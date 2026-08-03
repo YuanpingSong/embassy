@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.npmrc
+.DS_Store
+coverage/
+.claude-agent-bridge/
+outputs/
+work/
+*.tgz
+*.log
+npm-debug.log*
