@@ -9,7 +9,9 @@ start → status / wait → follow-up → interrupt or cancel → result
 
 Codex tasks remain native to the Codex app. This project does not wrap,
 replace, imitate, or create Codex agents, and it cannot create native Codex
-sidebar task cards. It provides operational parity for Claude through MCP.
+sidebar task cards. It provides a bounded asynchronous Claude task lifecycle
+through MCP. It is not a drop-in implementation of Codex Multi-Agent v2 and
+does not provide full feature parity.
 
 This is an unofficial community project and is not affiliated with or
 endorsed by Anthropic or OpenAI.
@@ -107,6 +109,130 @@ tool call. The bridge binds each stdio process to that first thread ID and
 stores its tasks in a matching private state leaf. A task ID is therefore
 owned by the Codex thread that started it; a child agent should finish or
 interrupt its Claude task and report the result to its parent.
+
+## Feature parity with Codex Multi-Agent v2
+
+**Bottom line: no, the bridge does not have full feature parity.** It is best
+understood as a specialized external Claude/Fable leaf worker that a native
+Codex agent can consult. Codex Multi-Agent v2 remains the orchestration layer.
+
+This is a comprehensive capability-level comparison of the user-visible
+orchestration surface:
+launch and configuration, topology and context, communication, lifecycle and
+results, concurrency, tools and permissions, persistence, and client
+integration. It does not compare model intelligence, price, latency, or
+unrelated product features. The baseline is Codex source commit
+[`8922a78`](https://github.com/openai/codex/commit/8922a784fe6aa80683fe97c2dcdfdc361478aa7f)
+and the Claude Code 2.1.220 contract pinned by this bridge.
+
+The bridge column describes capabilities implemented by the project, not one
+operator's effective environment. An opt-in capability is unavailable unless
+its corresponding server flag is enabled; write, execution, and web are all
+off by default.
+
+The parity labels mean:
+
+- **Yes**: materially equivalent for the capability as stated.
+- **Partial**: a useful analogue exists, but its semantics or scope differ.
+- **No**: the native V2 capability is absent.
+- **Different**: the bridge deliberately solves the problem another way.
+- **Bridge-only**: an additional bridge feature, not V2 parity.
+
+| Area | Capability | Codex Multi-Agent v2 | Claude agent bridge | Parity |
+| --- | --- | --- | --- | --- |
+| Architecture | Execution unit | Creates a first-class Codex thread with its own rollout, history, metadata, events, and status. | Runs an external local Claude Code process/session represented by an MCP task record. | **No** |
+| Architecture | Agent topology | Maintains a root-owned hierarchy with parent, child, sibling, and descendant relationships. | Maintains a flat task collection private to one invoking Codex thread. | **No** |
+| Architecture | Recursive delegation | Child agents receive collaboration tools and can spawn descendants. | Claude's `Agent` tool, MCP servers, plugins, skills, commands, and custom agents are disabled. | **No** |
+| Architecture | Stable identity and addressing | Required task names produce canonical paths such as `/root/research/reviewer`; relative and absolute addressing work across the tree. | An optional title accompanies an opaque `claude_<uuid>` task ID; there are no paths or relationships. | **No** |
+| Architecture | Native client presence | Codex app, CLI, and IDE surfaces can show agent status, activity, transcripts, and thread switching. | Appears as ordinary MCP calls and results; there are no native agent cards or thread views. | **No** |
+| Architecture | Local Claude Code/Fable subscription worker | Native children use Codex's configured model and provider stack; this row does not claim Codex cannot use other configured providers. | Reaches the locally authenticated Claude/Fable model through the installed Claude CLI. | **Bridge-only** |
+| Launch | Asynchronous start | `spawn_agent` starts a child turn in the background and immediately returns its canonical task path. | `claude_task_start` starts a Claude task in the background and returns its task ID. | **Yes**, for launch only |
+| Launch | Initial task input | Accepts a text task plus optional inherited conversation context. | Accepts an explicit text prompt only. | **Partial** |
+| Context | Context forking | Spawn can inherit all parent history, no history, or the last N turns. | Receives no Codex conversation fork; the caller must put all needed context in the prompt or workspace. | **No** |
+| Context | Full-history fork compatibility | A full-history fork cannot also select a named role; current guidance also keeps the inherited model and reasoning effort. | Has no full-history Codex fork mode. | **No** |
+| Configuration | Named agent roles | Built-in and custom roles can layer instructions, model, reasoning, sandbox, `mcp_servers`, `skills.config`, and nickname candidates. | No role registry; callers can only describe a persona in the prompt. | **No** |
+| Configuration | Per-task model | Spawn can inherit or select a supported Codex model. | Start can use the configured Claude default, such as Fable, or a supplied Claude model string. | **Partial** |
+| Configuration | Reasoning effort | First-class per-agent spawn setting. | No corresponding setting. | **No** |
+| Configuration | Service tier | First-class per-agent spawn setting. | No corresponding setting. | **No** |
+| Configuration | Developer instructions | Children inherit parent instructions and can receive role or V2 overrides. | The task prompt is combined with bridge-owned structured-report instructions. | **Partial** |
+| Configuration | Working directory | Inherits the parent's live runtime working directory and environment. | Caller selects a canonical `cwd` under an explicit allowlist; environment forwarding is deliberately minimal. | **Different** |
+| Configuration | Parent configuration and tool inheritance | Child starts from the parent's effective session configuration and available native, MCP, and app tools unless a role changes it. | Claude receives a separate fixed profile and an explicitly restricted built-in tool set. | **No** |
+| Configuration | Feature and mode gating | V2 can be enabled or disabled and can restrict collaboration tools to non-code modes. | Availability depends on Codex loading and enabling the MCP server; the bridge has no Codex-mode awareness. | **Different** |
+| Configuration | Tool namespace | The collaboration namespace is configurable. | The six tool names are fixed; the MCP server name is selected in Codex configuration. | **Partial** |
+| Configuration | Wait exposure and bounds | `wait_agent` can be hidden, and its minimum, maximum, and default timeout are configurable within hard bounds. | `claude_task_wait` is always registered and each call is capped at 25 seconds and 50 events. | **Partial** |
+| Configuration | Spawn metadata exposure | V2 can hide spawn metadata and can expose or hide model and reasoning override fields. | The start schema consistently exposes its optional title and model fields; normalized result metadata is fixed by the bridge. | **Different** |
+| Configuration | Usage-hint customization | Root, child, shared, and multi-agent-mode guidance can be overridden in V2 configuration. | MCP tool descriptions are fixed at build time; callers can add external Codex/project instructions. | **Partial** |
+| Orchestration | Delegation policy and team awareness | Bounded instructions describe proactive or explicit-only delegation, topology, tool semantics, and current slot limits. | The Codex caller may choose to invoke the MCP tool, but the bridge has no native scheduler or team world state. | **No** |
+| Communication | Queue a message without starting a turn | `send_message` adds context to another agent without waking it. | No corresponding tool. | **No** |
+| Communication | Continue a completed worker | `followup_task` wakes an idle agent while preserving its Codex history. | `claude_task_followup` resumes only an eligible terminal Claude session and rechecks ownership, process exit, usage accounting, turn allowance, session ID, workspace, and enabled capabilities. | **Partial** |
+| Communication | Follow up while the worker is active | Delivers at tool or message boundaries while the child is running. | Active tasks reject follow-ups with `TASK_BUSY`. | **No** |
+| Communication | Child, parent, peer, and cross-branch messaging | Known agents can address one another by canonical or relative path. | Only the owning Codex thread can operate its bridge task; bridge tasks cannot message one another. | **No** |
+| Communication | Ask the human | Non-root Codex agents must message the root, which mediates `request_user_input`. | `AskUserQuestion` is disabled; the structured result can report blockers or decisions needed to the caller. | **Partial** |
+| Monitoring | Status of a known worker | Native status is available through the agent tree and client events. | `claude_task_status` returns a detailed normalized snapshot for a retained task ID. | **Partial** |
+| Monitoring | List workers | `list_agents` reports the live root tree and supports path-prefix filtering. | There is no task-list tool; the caller must retain task IDs. | **No** |
+| Monitoring | Wait for activity | `wait_agent` waits on the caller's mailbox for a queued message or direct-child completion, and also wakes when the user steers the caller. | `claude_task_wait` long-polls one task after an event cursor, with bounded events and wait duration. | **Partial** |
+| Monitoring | Progress | Native events and client views expose thread activity and status. | Exposes bounded, normalized, task-specific cursor events; raw Claude events are discarded. | **Partial** |
+| Monitoring | Event retention | Native rollout and client state retain the agent thread. | Retains the latest 256 normalized events per task, includes 10 in snapshots, and returns at most 50 in one wait response. | **Partial** |
+| Results | Automatic completion delivery | A completed, errored, or shut-down child automatically sends a completion envelope containing its last message to the direct parent; interruption alone is non-final. | Completion is not pushed; the caller must explicitly call status, wait, or result, each of which can expose the final report. | **No** |
+| Results | Final result representation | Parent receives the child's final message and can inspect the native thread. | Returns a schema-validated, redacted report with outcome, summary, changed files, verification, decisions needed, warnings, and coarse metrics. | **Different** |
+| Results | Transcript inspection | Native clients can inspect the child's transcript. | Claude's private transcript exists only for `--resume`; the bridge never opens or exposes it. | **No**, intentionally |
+| Results | Token usage and tree-wide rollout budget | Codex records per-thread token usage and shares its configured rollout budget across the native tree. | Reports coarse turns, duration, and process state, not Codex tokens, cost, or quota. | **No** |
+| Results | Hard output bounds | Native output remains part of the Codex thread; there is no equivalent bridge protocol cap. | Fails closed above 8 MiB total stdout or 1 MiB for one JSON event; captures at most 64 KiB of stderr for controlled classification. | **Bridge-only** |
+| Control | Interrupt an active turn | `interrupt_agent` stops the current turn while keeping the child available for later work. | Interrupt terminates the CLI process; reuse is allowed only after exit and accounting are confirmed. | **Partial** |
+| Control | Permanent cancellation | The pinned V2 surface has no permanent close or cancel operation. | `claude_task_interrupt` can permanently cancel a bridge task. | **Bridge-only** |
+| Control | Terminal runtime detach delay | Native residency management can unload eligible idle children, but it does not manage Claude processes. | A terminal Claude runtime is detached after the configured cleanup delay. | **Bridge-only** |
+| Persistence | Continue the same session | Reuses the native child thread and its accumulated history. | Uses exact Claude `--resume <session-id>` after a terminal turn. | **Partial** |
+| Persistence | Recovery after coordinator restart | Rollout-backed agent metadata and descendants can be reconstructed when the root resumes. | Terminal state and Claude session IDs persist; active work becomes interrupted after a bridge restart, and IDs are not rediscoverable through a list tool. | **Partial** |
+| Persistence | Lazy residency | Idle native children can be unloaded to free a slot and later reloaded from persisted history. | No corresponding integration with Codex residency. | **No** |
+| Capacity | Concurrency scope | One root-tree residency and active-turn budget coordinates the whole native team. | The active-process limit is per invoking Codex thread and is not coordinated across bridge processes or native agents. | **Partial** |
+| Capacity | Slot accounting | A direct V2 concurrency value counts the root as one slot; the legacy `[agents]` spawned-thread value is converted to that total. | Counts only active Claude CLI task processes inside one Codex thread; the invoking Codex agent is outside the bridge limit. | **Different** |
+| Capacity | Global concurrency ceiling | Native descendants share one tree-wide limit. | There is no global ceiling across Codex threads or bridge processes. | **No** |
+| Capacity | Nested depth | V2 supports nested agents; total concurrency is the practical bound, and legacy `max_depth` is ignored. | Tasks cannot recursively delegate. | **No** |
+| Capacity | Per-task turn ceiling | No equivalent V2 spawn option. | Each task has a requested maximum and a server-enforced cumulative maximum. | **Bridge-only** |
+| Workspace | Shared files | Native agents share the parent's workspace and immediately see filesystem changes. | A task can target the same repository when it lies under an allowed root. | **Partial** |
+| Workspace | Mutation coordination | Native V2 does not generally create worktrees or automatically prevent write conflicts. | Adds per-Codex-thread workspace leases and process-exit fences, but no cross-process global lease. | **Bridge-only**, limited |
+| Ownership | Cross-thread access | Agents in the native tree can address known paths across branches. | A task ID is usable only by the Codex thread that created it. | **No**, intentional isolation |
+| Tools | File exploration | Child inherits the parent's available tools and permission boundary. | `read_only` exposes only `Read`, `Glob`, and `Grep` under allowed roots. | **Partial** |
+| Tools | File editing | Available according to inherited sandbox and approval policy. | Opt-in `workspace_write`; globally disabled unless `CLAUDE_BRIDGE_ENABLE_WRITE=1`. | **Partial**, off by default |
+| Tools | Shell execution | Available according to inherited sandbox and approval policy. | Opt-in `workspace_exec` with a mandatory Claude sandbox; globally disabled unless `CLAUDE_BRIDGE_ENABLE_EXEC=1`. | **Partial**, off by default |
+| Tools | Web access | Uses the parent's available web tools and policy. | All-or-none opt-in web tools; globally disabled unless `CLAUDE_BRIDGE_ENABLE_WEB=1`. | **Partial**, off by default |
+| Extensions | MCP servers and skills | Children inherit effective tools; role configuration can override `mcp_servers` and `skills.config`. | MCP servers and skills are forced empty or disabled. | **No** |
+| Isolation | Provider customizations | Native agents continue to use their effective Codex project and tool configuration. | Ordinary Claude plugins, hooks, commands, custom agents, browser integration, and auto-memory are suppressed; admin-managed Claude policy remains an external caveat. | **Different** |
+| Security | Sandbox and approval inheritance | Reapplies the parent's live sandbox, permission profile, and approval reviewer after role configuration. | Uses independent fail-closed `dontAsk` profiles, explicit roots, and predeclared tool modes. | **Different** |
+| Security | Interactive approvals | Pending approvals remain associated with the originating child and can surface in native clients. | There is no interactive approval channel; an unapproved action fails. | **No** |
+| Security | Isolated provider state and data minimization | Native agent history is retained as part of Codex's rollout and UI. | Uses a task-private Claude profile and persists only normalized state; raw prose, tool I/O, stderr, and account details are discarded. | **Bridge-only** |
+| Integration | Hooks | Native `SubagentStart` and `SubagentStop` events can integrate with Codex hooks. | No Codex-native subagent hook events. | **No** |
+| Integration | Protocol and telemetry | Dedicated Codex/app-server items represent paths, activity, sender/receiver, model, effort, and status. | Emits standard MCP responses and bridge-specific normalized events. | **No** |
+| Operations | Platform support | Native local subagent UI is documented for the Codex app, CLI, and IDE; availability follows the client and release. | Version 1 same-user subscription reuse is practically macOS-only and pinned to Claude Code 2.1.220 behavior. | **No** |
+| Operations | Authentication boundary | Uses Codex authentication and model backends. | Reuses the installed Claude CLI's same-user local subscription identity without reading credentials. | **Different** |
+| Reliability | Ambiguous mutation retries | V2 provides no documented idempotency guarantee for spawn or follow-up. | Start and follow-up are explicitly marked non-idempotent and must not be automatically retried after an ambiguous outcome. | **Different** |
+
+The pinned V2 default exposes six tools because `wait_agent` is enabled; it
+can expose five when that tool is disabled. The bridge always exposes six.
+Their equal default count is coincidental, and they are not a one-for-one API:
+
+| Multi-Agent v2 tool | Nearest bridge operation | Important gap |
+| --- | --- | --- |
+| `spawn_agent` | `claude_task_start` | Starts an external task, not a native child thread; no context fork or canonical path. |
+| `send_message` | None | The bridge has no passive inbox or agent-to-agent messaging. |
+| `followup_task` | `claude_task_followup` | Bridge follow-up works only for an eligible terminal task. |
+| `wait_agent` | `claude_task_wait` | Bridge wait targets one task and cannot wake for any agent or user steering. |
+| `interrupt_agent` | `claude_task_interrupt` | Similar lifecycle intent, but implemented by terminating a local process; the bridge also adds permanent cancel. |
+| `list_agents` | None | `claude_task_status` and `claude_task_result` require a retained task ID and do not list a tree. |
+
+The practical architecture is therefore:
+
+```text
+Codex root
+  └─ native Multi-Agent v2 child
+       └─ optional Claude/Fable bridge task (leaf worker)
+```
+
+That composition is useful: native agents provide scheduling, hierarchy,
+parallel synthesis, context management, UI, and Codex permissions, while the
+bridge adds a deliberately isolated second-model opinion and a structured
+handoff. Describing the bridge itself as “Multi-Agent v2 parity” would overstate
+what it implements.
 
 ## Runtime design
 
@@ -449,6 +575,11 @@ diagnostic output, or any attempt to show account or credential data.
 
 ## References
 
+- [Codex subagents documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents.md)
+- [Pinned Multi-Agent v2 tool schemas](https://github.com/openai/codex/blob/8922a784fe6aa80683fe97c2dcdfdc361478aa7f/codex-rs/core/src/tools/handlers/multi_agents_spec.rs)
+- [Pinned Multi-Agent v2 spawn and context implementation](https://github.com/openai/codex/blob/8922a784fe6aa80683fe97c2dcdfdc361478aa7f/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs)
+- [Pinned Codex agent configuration](https://github.com/openai/codex/blob/8922a784fe6aa80683fe97c2dcdfdc361478aa7f/codex-rs/core/src/config/mod.rs)
+- [Pinned Multi-Agent v2 feature configuration](https://github.com/openai/codex/blob/8922a784fe6aa80683fe97c2dcdfdc361478aa7f/codex-rs/features/src/feature_configs.rs)
 - [Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage)
 - [Run Claude Code programmatically](https://code.claude.com/docs/en/headless)
 - [Claude Code sessions](https://code.claude.com/docs/en/sessions)
