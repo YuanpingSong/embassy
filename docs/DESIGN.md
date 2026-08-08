@@ -103,7 +103,7 @@ and correct ambiguity/restart/version semantics.
 
 ## Localization
 
-All user-facing strings come from a typed catalog; surfaces render per-locale
+Target state (not yet implemented): all user-facing strings come from a typed catalog; surfaces render per-locale
 (`en`, `zh-CN`) from one source. Commands, JSON keys, enums, aliases, and
 safe codes stay English. English is canonical for security meaning.
 

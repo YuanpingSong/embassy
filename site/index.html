@@ -17,6 +17,7 @@
     --rule: #e4dccd;
     --seal: #b3382c;
     --jade: #557f68;
+    --jade-text: #46705b;
     --ochre: #a8842f;
     --codeblock: #262019;
     --serif: "Iowan Old Style", "Palatino Nova", Palatino, Georgia, serif;
@@ -29,14 +30,16 @@
   a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
   a:hover { text-decoration-color: var(--seal); }
 
-  header.top { display: flex; justify-content: space-between; align-items: center; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  header.top { display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap; padding: 22px 0; border-bottom: 1px solid var(--rule); }
   .brand { display: flex; align-items: center; gap: 10px; font: 700 19px var(--serif); }
-  nav { display: flex; gap: 26px; }
+  nav { display: flex; gap: 16px 26px; flex-wrap: wrap; }
   nav a { color: var(--ink-soft); font-size: 14.5px; text-decoration: none; }
   nav a:hover { color: var(--ink); }
 
+  .hero > * { min-width: 0; }
   .hero { display: grid; grid-template-columns: minmax(340px, 7fr) minmax(300px, 5fr); gap: 56px; align-items: center; padding: 82px 0 64px; }
   @media (max-width: 800px) { .hero { grid-template-columns: 1fr; gap: 40px; } }
+  .hero > div { min-width: 0; }
   .hero h1 { font: 400 clamp(34px, 4.6vw, 52px)/1.14 var(--serif); letter-spacing: -0.01em; text-wrap: balance; }
   .hero h1 .seal-word { color: var(--seal); font-style: italic; }
   .hero .sub { margin-top: 18px; color: var(--ink-soft); font-size: 18px; max-width: 54ch; }
@@ -47,13 +50,14 @@
   .btn.quiet { border: 1px solid var(--rule); color: var(--ink); background: var(--raise); }
   .btn.quiet:hover { border-color: var(--ink-soft); }
 
+  .vig-cap { font: 600 10.5px var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 12px; }
   .vignette { background: var(--raise); border: 1px solid var(--rule); border-radius: 12px; padding: 22px; box-shadow: 0 1px 2px rgb(35 31 26 / 4%); }
-  .vignette .party { font: 600 13px var(--mono); }
+  .vignette .party { font: 600 13px var(--mono); overflow-wrap: anywhere; }
   .vignette .party small { display: block; font: 400 11px var(--sans); color: var(--ink-soft); letter-spacing: 0.06em; text-transform: uppercase; margin-top: 2px; }
   .vignette .msg { margin: 10px 0 14px; padding: 12px 14px; border-left: 2px solid var(--rule); color: var(--ink-soft); font-size: 14px; }
   .vignette .transit { display: flex; align-items: center; gap: 10px; margin: 14px 0; }
   .vignette .transit .line { flex: 1; border-top: 1px solid var(--rule); }
-  .vignette .receipt { display: flex; align-items: center; gap: 8px; font: 600 12.5px var(--mono); color: var(--jade); margin-top: 4px; }
+  .vignette .receipt { display: flex; align-items: center; gap: 8px; font: 600 13px var(--mono); color: var(--jade-text); margin-top: 4px; overflow-wrap: anywhere; }
   .vignette .reply { margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--rule); }
 
   section { padding: 70px 0 6px; }
@@ -66,20 +70,22 @@
   .whys p { padding: 16px 0; border-bottom: 1px solid var(--rule); color: var(--ink-soft); font-size: 16px; max-width: 70ch; margin: 0; }
 
   .ledger { margin-top: 26px; border-top: 1px solid var(--rule); }
+  .ledger .row > * { min-width: 0; }
   .ledger .row { display: grid; grid-template-columns: 64px 180px 1fr; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--rule); }
   @media (max-width: 700px) { .ledger .row { grid-template-columns: 48px 1fr; } .ledger .row .what { grid-column: 2; } }
   .ledger .no { font: 400 26px var(--serif); color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .ledger .name { font-weight: 650; font-size: 16px; }
   .ledger .what { color: var(--ink-soft); font-size: 15px; max-width: 60ch; }
-  code { font-family: var(--mono); font-size: 0.86em; background: rgb(35 31 26 / 5%); border: 1px solid var(--rule); border-radius: 5px; padding: 1px 6px; }
+  code { font-family: var(--mono); font-size: 0.86em; overflow-wrap: anywhere; background: rgb(35 31 26 / 5%); border: 1px solid var(--rule); border-radius: 5px; padding: 1px 6px; }
 
   .truths { margin-top: 22px; }
+  .truths .t > * { min-width: 0; }
   .truths .t { display: grid; grid-template-columns: 24px 1fr; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--rule); align-items: start; }
   .truths .t p { color: var(--ink-soft); font-size: 15px; max-width: 68ch; margin: 0; }
   .truths .t p strong { color: var(--ink); }
   .truths svg { margin-top: 3px; }
 
-  pre { background: var(--codeblock); border-radius: 10px; padding: 18px 20px; overflow-x: auto; margin: 20px 0 8px; }
+  pre { max-width: 100%; background: var(--codeblock); border-radius: 10px; padding: 18px 20px; overflow-x: auto; margin: 20px 0 8px; }
   pre code { border: 0; background: none; padding: 0; font-size: 13.5px; line-height: 1.75; color: #f2eee4; }
   pre .c { color: #9a8f7d; }
   pre .out { color: #b8ad99; }
@@ -153,7 +159,8 @@
         <a class="btn quiet" href="https://github.com/YuanpingSong/agent-embassy">View on GitHub</a>
       </div>
     </div>
-    <div class="vignette" role="img" aria-label="A real exchange: a Codex task sends a review request through Embassy to a Claude session; the reply routes back with delivered receipts">
+    <figure class="vignette">
+      <figcaption class="vig-cap">Illustrative exchange</figcaption>
       <div class="party">codex-reviewer@this-mac<small>Codex task</small></div>
       <div class="msg">Please review the current approach and note the main risk.</div>
       <div class="transit">
@@ -167,7 +174,7 @@
         <div class="msg">Main risk: the migration trusts stale route bindings. Two call sites flagged in my notes.</div>
         <div class="receipt"><svg width="14" height="14" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg> reply delivered · conv_… token returned to the sender</div>
       </div>
-    </div>
+    </figure>
   </div>
 
   <section id="why">
@@ -186,12 +193,12 @@
     <div class="wrap" style="padding:0">
       <span class="eyebrow">How it works</span>
       <h2>Four steps, and only the ones that matter.</h2>
-      <p>No accounts, no daemons, no configuration files — four acts, each visible in your terminal.</p>
+      <p>No Embassy accounts, no daemons, no configuration files — four acts, each visible in your terminal.</p>
       <div class="ledger">
-        <div class="row"><span class="no">1</span><span class="name">Serve</span><span class="what">Run <code>embassy serve</code> in a terminal you trust. It stays in the foreground, publishes a local dashboard file, and never daemonizes. A host-wide lease guarantees one broker per account.</span></div>
+        <div class="row"><span class="no">1</span><span class="name">Serve</span><span class="what">Run <code>embassy serve</code> in a terminal you trust. It stays in the foreground, writes a local dashboard file, and never daemonizes. A host-wide lease ensures one broker per account.</span></div>
         <div class="row"><span class="no">2</span><span class="name">Register</span><span class="what">The Codex task registers itself from inside its own process — ask the Codex agent to run <code>embassy register-codex --alias codex-reviewer@this-mac</code> as a shell step in its current turn. Registration is the opt-in boundary: once registered, any compatible live Claude session running as your OS user can start a turn in that task under its existing native approval and sandbox policy — and if that policy is <code>approvalPolicy: never</code>, no human approval stands between an accepted message and the model turn. Retire it with <code>unregister-codex</code>.</span></div>
         <div class="row"><span class="no">3</span><span class="name">Select</span><span class="what">For the Codex→Claude direction, you explicitly select the destination — <code>embassy select-claude --alias &lt;a name from availablePeers&gt;</code>. Sending never silently selects a discovered session.</span></div>
-        <div class="row"><span class="no">4</span><span class="name">Send</span><span class="what">Bodies arrive via stdin, 16&nbsp;KiB at most, and live only in memory. Busy targets queue; idle targets get one ordinary turn; settled messages return their receipt.</span></div>
+        <div class="row"><span class="no">4</span><span class="name">Send</span><span class="what">Bodies arrive via stdin, 16&nbsp;KiB maximum, and live only in memory. Sending to a busy Codex task queues the message; an idle target gets one ordinary turn.</span></div>
       </div>
     </div>
   </section>
@@ -208,7 +215,7 @@
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ochre)" aria-hidden="true"><use href="#seal-half"/></svg>
-          <p><strong>Queues are honest.</strong> A busy route queues rather than interrupts — Embassy never steers another agent's turn — and queue age is visible, not silent.</p>
+          <p><strong>Queues are honest.</strong> Sending to a busy Codex task queues rather than interrupts — Embassy never steers another agent's mid-turn context. Queued messages drain in order once the target is idle.</p>
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-ring"/></svg>
@@ -235,7 +242,7 @@
       <span class="eyebrow">Quickstart</span>
       <h2>Honest requirements first.</h2>
       <ul class="req">
-        <li>macOS only (local host only) and Node.js ≥ 20</li>
+        <li>macOS only (localhost only) · Node.js ≥ 20</li>
         <li>Claude Code 2.1.225, installed and signed in — with a session running, or <code>availablePeers</code> is empty</li>
         <li>Codex desktop with its managed App Server 0.147.0 running</li>
       </ul>
@@ -243,7 +250,7 @@
 npm install -g agent-embassy
 embassy serve
 
-<span class="c"># in another terminal: list the Claude sessions Embassy can reach</span>
+<span class="c"># in another terminal: list the candidate sessions Embassy has discovered</span>
 embassy status
 <span class="out">  availablePeers: ["advisor@this-mac", "researcher@this-mac"]</span>
 
