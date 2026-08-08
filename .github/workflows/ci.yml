@@ -13,12 +13,13 @@ concurrency:
 
 jobs:
   test:
-    name: Node ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         node-version: [20.x, 22.x]
 
     steps:
@@ -37,3 +38,57 @@ jobs:
 
       - name: Run deterministic checks
         run: npm run check
+
+  package:
+    name: Inspect npm package
+    needs: test
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and inspect the dry-run package
+        shell: bash
+        run: |
+          npm pack --dry-run --json > package-dry-run.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const reports = JSON.parse(readFileSync("package-dry-run.json", "utf8"));
+            if (!Array.isArray(reports) || reports.length !== 1) {
+              throw new Error("Expected exactly one npm package report");
+            }
+            const paths = new Set(reports[0].files.map(({ path }) => path));
+            const required = [
+              "package.json",
+              "README.md",
+              "LICENSE",
+              "dist/src/gateway/cli.js",
+              "skills/embassy-peer/SKILL.md",
+              "docs/GATEWAY-ARCHITECTURE.md",
+            ];
+            const allowedRuntimePath =
+              /^(?:dist\/src\/gateway\/|dist\/src\/(?:errors|mutex)\.(?:js(?:\.map)?|d\.ts)$)/;
+            for (const path of required) {
+              if (!paths.has(path)) throw new Error(`Missing required package file: ${path}`);
+            }
+            for (const path of paths) {
+              if (
+                (path.startsWith("dist/src/") && !allowedRuntimePath.test(path)) ||
+                path === "pnpm-lock.yaml"
+              ) {
+                throw new Error(`Forbidden legacy package file: ${path}`);
+              }
+            }
+          '

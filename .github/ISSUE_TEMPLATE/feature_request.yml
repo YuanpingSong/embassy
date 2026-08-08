@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an idea for Embassy.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and where does Embassy fall short?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like Embassy to do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: scope-ack
+    attributes:
+      label: Scope acknowledgment
+      description: >-
+        Embassy is deliberately scoped. See the README's "What Embassy is
+        not" section and the Consulates entry in "The vocabulary" (remote
+        hosts over attach-only SSH are on the roadmap but deliberately
+        disabled in v1).
+      options:
+        - label: >-
+            This request keeps Embassy local-only, single-user, and
+            non-hosted.
+          required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context

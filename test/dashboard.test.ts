@@ -16,10 +16,13 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  DASHBOARD_ALERT_LIMIT,
   DASHBOARD_FILE_NAME,
   DASHBOARD_AVAILABLE_PEER_LIMIT,
+  DASHBOARD_CONNECTOR_LIMIT,
   DASHBOARD_MAX_HTML_BYTES,
   DASHBOARD_MESSAGE_LIMIT,
+  DASHBOARD_ROUTE_LIMIT,
   escapeDashboardHtml,
   renderDashboardHtml,
   writeDashboardSnapshot,
@@ -156,7 +159,7 @@ function exampleSnapshot(): DashboardSnapshot {
   };
 }
 
-test("dashboard rendering is deterministic, static, and self-contained", () => {
+test("dashboard rendering is branded, deterministic, static, and self-contained", () => {
   const snapshot = exampleSnapshot();
   const first = renderDashboardHtml(snapshot, { refreshSeconds: 7 });
   const second = renderDashboardHtml(snapshot, { refreshSeconds: 7 });
@@ -166,13 +169,26 @@ test("dashboard rendering is deterministic, static, and self-contained", () => {
   assert.match(first, /<meta http-equiv="refresh" content="7">/);
   assert.match(first, /Content-Security-Policy/);
   assert.match(first, /<main id="main">/);
+  assert.match(first, /<title>Embassy<\/title>/);
+  assert.match(first, /<h1>Embassy<\/h1>/);
+  assert.match(first, /Local agent gateway/);
+  assert.match(first, /metadata-only snapshot/);
+  assert.match(first, /color-scheme" content="light dark"/);
+  assert.match(first, /@media \(prefers-color-scheme: dark\)/);
+  assert.match(first, /@media \(forced-colors: active\)/);
+  assert.match(first, /@media \(max-width: 640px\)/);
   assert.match(
     first,
-    /<caption>Available genuine Claude peers and selection state<\/caption>/,
+    /<caption>Discovered Claude sessions and explicit selection state<\/caption>/,
   );
-  assert.match(first, /<caption>Bounded normalized delivery metadata<\/caption>/);
-  assert.match(first, /Available Claude peers<\/span><span class="metric__value">2<\/span>/);
+  assert.match(
+    first,
+    /<caption>Messages grouped from bounded normalized delivery events<\/caption>/,
+  );
   assert.match(first, />Selected<\/span>/);
+  assert.equal(first.includes("Agent Gateway Monitor"), false);
+  assert.equal(first.includes("Local, private snapshot"), false);
+  assert.equal(first.includes("genuine"), false);
   assert.equal(first.includes("<script"), false);
   assert.equal(first.includes("javascript:"), false);
   assert.equal(first.includes("http://"), false);
@@ -182,9 +198,10 @@ test("dashboard rendering is deterministic, static, and self-contained", () => {
   assert.equal(first.includes("document.cookie"), false);
   assert.ok(Buffer.byteLength(first, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
 
-  const claudeIndex = first.indexOf("claude-advisor@this-mac");
-  const reviewerIndex = first.indexOf("reviewer@this-mac");
-  assert.ok(claudeIndex >= 0 && reviewerIndex > claudeIndex);
+  const paused = renderDashboardHtml(snapshot, { refreshSeconds: 0 });
+  assert.equal(paused.includes('http-equiv="refresh"'), false);
+  assert.match(paused, /Automatic reload is paused/);
+  assert.match(paused, /Status is accurate at snapshot time/);
 });
 
 test("dashboard reports explicit projection omissions and progress states", () => {
@@ -195,11 +212,62 @@ test("dashboard reports explicit projection omissions and progress states", () =
   const written = renderDashboardHtml(snapshot);
   assert.match(
     written,
-    /Bounded snapshot:<\/strong> omitted 12 available peers, 34 messages\./,
+    /Bounded display:<\/strong> omitted 12 Claude sessions, 34 delivery records\./,
   );
   assert.ok(written.includes("Transport written"));
+  assert.match(written, /status--info[^>]*>.*Transport written/s);
   snapshot.messages[0]!.state = "held";
   assert.ok(renderDashboardHtml(snapshot).includes(">Held</span>"));
+});
+
+test("dashboard summarizes asymmetric directional readiness", () => {
+  const html = renderDashboardHtml(exampleSnapshot());
+
+  assert.match(html, /Broker at snapshot/);
+  assert.match(html, /Codex \u2192 Claude/);
+  assert.match(html, /Selected Claude destination/);
+  assert.match(html, /1<\/strong> of <strong>2<\/strong> discovered sessions selected/);
+  assert.match(html, /Claude \u2192 Codex/);
+  assert.match(html, /Registered Codex targets/);
+  assert.match(html, /1<\/strong> of <strong>1<\/strong> targets ready/);
+  assert.match(html, /Every live Claude session can see each registered Codex target/);
+  assert.match(html, /status--info[^>]*>.*Busy/s);
+  assert.equal(html.includes("Gateway</dt>"), false);
+  assert.equal(html.includes("Selected agents"), false);
+});
+
+test("dashboard renders actionable first-run states", () => {
+  const missingRoutes = exampleSnapshot();
+  missingRoutes.routes = [];
+  const routesHtml = renderDashboardHtml(missingRoutes);
+  assert.match(routesHtml, /No Claude session is selected/);
+  assert.match(routesHtml, /embassy select-claude --alias &lt;alias&gt;/);
+  assert.match(routesHtml, /No Codex tasks registered/);
+  assert.match(routesHtml, /Inside the Codex task/);
+  assert.match(routesHtml, /embassy register-codex --alias &lt;name&gt;@&lt;host&gt;/);
+
+  const noClaude = exampleSnapshot();
+  noClaude.availablePeers = [];
+  noClaude.routes = noClaude.routes.filter((route) => route.provider === "codex");
+  const noClaudeHtml = renderDashboardHtml(noClaude);
+  assert.match(noClaudeHtml, /No Claude sessions discovered/);
+  assert.match(noClaudeHtml, /crossSessionInbound/);
+  assert.match(noClaudeHtml, /embassy refresh-dashboard/);
+
+  const incompatible = exampleSnapshot();
+  incompatible.routes = incompatible.routes.filter(
+    (route) => route.provider === "codex",
+  );
+  incompatible.availablePeers = incompatible.availablePeers.map((peer) => ({
+    ...peer,
+    state: "incompatible" as const,
+    compatibility: "incompatible" as const,
+    selected: false,
+  }));
+  assert.match(
+    renderDashboardHtml(incompatible),
+    /Claude sessions need a compatible version/,
+  );
 });
 
 test("dashboard escapes every public string and rejects free-form codes", () => {
@@ -264,6 +332,16 @@ test("dashboard escapes every public string and rejects free-form codes", () => 
       safeErrorCode: "DELIVERY_FAILED",
     },
   ];
+  snapshot.alerts = [
+    {
+      code: "REOBSERVATION_REQUIRED",
+      severity: "warning",
+      timestamp: "2026-08-07T16:29:56.000Z",
+      provider: "codex",
+      host: "this-mac",
+      alias: payload,
+    },
+  ];
 
   const html = renderDashboardHtml(snapshot);
   assert.equal(html.includes(payload), false);
@@ -278,6 +356,7 @@ test("dashboard escapes every public string and rejects free-form codes", () => 
   assert.ok(html.includes("&lt;svg onload=&quot;MESSAGE_ATTACK&quot;&gt;"));
   assert.equal(html.includes("LEAK_THIS_SUFFIX"), false);
   assert.ok(html.includes("DELIVERY_FAILED"));
+  assert.match(html, /embassy register-codex --alias &lt;alias&gt;/);
 });
 
 test("dashboard allowlist omits native identifiers, content, paths, and diagnostics", () => {
@@ -357,7 +436,123 @@ test("dashboard allowlist omits native identifiers, content, paths, and diagnost
   }
 });
 
-test("message timeline is capped and keeps the newest normalized metadata", () => {
+test("dashboard maps safe alerts to inert, actionable guidance", () => {
+  const snapshot = exampleSnapshot();
+  snapshot.routes[0] = {
+    ...snapshot.routes[0]!,
+    state: "stale",
+    compatibility: "expired",
+    safeErrorCode: "REOBSERVATION_REQUIRED",
+  };
+  snapshot.alerts = [
+    {
+      code: "REOBSERVATION_REQUIRED",
+      severity: "warning",
+      timestamp: "2026-08-07T16:29:58.000Z",
+      provider: "codex",
+      host: "this-mac",
+      alias: "reviewer@this-mac",
+    },
+    {
+      code: "UNMAPPED_SAFE_ALERT",
+      severity: "info",
+      timestamp: "2026-08-07T16:29:57.000Z",
+      provider: "claude",
+      host: "this-mac",
+    },
+  ];
+
+  const html = renderDashboardHtml(snapshot);
+  assert.match(html, /Action required/);
+  assert.match(html, /REOBSERVATION_REQUIRED/);
+  assert.match(html, /Codex registration must be observed again/);
+  assert.match(
+    html,
+    /embassy register-codex --alias reviewer@this-mac/,
+  );
+  assert.match(html, /inside that exact Codex task/i);
+  assert.match(html, /UNMAPPED_SAFE_ALERT/);
+  assert.match(html, /no automatic repair mapped/);
+  assert.match(html, /Do not retry an ambiguous delivery automatically/);
+});
+
+test("dashboard groups message lifecycles without conflating matching suffixes", () => {
+  const snapshot = exampleSnapshot();
+  snapshot.messages = [
+    {
+      sequence: 1,
+      direction: "claude_to_codex",
+      sourceAlias: "claude-advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      messageIdSuffix: "a1b2c3",
+      state: "queued",
+      timestamp: "2026-08-07T16:29:50.000Z",
+      bytes: 342,
+      hopCount: 0,
+    },
+    {
+      sequence: 2,
+      direction: "claude_to_codex",
+      sourceAlias: "claude-advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      messageIdSuffix: "a1b2c3",
+      state: "dispatching",
+      timestamp: "2026-08-07T16:29:51.000Z",
+      latencyMs: 1_000,
+      bytes: 342,
+      hopCount: 0,
+    },
+    {
+      sequence: 3,
+      direction: "claude_to_codex",
+      sourceAlias: "claude-advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      messageIdSuffix: "a1b2c3",
+      state: "delivered",
+      timestamp: "2026-08-07T16:29:52.000Z",
+      latencyMs: 2_000,
+      bytes: 342,
+      hopCount: 0,
+    },
+    {
+      sequence: 4,
+      direction: "codex_to_claude",
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: "claude-advisor@this-mac",
+      messageIdSuffix: "a1b2c3",
+      state: "failed",
+      timestamp: "2026-08-07T16:29:49.000Z",
+      latencyMs: 500,
+      bytes: 120,
+      hopCount: 0,
+      safeErrorCode: "CODEX_DELIVERY_FAILED",
+    },
+  ];
+
+  const html = renderDashboardHtml(snapshot);
+  assert.equal(
+    (html.match(/data-dashboard-row="message-summary"/g) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (html.match(/data-dashboard-row="message-event"/g) ?? []).length,
+    3,
+  );
+  assert.match(
+    html,
+    /data-dashboard-row="message-summary"[\s\S]*?Claude \u2192 Codex[\s\S]*?Delivered[\s\S]*?2\.0 s[\s\S]*?<\/tr>/,
+  );
+  const queuedIndex = html.indexOf(">Queued</span>");
+  const dispatchingIndex = html.indexOf(">Dispatching</span>");
+  const deliveredIndex = html.lastIndexOf(">Delivered</span>");
+  assert.ok(
+    queuedIndex >= 0 &&
+      dispatchingIndex > queuedIndex &&
+      deliveredIndex > dispatchingIndex,
+  );
+});
+
+test("message timeline is capped and keeps the newest grouped metadata", () => {
   const snapshot = exampleSnapshot();
   snapshot.messages = Array.from(
     { length: DASHBOARD_MESSAGE_LIMIT + 5 },
@@ -376,11 +571,19 @@ test("message timeline is capped and keeps the newest normalized metadata", () =
   );
 
   const html = renderDashboardHtml(snapshot);
-  assert.equal((html.match(/<td>Claude \u2192 Codex<\/td>/g) ?? []).length, 100);
-  assert.equal(html.includes("agent-0000</td>"), false);
-  assert.equal(html.includes("agent-0004</td>"), false);
-  assert.ok(html.includes("agent-0005</td>"));
-  assert.ok(html.includes("agent-0104</td>"));
+  assert.equal(
+    (html.match(/data-dashboard-row="message-summary"/g) ?? []).length,
+    DASHBOARD_MESSAGE_LIMIT,
+  );
+  assert.equal(html.includes("agent-0000"), false);
+  assert.equal(html.includes("agent-0004"), false);
+  assert.ok(html.includes("agent-0005"));
+  assert.ok(
+    html.includes(
+      `agent-${String(DASHBOARD_MESSAGE_LIMIT + 4).padStart(4, "0")}`,
+    ),
+  );
+  assert.match(html, /omitted 5 delivery records/);
   assert.ok(Buffer.byteLength(html, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
 });
 
@@ -402,12 +605,27 @@ test("available peer inventory is bounded and remains Claude-only", () => {
   const html = renderDashboardHtml(snapshot);
   assert.match(
     html,
-    /Available Claude peers<\/span><span class="metric__value">130<\/span>/,
+    new RegExp(`${DASHBOARD_AVAILABLE_PEER_LIMIT + 2} discovered`),
   );
+  assert.match(html, /omitted 2 Claude sessions/);
   assert.ok(html.includes("peer0000@this-mac"));
-  assert.ok(html.includes("peer0127@this-mac"));
-  assert.equal(html.includes("peer0128@this-mac"), false);
-  assert.equal(html.includes("peer0129@this-mac"), false);
+  assert.ok(
+    html.includes(
+      `peer${String(DASHBOARD_AVAILABLE_PEER_LIMIT - 1).padStart(4, "0")}@this-mac`,
+    ),
+  );
+  assert.equal(
+    html.includes(
+      `peer${String(DASHBOARD_AVAILABLE_PEER_LIMIT).padStart(4, "0")}@this-mac`,
+    ),
+    false,
+  );
+  assert.equal(
+    html.includes(
+      `peer${String(DASHBOARD_AVAILABLE_PEER_LIMIT + 1).padStart(4, "0")}@this-mac`,
+    ),
+    false,
+  );
 
   snapshot.availablePeers = [
     {
@@ -421,11 +639,75 @@ test("available peer inventory is bounded and remains Claude-only", () => {
   ];
   const rejected = renderDashboardHtml(snapshot);
   assert.equal(rejected.includes("codex-peer@this-mac"), false);
-  assert.match(
-    rejected,
-    /Available Claude peers<\/span><span class="metric__value">0<\/span>/,
-  );
+  assert.match(rejected, /No Claude sessions are currently visible to Embassy/);
   assert.ok(rejected.includes("reviewer@this-mac"));
+});
+
+test("dense valid snapshots remain bounded and disclose local display caps", () => {
+  const snapshot = exampleSnapshot();
+  const routeTemplate = snapshot.routes[0]!;
+  snapshot.connectors = Array.from(
+    { length: DASHBOARD_CONNECTOR_LIMIT + 2 },
+    (_, index) => ({
+      ...snapshot.connectors[index % snapshot.connectors.length]!,
+      host: `host-${String(index).padStart(2, "0")}.local`,
+    }),
+  );
+  snapshot.availablePeers = Array.from(
+    { length: DASHBOARD_AVAILABLE_PEER_LIMIT + 2 },
+    (_, index) => ({
+      alias: `peer${String(index).padStart(4, "0")}@host.local`,
+      provider: "claude" as const,
+      host: "host.local",
+      state: "idle" as const,
+      compatibility: "compatible" as const,
+      selected: index === 0,
+    }),
+  );
+  snapshot.routes = Array.from(
+    { length: DASHBOARD_ROUTE_LIMIT + 2 },
+    (_, index) => ({
+      ...routeTemplate,
+      alias: `route${String(index).padStart(4, "0")}@host.local`,
+      provider: index % 2 === 0 ? ("codex" as const) : ("claude" as const),
+      host: "host.local",
+      queueDepth: 0,
+    }),
+  );
+  snapshot.messages = Array.from(
+    { length: DASHBOARD_MESSAGE_LIMIT + 2 },
+    (_, index) => ({
+      sequence: index + 1,
+      timestamp: new Date(Date.UTC(2026, 7, 7, 15, 0, index)).toISOString(),
+      messageIdSuffix: index.toString(16).padStart(6, "0"),
+      direction: "claude_to_codex" as const,
+      sourceAlias: `peer${String(index).padStart(4, "0")}@host.local`,
+      targetAlias: `route${String(index).padStart(4, "0")}@host.local`,
+      state: "delivered" as const,
+      bytes: 16_384,
+      hopCount: 0,
+      latencyMs: 2_000,
+    }),
+  );
+  snapshot.alerts = Array.from(
+    { length: DASHBOARD_ALERT_LIMIT + 2 },
+    (_, index) => ({
+      code: "UNMAPPED_SAFE_ALERT",
+      severity: "warning" as const,
+      timestamp: "2026-08-07T16:29:59.000Z",
+      provider: index % 2 === 0 ? ("codex" as const) : ("claude" as const),
+      host: "host.local",
+      alias: `route${String(index).padStart(4, "0")}@host.local`,
+    }),
+  );
+
+  const html = renderDashboardHtml(snapshot);
+  assert.ok(Buffer.byteLength(html, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
+  assert.match(html, /omitted 2 connectors/);
+  assert.match(html, /2 Claude sessions/);
+  assert.match(html, /2 routes/);
+  assert.match(html, /2 delivery records/);
+  assert.match(html, /2 alerts/);
 });
 
 test("publisher atomically replaces a mode-0600 snapshot in private state", async () => {

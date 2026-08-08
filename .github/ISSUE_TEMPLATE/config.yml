@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/YuanpingSong/agent-embassy/security/advisories/new
+    about: >-
+      Do not open a public issue for a suspected vulnerability. Use GitHub's
+      private vulnerability reporting, as described in SECURITY.md.
