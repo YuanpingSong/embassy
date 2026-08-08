@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import path from "node:path";
 import type { Duplex } from "node:stream";
 
 import WebSocket from "ws";
@@ -69,7 +68,6 @@ export type CodexRouteGuard = CodexRouteIdentity & {
   revision: number;
   status: CodexRouteStatus;
   writableReady: boolean;
-  workspaceAttested: boolean;
 };
 
 /** Safe dashboard/controller projection. It deliberately omits provider IDs. */
@@ -82,34 +80,9 @@ export type CodexConnectorObservation = {
   routeStatus: CodexRouteStatus;
   writableReady: boolean;
   writeBlockCode: CodexWriteBlockCode | null;
-  workspaceAttested: boolean;
 };
 
-export type CodexWriteBlockCode =
-  | "UNSAFE_EFFECTIVE_POLICY"
-  | "WRITES_DISABLED"
-  | "WORKSPACE_NOT_ATTESTED";
-
-/**
- * Transient, exact-route input to a trusted host-local workspace validator.
- * The connector never stores, emits, or returns `canonicalCwd`.
- */
-export type CodexWorkspaceAttestationRequest = Readonly<{
-  canonicalCwd: string;
-  endpointGeneration: string;
-  threadId: string;
-}>;
-
-/**
- * A literal `true` means the provider proved the workspace is canonical,
- * narrow, race-stable, and disjoint from controller-owned state at that call.
- * The connector calls this again immediately before every `turn/start`.
- * Local and remote hosts require separate validators in their own filesystem
- * namespace.
- */
-export type CodexWorkspaceAttestor = (
-  request: CodexWorkspaceAttestationRequest,
-) => Promise<boolean>;
+export type CodexWriteBlockCode = "WRITES_DISABLED";
 
 export type CodexTurnOutcome = "completed" | "failed" | "interrupted";
 export type CodexDeliveryOutcome =
@@ -167,8 +140,6 @@ export type CodexConnectorErrorCode =
   | "THREAD_NOT_OBSERVED"
   | "ROUTE_BUSY"
   | "TURN_NOT_OWNED"
-  | "WORKSPACE_NOT_ATTESTED"
-  | "UNSAFE_EFFECTIVE_POLICY"
   | "WRITES_DISABLED"
   | "INPUT_INVALID"
   | "QUEUE_FULL"
@@ -392,7 +363,6 @@ type ClientInfo = {
 };
 
 export type CodexAppServerConnectorOptions = {
-  attestWorkspace: CodexWorkspaceAttestor;
   clientInfo?: ClientInfo;
   compatibility: CodexEndpointCompatibilityAttestation;
   maxDeadlineMs?: number;
@@ -405,7 +375,6 @@ export type CodexAppServerConnectorOptions = {
   onEvent?: (event: CodexConnectorEvent) => void;
   onTurnResult?: (result: CodexTransientTurnResult) => void;
   requestTimeoutMs?: number;
-  requireReadOnlyPolicy?: boolean;
   route: CodexRouteIdentity;
   transport: CodexAppServerTransport;
   /** Immutable outer authorization; monitor-only connectors set this false. */
@@ -576,51 +545,6 @@ function parseTurn(value: unknown): {
   return { id: value.id, status: value.status };
 }
 
-function parseCanonicalWorkspace(value: unknown): string | null {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 4_096 ||
-    value.includes("\0") ||
-    /[\r\n]/u.test(value) ||
-    !(
-      (path.posix.isAbsolute(value) && path.posix.normalize(value) === value) ||
-      (path.win32.isAbsolute(value) && path.win32.normalize(value) === value)
-    )
-  ) {
-    return null;
-  }
-  return value;
-}
-
-function classifyEffectivePolicy(
-  approvalPolicy: unknown,
-  sandbox: unknown,
-): "invalid" | "safe" | "unsafe" {
-  if (
-    typeof approvalPolicy !== "string" ||
-    approvalPolicy.length === 0 ||
-    approvalPolicy.length > 64 ||
-    !isRecord(sandbox) ||
-    typeof sandbox.type !== "string" ||
-    sandbox.type.length === 0 ||
-    sandbox.type.length > 64 ||
-    (sandbox.networkAccess !== undefined &&
-      typeof sandbox.networkAccess !== "boolean")
-  ) {
-    return "invalid";
-  }
-  const exactReadOnlyKeys = Object.keys(sandbox).every(
-    (key) => key === "type" || key === "networkAccess",
-  );
-  return approvalPolicy === "never" &&
-    sandbox.type === "readOnly" &&
-    sandbox.networkAccess !== true &&
-    exactReadOnlyKeys
-    ? "safe"
-    : "unsafe";
-}
-
 /**
  * One connection, one exact opted-in Codex route, one endpoint generation.
  * Reconnection creates a new connector/generation; this object never retries
@@ -639,7 +563,6 @@ export class CodexAppServerConnector {
   private activeMessageId: string | null = null;
   private activeTurnId: string | null = null;
   private connection: CodexConnectorConnectionState = "connecting";
-  private effectivePolicySafe = false;
   private drainScheduled = false;
   private eventSequence = 0;
   private expectedClose = false;
@@ -652,7 +575,6 @@ export class CodexAppServerConnector {
   private ownsActiveTurn = false;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly queue: QueuedMessage[] = [];
-  private queueRefreshAuthorized = false;
   private revision = 0;
   private routeStatus: CodexRouteStatus = "unknown";
   private selectedThreadObserved = false;
@@ -660,11 +582,7 @@ export class CodexAppServerConnector {
   private transientReply: string | null = null;
   private transientReplyTooLarge = false;
   private readonly unlisten: Array<() => void> = [];
-  private workspaceAttested = false;
-  private workspaceCwd: string | null = null;
-  private workspaceEpoch = 0;
 
-  private readonly attestWorkspace: CodexWorkspaceAttestor;
   private readonly clientInfo: ClientInfo;
   private readonly compatibility: CodexEndpointCompatibilityAttestation;
   private readonly maxDeadlineMs: number;
@@ -679,7 +597,6 @@ export class CodexAppServerConnector {
     | ((result: CodexTransientTurnResult) => void)
     | undefined;
   private readonly requestTimeoutMs: number;
-  private readonly requireReadOnlyPolicy: boolean;
   private readonly route: CodexRouteIdentity;
   private readonly transport: CodexAppServerTransport;
   private readonly writesEnabled: boolean;
@@ -687,10 +604,6 @@ export class CodexAppServerConnector {
   private constructor(options: CodexAppServerConnectorOptions) {
     this.route = validateRoute(options.route);
     this.compatibility = validateCompatibility(options.compatibility, this.route);
-    if (typeof options.attestWorkspace !== "function") {
-      throw new CodexConnectorError("INVALID_CONFIGURATION");
-    }
-    this.attestWorkspace = options.attestWorkspace;
     if (typeof options.writesEnabled !== "boolean") {
       throw new CodexConnectorError("INVALID_CONFIGURATION");
     }
@@ -731,7 +644,6 @@ export class CodexAppServerConnector {
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       "INVALID_CONFIGURATION",
     );
-    this.requireReadOnlyPolicy = options.requireReadOnlyPolicy ?? true;
     this.now = options.now ?? (() => new Date());
     this.onEvent = options.onEvent;
     this.onTurnResult = options.onTurnResult;
@@ -752,21 +664,19 @@ export class CodexAppServerConnector {
       queueDepth: this.queue.length,
       requestInFlight: this.inFlightMethod !== null,
       routeStatus: this.routeStatus,
-      writableReady: writeBlockCode === null,
+      writableReady: this.isWritableReady(),
       writeBlockCode,
-      workspaceAttested: this.workspaceAttested,
     };
   }
 
   guard(): CodexRouteGuard {
-    const writableReady = this.currentWriteBlockCode() === null;
+    const writableReady = this.isWritableReady();
     return {
       ...this.route,
       activeTurnId: this.activeTurnId,
       revision: this.revision,
       status: this.routeStatus,
       writableReady,
-      workspaceAttested: this.workspaceAttested,
     };
   }
 
@@ -797,7 +707,6 @@ export class CodexAppServerConnector {
         this.bumpRevision();
       }
       if (!selectedThreadLoaded) {
-        this.invalidateWorkspaceAttestation();
         if (
           this.routeStatus === "active" ||
           this.routeStatus === "waiting_approval" ||
@@ -849,8 +758,6 @@ export class CodexAppServerConnector {
     ) {
       throw new CodexConnectorError("ROUTE_BUSY");
     }
-    this.invalidateWorkspaceAttestation();
-    const workspaceEpoch = this.workspaceEpoch;
     const statusEpoch = this.statusEpoch;
     this.beginRequest("thread/resume");
     try {
@@ -869,12 +776,6 @@ export class CodexAppServerConnector {
       if (result.thread.id !== this.route.threadId) {
         throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
       }
-      await this.attestResumedWorkspace(
-        result.cwd,
-        result.approvalPolicy,
-        result.sandbox,
-        workspaceEpoch,
-      );
       if (this.statusEpoch === statusEpoch) {
         const status = parseRouteStatus(result.thread.status);
         if (status === null) {
@@ -896,11 +797,7 @@ export class CodexAppServerConnector {
       if (normalized.ambiguous && this.connection === "ready") {
         this.setRouteStatus("uncertain");
       }
-      if (normalized.code === "WORKSPACE_NOT_ATTESTED") {
-        this.protocolFault(normalized.code);
-      } else {
-        this.handleActionError(normalized);
-      }
+      this.handleActionError(normalized);
       throw normalized;
     } finally {
       this.finishRequest("thread/resume");
@@ -939,7 +836,6 @@ export class CodexAppServerConnector {
       }
       this.setRouteStatus("not_loaded");
       this.selectedThreadObserved = false;
-      this.invalidateWorkspaceAttestation();
       this.emit("thread_unsubscribed");
       const status = result.status;
       this.finishRequest("thread/unsubscribe");
@@ -983,22 +879,19 @@ export class CodexAppServerConnector {
       this.routeStatus === "waiting_approval" ||
       this.routeStatus === "interrupting"
     ) {
-      this.assertQueueBoundaryRefreshable();
+      this.assertWritableReady();
       const message = this.validateMessage(input);
       this.enqueue(message);
       return { disposition: "queued", observation: this.observation() };
     }
-    const refreshWorkspace =
-      !this.workspaceAttested && this.queueRefreshAuthorized;
-    if (refreshWorkspace) this.assertQueueBoundaryRefreshable();
-    else this.assertWritableReady();
+    this.assertWritableReady();
     const message = this.validateMessage(input);
     if (this.routeStatus !== "idle") {
       this.acceptedMessageIds.delete(message.messageId);
       throw new CodexConnectorError("ROUTE_NOT_READY");
     }
 
-    const disposition = await this.startMessage(message, refreshWorkspace);
+    const disposition = await this.startMessage(message);
     return { disposition, observation: this.observation() };
   }
 
@@ -1150,10 +1043,9 @@ export class CodexAppServerConnector {
 
   private async startMessage(
     message: QueuedMessage,
-    allowStaleWorkspaceRefresh = false,
   ): Promise<"expired" | "started"> {
     this.assertNoRequest();
-    this.assertStartBoundary(allowStaleWorkspaceRefresh);
+    this.assertWritableReady();
     if (this.messageExpired(message)) {
       this.expireMessage(message);
       return "expired";
@@ -1168,7 +1060,7 @@ export class CodexAppServerConnector {
     this.setRouteStatus("starting");
     let requestBegan = false;
     try {
-      await this.refreshEffectiveWriteBoundary(allowStaleWorkspaceRefresh);
+      await this.refreshExactRouteBoundary();
       if (this.messageExpired(message)) {
         this.activeMessageId = null;
         this.acceptedMessageIds.delete(message.messageId);
@@ -1181,7 +1073,7 @@ export class CodexAppServerConnector {
         this.routeStatus !== "starting" ||
         this.activeMessageId !== message.messageId
       ) {
-        throw new CodexConnectorError("WORKSPACE_NOT_ATTESTED");
+        throw new CodexConnectorError("ROUTE_NOT_READY");
       }
 
       const statusEpoch = this.statusEpoch;
@@ -1231,19 +1123,6 @@ export class CodexAppServerConnector {
         this.ownsActiveTurn = false;
         this.acceptedMessageIds.delete(message.messageId);
         if (
-          normalized.code === "WORKSPACE_NOT_ATTESTED" ||
-          normalized.code === "UNSAFE_EFFECTIVE_POLICY"
-        ) {
-          if (normalized.code === "WORKSPACE_NOT_ATTESTED") {
-            this.invalidateWorkspaceAttestation();
-          }
-          const droppedMessages = this.dropQueuedMessages();
-          if (this.routeStatus === "starting") this.setRouteStatus("idle");
-          this.emit("route_write_blocked", {
-            droppedMessages,
-            errorCode: normalized.code,
-          });
-        } else if (
           normalized.code !== "ROUTE_NOT_READY" ||
           this.routeStatus === "starting"
         ) {
@@ -1269,7 +1148,7 @@ export class CodexAppServerConnector {
       this.drainScheduled ||
       this.connection !== "ready" ||
       this.routeStatus !== "idle" ||
-      !this.queueBoundaryRefreshable() ||
+      this.currentWriteBlockCode() !== null ||
       this.inFlightMethod !== null ||
       this.queue.length === 0
     ) {
@@ -1285,7 +1164,7 @@ export class CodexAppServerConnector {
       if (
         this.connection !== "ready" ||
         this.routeStatus !== "idle" ||
-        !this.queueBoundaryRefreshable() ||
+        this.currentWriteBlockCode() !== null ||
         this.inFlightMethod !== null ||
         this.queue.length === 0
       ) {
@@ -1294,7 +1173,7 @@ export class CodexAppServerConnector {
       const message = this.queue.shift();
       if (message === undefined) return;
       this.bumpRevision();
-      void this.startMessage(message, true).then(
+      void this.startMessage(message).then(
         (disposition) => {
           if (disposition === "expired") this.scheduleDrain();
         },
@@ -1314,8 +1193,7 @@ export class CodexAppServerConnector {
       guard.revision !== this.revision ||
       guard.status !== this.routeStatus ||
       guard.activeTurnId !== this.activeTurnId ||
-      guard.writableReady !== (this.currentWriteBlockCode() === null) ||
-      guard.workspaceAttested !== this.workspaceAttested
+      guard.writableReady !== this.isWritableReady()
     ) {
       throw new CodexConnectorError("ROUTE_CAS_MISMATCH");
     }
@@ -1338,17 +1216,11 @@ export class CodexAppServerConnector {
   }
 
   private currentWriteBlockCode(): CodexWriteBlockCode | null {
-    if (!this.writesEnabled) return "WRITES_DISABLED";
-    // Gateway routes are explicitly registered by the owning Codex task and
-    // retain that task's native approval/sandbox policy. In that mode,
-    // workspace metadata is observational rather than an additional delivery
-    // authorization gate. A live registered route remains reachable across
-    // external turns and settings notifications.
-    if (!this.requireReadOnlyPolicy) return null;
-    if (!this.workspaceAttested || this.workspaceCwd === null) {
-      return "WORKSPACE_NOT_ATTESTED";
-    }
-    return this.effectivePolicySafe ? null : "UNSAFE_EFFECTIVE_POLICY";
+    return this.writesEnabled ? null : "WRITES_DISABLED";
+  }
+
+  private isWritableReady(): boolean {
+    return this.connection === "ready" && this.currentWriteBlockCode() === null;
   }
 
   private assertWritableReady(): void {
@@ -1356,97 +1228,14 @@ export class CodexAppServerConnector {
     if (code !== null) throw new CodexConnectorError(code);
   }
 
-  private queueBoundaryRefreshable(): boolean {
-    const code = this.currentWriteBlockCode();
-    return (
-      code === null ||
-      (code === "WORKSPACE_NOT_ATTESTED" && this.queueRefreshAuthorized)
-    );
-  }
-
-  private assertQueueBoundaryRefreshable(): void {
-    if (this.queueBoundaryRefreshable()) return;
-    const code = this.currentWriteBlockCode();
-    throw new CodexConnectorError(code ?? "ROUTE_NOT_READY");
-  }
-
-  private assertStartBoundary(allowStaleWorkspaceRefresh: boolean): void {
-    if (allowStaleWorkspaceRefresh) {
-      this.assertQueueBoundaryRefreshable();
-      return;
-    }
-    this.assertWritableReady();
-  }
-
-  private async attestResumedWorkspace(
-    value: unknown,
-    approvalPolicy: unknown,
-    sandbox: unknown,
-    attemptEpoch: number,
-  ): Promise<void> {
-    if (!this.requireReadOnlyPolicy) {
-      if (
-        this.connection !== "ready" ||
-        this.inFlightMethod !== "thread/resume" ||
-        this.workspaceEpoch !== attemptEpoch
-      ) {
-        throw new CodexConnectorError("CONNECTOR_CLOSED");
-      }
-      this.workspaceCwd = parseCanonicalWorkspace(value) ?? "/";
-      this.workspaceAttested = true;
-      this.effectivePolicySafe = true;
-      this.queueRefreshAuthorized = true;
-      this.bumpRevision();
-      return;
-    }
-    const canonicalCwd = parseCanonicalWorkspace(value);
-    const policy = classifyEffectivePolicy(approvalPolicy, sandbox);
-    if (canonicalCwd === null || policy === "invalid") {
-      throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
-    }
-    let accepted: unknown = false;
-    try {
-      accepted = await this.attestWorkspace(
-        Object.freeze({
-          canonicalCwd,
-          endpointGeneration: this.route.endpointGeneration,
-          threadId: this.route.threadId,
-        }),
-      );
-    } catch {
-      // The outer validator's diagnostics may contain paths or filesystem
-      // details. Collapse every denial to one normalized, path-free code.
-      accepted = false;
-    }
-    if (
-      this.connection !== "ready" ||
-      this.inFlightMethod !== "thread/resume"
-    ) {
-      throw new CodexConnectorError("CONNECTOR_CLOSED");
-    }
-    if (this.workspaceEpoch !== attemptEpoch || accepted !== true) {
-      throw new CodexConnectorError("WORKSPACE_NOT_ATTESTED");
-    }
-    this.workspaceCwd = canonicalCwd;
-    this.workspaceAttested = true;
-    const policyAccepted =
-      policy === "safe" || !this.requireReadOnlyPolicy;
-    this.effectivePolicySafe = policyAccepted;
-    this.queueRefreshAuthorized = policyAccepted;
-    this.bumpRevision();
-  }
-
   /**
-   * Refresh the exact thread's effective cwd, approval policy, and sandbox on
-   * this same connection immediately before a `turn/start`. A filesystem-only
-   * lease renewal cannot detect an App Server settings change, and the
-   * settings-updated notification is experimental in 0.147.0, so writes never
-   * rely on notification fanout for policy freshness.
+   * Refresh the exact thread on this same connection immediately before a
+   * `turn/start`. This confirms the registered task is still the observed idle
+   * route without reading history or changing its native approval/sandbox
+   * policy.
    */
-  private async refreshEffectiveWriteBoundary(
-    allowStaleWorkspaceRefresh: boolean,
-  ): Promise<void> {
-    this.assertStartBoundary(allowStaleWorkspaceRefresh);
+  private async refreshExactRouteBoundary(): Promise<void> {
+    this.assertWritableReady();
     if (
       this.routeStatus !== "starting" ||
       this.activeMessageId === null ||
@@ -1456,8 +1245,6 @@ export class CodexAppServerConnector {
       throw new CodexConnectorError("ROUTE_NOT_READY");
     }
 
-    this.invalidateWorkspaceAttestation(true);
-    const workspaceEpoch = this.workspaceEpoch;
     const statusEpoch = this.statusEpoch;
     this.beginRequest("thread/resume");
     try {
@@ -1482,12 +1269,6 @@ export class CodexAppServerConnector {
         this.setRouteStatus(refreshedStatus);
         throw new CodexConnectorError("ROUTE_NOT_READY");
       }
-      await this.attestResumedWorkspace(
-        result.cwd,
-        result.approvalPolicy,
-        result.sandbox,
-        workspaceEpoch,
-      );
       this.assertWritableReady();
       if (
         this.statusEpoch !== statusEpoch ||
@@ -1496,34 +1277,11 @@ export class CodexAppServerConnector {
         this.activeTurnId !== null ||
         this.ownsActiveTurn
       ) {
-        this.invalidateWorkspaceAttestation(true);
         throw new CodexConnectorError("ROUTE_NOT_READY");
       }
     } finally {
       this.finishRequest("thread/resume");
     }
-  }
-
-  private invalidateWorkspaceAttestation(
-    retainQueueRefreshAuthorization = false,
-  ): void {
-    this.workspaceEpoch += 1;
-    if (!Number.isSafeInteger(this.workspaceEpoch)) {
-      this.protocolFault("PROTOCOL_ERROR");
-      return;
-    }
-    const changed =
-      this.workspaceAttested ||
-      this.workspaceCwd !== null ||
-      this.effectivePolicySafe ||
-      (!retainQueueRefreshAuthorization && this.queueRefreshAuthorized);
-    this.workspaceAttested = false;
-    this.workspaceCwd = null;
-    this.effectivePolicySafe = false;
-    if (!retainQueueRefreshAuthorization) {
-      this.queueRefreshAuthorized = false;
-    }
-    if (changed) this.bumpRevision();
   }
 
   private messageExpired(message: QueuedMessage): boolean {
@@ -1692,16 +1450,9 @@ export class CodexAppServerConnector {
         return;
       }
       if (params.threadId !== this.route.threadId) return;
-      // A settings update can replace the effective cwd, approval policy, or
-      // sandbox without a turn transition. Do not interpret or retain the raw
-      // settings payload. Invalidate the transient resume proof, abandon any
-      // queued bodies, and require a fresh exact-thread resume before writing.
-      this.invalidateWorkspaceAttestation();
-      const droppedMessages = this.dropQueuedMessages();
-      this.emit("route_write_blocked", {
-        droppedMessages,
-        errorCode: "WORKSPACE_NOT_ATTESTED",
-      });
+      // Native settings remain owned by Codex. Registration is the Embassy
+      // reachability boundary, so a settings update neither blocks the route
+      // nor drops already accepted messages.
       return;
     }
 
@@ -1716,25 +1467,33 @@ export class CodexAppServerConnector {
         this.protocolFault("PROTOCOL_ERROR");
         return;
       }
-      this.statusEpoch += 1;
-      if (
-        (status === "active" || status === "waiting_approval") &&
+      const reservedRefreshInFlight =
+        this.routeStatus === "starting" &&
+        this.activeMessageId !== null &&
+        this.activeTurnId === null &&
         !this.ownsActiveTurn &&
-        this.routeStatus !== "active" &&
-        this.routeStatus !== "waiting_approval"
+        this.inFlightMethod === "thread/resume";
+      const ownedStartInFlight =
+        this.activeMessageId !== null &&
+        this.activeTurnId === null &&
+        this.ownsActiveTurn &&
+        this.inFlightMethod === "turn/start";
+      if (
+        status === "idle" &&
+        (reservedRefreshInFlight || ownedStartInFlight)
       ) {
-        // Another client can change the thread's default cwd when starting a
-        // turn. Require a fresh resume-time workspace proof before any later
-        // gateway write.
-        this.invalidateWorkspaceAttestation(true);
+        // This idle belongs to the external turn whose completion released the
+        // queue. Do not let it invalidate the exact refresh epoch or reopen the
+        // drain while the reserved message crosses the refresh/start boundary.
+        return;
       }
+      this.statusEpoch += 1;
       if (status === "idle" && this.activeTurnId !== null) {
         // Wait for the correlated turn/completed notification before draining.
         return;
       }
       if (status === "not_loaded") {
         this.selectedThreadObserved = false;
-        this.invalidateWorkspaceAttestation();
         this.settleActiveDelivery("ambiguous");
         this.activeTurnId = null;
         this.activeMessageId = null;
@@ -1768,7 +1527,6 @@ export class CodexAppServerConnector {
       this.settleActiveDelivery("ambiguous");
       this.activeTurnId = null;
       this.selectedThreadObserved = false;
-      this.invalidateWorkspaceAttestation();
       this.activeMessageId = null;
       this.ownsActiveTurn = false;
       this.clearTransientReply();
@@ -1796,7 +1554,6 @@ export class CodexAppServerConnector {
         return;
       }
       if (!this.ownsActiveTurn || this.activeMessageId === null) {
-        this.invalidateWorkspaceAttestation(true);
         return;
       }
       if (this.lastCompletedTurnId === turn.id) return;
@@ -1831,8 +1588,27 @@ export class CodexAppServerConnector {
         this.protocolFault("PROTOCOL_ERROR");
         return;
       }
+      const outcome = turn.status as CodexTurnOutcome;
       if (!this.ownsActiveTurn || this.activeMessageId === null) {
-        this.invalidateWorkspaceAttestation(true);
+        // An approval request from another client records the external turn ID
+        // so Embassy can wait without answering it. Its terminal notification
+        // must release that observation and any queued Embassy work, while
+        // never claiming or settling the external turn as gateway-owned.
+        if (this.ownsActiveTurn || this.activeMessageId !== null) {
+          this.protocolFault("PROTOCOL_ERROR");
+          return;
+        }
+        if (this.activeTurnId === null) return;
+        if (this.activeTurnId !== turn.id) {
+          this.protocolFault("PROTOCOL_ERROR");
+          return;
+        }
+        this.activeTurnId = null;
+        this.lastCompletedTurnId = turn.id;
+        this.clearTransientReply();
+        this.setRouteStatus(outcome === "failed" ? "system_error" : "idle");
+        this.emit("turn_completed", { turnOutcome: outcome });
+        if (outcome !== "failed") this.scheduleDrain();
         return;
       }
       if (this.activeTurnId === null) return;
@@ -1848,7 +1624,6 @@ export class CodexAppServerConnector {
       this.activeMessageId = null;
       this.ownsActiveTurn = false;
       this.clearTransientReply();
-      const outcome = turn.status as CodexTurnOutcome;
       this.setRouteStatus(outcome === "failed" ? "system_error" : "idle");
       this.emit("turn_completed", { turnOutcome: outcome });
       if (messageId !== null) {
@@ -1901,13 +1676,6 @@ export class CodexAppServerConnector {
       return;
     }
     if (params.threadId !== this.route.threadId) return;
-    if (
-      !this.ownsActiveTurn &&
-      this.routeStatus !== "active" &&
-      this.routeStatus !== "waiting_approval"
-    ) {
-      this.invalidateWorkspaceAttestation(true);
-    }
     if (this.activeTurnId !== null && this.activeTurnId !== params.turnId) {
       this.protocolFault("PROTOCOL_ERROR");
       return;
@@ -2061,7 +1829,6 @@ export class CodexAppServerConnector {
     this.initialized = false;
     this.routeStatus = "stale";
     this.selectedThreadObserved = false;
-    this.invalidateWorkspaceAttestation();
     this.settleActiveDelivery("ambiguous");
     this.activeTurnId = null;
     const droppedMessages = this.dropQueuedMessages();
@@ -2080,7 +1847,6 @@ export class CodexAppServerConnector {
     this.initialized = false;
     this.routeStatus = "stale";
     this.selectedThreadObserved = false;
-    this.invalidateWorkspaceAttestation();
     this.settleActiveDelivery("ambiguous");
     this.activeTurnId = null;
     const droppedMessages = this.dropQueuedMessages();

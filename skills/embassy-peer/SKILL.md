@@ -1,6 +1,6 @@
 ---
 name: embassy-peer
-description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for monitoring, list available peers, open the local dashboard, select and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
+description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for native inbound messaging, list available peers, open the local dashboard, select and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
 ---
 
 # Embassy Peer Gateway
@@ -89,7 +89,7 @@ If the task identity or selector does not match, stop on the fail-closed result.
 
 Pass a non-empty UTF-8 body through standard input. Never place message text in a gateway argument or a temporary file.
 
-From a registered Codex task to a discovered Claude session:
+From a registered Codex task to an already-selected Claude session:
 
 ```sh
 embassy send-to-claude \
@@ -104,7 +104,7 @@ address the same logical route; a former name is not retained as an alias.
 
 Let the CLI read the current `CODEX_THREAD_ID`; do not inspect or forward it.
 
-The foreground launcher supports native bidirectional messaging for one explicitly registered `codex-*` task. Claude discovers it with native `ListAgents` and sends with native `SendMessage`; Claude Code controls this feature with `crossSessionInbound`. Every exact live same-UID Claude session may reach the registered `codex-*` task after Claude's own native registry and generation checks. This inbound reachability does not select that Claude session for Embassy's outbound Codex-to-Claude route. Embassy starts the Codex turn and returns its final reply to the originating Claude session.
+The foreground launcher supports native bidirectional messaging for one explicitly registered `codex-*` task. Claude discovers it with native `ListAgents` and sends with native `SendMessage`. Every exact compatible live same-UID Claude session may reach the registered `codex-*` task after Claude's own native registry and generation checks; the Codex task's existing native approval and sandbox policy governs that turn. Claude Code's `crossSessionInbound` instead controls messages entering a Claude session, including Embassy's outbound Codex-to-Claude delivery. Claude-to-Codex reachability does not select the sending Claude session for Embassy's outbound route. Embassy starts the Codex turn and returns its final reply to the originating Claude session.
 
 Use exactly one send for one user-authorized message. Do not automatically retry, fan out, poll, or fall back to Claude Code's native `SendMessage`.
 

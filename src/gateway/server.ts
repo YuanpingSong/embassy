@@ -2,7 +2,6 @@ import { userInfo } from "node:os";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
-import type { CodexWorkspaceAttestor } from "./codex-app-server.js";
 import {
   attestClaudePeerRuntime,
   type AttestedClaudePeerRuntime,
@@ -67,10 +66,6 @@ export type GatewayServerDependencies = {
   createCodexFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
-  createCodexWorkspaceAttestor?: (
-    store: GatewayStore,
-    endpointGeneration: string,
-  ) => CodexWorkspaceAttestor;
   createCodexProvider?: (
     options: LocalCodexGatewayProviderOptions,
   ) => LocalCodexGatewayProvider;
@@ -116,20 +111,6 @@ export function resolveGatewayClaudeLauncher(
     );
   }
   return launcher;
-}
-
-/**
- * Bind the App Server's transient canonical cwd to the initialized controller
- * store. Provider-native paths are neither persisted nor exposed.
- */
-export function createLocalCodexWorkspaceAttestor(
-  store: GatewayStore,
-  endpointGeneration: string,
-): CodexWorkspaceAttestor {
-  void store;
-  return async (request) => {
-    return request.endpointGeneration === endpointGeneration;
-  };
 }
 
 function localCodexProviderEnvironment(
@@ -243,9 +224,6 @@ export async function runGatewayServer(
   const createStore = dependencies.createStore ?? ((config) => new GatewayStore(config));
   const createCodexFactory =
     dependencies.createCodexFactory ?? createLocalCodexTransportFactory;
-  const createCodexWorkspaceAttestor =
-    dependencies.createCodexWorkspaceAttestor ??
-    createLocalCodexWorkspaceAttestor;
   const createCodexProvider =
     dependencies.createCodexProvider ?? createLocalCodexGatewayProvider;
   const createService =
@@ -289,18 +267,11 @@ export async function runGatewayServer(
       hostId: GATEWAY_LOCAL_HOST_ID,
       writableProtocolAttested: true,
     });
-    const attestWorkspace = createCodexWorkspaceAttestor(
-      store,
-      codexFactory.endpointGeneration,
-    );
     codexProvider = createCodexProvider({
       factory: codexFactory,
-      stateRoot: config.stateDir,
-      attestWorkspace,
     });
     service = createService({
       config,
-      forbiddenWorkspaceRoots: [],
       adapters: [claudeProvider, codexProvider],
       store,
     });

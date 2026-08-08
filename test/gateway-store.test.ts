@@ -302,22 +302,20 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   );
 });
 
-test("gateway state requires a private owned leaf disjoint from workspaces", async () => {
+test("gateway state requires a private owned leaf without imposing a workspace gate", async () => {
   const { root, workspace, config, clock: testClock } = await fixture();
   const overlappingConfig = {
     ...config,
     stateDir: path.join(workspace, "gateway"),
     controlSocketPath: path.join(workspace, "gateway", "control.sock"),
   };
-  await assert.rejects(
-    new GatewayStore(overlappingConfig, {
-      now: testClock.now,
-      randomId: testClock.randomId,
-    }).initialize([workspace]),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "GATEWAY_STATE_WORKSPACE_OVERLAP",
-  );
+  const nestedStore = new GatewayStore(overlappingConfig, {
+    now: testClock.now,
+    randomId: testClock.randomId,
+  });
+  await nestedStore.initialize();
+  assert.equal((await lstat(overlappingConfig.stateDir)).mode & 0o777, 0o700);
+  await nestedStore.close();
 
   const publicDirectory = path.join(root, "public");
   await mkdir(publicDirectory, { mode: 0o755 });
@@ -327,7 +325,7 @@ test("gateway state requires a private owned leaf disjoint from workspaces", asy
     controlSocketPath: path.join(publicDirectory, "control.sock"),
   };
   await assert.rejects(
-    new GatewayStore(publicConfig).initialize([workspace]),
+    new GatewayStore(publicConfig).initialize(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "UNSAFE_GATEWAY_STATE_DIRECTORY",
@@ -343,7 +341,7 @@ test("gateway state requires a private owned leaf disjoint from workspaces", asy
     controlSocketPath: path.join(linkedTarget, "gateway", "control.sock"),
   };
   await assert.rejects(
-    new GatewayStore(linkedConfig).initialize([workspace]),
+    new GatewayStore(linkedConfig).initialize(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "UNSAFE_GATEWAY_STATE_DIRECTORY",
@@ -352,129 +350,21 @@ test("gateway state requires a private owned leaf disjoint from workspaces", asy
 
 test("one live gateway exclusively owns its controller state", async () => {
   const { store, config, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   const second = new GatewayStore(config);
   await assert.rejects(
-    second.initialize([workspace]),
+    second.initialize(),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "GATEWAY_STATE_IN_USE",
   );
   await store.close();
-  await second.initialize([workspace]);
+  await second.initialize();
   await second.close();
-});
-
-test("gateway may start before discovery but dynamically attests each workspace", async () => {
-  const { store, stateDir, workspace } = await fixture();
-  await store.initialize([]);
-  assert.equal((await lstat(stateDir)).mode & 0o777, 0o700);
-  await store.assertWorkspaceDisjoint(workspace);
-  await store.close();
-});
-
-test("dynamic local route workspaces are checked without persistence", async () => {
-  const { store, root, workspace } = await fixture();
-  await store.initialize([workspace]);
-  await store.assertWorkspaceDisjoint(workspace);
-  await assert.rejects(
-    store.assertWorkspaceDisjoint(root),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "GATEWAY_STATE_WORKSPACE_OVERLAP",
-  );
-  const linked = path.join(root, "linked-workspace");
-  await symlink(workspace, linked);
-  await assert.rejects(
-    store.assertWorkspaceDisjoint(linked),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_PROVIDER_WORKSPACE",
-  );
-  assert.equal(
-    (await readFile(store.stateFilePath, "utf8")).includes(workspace),
-    false,
-  );
-  await store.close();
-});
-
-test("workspace attestation rejects broad local roots", async () => {
-  const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
-  const loginHome = await realpath(os.homedir());
-  const temporaryRoot = await realpath(os.tmpdir());
-  const broadRoots = new Set([
-    path.parse(loginHome).root,
-    path.dirname(loginHome),
-    loginHome,
-    temporaryRoot,
-  ]);
-  for (const sharedTemporaryRoot of ["/tmp", "/var/tmp"]) {
-    const canonical = await realpath(sharedTemporaryRoot).catch(() => undefined);
-    if (canonical !== undefined) broadRoots.add(canonical);
-  }
-  for (const broadRoot of broadRoots) {
-    await assert.rejects(
-      store.assertWorkspaceDisjoint(broadRoot),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "INVALID_PROVIDER_WORKSPACE",
-    );
-  }
-  await store.close();
-
-  const uninitialized = await fixture();
-  await assert.rejects(
-    uninitialized.store.initialize([loginHome]),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_PROVIDER_WORKSPACE",
-  );
-  await assert.rejects(lstat(uninitialized.stateDir));
-});
-
-test("workspace attestation requires an owned non-writable project leaf", async () => {
-  const dynamic = await fixture();
-  await dynamic.store.initialize([dynamic.workspace]);
-  const writableWorkspace = path.join(dynamic.root, "writable-workspace");
-  await mkdir(writableWorkspace, { mode: 0o700 });
-  await chmod(writableWorkspace, 0o777);
-  await assert.rejects(
-    dynamic.store.assertWorkspaceDisjoint(writableWorkspace),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_PROVIDER_WORKSPACE",
-  );
-  await dynamic.store.close();
-
-  const insecureInitial = await fixture();
-  await chmod(insecureInitial.workspace, 0o777);
-  await assert.rejects(
-    insecureInitial.store.initialize([insecureInitial.workspace]),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_PROVIDER_WORKSPACE",
-  );
-  await assert.rejects(lstat(insecureInitial.stateDir));
-
-  const foreign = await fixture();
-  let expectedUid = (await lstat(foreign.workspace)).uid;
-  const foreignAwareStore = new GatewayStore(foreign.config, {
-    workspaceOwnerUid: () => expectedUid,
-  });
-  await foreignAwareStore.initialize([foreign.workspace]);
-  expectedUid += 1;
-  await assert.rejects(
-    foreignAwareStore.assertWorkspaceDisjoint(foreign.workspace),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_PROVIDER_WORKSPACE",
-  );
-  await foreignAwareStore.close();
 });
 
 test("routes require explicit selection and immutable exact generations", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
@@ -536,7 +426,7 @@ test("routes require explicit selection and immutable exact generations", async 
 test("route registry has a configured durable capacity", async () => {
   const { store, workspace, config } = await fixture();
   config.limits.maxRoutes = 2;
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   await assert.rejects(
     store.registerRoute({
@@ -556,7 +446,7 @@ test("route registry has a configured durable capacity", async () => {
 
 test("persistence contains metadata but no body, dedupe key, or public native IDs", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   const body = "BODY_SENTINEL_4e6d_do_not_persist";
   const dedupeKey = "RAW_PROVIDER_MESSAGE_ID_SENTINEL_198a";
@@ -596,7 +486,7 @@ test("persistence contains metadata but no body, dedupe key, or public native ID
 test("native Claude ingress queues for an explicit Codex route without registering the peer", async () => {
   const { store, workspace, config } = await fixture();
   config.limits.rateLimitPerRoute = 1;
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegisterCodexOnly(store);
 
   const accepted = await store.enqueueNativeIngress({
@@ -689,7 +579,7 @@ test("native Claude ingress queues for an explicit Codex route without registeri
 
 test("a correlated native reply retains transient-target queue semantics and no route authority", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegisterCodexOnly(store);
 
   await assert.rejects(
@@ -750,7 +640,7 @@ test("a correlated native reply retains transient-target queue semantics and no 
 
 test("native messages fail closed on peer scope and abandon transient authority across restart", async () => {
   const { store, workspace, config, clock: testClock } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegisterCodexOnly(store);
 
   await assert.rejects(
@@ -804,7 +694,7 @@ test("native messages fail closed on peer scope and abandon transient authority 
     now: testClock.now,
     randomId: testClock.randomId,
   });
-  await recovered.initialize([workspace]);
+  await recovered.initialize();
   const snapshot = await recovered.publicSnapshot();
   assert.equal(snapshot.accounting.abandoned, 1);
   assert.equal(snapshot.accounting.ambiguous, 1);
@@ -1008,7 +898,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
 
 test("stale rebind preserves counters but cannot silently retarget an alias", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({
     sourceAlias: "reviewer@this-mac",
@@ -1054,7 +944,7 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
 
 test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   const first = await store.enqueueMessage({
     sourceAlias: "reviewer@this-mac",
@@ -1112,7 +1002,7 @@ test("queue, dedupe, delivery, and accounting stay bounded", async () => {
 
 test("a transient dispatch can return to the held queue without leaking in-flight metadata", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({
     sourceAlias: "reviewer@this-mac",
@@ -1146,7 +1036,7 @@ test("a transient dispatch can return to the held queue without leaking in-fligh
 
 test("in-flight expiry is terminal while progress remains nonterminal", async () => {
   const { store, workspace } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({
     sourceAlias: "reviewer@this-mac",
@@ -1179,7 +1069,7 @@ test("in-flight expiry is terminal while progress remains nonterminal", async ()
 
 test("event and dedupe TTLs prune and the event ring is capped", async () => {
   const { store, workspace, clock: testClock } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   for (let index = 0; index < 6; index += 1) {
     const accepted = await store.enqueueMessage({
@@ -1206,7 +1096,7 @@ test("event and dedupe TTLs prune and the event ring is capped", async () => {
 
 test("restart stales routes and never replays bodyless queued or ambiguous writes", async () => {
   const { store, workspace, config, clock: testClock } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await observeAndRegister(store);
   const inFlight = await store.enqueueMessage({
     sourceAlias: "reviewer@this-mac",
@@ -1228,7 +1118,7 @@ test("restart stales routes and never replays bodyless queued or ambiguous write
     now: testClock.now,
     randomId: testClock.randomId,
   });
-  await recovered.initialize([workspace]);
+  await recovered.initialize();
   const snapshot = await recovered.publicSnapshot();
   assert.equal(snapshot.accounting.abandoned, 1);
   assert.equal(snapshot.accounting.ambiguous, 1);
@@ -1245,7 +1135,7 @@ test("restart stales routes and never replays bodyless queued or ambiguous write
 
 test("strict state schema rejects unknown content-bearing fields", async () => {
   const { store, workspace, config } = await fixture();
-  await store.initialize([workspace]);
+  await store.initialize();
   await store.close();
   const body = JSON.parse(await readFile(store.stateFilePath, "utf8")) as Record<
     string,
@@ -1257,7 +1147,7 @@ test("strict state schema rejects unknown content-bearing fields", async () => {
   });
   await chmod(store.stateFilePath, 0o600);
   await assert.rejects(
-    new GatewayStore(config).initialize([workspace]),
+    new GatewayStore(config).initialize(),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
   );
@@ -1265,7 +1155,7 @@ test("strict state schema rejects unknown content-bearing fields", async () => {
 
 test("oversized state and lock files are rejected before unbounded reads", async () => {
   const stateFixture = await fixture();
-  await stateFixture.store.initialize([stateFixture.workspace]);
+  await stateFixture.store.initialize();
   await stateFixture.store.close();
   await writeFile(
     stateFixture.store.stateFilePath,
@@ -1273,14 +1163,14 @@ test("oversized state and lock files are rejected before unbounded reads", async
     { mode: 0o600 },
   );
   await assert.rejects(
-    new GatewayStore(stateFixture.config).initialize([stateFixture.workspace]),
+    new GatewayStore(stateFixture.config).initialize(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "GATEWAY_STATE_FILE_TOO_LARGE",
   );
 
   const lockFixture = await fixture();
-  await lockFixture.store.initialize([lockFixture.workspace]);
+  await lockFixture.store.initialize();
   await lockFixture.store.close();
   await writeFile(
     path.join(lockFixture.stateDir, ".gateway-controller.lock"),
@@ -1288,7 +1178,7 @@ test("oversized state and lock files are rejected before unbounded reads", async
     { mode: 0o600 },
   );
   await assert.rejects(
-    new GatewayStore(lockFixture.config).initialize([lockFixture.workspace]),
+    new GatewayStore(lockFixture.config).initialize(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "GATEWAY_STATE_LOCK_UNVERIFIED",

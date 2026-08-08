@@ -188,6 +188,9 @@ test("dashboard rendering is branded, deterministic, static, and self-contained"
   assert.match(first, />Selected<\/span>/);
   assert.equal(first.includes("Agent Gateway Monitor"), false);
   assert.equal(first.includes("Local, private snapshot"), false);
+  assert.equal(first.includes("CODEX_POLICY_MONITOR_ONLY"), false);
+  assert.equal(first.includes("CODEX_WORKSPACE_UNATTESTED"), false);
+  assert.equal(first.includes("workspace attestation needs renewal"), false);
   assert.equal(first.includes("genuine"), false);
   assert.equal(first.includes("<script"), false);
   assert.equal(first.includes("javascript:"), false);
@@ -230,7 +233,10 @@ test("dashboard summarizes asymmetric directional readiness", () => {
   assert.match(html, /Claude \u2192 Codex/);
   assert.match(html, /Registered Codex targets/);
   assert.match(html, /1<\/strong> of <strong>1<\/strong> targets ready/);
-  assert.match(html, /Every live Claude session can see each registered Codex target/);
+  assert.match(
+    html,
+    /Every compatible live Claude session running as the same OS user can see each registered Codex target/,
+  );
   assert.match(html, /status--info[^>]*>.*Busy/s);
   assert.equal(html.includes("Gateway</dt>"), false);
   assert.equal(html.includes("Selected agents"), false);

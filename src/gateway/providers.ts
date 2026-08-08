@@ -18,7 +18,6 @@ import {
   type CodexConnectorEvent,
   type CodexConnectorObservation,
   type CodexTransientTurnResult,
-  type CodexWorkspaceAttestor,
 } from "./codex-app-server.js";
 import type {
   LocalCodexOwnedTransport,
@@ -947,10 +946,6 @@ export function createLocalClaudeGatewayProvider(
 
 export type LocalCodexGatewayProviderOptions = {
   factory: LocalCodexTransportFactory;
-  /** Exact controller root expected from GatewayService. */
-  stateRoot: string;
-  /** Host-local validator, normally GatewayStore.assertWorkspaceDisjoint. */
-  attestWorkspace: CodexWorkspaceAttestor;
   cleanupPollMs?: number;
   cleanupTimeoutMs?: number;
   maxCallbackEvents?: number;
@@ -961,7 +956,6 @@ export type LocalCodexGatewayProviderOptions = {
 
 type CodexRoute = {
   connector: CodexAppServerConnector;
-  stateRoot: string;
   threadId: string;
   transport: LocalCodexOwnedTransport;
 };
@@ -974,21 +968,6 @@ type CodexCallbackEvent =
       state: GatewayAdapterRouteState;
       safeErrorCode?: string;
     };
-
-function validateControllerStateRoot(stateRoot: string): string {
-  if (
-    !path.isAbsolute(stateRoot) ||
-    path.normalize(stateRoot) !== stateRoot ||
-    stateRoot.includes("\0") ||
-    path.parse(stateRoot).root === stateRoot
-  ) {
-    throw new BridgeError(
-      "CODEX_STATE_ROOT_INVALID",
-      "The Codex provider requires one exact non-root controller state path.",
-    );
-  }
-  return stateRoot;
-}
 
 function validateCodexFactory(factory: LocalCodexTransportFactory): void {
   const schema = factory.schemaCompatibility;
@@ -1030,14 +1009,10 @@ function codexRouteState(
 function codexRouteSafeCode(
   observation: CodexConnectorObservation,
 ): string | undefined {
-  if (!observation.writableReady) {
-    return observation.writeBlockCode === "UNSAFE_EFFECTIVE_POLICY"
-      ? "CODEX_POLICY_MONITOR_ONLY"
-      : observation.writeBlockCode === "WRITES_DISABLED"
-        ? "CODEX_WRITES_DISABLED"
-        : "CODEX_WORKSPACE_UNATTESTED";
-  }
   if (observation.connection !== "ready") return "CODEX_ROUTE_STALE";
+  if (!observation.writableReady) {
+    return "CODEX_WRITES_DISABLED";
+  }
   return undefined;
 }
 
@@ -1047,8 +1022,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   readonly protocolVersion: string;
 
   private readonly factory: LocalCodexTransportFactory;
-  private readonly stateRoot: string;
-  private readonly attestWorkspace: CodexWorkspaceAttestor;
   private readonly maxCallbacks: number;
   private readonly maxRoutes: number;
   private readonly maxReplyBytes: number;
@@ -1076,8 +1049,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     };
     this.protocol = options.factory.protocol;
     this.protocolVersion = options.factory.protocolVersion;
-    this.stateRoot = validateControllerStateRoot(options.stateRoot);
-    this.attestWorkspace = options.attestWorkspace;
     this.maxCallbacks = positiveBounded(
       options.maxCallbackEvents,
       MAX_CODEX_CALLBACKS,
@@ -1132,20 +1103,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       : { health: "healthy", compatibility: "compatible" };
   }
 
-  async assertWorkspaceDisjoint(
-    routeHandle: string,
-    stateRoot: string,
-  ): Promise<void> {
-    this.assertReady();
-    if (stateRoot !== this.stateRoot || !OPAQUE_ROUTE.test(routeHandle)) {
-      throw new BridgeError(
-        "CODEX_ROUTE_ATTESTATION_MISMATCH",
-        "The exact Codex task or controller state generation does not match.",
-      );
-    }
-    await this.ensureRoute(routeHandle);
-  }
-
   async selectRoute(input: {
     alias: string;
     routeHandle: string;
@@ -1160,13 +1117,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         "The Codex alias is outside the exact local provider boundary.",
       );
     }
-    const route = this.routes.get(input.routeHandle);
-    if (route === undefined) {
+    if (!OPAQUE_ROUTE.test(input.routeHandle)) {
       throw new BridgeError(
-        "CODEX_ROUTE_NOT_ATTESTED",
-        "The Codex task must be observed and workspace-attested first.",
+        "CODEX_ROUTE_INVALID",
+        "The Codex task identifier is outside the exact provider boundary.",
       );
     }
+    const route = await this.ensureRoute(input.routeHandle);
     const observation = route.connector.observation();
     this.queueRouteObservation(input.routeHandle, observation);
     return {
@@ -1207,16 +1164,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     const guard = route.connector.guard();
     if (!guard.writableReady) {
-      const writeBlockCode = route.connector.observation().writeBlockCode;
-      if (writeBlockCode !== "WORKSPACE_NOT_ATTESTED") {
-        return {
-          state: "failed",
-          safeErrorCode:
-            writeBlockCode === "UNSAFE_EFFECTIVE_POLICY"
-              ? "CODEX_POLICY_MONITOR_ONLY"
-              : "CODEX_WRITES_DISABLED",
-        };
-      }
+      return { state: "failed", safeErrorCode: "CODEX_WRITES_DISABLED" };
     }
     if (strictDeadline(input.deadlineAt, this.now().getTime()) === undefined) {
       return { state: "failed", safeErrorCode: "MESSAGE_EXPIRED" };
@@ -1249,7 +1197,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         [
           "ROUTE_NOT_READY",
           "ROUTE_BUSY",
-          "WORKSPACE_NOT_ATTESTED",
         ].includes(error.code)
       ) {
         return { state: "deferred", safeErrorCode: "CODEX_ROUTE_HELD" };
@@ -1319,15 +1266,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   private async ensureRoute(threadId: string): Promise<CodexRoute> {
     const existing = this.routes.get(threadId);
-    if (existing !== undefined) {
-      if (existing.stateRoot !== this.stateRoot) {
-        throw new BridgeError(
-          "CODEX_ROUTE_ATTESTATION_MISMATCH",
-          "The Codex task is bound to another controller state root.",
-        );
-      }
-      return existing;
-    }
+    if (existing !== undefined) return existing;
     const pending = this.routeCreations.get(threadId);
     if (pending !== undefined) return await pending;
     if (this.routes.size + this.routeCreations.size >= this.maxRoutes) {
@@ -1364,20 +1303,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         this.factory.writableReady &&
         this.factory.writeCompatibility !== null;
       connector = await CodexAppServerConnector.connect({
-        attestWorkspace: async (request) => {
-          if (
-            request.threadId !== threadId ||
-            request.endpointGeneration !== this.identity.endpointGeneration
-          ) {
-            return false;
-          }
-          return (await this.attestWorkspace(request)) === true;
-        },
         compatibility:
           this.factory.writeCompatibility ??
           this.factory.schemaCompatibility,
         writesEnabled,
-        requireReadOnlyPolicy: false,
         route: {
           endpointGeneration: this.identity.endpointGeneration,
           threadId,
@@ -1398,7 +1327,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       await connector.resumeThread(connector.guard());
       const route = {
         connector,
-        stateRoot: this.stateRoot,
         threadId,
         transport,
       };

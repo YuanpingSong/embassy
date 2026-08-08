@@ -11,7 +11,6 @@ import type {
   LocalCodexGatewayProvider,
 } from "../src/gateway/providers.js";
 import {
-  createLocalCodexWorkspaceAttestor,
   resolveGatewayClaudeLauncher,
   runGatewayServer,
   type GatewayServerDependencies,
@@ -138,12 +137,6 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
         codexFactoryOptions = options as unknown as Record<string, unknown>;
         return factory(() => events.push("close-codex-factory"));
       },
-      createCodexWorkspaceAttestor: (receivedStore, generation) => {
-        events.push("create-attestor");
-        assert.equal(receivedStore, store);
-        assert.equal(generation, "synthetic_endpoint_generation");
-        return async () => true;
-      },
       createCodexProvider: (options) => {
         events.push("create-codex");
         codexProviderOptions = options as unknown as Record<string, unknown>;
@@ -176,9 +169,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     JSON.stringify(codexFactoryOptions).includes(SYNTHETIC_SECRET),
     false,
   );
-  assert.equal(codexProviderOptions?.stateRoot, stateDir);
-  assert.equal(typeof codexProviderOptions?.attestWorkspace, "function");
-  assert.deepEqual(serviceOptions?.forbiddenWorkspaceRoots, []);
+  assert.deepEqual(Object.keys(codexProviderOptions ?? {}), ["factory"]);
   assert.equal(serviceOptions?.store, store);
   assert.equal(
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
@@ -198,7 +189,6 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     "create-claude",
     "create-store",
     "create-codex-factory",
-    "create-attestor",
     "create-codex",
     "start-service",
     "ready",
@@ -234,7 +224,6 @@ test("assembly failure closes every resource not yet owned by a service", async 
         createStore: () => store,
         createCodexFactory: async () =>
           factory(() => closed.push("codex-factory")),
-        createCodexWorkspaceAttestor: () => async () => true,
         createCodexProvider: () => {
           throw new BridgeError("SYNTHETIC_ASSEMBLY_FAILURE", "synthetic");
         },
@@ -246,44 +235,6 @@ test("assembly failure closes every resource not yet owned by a service", async 
   );
   assert.deepEqual(closed, ["codex-factory", "claude", "store"]);
   assert.equal(signals.listenerCount(), 0);
-});
-
-test("workspace attestor is endpoint-fenced without imposing workspace policy", async () => {
-  const calls: string[] = [];
-  const store = {
-    assertWorkspaceDisjoint: async (workspace: string) => {
-      calls.push(workspace);
-      if (workspace.endsWith("unsafe")) throw new Error("synthetic");
-    },
-  } as unknown as GatewayStore;
-  const attest = createLocalCodexWorkspaceAttestor(store, "generation-one");
-
-  assert.equal(
-    await attest({
-      canonicalCwd: "/synthetic/project",
-      endpointGeneration: "generation-two",
-      threadId: "private-thread-id",
-    }),
-    false,
-  );
-  assert.deepEqual(calls, []);
-  assert.equal(
-    await attest({
-      canonicalCwd: "/synthetic/project",
-      endpointGeneration: "generation-one",
-      threadId: "private-thread-id",
-    }),
-    true,
-  );
-  assert.equal(
-    await attest({
-      canonicalCwd: "/synthetic/unsafe",
-      endpointGeneration: "generation-one",
-      threadId: "private-thread-id",
-    }),
-    true,
-  );
-  assert.deepEqual(calls, []);
 });
 
 test("launcher resolution uses only an explicit path or the official local default", () => {

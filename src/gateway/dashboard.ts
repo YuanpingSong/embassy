@@ -603,7 +603,7 @@ function renderDirectionCard(
       <div><p class="direction-card__eyebrow">Claude \u2192 Codex</p><h2 id="claude-to-codex-heading">Registered Codex targets</h2></div>
       ${statusPill(cardStatus, cardTone)}
     </div>
-    <p class="direction-card__note">Every live Claude session can see each registered Codex target.</p>
+    <p class="direction-card__note">Every compatible live Claude session running as the same OS user can see each registered Codex target.</p>
     <p class="direction-card__count"><strong>${formatInteger(ready)}</strong> of <strong>${formatInteger(allRoutes.length)}</strong> targets ready${needsAttention > 0 ? `; ${formatInteger(needsAttention)} ${needsAttention === 1 ? "needs" : "need"} attention` : ""}.</p>
     ${content}
   </section>`;
@@ -778,20 +778,6 @@ function alertGuidance(alert: SafeGatewayAlert): {
         description:
           "The previously selected session is not present in current local discovery.",
         action: `Keep Claude Code running with <code>crossSessionInbound</code> enabled, run ${command("embassy refresh-dashboard")}, then select the current alias explicitly.`,
-      };
-    case "CODEX_POLICY_MONITOR_ONLY":
-      return {
-        title: "Codex task is monitor-only",
-        description:
-          "The task is visible, but its effective native policy is not eligible for inbound turns.",
-        action: `Use native Codex controls to set <code>approvalPolicy: never</code>, sandbox <code>readOnly</code>, and network access off; then re-run ${command(`embassy register-codex --alias ${alias}`)} inside that task.`,
-      };
-    case "CODEX_WORKSPACE_UNATTESTED":
-      return {
-        title: "Codex workspace attestation needs renewal",
-        description:
-          "Embassy could not re-establish the exact task and workspace proof required for writes.",
-        action: `Confirm <code>EMBASSY_STATE_DIR</code> is outside the task workspace, then re-run ${command(`embassy register-codex --alias ${alias}`)} inside that task.`,
       };
     case "CODEX_ROUTE_STALE":
       return {

@@ -709,6 +709,4 @@ export type GatewayStoreLimits = {
 export type GatewayStoreDependencies = {
   now?: () => Date;
   randomId?: () => string;
-  /** Deterministic test seam; production defaults to the effective process uid. */
-  workspaceOwnerUid?: () => number | undefined;
 };

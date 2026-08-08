@@ -82,6 +82,10 @@ class FakeProvider implements GatewayProviderAdapter {
     status: "held" | "delivered" | "denied" | "expired";
     diagnosticCode?: string;
   }> = [];
+  assertWorkspaceDisjoint?: (
+    routeHandle: string,
+    stateRoot: string,
+  ) => Promise<void>;
 
   constructor(provider: "codex" | "claude") {
     this.identity = {
@@ -90,6 +94,11 @@ class FakeProvider implements GatewayProviderAdapter {
       endpointGeneration: `generation_${provider}`,
     };
     this.protocol = provider === "codex" ? "codex-app-server" : "claude-peer";
+    if (provider === "claude") {
+      this.assertWorkspaceDisjoint = async (routeHandle) => {
+        this.attested.push(routeHandle);
+      };
+    }
   }
 
   async initialize(callbacks: GatewayAdapterCallbacks): Promise<{
@@ -109,13 +118,6 @@ class FakeProvider implements GatewayProviderAdapter {
     routeHandle: string;
   }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }> {
     return { routeHandle: input.routeHandle, state: this.state };
-  }
-
-  async assertWorkspaceDisjoint(
-    routeHandle: string,
-    _stateRoot: string,
-  ): Promise<void> {
-    this.attested.push(routeHandle);
   }
 
   async resolveReplyAddress(
@@ -253,7 +255,6 @@ test("Codex registration requires the native codex-* namespace", async (t) => {
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
   });
   await service.start();
@@ -300,7 +301,6 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
   const codex = new FakeProvider("codex");
   const service = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
     now: () => clock,
   });
@@ -319,7 +319,7 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
   );
   assert.equal(JSON.stringify(snapshot).includes("claude_target_1"), false);
   assert.deepEqual(claude.attested, ["claude_target_1"]);
-  assert.deepEqual(codex.attested, [THREAD_ID]);
+  assert.deepEqual(codex.attested, []);
 
   const accepted = await handlers.sendToClaude(toClaude());
   assert.equal(accepted.accepted, true);
@@ -480,7 +480,6 @@ test("Claude sends require explicit selection while UUID routing survives rename
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -591,7 +590,6 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
   ];
   const first = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [firstClaude],
   });
   await first.start();
@@ -607,7 +605,6 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
   }));
   const second = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [secondClaude],
   });
   await second.start();
@@ -644,7 +641,6 @@ test("transient Codex dispatch failures return to held queue and retry", async (
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -705,7 +701,6 @@ test("native Claude ingress reports delivery without approval-like held notices 
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -772,7 +767,6 @@ test("an exact unselected native Claude peer can reach Codex and receive only it
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -841,7 +835,6 @@ test("native Claude ingress reports delivery errors as expired with a safe diagn
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -891,7 +884,6 @@ test("a busy Claude peer can receive a native reply without deadlocking the conv
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -930,7 +922,6 @@ test("queued bodies are cancelled on close and never replayed after restart", as
   codex.state = "busy";
   const first = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await first.start();
@@ -953,7 +944,6 @@ test("queued bodies are cancelled on close and never replayed after restart", as
 
   second = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [],
   });
   await second.start();
@@ -989,7 +979,6 @@ test("one exact target has at most one active provider dispatch", async (t) => {
   const codex = new FakeProvider("codex");
   const service = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   await service.start();
@@ -1043,7 +1032,6 @@ test("adapter cleanup failures reject close after controller cleanup completes",
   codex.closeError = codexFailure;
   const service = new GatewayService({
     config,
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
   });
   let successor: GatewayService | undefined;
@@ -1066,7 +1054,6 @@ test("adapter cleanup failures reject close after controller cleanup completes",
     // controller-owned store lock and control socket are still released.
     successor = new GatewayService({
       config,
-      forbiddenWorkspaceRoots: [workspace],
       adapters: [],
     });
     await successor.start();

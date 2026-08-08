@@ -11,8 +11,6 @@ import {
   type CodexAppServerTransport,
   type CodexConnectorEvent,
   type CodexTransientTurnResult,
-  type CodexWorkspaceAttestationRequest,
-  type CodexWorkspaceAttestor,
 } from "../src/gateway/codex-app-server.js";
 
 const THREAD_ID = "thread-opted-in-001";
@@ -103,7 +101,6 @@ class FakeTransport implements CodexAppServerTransport {
 function fixture(
   handler: SendHandler = () => undefined,
   options: {
-    attestWorkspace?: CodexWorkspaceAttestor;
     maxDeadlineMs?: number;
     maxReplyBytes?: number;
     now?: () => Date;
@@ -115,11 +112,9 @@ function fixture(
   events: CodexConnectorEvent[];
   replies: CodexTransientTurnResult[];
   transport: FakeTransport;
-  workspaceAttestations: CodexWorkspaceAttestationRequest[];
 } {
   const events: CodexConnectorEvent[] = [];
   const replies: CodexTransientTurnResult[] = [];
-  const workspaceAttestations: CodexWorkspaceAttestationRequest[] = [];
   const transport = new FakeTransport(async (message, fake) => {
     if (message.method === "initialize") {
       fake.respond(message, {
@@ -141,10 +136,6 @@ function fixture(
   return {
     connect: () =>
       CodexAppServerConnector.connect({
-        attestWorkspace: async (request) => {
-          workspaceAttestations.push({ ...request });
-          return options.attestWorkspace?.(request) ?? true;
-        },
         compatibility: {
           appServerVersion: "0.147.0",
           endpointGeneration: ENDPOINT_GENERATION,
@@ -172,7 +163,6 @@ function fixture(
     events,
     replies,
     transport,
-    workspaceAttestations,
   };
 }
 
@@ -299,15 +289,13 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
     queueDepth: 0,
     requestInFlight: false,
     routeStatus: "unknown",
-    writableReady: false,
-    writeBlockCode: "WORKSPACE_NOT_ATTESTED",
-    workspaceAttested: false,
+    writableReady: true,
+    writeBlockCode: null,
   });
 
   const incompatibleTransport = new FakeTransport(() => undefined);
   await assert.rejects(
     CodexAppServerConnector.connect({
-      attestWorkspace: async () => true,
       compatibility: {
         appServerVersion: "0.147.0",
         endpointGeneration: "different-generation",
@@ -325,7 +313,6 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
   assert.equal(incompatibleTransport.sent.length, 0);
   await assert.rejects(
     CodexAppServerConnector.connect({
-      attestWorkspace: async () => true,
       compatibility: {
         appServerVersion: "0.148.0",
         endpointGeneration: ENDPOINT_GENERATION,
@@ -342,30 +329,10 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
   );
   assert.equal(incompatibleTransport.sent.length, 0);
 
-  const unattestedTransport = new FakeTransport(() => undefined);
-  await assert.rejects(
-    CodexAppServerConnector.connect({
-      attestWorkspace: undefined as never,
-      compatibility: {
-        appServerVersion: "0.147.0",
-        endpointGeneration: ENDPOINT_GENERATION,
-        protocol: "app-server-v2-stable",
-      },
-      route: {
-        endpointGeneration: ENDPOINT_GENERATION,
-        threadId: THREAD_ID,
-      },
-      transport: unattestedTransport,
-      writesEnabled: true,
-    }),
-    (error) => assertConnectorError(error, "INVALID_CONFIGURATION"),
-  );
-  assert.equal(unattestedTransport.sent.length, 0);
-
   await connector.close();
 });
 
-test("monitor-only connectors can observe and attest but can never start a turn", async () => {
+test("monitor-only connectors can observe but can never start a turn", async () => {
   const current = fixture(
     (message, fake) => {
       if (message.method === "thread/resume") {
@@ -386,10 +353,8 @@ test("monitor-only connectors can observe and attest but can never start a turn"
   const resumed = await connector.resumeThread(connector.guard());
   assert.equal(resumed.connection, "ready");
   assert.equal(resumed.routeStatus, "idle");
-  assert.equal(resumed.workspaceAttested, true);
   assert.equal(resumed.writableReady, false);
   assert.equal(resumed.writeBlockCode, "WRITES_DISABLED");
-  assert.equal(current.workspaceAttestations.length, 1);
 
   await assert.rejects(
     connector.submitMessage(connector.guard(), {
@@ -404,8 +369,8 @@ test("monitor-only connectors can observe and attest but can never start a turn"
   await connector.close();
 });
 
-test("observes, workspace-attests, and resumes only the exact opted-in thread", async () => {
-  const { connect, events, transport, workspaceAttestations } = fixture((message, fake) => {
+test("observes and resumes only the exact opted-in thread", async () => {
+  const { connect, events, transport } = fixture((message, fake) => {
     if (message.method === "thread/loaded/list") {
       fake.respond(message, { data: ["thread-other", THREAD_ID] });
     } else if (message.method === "thread/resume") {
@@ -435,9 +400,8 @@ test("observes, workspace-attests, and resumes only the exact opted-in thread", 
       queueDepth: 0,
       requestInFlight: false,
       routeStatus: "unknown",
-      writableReady: false,
-      writeBlockCode: "WORKSPACE_NOT_ATTESTED",
-      workspaceAttested: false,
+      writableReady: true,
+      writeBlockCode: null,
     },
     selectedThreadLoaded: true,
   });
@@ -446,28 +410,11 @@ test("observes, workspace-attests, and resumes only the exact opted-in thread", 
     connector.resumeThread(staleGuard),
     (error) => assertConnectorError(error, "ROUTE_CAS_MISMATCH"),
   );
-  await assert.rejects(
-    connector.submitMessage(connector.guard(), {
-      deadlineAt: futureDeadline(),
-      messageId: "message-before-workspace-attestation",
-      text: "must not be sent",
-    }),
-    (error) => assertConnectorError(error, "WORKSPACE_NOT_ATTESTED"),
-  );
-
   const resumed = await connector.resumeThread(connector.guard());
   assert.equal(resumed.routeStatus, "idle");
   assert.equal(resumed.requestInFlight, false);
   assert.equal(resumed.writableReady, true);
   assert.equal(resumed.writeBlockCode, null);
-  assert.equal(resumed.workspaceAttested, true);
-  assert.deepEqual(workspaceAttestations, [
-    {
-      canonicalCwd: WORKSPACE_CWD,
-      endpointGeneration: ENDPOINT_GENERATION,
-      threadId: THREAD_ID,
-    },
-  ]);
   const resumeFrame = transport.sent.find(
     (message) => message.method === "thread/resume",
   );
@@ -482,371 +429,7 @@ test("observes, workspace-attests, and resumes only the exact opted-in thread", 
   await connector.close();
 });
 
-test("fails registration closed when resume workspace evidence is missing or denied", async () => {
-  const privateWorkspace = "/private/workspace/never-project-this-path";
-  const privateDiagnostic = "outer-validator-private-diagnostic";
-  const scenarios: Array<{
-    attestWorkspace?: CodexWorkspaceAttestor;
-    expectedAttestations: number;
-    expectedCode: CodexConnectorError["code"];
-    result: WireRecord;
-  }> = [
-    {
-      expectedAttestations: 0,
-      expectedCode: "RESULT_SCHEMA_MISMATCH",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-      },
-    },
-    {
-      expectedAttestations: 0,
-      expectedCode: "RESULT_SCHEMA_MISMATCH",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: privateWorkspace,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" } },
-      },
-    },
-    {
-      expectedAttestations: 0,
-      expectedCode: "RESULT_SCHEMA_MISMATCH",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: privateWorkspace,
-        sandbox: SAFE_SANDBOX,
-        thread: {
-          id: THREAD_ID,
-          status: { type: "idle" },
-          turns: "malformed",
-        },
-      },
-    },
-    {
-      expectedAttestations: 0,
-      expectedCode: "RESULT_SCHEMA_MISMATCH",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: `${privateWorkspace}\nsmuggled`,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-      },
-    },
-    {
-      expectedAttestations: 0,
-      expectedCode: "RESULT_SCHEMA_MISMATCH",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: privateWorkspace,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: "thread-other", status: { type: "idle" }, turns: [] },
-      },
-    },
-    {
-      attestWorkspace: async () => false,
-      expectedAttestations: 1,
-      expectedCode: "WORKSPACE_NOT_ATTESTED",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: privateWorkspace,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-      },
-    },
-    {
-      attestWorkspace: async () => {
-        throw new Error(privateDiagnostic);
-      },
-      expectedAttestations: 1,
-      expectedCode: "WORKSPACE_NOT_ATTESTED",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: privateWorkspace,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-      },
-    },
-    {
-      attestWorkspace: async () => "truthy" as unknown as boolean,
-      expectedAttestations: 1,
-      expectedCode: "WORKSPACE_NOT_ATTESTED",
-      result: {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: privateWorkspace,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-      },
-    },
-  ];
-
-  for (const scenario of scenarios) {
-    const current = fixture(
-      (message, fake) => {
-        if (message.method === "thread/resume") {
-          fake.respond(message, scenario.result);
-        }
-      },
-      scenario.attestWorkspace === undefined
-        ? {}
-        : { attestWorkspace: scenario.attestWorkspace },
-    );
-    const connector = await current.connect();
-    await observeRoute(connector);
-    let caught: unknown;
-    await assert.rejects(
-      connector.resumeThread(connector.guard()),
-      (error) => {
-        caught = error;
-        return assertConnectorError(error, scenario.expectedCode);
-      },
-    );
-    assert.equal(current.workspaceAttestations.length, scenario.expectedAttestations);
-    assert.equal(connector.observation().connection, "faulted");
-    assert.equal(connector.observation().routeStatus, "stale");
-    assert.equal(connector.observation().workspaceAttested, false);
-    assert.equal(requestMethods(current.transport).includes("turn/start"), false);
-    const publicMaterial = JSON.stringify({
-      error: String(caught),
-      events: current.events,
-      observation: connector.observation(),
-    });
-    assert.equal(publicMaterial.includes(privateWorkspace), false);
-    assert.equal(publicMaterial.includes(privateDiagnostic), false);
-  }
-});
-
-test("keeps unsafe effective App Server policies observable but non-writable", async () => {
-  const unsafePolicies: Array<{
-    approvalPolicy: string;
-    sandbox: WireRecord;
-  }> = [
-    {
-      approvalPolicy: "on-request",
-      sandbox: { networkAccess: false, type: "readOnly" },
-    },
-    {
-      approvalPolicy: SAFE_APPROVAL_POLICY,
-      sandbox: { networkAccess: false, type: "workspaceWrite" },
-    },
-    {
-      approvalPolicy: SAFE_APPROVAL_POLICY,
-      sandbox: { type: "dangerFull" },
-    },
-    {
-      approvalPolicy: SAFE_APPROVAL_POLICY,
-      sandbox: { networkAccess: true, type: "readOnly" },
-    },
-  ];
-
-  for (const [index, unsafe] of unsafePolicies.entries()) {
-    const current = fixture((message, fake) => {
-      if (message.method === "thread/resume") {
-        fake.respond(message, {
-          ...unsafe,
-          cwd: WORKSPACE_CWD,
-          thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-        });
-      }
-    });
-    const connector = await current.connect();
-    await observeRoute(connector);
-    const observation = await connector.resumeThread(connector.guard());
-
-    assert.equal(observation.connection, "ready");
-    assert.equal(observation.routeStatus, "idle");
-    assert.equal(observation.workspaceAttested, true);
-    assert.equal(observation.writableReady, false);
-    assert.equal(observation.writeBlockCode, "UNSAFE_EFFECTIVE_POLICY");
-    await assert.rejects(
-      connector.submitMessage(connector.guard(), {
-        deadlineAt: futureDeadline(),
-        messageId: `message-unsafe-policy-${index}`,
-        text: "must not start under an unsafe effective policy",
-      }),
-      (error) => assertConnectorError(error, "UNSAFE_EFFECTIVE_POLICY"),
-    );
-    assert.equal(requestMethods(current.transport).includes("turn/start"), false);
-    assert.equal(JSON.stringify(current.events).includes(WORKSPACE_CWD), false);
-    await connector.close();
-  }
-});
-
-test("late workspace approval cannot survive close or unload during attestation", async () => {
-  for (const invalidation of ["close", "not_loaded"] as const) {
-    let resolveAttestation: ((accepted: boolean) => void) | undefined;
-    const current = fixture(
-      (message, fake) => {
-        if (message.method === "thread/resume") {
-          fake.respond(message, {
-            approvalPolicy: SAFE_APPROVAL_POLICY,
-            cwd: WORKSPACE_CWD,
-            sandbox: SAFE_SANDBOX,
-            thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-          });
-        }
-      },
-      {
-        attestWorkspace: () =>
-          new Promise<boolean>((resolve) => {
-            resolveAttestation = resolve;
-          }),
-      },
-    );
-    const connector = await current.connect();
-    await observeRoute(connector);
-    const pendingResume = connector.resumeThread(connector.guard());
-    await delayImmediate();
-    assert.equal(connector.observation().requestInFlight, true);
-    assert.equal(connector.observation().workspaceAttested, false);
-    await assert.rejects(
-      connector.submitMessage(connector.guard(), {
-        deadlineAt: futureDeadline(),
-        messageId: `message-during-attestation-${invalidation}`,
-        text: "must not queue or send",
-      }),
-      (error) => assertConnectorError(error, "WORKSPACE_NOT_ATTESTED"),
-    );
-    assert.equal(requestMethods(current.transport).includes("turn/start"), false);
-
-    if (invalidation === "close") {
-      await current.transport.close();
-    } else {
-      current.transport.emit({
-        method: "thread/status/changed",
-        params: { status: { type: "notLoaded" }, threadId: THREAD_ID },
-      });
-    }
-    assert.notEqual(resolveAttestation, undefined);
-    resolveAttestation?.(true);
-    await assert.rejects(
-      pendingResume,
-      (error) =>
-        assertConnectorError(
-          error,
-          invalidation === "close"
-            ? "CONNECTOR_CLOSED"
-            : "WORKSPACE_NOT_ATTESTED",
-        ),
-    );
-    assert.equal(connector.observation().workspaceAttested, false);
-    assert.equal(requestMethods(current.transport).includes("turn/start"), false);
-    assert.equal(
-      JSON.stringify({
-        events: current.events,
-        guard: connector.guard(),
-        observation: connector.observation(),
-      }).includes(WORKSPACE_CWD),
-      false,
-    );
-  }
-});
-
-test("an idle message automatically reattests workspace after an external turn", async () => {
-  let ownedTurnCounter = 0;
-  const current = fixture((message, fake) => {
-    if (message.method === "thread/resume") {
-      fake.respond(message, {
-        approvalPolicy: SAFE_APPROVAL_POLICY,
-        cwd: WORKSPACE_CWD,
-        sandbox: SAFE_SANDBOX,
-        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-      });
-    } else if (message.method === "turn/start") {
-      ownedTurnCounter += 1;
-      fake.respond(message, {
-        turn: { id: `turn-after-reattest-${ownedTurnCounter}`, status: "inProgress" },
-      });
-    }
-  });
-  const connector = await current.connect();
-  await observeRoute(connector);
-  await connector.resumeThread(connector.guard());
-  assert.equal(connector.observation().workspaceAttested, true);
-
-  current.transport.emit({
-    method: "thread/status/changed",
-    params: { status: { type: "active" }, threadId: THREAD_ID },
-  });
-  current.transport.emit({
-    method: "turn/started",
-    params: {
-      threadId: THREAD_ID,
-      turn: { id: "turn-external-workspace-change", status: "inProgress" },
-    },
-  });
-  current.transport.emit({
-    method: "thread/status/changed",
-    params: { status: { type: "idle" }, threadId: THREAD_ID },
-  });
-  assert.equal(connector.observation().workspaceAttested, false);
-  await connector.submitMessage(connector.guard(), {
-    deadlineAt: futureDeadline(),
-    messageId: "message-with-automatic-reattest",
-    text: "safe after an automatic fresh proof",
-  });
-  assert.equal(connector.observation().workspaceAttested, true);
-  assert.equal(current.workspaceAttestations.length, 2);
-  assert.equal(
-    current.transport.sent.filter((message) => message.method === "turn/start")
-      .length,
-    1,
-  );
-  await connector.close();
-});
-
-test("revalidates the workspace immediately before start and fails closed on drift", async () => {
-  const changedWorkspace = "/workspace/replaced-project";
-  let resumeCall = 0;
-  const current = fixture(
-    (message, fake) => {
-      if (message.method === "thread/resume") {
-        resumeCall += 1;
-        fake.respond(message, {
-          approvalPolicy: SAFE_APPROVAL_POLICY,
-          cwd: resumeCall === 1 ? WORKSPACE_CWD : changedWorkspace,
-          sandbox: SAFE_SANDBOX,
-          thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
-        });
-      }
-    },
-    {
-      attestWorkspace: async (request) =>
-        request.canonicalCwd === WORKSPACE_CWD,
-    },
-  );
-  const connector = await current.connect();
-  await observeRoute(connector);
-  await connector.resumeThread(connector.guard());
-
-  await assert.rejects(
-    connector.submitMessage(connector.guard(), {
-      deadlineAt: futureDeadline(),
-      messageId: "message-workspace-drift",
-      text: "must not cross a stale workspace lease",
-    }),
-    (error) => assertConnectorError(error, "WORKSPACE_NOT_ATTESTED"),
-  );
-  assert.equal(resumeCall, 2);
-  assert.equal(current.workspaceAttestations.length, 2);
-  assert.equal(requestMethods(current.transport).includes("turn/start"), false);
-  assert.equal(connector.observation().connection, "ready");
-  assert.equal(connector.observation().routeStatus, "idle");
-  assert.equal(connector.observation().workspaceAttested, false);
-  assert.deepEqual(current.replies, [
-    {
-      messageId: "message-workspace-drift",
-      outcome: "failed",
-      replyCode: "REPLY_UNAVAILABLE",
-      text: null,
-    },
-  ]);
-  assert.equal(JSON.stringify(current.events).includes(changedWorkspace), false);
-  await connector.close();
-});
-
-test("refreshes native policy immediately before start and rejects policy drift", async () => {
+test("refreshes the exact task but leaves changed native policy and workspace to Codex", async () => {
   let resumeCall = 0;
   const current = fixture((message, fake) => {
     if (message.method === "thread/resume") {
@@ -854,9 +437,16 @@ test("refreshes native policy immediately before start and rejects policy drift"
       fake.respond(message, {
         approvalPolicy:
           resumeCall === 1 ? SAFE_APPROVAL_POLICY : "on-request",
-        cwd: WORKSPACE_CWD,
-        sandbox: SAFE_SANDBOX,
+        cwd: resumeCall === 1 ? WORKSPACE_CWD : "/workspace/changed-project",
+        sandbox:
+          resumeCall === 1
+            ? SAFE_SANDBOX
+            : { networkAccess: true, type: "workspaceWrite" },
         thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
+      });
+    } else if (message.method === "turn/start") {
+      fake.respond(message, {
+        turn: { id: "turn-native-policy", status: "inProgress" },
       });
     }
   });
@@ -864,35 +454,29 @@ test("refreshes native policy immediately before start and rejects policy drift"
   await observeRoute(connector);
   await connector.resumeThread(connector.guard());
 
-  await assert.rejects(
-    connector.submitMessage(connector.guard(), {
-      deadlineAt: futureDeadline(),
-      messageId: "message-policy-drift",
-      text: "must not cross a changed native policy",
-    }),
-    (error) => assertConnectorError(error, "UNSAFE_EFFECTIVE_POLICY"),
-  );
+  const disposition = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-native-policy",
+    text: "use the task's existing native policy",
+  });
+  assert.equal(disposition.disposition, "started");
   assert.equal(resumeCall, 2);
-  assert.equal(requestMethods(current.transport).includes("turn/start"), false);
+  assert.equal(requestMethods(current.transport).includes("turn/start"), true);
   assert.equal(connector.observation().connection, "ready");
-  assert.equal(connector.observation().routeStatus, "idle");
-  assert.equal(connector.observation().workspaceAttested, true);
-  assert.equal(
-    connector.observation().writeBlockCode,
-    "UNSAFE_EFFECTIVE_POLICY",
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().writeBlockCode, null);
+  const start = current.transport.sent.find(
+    (message) => message.method === "turn/start",
   );
-  assert.deepEqual(current.replies, [
-    {
-      messageId: "message-policy-drift",
-      outcome: "failed",
-      replyCode: "REPLY_UNAVAILABLE",
-      text: null,
-    },
-  ]);
+  assert.deepEqual(start?.params, {
+    input: [{ text: "use the task's existing native policy", type: "text" }],
+    threadId: THREAD_ID,
+  });
+  assert.equal(JSON.stringify(current.events).includes("changed-project"), false);
   await connector.close();
 });
 
-test("rejects nonempty suppressed history before a per-start attestation", async () => {
+test("rejects nonempty suppressed history before a start", async () => {
   const historySentinel = "SUPPRESSED_HISTORY_MUST_NOT_ESCAPE";
   let resumeCall = 0;
   const current = fixture((message, fake) => {
@@ -930,7 +514,6 @@ test("rejects nonempty suppressed history before a per-start attestation", async
     },
   );
   assert.equal(resumeCall, 2);
-  assert.equal(current.workspaceAttestations.length, 1);
   assert.equal(requestMethods(current.transport).includes("turn/start"), false);
   assert.equal(connector.observation().connection, "faulted");
   assert.equal(
@@ -944,7 +527,7 @@ test("rejects nonempty suppressed history before a per-start attestation", async
   );
 });
 
-test("settings drift blocks new writes but preserves exact-owned interruption", async () => {
+test("settings updates preserve native reachability and exact-owned interruption", async () => {
   const current = fixture((message, fake) => {
     if (message.method === "thread/resume") {
       fake.respond(message, {
@@ -981,8 +564,7 @@ test("settings drift blocks new writes but preserves exact-owned interruption", 
       },
     },
   });
-  assert.equal(connector.observation().workspaceAttested, false);
-  assert.equal(connector.observation().writeBlockCode, "WORKSPACE_NOT_ATTESTED");
+  assert.equal(connector.observation().writeBlockCode, null);
 
   const interrupted = await connector.interruptOwnedTurn(connector.guard());
   assert.equal(interrupted.routeStatus, "interrupting");
@@ -1117,8 +699,7 @@ test("queues by default while active or awaiting approval and never answers appr
     requestInFlight: false,
     routeStatus: "stale",
     writableReady: false,
-    writeBlockCode: "WORKSPACE_NOT_ATTESTED",
-    workspaceAttested: false,
+    writeBlockCode: null,
   });
   assert.equal(requestMethods(transport).includes("turn/start"), false);
   assert.deepEqual(replies, [
@@ -1137,7 +718,388 @@ test("queues by default while active or awaiting approval and never answers appr
   ]);
 });
 
-test("queued work refreshes a stale workspace boundary after an external turn", async () => {
+test("external approval completion releases queued work without answering approval", async () => {
+  let resumeCalls = 0;
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      resumeCalls += 1;
+      fake.respond(message, {
+        approvalPolicy: SAFE_APPROVAL_POLICY,
+        cwd: WORKSPACE_CWD,
+        sandbox: SAFE_SANDBOX,
+        thread: {
+          id: THREAD_ID,
+          status:
+            resumeCalls === 1
+              ? { activeFlags: ["waitingOnApproval"], type: "active" }
+              : { type: "idle" },
+          turns: [],
+        },
+      });
+    } else if (message.method === "turn/start") {
+      fake.respond(message, {
+        turn: { id: "turn-after-external-approval", status: "inProgress" },
+      });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+
+  const queued = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-after-external-approval",
+    text: "start after the external approval turn finishes",
+  });
+  assert.equal(queued.disposition, "queued");
+
+  current.transport.emit({
+    id: "external-approval-request",
+    method: "item/commandExecution/requestApproval",
+    params: {
+      command: "external command",
+      threadId: THREAD_ID,
+      turnId: "turn-external-approval",
+    },
+  });
+  current.transport.emit({
+    method: "thread/status/changed",
+    params: { status: { type: "idle" }, threadId: THREAD_ID },
+  });
+  await delayImmediate();
+  assert.equal(requestMethods(current.transport).includes("turn/start"), false);
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external-approval", status: "completed" },
+    },
+  });
+  await delayImmediate();
+
+  assert.equal(resumeCalls, 2);
+  assert.equal(
+    current.transport.sent.filter((message) => message.method === "turn/start")
+      .length,
+    1,
+  );
+  assert.equal(
+    current.transport.sent.some(
+      (message) => message.id === "external-approval-request",
+    ),
+    false,
+  );
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().queueDepth, 0);
+  await connector.close();
+});
+
+test("delayed external idle cannot overlap an owned start in flight", async () => {
+  let resumeCalls = 0;
+  let startCalls = 0;
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      resumeCalls += 1;
+      fake.respond(message, {
+        approvalPolicy: SAFE_APPROVAL_POLICY,
+        cwd: WORKSPACE_CWD,
+        sandbox: SAFE_SANDBOX,
+        thread: {
+          id: THREAD_ID,
+          status:
+            resumeCalls === 1
+              ? { activeFlags: ["waitingOnApproval"], type: "active" }
+              : { type: "idle" },
+          turns: [],
+        },
+      });
+    } else if (message.method === "turn/start") {
+      startCalls += 1;
+      if (startCalls === 1) {
+        return;
+      }
+      fake.respond(message, {
+        turn: { id: "turn-owned-after-race-2", status: "inProgress" },
+      });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+
+  current.transport.emit({
+    id: "external-approval-race-request",
+    method: "item/commandExecution/requestApproval",
+    params: {
+      command: "external command",
+      threadId: THREAD_ID,
+      turnId: "turn-external-before-start-race",
+    },
+  });
+  for (const [messageId, text] of [
+    ["message-after-external-race-1", "first queued message"],
+    ["message-after-external-race-2", "second queued message"],
+  ] as const) {
+    const queued = await connector.submitMessage(connector.guard(), {
+      deadlineAt: futureDeadline(),
+      messageId,
+      text,
+    });
+    assert.equal(queued.disposition, "queued");
+  }
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external-before-start-race", status: "completed" },
+    },
+  });
+  await delayImmediate();
+
+  const firstStartRequest = current.transport.sent.find(
+    (message) => message.method === "turn/start",
+  );
+  assert.notEqual(firstStartRequest, undefined);
+  if (firstStartRequest === undefined) {
+    throw new Error("expected the first turn/start request");
+  }
+  assert.equal(startCalls, 1);
+  assert.equal(connector.observation().requestInFlight, true);
+  assert.equal(connector.observation().routeStatus, "starting");
+  assert.equal(connector.observation().queueDepth, 1);
+
+  // This belongs to the just-completed external turn. It arrives only after
+  // Embassy has claimed the first queued message and sent turn/start, but
+  // before the response supplies Embassy's owned turn ID.
+  current.transport.emit({
+    method: "thread/status/changed",
+    params: { status: { type: "idle" }, threadId: THREAD_ID },
+  });
+  await delayImmediate();
+
+  assert.equal(startCalls, 1);
+  assert.equal(connector.observation().requestInFlight, true);
+  assert.equal(connector.observation().routeStatus, "starting");
+  assert.equal(connector.observation().queueDepth, 1);
+
+  current.transport.respond(firstStartRequest, {
+    turn: { id: "turn-owned-after-race-1", status: "inProgress" },
+  });
+  await delayImmediate();
+
+  assert.equal(startCalls, 1);
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().queueDepth, 1);
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-owned-after-race-1", status: "completed" },
+    },
+  });
+  await delayImmediate();
+
+  assert.equal(startCalls, 2);
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().queueDepth, 0);
+  const starts = current.transport.sent.filter(
+    (message) => message.method === "turn/start",
+  );
+  assert.deepEqual(
+    starts.map((message) => message.params),
+    [
+      {
+        input: [{ text: "first queued message", type: "text" }],
+        threadId: THREAD_ID,
+      },
+      {
+        input: [{ text: "second queued message", type: "text" }],
+        threadId: THREAD_ID,
+      },
+    ],
+  );
+  assert.equal(
+    current.transport.sent.some(
+      (message) => message.id === "external-approval-race-request",
+    ),
+    false,
+  );
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-owned-after-race-2", status: "completed" },
+    },
+  });
+  await delayImmediate();
+  assert.equal(connector.observation().routeStatus, "idle");
+
+  await connector.close();
+});
+
+test("delayed external idle cannot invalidate a reserved start refresh", async () => {
+  let resumeCalls = 0;
+  let startCalls = 0;
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      resumeCalls += 1;
+      if (resumeCalls === 2) return;
+      fake.respond(message, {
+        approvalPolicy: SAFE_APPROVAL_POLICY,
+        cwd: WORKSPACE_CWD,
+        sandbox: SAFE_SANDBOX,
+        thread: {
+          id: THREAD_ID,
+          status:
+            resumeCalls === 1
+              ? { activeFlags: ["waitingOnApproval"], type: "active" }
+              : { type: "idle" },
+          turns: [],
+        },
+      });
+    } else if (message.method === "turn/start") {
+      startCalls += 1;
+      fake.respond(message, {
+        turn: {
+          id: `turn-owned-after-refresh-race-${startCalls}`,
+          status: "inProgress",
+        },
+      });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+
+  current.transport.emit({
+    id: "external-refresh-race-request",
+    method: "item/commandExecution/requestApproval",
+    params: {
+      command: "external command",
+      threadId: THREAD_ID,
+      turnId: "turn-external-before-refresh-race",
+    },
+  });
+  for (const [messageId, text] of [
+    ["message-after-refresh-race-1", "first refresh-race message"],
+    ["message-after-refresh-race-2", "second refresh-race message"],
+  ] as const) {
+    const queued = await connector.submitMessage(connector.guard(), {
+      deadlineAt: futureDeadline(),
+      messageId,
+      text,
+    });
+    assert.equal(queued.disposition, "queued");
+  }
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external-before-refresh-race", status: "completed" },
+    },
+  });
+  await delayImmediate();
+
+  const heldRefreshRequest = current.transport.sent.filter(
+    (message) => message.method === "thread/resume",
+  )[1];
+  assert.notEqual(heldRefreshRequest, undefined);
+  if (heldRefreshRequest === undefined) {
+    throw new Error("expected the reserved start's refresh request");
+  }
+  assert.equal(startCalls, 0);
+  assert.equal(connector.observation().requestInFlight, true);
+  assert.equal(connector.observation().routeStatus, "starting");
+  assert.equal(connector.observation().queueDepth, 1);
+
+  current.transport.emit({
+    method: "thread/status/changed",
+    params: { status: { type: "idle" }, threadId: THREAD_ID },
+  });
+  await delayImmediate();
+
+  assert.equal(startCalls, 0);
+  assert.equal(connector.observation().requestInFlight, true);
+  assert.equal(connector.observation().routeStatus, "starting");
+  assert.equal(connector.observation().queueDepth, 1);
+
+  current.transport.respond(heldRefreshRequest, {
+    approvalPolicy: SAFE_APPROVAL_POLICY,
+    cwd: WORKSPACE_CWD,
+    sandbox: SAFE_SANDBOX,
+    thread: {
+      id: THREAD_ID,
+      status: { type: "idle" },
+      turns: [],
+    },
+  });
+  await delayImmediate();
+
+  assert.equal(startCalls, 1);
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().queueDepth, 1);
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-owned-after-refresh-race-1", status: "completed" },
+    },
+  });
+  await delayImmediate();
+
+  assert.equal(startCalls, 2);
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().queueDepth, 0);
+  const starts = current.transport.sent.filter(
+    (message) => message.method === "turn/start",
+  );
+  assert.deepEqual(
+    starts.map((message) => message.params),
+    [
+      {
+        input: [{ text: "first refresh-race message", type: "text" }],
+        threadId: THREAD_ID,
+      },
+      {
+        input: [{ text: "second refresh-race message", type: "text" }],
+        threadId: THREAD_ID,
+      },
+    ],
+  );
+  assert.equal(
+    current.transport.sent.some(
+      (message) => message.id === "external-refresh-race-request",
+    ),
+    false,
+  );
+
+  current.transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-owned-after-refresh-race-2", status: "completed" },
+    },
+  });
+  await delayImmediate();
+  assert.equal(connector.observation().routeStatus, "idle");
+  assert.deepEqual(
+    current.replies.map(({ messageId, outcome }) => ({ messageId, outcome })),
+    [
+      { messageId: "message-after-refresh-race-1", outcome: "completed" },
+      { messageId: "message-after-refresh-race-2", outcome: "completed" },
+    ],
+  );
+
+  await connector.close();
+});
+
+test("queued work refreshes the exact route after an external turn", async () => {
   let resumeCalls = 0;
   const current = fixture((message, fake) => {
     if (message.method === "thread/resume") {
@@ -1162,7 +1124,6 @@ test("queued work refreshes a stale workspace boundary after an external turn", 
     method: "thread/status/changed",
     params: { status: { type: "active" }, threadId: THREAD_ID },
   });
-  assert.equal(connector.observation().workspaceAttested, false);
   const queued = await connector.submitMessage(connector.guard(), {
     deadlineAt: futureDeadline(),
     messageId: "message-after-external-turn",
@@ -1185,7 +1146,6 @@ test("queued work refreshes a stale workspace boundary after an external turn", 
   await delayImmediate();
 
   assert.equal(resumeCalls, 2);
-  assert.equal(current.workspaceAttestations.length, 2);
   assert.equal(
     current.transport.sent.filter((message) => message.method === "turn/start")
       .length,
@@ -1683,7 +1643,6 @@ test("interrupts only an exact connector-owned active turn and clears queued wor
     method: "thread/status/changed",
     params: { status: { type: "idle" }, threadId: THREAD_ID },
   });
-  await connector.resumeThread(connector.guard());
 
   await connector.submitMessage(connector.guard(), {
     deadlineAt: futureDeadline(),

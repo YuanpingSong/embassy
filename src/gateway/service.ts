@@ -125,8 +125,11 @@ export interface GatewayProviderAdapter {
     alias: string;
     routeHandle: string;
   }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }>;
-  /** Must attest the selected provider workspace against this controller root. */
-  assertWorkspaceDisjoint(routeHandle: string, stateRoot: string): Promise<void>;
+  /** Claude-only workspace guard. Codex registration has no workspace gate. */
+  assertWorkspaceDisjoint?(
+    routeHandle: string,
+    stateRoot: string,
+  ): Promise<void>;
   /** Converts a UDS connect-back capability to an exact already-observed handle. */
   resolveReplyAddress?(address: string): Promise<{ routeHandle: string }>;
   advertiseNativeCodexPeer?(input: {
@@ -231,7 +234,6 @@ type Candidate = GatewayAdapterDiscovery & {
 
 export type GatewayServiceOptions = {
   config: GatewayConfig;
-  forbiddenWorkspaceRoots: readonly string[];
   adapters?: readonly GatewayProviderAdapter[];
   store?: GatewayStore;
   publishDashboard?: typeof publishGatewayDashboard;
@@ -292,7 +294,6 @@ function decisionFor(error: unknown): RejectedDecision {
 export class GatewayService {
   readonly config: GatewayConfig;
   readonly store: GatewayStore;
-  private readonly forbiddenWorkspaceRoots: readonly string[];
   private readonly adapters: readonly GatewayProviderAdapter[];
   private readonly publishDashboard: typeof publishGatewayDashboard;
   private readonly now: () => Date;
@@ -328,7 +329,6 @@ export class GatewayService {
 
   constructor(options: GatewayServiceOptions) {
     this.config = options.config;
-    this.forbiddenWorkspaceRoots = [...options.forbiddenWorkspaceRoots];
     this.adapters = [...(options.adapters ?? [])];
     this.store = options.store ?? new GatewayStore(options.config);
     this.publishDashboard = options.publishDashboard ?? publishGatewayDashboard;
@@ -343,7 +343,7 @@ export class GatewayService {
 
   async start(): Promise<void> {
     if (this.running || this.closing) return;
-    await this.store.initialize(this.forbiddenWorkspaceRoots);
+    await this.store.initialize();
     try {
       const seen = new Set<string>();
       for (const adapter of this.adapters) {
@@ -726,6 +726,31 @@ export class GatewayService {
     return adapter;
   }
 
+  private async assertClaudeWorkspaceDisjoint(
+    adapter: GatewayProviderAdapter,
+    routeHandle: string,
+  ): Promise<void> {
+    if (adapter.identity.provider !== "claude") {
+      throw new BridgeError(
+        "CLAUDE_PROVIDER_MISMATCH",
+        "The selected workspace guard does not belong to Claude.",
+      );
+    }
+    const assertWorkspaceDisjoint = adapter.assertWorkspaceDisjoint;
+    if (assertWorkspaceDisjoint === undefined) {
+      throw new BridgeError(
+        "CLAUDE_WORKSPACE_ATTESTATION_UNAVAILABLE",
+        "The selected Claude provider cannot revalidate its workspace.",
+        true,
+      );
+    }
+    await assertWorkspaceDisjoint.call(
+      adapter,
+      routeHandle,
+      this.store.rootDir,
+    );
+  }
+
   private contextTargetBinding(
     context: MessageContext,
   ): PrivateRouteBinding | undefined {
@@ -745,7 +770,6 @@ export class GatewayService {
       );
     }
     const adapter = this.adapter("codex", params.hostId);
-    await adapter.assertWorkspaceDisjoint(params.threadId, this.store.rootDir);
     const registered = await adapter.selectRoute({
       alias: params.alias,
       routeHandle: params.threadId,
@@ -915,7 +939,10 @@ export class GatewayService {
     candidate: Candidate,
     currentOwnerLease?: string,
   ): Promise<void> {
-    await candidate.adapter.assertWorkspaceDisjoint(candidate.routeHandle, this.store.rootDir);
+    await this.assertClaudeWorkspaceDisjoint(
+      candidate.adapter,
+      candidate.routeHandle,
+    );
     const selected = await candidate.adapter.selectRoute({ alias: candidate.alias, routeHandle: candidate.routeHandle });
     if (selected.routeHandle !== candidate.routeHandle) throw new BridgeError("ROUTE_MISMATCH", "The peer identity changed during selection.");
     const binding: PrivateRouteBinding = {
@@ -1071,7 +1098,7 @@ export class GatewayService {
     const adapter = this.adapter("claude", binding.hostId);
     const resolved = await adapter.resolveReplyAddress?.(replyAddress);
     if (resolved === undefined || resolved.routeHandle !== binding.routeHandle) throw new BridgeError("REPLY_ADDRESS_MISMATCH", "The reply capability does not match the selected peer generation.");
-    await adapter.assertWorkspaceDisjoint(binding.routeHandle, this.store.rootDir);
+    await this.assertClaudeWorkspaceDisjoint(adapter, binding.routeHandle);
     return binding;
   }
 

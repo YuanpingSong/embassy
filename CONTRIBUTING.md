@@ -38,8 +38,8 @@ models.
   `codex-*` alias. Never add a thread-ID argument or global task-history scan.
 - Codex-to-Claude sends require a previously selected compatible live session.
   Do not auto-select during send.
-- Exact live same-UID Claude sessions may reach the registered native Codex
-  peer without becoming outbound-selected.
+- Exact compatible live same-UID Claude sessions may reach the registered
+  native Codex peer without becoming outbound-selected.
 - Claude's session UUID is its stable logical identity. Current names are a
   live index; do not add historical-name routing or PID/socket identity.
 - Preserve current-name collision refusal and endpoint-generation fencing.
@@ -66,11 +66,11 @@ must require an empty `thread.turns` response.
 
 Embassy does not set or override a Codex task's persistent approval or sandbox
 policy. Registration is the gateway reachability boundary. The connector may
-observe native policy for status, but must not turn it into an undocumented
-second authorization gate.
+observe native route and approval-waiting status, but must not classify policy
+or turn workspace/settings metadata into a second authorization gate.
 
-Claude's `crossSessionInbound` behavior remains native. Do not route around a
-hold or refusal or fabricate a successful receipt.
+For Codex-to-Claude delivery, Claude's `crossSessionInbound` behavior remains
+native. Do not route around a hold or refusal or fabricate a successful receipt.
 
 ### Delivery and state
 

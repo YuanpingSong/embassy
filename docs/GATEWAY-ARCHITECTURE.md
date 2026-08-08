@@ -20,8 +20,8 @@ queued turn after idle, and delivered the exact final reply back to Claude.
 The gateway lets already-running Claude Code sessions and explicitly
 registered native Codex tasks address one another by short aliases. Outbound
 Codex-to-Claude sends require an explicitly selected Claude route; inbound
-native Claude messages may come from any exact live same-UID session without
-making that session outbound-selected. It provides a single
+native Claude messages may come from any exact compatible live same-UID
+session without making that session outbound-selected. It provides a single
 private operational view across the two products without rebuilding either
 agent runtime.
 
@@ -226,7 +226,8 @@ The thin skill/CLI exposes the same safe alias list to either provider.
    deadline, hop count, and dedupe state.
 3. It requires the selector to match an explicitly selected live UUID,
    refreshes the UUID's current process/socket coordinates, and revalidates
-   the private workspace/controller-state separation before every send.
+   the selected Claude peer's canonical workspace access and exact generation
+   before every send.
 4. It opens a short-lived connection and writes one version-pinned peer frame.
    In the designed write-enabled mode, a reply request carries the gateway's
    own anonymous callback UDS as the reply address.
@@ -270,7 +271,7 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    ordinary queueing.
 8. When the task becomes idle, the connector refreshes the exact task state and
    starts the held message. Explicit registration is sufficient authorization;
-   workspace and policy metadata do not create another gateway delivery gate.
+   Embassy does not run an additional workspace or policy classifier.
 9. Successful App Server acceptance returns Claude's native `delivered`
    receipt. A route or delivery error returns native `expired`, followed by a
    static `<gateway-delivery-diagnostic>` user frame containing one safe error
@@ -410,13 +411,12 @@ schema compatibility is attested while still reporting its write gate as
 unavailable. No Claude-initiated turn can start until exact write compatibility
 and explicit route ownership are established.
 
-Registration resumes the exact task and establishes reachability. No reported
-working directory or policy value is copied into controller state or an event.
-Before `turn/start`, including a queued drain, the connector refreshes that
-exact task on the same live connection, requires it to be idle, and starts the
-turn with no policy overrides. Workspace and policy notifications remain
-observational; they cannot make an explicitly registered live route
-unreachable.
+Registration resumes the exact task and establishes reachability. Embassy does
+not read or retain reported working-directory or policy fields. Before
+`turn/start`, including a queued drain, the connector refreshes that exact task
+on the same live connection, requires it to be idle, and starts the turn with
+no policy overrides. Settings notifications cannot make an explicitly
+registered live route unreachable or discard its accepted queue.
 
 Version 1 never changes or independently classifies a Codex task's approval or
 sandbox policy. Offline 0.147.0 `TurnStartParams` schema evidence shows that
@@ -425,8 +425,7 @@ as per-message restrictions would silently mutate the native task. Embassy
 therefore starts the turn without overrides and leaves approval, sandbox, and
 tool enforcement to the registered task's native Codex configuration. Explicit
 `codex-*` registration plus exact live thread/generation validation is the
-gateway reachability boundary; workspace and policy metadata are observational
-only.
+gateway reachability boundary; native task policy remains Codex's concern.
 
 A remote connector never starts, stops, replaces, signals, or unlinks a
 Desktop-owned App Server or its socket. If attach fails, the host is offline;
@@ -571,9 +570,9 @@ No grant to `~/.claude/projects`, the rest of
 unrelated temporary files is required. Remote-host access is a later,
 separately reviewed fixed-SSH-alias capability.
 
-Provider workspaces may contain the private controller-state directory. The
+Selected Claude workspaces may contain the private controller-state directory. The
 filesystem root and configured temporary roots are still rejected as
-deliberately broad provider workspaces. The user's home is selectable with the
+deliberately broad Claude workspaces. The user's home is selectable with the
 default controller-state root beneath it. A narrower project directory remains
 the preferred least-context setup, but it is not mandatory.
 

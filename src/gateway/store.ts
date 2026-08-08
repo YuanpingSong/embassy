@@ -588,37 +588,6 @@ function emptyAccounting(): GatewayAccounting {
   };
 }
 
-function inside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (relative !== ".." &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
-}
-
-function overlaps(left: string, right: string): boolean {
-  return inside(left, right) || inside(right, left);
-}
-
-function isBroadWorkspaceRoot(
-  candidate: string,
-  loginHome: string,
-  temporaryRoots: readonly string[],
-): boolean {
-  const filesystemRoot = path.parse(candidate).root;
-  const depth = path
-    .relative(filesystemRoot, candidate)
-    .split(path.sep)
-    .filter(Boolean).length;
-  return (
-    depth < 2 ||
-    inside(candidate, loginHome) ||
-    temporaryRoots.some((root) => inside(candidate, root))
-  );
-}
-
 async function canonicalFuturePath(candidate: string): Promise<string> {
   const suffix: string[] = [];
   let cursor = path.resolve(candidate);
@@ -741,55 +710,27 @@ export class GatewayStore {
   rootDir: string;
   private readonly now: () => Date;
   private readonly randomId: () => string;
-  private readonly workspaceOwnerUid: () => number | undefined;
   private readonly mutex = new KeyedMutex();
   private readonly transientBodies = new Map<string, string>();
   private state: GatewayPersistedState | undefined;
   private lockHandle: FileHandle | undefined;
   private lockToken: string | undefined;
-  private rootIdentity: { dev: number; ino: number } | undefined;
-  private workspaceTrust:
-    | {
-        loginHome: string;
-        temporaryRoots: readonly string[];
-        initialRoots: readonly string[];
-      }
-    | undefined;
 
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
     this.config = config;
     this.rootDir = path.resolve(config.stateDir);
     this.now = dependencies.now ?? (() => new Date());
     this.randomId = dependencies.randomId ?? randomUUID;
-    this.workspaceOwnerUid =
-      dependencies.workspaceOwnerUid ?? (() => process.getuid?.());
   }
 
   get stateFilePath(): string {
     return path.join(this.rootDir, STATE_FILE);
   }
 
-  async initialize(forbiddenRoots: readonly string[]): Promise<void> {
+  async initialize(): Promise<void> {
     await this.mutex.run("gateway", async () => {
       if (this.state) return;
-      if (
-        !Array.isArray(forbiddenRoots) ||
-        forbiddenRoots.some(
-          (root) =>
-            typeof root !== "string" ||
-            root.length === 0 ||
-            !path.isAbsolute(root),
-        )
-      ) {
-        throw new BridgeError(
-          "GATEWAY_FORBIDDEN_ROOTS_REQUIRED",
-          "Every initially known provider workspace root must be an absolute disjointness boundary.",
-        );
-      }
-      const workspaceTrust = await this.resolveWorkspaceTrust(forbiddenRoots);
-      this.rootDir = await this.prepareOwnedDirectory(
-        workspaceTrust.initialRoots,
-      );
+      this.rootDir = await this.prepareOwnedDirectory();
       const rootMetadata = await lstat(this.rootDir);
       if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
         throw new BridgeError(
@@ -797,11 +738,6 @@ export class GatewayStore {
           "The prepared gateway controller root is no longer a real directory.",
         );
       }
-      this.rootIdentity = {
-        dev: rootMetadata.dev,
-        ino: rootMetadata.ino,
-      };
-      this.workspaceTrust = workspaceTrust;
       await this.acquireLock();
       try {
         const loaded = await this.loadStateFile();
@@ -825,8 +761,6 @@ export class GatewayStore {
         await this.persist();
       } catch (error) {
         this.state = undefined;
-        this.rootIdentity = undefined;
-        this.workspaceTrust = undefined;
         await this.releaseControllerLock();
         throw error;
       }
@@ -838,153 +772,6 @@ export class GatewayStore {
       this.transientBodies.clear();
       this.state = undefined;
       await this.releaseControllerLock();
-      this.rootIdentity = undefined;
-      this.workspaceTrust = undefined;
-    });
-  }
-
-  /**
-   * Registration-time local workspace fence. Call this for every newly
-   * selected/re-observed local provider route; the path is checked transiently
-   * and is never copied into controller state or public snapshots.
-   */
-  async assertWorkspaceDisjoint(workspace: string): Promise<void> {
-    await this.mutex.run("gateway", async () => {
-      this.requireState();
-      if (
-        typeof workspace !== "string" ||
-        workspace.length === 0 ||
-        workspace.length > 4_096 ||
-        workspace.includes("\0") ||
-        !path.isAbsolute(workspace) ||
-        path.normalize(workspace) !== workspace
-      ) {
-        throw new BridgeError(
-          "INVALID_PROVIDER_WORKSPACE",
-          "A selected local provider workspace must be a normalized absolute path.",
-        );
-      }
-      const rootIdentity = this.rootIdentity;
-      const workspaceTrust = this.workspaceTrust;
-      if (!rootIdentity || !workspaceTrust) {
-        throw new BridgeError(
-          "GATEWAY_NOT_INITIALIZED",
-          "The gateway controller root identity is unavailable.",
-        );
-      }
-      try {
-        await assertNoSymlinkComponents(workspace);
-      } catch {
-        throw new BridgeError(
-          "INVALID_PROVIDER_WORKSPACE",
-          "A selected local provider workspace must not contain symbolic links.",
-        );
-      }
-      let workspaceHandle: FileHandle | undefined;
-      try {
-        const rootMetadata = await lstat(this.rootDir);
-        if (
-          rootMetadata.isSymbolicLink() ||
-          !rootMetadata.isDirectory() ||
-          rootMetadata.dev !== rootIdentity.dev ||
-          rootMetadata.ino !== rootIdentity.ino ||
-          (await realpath(this.rootDir)) !== this.rootDir
-        ) {
-          throw new BridgeError(
-            "UNSAFE_GATEWAY_STATE_DIRECTORY",
-            "The gateway controller root identity changed after initialization.",
-          );
-        }
-        this.assertOwnedPrivate(
-          rootMetadata.uid,
-          rootMetadata.mode,
-          "directory",
-        );
-
-        const before = await lstat(workspace);
-        if (
-          before.isSymbolicLink() ||
-          !before.isDirectory() ||
-          !this.isTrustedWorkspaceMetadata(before.uid, before.mode)
-        ) {
-          throw new BridgeError(
-            "INVALID_PROVIDER_WORKSPACE",
-            "A selected local provider workspace must be an existing real directory.",
-          );
-        }
-        workspaceHandle = await open(
-          workspace,
-          constants.O_RDONLY |
-            (constants.O_DIRECTORY ?? 0) |
-            (constants.O_NOFOLLOW ?? 0),
-        );
-        const opened = await workspaceHandle.stat();
-        const canonical = await realpath(workspace);
-        const after = await lstat(workspace);
-        try {
-          await assertNoSymlinkComponents(workspace);
-        } catch {
-          throw new BridgeError(
-            "INVALID_PROVIDER_WORKSPACE",
-            "The selected local provider workspace acquired a symbolic link during validation.",
-          );
-        }
-        if (
-          !opened.isDirectory() ||
-          after.isSymbolicLink() ||
-          !after.isDirectory() ||
-          canonical !== workspace ||
-          (await realpath(workspace)) !== canonical ||
-          before.dev !== opened.dev ||
-          before.ino !== opened.ino ||
-          after.dev !== opened.dev ||
-          after.ino !== opened.ino ||
-          !this.isTrustedWorkspaceMetadata(opened.uid, opened.mode) ||
-          !this.isTrustedWorkspaceMetadata(after.uid, after.mode)
-        ) {
-          throw new BridgeError(
-            "INVALID_PROVIDER_WORKSPACE",
-            "The selected local provider workspace changed during identity validation.",
-          );
-        }
-        const trustedNamespace =
-          (canonical !== workspaceTrust.loginHome &&
-            inside(workspaceTrust.loginHome, canonical)) ||
-          workspaceTrust.temporaryRoots.some(
-            (root) => canonical !== root && inside(root, canonical),
-          ) ||
-          workspaceTrust.initialRoots.some((root) => inside(root, canonical));
-        if (
-          isBroadWorkspaceRoot(
-            canonical,
-            workspaceTrust.loginHome,
-            workspaceTrust.temporaryRoots,
-          ) ||
-          !trustedNamespace
-        ) {
-          throw new BridgeError(
-            "INVALID_PROVIDER_WORKSPACE",
-            "A selected local provider workspace must be a narrow trusted project directory.",
-          );
-        }
-        if (overlaps(this.rootDir, canonical)) {
-          throw new BridgeError(
-            "GATEWAY_STATE_WORKSPACE_OVERLAP",
-            "Gateway controller state must be disjoint from every selected local provider workspace.",
-          );
-        }
-      } catch (error) {
-        if (error instanceof BridgeError) {
-          if (error.code === "UNSAFE_GATEWAY_STATE_DIRECTORY") throw error;
-          if (error.code === "GATEWAY_STATE_WORKSPACE_OVERLAP") throw error;
-        }
-        throw new BridgeError(
-          "INVALID_PROVIDER_WORKSPACE",
-          "A selected local provider workspace could not be safely resolved.",
-        );
-      } finally {
-        await workspaceHandle?.close().catch(() => undefined);
-      }
     });
   }
 
@@ -2451,83 +2238,7 @@ export class GatewayStore {
     return "offline";
   }
 
-  private async resolveWorkspaceTrust(
-    roots: readonly string[],
-  ): Promise<{
-    loginHome: string;
-    temporaryRoots: readonly string[];
-    initialRoots: readonly string[];
-  }> {
-    const loginHome = await realpath(os.homedir()).catch(() =>
-      path.resolve(os.homedir()),
-    );
-    const temporaryRoots: string[] = [];
-    for (const candidate of [os.tmpdir(), "/tmp", "/var/tmp"]) {
-      const canonical = await realpath(candidate).catch(() => undefined);
-      if (canonical !== undefined) temporaryRoots.push(canonical);
-    }
-    const uniqueTemporaryRoots = [...new Set(temporaryRoots)];
-    const initialRoots: string[] = [];
-    for (const root of roots) {
-      if (
-        root.length > 4_096 ||
-        root.includes("\0") ||
-        path.normalize(root) !== root
-      ) {
-        throw new BridgeError(
-          "INVALID_PROVIDER_WORKSPACE",
-          "Every initial provider workspace must be a normalized absolute project directory.",
-        );
-      }
-      try {
-        await assertNoSymlinkComponents(root);
-        const canonical = await realpath(root);
-        const metadata = await lstat(root);
-        if (
-          canonical !== root ||
-          metadata.isSymbolicLink() ||
-          !metadata.isDirectory() ||
-          !this.isTrustedWorkspaceMetadata(metadata.uid, metadata.mode) ||
-          isBroadWorkspaceRoot(canonical, loginHome, uniqueTemporaryRoots)
-        ) {
-          throw new BridgeError(
-            "INVALID_PROVIDER_WORKSPACE",
-            "Every initial provider workspace must be a narrow real project directory.",
-          );
-        }
-        initialRoots.push(canonical);
-      } catch (error) {
-        if (error instanceof BridgeError) throw error;
-        throw new BridgeError(
-          "INVALID_PROVIDER_WORKSPACE",
-          "An initial provider workspace could not be safely resolved.",
-        );
-      }
-    }
-    if (new Set(initialRoots).size !== initialRoots.length) {
-      throw new BridgeError(
-        "INVALID_PROVIDER_WORKSPACE",
-        "Initial provider workspace roots must be unique.",
-      );
-    }
-    return {
-      loginHome,
-      temporaryRoots: uniqueTemporaryRoots,
-      initialRoots,
-    };
-  }
-
-  private isTrustedWorkspaceMetadata(uid: number, mode: number): boolean {
-    const expectedUid = this.workspaceOwnerUid();
-    return (
-      (expectedUid === undefined || uid === expectedUid) &&
-      (mode & 0o022) === 0
-    );
-  }
-
-  private async prepareOwnedDirectory(
-    forbiddenRoots: readonly string[],
-  ): Promise<string> {
+  private async prepareOwnedDirectory(): Promise<string> {
     const requested = path.resolve(this.rootDir);
     await assertNoSymlinkComponents(requested);
     const canonical = await canonicalFuturePath(requested);
@@ -2543,14 +2254,6 @@ export class GatewayStore {
         "The gateway state directory must be a dedicated private leaf.",
       );
     }
-    const forbidden = await Promise.all(forbiddenRoots.map(canonicalFuturePath));
-    if (forbidden.some((root) => overlaps(root, canonical))) {
-      throw new BridgeError(
-        "GATEWAY_STATE_WORKSPACE_OVERLAP",
-        "Gateway controller state must be disjoint from provider workspaces.",
-      );
-    }
-
     let existed = true;
     try {
       const info = await lstat(canonical);

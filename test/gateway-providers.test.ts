@@ -14,10 +14,7 @@ import type {
   ClaudePeerSendResult,
 } from "../src/gateway/claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
-import type {
-  CodexAppServerTransport,
-  CodexWorkspaceAttestationRequest,
-} from "../src/gateway/codex-app-server.js";
+import type { CodexAppServerTransport } from "../src/gateway/codex-app-server.js";
 import type {
   LocalCodexOwnedTransport,
   LocalCodexTransportFactory,
@@ -267,8 +264,6 @@ class RegistrationOnlyCodexProvider implements GatewayProviderAdapter {
   }> {
     return { health: "healthy", compatibility: "compatible" };
   }
-
-  async assertWorkspaceDisjoint(): Promise<void> {}
 
   async selectRoute(input: {
     alias: string;
@@ -647,7 +642,6 @@ test("successful Claude socket writes immediately unlock a second queued gateway
       EMBASSY_STATE_DIR: path.join(root, "state"),
       EMBASSY_HOSTS: "this-mac",
     }),
-    forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, new RegistrationOnlyCodexProvider()],
   });
   try {
@@ -830,16 +824,10 @@ class FakeCodexFactory {
 
 function codexProvider(
   factory: FakeCodexFactory,
-  attestations: CodexWorkspaceAttestationRequest[],
   cleanup: { cleanupPollMs?: number; cleanupTimeoutMs?: number } = {},
 ) {
   return createLocalCodexGatewayProvider({
     factory: factory as unknown as LocalCodexTransportFactory,
-    stateRoot: "/synthetic/controller-state",
-    attestWorkspace: async (request) => {
-      attestations.push({ ...request });
-      return request.canonicalCwd === SAFE_WORKSPACE;
-    },
     ...cleanup,
   });
 }
@@ -854,20 +842,14 @@ function codexBinding(
   };
 }
 
-test("local Codex provider attaches one exact route, reattests before write, and hands off a bounded final reply", async () => {
+test("local Codex provider attaches one exact route, refreshes it before write, and hands off a bounded final reply", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);
-  const attestations: CodexWorkspaceAttestationRequest[] = [];
-  const provider = codexProvider(factory, attestations);
+  const provider = codexProvider(factory);
   const observed = callbacks();
   assert.deepEqual(await provider.initialize(observed.callbacks), {
     health: "healthy",
     compatibility: "compatible",
   });
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
-  assert.equal(factory.transports.length, 1);
   assert.deepEqual(
     await provider.selectRoute({
       alias: "codex-main@this-mac",
@@ -875,7 +857,7 @@ test("local Codex provider attaches one exact route, reattests before write, and
     }),
     { routeHandle: THREAD_ID, state: "idle" },
   );
-  assert.equal(attestations.length, 0);
+  assert.equal(factory.transports.length, 1);
 
   assert.deepEqual(
     await provider.dispatch({
@@ -888,7 +870,6 @@ test("local Codex provider attaches one exact route, reattests before write, and
     }),
     { state: "pending" },
   );
-  assert.equal(attestations.length, 0);
   const transport = factory.transports[0]!;
   assert.equal(
     transport.sent.filter((message) => message.method === "turn/start").length,
@@ -941,15 +922,11 @@ test("local Codex provider attaches one exact route, reattests before write, and
   assert.equal(factory.closed, true);
 });
 
-test("an explicitly registered Codex route remains reachable after settings invalidate observational workspace metadata", async () => {
-  const factory = new FakeCodexFactory(THREAD_ID, true);
-  const provider = codexProvider(factory, []);
+test("an explicitly registered Codex route uses its native policy and remains reachable after settings updates", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true, false);
+  const provider = codexProvider(factory);
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
   await provider.selectRoute({
     alias: "codex-main@this-mac",
     routeHandle: THREAD_ID,
@@ -983,30 +960,20 @@ test("an explicitly registered Codex route remains reachable after settings inva
     transport.sent.filter((message) => message.method === "turn/start").length,
     1,
   );
-  assert.equal(
-    observed.routes.some(
-      (event) => event.safeErrorCode === "CODEX_WORKSPACE_UNATTESTED",
-    ),
-    false,
-  );
+  assert.equal(observed.routes.some((event) => event.safeErrorCode !== undefined), false);
 
   await provider.close();
 });
 
 test("local Codex provider remains monitor-only without the distinct write attestation", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, false);
-  const attestations: CodexWorkspaceAttestationRequest[] = [];
-  const provider = codexProvider(factory, attestations);
+  const provider = codexProvider(factory);
   const observed = callbacks();
   assert.deepEqual(await provider.initialize(observed.callbacks), {
     health: "degraded",
     compatibility: "compatible",
     safeErrorCode: "CODEX_MONITOR_ONLY",
   });
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
   await provider.selectRoute({
     alias: "codex-main@this-mac",
     routeHandle: THREAD_ID,
@@ -1028,19 +995,14 @@ test("local Codex provider remains monitor-only without the distinct write attes
     ),
     false,
   );
-  assert.equal(attestations.length, 0);
   await provider.close();
 });
 
 test("local Codex provider cancels queued work and confirms only its exact owned turn before proxy cleanup", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);
-  const provider = codexProvider(factory, []);
+  const provider = codexProvider(factory);
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
   await provider.selectRoute({
     alias: "codex-main@this-mac",
     routeHandle: THREAD_ID,
@@ -1097,12 +1059,8 @@ test("local Codex provider never interrupts an external active turn", async () =
     true,
     "active",
   );
-  const provider = codexProvider(factory, []);
+  const provider = codexProvider(factory);
   await provider.initialize(callbacks().callbacks);
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
   await provider.selectRoute({
     alias: "codex-main@this-mac",
     routeHandle: THREAD_ID,
@@ -1119,12 +1077,8 @@ test("local Codex provider never interrupts an external active turn", async () =
 
 test("local Codex provider detaches from an external approval without interrupting or waiting for it", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);
-  const provider = codexProvider(factory, []);
+  const provider = codexProvider(factory);
   await provider.initialize(callbacks().callbacks);
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
   await provider.selectRoute({
     alias: "codex-main@this-mac",
     routeHandle: THREAD_ID,
@@ -1163,15 +1117,11 @@ test("local Codex provider preserves the proxy when owned-turn termination is no
     "idle",
     false,
   );
-  const provider = codexProvider(factory, [], {
+  const provider = codexProvider(factory, {
     cleanupPollMs: 5,
     cleanupTimeoutMs: 25,
   });
   await provider.initialize(callbacks().callbacks);
-  await provider.assertWorkspaceDisjoint(
-    THREAD_ID,
-    "/synthetic/controller-state",
-  );
   await provider.selectRoute({
     alias: "codex-main@this-mac",
     routeHandle: THREAD_ID,
