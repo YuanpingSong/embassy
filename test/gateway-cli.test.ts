@@ -208,6 +208,10 @@ test("all client commands use one private control socket and expose only normali
       return { accepted: true, code: "ok" };
     },
     listSnapshot: () => emptySnapshot(),
+    observeSnapshot: () => ({
+      snapshotRevision: 0,
+      snapshot: emptySnapshot(),
+    }),
     deliveryStatus: ({ token }) => {
       deliveryStatuses.push(token);
       return {
@@ -1102,6 +1106,10 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
       listSnapshot: () => emptySnapshot(),
+      observeSnapshot: () => ({
+        snapshotRevision: 0,
+        snapshot: emptySnapshot(),
+      }),
       deliveryStatus: () => ({ found: false }),
       sendToClaude: () => ({
         accepted: true,

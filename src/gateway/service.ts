@@ -5,6 +5,7 @@ import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
 import {
   createGatewayConversationId,
+  isGatewaySnapshot,
   startGatewayControlServer,
   type GatewayControlHandlers,
   type GatewayDeliveryStatusResult,
@@ -12,6 +13,7 @@ import {
   type GatewayDecision,
   type GatewayReplyCaller,
   type GatewaySendResult,
+  type GatewaySnapshotObservation,
   type ReplyParams,
   type SelectClaudeParams,
   type UnregisterCodexParams,
@@ -37,6 +39,7 @@ import {
   type RouteInFlightSettlementInput,
 } from "./store.js";
 import {
+  GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   arePublicAvailablePeerSnapshots,
   projectGatewayPublicSnapshot,
   type CompatibilityState,
@@ -446,7 +449,14 @@ export class GatewayService {
   private lifecycleTimer: GatewayServiceTimer | undefined;
   private nextDashboardRefreshAt: number | undefined;
   private control: GatewayControlServer | undefined;
+  /** Coarse controller mutation revision exposed by `health`. */
   private revision = 0;
+  /**
+   * Process-local semantic public-snapshot clock. The first observation
+   * establishes revision zero; a new GatewayService process resets it.
+   */
+  private snapshotRevision = 0;
+  private snapshotFingerprint: string | undefined;
   private running = false;
   private closing = false;
   private closeInFlight: Promise<void> | undefined;
@@ -699,7 +709,8 @@ export class GatewayService {
         await this.exclusiveDecision(async () => this.selectClaude(params)),
       unselectClaude: async (params) =>
         await this.exclusiveDecision(async () => this.unselectClaude(params)),
-      listSnapshot: async () => await this.snapshot(),
+      listSnapshot: async () => (await this.observeSnapshot()).snapshot,
+      observeSnapshot: async () => await this.observeSnapshot(),
       deliveryStatus: async (params) => await this.deliveryStatus(params.token),
       sendToClaude: async (params) => await this.acceptToClaude(params),
       sendToCodex: async (params) => await this.acceptToCodex(params),
@@ -715,14 +726,60 @@ export class GatewayService {
   }
 
   async snapshot(): Promise<GatewayPublicSnapshot> {
+    return (await this.observeSnapshot()).snapshot;
+  }
+
+  async observeSnapshot(): Promise<GatewaySnapshotObservation> {
     return await this.mutex.run("service", async () => {
       const changed = await this.processLifecycleLocked();
       if (changed) {
         this.revision += 1;
-        await this.publish();
       }
-      return await this.publicSnapshotLocked();
+      const snapshot = await this.publicSnapshotLocked();
+      if (!isGatewaySnapshot(snapshot)) {
+        throw new BridgeError(
+          "INVALID_PUBLIC_SNAPSHOT",
+          "The gateway public snapshot failed its closed-schema validation.",
+        );
+      }
+      const fingerprint = this.fingerprintSnapshot(snapshot);
+      if (this.snapshotFingerprint === undefined) {
+        this.snapshotFingerprint = fingerprint;
+      } else if (this.snapshotFingerprint !== fingerprint) {
+        if (this.snapshotRevision >= Number.MAX_SAFE_INTEGER) {
+          throw new BridgeError(
+            "SNAPSHOT_REVISION_EXHAUSTED",
+            "The process-local public snapshot revision is exhausted.",
+          );
+        }
+        this.snapshotFingerprint = fingerprint;
+        this.snapshotRevision += 1;
+      }
+      if (changed) await this.publish(snapshot);
+      return {
+        snapshotRevision: this.snapshotRevision,
+        snapshot,
+      };
     });
+  }
+
+  private fingerprintSnapshot(snapshot: GatewayPublicSnapshot): string {
+    // Closed snapshot validation bounds every array and field before this
+    // serialization. Omitting generatedAt is the sole semantic exception.
+    const { generatedAt: _generatedAt, ...semanticSnapshot } = snapshot;
+    const encoded = JSON.stringify(
+      semanticSnapshot satisfies Omit<GatewayPublicSnapshot, "generatedAt">,
+    );
+    if (
+      Buffer.byteLength(encoded, "utf8") >
+      GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET
+    ) {
+      throw new BridgeError(
+        "PUBLIC_SNAPSHOT_FINGERPRINT_TOO_LARGE",
+        "The gateway public snapshot exceeds the semantic fingerprint budget.",
+      );
+    }
+    return createHash("sha256").update(encoded, "utf8").digest("base64url");
   }
 
   private callbacksFor(source: PrivateEndpointIdentity): GatewayAdapterCallbacks {
@@ -4100,10 +4157,10 @@ export class GatewayService {
     });
   }
 
-  private async publish(): Promise<void> {
+  private async publish(snapshot?: GatewayPublicSnapshot): Promise<void> {
     try {
-      const snapshot = await this.publicSnapshotLocked();
-      await this.publishDashboard(this.store.rootDir, snapshot);
+      const current = snapshot ?? (await this.publicSnapshotLocked());
+      await this.publishDashboard(this.store.rootDir, current);
       this.dashboardHealthy = true;
     } catch {
       this.dashboardHealthy = false;

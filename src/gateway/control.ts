@@ -69,6 +69,7 @@ export const gatewayControlMethods = [
   "select_claude",
   "unselect_claude",
   "list_snapshot",
+  "observe_snapshot",
   "delivery_status",
   "send_to_claude",
   "send_to_codex",
@@ -193,6 +194,11 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
+      method: "observe_snapshot";
+      params: Record<string, never>;
+    }
+  | {
+      protocolVersion: 1;
       method: "delivery_status";
       params: DeliveryStatusParams;
     }
@@ -228,6 +234,7 @@ type ValidatedGatewayControlRequest =
   | Extract<GatewayControlRequest, { method: "select_claude" }>
   | Extract<GatewayControlRequest, { method: "unselect_claude" }>
   | Extract<GatewayControlRequest, { method: "list_snapshot" }>
+  | Extract<GatewayControlRequest, { method: "observe_snapshot" }>
   | Extract<GatewayControlRequest, { method: "delivery_status" }>
   | {
       protocolVersion: 1;
@@ -276,6 +283,7 @@ export type GatewaySendResult =
 
 export type GatewayHealthResult = {
   status: "ok" | "degraded";
+  /** Coarse controller activity clock; not a semantic snapshot revision. */
   revision: number;
 };
 
@@ -307,6 +315,16 @@ export type GatewayDeliveryStatusResult =
 
 export type GatewaySnapshot = GatewayPublicSnapshot;
 
+/**
+ * One atomic, read-only public observation. `snapshotRevision` is distinct
+ * from the coarse controller revision returned by `health`: it resets with
+ * the gateway process and changes only when public snapshot semantics change.
+ */
+export type GatewaySnapshotObservation = {
+  snapshotRevision: number;
+  snapshot: GatewaySnapshot;
+};
+
 type ResultByMethod = {
   health: GatewayHealthResult;
   register_codex: GatewayDecision;
@@ -314,6 +332,7 @@ type ResultByMethod = {
   select_claude: GatewayDecision;
   unselect_claude: GatewayDecision;
   list_snapshot: GatewaySnapshot;
+  observe_snapshot: GatewaySnapshotObservation;
   delivery_status: GatewayDeliveryStatusResult;
   send_to_claude: GatewaySendResult;
   send_to_codex: GatewaySendResult;
@@ -338,6 +357,7 @@ export type GatewayControlHandlers = {
     params: Readonly<SelectClaudeParams>,
   ) => MaybePromise<GatewayDecision>;
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
+  observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
   deliveryStatus: (
     params: Readonly<DeliveryStatusParams>,
   ) => MaybePromise<GatewayDeliveryStatusResult>;
@@ -593,6 +613,7 @@ function normalizeParams(
   switch (method) {
     case "health":
     case "list_snapshot":
+    case "observe_snapshot":
     case "refresh_dashboard":
       if (!hasExactKeys(value, [])) {
         throw new ProtocolFault("INVALID_REQUEST");
@@ -1141,7 +1162,7 @@ function isSnapshotTruncation(value: unknown): boolean {
   );
 }
 
-function isSnapshot(value: unknown): value is GatewaySnapshot {
+export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
@@ -1194,6 +1215,17 @@ function isSnapshot(value: unknown): value is GatewaySnapshot {
   );
 }
 
+function isSnapshotObservation(
+  value: unknown,
+): value is GatewaySnapshotObservation {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["snapshotRevision", "snapshot"]) &&
+    isNonNegativeInteger(value.snapshotRevision) &&
+    isGatewaySnapshot(value.snapshot)
+  );
+}
+
 function isResultForMethod<M extends GatewayControlMethod>(
   method: M,
   value: unknown,
@@ -1207,7 +1239,9 @@ function isResultForMethod<M extends GatewayControlMethod>(
     case "unselect_claude":
       return isDecision(value);
     case "list_snapshot":
-      return isSnapshot(value);
+      return isGatewaySnapshot(value);
+    case "observe_snapshot":
+      return isSnapshotObservation(value);
     case "delivery_status":
       return isDeliveryStatusResult(value);
     case "send_to_claude":
@@ -1253,6 +1287,9 @@ async function dispatch(
         break;
       case "list_snapshot":
         result = await handlers.listSnapshot();
+        break;
+      case "observe_snapshot":
+        result = await handlers.observeSnapshot();
         break;
       case "delivery_status":
         result = await handlers.deliveryStatus(request.params);

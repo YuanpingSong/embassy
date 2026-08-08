@@ -18,6 +18,7 @@ import { afterEach, test } from "node:test";
 import {
   GATEWAY_CONTROL_MAX_FRAME_BYTES,
   GATEWAY_CONTROL_MAX_CONNECTIONS,
+  GATEWAY_CONTROL_MAX_RESPONSE_BYTES,
   GATEWAY_CONTROL_PROTOCOL_VERSION,
   type GatewayControlHandlers,
   type GatewayControlResponse,
@@ -36,6 +37,7 @@ import {
   type ValidatedSendToClaudeParams,
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
+import { projectGatewayPublicSnapshot } from "../src/gateway/types.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
@@ -217,6 +219,7 @@ function handlers(
     selectClaude: () => ({ accepted: true, code: "ok" }),
     unselectClaude: () => ({ accepted: true, code: "ok" }),
     listSnapshot: () => snapshot(),
+    observeSnapshot: () => ({ snapshotRevision: 3, snapshot: snapshot() }),
     deliveryStatus: () => ({
       found: true,
       state: "delivered",
@@ -517,6 +520,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   });
   assert.equal(listed.ok, true);
   if (!listed.ok) assert.fail("expected a projected public snapshot");
+  assert.equal("snapshotRevision" in listed.result, false);
   assert.deepEqual(
     listed.result.messages.map((event) => event.state),
     ["transport_written", "held", "unconfirmed"],
@@ -530,6 +534,17 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   });
   assert.equal(JSON.stringify(listed).includes("threadId"), false);
   assert.equal(JSON.stringify(listed).includes(secretText), false);
+
+  const observed = await sendGatewayControlRequest({
+    socketPath,
+    request: { protocolVersion: 1, method: "observe_snapshot", params: {} },
+  });
+  assert.equal(observed.ok, true);
+  if (!observed.ok) assert.fail("expected an atomic public observation");
+  assert.equal(observed.result.snapshotRevision, 3);
+  assert.deepEqual(observed.result.snapshot, snapshot());
+  assert.equal(JSON.stringify(observed).includes("threadId"), false);
+  assert.equal(JSON.stringify(observed).includes(secretText), false);
 
   await sendGatewayControlRequest({
     socketPath,
@@ -562,6 +577,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "select_claude",
     "unselect_claude",
     "list_snapshot",
+    "observe_snapshot",
     "delivery_status",
     "send_to_claude",
     "send_to_codex",
@@ -694,6 +710,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ],
     ["delivery_status", { token: "dlv_too-short" }],
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
+    ["observe_snapshot", { extra: true }],
     [
       "reply",
       {
@@ -1043,6 +1060,80 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     );
     assertWireError(response, "INVALID_HANDLER_RESPONSE");
   }
+  await server.close();
+});
+
+test("observe_snapshot enforces a closed revision-and-snapshot result", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const privateSnapshot = { ...snapshot(), threadId: THREAD_ID };
+  const candidates: unknown[] = [
+    { snapshotRevision: -1, snapshot: snapshot() },
+    { snapshotRevision: 0, snapshot: privateSnapshot },
+    { snapshotRevision: 0, snapshot: snapshot(), extra: true },
+  ];
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      observeSnapshot: () => candidates.shift() as never,
+    }),
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await rawRequest(
+      socketPath,
+      wireRequest("observe_snapshot", {}),
+    );
+    assertWireError(response, "INVALID_HANDLER_RESPONSE");
+    assert.equal(JSON.stringify(response).includes(THREAD_ID), false);
+  }
+  await server.close();
+});
+
+test("observe_snapshot carries a maximally projected snapshot under the control cap", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const oversized = snapshot();
+  const baseEvent = oversized.messages[0];
+  assert.ok(baseEvent);
+  oversized.messages = Array.from({ length: 1_024 }, (_, index) => ({
+    ...baseEvent,
+    sequence: index,
+    messageIdSuffix: index.toString(16).padStart(8, "0"),
+    sourceAlias: `${"a".repeat(32)}@${"b".repeat(63)}`,
+    targetAlias: `${"c".repeat(32)}@${"d".repeat(63)}`,
+    safeErrorCode: "MAXIMALLY_BOUNDED_SYNTHETIC_EVENT",
+  }));
+  const projected = projectGatewayPublicSnapshot(oversized);
+  assert.ok(projected.truncation.messages > 0);
+
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      observeSnapshot: () => ({
+        snapshotRevision: Number.MAX_SAFE_INTEGER,
+        snapshot: projected,
+      }),
+    }),
+  });
+  const response = await rawRequest(
+    socketPath,
+    wireRequest("observe_snapshot", {}),
+  );
+  assert.equal(response.ok, true);
+  assert.ok(
+    Buffer.byteLength(`${JSON.stringify(response)}\n`, "utf8") <=
+      GATEWAY_CONTROL_MAX_RESPONSE_BYTES,
+  );
+  const result = response.result as {
+    snapshotRevision: number;
+    snapshot: GatewaySnapshot;
+  };
+  assert.equal(result.snapshotRevision, Number.MAX_SAFE_INTEGER);
+  assert.equal(
+    result.snapshot.truncation.messages,
+    projected.truncation.messages,
+  );
   await server.close();
 });
 

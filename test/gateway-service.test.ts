@@ -21,6 +21,7 @@ import {
   type GatewayAdapterRouteState,
   type GatewayProviderAdapter,
 } from "../src/gateway/service.js";
+import { GatewayStore } from "../src/gateway/store.js";
 import type {
   GatewayPublicSnapshot,
   PrivateEndpointIdentity,
@@ -32,6 +33,92 @@ const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OTHER_THREAD_ID = "00000000-0000-7000-8000-000000000702";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
 const SECRET = "SYNTHETIC_BODY_MUST_STAY_MEMORY_ONLY_8e24";
+
+function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
+  const counters = {
+    accepted: 0,
+    delivered: 0,
+    unconfirmed: 0,
+    failed: 0,
+    ambiguous: 0,
+    expired: 0,
+    cancelled: 0,
+    abandoned: 0,
+    rejected: 0,
+    bytesAccepted: 0,
+  };
+  return {
+    schemaVersion: 1,
+    generatedAt,
+    health: "healthy",
+    connectors: [
+      {
+        provider: "claude",
+        host: "this-mac",
+        health: "healthy",
+        compatibility: "compatible",
+        protocol: "claude-peer",
+        protocolVersion: "1",
+        lastSeenAt: generatedAt,
+      },
+    ],
+    availablePeers: [],
+    routes: [
+      {
+        alias: "codex-main@this-mac",
+        provider: "codex",
+        host: "this-mac",
+        enabled: true,
+        state: "idle",
+        compatibility: "compatible",
+        busyPolicy: "queue",
+        lastSeenAt: generatedAt,
+        queueDepth: 0,
+        counters,
+      },
+    ],
+    messages: [],
+    accounting: {
+      accepted: 0,
+      duplicates: 0,
+      delivered: 0,
+      unconfirmed: 0,
+      failed: 0,
+      ambiguous: 0,
+      expired: 0,
+      cancelled: 0,
+      abandoned: 0,
+      rejected: 0,
+      bytesAccepted: 0,
+      queuedBytes: 0,
+    },
+    alerts: [],
+    truncation: {
+      connectors: 0,
+      availablePeers: 0,
+      routes: 0,
+      messages: 0,
+      alerts: 0,
+    },
+  };
+}
+
+class MutableSnapshotStore extends GatewayStore {
+  current: GatewayPublicSnapshot;
+
+  constructor(
+    config: ReturnType<typeof loadGatewayConfig>,
+    snapshot: GatewayPublicSnapshot,
+  ) {
+    super(config);
+    this.current = snapshot;
+  }
+
+  override async publicSnapshot(): Promise<GatewayPublicSnapshot> {
+    return structuredClone(this.current);
+  }
+}
+
 async function fixture(): Promise<{
   root: string;
   stateDir: string;
@@ -4256,4 +4343,190 @@ test("a Claude rename migrates an enqueue that is already scheduled to dispatch"
     claude.dispatches[0]?.text,
     "scheduled body follows exact UUID rename",
   );
+});
+
+test("snapshot observations ignore generatedAt but revision every public semantic surface", async () => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const store = new MutableSnapshotStore(
+    config,
+    semanticSnapshot(clock.now().toISOString()),
+  );
+  const service = new GatewayService({
+    config,
+    store,
+    now: clock.now,
+    timers: clock,
+  });
+  const internal = service as unknown as {
+    availablePeers: GatewayPublicSnapshot["availablePeers"];
+  };
+  internal.availablePeers = [
+    {
+      alias: "claude-one@this-mac",
+      provider: "claude",
+      host: "this-mac",
+      state: "idle",
+      compatibility: "compatible",
+      selected: false,
+      lastSeenAt: clock.now().toISOString(),
+    },
+  ];
+
+  const revisions: number[] = [];
+  const observe = async (): Promise<GatewayPublicSnapshot> => {
+    const observation = await service.handlers().observeSnapshot();
+    revisions.push(observation.snapshotRevision);
+    return observation.snapshot;
+  };
+
+  await observe();
+  store.current.generatedAt = new Date(clock.nowMs + 1_000).toISOString();
+  await observe();
+
+  store.current.health = "degraded";
+  await observe();
+  store.current.connectors[0]!.health = "degraded";
+  await observe();
+  store.current.connectors[0]!.lastSeenAt = new Date(
+    clock.nowMs + 2_000,
+  ).toISOString();
+  await observe();
+  internal.availablePeers[0]!.lastSeenAt = new Date(
+    clock.nowMs + 3_000,
+  ).toISOString();
+  await observe();
+  store.current.routes[0]!.state = "busy";
+  await observe();
+  store.current.routes[0]!.counters.accepted += 1;
+  await observe();
+  store.current.messages.push({
+    sequence: 1,
+    timestamp: clock.now().toISOString(),
+    messageIdSuffix: "0123abcd",
+    direction: "claude_to_codex",
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    state: "queued",
+    bytes: 1,
+    hopCount: 0,
+  });
+  await observe();
+  store.current.accounting.accepted += 1;
+  await observe();
+  store.current.alerts.push({
+    code: "SYNTHETIC_PUBLIC_ALERT",
+    severity: "warning",
+    timestamp: clock.now().toISOString(),
+    provider: "codex",
+    host: "this-mac",
+    alias: "codex-main@this-mac",
+  });
+  await observe();
+  store.current.truncation.messages += 1;
+  await observe();
+
+  const almostStalledAt = clock.nowMs - config.stallNoticeMs + 1;
+  store.current.routes[0]!.queueDepth = 1;
+  store.current.routes[0]!.oldestQueuedAt = new Date(
+    almostStalledAt,
+  ).toISOString();
+  let latest = await observe();
+  assert.equal(latest.alerts.some(({ code }) => code === "QUEUE_STALLED"), false);
+  clock.nowMs += 1;
+  latest = await observe();
+  assert.equal(latest.alerts.some(({ code }) => code === "QUEUE_STALLED"), true);
+
+  assert.deepEqual(
+    revisions,
+    [0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+  );
+  const encoded = JSON.stringify(latest);
+  assert.equal(encoded.includes(THREAD_ID), false);
+  assert.equal(encoded.includes(CLAUDE_SESSION_ID), false);
+  assert.equal(encoded.includes("endpointGeneration"), false);
+  assert.equal(encoded.includes(SECRET), false);
+
+  const restartedStore = new MutableSnapshotStore(
+    config,
+    structuredClone(store.current),
+  );
+  const restarted = new GatewayService({
+    config,
+    store: restartedStore,
+    now: clock.now,
+    timers: clock,
+  });
+  const restartedInternal = restarted as unknown as {
+    availablePeers: GatewayPublicSnapshot["availablePeers"];
+  };
+  restartedInternal.availablePeers = structuredClone(internal.availablePeers);
+  assert.equal(
+    (await restarted.handlers().observeSnapshot()).snapshotRevision,
+    0,
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
+test("observe_snapshot processes due delivery lifecycle before one atomic result", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.state = "busy";
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "busy",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const accepted = await service.handlers().sendToClaude({
+    ...toClaude("atomic lifecycle observation"),
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+
+  const before = await service.handlers().observeSnapshot();
+  assert.equal(before.snapshotRevision, 0);
+  assert.equal(before.snapshot.accounting.queuedBytes > 0, true);
+  const coarseBefore = (await service.handlers().health()).revision;
+
+  // Do not run the fake timer: the read itself must process the due deadline.
+  clock.nowMs += 1_000;
+  const after = await service.handlers().observeSnapshot();
+  assert.equal(after.snapshotRevision, 1);
+  assert.equal(after.snapshot.accounting.queuedBytes, 0);
+  assert.equal(
+    after.snapshot.messages.some(
+      ({ state, safeErrorCode }) =>
+        state === "expired" && safeErrorCode === "DELIVERY_DEADLINE_EXPIRED",
+    ),
+    true,
+  );
+  const coarseAfter = (await service.handlers().health()).revision;
+  assert.equal(coarseAfter >= coarseBefore, true);
+  assert.notEqual(coarseAfter, after.snapshotRevision);
 });
