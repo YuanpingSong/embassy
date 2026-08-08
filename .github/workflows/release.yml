@@ -158,9 +158,29 @@ jobs:
             "skills/embassy-peer/SKILL.md",
             "skills/embassy-peer/agents/openai.yaml",
           ]);
+          const exactLocaleRuntimePaths = new Set([
+            "dist/src/gateway/dashboard-copy.en.d.ts",
+            "dist/src/gateway/dashboard-copy.en.js",
+            "dist/src/gateway/dashboard-copy.en.js.map",
+            "dist/src/gateway/dashboard-copy.zh-CN.d.ts",
+            "dist/src/gateway/dashboard-copy.zh-CN.js",
+            "dist/src/gateway/dashboard-copy.zh-CN.js.map",
+          ]);
           const requiredPaths = [
             ...exactPaths,
             "dist/src/gateway/cli.js",
+            "dist/src/gateway/dashboard-copy.js",
+            "dist/src/gateway/dashboard-copy.en.js",
+            "dist/src/gateway/dashboard-copy.zh-CN.js",
+            "dist/src/gateway/dashboard-model.js",
+            "dist/src/gateway/live-dashboard.js",
+            "dist/src/gateway/live-dashboard-assets.js",
+            "dist/src/gateway/live-dashboard-bootstrap.js",
+            "dist/src/gateway/live-dashboard-command.js",
+            "dist/src/gateway/live-dashboard-http.js",
+            "dist/src/gateway/live-dashboard-protocol.js",
+            "dist/src/gateway/live-dashboard-server.js",
+            "dist/src/gateway/live-dashboard-stream.js",
             "dist/src/gateway/server.js",
           ];
           const allowedRuntimePath =
@@ -173,7 +193,9 @@ jobs:
           for (const path of paths) {
             if (
               forbiddenLegacyPath.test(path) ||
-              (!exactPaths.has(path) && !allowedRuntimePath.test(path))
+              (!exactPaths.has(path) &&
+                !exactLocaleRuntimePaths.has(path) &&
+                !allowedRuntimePath.test(path))
             ) {
               throw new Error(`Unexpected package file: ${path}`);
             }

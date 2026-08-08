@@ -32,6 +32,12 @@ import {
   type SendGatewayControlRequestOptions,
 } from "./control.js";
 import { loadGatewayConfig, type GatewayConfig } from "./config.js";
+import type { DashboardLocale } from "./dashboard-copy.js";
+import {
+  runLiveDashboardCommand,
+  type LiveDashboardCommandOutcome,
+  type LiveDashboardCommandOptions,
+} from "./live-dashboard-command.js";
 import {
   runGatewayServer,
   type GatewayServerOptions,
@@ -60,6 +66,7 @@ export const gatewayCliCommands = [
   "delivery-status",
   "wait-delivery",
   "refresh-dashboard",
+  "dashboard",
   "register-codex",
   "unregister-codex",
   "select-claude",
@@ -89,6 +96,9 @@ type GatewayControlSender = <M extends GatewayControlMethod>(
 ) => Promise<GatewayControlResponse<M>>;
 
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
+type LiveDashboardRunner = (
+  options: LiveDashboardCommandOptions,
+) => Promise<LiveDashboardCommandOutcome | void>;
 
 export type GatewayCliDependencies = {
   env?: NodeJS.ProcessEnv;
@@ -98,7 +108,9 @@ export type GatewayCliDependencies = {
   loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig;
   sendRequest?: GatewayControlSender;
   runServer?: GatewayServerRunner;
+  runLiveDashboard?: LiveDashboardRunner;
   serverSignal?: AbortSignal;
+  liveDashboardSignal?: AbortSignal;
   validateControlSocket?: (
     stateDir: string,
     socketPath: string,
@@ -308,6 +320,17 @@ function emptyParams(args: readonly string[]): Record<string, never> {
   return {};
 }
 
+function liveDashboardLocale(args: readonly string[]): DashboardLocale {
+  const options = parseOptions(args, ["lang"], ["live"]);
+  assertExactOptionCount(options, 1, 2);
+  if (options.live !== true) throw new CliFault("INVALID_ARGUMENTS");
+  const locale = options.lang ?? "en";
+  if (locale !== "en" && locale !== "zh-CN") {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  return locale;
+}
+
 async function buildRequest(
   command: GatewayCliCommand,
   args: readonly string[],
@@ -316,6 +339,7 @@ async function buildRequest(
 ): Promise<GatewayControlRequest> {
   switch (command) {
     case "serve":
+    case "dashboard":
       throw new CliFault("INVALID_ARGUMENTS");
     case "health":
       return {
@@ -676,7 +700,7 @@ async function waitForDelivery(
   }
 }
 
-/** Run one client command without installing process-level signal handlers. */
+/** Run one command; foreground runners own and release their signal handlers. */
 export async function runGatewayCli(
   argv: readonly string[] = process.argv.slice(2),
   dependencies: GatewayCliDependencies = {},
@@ -690,6 +714,8 @@ export async function runGatewayCli(
   const validateControlSocket =
     dependencies.validateControlSocket ?? validatePrivateGatewayControlSocket;
   const runServer = dependencies.runServer ?? runGatewayServer;
+  const runLiveDashboard =
+    dependencies.runLiveDashboard ?? runLiveDashboardCommand;
   const now = dependencies.now ?? Date.now;
   const delay = dependencies.delay ?? defaultDelay;
   if (
@@ -701,6 +727,7 @@ export async function runGatewayCli(
   }
   const command = isCommand(argv[0]) ? argv[0] : undefined;
   let serverReadyEmitted = false;
+  let liveDashboardReadyEmitted = false;
 
   try {
     if (command === undefined) throw new CliFault("UNKNOWN_COMMAND");
@@ -727,6 +754,39 @@ export async function runGatewayCli(
       });
       if (!serverReadyEmitted) {
         throw new CliFault("SERVER_NOT_READY");
+      }
+      return gatewayCliExitCodes.ok;
+    }
+    if (command === "dashboard") {
+      const locale = liveDashboardLocale(argv.slice(1));
+      const outcome = await runLiveDashboard({
+        env,
+        locale,
+        ...(dependencies.liveDashboardSignal === undefined
+          ? {}
+          : { signal: dependencies.liveDashboardSignal }),
+        loadConfig,
+        validateControlSocket,
+        sendRequest,
+        onReady: async (result) => {
+          if (liveDashboardReadyEmitted) {
+            throw new CliFault("LIVE_DASHBOARD_READY_ALREADY_EMITTED");
+          }
+          stdout.write(
+            serializedOutput({
+              ok: true,
+              command,
+              result,
+            }),
+          );
+          liveDashboardReadyEmitted = true;
+        },
+      });
+      if (!liveDashboardReadyEmitted) {
+        if (outcome?.status === "cancelled") {
+          return gatewayCliExitCodes.ok;
+        }
+        throw new Error("LIVE_DASHBOARD_NOT_READY");
       }
       return gatewayCliExitCodes.ok;
     }
@@ -797,7 +857,10 @@ export async function runGatewayCli(
     }
     return exitCode;
   } catch (error) {
-    if (command === "serve" && serverReadyEmitted) {
+    if (
+      (command === "serve" && serverReadyEmitted) ||
+      (command === "dashboard" && liveDashboardReadyEmitted)
+    ) {
       stderr.write(FIXED_STDERR.failure);
       return gatewayCliExitCodes.failure;
     }
