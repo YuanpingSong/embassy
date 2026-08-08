@@ -98,7 +98,7 @@ export function resolveGatewayClaudeLauncher(
   env: NodeJS.ProcessEnv,
   loginHome: string,
 ): string {
-  const configured = env.CLAUDE_BRIDGE_CLAUDE_BIN;
+  const configured = env.EMBASSY_CLAUDE_BIN;
   const launcher =
     configured ?? path.join(loginHome, ".local", "bin", "claude");
   if (

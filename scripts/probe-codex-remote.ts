@@ -6,9 +6,9 @@ import { pathToFileURL } from "node:url";
 
 import WebSocket from "ws";
 
-const AUTHORIZATION_ENV = "CLAUDE_BRIDGE_RUN_CODEX_REMOTE_PROBE";
-const ALLOWLIST_ENV = "CLAUDE_BRIDGE_CODEX_REMOTE_PROBE_ALLOWED_HOSTS";
-const HOST_ENV = "CLAUDE_BRIDGE_CODEX_REMOTE_PROBE_HOST";
+const AUTHORIZATION_ENV = "EMBASSY_RUN_CODEX_REMOTE_PROBE";
+const ALLOWLIST_ENV = "EMBASSY_CODEX_REMOTE_PROBE_ALLOWED_HOSTS";
+const HOST_ENV = "EMBASSY_CODEX_REMOTE_PROBE_HOST";
 
 const MAX_PRE_MARKER_BYTES = 64 * 1024;
 const MAX_PROXY_STDOUT_BYTES = 4 * 1024 * 1024;
@@ -644,8 +644,8 @@ async function runProtocol(socket: WebSocket): Promise<number> {
         method: "initialize",
         params: {
           clientInfo: {
-            name: "claude_agent_bridge_probe",
-            title: "Claude Agent Bridge Probe",
+            name: "agent_embassy_probe",
+            title: "Embassy Probe",
             version: "0.1.0",
           },
         },

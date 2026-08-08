@@ -44,22 +44,22 @@ export function defaultGatewayStateDir(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   if (
-    (env.CLAUDE_BRIDGE_STATE_DIR !== undefined &&
-      !path.isAbsolute(env.CLAUDE_BRIDGE_STATE_DIR)) ||
+    (env.EMBASSY_STATE_DIR !== undefined &&
+      !path.isAbsolute(env.EMBASSY_STATE_DIR)) ||
     (env.XDG_STATE_HOME !== undefined &&
       !path.isAbsolute(env.XDG_STATE_HOME))
   ) {
     throw new BridgeError(
       "INVALID_GATEWAY_CONFIGURATION",
-      "Inherited bridge and XDG state roots must be absolute paths.",
+      "Inherited Embassy and XDG state roots must be absolute paths.",
     );
   }
-  const parent =
-    env.CLAUDE_BRIDGE_STATE_DIR ??
+  return (
+    env.EMBASSY_STATE_DIR ??
     (env.XDG_STATE_HOME
-      ? path.join(env.XDG_STATE_HOME, "claude-agent-bridge")
-      : path.join(os.homedir(), ".local", "state", "claude-agent-bridge"));
-  return path.join(parent, "gateway");
+      ? path.join(env.XDG_STATE_HOME, "agent-embassy")
+      : path.join(os.homedir(), ".local", "state", "agent-embassy"))
+  );
 }
 
 function parseAllowedHosts(value: string | undefined): readonly string[] {
@@ -75,7 +75,7 @@ function parseAllowedHosts(value: string | undefined): readonly string[] {
   ) {
     throw new BridgeError(
       "INVALID_GATEWAY_CONFIGURATION",
-      "CLAUDE_BRIDGE_GATEWAY_HOSTS must contain 1 through 32 unique lowercase ASCII host aliases separated by commas.",
+      "EMBASSY_HOSTS must contain 1 through 32 unique lowercase ASCII host aliases separated by commas.",
     );
   }
   return Object.freeze([...hosts]);
@@ -84,16 +84,7 @@ function parseAllowedHosts(value: string | undefined): readonly string[] {
 export function loadGatewayConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): GatewayConfig {
-  const configuredStateDir = env.CLAUDE_BRIDGE_GATEWAY_STATE_DIR;
-  if (configuredStateDir !== undefined && !path.isAbsolute(configuredStateDir)) {
-    throw new BridgeError(
-      "INVALID_GATEWAY_CONFIGURATION",
-      "CLAUDE_BRIDGE_GATEWAY_STATE_DIR must be an absolute path.",
-    );
-  }
-  const stateDir = path.resolve(
-    configuredStateDir ?? defaultGatewayStateDir(env),
-  );
+  const stateDir = path.resolve(defaultGatewayStateDir(env));
   const controlSocketPath = path.join(stateDir, "control.sock");
   if (Buffer.byteLength(controlSocketPath) > 100) {
     throw new BridgeError(
@@ -104,99 +95,99 @@ export function loadGatewayConfig(
 
   const limits: GatewayStoreLimits = {
     maxRoutes: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_ROUTES",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_ROUTES,
+      "EMBASSY_MAX_ROUTES",
+      env.EMBASSY_MAX_ROUTES,
       128,
       2,
       gatewayPublicSnapshotLimits.routes,
     ),
     eventCapacity: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_EVENT_CAPACITY",
-      env.CLAUDE_BRIDGE_GATEWAY_EVENT_CAPACITY,
+      "EMBASSY_EVENT_CAPACITY",
+      env.EMBASSY_EVENT_CAPACITY,
       500,
       10,
       gatewayPublicSnapshotLimits.messages,
     ),
     eventTtlMs: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_EVENT_TTL_MS",
-      env.CLAUDE_BRIDGE_GATEWAY_EVENT_TTL_MS,
+      "EMBASSY_EVENT_TTL_MS",
+      env.EMBASSY_EVENT_TTL_MS,
       86_400_000,
       60_000,
       604_800_000,
     ),
     dedupeCapacity: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_DEDUPE_CAPACITY",
-      env.CLAUDE_BRIDGE_GATEWAY_DEDUPE_CAPACITY,
+      "EMBASSY_DEDUPE_CAPACITY",
+      env.EMBASSY_DEDUPE_CAPACITY,
       2_000,
       10,
       100_000,
     ),
     dedupeTtlMs: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_DEDUPE_TTL_MS",
-      env.CLAUDE_BRIDGE_GATEWAY_DEDUPE_TTL_MS,
+      "EMBASSY_DEDUPE_TTL_MS",
+      env.EMBASSY_DEDUPE_TTL_MS,
       300_000,
       1_000,
       86_400_000,
     ),
     maxQueueMessages: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_MESSAGES",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_MESSAGES,
+      "EMBASSY_MAX_QUEUE_MESSAGES",
+      env.EMBASSY_MAX_QUEUE_MESSAGES,
       100,
       1,
       10_000,
     ),
     maxQueueMessagesPerRoute: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_PER_ROUTE",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_PER_ROUTE,
+      "EMBASSY_MAX_QUEUE_PER_ROUTE",
+      env.EMBASSY_MAX_QUEUE_PER_ROUTE,
       20,
       1,
       1_000,
     ),
     maxInFlightMessages: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_IN_FLIGHT",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_IN_FLIGHT,
+      "EMBASSY_MAX_IN_FLIGHT",
+      env.EMBASSY_MAX_IN_FLIGHT,
       16,
       1,
       1_000,
     ),
     maxQueueBytes: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_BYTES",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_BYTES,
+      "EMBASSY_MAX_QUEUE_BYTES",
+      env.EMBASSY_MAX_QUEUE_BYTES,
       1_048_576,
       1_024,
       67_108_864,
     ),
     maxMessageBytes: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_MESSAGE_BYTES",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_MESSAGE_BYTES,
+      "EMBASSY_MAX_MESSAGE_BYTES",
+      env.EMBASSY_MAX_MESSAGE_BYTES,
       16_384,
       1,
       1_048_576,
     ),
     messageDeadlineMs: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MESSAGE_DEADLINE_MS",
-      env.CLAUDE_BRIDGE_GATEWAY_MESSAGE_DEADLINE_MS,
+      "EMBASSY_MESSAGE_DEADLINE_MS",
+      env.EMBASSY_MESSAGE_DEADLINE_MS,
       300_000,
       1_000,
       3_600_000,
     ),
     maxHopCount: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_MAX_HOPS",
-      env.CLAUDE_BRIDGE_GATEWAY_MAX_HOPS,
+      "EMBASSY_MAX_HOPS",
+      env.EMBASSY_MAX_HOPS,
       2,
       0,
       16,
     ),
     rateLimitPerRoute: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_RATE_LIMIT",
-      env.CLAUDE_BRIDGE_GATEWAY_RATE_LIMIT,
+      "EMBASSY_RATE_LIMIT",
+      env.EMBASSY_RATE_LIMIT,
       30,
       1,
       10_000,
     ),
     rateWindowMs: boundedInteger(
-      "CLAUDE_BRIDGE_GATEWAY_RATE_WINDOW_MS",
-      env.CLAUDE_BRIDGE_GATEWAY_RATE_WINDOW_MS,
+      "EMBASSY_RATE_WINDOW_MS",
+      env.EMBASSY_RATE_WINDOW_MS,
       60_000,
       1_000,
       3_600_000,
@@ -205,19 +196,19 @@ export function loadGatewayConfig(
   if (limits.maxMessageBytes > limits.maxQueueBytes) {
     throw new BridgeError(
       "INVALID_GATEWAY_CONFIGURATION",
-      "CLAUDE_BRIDGE_GATEWAY_MAX_MESSAGE_BYTES cannot exceed CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_BYTES.",
+      "EMBASSY_MAX_MESSAGE_BYTES cannot exceed EMBASSY_MAX_QUEUE_BYTES.",
     );
   }
   if (limits.maxQueueMessagesPerRoute > limits.maxQueueMessages) {
     throw new BridgeError(
       "INVALID_GATEWAY_CONFIGURATION",
-      "CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_PER_ROUTE cannot exceed CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_MESSAGES.",
+      "EMBASSY_MAX_QUEUE_PER_ROUTE cannot exceed EMBASSY_MAX_QUEUE_MESSAGES.",
     );
   }
   if (limits.maxInFlightMessages > limits.maxQueueMessages) {
     throw new BridgeError(
       "INVALID_GATEWAY_CONFIGURATION",
-      "CLAUDE_BRIDGE_GATEWAY_MAX_IN_FLIGHT cannot exceed CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_MESSAGES.",
+      "EMBASSY_MAX_IN_FLIGHT cannot exceed EMBASSY_MAX_QUEUE_MESSAGES.",
     );
   }
   const conservativeStateBudget =
@@ -236,7 +227,7 @@ export function loadGatewayConfig(
   return {
     stateDir,
     controlSocketPath,
-    allowedHosts: parseAllowedHosts(env.CLAUDE_BRIDGE_GATEWAY_HOSTS),
+    allowedHosts: parseAllowedHosts(env.EMBASSY_HOSTS),
     limits,
   };
 }

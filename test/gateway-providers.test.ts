@@ -48,21 +48,30 @@ function callbacks(): {
   callbacks: GatewayAdapterCallbacks;
   deliveries: GatewayAdapterDelivery[];
   replies: Parameters<GatewayAdapterCallbacks["onClaudeReply"]>[0][];
+  messages: NonNullable<
+    Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0]
+  >[];
   routes: Parameters<GatewayAdapterCallbacks["onRouteState"]>[0][];
 } {
   const deliveries: GatewayAdapterDelivery[] = [];
   const replies: Parameters<GatewayAdapterCallbacks["onClaudeReply"]>[0][] = [];
+  const messages: NonNullable<
+    Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0]
+  >[] = [];
   const routes: Parameters<GatewayAdapterCallbacks["onRouteState"]>[0][] = [];
   return {
     callbacks: {
       onDelivery: (event) => deliveries.push({ ...event }),
       onClaudeReply: (event) =>
         replies.push({ endpoint: { ...event.endpoint }, text: event.text }),
+      onClaudeMessage: (event) =>
+        messages.push({ ...event, endpoint: { ...event.endpoint } }),
       onRouteState: (event) =>
         routes.push({ endpoint: { ...event.endpoint }, state: event.state }),
     },
     deliveries,
     replies,
+    messages,
     routes,
   };
 }
@@ -358,6 +367,7 @@ test("local Claude provider publishes only canonical interactive names and gener
   );
 
   const result = await provider.dispatch({
+    authorization: "selected_route",
     binding: binding(provider),
     messageId: GATEWAY_MESSAGE_ID,
     text: "synthetic body",
@@ -403,12 +413,82 @@ test("local Claude provider publishes only canonical interactive names and gener
     {
       receiptHandle: "synthetic-receipt-handle",
       status: "expired",
-      diagnosticCode: "CLAUDE_SOURCE_ROUTE_UNSELECTED",
+      diagnosticCode: "CLAUDE_SOURCE_ROUTE_STALE",
     },
   ]);
 
   await provider.close();
   assert.equal(fake.closed, true);
+});
+
+test("an exact live native sender stays outbound-unselected but can receive its correlated reply", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.discoverClaudePeers();
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-reviewer@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+
+  await fake.emitInbound("target-selected", "native unselected ingress");
+  assert.deepEqual(observed.messages, [
+    {
+      endpoint: { ...provider.identity, routeHandle: "target-selected" },
+      sourceAlias: "advisor@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
+      text: "native unselected ingress",
+      receiptHandle: "synthetic-receipt-handle",
+    },
+  ]);
+  assert.deepEqual(observed.routes, []);
+
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-message-unselected",
+      text: "must remain blocked",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" },
+  );
+  assert.equal(fake.sendCalls, 0);
+
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "native_reply",
+      binding: binding(provider),
+      messageId: "gateway-message-native-reply",
+      text: "correlated native reply",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.sendCalls, 1);
+  assert.deepEqual(observed.routes, []);
+
+  fake.peers.splice(0, 1);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "native_reply",
+      binding: binding(provider),
+      messageId: "gateway-message-stale-native-reply",
+      text: "must not cross-deliver",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" },
+  );
+  assert.equal(fake.sendCalls, 1);
+  await provider.close();
 });
 
 test("local Claude provider waits for a late exact receipt after post-write ambiguity and fails clean prewrites", async () => {
@@ -433,6 +513,7 @@ test("local Claude provider waits for a late exact receipt after post-write ambi
 
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: binding(provider),
       messageId: GATEWAY_MESSAGE_ID,
       text: "ambiguous synthetic body",
@@ -450,6 +531,7 @@ test("local Claude provider waits for a late exact receipt after post-write ambi
   fake.sendMode = "prewrite_failure";
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: binding(provider),
       messageId: "gateway-message-002",
       text: "prewrite failure",
@@ -481,6 +563,7 @@ test("Claude idle discovery overlapping an entire dispatch remains stale until t
   await heldDiscovery.started;
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: binding(provider),
       messageId: "gateway-overlapped-dispatch",
       text: "synthetic overlapped dispatch",
@@ -519,6 +602,7 @@ test("local Claude provider releases successful socket writes without waiting fo
   });
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: binding(provider),
       messageId: "gateway-collision-1",
       text: "first",
@@ -529,6 +613,7 @@ test("local Claude provider releases successful socket writes without waiting fo
   );
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: binding(provider),
       messageId: "gateway-collision-2",
       text: "second",
@@ -559,8 +644,8 @@ test("successful Claude socket writes immediately unlock a second queued gateway
   });
   const service = new GatewayService({
     config: loadGatewayConfig({
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: path.join(root, "state"),
-      CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+      EMBASSY_STATE_DIR: path.join(root, "state"),
+      EMBASSY_HOSTS: "this-mac",
     }),
     forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, new RegistrationOnlyCodexProvider()],
@@ -794,6 +879,7 @@ test("local Codex provider attaches one exact route, reattests before write, and
 
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: codexBinding(provider),
       messageId: GATEWAY_MESSAGE_ID,
       text: "synthetic Codex request",
@@ -884,6 +970,7 @@ test("an explicitly registered Codex route remains reachable after settings inva
 
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: codexBinding(provider),
       messageId: "gateway-message-after-settings-update",
       text: "registered routes remain reachable",
@@ -926,6 +1013,7 @@ test("local Codex provider remains monitor-only without the distinct write attes
   });
   assert.deepEqual(
     await provider.dispatch({
+    authorization: "selected_route",
       binding: codexBinding(provider),
       messageId: GATEWAY_MESSAGE_ID,
       text: "must never reach turn/start",
@@ -958,6 +1046,7 @@ test("local Codex provider cancels queued work and confirms only its exact owned
     routeHandle: THREAD_ID,
   });
   await provider.dispatch({
+    authorization: "selected_route",
     binding: codexBinding(provider),
     messageId: "gateway-active-owned",
     text: "active synthetic turn",
@@ -965,6 +1054,7 @@ test("local Codex provider cancels queued work and confirms only its exact owned
     deadlineAt: new Date(Date.now() + 60_000).toISOString(),
   });
   await provider.dispatch({
+    authorization: "selected_route",
     binding: codexBinding(provider),
     messageId: "gateway-queued-owned",
     text: "queued synthetic turn",
@@ -1087,6 +1177,7 @@ test("local Codex provider preserves the proxy when owned-turn termination is no
     routeHandle: THREAD_ID,
   });
   await provider.dispatch({
+    authorization: "selected_route",
     binding: codexBinding(provider),
     messageId: "gateway-timeout-owned",
     text: "active synthetic turn",

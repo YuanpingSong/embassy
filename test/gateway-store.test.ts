@@ -87,7 +87,7 @@ async function fixture(): Promise<{
   const config: GatewayConfig = {
     stateDir,
     controlSocketPath: path.join(stateDir, "control.sock"),
-    allowedHosts: ["this-mac", "m5dev"],
+    allowedHosts: ["this-mac", "build-mac"],
     limits: limits(),
   };
   const testClock = clock();
@@ -158,20 +158,74 @@ async function observeAndRegister(store: GatewayStore): Promise<void> {
   await store.registerRoute(claude);
 }
 
+async function observeAndRegisterCodexOnly(store: GatewayStore): Promise<void> {
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.observeConnector({
+    identity: endpoint(claudeBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "claude-peer",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "reviewer@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+}
+
+const transientClaudePeer = {
+  alias: "native-advisor@this-mac",
+  binding: {
+    ...claudeBinding,
+    routeHandle: "79fa18fc-1486-4e2f-a549-a8d922573477",
+    ownerLease: "native-claude-call-proof-0001",
+  },
+} as const;
+
 test("gateway configuration is local, bounded, and fail-closed", () => {
   const config = loadGatewayConfig({
     HOME: os.homedir(),
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/private-gateway-test",
-    CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac,m5dev",
+    EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+    EMBASSY_HOSTS: "this-mac,build-mac",
   });
-  assert.deepEqual(config.allowedHosts, ["this-mac", "m5dev"]);
+  assert.deepEqual(config.allowedHosts, ["this-mac", "build-mac"]);
   assert.equal(config.controlSocketPath, "/tmp/private-gateway-test/control.sock");
   assert.equal(config.limits.maxMessageBytes, 16_384);
+
+  const xdgDefault = loadGatewayConfig({
+    XDG_STATE_HOME: "/tmp/synthetic-xdg-state",
+  });
+  assert.equal(
+    xdgDefault.stateDir,
+    "/tmp/synthetic-xdg-state/agent-embassy",
+  );
+  assert.equal(
+    xdgDefault.controlSocketPath,
+    "/tmp/synthetic-xdg-state/agent-embassy/control.sock",
+  );
+
+  const noLegacyFallback = loadGatewayConfig({
+    XDG_STATE_HOME: "/tmp/synthetic-xdg-state",
+    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/legacy-state-must-be-ignored",
+    CLAUDE_BRIDGE_GATEWAY_HOSTS: "legacy-host",
+  });
+  assert.equal(
+    noLegacyFallback.stateDir,
+    "/tmp/synthetic-xdg-state/agent-embassy",
+  );
+  assert.deepEqual(noLegacyFallback.allowedHosts, ["this-mac"]);
 
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "relative",
+        EMBASSY_STATE_DIR: "relative",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -180,8 +234,8 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/gateway",
-        CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac,M5DEV",
+        EMBASSY_STATE_DIR: "/tmp/gateway",
+        EMBASSY_HOSTS: "this-mac,Build-Mac",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -190,9 +244,9 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/gateway",
-        CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_MESSAGES: "2",
-        CLAUDE_BRIDGE_GATEWAY_MAX_QUEUE_PER_ROUTE: "3",
+        EMBASSY_STATE_DIR: "/tmp/gateway",
+        EMBASSY_MAX_QUEUE_MESSAGES: "2",
+        EMBASSY_MAX_QUEUE_PER_ROUTE: "3",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -201,7 +255,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_STATE_DIR: "relative-parent",
+        EMBASSY_STATE_DIR: "relative-parent",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -219,8 +273,8 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/gateway",
-        CLAUDE_BRIDGE_GATEWAY_DEDUPE_CAPACITY: "100000",
+        EMBASSY_STATE_DIR: "/tmp/gateway",
+        EMBASSY_DEDUPE_CAPACITY: "100000",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -229,8 +283,8 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/gateway",
-        CLAUDE_BRIDGE_GATEWAY_MAX_ROUTES: "257",
+        EMBASSY_STATE_DIR: "/tmp/gateway",
+        EMBASSY_MAX_ROUTES: "257",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -239,8 +293,8 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.throws(
     () =>
       loadGatewayConfig({
-        CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/tmp/gateway",
-        CLAUDE_BRIDGE_GATEWAY_EVENT_CAPACITY: "1025",
+        EMBASSY_STATE_DIR: "/tmp/gateway",
+        EMBASSY_EVENT_CAPACITY: "1025",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -537,6 +591,229 @@ test("persistence contains metadata but no body, dedupe key, or public native ID
   }
   assert.match(snapshot.messages.at(-1)?.messageIdSuffix ?? "", /^[0-9a-f]{8}$/);
   await store.close();
+});
+
+test("native Claude ingress queues for an explicit Codex route without registering the peer", async () => {
+  const { store, workspace, config } = await fixture();
+  config.limits.rateLimitPerRoute = 1;
+  await store.initialize([workspace]);
+  await observeAndRegisterCodexOnly(store);
+
+  const accepted = await store.enqueueNativeIngress({
+    source: transientClaudePeer,
+    targetAlias: "reviewer@this-mac",
+    body: "native ingress body",
+    dedupeKey: "native-ingress-provider-message-1",
+  });
+  const duplicate = await store.enqueueNativeIngress({
+    source: transientClaudePeer,
+    targetAlias: "reviewer@this-mac",
+    body: "duplicate body is ignored",
+    dedupeKey: "native-ingress-provider-message-1",
+  });
+  assert.equal(accepted.accepted, true);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.messageIdSuffix, accepted.messageIdSuffix);
+  await assert.rejects(
+    store.enqueueNativeIngress({
+      source: transientClaudePeer,
+      targetAlias: "reviewer@this-mac",
+      body: "rate limited native ingress",
+      dedupeKey: "native-ingress-provider-message-2",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "GATEWAY_RATE_LIMITED",
+  );
+
+  const beforeDispatch = await store.publicSnapshot();
+  assert.deepEqual(
+    beforeDispatch.routes.map((route) => route.alias),
+    ["reviewer@this-mac"],
+  );
+  assert.equal(beforeDispatch.routes[0]?.provider, "codex");
+  assert.equal(beforeDispatch.routes[0]?.queueDepth, 1);
+  assert.equal(beforeDispatch.accounting.accepted, 1);
+  assert.equal(beforeDispatch.accounting.duplicates, 1);
+  assert.equal(beforeDispatch.accounting.rejected, 1);
+  assert.deepEqual(
+    beforeDispatch.messages.slice(-2).map((event) => ({
+      direction: event.direction,
+      sourceAlias: event.sourceAlias,
+      targetAlias: event.targetAlias,
+      state: event.state,
+    })),
+    [
+      {
+        direction: "claude_to_codex",
+        sourceAlias: "native-advisor@this-mac",
+        targetAlias: "reviewer@this-mac",
+        state: "queued",
+      },
+      {
+        direction: "claude_to_codex",
+        sourceAlias: "native-advisor@this-mac",
+        targetAlias: "reviewer@this-mac",
+        state: "duplicate",
+      },
+    ],
+  );
+
+  const persisted = await readFile(store.stateFilePath, "utf8");
+  const exposed = JSON.stringify(beforeDispatch);
+  for (const privateValue of [
+    transientClaudePeer.binding.routeHandle,
+    transientClaudePeer.binding.ownerLease,
+  ]) {
+    assert.equal(persisted.includes(privateValue), false);
+    assert.equal(exposed.includes(privateValue), false);
+  }
+
+  const dispatch = await store.dequeueMessage("reviewer@this-mac");
+  assert.equal(dispatch?.body, "native ingress body");
+  assert.equal(dispatch?.direction, "claude_to_codex");
+  assert.ok(accepted.messageId);
+  await store.settleMessage({
+    messageId: accepted.messageId,
+    state: "delivered",
+  });
+  const settled = await store.publicSnapshot();
+  assert.equal(settled.accounting.delivered, 1);
+  assert.equal(settled.routes[0]?.counters.delivered, 1);
+  await store.unregisterRoute(
+    "reviewer@this-mac",
+    codexBinding.ownerLease,
+  );
+  assert.deepEqual((await store.publicSnapshot()).routes, []);
+  await store.close();
+});
+
+test("a correlated native reply retains transient-target queue semantics and no route authority", async () => {
+  const { store, workspace } = await fixture();
+  await store.initialize([workspace]);
+  await observeAndRegisterCodexOnly(store);
+
+  await assert.rejects(
+    store.enqueueMessage({
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: transientClaudePeer.alias,
+      body: "generic routing must still require a registered target",
+      dedupeKey: "generic-native-target-is-not-authority",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
+  );
+
+  const reply = await store.enqueueNativeReply({
+    sourceAlias: "reviewer@this-mac",
+    target: transientClaudePeer,
+    body: "correlated native reply",
+    dedupeKey: "native-reply-1",
+  });
+  assert.ok(reply.messageId);
+  const firstDispatch = await store.dequeueMessage(transientClaudePeer.alias);
+  assert.equal(firstDispatch?.body, "correlated native reply");
+  assert.equal(firstDispatch?.direction, "codex_to_claude");
+  assert.equal(
+    await store.requeueInFlightMessage(
+      reply.messageId,
+      firstDispatch?.body ?? "",
+    ),
+    true,
+  );
+  const retry = await store.dequeueMessage(transientClaudePeer.alias);
+  assert.equal(retry?.messageId, reply.messageId);
+  await store.settleMessage({ messageId: reply.messageId, state: "delivered" });
+
+  const cancelled = await store.enqueueNativeReply({
+    sourceAlias: "reviewer@this-mac",
+    target: transientClaudePeer,
+    body: "cancel this transient reply",
+    dedupeKey: "native-reply-2",
+  });
+  assert.ok(cancelled.messageId);
+  assert.equal(await store.cancelQueuedMessage(cancelled.messageId), true);
+
+  const snapshot = await store.publicSnapshot();
+  assert.deepEqual(snapshot.routes.map((route) => route.alias), [
+    "reviewer@this-mac",
+  ]);
+  assert.equal(snapshot.accounting.accepted, 2);
+  assert.equal(snapshot.accounting.delivered, 1);
+  assert.equal(snapshot.accounting.cancelled, 1);
+  assert.equal(snapshot.routes[0]?.counters.accepted, 2);
+  assert.equal(snapshot.routes[0]?.counters.delivered, 0);
+  const persisted = await readFile(store.stateFilePath, "utf8");
+  assert.equal(persisted.includes(transientClaudePeer.binding.routeHandle), false);
+  assert.equal(persisted.includes(transientClaudePeer.binding.ownerLease), false);
+  await store.close();
+});
+
+test("native messages fail closed on peer scope and abandon transient authority across restart", async () => {
+  const { store, workspace, config, clock: testClock } = await fixture();
+  await store.initialize([workspace]);
+  await observeAndRegisterCodexOnly(store);
+
+  await assert.rejects(
+    store.enqueueNativeIngress({
+      source: {
+        ...transientClaudePeer,
+        alias: "native-advisor@build-mac",
+      },
+      targetAlias: "reviewer@this-mac",
+      body: "cross-host ingress",
+      dedupeKey: "cross-host-ingress",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "NATIVE_PEER_SCOPE_MISMATCH",
+  );
+  await assert.rejects(
+    store.enqueueNativeIngress({
+      source: {
+        ...transientClaudePeer,
+        binding: {
+          ...transientClaudePeer.binding,
+          endpointGeneration: "unobserved-claude-generation",
+        },
+      },
+      targetAlias: "reviewer@this-mac",
+      body: "unobserved generation",
+      dedupeKey: "unobserved-generation",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "NATIVE_PEER_ENDPOINT_NOT_OBSERVED",
+  );
+
+  await store.enqueueNativeIngress({
+    source: transientClaudePeer,
+    targetAlias: "reviewer@this-mac",
+    body: "queued native ingress",
+    dedupeKey: "restart-native-ingress",
+  });
+  const reply = await store.enqueueNativeReply({
+    sourceAlias: "reviewer@this-mac",
+    target: transientClaudePeer,
+    body: "in-flight native reply",
+    dedupeKey: "restart-native-reply",
+  });
+  assert.ok(reply.messageId);
+  await store.dequeueMessage(transientClaudePeer.alias);
+  await store.close();
+
+  const recovered = new GatewayStore(config, {
+    now: testClock.now,
+    randomId: testClock.randomId,
+  });
+  await recovered.initialize([workspace]);
+  const snapshot = await recovered.publicSnapshot();
+  assert.equal(snapshot.accounting.abandoned, 1);
+  assert.equal(snapshot.accounting.ambiguous, 1);
+  assert.equal(snapshot.accounting.queuedBytes, 0);
+  assert.equal(await recovered.dequeueMessage(), undefined);
+  const persisted = await readFile(recovered.stateFilePath, "utf8");
+  assert.equal(persisted.includes(transientClaudePeer.binding.routeHandle), false);
+  assert.equal(persisted.includes(transientClaudePeer.binding.ownerLease), false);
+  await recovered.close();
 });
 
 test("transient available-peer rows use a closed metadata-only schema", () => {

@@ -62,6 +62,7 @@ class FakeProvider implements GatewayProviderAdapter {
   callbacks: GatewayAdapterCallbacks | undefined;
   dispatches: Array<{
     binding: PrivateRouteBinding;
+    authorization: "selected_route" | "native_reply";
     messageId: string;
     text: string;
     expectsReply: boolean;
@@ -131,6 +132,7 @@ class FakeProvider implements GatewayProviderAdapter {
 
   async dispatch(input: {
     binding: PrivateRouteBinding;
+    authorization: "selected_route" | "native_reply";
     messageId: string;
     text: string;
     expectsReply: boolean;
@@ -230,11 +232,51 @@ async function selectAndRegister(
   });
 }
 
+async function discoverAndRegisterCodexOnly(
+  handlers: GatewayControlHandlers,
+): Promise<void> {
+  assert.deepEqual(await handlers.refreshDashboard(), {
+    accepted: true,
+    code: "ok",
+    revision: 0,
+  });
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+}
+
+test("Codex registration requires the native codex-* namespace", async (t) => {
+  const { root, stateDir, workspace } = await fixture();
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    forbiddenWorkspaceRoots: [workspace],
+    adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  assert.deepEqual(
+    await service.handlers().registerCodex({
+      ...codexRegistration(),
+      alias: "reviewer@this-mac",
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal((await service.handlers().listSnapshot()).routes.length, 0);
+});
+
 test("fake end-to-end selection, dispatch, correlation, and reply authority stay metadata-only", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const config = loadGatewayConfig({
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-    CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
   });
   const claude = new FakeProvider("claude");
   let clock = new Date();
@@ -420,7 +462,7 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
   assert.equal(codex.closed, true);
 });
 
-test("Claude UUID routing survives endpoint refresh and keeps only the latest live name", async (t) => {
+test("Claude sends require explicit selection while UUID routing survives rename and endpoint refresh", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -435,8 +477,8 @@ test("Claude UUID routing survives endpoint refresh and keeps only the latest li
   const codex = new FakeProvider("codex");
   const service = new GatewayService({
     config: loadGatewayConfig({
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-      CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
     }),
     forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
@@ -453,6 +495,28 @@ test("Claude UUID routing survives endpoint refresh and keeps only the latest li
     code: "ok",
   });
 
+  assert.deepEqual(
+    await handlers.sendToClaude({
+      ...toClaude("unselected UUID must not route"),
+      toAlias: CLAUDE_SESSION_ID,
+      expectsReply: false,
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.deepEqual(
+    await handlers.sendToClaude({
+      ...toClaude("unselected name must not route"),
+      toAlias: "old-name@this-mac",
+      expectsReply: false,
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(claude.dispatches.length, 0);
+
+  assert.deepEqual(await handlers.selectClaude({ alias: CLAUDE_SESSION_ID }), {
+    accepted: true,
+    code: "ok",
+  });
   const byUuid = await handlers.sendToClaude({
     ...toClaude("addressed by UUID"),
     toAlias: CLAUDE_SESSION_ID,
@@ -512,8 +576,8 @@ test("Claude UUID routing survives endpoint refresh and keeps only the latest li
 test("explicit Claude selection reactivates its persisted stale alias after restart", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const config = loadGatewayConfig({
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-    CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
   });
   const firstClaude = new FakeProvider("claude");
   firstClaude.discoveries = [
@@ -577,8 +641,8 @@ test("transient Codex dispatch failures return to held queue and retry", async (
   );
   const service = new GatewayService({
     config: loadGatewayConfig({
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-      CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
     }),
     forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
@@ -638,8 +702,8 @@ test("native Claude ingress reports delivery without approval-like held notices 
   );
   const service = new GatewayService({
     config: loadGatewayConfig({
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-      CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
     }),
     forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
@@ -686,6 +750,75 @@ test("native Claude ingress reports delivery without approval-like held notices 
   );
 });
 
+test("an exact unselected native Claude peer can reach Codex and receive only its correlated reply", async (t) => {
+  const { root, stateDir, workspace } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  codex.dispatchResults.push({
+    state: "delivered",
+    replyText: "correlated reply only",
+  });
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    forbiddenWorkspaceRoots: [workspace],
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await discoverAndRegisterCodexOnly(handlers);
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: {
+      ...claude.identity,
+      routeHandle: "claude_target_1",
+    },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "unselected native ingress",
+    receiptHandle: "receipt-unselected-native",
+  });
+
+  await waitFor(() => codex.dispatches.length === 1);
+  await waitFor(() => claude.dispatches.length === 1);
+  assert.equal(codex.dispatches[0]?.authorization, "selected_route");
+  assert.equal(claude.dispatches[0]?.authorization, "native_reply");
+  assert.equal(claude.dispatches[0]?.binding.routeHandle, "claude_target_1");
+  assert.equal(claude.dispatches[0]?.text, "correlated reply only");
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-unselected-native", status: "delivered" },
+  ]);
+
+  assert.deepEqual(await handlers.sendToClaude(toClaude("unsolicited")), {
+    accepted: false,
+    code: "rejected",
+  });
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes.map((route) => route.alias),
+    ["codex-main@this-mac"],
+  );
+  assert.deepEqual(
+    snapshot.availablePeers.map(({ alias, selected }) => ({ alias, selected })),
+    [{ alias: "claude-one@this-mac", selected: false }],
+  );
+});
+
 test("native Claude ingress reports delivery errors as expired with a safe diagnostic", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const claude = new FakeProvider("claude");
@@ -705,8 +838,8 @@ test("native Claude ingress reports delivery errors as expired with a safe diagn
   });
   const service = new GatewayService({
     config: loadGatewayConfig({
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-      CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
     }),
     forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
@@ -755,8 +888,8 @@ test("a busy Claude peer can receive a native reply without deadlocking the conv
   codex.state = "busy";
   const service = new GatewayService({
     config: loadGatewayConfig({
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-      CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
     }),
     forbiddenWorkspaceRoots: [workspace],
     adapters: [claude, codex],
@@ -780,8 +913,8 @@ test("a busy Claude peer can receive a native reply without deadlocking the conv
 test("queued bodies are cancelled on close and never replayed after restart", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const config = loadGatewayConfig({
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-    CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
   });
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -840,8 +973,8 @@ test("queued bodies are cancelled on close and never replayed after restart", as
 test("one exact target has at most one active provider dispatch", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const config = loadGatewayConfig({
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-    CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
   });
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -893,8 +1026,8 @@ test("one exact target has at most one active provider dispatch", async (t) => {
 test("adapter cleanup failures reject close after controller cleanup completes", async () => {
   const { root, stateDir, workspace } = await fixture();
   const config = loadGatewayConfig({
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-    CLAUDE_BRIDGE_GATEWAY_HOSTS: "this-mac",
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
   });
   const claude = new FakeProvider("claude");
   const codex = new FakeProvider("codex");

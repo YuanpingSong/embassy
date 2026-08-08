@@ -698,8 +698,8 @@ export class CodexAppServerConnector {
     this.transport = options.transport;
     this.clientInfo = validateClientInfo(
       options.clientInfo ?? {
-        name: "claude_agent_bridge_gateway",
-        title: "Claude Agent Bridge Gateway",
+        name: "agent_embassy_gateway",
+        title: "Embassy Gateway",
         version: "0.1.0",
       },
     );

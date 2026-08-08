@@ -145,6 +145,7 @@ export interface GatewayProviderAdapter {
   ): Promise<void>;
   dispatch(input: {
     binding: PrivateRouteBinding;
+    authorization: "selected_route" | "native_reply";
     messageId: string;
     text: string;
     expectsReply: boolean;
@@ -171,7 +172,15 @@ type MessageContext = {
   hopCount: number;
   sequence: number;
   targetBindingKey: string;
+  nativeReplyBinding?: PrivateRouteBinding;
+  authorization: "selected_route" | "native_reply";
   targetAlias: string;
+  deadlineAt: string;
+};
+
+type NativeIngressCapability = {
+  sourceAlias: string;
+  binding: PrivateRouteBinding;
   deadlineAt: string;
 };
 
@@ -302,6 +311,10 @@ export class GatewayService {
     string,
     { hostId: string; receiptHandle: string }
   >();
+  private readonly nativeIngressByConversation = new Map<
+    string,
+    NativeIngressCapability
+  >();
   private readonly callbackQueue: CallbackEvent[] = [];
   private callbackWorker: Promise<void> | undefined;
   private callbackScheduled = false;
@@ -415,6 +428,7 @@ export class GatewayService {
         this.activeDispatchByTarget.clear();
         this.pendingClaudeReplies.clear();
         this.nativeReceipts.clear();
+        this.nativeIngressByConversation.clear();
         this.callbackQueue.length = 0;
         this.candidates.clear();
         this.routeBindings.clear();
@@ -492,10 +506,7 @@ export class GatewayService {
         const target =
           context === undefined
             ? undefined
-            : [...this.routeBindings.values()].find(
-                (binding) =>
-                  bindingKey(binding) === context.targetBindingKey,
-              );
+            : this.contextTargetBinding(context);
         if (
           target === undefined ||
           target.provider !== source.provider ||
@@ -583,7 +594,7 @@ export class GatewayService {
         ) {
           return;
         }
-        this.enqueueCallback({
+        const retained = this.enqueueCallback({
           type: "claude_message",
           value: {
             endpoint: { ...event.endpoint },
@@ -595,12 +606,23 @@ export class GatewayService {
               : { receiptHandle: event.receiptHandle }),
           },
         });
+        if (!retained && event.receiptHandle !== undefined) {
+          void this.adapter("claude", source.hostId)
+            .updateNativeInboundStatus?.(
+              event.receiptHandle,
+              "expired",
+              "GATEWAY_CALLBACK_CAPACITY",
+            )
+            .catch(() => {
+              this.dashboardHealthy = false;
+            });
+        }
       },
     };
   }
 
-  private enqueueCallback(event: CallbackEvent): void {
-    if (!this.acceptingCallbacks) return;
+  private enqueueCallback(event: CallbackEvent): boolean {
+    if (!this.acceptingCallbacks) return false;
     if (event.type === "delivery") {
       const duplicate = this.callbackQueue.findIndex(
         (candidate) =>
@@ -610,7 +632,7 @@ export class GatewayService {
       );
       if (duplicate >= 0) {
         this.callbackQueue[duplicate] = event;
-        return;
+        return true;
       }
     }
     if (this.callbackQueue.length >= this.callbackCapacity) {
@@ -626,12 +648,12 @@ export class GatewayService {
       );
       if (replaceable < 0) {
         this.dashboardHealthy = false;
-        return;
+        return false;
       }
       this.callbackQueue.splice(replaceable, 1);
     }
     this.callbackQueue.push(event);
-    if (this.callbackScheduled) return;
+    if (this.callbackScheduled) return true;
     this.callbackScheduled = true;
     setImmediate(() => {
       this.callbackScheduled = false;
@@ -650,6 +672,7 @@ export class GatewayService {
           }
         });
     });
+    return true;
   }
 
   private enqueueCallbackWorkerOnly(): void {
@@ -703,7 +726,24 @@ export class GatewayService {
     return adapter;
   }
 
+  private contextTargetBinding(
+    context: MessageContext,
+  ): PrivateRouteBinding | undefined {
+    if (context.nativeReplyBinding !== undefined) {
+      return context.nativeReplyBinding;
+    }
+    return [...this.routeBindings.values()].find(
+      (binding) => bindingKey(binding) === context.targetBindingKey,
+    );
+  }
+
   private async registerCodex(params: ValidatedRegisterCodexParams): Promise<void> {
+    if (!params.alias.startsWith("codex-")) {
+      throw new BridgeError(
+        "INVALID_CODEX_PEER_ALIAS",
+        "A registered Codex alias must start with codex-.",
+      );
+    }
     const adapter = this.adapter("codex", params.hostId);
     await adapter.assertWorkspaceDisjoint(params.threadId, this.store.rootDir);
     const selected = await adapter.selectRoute({ alias: params.alias, routeHandle: params.threadId });
@@ -725,20 +765,18 @@ export class GatewayService {
       throw error;
     }
     this.rememberBinding(params.alias, binding, selected.state);
-    if (params.alias.startsWith("codex-")) {
-      await this.adapter("claude", params.hostId).advertiseNativeCodexPeer?.({
-        alias: params.alias,
-        cwd: this.nativePeerCwd,
-      });
-      await this.adapter("claude", params.hostId).updateNativeCodexPeerStatus?.(
-        params.alias,
-        selected.state === "idle"
-          ? "idle"
-          : selected.state === "awaiting_approval"
-            ? "waiting"
-            : "busy",
-      );
-    }
+    await this.adapter("claude", params.hostId).advertiseNativeCodexPeer?.({
+      alias: params.alias,
+      cwd: this.nativePeerCwd,
+    });
+    await this.adapter("claude", params.hostId).updateNativeCodexPeerStatus?.(
+      params.alias,
+      selected.state === "idle"
+        ? "idle"
+        : selected.state === "awaiting_approval"
+          ? "waiting"
+          : "busy",
+    );
     await this.changed();
   }
 
@@ -747,13 +785,11 @@ export class GatewayService {
     const lease = stableLease("codex", `${host}\0${params.threadId}`);
     await this.store.unregisterRoute(params.alias, lease);
     this.forgetBinding(params.alias);
-    if (params.alias.startsWith("codex-")) {
-      await this.adapter("claude", host)
-        .unadvertiseNativeCodexPeer?.(params.alias)
-        .catch(() => {
-          this.dashboardHealthy = false;
-        });
-    }
+    await this.adapter("claude", host)
+      .unadvertiseNativeCodexPeer?.(params.alias)
+      .catch(() => {
+        this.dashboardHealthy = false;
+      });
     await this.adapter("codex", host)
       .releaseRoute?.(params.threadId)
       .catch(() => {
@@ -894,7 +930,9 @@ export class GatewayService {
     this.rememberBinding(candidate.alias, binding, selected.state);
   }
 
-  private async ensureClaudeDestination(selector: string): Promise<string> {
+  private async resolveSelectedClaudeDestination(
+    selector: string,
+  ): Promise<string> {
     await this.refreshClaudeDiscovery();
     const candidate = this.claudeCandidate(selector);
     if (candidate === undefined) throw new BridgeError("PEER_NOT_FOUND", "No unique compatible interactive peer matches that current name or session UUID.");
@@ -904,10 +942,10 @@ export class GatewayService {
       existing.provider !== "claude" ||
       existing.routeHandle !== candidate.routeHandle
     ) {
-      if (existing !== undefined) {
-        await this.store.invalidateRoute(existing, "PEER_RESELECTED");
-      }
-      await this.selectClaudeCandidate(candidate, existing?.ownerLease);
+      throw new BridgeError(
+        "PEER_NOT_SELECTED",
+        "The Claude session must be explicitly selected before messaging.",
+      );
     }
     return candidate.alias;
   }
@@ -1033,7 +1071,9 @@ export class GatewayService {
     return await this.mutex.run("service", async () => {
       try {
         await this.verifyCodex(params.fromAlias, params.threadId);
-        const targetAlias = await this.ensureClaudeDestination(params.toAlias);
+        const targetAlias = await this.resolveSelectedClaudeDestination(
+          params.toAlias,
+        );
         return await this.enqueue(params.fromAlias, targetAlias, params.text, params.expectsReply, false);
       } catch (error) {
         return decisionFor(error);
@@ -1063,15 +1103,24 @@ export class GatewayService {
         const from = caller.alias;
         const to = from === conversation.sourceAlias ? conversation.targetAlias : from === conversation.targetAlias ? conversation.sourceAlias : undefined;
         if (to === undefined) throw new BridgeError("ROUTE_MISMATCH", "The caller is not a conversation participant.");
-        const result = await this.enqueue(
-          from,
-          to,
-          params.text,
-          false,
-          true,
-          conversation.id,
-          conversation.lastHopCount + 1,
-        );
+        const result =
+          caller.kind === "codex" &&
+          this.nativeIngressByConversation.has(conversation.id)
+            ? await this.enqueueNativeReply(
+                conversation,
+                from,
+                params.text,
+                conversation.lastHopCount + 1,
+              )
+            : await this.enqueue(
+                from,
+                to,
+                params.text,
+                false,
+                true,
+                conversation.id,
+                conversation.lastHopCount + 1,
+              );
         return result.accepted ? { accepted: true, code: "ok" } : result;
       } catch (error) {
         return decisionFor(error);
@@ -1135,6 +1184,7 @@ export class GatewayService {
       hopCount,
       sequence,
       targetBindingKey: bindingKey(target),
+      authorization: "selected_route",
       targetAlias,
       deadlineAt,
     });
@@ -1153,6 +1203,74 @@ export class GatewayService {
     return { accepted: true, code: "ok", conversationId };
   }
 
+  private async enqueueNativeReply(
+    conversation: Conversation,
+    sourceAlias: string,
+    text: string,
+    requestedHopCount: number,
+  ): Promise<GatewaySendResult> {
+    this.pruneTransient();
+    const capability = this.nativeIngressByConversation.get(conversation.id);
+    if (
+      capability === undefined ||
+      sourceAlias !== conversation.targetAlias ||
+      capability.sourceAlias !== conversation.sourceAlias ||
+      Date.parse(capability.deadlineAt) <= this.now().getTime()
+    ) {
+      throw new BridgeError(
+        "NATIVE_REPLY_CAPABILITY_EXPIRED",
+        "The correlated native Claude reply capability is no longer active.",
+      );
+    }
+    const sequence = conversation.nextSequence;
+    const deadlineAt = new Date(
+      Math.min(
+        Date.parse(capability.deadlineAt),
+        this.now().getTime() + this.config.limits.messageDeadlineMs,
+      ),
+    ).toISOString();
+    const queued = await this.store.enqueueNativeReply({
+      sourceAlias,
+      target: {
+        alias: capability.sourceAlias,
+        binding: capability.binding,
+      },
+      body: text,
+      dedupeKey: `${conversation.id}:${sequence}`,
+      hopCount: requestedHopCount,
+      deadlineAt,
+    });
+    if (!queued.accepted || queued.messageId === undefined) {
+      throw new BridgeError(
+        "MESSAGE_REJECTED",
+        "The native reply was not accepted.",
+      );
+    }
+    conversation.nextSequence += 1;
+    conversation.lastHopCount = requestedHopCount;
+    conversation.lastActivityAt = this.now().toISOString();
+    this.messageContexts.set(queued.messageId, {
+      conversationId: conversation.id,
+      isReply: true,
+      expectsReply: false,
+      hopCount: requestedHopCount,
+      sequence,
+      targetBindingKey: bindingKey(capability.binding),
+      nativeReplyBinding: { ...capability.binding },
+      authorization: "native_reply",
+      targetAlias: capability.sourceAlias,
+      deadlineAt,
+    });
+    this.nativeIngressByConversation.delete(conversation.id);
+    await this.changed();
+    this.scheduleDispatch(capability.sourceAlias);
+    return {
+      accepted: true,
+      code: "ok",
+      conversationId: conversation.id,
+    };
+  }
+
   private pruneTransient(): void {
     const now = this.now().getTime();
     for (const [messageId, context] of this.messageContexts) {
@@ -1167,11 +1285,19 @@ export class GatewayService {
         pending.tainted = true;
       }
     }
+    for (const [conversationId, capability] of this.nativeIngressByConversation) {
+      if (Date.parse(capability.deadlineAt) <= now) {
+        this.nativeIngressByConversation.delete(conversationId);
+      }
+    }
     const active = new Set(
       [...this.messageContexts.values()].map((context) => context.conversationId),
     );
     for (const pending of this.pendingClaudeReplies.values()) {
       active.add(pending.conversationId);
+    }
+    for (const conversationId of this.nativeIngressByConversation.keys()) {
+      active.add(conversationId);
     }
     const ttl = Math.max(60_000, this.config.limits.messageDeadlineMs * 2);
     for (const id of this.conversations.keys()) {
@@ -1192,34 +1318,56 @@ export class GatewayService {
   private async dispatchOne(targetAlias: string): Promise<void> {
     if (!this.running || this.closing) return;
     if (this.activeDispatchByTarget.has(targetAlias)) return;
-    const binding = this.routeBindings.get(targetAlias);
-    if (binding === undefined) return;
-    const routeState = this.routeStates.get(targetAlias);
-    const dispatchable =
-      routeState === "idle" ||
-      (binding.provider === "claude" && routeState === "busy");
-    if (!dispatchable) return;
-    const inspection = await this.store.inspectPrivateRoute(targetAlias);
-    const storedDispatchable =
-      inspection?.state === "idle" ||
-      (binding.provider === "claude" && inspection?.state === "busy");
-    if (
-      inspection === undefined ||
-      !inspection.enabled ||
-      inspection.compatibility !== "compatible" ||
-      !storedDispatchable ||
-      bindingKey(inspection.binding) !== bindingKey(binding)
-    ) {
-      return;
-    }
     const item = await this.store.dequeueMessage(targetAlias);
     if (item === undefined) return;
-    this.activeDispatchByTarget.set(targetAlias, item.messageId);
-    this.routeStates.set(targetAlias, "busy");
     const context = this.messageContexts.get(item.messageId);
+    const selectedBinding = this.routeBindings.get(targetAlias);
+    const binding = context?.nativeReplyBinding ?? selectedBinding;
+    if (context === undefined || binding === undefined) {
+      await this.store.requeueInFlightMessage(item.messageId, item.body);
+      return;
+    }
+
+    if (context.authorization === "selected_route") {
+      const routeState = this.routeStates.get(targetAlias);
+      const dispatchable =
+        routeState === "idle" ||
+        (binding.provider === "claude" && routeState === "busy");
+      const inspection = await this.store.inspectPrivateRoute(targetAlias);
+      const storedDispatchable =
+        inspection?.state === "idle" ||
+        (binding.provider === "claude" && inspection?.state === "busy");
+      if (
+        selectedBinding === undefined ||
+        !dispatchable ||
+        inspection === undefined ||
+        !inspection.enabled ||
+        inspection.compatibility !== "compatible" ||
+        !storedDispatchable ||
+        bindingKey(inspection.binding) !== bindingKey(binding) ||
+        bindingKey(selectedBinding) !== bindingKey(binding)
+      ) {
+        await this.store.requeueInFlightMessage(item.messageId, item.body);
+        return;
+      }
+      this.routeStates.set(targetAlias, "busy");
+    } else if (
+      binding.provider !== "claude" ||
+      bindingKey(binding) !== context.targetBindingKey
+    ) {
+      await this.finishDelivery({
+        messageId: item.messageId,
+        state: "failed",
+        safeErrorCode: "NATIVE_REPLY_BINDING_MISMATCH",
+      });
+      return;
+    }
+
+    this.activeDispatchByTarget.set(targetAlias, item.messageId);
     try {
       const result = await this.adapter(binding.provider, binding.hostId).dispatch({
         binding,
+        authorization: context.authorization,
         messageId: item.messageId,
         text: item.body,
         expectsReply: context?.expectsReply ?? false,
@@ -1234,13 +1382,15 @@ export class GatewayService {
         );
         this.activeDispatchByTarget.delete(currentTargetAlias);
         if (requeued) {
-          this.routeStates.set(currentTargetAlias, "idle");
-          await this.store.observeRoute({
-            binding,
-            state: "idle",
-            compatibility: "compatible",
-          });
-          await this.setNativeCodexStatus(currentTargetAlias, "waiting");
+          if (context.authorization === "selected_route") {
+            this.routeStates.set(currentTargetAlias, "idle");
+            await this.store.observeRoute({
+              binding,
+              state: "idle",
+              compatibility: "compatible",
+            });
+            await this.setNativeCodexStatus(currentTargetAlias, "waiting");
+          }
           setTimeout(() => this.scheduleDispatch(currentTargetAlias), 500);
         } else {
           await this.ackNativeReceipt(context?.conversationId, "expired");
@@ -1278,9 +1428,7 @@ export class GatewayService {
   ): Promise<void> {
     const context = this.messageContexts.get(event.messageId);
     if (context === undefined) return;
-    const target = [...this.routeBindings.values()].find(
-      (binding) => bindingKey(binding) === context.targetBindingKey,
-    );
+    const target = this.contextTargetBinding(context);
     if (
       target === undefined ||
       target.provider !== source.provider ||
@@ -1328,6 +1476,9 @@ export class GatewayService {
         "expired",
         safeCode(event.safeErrorCode, "CODEX_DELIVERY_FAILED"),
       );
+      this.nativeIngressByConversation.delete(context.conversationId);
+    } else {
+      await this.ackNativeReceipt(context.conversationId, "delivered");
     }
     this.messageContexts.delete(event.messageId);
     if (
@@ -1349,15 +1500,24 @@ export class GatewayService {
       conversation !== undefined
     ) {
       try {
-        await this.enqueue(
-          conversation.targetAlias,
-          conversation.sourceAlias,
-          event.replyText,
-          false,
-          true,
-          conversation.id,
-          context.hopCount + 1,
-        );
+        if (this.nativeIngressByConversation.has(conversation.id)) {
+          await this.enqueueNativeReply(
+            conversation,
+            conversation.targetAlias,
+            event.replyText,
+            context.hopCount + 1,
+          );
+        } else {
+          await this.enqueue(
+            conversation.targetAlias,
+            conversation.sourceAlias,
+            event.replyText,
+            false,
+            true,
+            conversation.id,
+            context.hopCount + 1,
+          );
+        }
       } catch {
         this.dashboardHealthy = false;
       }
@@ -1412,33 +1572,102 @@ export class GatewayService {
     receiptHandle?: string;
   }): Promise<void> {
     if (this.closing) return;
-    const source = this.routeBindings.get(event.sourceAlias);
-    const target = this.routeBindings.get(event.targetAlias);
-    if (
-      source === undefined ||
-      target === undefined ||
-      source.provider !== "claude" ||
-      target.provider !== "codex" ||
-      source.hostId !== event.endpoint.hostId ||
-      source.endpointGeneration !== event.endpoint.endpointGeneration ||
-      source.routeHandle !== event.endpoint.routeHandle
-    ) {
-      return;
-    }
-    const accepted = await this.enqueue(
-      event.sourceAlias,
-      event.targetAlias,
-      event.text,
-      true,
-      false,
-    );
-    if (accepted.accepted && event.receiptHandle !== undefined) {
-      this.nativeReceipts.set(accepted.conversationId, {
-        hostId: event.endpoint.hostId,
-        receiptHandle: event.receiptHandle,
+    try {
+      this.pruneTransient();
+      if (this.conversations.size >= MAX_CONVERSATIONS) {
+        throw new BridgeError(
+          "CONVERSATION_CAPACITY",
+          "The transient conversation table is full.",
+          true,
+        );
+      }
+      const target = this.routeBindings.get(event.targetAlias);
+      const sourceBinding: PrivateRouteBinding = {
+        ...event.endpoint,
+        ownerLease: stableLease("claude", event.endpoint.routeHandle),
+      };
+      const collision = this.routeBindings.get(event.sourceAlias);
+      if (
+        target === undefined ||
+        target.provider !== "codex" ||
+        target.hostId !== event.endpoint.hostId ||
+        (collision !== undefined &&
+          bindingKey(collision) !== bindingKey(sourceBinding))
+      ) {
+        throw new BridgeError(
+          "NATIVE_INGRESS_ROUTE_MISMATCH",
+          "The native sender or registered Codex target no longer matches this exact host generation.",
+        );
+      }
+      const conversationId = createGatewayConversationId();
+      const deadlineAt = new Date(
+        this.now().getTime() + this.config.limits.messageDeadlineMs,
+      ).toISOString();
+      const queued = await this.store.enqueueNativeIngress({
+        source: { alias: event.sourceAlias, binding: sourceBinding },
+        targetAlias: event.targetAlias,
+        body: event.text,
+        dedupeKey: `${conversationId}:0`,
+        hopCount: 0,
+        deadlineAt,
       });
+      if (!queued.accepted || queued.messageId === undefined) {
+        throw new BridgeError(
+          "MESSAGE_REJECTED",
+          "The native message was not accepted.",
+        );
+      }
+      const conversation: Conversation = {
+        id: conversationId,
+        sourceAlias: event.sourceAlias,
+        targetAlias: event.targetAlias,
+        expectsReply: true,
+        nextSequence: 1,
+        lastHopCount: 0,
+        lastActivityAt: this.now().toISOString(),
+      };
+      this.conversations.set(conversationId, conversation);
+      this.messageContexts.set(queued.messageId, {
+        conversationId,
+        isReply: false,
+        expectsReply: true,
+        hopCount: 0,
+        sequence: 0,
+        targetBindingKey: bindingKey(target),
+        authorization: "selected_route",
+        targetAlias: event.targetAlias,
+        deadlineAt,
+      });
+      this.nativeIngressByConversation.set(conversationId, {
+        sourceAlias: event.sourceAlias,
+        binding: sourceBinding,
+        deadlineAt,
+      });
+      if (event.receiptHandle !== undefined) {
+        this.nativeReceipts.set(conversationId, {
+          hostId: event.endpoint.hostId,
+          receiptHandle: event.receiptHandle,
+        });
+      }
+      await this.changed();
+      await this.setNativeCodexStatus(event.targetAlias, "waiting");
+      this.scheduleDispatch(event.targetAlias);
+    } catch (error) {
+      if (event.receiptHandle !== undefined) {
+        await this.adapter("claude", event.endpoint.hostId)
+          .updateNativeInboundStatus?.(
+            event.receiptHandle,
+            "expired",
+            safeCode(
+              error instanceof BridgeError ? error.code : undefined,
+              "NATIVE_INGRESS_REJECTED",
+            ),
+          )
+          .catch(() => {
+            this.dashboardHealthy = false;
+          });
+      }
     }
-    await this.setNativeCodexStatus(event.targetAlias, "waiting");
   }
 
   private releasePendingClaude(conversation: Conversation | undefined): void {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Embassy Peer Gateway"
+  short_description: "Message selected local Claude and Codex peers"
+  default_prompt: "Use $embassy-peer to register this task and message a selected name@host peer safely."

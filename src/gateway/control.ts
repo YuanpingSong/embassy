@@ -563,6 +563,7 @@ function normalizeParams(
           ["hostId", "busyPolicy"],
         ) ||
         !isAlias(value.alias) ||
+        !value.alias.startsWith("codex-") ||
         !isUuid(value.threadId) ||
         (value.hostId !== undefined && !isHostId(value.hostId)) ||
         (value.busyPolicy !== undefined &&
@@ -585,6 +586,7 @@ function normalizeParams(
       if (
         !hasExactKeys(value, ["alias", "threadId"]) ||
         !isAlias(value.alias) ||
+        !value.alias.startsWith("codex-") ||
         !isUuid(value.threadId)
       ) {
         throw new ProtocolFault("INVALID_REQUEST");

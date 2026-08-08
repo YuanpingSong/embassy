@@ -38,13 +38,14 @@ const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_HOST_ID = "this-mac";
 const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
+export const EMBASSY_VERSION = "1.0.0";
 const FIXED_STDERR = {
-  input: "[claude-codex-gateway] request rejected.\n",
-  decision: "[claude-codex-gateway] gateway rejected the request.\n",
-  unavailable: "[claude-codex-gateway] gateway unavailable.\n",
+  input: "[embassy] request rejected.\n",
+  decision: "[embassy] gateway rejected the request.\n",
+  unavailable: "[embassy] gateway unavailable.\n",
   ambiguous:
-    "[claude-codex-gateway] outcome ambiguous; do not retry automatically.\n",
-  failure: "[claude-codex-gateway] command failed.\n",
+    "[embassy] outcome ambiguous; do not retry automatically.\n",
+  failure: "[embassy] command failed.\n",
 } as const;
 
 export const gatewayCliCommands = [
@@ -183,6 +184,12 @@ function requireAlias(options: ParsedOptions, name: string): string {
   return alias;
 }
 
+function requireCodexAlias(options: ParsedOptions, name: string): string {
+  const alias = requireAlias(options, name);
+  if (!alias.startsWith("codex-")) throw new CliFault("INVALID_ARGUMENTS");
+  return alias;
+}
+
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) {
@@ -314,7 +321,7 @@ async function buildRequest(
     case "register-codex": {
       const options = parseOptions(args, ["alias", "host"]);
       assertExactOptionCount(options, 1, 2);
-      const alias = requireAlias(options, "alias");
+      const alias = requireCodexAlias(options, "alias");
       const host = options.host ?? DEFAULT_HOST_ID;
       if (
         typeof host !== "string" ||
@@ -341,7 +348,7 @@ async function buildRequest(
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "unregister_codex",
         params: {
-          alias: requireAlias(options, "alias"),
+          alias: requireCodexAlias(options, "alias"),
           threadId: requireExclusiveCodexThreadId(env),
         },
       };
@@ -546,6 +553,13 @@ export async function runGatewayCli(
   const validateControlSocket =
     dependencies.validateControlSocket ?? validatePrivateGatewayControlSocket;
   const runServer = dependencies.runServer ?? runGatewayServer;
+  if (
+    argv.length === 1 &&
+    (argv[0] === "--version" || argv[0] === "-v")
+  ) {
+    stdout.write(`embassy ${EMBASSY_VERSION}\n`);
+    return gatewayCliExitCodes.ok;
+  }
   const command = isCommand(argv[0]) ? argv[0] : undefined;
   let serverReadyEmitted = false;
 

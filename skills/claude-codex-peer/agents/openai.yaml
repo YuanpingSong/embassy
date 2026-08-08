@@ -1,4 +1,0 @@
-interface:
-  display_name: "Claude–Codex Peer Gateway"
-  short_description: "Message selected local Claude and Codex peers"
-  default_prompt: "Use $claude-codex-peer to register this task and message a selected name@host peer safely."

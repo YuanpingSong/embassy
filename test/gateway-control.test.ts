@@ -95,7 +95,7 @@ function snapshot(): GatewaySnapshot {
       },
       {
         provider: "claude",
-        host: "m5dev",
+        host: "build-mac",
         health: "healthy",
         compatibility: "compatible",
         protocol: "claude-peer",
@@ -128,9 +128,9 @@ function snapshot(): GatewaySnapshot {
         counters: { ...counters },
       },
       {
-        alias: "claude-one@m5dev",
+        alias: "claude-one@build-mac",
         provider: "claude",
-        host: "m5dev",
+        host: "build-mac",
         enabled: true,
         state: "busy",
         compatibility: "compatible",
@@ -147,7 +147,7 @@ function snapshot(): GatewaySnapshot {
         messageIdSuffix: "89abcdef",
         direction: "codex_to_claude",
         sourceAlias: "codex-main@this-mac",
-        targetAlias: "claude-one@m5dev",
+        targetAlias: "claude-one@build-mac",
         state: "transport_written",
         bytes: 12,
         hopCount: 0,
@@ -158,7 +158,7 @@ function snapshot(): GatewaySnapshot {
         timestamp: NOW,
         messageIdSuffix: "0123abcd",
         direction: "claude_to_codex",
-        sourceAlias: "claude-one@m5dev",
+        sourceAlias: "claude-one@build-mac",
         targetAlias: "codex-main@this-mac",
         state: "held",
         bytes: 8,
@@ -354,7 +354,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     request: {
       protocolVersion: 1,
       method: "select_claude",
-      params: { alias: "claude-one@m5dev" },
+      params: { alias: "claude-one@build-mac" },
     },
   });
   await sendGatewayControlRequest({
@@ -362,7 +362,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     request: {
       protocolVersion: 1,
       method: "unselect_claude",
-      params: { alias: "claude-one@m5dev" },
+      params: { alias: "claude-one@build-mac" },
     },
   });
   assert.deepEqual(registered, {
@@ -381,7 +381,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       params: {
         fromAlias: "codex-main@this-mac",
         threadId: THREAD_ID,
-        toAlias: "claude-one@m5dev",
+        toAlias: "claude-one@build-mac",
         text: secretText,
         expectsReply: true,
       },
@@ -390,7 +390,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   assert.deepEqual(toClaude, {
     fromAlias: "codex-main@this-mac",
     threadId: THREAD_ID,
-    toAlias: "claude-one@m5dev",
+    toAlias: "claude-one@build-mac",
     text: secretText,
     expectsReply: true,
   });
@@ -403,7 +403,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       protocolVersion: 1,
       method: "send_to_codex",
       params: {
-        fromAlias: "claude-one@m5dev",
+        fromAlias: "claude-one@build-mac",
         toAlias: "codex-main@this-mac",
         text: secretText,
         replyAddress: "uds:/tmp/cc-socks/12345.sock",
@@ -411,7 +411,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     },
   });
   assert.deepEqual(toCodex, {
-    fromAlias: "claude-one@m5dev",
+    fromAlias: "claude-one@build-mac",
     toAlias: "codex-main@this-mac",
     text: secretText,
     replyAddress: "uds:/tmp/cc-socks/12345.sock",
@@ -503,7 +503,7 @@ test("only exposes queue-mode lifecycle methods", () => {
   assert.equal(isGatewayAlias("codex-main@this-mac"), true);
   assert.equal(isGatewayAlias("codex-main"), false);
   assert.equal(isGatewayAlias("Codex Main"), false);
-  assert.equal(isGatewayHostId("max-ws.lab"), true);
+  assert.equal(isGatewayHostId("lab-mac.example"), true);
   assert.equal(isGatewayHostId("Max WS"), false);
   assert.equal(isGatewayConversationId(createGatewayConversationId()), true);
   assert.equal(isGatewayReplyAddress("uds:/tmp/cc-socks/123.sock"), true);
@@ -533,6 +533,10 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["register_codex", { alias: "Bad Alias", threadId: THREAD_ID }],
     [
       "register_codex",
+      { alias: "reviewer@this-mac", threadId: THREAD_ID },
+    ],
+    [
+      "register_codex",
       { alias: "codex@this-mac", threadId: "not-a-uuid" },
     ],
     [
@@ -541,7 +545,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ],
     [
       "register_codex",
-      { alias: "codex@this-mac", threadId: THREAD_ID, hostId: "m5dev" },
+      { alias: "codex@this-mac", threadId: THREAD_ID, hostId: "build-mac" },
     ],
     [
       "register_codex",
@@ -564,7 +568,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       {
         fromAlias: "codex@this-mac",
         threadId: THREAD_ID,
-        toAlias: "claude@m5dev",
+        toAlias: "claude@build-mac",
         text: "   ",
       },
     ],
@@ -573,7 +577,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       {
         fromAlias: "codex@this-mac",
         threadId: THREAD_ID,
-        toAlias: "claude@m5dev",
+        toAlias: "claude@build-mac",
         text: "hello\0smuggled",
       },
     ],
@@ -582,7 +586,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       {
         fromAlias: "codex@this-mac",
         threadId: "not-a-uuid",
-        toAlias: "claude@m5dev",
+        toAlias: "claude@build-mac",
         text: "hello",
       },
     ],
@@ -591,14 +595,14 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       {
         fromAlias: "codex@this-mac",
         threadId: THREAD_ID,
-        toAlias: "claude@m5dev",
+        toAlias: "claude@build-mac",
         text: "x".repeat(16 * 1024 + 1),
       },
     ],
     [
       "send_to_codex",
       {
-        fromAlias: "claude@m5dev",
+        fromAlias: "claude@build-mac",
         toAlias: "codex@this-mac",
         text: "hello",
         replyAddress: "uds:../outside.sock",
@@ -611,7 +615,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
         text: "hello",
         caller: {
           kind: "claude",
-          alias: "claude@m5dev",
+          alias: "claude@build-mac",
           destination: "codex@this-mac",
         },
       },
@@ -728,7 +732,7 @@ test("never reflects handler exceptions or invalid private response fields", asy
     wireRequest("send_to_claude", {
       fromAlias: "codex-main@this-mac",
       threadId: THREAD_ID,
-      toAlias: "claude-one@m5dev",
+      toAlias: "claude-one@build-mac",
       text: secretText,
     }),
   );
@@ -1003,7 +1007,7 @@ test("client marks a lost mutation response ambiguous only after write starts", 
         params: {
           fromAlias: "codex-main@this-mac",
           threadId: THREAD_ID,
-          toAlias: "claude-one@m5dev",
+          toAlias: "claude-one@build-mac",
           text: "one bounded mutation",
         },
       },
@@ -1028,7 +1032,7 @@ test("client marks a lost mutation response ambiguous only after write starts", 
         params: {
           fromAlias: "codex-main@this-mac",
           threadId: THREAD_ID,
-          toAlias: "claude-one@m5dev",
+          toAlias: "claude-one@build-mac",
           text: "not connected",
         },
       },

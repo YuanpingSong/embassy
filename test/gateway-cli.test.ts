@@ -16,6 +16,7 @@ import {
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
 import {
+  EMBASSY_VERSION,
   type GatewayCliDependencies,
   gatewayCliExitCodes,
   runGatewayCli,
@@ -40,6 +41,26 @@ afterEach(async () => {
       await rm(root, { recursive: true, force: true });
     }),
   );
+});
+
+test("version flags are deterministic and never contact the gateway", async () => {
+  for (const flag of ["--version", "-v"] as const) {
+    const stdout = capture();
+    const stderr = capture();
+    const exitCode = await runGatewayCli([flag], {
+      stdout,
+      stderr,
+      loadConfig: () => {
+        throw new Error("version must not load configuration");
+      },
+      sendRequest: async () => {
+        throw new Error("version must not contact the gateway");
+      },
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.ok);
+    assert.equal(stdout.chunks.join(""), `embassy ${EMBASSY_VERSION}\n`);
+    assert.equal(stderr.chunks.join(""), "");
+  }
 });
 
 function emptySnapshot(): GatewaySnapshot {
@@ -118,7 +139,7 @@ async function invoke(
   const stderr = capture();
   const code = await runGatewayCli(argv, {
     env: {
-      CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
+      EMBASSY_STATE_DIR: stateDir,
       ...options.env,
     },
     stdin: input(options.body),
@@ -205,11 +226,11 @@ test("all client commands use one private control socket and expose only normali
     { argv: ["status"], env: BOTH_IDENTITIES },
     { argv: ["refresh-dashboard"], env: BOTH_IDENTITIES },
     {
-      argv: ["register-codex", "--alias", "reviewer@this-mac"],
+      argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: { CODEX_THREAD_ID: THREAD_ID },
     },
     {
-      argv: ["unregister-codex", "--alias", "reviewer@this-mac"],
+      argv: ["unregister-codex", "--alias", "codex-reviewer@this-mac"],
       env: { CODEX_THREAD_ID: THREAD_ID },
     },
     {
@@ -228,7 +249,7 @@ test("all client commands use one private control socket and expose only normali
       argv: [
         "send-to-claude",
         "--from",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
         "--to",
         "advisor@this-mac",
         "--expects-reply",
@@ -240,7 +261,7 @@ test("all client commands use one private control socket and expose only normali
       argv: [
         "send-to-claude",
         "--from",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
         "--to",
         CLAUDE_SESSION_ID,
       ],
@@ -253,7 +274,7 @@ test("all client commands use one private control socket and expose only normali
         "--from",
         "advisor@this-mac",
         "--to",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       body: SECRET_BODY,
       env: { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH },
@@ -264,7 +285,7 @@ test("all client commands use one private control socket and expose only normali
         "--conversation",
         CONVERSATION_ID,
         "--alias",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       body: SECRET_BODY,
       env: { CODEX_THREAD_ID: THREAD_ID },
@@ -299,27 +320,27 @@ test("all client commands use one private control socket and expose only normali
 
   assert.deepEqual(registrations, [
     {
-      alias: "reviewer@this-mac",
+      alias: "codex-reviewer@this-mac",
       threadId: THREAD_ID,
       hostId: "this-mac",
       busyPolicy: "queue",
     },
   ]);
   assert.deepEqual(unregisters, [
-    { alias: "reviewer@this-mac", threadId: THREAD_ID },
+    { alias: "codex-reviewer@this-mac", threadId: THREAD_ID },
   ]);
   assert.deepEqual(selected, ["advisor@this-mac", CLAUDE_SESSION_ID]);
   assert.deepEqual(unselected, ["advisor@this-mac"]);
   assert.deepEqual(sendsToClaude, [
     {
-      fromAlias: "reviewer@this-mac",
+      fromAlias: "codex-reviewer@this-mac",
       threadId: THREAD_ID,
       toAlias: "advisor@this-mac",
       text: SECRET_BODY,
       expectsReply: true,
     },
     {
-      fromAlias: "reviewer@this-mac",
+      fromAlias: "codex-reviewer@this-mac",
       threadId: THREAD_ID,
       toAlias: CLAUDE_SESSION_ID,
       text: SECRET_BODY,
@@ -329,7 +350,7 @@ test("all client commands use one private control socket and expose only normali
   assert.deepEqual(sendsToCodex, [
     {
       fromAlias: "advisor@this-mac",
-      toAlias: "reviewer@this-mac",
+      toAlias: "codex-reviewer@this-mac",
       text: SECRET_BODY,
       replyAddress: REPLY_ADDRESS,
       expectsReply: false,
@@ -341,7 +362,7 @@ test("all client commands use one private control socket and expose only normali
       text: SECRET_BODY,
       caller: {
         kind: "codex",
-        alias: "reviewer@this-mac",
+        alias: "codex-reviewer@this-mac",
         threadId: THREAD_ID,
       },
     },
@@ -365,7 +386,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
     [
       "send-to-claude",
       "--from",
-      "reviewer@this-mac",
+      "codex-reviewer@this-mac",
       "--to",
       "advisor@this-mac",
     ],
@@ -405,7 +426,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
   });
   assert.equal(
     stderr.chunks.join(""),
-    "[claude-codex-gateway] outcome ambiguous; do not retry automatically.\n",
+    "[embassy] outcome ambiguous; do not retry automatically.\n",
   );
   assert.doesNotMatch(stdout.chunks.join(""), /private diagnostic|BODY_SENTINEL/);
 });
@@ -443,7 +464,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
   });
   assert.equal(
     stderr.chunks.join(""),
-    "[claude-codex-gateway] gateway rejected the request.\n",
+    "[embassy] gateway rejected the request.\n",
   );
 });
 
@@ -456,6 +477,11 @@ test("identity, stdin, and argument failures happen before any control request",
   }> = [
     {
       argv: ["register-codex", "--alias", "reviewer@this-mac"],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: {},
       code: "CODEX_IDENTITY_REQUIRED",
     },
@@ -465,7 +491,7 @@ test("identity, stdin, and argument failures happen before any control request",
         "--from",
         "advisor@this-mac",
         "--to",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       env: {},
       body: SECRET_BODY,
@@ -477,7 +503,7 @@ test("identity, stdin, and argument failures happen before any control request",
         "--from",
         "advisor@this-mac",
         "--to",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       env: { CLAUDE_CODE_MESSAGING_SOCKET: REPLY_ADDRESS },
       body: SECRET_BODY,
@@ -489,7 +515,7 @@ test("identity, stdin, and argument failures happen before any control request",
         "--conversation",
         CONVERSATION_ID,
         "--alias",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       env: {
         ...BOTH_IDENTITIES,
@@ -498,12 +524,12 @@ test("identity, stdin, and argument failures happen before any control request",
       code: "CALLER_IDENTITY_CONFLICT",
     },
     {
-      argv: ["register-codex", "--alias", "reviewer@this-mac"],
+      argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: { ...BOTH_IDENTITIES },
       code: "CALLER_IDENTITY_CONFLICT",
     },
     {
-      argv: ["unregister-codex", "--alias", "reviewer@this-mac"],
+      argv: ["unregister-codex", "--alias", "codex-reviewer@this-mac"],
       env: { ...BOTH_IDENTITIES },
       code: "CALLER_IDENTITY_CONFLICT",
     },
@@ -511,7 +537,7 @@ test("identity, stdin, and argument failures happen before any control request",
       argv: [
         "send-to-claude",
         "--from",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
         "--to",
         "advisor@this-mac",
       ],
@@ -525,7 +551,7 @@ test("identity, stdin, and argument failures happen before any control request",
         "--from",
         "advisor@this-mac",
         "--to",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       env: { ...BOTH_IDENTITIES },
       body: SECRET_BODY,
@@ -535,7 +561,7 @@ test("identity, stdin, and argument failures happen before any control request",
       argv: [
         "send-to-claude",
         "--from",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
         "--to",
         "advisor@this-mac",
         "--text",
@@ -579,7 +605,7 @@ test("identity, stdin, and argument failures happen before any control request",
     assert.equal(parsed.error.code, current.code);
     assert.equal(
       stderr.chunks.join(""),
-      "[claude-codex-gateway] request rejected.\n",
+      "[embassy] request rejected.\n",
     );
     assert.doesNotMatch(stdout.chunks.join(""), /BODY_SENTINEL|cc-socks|45201/);
   }
@@ -665,7 +691,7 @@ test("serve reports startup failure once and never appends protocol output after
   });
   assert.equal(
     beforeReadyErr.chunks.join(""),
-    "[claude-codex-gateway] request rejected.\n",
+    "[embassy] request rejected.\n",
   );
   assert.equal(beforeReadyOut.chunks.join("").includes("private detail"), false);
 
@@ -693,7 +719,7 @@ test("serve reports startup failure once and never appends protocol output after
   );
   assert.equal(
     afterReadyErr.chunks.join(""),
-    "[claude-codex-gateway] command failed.\n",
+    "[embassy] command failed.\n",
   );
   assert.equal(afterReadyOut.chunks.join("").includes("private shutdown"), false);
 });
@@ -744,7 +770,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
   });
   assert.equal(
     result.stderr,
-    "[claude-codex-gateway] request rejected.\n",
+    "[embassy] request rejected.\n",
   );
   assert.doesNotMatch(result.stdout, new RegExp(state.root.replaceAll("/", "\\/")));
 });
@@ -768,7 +794,7 @@ test("oversized and non-UTF-8 stdin are rejected without a request", async () =>
       [
         "send-to-claude",
         "--from",
-        "reviewer@this-mac",
+        "codex-reviewer@this-mac",
         "--to",
         "advisor@this-mac",
       ],
@@ -797,18 +823,29 @@ test("package metadata publishes the client and its runtime dependency", async (
   const packageJson = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   ) as {
+    name: string;
+    version: string;
+    os: string[];
     bin: Record<string, string>;
     files: string[];
     scripts: Record<string, string>;
     dependencies: Record<string, string>;
     devDependencies: Record<string, string>;
   };
+  assert.equal(packageJson.name, "agent-embassy");
+  assert.equal(packageJson.version, "1.0.0");
+  assert.equal(packageJson.version, EMBASSY_VERSION);
+  assert.deepEqual(packageJson.os, ["darwin"]);
+  assert.equal(packageJson.bin.embassy, "./dist/src/gateway/cli.js");
   assert.equal(
     packageJson.bin["claude-codex-gateway"],
     "./dist/src/gateway/cli.js",
   );
-  assert.equal(packageJson.scripts.gateway, "node dist/src/gateway/cli.js");
-  assert.ok(packageJson.files.includes("skills/claude-codex-peer"));
+  assert.equal(packageJson.scripts.embassy, "node dist/src/gateway/cli.js");
+  assert.match(packageJson.scripts.build ?? "", /npm run clean/);
+  assert.ok(packageJson.files.includes("skills/embassy-peer"));
+  assert.ok(packageJson.files.includes("dist/src/gateway"));
+  assert.equal(packageJson.files.includes("dist/src"), false);
   assert.equal(packageJson.dependencies.ws, "8.21.3");
   assert.equal(packageJson.devDependencies.ws, undefined);
 });

@@ -30,6 +30,8 @@ import {
   type DeliveryState,
   type EnqueueMessageInput,
   type EnqueueMessageResult,
+  type EnqueueNativeIngressInput,
+  type EnqueueNativeReplyInput,
   type GatewayAccounting,
   type GatewayPersistedState,
   type GatewayPrivateRouteInspection,
@@ -51,11 +53,12 @@ import {
   type RouteCounters,
   type SafeGatewayAlert,
   type SettleMessageInput,
+  type TransientNativeClaudePeer,
   type TransientQueuedMessage,
 } from "./types.js";
 
-const STATE_MARKER = ".claude-codex-gateway-state";
-const STATE_MARKER_CONTENT = "claude-codex-local-gateway-state-v1\n";
+const STATE_MARKER = ".agent-embassy-state";
+const STATE_MARKER_CONTENT = "agent-embassy-state-v1\n";
 const STATE_FILE = "gateway-state.json";
 const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_MARKER_FILE_BYTES = 128;
@@ -470,6 +473,39 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
   const routeByAlias = new Map(
     candidate.routes.map((route) => [route.alias, route]),
   );
+  const claudeConnectorHosts = new Set(
+    candidate.connectors
+      .filter((connector) => connector.provider === "claude")
+      .map((connector) => connector.hostId),
+  );
+  const aliasHost = (alias: string): string =>
+    alias.slice(alias.lastIndexOf("@") + 1);
+  const isValidPersistedMessagePair = (message: {
+    direction: "codex_to_claude" | "claude_to_codex";
+    sourceAlias: string;
+    targetAlias: string;
+  }): boolean => {
+    const source = routeByAlias.get(message.sourceAlias);
+    const target = routeByAlias.get(message.targetAlias);
+    if (message.direction === "codex_to_claude") {
+      return (
+        source?.binding.provider === "codex" &&
+        ((target?.binding.provider === "claude" &&
+          target.binding.hostId === source.binding.hostId) ||
+          (target === undefined &&
+            claudeConnectorHosts.has(source.binding.hostId) &&
+            aliasHost(message.targetAlias) === source.binding.hostId))
+      );
+    }
+    return (
+      target?.binding.provider === "codex" &&
+      ((source?.binding.provider === "claude" &&
+        source.binding.hostId === target.binding.hostId) ||
+        (source === undefined &&
+          claudeConnectorHosts.has(target.binding.hostId) &&
+          aliasHost(message.sourceAlias) === target.binding.hostId))
+    );
+  };
   const sequencesStrictlyIncrease = candidate.events.every(
     (event, index) =>
       index === 0 ||
@@ -502,22 +538,23 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
             .length,
     ) &&
     [...candidate.queue, ...candidate.inFlight].every((item) => {
-      const source = routeByAlias.get(item.sourceAlias);
-      const target = routeByAlias.get(item.targetAlias);
       return (
         item.messageIdSuffix ===
           item.messageId.replaceAll("-", "").slice(-8).toLowerCase() &&
-        source !== undefined &&
-        target !== undefined &&
-        ((source.binding.provider === "codex" &&
-          target.binding.provider === "claude" &&
-          item.direction === "codex_to_claude") ||
-          (source.binding.provider === "claude" &&
-            target.binding.provider === "codex" &&
-            item.direction === "claude_to_codex"))
+        isValidPersistedMessagePair(item)
       );
     }) &&
-    candidate.rateBuckets.every((bucket) => aliases.has(bucket.sourceAlias))
+    candidate.dedupe.every(isValidPersistedMessagePair) &&
+    candidate.rateBuckets.every(
+      (bucket) =>
+        aliases.has(bucket.sourceAlias) ||
+        candidate.routes.some(
+          (route) =>
+            route.binding.provider === "codex" &&
+            claudeConnectorHosts.has(route.binding.hostId) &&
+            route.binding.hostId === aliasHost(bucket.sourceAlias),
+        ),
+    )
   );
 }
 
@@ -690,6 +727,14 @@ function directionFor(
     "Gateway messages must cross from one provider to the other.",
   );
 }
+
+type ResolvedEnqueueSides = {
+  sourceAlias: string;
+  targetAlias: string;
+  direction: "codex_to_claude" | "claude_to_codex";
+  sourceRoute?: GatewayRouteRecord;
+  targetRoute?: GatewayRouteRecord;
+};
 
 export class GatewayStore {
   readonly config: GatewayConfig;
@@ -1321,8 +1366,20 @@ export class GatewayStore {
         "ROUTE_UNREGISTERED",
       );
       state.routes = state.routes.filter((candidate) => candidate !== route);
+      const remainingCodexHosts = new Set(
+        state.routes
+          .filter((candidate) => candidate.binding.provider === "codex")
+          .map((candidate) => candidate.binding.hostId),
+      );
       state.rateBuckets = state.rateBuckets.filter(
-        (bucket) => bucket.sourceAlias !== route.alias,
+        (bucket) =>
+          bucket.sourceAlias !== route.alias &&
+          (state.routes.some(
+            (candidate) => candidate.alias === bucket.sourceAlias,
+          ) ||
+            remainingCodexHosts.has(
+              bucket.sourceAlias.slice(bucket.sourceAlias.lastIndexOf("@") + 1),
+            )),
       );
       state.dedupe = state.dedupe.filter(
         (record) =>
@@ -1431,163 +1488,65 @@ export class GatewayStore {
     return this.mutate(async (state, now) => {
       const source = this.requireAvailableRoute(state, input.sourceAlias);
       const target = this.requireAvailableRoute(state, input.targetAlias);
-      const direction = directionFor(source, target);
-      if (
-        typeof input.body !== "string" ||
-        input.body.length === 0 ||
-        input.body.includes("\u0000")
-      ) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_MESSAGE",
-          "Gateway messages must contain a non-empty text body without NUL bytes.",
-        );
-      }
-      const bytes = Buffer.byteLength(input.body, "utf8");
-      if (bytes > this.config.limits.maxMessageBytes) {
-        this.recordRejection(state, source, target, direction, bytes, now, "MESSAGE_TOO_LARGE");
-        throw new BridgeError(
-          "MESSAGE_TOO_LARGE",
-          "The transient message exceeds the configured byte limit.",
-        );
-      }
-      const hopCount = input.hopCount ?? 0;
-      if (!isNonNegativeInteger(hopCount) || hopCount > this.config.limits.maxHopCount) {
-        this.recordRejection(state, source, target, direction, bytes, now, "HOP_LIMIT_EXCEEDED");
-        throw new BridgeError(
-          "HOP_LIMIT_EXCEEDED",
-          "The message exceeds the configured gateway hop limit.",
-        );
-      }
-      if (
-        typeof input.dedupeKey !== "string" ||
-        input.dedupeKey.length === 0 ||
-        Buffer.byteLength(input.dedupeKey) > 512
-      ) {
-        throw new BridgeError(
-          "INVALID_DEDUPE_KEY",
-          "A bounded, non-empty deduplication key is required.",
-        );
-      }
-      const fingerprint = createHash("sha256")
-        .update(source.alias)
-        .update("\0")
-        .update(target.alias)
-        .update("\0")
-        .update(input.dedupeKey)
-        .digest("base64url");
-      const duplicate = state.dedupe.find(
-        (record) =>
-          record.fingerprint === fingerprint &&
-          Date.parse(record.expiresAt) > now.getTime(),
-      );
-      if (duplicate) {
-        state.accounting.duplicates += 1;
-        this.appendEvent(state, {
-          timestamp: now.toISOString(),
-          messageIdSuffix: duplicate.messageIdSuffix,
-          direction,
-          sourceAlias: source.alias,
-          targetAlias: target.alias,
-          state: "duplicate",
-          bytes,
-          hopCount,
-        });
-        return {
-          accepted: false,
-          duplicate: true,
-          messageIdSuffix: duplicate.messageIdSuffix,
-        };
-      }
-      this.consumeRateLimit(state, source.alias, now);
-      const deadline = input.deadlineAt
-        ? new Date(input.deadlineAt)
-        : new Date(now.getTime() + this.config.limits.messageDeadlineMs);
-      if (
-        !Number.isFinite(deadline.getTime()) ||
-        deadline.getTime() <= now.getTime() ||
-        deadline.getTime() >
-          now.getTime() + this.config.limits.messageDeadlineMs
-      ) {
-        this.recordRejection(state, source, target, direction, bytes, now, "INVALID_DEADLINE");
-        throw new BridgeError(
-          "INVALID_DEADLINE",
-          "The message deadline must be in the future and within the configured maximum.",
-        );
-      }
-      const targetDepth = state.queue.filter(
-        (item) => item.targetAlias === target.alias,
-      ).length;
-      if (
-        state.queue.length + state.inFlight.length >=
-          this.config.limits.maxQueueMessages ||
-        targetDepth >= this.config.limits.maxQueueMessagesPerRoute ||
-        state.accounting.queuedBytes + bytes > this.config.limits.maxQueueBytes
-      ) {
-        this.recordRejection(state, source, target, direction, bytes, now, "QUEUE_FULL");
-        throw new BridgeError(
-          "GATEWAY_QUEUE_FULL",
-          "The bounded gateway queue cannot accept another message.",
-          true,
-        );
-      }
-      const opaque = this.randomId();
-      const messageId = `msg_${opaque}`;
-      if (!MESSAGE_ID_PATTERN.test(messageId)) {
-        throw new BridgeError(
-          "INVALID_RANDOM_ID_SOURCE",
-          "The gateway random identifier source did not return a UUID.",
-        );
-      }
-      const messageIdSuffix = opaque.replaceAll("-", "").slice(-8).toLowerCase();
-      const metadata: QueuedMessageMetadata = {
-        messageId,
-        messageIdSuffix,
-        direction,
+      return this.enqueueResolvedMessage(state, now, input, {
         sourceAlias: source.alias,
         targetAlias: target.alias,
-        enqueuedAt: now.toISOString(),
-        deadlineAt: deadline.toISOString(),
-        bytes,
-        hopCount,
-      };
-      state.queue.push(metadata);
-      this.transientBodies.set(messageId, input.body);
-      state.accounting.accepted += 1;
-      state.accounting.bytesAccepted += bytes;
-      state.accounting.queuedBytes += bytes;
-      source.counters.accepted += 1;
-      source.counters.bytesAccepted += bytes;
-      target.queueDepth += 1;
-      state.dedupe.push({
-        fingerprint,
-        messageIdSuffix,
-        sourceAlias: source.alias,
-        targetAlias: target.alias,
-        direction,
-        firstSeenAt: now.toISOString(),
-        expiresAt: new Date(
-          now.getTime() + this.config.limits.dedupeTtlMs,
-        ).toISOString(),
+        direction: directionFor(source, target),
+        sourceRoute: source,
+        targetRoute: target,
       });
-      while (state.dedupe.length > this.config.limits.dedupeCapacity) {
-        state.dedupe.shift();
+    });
+  }
+
+  /**
+   * Accept one message from a caller-attested native Claude peer without
+   * registering or persisting that peer as a route. The exact private binding
+   * is used only to prove a live same-host connector generation for this call.
+   */
+  async enqueueNativeIngress(
+    input: EnqueueNativeIngressInput,
+  ): Promise<EnqueueMessageResult> {
+    return this.mutate(async (state, now) => {
+      const target = this.requireAvailableRoute(state, input.targetAlias);
+      if (target.binding.provider !== "codex") {
+        throw new BridgeError(
+          "INVALID_NATIVE_INGRESS_TARGET",
+          "Native Claude ingress requires an explicitly registered Codex target.",
+        );
       }
-      this.appendEvent(state, {
-        timestamp: now.toISOString(),
-        messageIdSuffix,
-        direction,
-        sourceAlias: source.alias,
+      this.validateTransientNativeClaudePeer(state, input.source, target);
+      return this.enqueueResolvedMessage(state, now, input, {
+        sourceAlias: input.source.alias,
         targetAlias: target.alias,
-        state: "queued",
-        bytes,
-        hopCount,
+        direction: "claude_to_codex",
+        targetRoute: target,
       });
-      return {
-        accepted: true,
-        duplicate: false,
-        messageId,
-        messageIdSuffix,
-      };
+    });
+  }
+
+  /**
+   * Queue a correlated Codex reply for a caller-attested transient Claude
+   * peer. The service owns conversation correlation and the live dispatch
+   * capability; the store retains only bounded public-alias metadata.
+   */
+  async enqueueNativeReply(
+    input: EnqueueNativeReplyInput,
+  ): Promise<EnqueueMessageResult> {
+    return this.mutate(async (state, now) => {
+      const source = this.requireAvailableRoute(state, input.sourceAlias);
+      if (source.binding.provider !== "codex") {
+        throw new BridgeError(
+          "INVALID_NATIVE_REPLY_SOURCE",
+          "A native Claude reply requires an explicitly registered Codex source.",
+        );
+      }
+      this.validateTransientNativeClaudePeer(state, input.target, source);
+      return this.enqueueResolvedMessage(state, now, input, {
+        sourceAlias: source.alias,
+        targetAlias: input.target.alias,
+        direction: "codex_to_claude",
+        sourceRoute: source,
+      });
     });
   }
 
@@ -2024,6 +1983,224 @@ export class GatewayStore {
     return route;
   }
 
+  private validateTransientNativeClaudePeer(
+    state: GatewayPersistedState,
+    peer: TransientNativeClaudePeer,
+    codexRoute: GatewayRouteRecord,
+  ): void {
+    if (
+      !isObject(peer) ||
+      !hasOnlyKeys(peer, ["alias", "binding"]) ||
+      typeof peer.alias !== "string" ||
+      !ALIAS_PATTERN.test(peer.alias) ||
+      !isPrivateRouteBinding(peer.binding) ||
+      peer.binding.provider !== "claude"
+    ) {
+      throw new BridgeError(
+        "INVALID_NATIVE_CLAUDE_PEER",
+        "Native ingress requires a normalized alias and a private Claude binding.",
+      );
+    }
+    this.assertAllowedIdentity(endpointOf(peer.binding));
+    const aliasHost = peer.alias.slice(peer.alias.lastIndexOf("@") + 1);
+    if (
+      codexRoute.binding.provider !== "codex" ||
+      aliasHost !== peer.binding.hostId ||
+      peer.binding.hostId !== codexRoute.binding.hostId ||
+      peer.alias === codexRoute.alias
+    ) {
+      throw new BridgeError(
+        "NATIVE_PEER_SCOPE_MISMATCH",
+        "The transient Claude peer and registered Codex route must have distinct aliases on the same allowlisted host.",
+      );
+    }
+    const connector = state.connectors.find((candidate) =>
+      sameEndpoint(candidate, peer.binding),
+    );
+    if (
+      !connector ||
+      !["healthy", "degraded"].includes(connector.health) ||
+      connector.compatibility !== "compatible"
+    ) {
+      throw new BridgeError(
+        "NATIVE_PEER_ENDPOINT_NOT_OBSERVED",
+        "The transient Claude peer's exact compatible connector generation is not live.",
+        true,
+      );
+    }
+  }
+
+  private enqueueResolvedMessage(
+    state: GatewayPersistedState,
+    now: Date,
+    input: Pick<
+      EnqueueMessageInput,
+      "body" | "dedupeKey" | "deadlineAt" | "hopCount"
+    >,
+    sides: ResolvedEnqueueSides,
+  ): EnqueueMessageResult {
+    if (
+      typeof input.body !== "string" ||
+      input.body.length === 0 ||
+      input.body.includes("\u0000")
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_MESSAGE",
+        "Gateway messages must contain a non-empty text body without NUL bytes.",
+      );
+    }
+    const bytes = Buffer.byteLength(input.body, "utf8");
+    if (bytes > this.config.limits.maxMessageBytes) {
+      this.recordRejection(state, sides, bytes, now, "MESSAGE_TOO_LARGE");
+      throw new BridgeError(
+        "MESSAGE_TOO_LARGE",
+        "The transient message exceeds the configured byte limit.",
+      );
+    }
+    const hopCount = input.hopCount ?? 0;
+    if (
+      !isNonNegativeInteger(hopCount) ||
+      hopCount > this.config.limits.maxHopCount
+    ) {
+      this.recordRejection(state, sides, bytes, now, "HOP_LIMIT_EXCEEDED");
+      throw new BridgeError(
+        "HOP_LIMIT_EXCEEDED",
+        "The message exceeds the configured gateway hop limit.",
+      );
+    }
+    if (
+      typeof input.dedupeKey !== "string" ||
+      input.dedupeKey.length === 0 ||
+      Buffer.byteLength(input.dedupeKey) > 512
+    ) {
+      throw new BridgeError(
+        "INVALID_DEDUPE_KEY",
+        "A bounded, non-empty deduplication key is required.",
+      );
+    }
+    const fingerprint = createHash("sha256")
+      .update(sides.sourceAlias)
+      .update("\0")
+      .update(sides.targetAlias)
+      .update("\0")
+      .update(input.dedupeKey)
+      .digest("base64url");
+    const duplicate = state.dedupe.find(
+      (record) =>
+        record.fingerprint === fingerprint &&
+        Date.parse(record.expiresAt) > now.getTime(),
+    );
+    if (duplicate) {
+      state.accounting.duplicates += 1;
+      this.appendEvent(state, {
+        timestamp: now.toISOString(),
+        messageIdSuffix: duplicate.messageIdSuffix,
+        direction: sides.direction,
+        sourceAlias: sides.sourceAlias,
+        targetAlias: sides.targetAlias,
+        state: "duplicate",
+        bytes,
+        hopCount,
+      });
+      return {
+        accepted: false,
+        duplicate: true,
+        messageIdSuffix: duplicate.messageIdSuffix,
+      };
+    }
+    this.consumeRateLimit(state, sides.sourceAlias, now);
+    const deadline = input.deadlineAt
+      ? new Date(input.deadlineAt)
+      : new Date(now.getTime() + this.config.limits.messageDeadlineMs);
+    if (
+      !Number.isFinite(deadline.getTime()) ||
+      deadline.getTime() <= now.getTime() ||
+      deadline.getTime() > now.getTime() + this.config.limits.messageDeadlineMs
+    ) {
+      this.recordRejection(state, sides, bytes, now, "INVALID_DEADLINE");
+      throw new BridgeError(
+        "INVALID_DEADLINE",
+        "The message deadline must be in the future and within the configured maximum.",
+      );
+    }
+    const targetDepth = state.queue.filter(
+      (item) => item.targetAlias === sides.targetAlias,
+    ).length;
+    if (
+      state.queue.length + state.inFlight.length >=
+        this.config.limits.maxQueueMessages ||
+      targetDepth >= this.config.limits.maxQueueMessagesPerRoute ||
+      state.accounting.queuedBytes + bytes > this.config.limits.maxQueueBytes
+    ) {
+      this.recordRejection(state, sides, bytes, now, "QUEUE_FULL");
+      throw new BridgeError(
+        "GATEWAY_QUEUE_FULL",
+        "The bounded gateway queue cannot accept another message.",
+        true,
+      );
+    }
+    const opaque = this.randomId();
+    const messageId = `msg_${opaque}`;
+    if (!MESSAGE_ID_PATTERN.test(messageId)) {
+      throw new BridgeError(
+        "INVALID_RANDOM_ID_SOURCE",
+        "The gateway random identifier source did not return a UUID.",
+      );
+    }
+    const messageIdSuffix = opaque.replaceAll("-", "").slice(-8).toLowerCase();
+    const metadata: QueuedMessageMetadata = {
+      messageId,
+      messageIdSuffix,
+      direction: sides.direction,
+      sourceAlias: sides.sourceAlias,
+      targetAlias: sides.targetAlias,
+      enqueuedAt: now.toISOString(),
+      deadlineAt: deadline.toISOString(),
+      bytes,
+      hopCount,
+    };
+    state.queue.push(metadata);
+    this.transientBodies.set(messageId, input.body);
+    state.accounting.accepted += 1;
+    state.accounting.bytesAccepted += bytes;
+    state.accounting.queuedBytes += bytes;
+    if (sides.sourceRoute) {
+      sides.sourceRoute.counters.accepted += 1;
+      sides.sourceRoute.counters.bytesAccepted += bytes;
+    }
+    if (sides.targetRoute) sides.targetRoute.queueDepth += 1;
+    state.dedupe.push({
+      fingerprint,
+      messageIdSuffix,
+      sourceAlias: sides.sourceAlias,
+      targetAlias: sides.targetAlias,
+      direction: sides.direction,
+      firstSeenAt: now.toISOString(),
+      expiresAt: new Date(
+        now.getTime() + this.config.limits.dedupeTtlMs,
+      ).toISOString(),
+    });
+    while (state.dedupe.length > this.config.limits.dedupeCapacity) {
+      state.dedupe.shift();
+    }
+    this.appendEvent(state, {
+      timestamp: now.toISOString(),
+      messageIdSuffix,
+      direction: sides.direction,
+      sourceAlias: sides.sourceAlias,
+      targetAlias: sides.targetAlias,
+      state: "queued",
+      bytes,
+      hopCount,
+    });
+    return {
+      accepted: true,
+      duplicate: false,
+      messageId,
+      messageIdSuffix,
+    };
+  }
+
   private consumeRateLimit(
     state: GatewayPersistedState,
     sourceAlias: string,
@@ -2037,14 +2214,26 @@ export class GatewayStore {
       now.getTime() - Date.parse(bucket.windowStartedAt) >=
         this.config.limits.rateWindowMs
     ) {
+      state.rateBuckets = state.rateBuckets.filter(
+        (candidate) => candidate.sourceAlias !== sourceAlias,
+      );
+      if (state.rateBuckets.length >= this.config.limits.maxRoutes) {
+        state.accounting.rejected += 1;
+        const route = state.routes.find(
+          (candidate) => candidate.alias === sourceAlias,
+        );
+        if (route) route.counters.rejected += 1;
+        throw new BridgeError(
+          "GATEWAY_RATE_LIMITED",
+          "The bounded gateway rate window cannot admit another source.",
+          true,
+        );
+      }
       bucket = {
         sourceAlias,
         windowStartedAt: now.toISOString(),
         count: 0,
       };
-      state.rateBuckets = state.rateBuckets.filter(
-        (candidate) => candidate.sourceAlias !== sourceAlias,
-      );
       state.rateBuckets.push(bucket);
     }
     if (bucket.count >= this.config.limits.rateLimitPerRoute) {
@@ -2062,9 +2251,7 @@ export class GatewayStore {
 
   private recordRejection(
     state: GatewayPersistedState,
-    source: GatewayRouteRecord,
-    target: GatewayRouteRecord,
-    direction: "codex_to_claude" | "claude_to_codex",
+    sides: ResolvedEnqueueSides,
     bytes: number,
     now: Date,
     safeErrorCode: string,
@@ -2072,13 +2259,13 @@ export class GatewayStore {
     const suffix = this.randomId().replaceAll("-", "").slice(-8).toLowerCase();
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
     state.accounting.rejected += 1;
-    source.counters.rejected += 1;
+    if (sides.sourceRoute) sides.sourceRoute.counters.rejected += 1;
     this.appendEvent(state, {
       timestamp: now.toISOString(),
       messageIdSuffix: suffix,
-      direction,
-      sourceAlias: source.alias,
-      targetAlias: target.alias,
+      direction: sides.direction,
+      sourceAlias: sides.sourceAlias,
+      targetAlias: sides.targetAlias,
       state: "rejected",
       bytes: Math.max(1, bytes),
       hopCount: 0,

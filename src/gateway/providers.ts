@@ -195,6 +195,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly now: () => number;
   private readonly discovered = new Map<string, GatewayAdapterDiscovery>();
   private readonly selected = new Map<string, string>();
+  /** Exact live same-UID sessions observed through native inbound frames. */
+  private readonly nativeInbound = new Map<string, string>();
   private readonly selectedObservations = new Map<string, string>();
   /** Invalidates any discovery that overlaps a dispatch on this route. */
   private readonly selectedDispatchEpoch = new Map<string, number>();
@@ -267,22 +269,56 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         onMessage: async (message) => {
           if (
             message.sourceTargetId === undefined ||
-            !message.replySupported ||
-            this.selected.get(message.sourceTargetId) === undefined
+            message.sourceAlias === undefined ||
+            !message.replySupported
           ) {
             if (message.receiptHandle !== undefined) {
               await this.listener?.acknowledge?.(
                 message.receiptHandle,
                 "expired",
-                { code: "CLAUDE_SOURCE_ROUTE_UNSELECTED" },
+                { code: "CLAUDE_SOURCE_ROUTE_INVALID" },
               );
             }
             return;
           }
-          const sourceAlias = this.selected.get(message.sourceTargetId);
-          if (sourceAlias === undefined) return;
+          let sourceAlias: string | undefined;
+          try {
+            await this.refreshClaudeDiscovery();
+            const current = this.discovered.get(message.sourceTargetId);
+            const expectedAlias = `${message.sourceAlias}@${this.identity.hostId}`;
+            if (current?.alias === expectedAlias) sourceAlias = expectedAlias;
+          } catch {
+            sourceAlias = undefined;
+          }
+          if (sourceAlias === undefined) {
+            if (message.receiptHandle !== undefined) {
+              await this.listener?.acknowledge?.(
+                message.receiptHandle,
+                "expired",
+                { code: "CLAUDE_SOURCE_ROUTE_STALE" },
+              );
+            }
+            return;
+          }
           invokeCallback(() => {
             if (this.advertisedCodexAlias !== undefined) {
+              if (
+                !this.nativeInbound.has(message.sourceTargetId as string) &&
+                this.nativeInbound.size >= this.maxPending
+              ) {
+                if (message.receiptHandle !== undefined) {
+                  void this.listener?.acknowledge?.(
+                    message.receiptHandle,
+                    "expired",
+                    { code: "CLAUDE_NATIVE_INGRESS_CAPACITY" },
+                  );
+                }
+                return;
+              }
+              this.nativeInbound.set(
+                message.sourceTargetId as string,
+                sourceAlias as string,
+              );
               callbacks.onClaudeMessage?.({
                 endpoint: callbackEndpoint(
                   this.identity,
@@ -296,13 +332,18 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
                   : { receiptHandle: message.receiptHandle }),
               });
             } else {
-              callbacks.onClaudeReply({
-                endpoint: callbackEndpoint(
-                  this.identity,
-                  message.sourceTargetId as string,
-                ),
-                text: message.content,
-              });
+              if (
+                this.selected.get(message.sourceTargetId as string) ===
+                sourceAlias
+              ) {
+                callbacks.onClaudeReply({
+                  endpoint: callbackEndpoint(
+                    this.identity,
+                    message.sourceTargetId as string,
+                  ),
+                  text: message.content,
+                });
+              }
             }
           });
         },
@@ -436,6 +477,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   async dispatch(input: {
     binding: PrivateRouteBinding;
+    authorization: "selected_route" | "native_reply";
     messageId: string;
     text: string;
     expectsReply: boolean;
@@ -445,9 +487,23 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       !this.initialized ||
       this.closed ||
       this.listener === undefined ||
-      !sameEndpoint(input.binding, this.identity) ||
-      this.selected.get(input.binding.routeHandle) === undefined
+      !sameEndpoint(input.binding, this.identity)
     ) {
+      return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+    }
+    if (input.authorization === "native_reply") {
+      try {
+        await this.refreshClaudeDiscovery();
+      } catch {
+        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+      }
+      const observedAlias = this.nativeInbound.get(input.binding.routeHandle);
+      const current = this.discovered.get(input.binding.routeHandle);
+      if (observedAlias === undefined || current?.alias !== observedAlias) {
+        this.nativeInbound.delete(input.binding.routeHandle);
+        return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" };
+      }
+    } else if (this.selected.get(input.binding.routeHandle) === undefined) {
       return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
     }
     const deadline = strictDeadline(input.deadlineAt, this.now());
@@ -466,15 +522,16 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       input.messageId,
       input.binding.routeHandle,
     );
-    this.selectedDispatchEpoch.set(
-      input.binding.routeHandle,
-      (this.selectedDispatchEpoch.get(input.binding.routeHandle) ?? 0) + 1,
-    );
-    // Once a gateway dispatch begins, keep the route conservatively busy
-    // until a later registry refresh observes authoritative native state.
-    // Receipt release proves inbox delivery only and never unlocks the route.
-    this.selectedObservationDirty.add(input.binding.routeHandle);
-    this.emitClaudeRouteObservation(input.binding.routeHandle, "busy");
+    if (input.authorization === "selected_route") {
+      this.selectedDispatchEpoch.set(
+        input.binding.routeHandle,
+        (this.selectedDispatchEpoch.get(input.binding.routeHandle) ?? 0) + 1,
+      );
+      // Once a selected-route dispatch begins, keep the route conservatively
+      // busy until a later registry refresh observes authoritative state.
+      this.selectedObservationDirty.add(input.binding.routeHandle);
+      this.emitClaudeRouteObservation(input.binding.routeHandle, "busy");
+    }
     let providerId: string | undefined;
     let trackingFailed = false;
     let terminalDuringSend = false;
@@ -553,13 +610,15 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
       this.listener.untrack(result.messageId);
       this.finishClaudeMessage(result.messageId, "released");
-      this.selectedObservationDirty.delete(input.binding.routeHandle);
-      this.emitClaudeRouteObservation(
-        input.binding.routeHandle,
-        "idle",
-        undefined,
-        true,
-      );
+      if (input.authorization === "selected_route") {
+        this.selectedObservationDirty.delete(input.binding.routeHandle);
+        this.emitClaudeRouteObservation(
+          input.binding.routeHandle,
+          "idle",
+          undefined,
+          true,
+        );
+      }
       return { state: "pending" };
     } catch (error) {
       if (trackingFailed) {
@@ -617,6 +676,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.providerIdByGatewayId.clear();
       this.pendingTargetByGatewayId.clear();
       this.selected.clear();
+      this.nativeInbound.clear();
       this.selectedDispatchEpoch.clear();
       this.selectedObservationDirty.clear();
       this.selectedObservations.clear();
@@ -773,6 +833,11 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       };
       this.discovered.set(peer.targetId, row);
       rows.push(row);
+    }
+    for (const [routeHandle, alias] of this.nativeInbound) {
+      if (this.discovered.get(routeHandle)?.alias !== alias) {
+        this.nativeInbound.delete(routeHandle);
+      }
     }
     for (const [routeHandle, selectedAlias] of this.selected) {
       const row = this.discovered.get(routeHandle);
@@ -1112,6 +1177,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   async dispatch(input: {
     binding: PrivateRouteBinding;
+    authorization: "selected_route" | "native_reply";
     messageId: string;
     text: string;
     expectsReply: boolean;
@@ -1121,6 +1187,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       !this.initialized ||
       this.closing ||
       this.closed ||
+      input.authorization !== "selected_route" ||
       !sameEndpoint(input.binding, this.identity)
     ) {
       return { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" };

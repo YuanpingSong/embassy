@@ -642,6 +642,32 @@ export type EnqueueMessageInput = {
   hopCount?: number;
 };
 
+/**
+ * Controller-internal proof of one currently observed native Claude peer.
+ * The binding may contain a native session identifier and must remain an
+ * in-memory call argument. Store metadata retains only the public alias.
+ */
+export type TransientNativeClaudePeer = {
+  alias: string;
+  binding: PrivateRouteBinding;
+};
+
+export type EnqueueNativeIngressInput = Omit<
+  EnqueueMessageInput,
+  "sourceAlias" | "targetAlias"
+> & {
+  source: TransientNativeClaudePeer;
+  targetAlias: string;
+};
+
+export type EnqueueNativeReplyInput = Omit<
+  EnqueueMessageInput,
+  "sourceAlias" | "targetAlias"
+> & {
+  sourceAlias: string;
+  target: TransientNativeClaudePeer;
+};
+
 export type EnqueueMessageResult = {
   accepted: boolean;
   duplicate: boolean;

@@ -82,8 +82,8 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     HOME: SYNTHETIC_HOME,
     USER: "synthetic-user",
     LOGNAME: "synthetic-user",
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: stateDir,
-    CLAUDE_BRIDGE_CLAUDE_BIN: SYNTHETIC_LAUNCHER,
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_CLAUDE_BIN: SYNTHETIC_LAUNCHER,
     ANTHROPIC_API_KEY: SYNTHETIC_SECRET,
     CLAUDE_CODE_MESSAGING_SOCKET: "/synthetic/private/provider.sock",
     CODEX_THREAD_ID: "019f9a56-9fca-75b1-80e4-48ccef693abc",
@@ -210,7 +210,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
 test("assembly failure closes every resource not yet owned by a service", async () => {
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
-    CLAUDE_BRIDGE_GATEWAY_STATE_DIR: "/synthetic/controller-state",
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
   };
   const config = loadGatewayConfig(env);
   const store = new GatewayStore(config);
@@ -293,7 +293,7 @@ test("launcher resolution uses only an explicit path or the official local defau
   );
   assert.equal(
     resolveGatewayClaudeLauncher(
-      { CLAUDE_BRIDGE_CLAUDE_BIN: "/synthetic/custom/bin/claude" },
+      { EMBASSY_CLAUDE_BIN: "/synthetic/custom/bin/claude" },
       SYNTHETIC_HOME,
     ),
     "/synthetic/custom/bin/claude",
@@ -301,7 +301,7 @@ test("launcher resolution uses only an explicit path or the official local defau
   assert.throws(
     () =>
       resolveGatewayClaudeLauncher(
-        { CLAUDE_BRIDGE_CLAUDE_BIN: "claude" },
+        { EMBASSY_CLAUDE_BIN: "claude" },
         SYNTHETIC_HOME,
       ),
     (error: unknown) =>

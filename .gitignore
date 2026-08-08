@@ -6,7 +6,7 @@ dist/
 .npmrc
 .DS_Store
 coverage/
-.claude-agent-bridge/
+.agent-embassy/
 outputs/
 work/
 *.tgz

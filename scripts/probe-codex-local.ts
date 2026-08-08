@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import WebSocket from "ws";
 
-const AUTHORIZATION_ENV = "CLAUDE_BRIDGE_RUN_CODEX_LOCAL_PROBE";
+const AUTHORIZATION_ENV = "EMBASSY_RUN_CODEX_LOCAL_PROBE";
 const THREAD_ID_ENV = "CODEX_THREAD_ID";
 
 const MAX_PROXY_STDOUT_BYTES = 4 * 1024 * 1024;
@@ -298,8 +298,8 @@ export function buildLocalInitializeRequest(): string {
     method: "initialize",
     params: {
       clientInfo: {
-        name: "claude_agent_bridge_local_probe",
-        title: "Claude Agent Bridge Local Probe",
+        name: "agent_embassy_local_probe",
+        title: "Embassy Local Probe",
         version: "0.1.0",
       },
     },

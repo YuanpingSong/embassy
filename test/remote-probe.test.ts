@@ -99,24 +99,24 @@ test("remote probe SSH environment is an explicit non-secret allowlist", () => {
 });
 
 test("remote probe SSH arguments disable environment and connection forwarding", () => {
-  const args = buildProbeSshArguments("m5dev", "safe-remote-command");
+  const args = buildProbeSshArguments("build-mac", "safe-remote-command");
 
   assert.ok(args.includes("SendEnv=-*"));
   assert.ok(args.includes("ForwardAgent=no"));
   assert.ok(args.includes("ClearAllForwardings=yes"));
   assert.ok(args.includes("PermitLocalCommand=no"));
-  assert.deepEqual(args.slice(-2), ["m5dev", "safe-remote-command"]);
+  assert.deepEqual(args.slice(-2), ["build-mac", "safe-remote-command"]);
 });
 
 test("remote proxy discovery matches a complete host argument", () => {
-  const command = "/usr/bin/ssh -T m5dev exec codex app-server proxy";
+  const command = "/usr/bin/ssh -T build-mac exec codex app-server proxy";
 
-  assert.equal(commandHasExactToken(command, "m5dev"), true);
+  assert.equal(commandHasExactToken(command, "build-mac"), true);
   assert.equal(commandHasExactToken(command, "m5"), false);
   assert.equal(commandHasExactToken(command, "dev"), false);
-  assert.equal(commandIsDesktopProxy(command, "m5dev"), true);
+  assert.equal(commandIsDesktopProxy(command, "build-mac"), true);
   assert.equal(
-    commandIsDesktopProxy("/usr/bin/ssh -T m5dev sh -c 'exec codex app-server proxy'", "m5dev"),
+    commandIsDesktopProxy("/usr/bin/ssh -T build-mac sh -c 'exec codex app-server proxy'", "build-mac"),
     true,
   );
   assert.equal(commandIsDesktopProxy(command, "m5"), false);
