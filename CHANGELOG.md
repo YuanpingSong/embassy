@@ -17,13 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A metadata-only, self-contained `gateway-dashboard.html`: mode 0600, atomically rewritten, auto-refreshing, no JavaScript, no server, no external assets, no message content shown.
 - Delivery semantics: queue-while-busy as the only busy policy (no steering, no forced interruption); normalized `delivered`/`expired` receipts, with a single static `<gateway-delivery-diagnostic>` frame carrying one safe error code on failure; bounded queues, rate limiting, dedupe, deadlines, and hop counts.
 - Repo-shipped agent skill (`skills/embassy-peer/SKILL.md`) teaching the full operator/agent workflow — health, registration, sending, replying, queue-state interpretation — without exposing identifiers or message bodies.
+- One host-wide crash-reclaimable owner lease, acquired before provider setup and independent of `EMBASSY_STATE_DIR`, so only one foreground Embassy controller can advertise routes for a login account.
 
 ### Changed
 
 - Binary renamed from `claude-codex-gateway` to `embassy`; the old name ships for one release as a deprecated alias.
-- State root moved from `~/.local/state/claude-agent-bridge` to `~/.local/state/agent-embassy`. This is a clean reset, not a migration — old state is not read or carried forward.
+- State root moved from `~/.local/state/claude-agent-bridge/gateway` to `~/.local/state/agent-embassy`. This is a clean reset, not a migration — old gateway state is not carried forward. For one release, Embassy bounded-reads only the exact legacy default ownership marker and controller-lock record, then creates and holds that lock so a prototype cannot run alongside v1. A pre-existing legacy lock is preserved and blocks startup; after confirming no prototype process remains, remove that exact stale lock manually, then register and select again.
 - Compatibility pins re-established for this release: Claude Code **2.1.225** / peer protocol 1 (with still-running 2.1.224 sessions remaining discoverable during a patch-upgrade overlap window), and Codex App Server **0.147.0**, resolved by exact path. An unknown version on either surface fails closed.
 - The public v1 launcher is macOS-only and local-host-only.
+- Validated native records named `codex-*` are excluded from Claude destination discovery; they are gateway advertisements, not selectable Claude sessions.
+- After Embassy restarts, a persisted Claude binding remains stale and must be explicitly selected again after authorized live discovery. Queued text, pending replies, and conversation capability are never restored.
+- Re-running `register-codex` replaces a closed or faulted App Server connector; an idle recovered route wakes held work without retrying any ambiguous write.
 
 ### Removed
 

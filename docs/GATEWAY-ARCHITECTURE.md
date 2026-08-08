@@ -202,7 +202,9 @@ connector positively observes that exact task on the current endpoint
 generation.
 
 Claude discovery is passive and limited to currently advertised genuine
-Claude session records. It produces a bounded, sanitized `availablePeers`
+Claude session records. A validated native record whose current name begins
+with reserved `codex-` is another gateway advertisement, not a selectable
+Claude destination, and is excluded. Discovery produces a bounded, sanitized `availablePeers`
 inventory keyed for display by the latest name. The adapter validates the
 exact pinned schema, session UUID, process identity and liveness,
 record/socket type, PID and socket-path correlation, allowed roots, and
@@ -300,8 +302,9 @@ hatch.
 Conversation IDs correlate replies, but callback addresses and message bodies
 exist only in memory. After a gateway restart, previously queued or in-flight
 metadata is marked abandoned; bodies are not recoverable and are never
-replayed. Routes are stale until their exact provider endpoint/session is
-observed again.
+replayed. The prior Claude binding remains stored but stale. After authorized
+live discovery, the operator must run `select-claude` again; no queued text,
+pending reply, or conversation capability survives the restart.
 
 ## Gateway control plane
 
@@ -351,6 +354,17 @@ The foreground command is:
 ```text
 embassy serve
 ```
+
+Before provider attestation, listener creation, or App Server attachment, the
+launcher acquires one fixed host-wide crash-reclaimable owner lease under the
+verified login home. The lease is independent of `EMBASSY_STATE_DIR`, so two foreground
+controllers cannot be started for the same login account by choosing different
+state roots. During the one-release prototype transition, a recognized exact
+legacy default root is also controller-locked while Embassy runs. Any
+pre-existing legacy lock blocks startup as `GATEWAY_INSTANCE_IN_USE` and is
+preserved; the operator may remove that exact stale lock only after confirming
+no prototype process remains. Missing, unsafe, or unrecognized legacy roots
+are not created, imported, or mutated.
 
 It emits one normalized ready line, publishes the private dashboard, and
 holds the process until `SIGINT` or `SIGTERM`, when exact-owned resources are
@@ -525,9 +539,9 @@ strict projection that also removes private route handles and endpoint
 generations. The state directory is mode 0700 and binding state is mode 0600;
 provider-native identifiers never enter normalized events, public snapshots,
 the dashboard, CLI arguments/output, aliases, logs, or error text. On restart,
-every restored route is stale and unusable until its exact host, endpoint
-generation, and target are positively re-observed. Claude selection fails
-closed and requires explicit reselection if that proof cannot be restored.
+every restored route is stale and unusable. A prior Claude binding is not
+automatically selected: after authorized live discovery, the operator runs
+`select-claude` again. No queued body or reply capability is restored.
 
 ## Minimum filesystem and process access
 
@@ -554,15 +568,20 @@ and fake App Server transports.
 ### Exact default roots on macOS
 
 The runtime attestation code derives these paths from the current OS user's
-verified home; it does not scan the home directory. They have not yet been
-opened by a live gateway run:
+verified home; it does not scan the home directory. These are the reviewed
+boundaries exercised by the live gateway; routine tests substitute synthetic
+paths, peers, and transports:
 
 | Path/capability | Minimum purpose |
 | --- | --- |
 | `~/.local/bin/claude` and derived expected target `~/.local/share/claude/versions/2.1.225` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher attestation succeeded |
 | `~/.claude/sessions` | Read/enumerate only live registry JSON during the separately authorized passive-discovery gate |
 | `/tmp/cc-socks` | At foreground startup, validate the private directory and create/remove only `/tmp/cc-socks/<gateway-pid>.sock` after inode/generation checks; search/stat genuine peers at passive discovery and connect one validated target only at the separately authorized send gate |
-| `~/.local/state/agent-embassy` | Default controller-owned store, control UDS, lock, and static dashboard; an explicit absolute configuration may replace this root |
+| `~/.local/state/agent-embassy/.agent-embassy-state` | Validate or establish the exact ownership marker before creating the fixed host lease; an existing non-empty unmarked root is rejected without mutation |
+| `/usr/bin/lockf` and `/bin/cat` | Hold one fixed, non-waiting macOS advisory lease for the foreground controller; the helper receives no shell text, provider data, or model-supplied argument |
+| `~/.local/state/agent-embassy/.gateway-host.lock` | Fixed per-login kernel-held lease acquired before provider setup; it remains here even when `EMBASSY_STATE_DIR` is overridden. Its bounded PID/token record is exact-cleanup metadata, not a path-only stale-lock authority; a crash releases the kernel lock and the next foreground process may acquire the existing file |
+| `~/.local/state/claude-agent-bridge/gateway/.claude-codex-gateway-state` and `.gateway-controller.lock` | For one release, bounded-read the exact legacy ownership marker and lock record; create and hold the lock only when absent, preserve any pre-existing lock, and read no other legacy state or message data |
+| `~/.local/state/agent-embassy` (or explicit `EMBASSY_STATE_DIR`) | Default controller-owned store, control UDS, state lock, and static dashboard; an explicit absolute configuration may replace only these state surfaces |
 | `~/.codex/packages/standalone` and `~/.codex/app-server-control/app-server-control.sock` | Resolve the pinned managed Codex binary and attach to the already-running private local App Server; never bootstrap or unlink it |
 
 No grant to `~/.claude/projects`, the rest of
@@ -584,6 +603,9 @@ the preferred least-context setup, but it is not mandatory.
   gateway-owned state, unexpected paths, queue overflow, deadline expiry, and ambiguous writes are
   normalized failures, never raw diagnostics.
 - Provider disconnect invalidates every route on that endpoint generation.
+- Explicit `register-codex` replaces a closed or faulted App Server connector;
+  if the recovered route is idle, held undispatched work is woken. Ambiguous
+  writes are not retried.
 - No ambiguous mutation is retried automatically.
 - No queued body survives process loss.
 - Version-specific compatibility evidence expires on a provider or Desktop

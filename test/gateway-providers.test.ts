@@ -96,6 +96,13 @@ class FakeClaudePeer {
       status: "idle",
       compatibility: "compatible",
     },
+    {
+      targetId: "target-foreign-codex-advertisement",
+      alias: "codex-other-gateway",
+      kind: "interactive",
+      status: "idle",
+      compatibility: "compatible",
+    },
   ];
   listenerOptions: ClaudePeerListenerOptions | undefined;
   listenerUsed = false;
@@ -310,8 +317,58 @@ function binding(
   };
 }
 
+test("closing during Claude listen fences and closes the late listener", async () => {
+  const fake = new FakeClaudePeer();
+  let markListenEntered: (() => void) | undefined;
+  let releaseListen: (() => void) | undefined;
+  const listenEntered = new Promise<void>((resolve) => {
+    markListenEntered = resolve;
+  });
+  const listenMayFinish = new Promise<void>((resolve) => {
+    releaseListen = resolve;
+  });
+  let listenerClosed = false;
+  fake.listener.close = async () => {
+    listenerClosed = true;
+  };
+  fake.listen = async (options) => {
+    fake.listenerOptions = options;
+    markListenEntered?.();
+    await listenMayFinish;
+    return fake.listener;
+  };
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    peerFactory: () => fake as never,
+  });
+
+  const initializing = provider.initialize(callbacks().callbacks);
+  await listenEntered;
+  const closing = provider.close();
+  releaseListen?.();
+
+  await assert.rejects(
+    initializing,
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_CALLBACK_UNAVAILABLE",
+  );
+  await closing;
+  assert.equal(fake.closed, true);
+  assert.equal(listenerClosed, true);
+  await assert.rejects(
+    provider.discoverClaudePeers(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CLAUDE_PROVIDER_UNAVAILABLE",
+  );
+});
+
 test("local Claude provider publishes only canonical interactive names and generation-fences callbacks", async () => {
   const fake = new FakeClaudePeer();
+  assert.equal(
+    fake.peers.some((peer) => peer.alias === "codex-other-gateway"),
+    true,
+  );
   const provider = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
     discoveryPollMs: 30_000,
@@ -333,6 +390,10 @@ test("local Claude provider publishes only canonical interactive names and gener
       compatibility: "compatible",
     },
   ]);
+  assert.equal(
+    discovered.some((peer) => peer.alias.startsWith("codex-")),
+    false,
+  );
   await provider.assertWorkspaceDisjoint(
     "target-selected",
     "/synthetic/controller-state",
@@ -701,6 +762,7 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     private readonly safePolicy: boolean,
     private readonly resumeStatus: "idle" | "active",
     private readonly completeInterrupt: boolean,
+    private readonly faultAfterResume = false,
   ) {}
 
   onMessage(listener: (payload: string) => void): () => void {
@@ -738,6 +800,9 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
           turns: [],
         },
       });
+      if (this.faultAfterResume) {
+        queueMicrotask(() => this.faultUnexpectedly());
+      }
     } else if (message.method === "turn/start") {
       this.respond(message, {
         turn: { id: "turn-provider-1", status: "inProgress" },
@@ -766,6 +831,26 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     for (const listener of this.closeListeners) listener();
   }
 
+  disconnectUnexpectedly(): void {
+    for (const listener of [...this.closeListeners]) listener();
+  }
+
+  faultUnexpectedly(): void {
+    for (const listener of [...this.errorListeners]) listener();
+  }
+
+  snapshotMessageListeners(): Array<(payload: string) => void> {
+    return [...this.messageListeners];
+  }
+
+  emitTo(
+    listeners: Array<(payload: string) => void>,
+    message: unknown,
+  ): void {
+    const payload = JSON.stringify(message);
+    for (const listener of listeners) listener(payload);
+  }
+
   emit(message: unknown): void {
     const payload = JSON.stringify(message);
     for (const listener of this.messageListeners) listener(payload);
@@ -791,6 +876,8 @@ class FakeCodexFactory {
   readonly writableReady: boolean;
   readonly transports: FakeCodexTransport[] = [];
   closed = false;
+  failNextConnect = false;
+  faultNextRouteAfterResume = false;
 
   constructor(
     private readonly threadId: string,
@@ -806,11 +893,18 @@ class FakeCodexFactory {
   }
 
   async connectTransport(): Promise<LocalCodexOwnedTransport> {
+    if (this.failNextConnect) {
+      this.failNextConnect = false;
+      throw new Error("synthetic connection failure");
+    }
+    const faultAfterResume = this.faultNextRouteAfterResume;
+    this.faultNextRouteAfterResume = false;
     const transport = new FakeCodexTransport(
       this.threadId,
       this.safePolicy,
       this.resumeStatus,
       this.completeInterrupt,
+      faultAfterResume,
     );
     this.transports.push(transport);
     return transport;
@@ -920,6 +1014,174 @@ test("local Codex provider attaches one exact route, refreshes it before write, 
   assert.equal(transport.cleanupConfirmed, true);
   await provider.close();
   assert.equal(factory.closed, true);
+});
+
+for (const failureMode of ["disconnect", "fault"] as const) {
+  test(`explicit Codex route selection replaces a ${failureMode}ed connector without replaying ambiguous work`, async () => {
+    const factory = new FakeCodexFactory(THREAD_ID, true);
+    const provider = codexProvider(factory);
+    const observed = callbacks();
+    await provider.initialize(observed.callbacks);
+    assert.deepEqual(
+      await provider.selectRoute({
+        alias: "codex-main@this-mac",
+        routeHandle: THREAD_ID,
+      }),
+      { routeHandle: THREAD_ID, state: "idle" },
+    );
+
+    const first = factory.transports[0]!;
+    const staleMessageListeners = first.snapshotMessageListeners();
+    const messageId = `gateway-recover-${failureMode}`;
+    assert.deepEqual(
+      await provider.dispatch({
+        authorization: "selected_route",
+        binding: codexBinding(provider),
+        messageId,
+        text: "must become ambiguous, never replayed",
+        expectsReply: false,
+        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      { state: "pending" },
+    );
+    assert.equal(
+      first.sent.filter((message) => message.method === "turn/start").length,
+      1,
+    );
+
+    if (failureMode === "disconnect") first.disconnectUnexpectedly();
+    else first.faultUnexpectedly();
+    await delayImmediate();
+    assert.equal(
+      observed.deliveries.filter(
+        (delivery) =>
+          delivery.messageId === messageId && delivery.state === "ambiguous",
+      ).length,
+      1,
+    );
+
+    const recoveredSelections = await Promise.all([
+      provider.selectRoute({
+        alias: "codex-main@this-mac",
+        routeHandle: THREAD_ID,
+      }),
+      provider.selectRoute({
+        alias: "codex-main@this-mac",
+        routeHandle: THREAD_ID,
+      }),
+    ]);
+    assert.deepEqual(recoveredSelections, [
+      { routeHandle: THREAD_ID, state: "idle" },
+      { routeHandle: THREAD_ID, state: "idle" },
+    ]);
+    assert.equal(factory.transports.length, 2);
+    assert.equal(first.cleanupConfirmed, true);
+    const replacement = factory.transports[1]!;
+    assert.equal(
+      replacement.sent.some((message) => message.method === "turn/start"),
+      false,
+    );
+
+    await delayImmediate();
+    const routesBeforeStaleEvent = observed.routes.length;
+    first.emitTo(staleMessageListeners, {
+      method: "thread/status/changed",
+      params: {
+        status: { type: "active" },
+        threadId: THREAD_ID,
+      },
+    });
+    await delayImmediate();
+    assert.equal(observed.routes.length, routesBeforeStaleEvent);
+
+    await provider.close();
+    assert.equal(replacement.cleanupConfirmed, true);
+  });
+}
+
+test("failed Codex route recovery removes the stale connector and leaves no writable route", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory);
+  await provider.initialize(callbacks().callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  const stale = factory.transports[0]!;
+  stale.disconnectUnexpectedly();
+  factory.failNextConnect = true;
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ROUTE_SETUP_REJECTED",
+  );
+  assert.equal(stale.cleanupConfirmed, true);
+  assert.equal(factory.transports.length, 1);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-recovery-failed",
+      text: "must not be written",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  assert.equal(
+    stale.sent.some((message) => message.method === "turn/start"),
+    false,
+  );
+
+  assert.deepEqual(
+    await provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    { routeHandle: THREAD_ID, state: "idle" },
+  );
+  assert.equal(factory.transports.length, 2);
+  await provider.close();
+});
+
+test("Codex route selection rejects a fresh connector that faults before acceptance", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.faultNextRouteAfterResume = true;
+  const provider = codexProvider(factory);
+  await provider.initialize(callbacks().callbacks);
+
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ROUTE_SETUP_REJECTED",
+  );
+  assert.equal(factory.transports.length, 1);
+  assert.equal(factory.transports[0]!.cleanupConfirmed, true);
+  assert.equal(
+    factory.transports[0]!.sent.some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+
+  assert.deepEqual(
+    await provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    { routeHandle: THREAD_ID, state: "idle" },
+  );
+  assert.equal(factory.transports.length, 2);
+  await provider.close();
 });
 
 test("an explicitly registered Codex route uses its native policy and remains reachable after settings updates", async () => {

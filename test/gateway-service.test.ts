@@ -54,6 +54,14 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
+async function waitForAsync(predicate: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error("synthetic dispatch timed out");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 class FakeProvider implements GatewayProviderAdapter {
   readonly identity: PrivateEndpointIdentity;
   readonly protocol: string;
@@ -247,6 +255,125 @@ async function discoverAndRegisterCodexOnly(
     code: "ok",
   });
 }
+
+test("aborted startup cannot become active after an in-flight adapter initialization resumes", async () => {
+  const { root, stateDir } = await fixture();
+  const provider = new FakeProvider("claude");
+  let markInitializeEntered: (() => void) | undefined;
+  let releaseInitialize: (() => void) | undefined;
+  const initializeEntered = new Promise<void>((resolve) => {
+    markInitializeEntered = resolve;
+  });
+  const initializeMayFinish = new Promise<void>((resolve) => {
+    releaseInitialize = resolve;
+  });
+  let markCloseEntered: (() => void) | undefined;
+  let releaseClose: (() => void) | undefined;
+  const closeEntered = new Promise<void>((resolve) => {
+    markCloseEntered = resolve;
+  });
+  const closeMayFinish = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  provider.initialize = async (callbacks) => {
+    provider.callbacks = callbacks;
+    markInitializeEntered?.();
+    await initializeMayFinish;
+    return { health: "healthy", compatibility: "compatible" };
+  };
+  provider.close = async () => {
+    markCloseEntered?.();
+    await closeMayFinish;
+    provider.closed = true;
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [provider],
+  });
+  const abort = new AbortController();
+
+  try {
+    const starting = service.start(abort.signal);
+    await initializeEntered;
+    abort.abort();
+    releaseInitialize?.();
+    await closeEntered;
+    let concurrentCloseSettled = false;
+    const closing = service.close().then(() => {
+      concurrentCloseSettled = true;
+    });
+    await immediate();
+    assert.equal(concurrentCloseSettled, false);
+    releaseClose?.();
+
+    await assert.rejects(
+      starting,
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "GATEWAY_START_CANCELLED",
+    );
+    await closing;
+    assert.equal(concurrentCloseSettled, true);
+    assert.equal(provider.closed, true);
+    assert.equal((await service.handlers().health()).status, "degraded");
+  } finally {
+    releaseInitialize?.();
+    releaseClose?.();
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent service close callers join the same provider cleanup", async () => {
+  const { root, stateDir } = await fixture();
+  const provider = new FakeProvider("claude");
+  let closeCalls = 0;
+  let markCloseEntered: (() => void) | undefined;
+  let releaseClose: (() => void) | undefined;
+  const closeEntered = new Promise<void>((resolve) => {
+    markCloseEntered = resolve;
+  });
+  const closeMayFinish = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  provider.close = async () => {
+    closeCalls += 1;
+    markCloseEntered?.();
+    await closeMayFinish;
+    provider.closed = true;
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [provider],
+  });
+
+  try {
+    await service.start();
+    const first = service.close();
+    await closeEntered;
+    let secondSettled = false;
+    const second = service.close().then(() => {
+      secondSettled = true;
+    });
+    await immediate();
+    assert.equal(secondSettled, false);
+    assert.equal(closeCalls, 1);
+    releaseClose?.();
+    await Promise.all([first, second]);
+    assert.equal(closeCalls, 1);
+    assert.equal(secondSettled, true);
+  } finally {
+    releaseClose?.();
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Codex registration requires the native codex-* namespace", async (t) => {
   const { root, stateDir, workspace } = await fixture();
@@ -677,6 +804,86 @@ test("transient Codex dispatch failures return to held queue and retry", async (
     ),
     false,
   );
+});
+
+test("idle Codex re-registration wakes an already-held native message without another route notification", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await discoverAndRegisterCodexOnly(handlers);
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: {
+      ...claude.identity,
+      routeHandle: "claude_target_1",
+    },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "wake this exact held body once",
+    receiptHandle: "receipt-reregister-wake",
+  });
+
+  await waitForAsync(async () => {
+    const snapshot = await handlers.listSnapshot();
+    return (
+      snapshot.routes.some(
+        (route) =>
+          route.alias === "codex-main@this-mac" && route.queueDepth === 1,
+      ) &&
+      snapshot.messages.some(
+        (event) =>
+          event.direction === "claude_to_codex" && event.state === "held",
+      )
+    );
+  });
+  assert.equal(codex.dispatches.length, 0);
+
+  codex.dispatchResults.push({ state: "delivered" });
+  codex.state = "idle";
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  // No emitRouteState call follows registration: the returned idle state must
+  // wake the existing queue by itself.
+  await waitFor(() => codex.dispatches.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(codex.dispatches.length, 1);
+  assert.equal(codex.dispatches[0]?.text, "wake this exact held body once");
+  await waitForAsync(async () => {
+    const snapshot = await handlers.listSnapshot();
+    return (
+      snapshot.routes.some(
+        (route) =>
+          route.alias === "codex-main@this-mac" && route.queueDepth === 0,
+      ) &&
+      snapshot.messages.some(
+        (event) =>
+          event.direction === "claude_to_codex" && event.state === "delivered",
+      )
+    );
+  });
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-reregister-wake",
+      status: "delivered",
+    },
+  ]);
 });
 
 test("native Claude ingress reports delivery without approval-like held notices while internal queueing remains visible", async (t) => {

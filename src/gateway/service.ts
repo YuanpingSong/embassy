@@ -324,6 +324,7 @@ export class GatewayService {
   private revision = 0;
   private running = false;
   private closing = false;
+  private closeInFlight: Promise<void> | undefined;
   private acceptingCallbacks = true;
   private dashboardHealthy = true;
 
@@ -341,10 +342,21 @@ export class GatewayService {
     );
   }
 
-  async start(): Promise<void> {
+  async start(signal?: AbortSignal): Promise<void> {
     if (this.running || this.closing) return;
+    const assertStartActive = (): void => {
+      if (signal?.aborted === true || this.closing) {
+        throw new BridgeError(
+          "GATEWAY_START_CANCELLED",
+          "Gateway startup was cancelled before it became ready.",
+          true,
+        );
+      }
+    };
+    assertStartActive();
     await this.store.initialize();
     try {
+      assertStartActive();
       const seen = new Set<string>();
       for (const adapter of this.adapters) {
         const key = `${adapter.identity.provider}@${adapter.identity.hostId}`;
@@ -355,6 +367,7 @@ export class GatewayService {
         const observation = await adapter.initialize(
           this.callbacksFor(adapter.identity),
         );
+        assertStartActive();
         await this.store.observeConnector({
           identity: adapter.identity,
           health: observation.health,
@@ -365,24 +378,44 @@ export class GatewayService {
             ? {}
             : { safeErrorCode: safeCode(observation.safeErrorCode, "ADAPTER_DEGRADED") }),
         });
+        assertStartActive();
       }
-      this.control = await startGatewayControlServer({
+      const control = await startGatewayControlServer({
         stateDir: this.store.rootDir,
         socketPath: this.config.controlSocketPath,
         handlers: this.handlers(),
       });
+      try {
+        assertStartActive();
+      } catch (error) {
+        await control.close();
+        throw error;
+      }
+      this.control = control;
       this.running = true;
       await this.publish();
+      assertStartActive();
     } catch (error) {
-      await Promise.allSettled(this.adapters.map(async (adapter) => adapter.close()));
-      await this.store.close();
+      this.running = false;
+      // Startup and the server's lease-loss path may observe the same failure
+      // from opposite sides. Join the one canonical cleanup so no caller can
+      // release host ownership while an adapter/store close is still active.
+      await this.close();
       throw error;
     }
   }
 
   async close(): Promise<void> {
-    if (this.closing) return;
+    if (this.closeInFlight !== undefined) {
+      return await this.closeInFlight;
+    }
     this.closing = true;
+    const close = this.closeOnce();
+    this.closeInFlight = close;
+    return await close;
+  }
+
+  private async closeOnce(): Promise<void> {
     const control = this.control;
     this.control = undefined;
     let closeFailed = false;
@@ -810,6 +843,11 @@ export class GatewayService {
           : "busy",
     );
     await this.changed();
+    // The provider may have reported its initial idle observation before this
+    // binding was remembered. Explicit registration is itself an authoritative
+    // wake-up point, so do not require a second route notification to release a
+    // message that was already held for this exact target.
+    if (registered.state === "idle") this.scheduleDispatch(params.alias);
   }
 
   private async unregisterCodex(params: UnregisterCodexParams): Promise<void> {

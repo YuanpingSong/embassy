@@ -15,7 +15,7 @@ Address a Claude session by its latest `name@host` or by a user-supplied native 
 
 Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus the one explicitly advertised `codex-*` Embassy peer.
 
-Read the status snapshot's `availablePeers` as sanitized current-name candidates. A send never selects a Claude session automatically. Run `select-claude` for the exact user-chosen current name or UUID before sending; an unselected destination is not routable.
+Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native `codex-*` gateway advertisements are excluded because they are not Claude destinations. A send never selects a Claude session automatically. Run `select-claude` for the exact user-chosen current name or UUID before sending; an unselected destination is not routable.
 
 Accept a Claude session UUID only when the user supplies it or it is already part of the current task context. Never discover one by scanning history or configuration, and never infer a peer from a thread ID, process ID, working directory, socket path, or title.
 
@@ -27,7 +27,7 @@ Run this before a state-changing operation:
 embassy health
 ```
 
-If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
+If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
 List the public snapshot:
 
@@ -124,9 +124,9 @@ The CLI infers the caller from the inherited environment. In a Codex task it use
 
 ## Interpret queue state
 
-Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `status` or the dashboard once when the user asks for progress. The v1 busy policy is queue-only: an active or temporarily unavailable destination may remain queued until its exact route is ready.
+Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `status` or the dashboard once when the user asks for progress. The v1 busy policy is queue-only: an active or temporarily unavailable destination may remain queued until its exact route is ready. If a registered Codex connector is closed or faulted, an explicit `register-codex` replaces it and wakes held work when the recovered route is idle; it never retries an ambiguous write.
 
-Do not steer an active turn, approve permissions, widen tools, or alter inbound-message policy. Report held, refused, incompatible, full, expired, or unavailable states without retrying. Ordinary process/socket rotation for the same Claude UUID is refreshed automatically and is not a reason to ask for reselection. Message bodies exist only in gateway memory; after a gateway restart, queued or in-flight bodies are discarded and routes must be re-observed before a new send.
+Do not steer an active turn, approve permissions, widen tools, or alter inbound-message policy. Report held, refused, incompatible, full, expired, or unavailable states without retrying. Ordinary process/socket rotation for the same Claude UUID is refreshed automatically and is not a reason to ask for reselection while the same gateway process remains live. After a gateway restart, the prior Claude binding is stored but stale: run `select-claude` again after authorized discovery. Queued or in-flight text, pending replies, and conversation capabilities do not survive.
 
 ## Preserve the boundary
 

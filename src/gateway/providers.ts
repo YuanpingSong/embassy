@@ -264,7 +264,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
     this.callbacks = callbacks;
     try {
-      this.listener = await this.peer.listen({
+      const listener = await this.peer.listen({
         onMessage: async (message) => {
           if (
             message.sourceTargetId === undefined ||
@@ -348,6 +348,14 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         },
         onReceipt: (event) => this.onReceipt(event),
       });
+      if (this.closed) {
+        await listener.close();
+        throw new BridgeError(
+          "CLAUDE_PROVIDER_CLOSED",
+          "The local Claude provider closed during initialization.",
+        );
+      }
+      this.listener = listener;
       this.initialized = true;
       return { health: "healthy", compatibility: "compatible" };
     } catch {
@@ -817,7 +825,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     for (const peer of discovery.peers) {
       if (
         peer.kind !== "interactive" ||
-        !NATIVE_CLAUDE_NAME.test(peer.alias)
+        !NATIVE_CLAUDE_NAME.test(peer.alias) ||
+        peer.alias.startsWith("codex-")
       ) {
         continue;
       }
@@ -956,6 +965,7 @@ export type LocalCodexGatewayProviderOptions = {
 
 type CodexRoute = {
   connector: CodexAppServerConnector;
+  generation: symbol;
   threadId: string;
   transport: LocalCodexOwnedTransport;
 };
@@ -964,6 +974,7 @@ type CodexCallbackEvent =
   | { type: "delivery"; value: GatewayAdapterDelivery }
   | {
       type: "route";
+      generation: symbol;
       routeHandle: string;
       state: GatewayAdapterRouteState;
       safeErrorCode?: string;
@@ -1125,7 +1136,14 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     const route = await this.ensureRoute(input.routeHandle);
     const observation = route.connector.observation();
-    this.queueRouteObservation(input.routeHandle, observation);
+    if (observation.connection !== "ready") {
+      await this.releaseRoute(input.routeHandle);
+      throw new BridgeError(
+        "CODEX_ROUTE_SETUP_REJECTED",
+        "The exact Codex task connection closed during route selection.",
+      );
+    }
+    this.queueRouteObservation(route, observation);
     return {
       routeHandle: input.routeHandle,
       state: codexRouteState(observation),
@@ -1265,8 +1283,25 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   }
 
   private async ensureRoute(threadId: string): Promise<CodexRoute> {
+    this.assertReady();
+    const pendingRelease = this.routeReleases.get(threadId);
+    if (pendingRelease !== undefined) {
+      await pendingRelease;
+      return await this.ensureRoute(threadId);
+    }
     const existing = this.routes.get(threadId);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      if (existing.connector.observation().connection === "ready") {
+        return existing;
+      }
+      // A cached connector cannot recover after its transport closes or the
+      // protocol faults. Explicit route selection is the operator's recovery
+      // boundary: fully release that exact connector before constructing a
+      // fresh one. releaseRoute is identity-checked, so a concurrent selector
+      // joins the same cleanup instead of closing a replacement.
+      await this.releaseRoute(threadId);
+      return await this.ensureRoute(threadId);
+    }
     const pending = this.routeCreations.get(threadId);
     if (pending !== undefined) return await pending;
     if (this.routes.size + this.routeCreations.size >= this.maxRoutes) {
@@ -1297,6 +1332,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private async createRoute(threadId: string): Promise<CodexRoute> {
     let transport: LocalCodexOwnedTransport | undefined;
     let connector: CodexAppServerConnector | undefined;
+    const generation = Symbol(threadId);
     try {
       transport = await this.factory.connectTransport();
       const writesEnabled =
@@ -1314,7 +1350,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         transport,
         maxReplyBytes: this.maxReplyBytes,
         now: this.now,
-        onEvent: (event) => this.onConnectorEvent(threadId, event),
+        onEvent: (event) =>
+          this.onConnectorEvent(threadId, generation, event),
         onTurnResult: (result) => this.onTurnResult(result),
       });
       const loaded = await connector.observeLoadedThread(connector.guard());
@@ -1327,10 +1364,11 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       await connector.resumeThread(connector.guard());
       const route = {
         connector,
+        generation,
         threadId,
         transport,
       };
-      this.queueRouteObservation(threadId, connector.observation());
+      this.queueRouteObservation(route, connector.observation());
       return route;
     } catch (error) {
       if (connector !== undefined) {
@@ -1356,9 +1394,12 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   private onConnectorEvent(
     threadId: string,
+    generation: symbol,
     event: CodexConnectorEvent,
   ): void {
-    this.queueRouteObservation(threadId, event);
+    const route = this.routes.get(threadId);
+    if (route === undefined || route.generation !== generation) return;
+    this.queueRouteObservation(route, event);
   }
 
   private onTurnResult(result: CodexTransientTurnResult): void {
@@ -1405,12 +1446,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   }
 
   private queueRouteObservation(
-    threadId: string,
+    route: CodexRoute,
     observation: CodexConnectorObservation,
   ): void {
     this.enqueueCodexCallback({
       type: "route",
-      routeHandle: threadId,
+      generation: route.generation,
+      routeHandle: route.threadId,
       state: codexRouteState(observation),
       ...(codexRouteSafeCode(observation) === undefined
         ? {}
@@ -1448,6 +1490,11 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     if (event.type === "delivery") {
       invokeCallback(() => callbacks.onDelivery(event.value));
     } else {
+      if (
+        this.routes.get(event.routeHandle)?.generation !== event.generation
+      ) {
+        return;
+      }
       invokeCallback(() =>
         callbacks.onRouteState({
           endpoint: callbackEndpoint(this.identity, event.routeHandle),

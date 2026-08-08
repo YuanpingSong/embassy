@@ -67,7 +67,7 @@ There is an intentional asymmetry:
 
 Embassy queues messages while the Codex task is busy and starts an ordinary turn when it is available. It never exposes `turn/steer`. It may interrupt only a turn that the same connector started and positively observed, such as during controlled shutdown.
 
-The gateway creates one callback socket and one `codex-*` registry record while it runs. It removes both during graceful shutdown. After a crash, stale artifacts are rejected by process-liveness and generation checks.
+The gateway creates one callback socket and one `codex-*` registry record while it runs. It removes both during graceful shutdown. After a crash, stale artifacts are rejected by process-liveness and generation checks. A fixed host-wide lease permits only one Embassy controller for the current login account, even when `EMBASSY_STATE_DIR` differs between launches.
 
 ## Quickstart
 
@@ -94,7 +94,7 @@ embassy health
 embassy status
 ```
 
-The `availablePeers` list in `status` contains the current names you can select.
+The `availablePeers` list in `status` contains the current genuine Claude names you can select. Native `codex-*` advertisements from another gateway are not Claude destinations and are excluded.
 
 ### 2. Register the Codex task
 
@@ -123,6 +123,8 @@ embassy select-claude --session 123e4567-e89b-42d3-a456-426614174000
 ```
 
 Embassy never prints or discovers that UUID for you.
+
+After Embassy itself restarts, the prior Claude binding remains stored but stale. Run `select-claude` again after an authorized live discovery before sending. No queued text, pending reply, or conversation capability survives the restart.
 
 ### 4. Send a message
 
@@ -181,9 +183,9 @@ Provider-authorized commands inherit exactly one identity: a Codex task's `CODEX
 - **Queue while busy.** Embassy queues for an active Codex task and dispatches after it becomes available. It does not steer or interrupt someone else's turn to force delivery.
 - **Acceptance is not completion.** Initial CLI acceptance returns a conversation token. Successful destination or App Server acceptance settles as `delivered`.
 - **Native failures.** A Claude-originated route or delivery failure settles as native `expired`, followed by one static `<gateway-delivery-diagnostic>` frame containing a safe error code. It contains no path, native identifier, exception, or message body. `denied` is reserved for a real user or policy refusal and is not authored by Embassy v1. `held` and transport-written are progress, never success.
-- **Retries are conservative.** Messages that have not been dispatched remain queued while their route is busy or temporarily unavailable. An explicit clean adapter deferral can return the same body to the queue. A confirmed delivery failure settles; an ambiguous write is never retried automatically.
+- **Retries are conservative.** Messages that have not been dispatched remain queued while their route is busy or temporarily unavailable. Re-running `register-codex` replaces a closed or faulted App Server connector and wakes held work when the recovered route is idle. An explicit clean adapter deferral can return the same body to the queue. A confirmed delivery failure settles; an ambiguous write is never retried automatically.
 - **Bounded by design.** Bodies, queues, rate windows, deduplication tables, deadlines, hop counts, and transient conversations all have fixed limits.
-- **Restarts do not replay text.** Queued and in-flight bodies live only in memory. If Embassy stops before settlement, metadata becomes abandoned, bodies are discarded, and nothing is replayed. Restored routes remain stale until their exact endpoints are positively re-observed.
+- **Restarts do not replay text.** Queued and in-flight bodies live only in memory. If Embassy stops before settlement, metadata becomes abandoned, bodies are discarded, and nothing is replayed. A prior Claude binding remains stored but stale; after authorized live discovery, run `select-claude` again. No pending reply or conversation capability survives.
 
 Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. The dashboard distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.
 
@@ -195,7 +197,7 @@ Embassy creates a new input path between two powerful local agents. Treat every 
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Another process already running as your OS user can present that identity. Route ownership, exact endpoint generation, bounds, and conversation state reduce mistakes; they are not a defense against code you already allowed to run as you.
 - **Explicit outbound consent.** A Codex task cannot send to a merely discovered Claude candidate. The operator must select it first. Inbound native Claude senders are validated as exact compatible live sessions but do not become outbound-selected automatically.
 - **Native permissions remain native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. For Codex-to-Claude delivery, `crossSessionInbound` remains Claude's native control for accepting, holding, or refusing messages entering the selected Claude session; Embassy cannot override it.
-- **Narrow filesystem and process access.** Embassy reads and executes the configured Claude launcher only for bounded version attestation, reads the live Claude registry, connects validated peer sockets, creates its own callback socket and one registry record, resolves the managed Codex installation, and attaches to the already-running local App Server. It may inspect canonical metadata for provider-advertised paths. It writes persistent data only to its own private state directory and removes only its exact-owned provider artifacts.
+- **Narrow filesystem and process access.** Embassy reads and executes the configured Claude launcher only for bounded version attestation, uses fixed macOS `/usr/bin/lockf` plus `/bin/cat` to hold its private host lease, reads the live Claude registry, connects validated peer sockets, creates its own callback socket and one registry record, resolves the managed Codex installation, and attaches to the already-running local App Server. It may inspect canonical metadata for provider-advertised paths. It writes persistent data only to its configured private state directory plus the fixed private host-lease record under `~/.local/state/agent-embassy`, and removes only its exact-owned provider artifacts.
 - **No credential or transcript access.** Embassy never reads credentials, Keychain items, Claude project history, Codex or Claude transcripts, shell history, or provider configuration contents.
 - **Private persistence.** Message bodies, prompts, replies, raw provider frames, callback addresses, and socket paths are never persisted. Closed mode-0600 route bindings retain the Codex thread ID and Claude session UUID needed for ownership and restart re-observation. Those identifiers never enter normalized events, the dashboard, aliases, logs, errors, or CLI output. A Claude UUID may appear only when the user supplies it as an explicit CLI selector.
 - **Static dashboard.** `gateway-dashboard.html` is a self-contained mode-0600 file atomically rewritten under the state directory. It has inline CSS and meta refresh, but no JavaScript, server, external assets, cookies, storage, telemetry, or mutation endpoint. It displays metadata—not message content—including aliases, route state, timestamps, byte counts, and queue depth.
@@ -226,7 +228,7 @@ Common configuration:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute |
+| `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute and does not relocate the fixed host-wide lease |
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`, resolved to the pinned version target | Absolute Claude Code launcher path; `PATH` is not searched |
 
 Advanced bounds retain conservative defaults:
@@ -262,7 +264,8 @@ The dashboard is deliberately a file rather than a web application. Anything alr
 Embassy is the public gateway extracted from an unpublished internal prototype.
 
 - The prototype's one-way MCP task lifecycle is retired and is not part of Embassy v1.
-- Embassy starts with clean state under `agent-embassy`; it does not migrate prototype state. Register the Codex task and select the Claude destination again.
+- Stop any foreground prototype gateway before the first `embassy serve`. For one release, Embassy bounded-reads only the exact legacy default ownership marker and controller-lock record, then holds a newly created legacy lock while running. Any pre-existing legacy lock is preserved and startup stops as `GATEWAY_INSTANCE_IN_USE`; after confirming no prototype process remains, remove that exact stale lock manually and retry. Legacy gateway state and message data are not imported, migrated, or deleted.
+- Embassy starts with clean state under `agent-embassy`; it does not migrate prototype state. Register the Codex task and select the Claude destination again. A state-directory override cannot be used to run a second controller.
 - `claude-codex-gateway` remains as a deprecated binary alias for one release. New usage should call `embassy`.
 
 ## Development

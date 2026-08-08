@@ -67,6 +67,10 @@ message content trustworthy.
 ## Process and protocol boundary
 
 - The v1 launcher is foreground, macOS-only, same-machine, and local-host-only.
+- Before provider setup, the launcher acquires one host-wide macOS advisory
+  lease. If its lease helper exits or the lease is otherwise lost
+  unexpectedly, Embassy shuts down rather than continuing without singleton
+  ownership.
 - The control plane is a private Unix-domain socket in a controller-owned
   mode-0700 state directory. Embassy has no TCP or HTTP listener.
 - Provider protocols are version-pinned. Unknown Claude Code peer or Codex App
@@ -93,6 +97,14 @@ message content trustworthy.
 Controller-owned state is a dedicated mode-0700 directory. Its files and
 control socket are mode 0600 and validated against replacement, symlinks, and
 unexpected ownership or permissions.
+
+The host-wide singleton has one fixed surface under the verified login home:
+the private mode-0700 `~/.local/state/agent-embassy` directory and its mode-0600
+`.gateway-host.lock`. Neither `EMBASSY_STATE_DIR` nor `XDG_STATE_HOME` relocates
+that lease. Embassy executes the exact `/usr/bin/lockf` and `/bin/cat` helpers,
+without a shell, to hold the kernel lease for the foreground process lifetime.
+The lock file is retained and reused across restarts; process exit releases the
+kernel lock.
 
 Embassy's provider-facing access is intentionally enumerable:
 
