@@ -24,17 +24,33 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: npm-shrinkwrap.json
 
-      - name: Install dependencies
+      - name: Pin the declared npm version
+        run: |
+          npm install --global npm@10.9.8 --ignore-scripts
+          test "$(npm --version)" = "10.9.8"
+
+      - name: Install dependencies on macOS
+        if: runner.os == 'macOS'
         run: npm ci
+
+      # The deterministic TypeScript suite is platform-independent. This
+      # Linux-only test install uses --force to bypass the root package's macOS
+      # publish guard; release/package jobs use normal installs, and no Linux
+      # artifact ships.
+      - name: Install dependencies for Linux checks
+        if: runner.os == 'Linux'
+        run: npm ci --force
 
       - name: Run deterministic checks
         run: npm run check
@@ -47,14 +63,21 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.x
           cache: npm
           cache-dependency-path: npm-shrinkwrap.json
+
+      - name: Pin the declared npm version
+        run: |
+          npm install --global npm@10.9.8 --ignore-scripts
+          test "$(npm --version)" = "10.9.8"
 
       - name: Install dependencies
         run: npm ci
@@ -62,33 +85,59 @@ jobs:
       - name: Build and inspect the dry-run package
         shell: bash
         run: |
-          npm pack --dry-run --json > package-dry-run.json
-          node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            const reports = JSON.parse(readFileSync("package-dry-run.json", "utf8"));
-            if (!Array.isArray(reports) || reports.length !== 1) {
-              throw new Error("Expected exactly one npm package report");
+          npm pack --dry-run --json > package-report.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const reports = JSON.parse(readFileSync("package-report.json", "utf8"));
+          if (!Array.isArray(reports) || reports.length !== 1) {
+            throw new Error("Expected exactly one npm package report");
+          }
+
+          const [report] = reports;
+          const expectedFilename = `${pkg.name.replace(/^@/, "").replaceAll("/", "-")}-${pkg.version}.tgz`;
+          if (report.name !== pkg.name || report.version !== pkg.version) {
+            throw new Error("npm package identity does not match package.json");
+          }
+          if (report.filename !== expectedFilename) {
+            throw new Error(`Unexpected package filename: ${report.filename}`);
+          }
+
+          const paths = new Set(report.files.map(({ path }) => path));
+          if (paths.size !== report.files.length) {
+            throw new Error("npm package report contains duplicate paths");
+          }
+
+          const exactPaths = new Set([
+            "CHANGELOG.md",
+            "CONTRIBUTING.md",
+            "LICENSE",
+            "README.md",
+            "SECURITY.md",
+            "docs/GATEWAY-ARCHITECTURE.md",
+            "package.json",
+            "skills/embassy-peer/SKILL.md",
+            "skills/embassy-peer/agents/openai.yaml",
+          ]);
+          const requiredPaths = [
+            ...exactPaths,
+            "dist/src/gateway/cli.js",
+            "dist/src/gateway/server.js",
+          ];
+          const allowedRuntimePath =
+            /^(?:dist\/src\/gateway\/[a-z0-9-]+\.(?:d\.ts|js|js\.map)|dist\/src\/(?:errors|mutex)\.(?:d\.ts|js|js\.map))$/;
+          const forbiddenLegacyPath = /(?:^|[-/])(?:mcp|lifecycle)(?:[-./]|$)/i;
+
+          for (const path of requiredPaths) {
+            if (!paths.has(path)) throw new Error(`Missing required package file: ${path}`);
+          }
+          for (const path of paths) {
+            if (
+              forbiddenLegacyPath.test(path) ||
+              (!exactPaths.has(path) && !allowedRuntimePath.test(path))
+            ) {
+              throw new Error(`Unexpected package file: ${path}`);
             }
-            const paths = new Set(reports[0].files.map(({ path }) => path));
-            const required = [
-              "package.json",
-              "README.md",
-              "LICENSE",
-              "dist/src/gateway/cli.js",
-              "skills/embassy-peer/SKILL.md",
-              "docs/GATEWAY-ARCHITECTURE.md",
-            ];
-            const allowedRuntimePath =
-              /^(?:dist\/src\/gateway\/|dist\/src\/(?:errors|mutex)\.(?:js(?:\.map)?|d\.ts)$)/;
-            for (const path of required) {
-              if (!paths.has(path)) throw new Error(`Missing required package file: ${path}`);
-            }
-            for (const path of paths) {
-              if (
-                (path.startsWith("dist/src/") && !allowedRuntimePath.test(path)) ||
-                path === "pnpm-lock.yaml"
-              ) {
-                throw new Error(`Forbidden legacy package file: ${path}`);
-              }
-            }
-          '
+          }
+          NODE
