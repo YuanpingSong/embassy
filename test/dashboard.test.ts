@@ -15,752 +15,372 @@ import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
 
+import { dashboardCopyEn } from "../src/gateway/dashboard-copy.en.js";
+import { dashboardCopyZhCn } from "../src/gateway/dashboard-copy.zh-CN.js";
+import { dashboardCopyKeys } from "../src/gateway/dashboard-copy.js";
 import {
   DASHBOARD_ALERT_LIMIT,
-  DASHBOARD_FILE_NAME,
   DASHBOARD_AVAILABLE_PEER_LIMIT,
   DASHBOARD_CONNECTOR_LIMIT,
+  DASHBOARD_FILE_NAME,
   DASHBOARD_MAX_HTML_BYTES,
   DASHBOARD_MESSAGE_LIMIT,
   DASHBOARD_ROUTE_LIMIT,
+  DASHBOARD_ZH_CN_FILE_NAME,
   escapeDashboardHtml,
   renderDashboardHtml,
   writeDashboardSnapshot,
   type DashboardSnapshot,
 } from "../src/gateway/dashboard.js";
+import { buildDashboardViewModel } from "../src/gateway/dashboard-model.js";
+import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
 
-function exampleSnapshot(): DashboardSnapshot {
-  return {
-    schemaVersion: 1,
-    generatedAt: "2026-08-07T16:30:00.000Z",
-    health: "healthy",
-    connectors: [
-      {
-        provider: "codex",
-        host: "this-mac",
-        health: "healthy",
-        compatibility: "compatible",
-        protocol: "app-server/1",
-        protocolVersion: "1",
-        lastSeenAt: "2026-08-07T16:29:59.000Z",
-      },
-      {
-        provider: "claude",
-        host: "this-mac",
-        health: "healthy",
-        compatibility: "compatible",
-        protocol: "peer/1",
-        protocolVersion: "1",
-        lastSeenAt: "2026-08-07T16:29:59.000Z",
-      },
-    ],
-    availablePeers: [
-      {
-        alias: "claude-advisor@this-mac",
-        provider: "claude",
-        host: "this-mac",
-        state: "busy",
-        compatibility: "compatible",
-        selected: true,
-        lastSeenAt: "2026-08-07T16:29:59.000Z",
-      },
-      {
-        alias: "review-peer@this-mac",
-        provider: "claude",
-        host: "this-mac",
-        state: "idle",
-        compatibility: "compatible",
-        selected: false,
-        lastSeenAt: "2026-08-07T16:29:58.000Z",
-      },
-    ],
-    routes: [
-      {
-        alias: "codex-reviewer@this-mac",
-        provider: "codex",
-        host: "this-mac",
-        enabled: true,
-        state: "idle",
-        compatibility: "compatible",
-        busyPolicy: "queue",
-        lastSeenAt: "2026-08-07T16:29:58.000Z",
-        queueDepth: 2,
-        counters: {
-          accepted: 4,
-          delivered: 3,
-          unconfirmed: 0,
-          failed: 0,
-          ambiguous: 0,
-          expired: 0,
-          cancelled: 0,
-          abandoned: 0,
-          rejected: 0,
-          bytesAccepted: 342,
-        },
-      },
-      {
-        alias: "claude-advisor@this-mac",
-        provider: "claude",
-        host: "this-mac",
-        enabled: true,
-        state: "busy",
-        compatibility: "compatible",
-        busyPolicy: "queue",
-        lastSeenAt: "2026-08-07T16:29:57.000Z",
-        queueDepth: 0,
-        counters: {
-          accepted: 1,
-          delivered: 1,
-          unconfirmed: 0,
-          failed: 0,
-          ambiguous: 0,
-          expired: 0,
-          cancelled: 0,
-          abandoned: 0,
-          rejected: 0,
-          bytesAccepted: 120,
-        },
-      },
-    ],
-    messages: [
-      {
-        sequence: 1,
-        direction: "claude_to_codex",
-        sourceAlias: "claude-advisor@this-mac",
-        targetAlias: "codex-reviewer@this-mac",
-        messageIdSuffix: "a1b2c3",
-        state: "delivered",
-        timestamp: "2026-08-07T16:29:56.000Z",
-        latencyMs: 18,
-        bytes: 342,
-        hopCount: 0,
-        safeErrorCode: "DELIVERED",
-      },
-    ],
-    accounting: {
-      accepted: 4,
-      duplicates: 0,
-      delivered: 3,
-      unconfirmed: 0,
-      failed: 0,
-      ambiguous: 0,
-      expired: 0,
-      cancelled: 0,
-      abandoned: 0,
-      rejected: 0,
-      bytesAccepted: 462,
-      queuedBytes: 0,
-    },
-    alerts: [],
-    truncation: {
-      connectors: 0,
-      availablePeers: 0,
-      routes: 0,
-      messages: 0,
-      alerts: 0,
-    },
-  };
-}
-
-test("dashboard rendering is branded, deterministic, static, and self-contained", () => {
-  const snapshot = exampleSnapshot();
-  const first = renderDashboardHtml(snapshot, { refreshSeconds: 7 });
-  const second = renderDashboardHtml(snapshot, { refreshSeconds: 7 });
-
-  assert.equal(first, second);
-  assert.match(first, /^<!doctype html>/);
-  assert.match(first, /<meta http-equiv="refresh" content="7">/);
-  assert.match(first, /Content-Security-Policy/);
-  assert.match(first, /<main id="main">/);
-  assert.match(first, /<title>Embassy<\/title>/);
-  assert.match(first, /<h1>Embassy<\/h1>/);
-  assert.match(first, /Local agent gateway/);
-  assert.match(first, /metadata-only snapshot/);
-  assert.match(first, /color-scheme" content="light dark"/);
-  assert.match(first, /@media \(prefers-color-scheme: dark\)/);
-  assert.match(first, /@media \(forced-colors: active\)/);
-  assert.match(first, /@media \(max-width: 640px\)/);
-  assert.match(
-    first,
-    /<caption>Discovered Claude sessions and explicit selection state<\/caption>/,
-  );
-  assert.match(
-    first,
-    /<caption>Messages grouped from bounded normalized delivery events<\/caption>/,
-  );
-  assert.match(first, />Selected<\/span>/);
-  assert.equal(first.includes("Agent Gateway Monitor"), false);
-  assert.equal(first.includes("Local, private snapshot"), false);
-  assert.equal(first.includes("CODEX_POLICY_MONITOR_ONLY"), false);
-  assert.equal(first.includes("CODEX_WORKSPACE_UNATTESTED"), false);
-  assert.equal(first.includes("workspace attestation needs renewal"), false);
-  assert.equal(first.includes("genuine"), false);
-  assert.equal(first.includes("<script"), false);
-  assert.equal(first.includes("javascript:"), false);
-  assert.equal(first.includes("http://"), false);
-  assert.equal(first.includes("https://"), false);
-  assert.equal(first.includes("localStorage"), false);
-  assert.equal(first.includes("sessionStorage"), false);
-  assert.equal(first.includes("document.cookie"), false);
-  assert.ok(Buffer.byteLength(first, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
-
-  const paused = renderDashboardHtml(snapshot, { refreshSeconds: 0 });
-  assert.equal(paused.includes('http-equiv="refresh"'), false);
-  assert.match(paused, /Automatic reload is paused/);
-  assert.match(paused, /Status is accurate at snapshot time/);
+test("dashboard catalogs have exact key parity", () => {
+  const expected = [...dashboardCopyKeys].sort();
+  assert.deepEqual(Object.keys(dashboardCopyEn).sort(), expected);
+  assert.deepEqual(Object.keys(dashboardCopyZhCn).sort(), expected);
+  for (const key of dashboardCopyKeys) {
+    assert.ok(dashboardCopyEn[key].trim().length > 0, `English ${key}`);
+    assert.ok(dashboardCopyZhCn[key].trim().length > 0, `Chinese ${key}`);
+    const placeholders = (value: string): string[] =>
+      [...value.matchAll(/\{([a-zA-Z][a-zA-Z0-9]*)\}/g)]
+        .map((match) => match[1]!)
+        .sort();
+    assert.deepEqual(
+      placeholders(dashboardCopyZhCn[key]),
+      placeholders(dashboardCopyEn[key]),
+      `placeholder parity for ${key}`,
+    );
+  }
 });
 
-test("dashboard reports explicit projection omissions and progress states", () => {
-  const snapshot = exampleSnapshot();
-  snapshot.truncation.availablePeers = 12;
-  snapshot.truncation.messages = 34;
-  snapshot.messages[0]!.state = "transport_written";
-  const written = renderDashboardHtml(snapshot);
-  assert.match(
-    written,
-    /Bounded display:<\/strong> omitted 12 Claude sessions, 34 delivery records\./,
-  );
-  assert.ok(written.includes("Transport written"));
-  assert.match(written, /status--info[^>]*>.*Transport written/s);
-  snapshot.messages[0]!.state = "held";
-  assert.ok(renderDashboardHtml(snapshot).includes(">Held</span>"));
+test("English and Chinese render one semantic model with reciprocal local links", () => {
+  const snapshot = dashboardFixture();
+  const model = buildDashboardViewModel(snapshot);
+  const en = renderDashboardHtml(snapshot, { locale: "en", refreshSeconds: 2 });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+
+  assert.equal(renderDashboardHtml(snapshot, { locale: "en" }), en);
+  assert.match(en, /^<!doctype html>\n<html lang="en">/);
+  assert.match(zh, /^<!doctype html>\n<html lang="zh-CN">/);
+  assert.match(en, new RegExp(`href="\\./${DASHBOARD_ZH_CN_FILE_NAME}"`));
+  assert.match(zh, new RegExp(`href="\\./${DASHBOARD_FILE_NAME}"`));
+  assert.match(en, /lang="zh-CN" hreflang="zh-CN"/);
+  assert.match(zh, /lang="en" hreflang="en"/);
+  assert.equal((en.match(/data-dashboard-row="message-summary"/g) ?? []).length, model.activity.length);
+  assert.equal((zh.match(/data-dashboard-row="message-summary"/g) ?? []).length, model.activity.length);
+  for (const state of model.activity.map((message) => message.state)) {
+    assert.equal((en.match(new RegExp(`data-delivery-state="${state}"`, "g")) ?? []).length, 1);
+    assert.equal((zh.match(new RegExp(`data-delivery-state="${state}"`, "g")) ?? []).length, 1);
+  }
+  assert.ok(Buffer.byteLength(en, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
+  assert.ok(Buffer.byteLength(zh, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
 });
 
-test("dashboard summarizes asymmetric directional readiness", () => {
-  const html = renderDashboardHtml(exampleSnapshot());
+test("runtime locale selection rejects every value outside the closed allowlist", () => {
+  const hostile = `zh-CN\"><script>LOCALE_ATTACK</script>`;
+  assert.throws(
+    () =>
+      renderDashboardHtml(dashboardFixture(), {
+        locale: hostile as "en",
+      }),
+    { message: "DASHBOARD_LOCALE_UNSUPPORTED" },
+  );
+  assert.throws(
+    () =>
+      renderDashboardHtml(dashboardFixture(), {
+        locale: "EN" as "en",
+      }),
+    { message: "DASHBOARD_LOCALE_UNSUPPORTED" },
+  );
+});
 
-  assert.match(html, /Broker at snapshot/);
-  assert.match(html, /Codex \u2192 Claude/);
-  assert.match(html, /Selected Claude destination/);
-  assert.match(html, /1<\/strong> of <strong>2<\/strong> discovered sessions selected/);
-  assert.match(html, /Claude \u2192 Codex/);
-  assert.match(html, /Registered Codex targets/);
-  assert.match(html, /1<\/strong> of <strong>1<\/strong> targets ready/);
+test("dashboard is an inert self-contained snapshot with strict accessibility floors", () => {
+  const html = renderDashboardHtml(dashboardFixture());
+  assert.match(html, /default-src &#39;none&#39;|default-src 'none'/);
+  assert.match(html, /connect-src &#39;none&#39;|connect-src 'none'/);
+  assert.match(html, /form-action &#39;none&#39;|form-action 'none'/);
+  assert.match(html, /<a class="skip-link" href="#main">/);
+  assert.match(html, /<main id="main">/);
+  assert.match(html, /@media \(max-width: 560px\)/);
+  assert.match(html, /@media \(forced-colors: active\)/);
+  assert.match(html, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(html, /\.register-grid > section \{ min-width: 0; \}/);
+  assert.match(html, /tabindex="0" role="region"/);
   assert.match(
     html,
-    /Every compatible live Claude session running as the same OS user can see each registered Codex target/,
+    /<details class="section diagnostics"[^>]*aria-labelledby="diagnostics-title"[^>]*>/,
   );
-  assert.match(html, /status--info[^>]*>.*Busy/s);
-  assert.equal(html.includes("Gateway</dt>"), false);
-  assert.equal(html.includes("Selected agents"), false);
+  assert.match(html, /<summary><h2 id="diagnostics-title">/);
+  assert.match(html, /class="disclosure-icon" aria-hidden="true"/);
+  assert.equal(html.includes("strong::before"), false);
+  assert.equal(html.includes("<script"), false);
+  assert.equal(html.includes("<form"), false);
+  assert.equal(html.includes("javascript:"), false);
+  assert.equal(html.includes("http://"), false);
+  assert.equal(html.includes("https://"), false);
+  assert.equal(html.includes("src="), false);
+  assert.equal(html.includes("localStorage"), false);
+  assert.equal(html.includes("sessionStorage"), false);
+  assert.equal(html.includes("document.cookie"), false);
+  assert.equal(html.includes('http-equiv="refresh"'), false);
+  assert.equal(html.includes("onclick="), false);
+  assert.equal(html.includes(">Copy<"), false);
 });
 
-test("dashboard renders actionable first-run states", () => {
-  const missingRoutes = exampleSnapshot();
-  missingRoutes.routes = [];
-  const routesHtml = renderDashboardHtml(missingRoutes);
-  assert.match(routesHtml, /No Claude session is selected/);
-  assert.match(routesHtml, /embassy select-claude --alias &lt;alias&gt;/);
-  assert.match(routesHtml, /No Codex tasks registered/);
-  assert.match(routesHtml, /Inside the Codex task/);
-  assert.match(routesHtml, /embassy register-codex --alias codex-&lt;name&gt;@&lt;host&gt;/);
+test("information architecture is ordered and calm when no alert exists", () => {
+  const html = renderDashboardHtml(dashboardFixture());
+  const exchange = html.indexOf('id="exchange-title"');
+  const transit = html.indexOf('id="transit-title"');
+  const activity = html.indexOf('id="activity-title"');
+  const sessions = html.indexOf('id="sessions-title"');
+  const diagnostics = html.indexOf('class="section diagnostics"');
+  assert.ok(exchange > 0 && transit > exchange && activity > transit && sessions > activity && diagnostics > sessions);
+  assert.equal(html.includes('id="attention-title"'), false);
+  assert.match(html, /Two directions, two explicit boundaries/);
+  assert.match(html, /Claude selection/);
+  assert.match(html, /Local pouch/);
+  assert.match(html, /Codex registration/);
+  assert.match(html, /Compatibility &amp; system details/);
+  assert.match(html, /<details class="section diagnostics"/);
+});
 
-  const noClaude = exampleSnapshot();
-  noClaude.availablePeers = [];
-  noClaude.routes = noClaude.routes.filter((route) => route.provider === "codex");
-  const noClaudeHtml = renderDashboardHtml(noClaude);
-  assert.match(noClaudeHtml, /No Claude sessions discovered/);
-  assert.match(noClaudeHtml, /crossSessionInbound/);
-  assert.match(noClaudeHtml, /embassy refresh-dashboard/);
+test("delivery language preserves delivered, unconfirmed, and ambiguous semantics", () => {
+  const en = renderDashboardHtml(dashboardFixture(), { locale: "en" });
+  assert.match(en, /Provider-specific terminal evidence was observed/);
+  assert.match(en, /acceptance into the recipient queue/);
+  assert.match(en, /not that the model read or acted on the message/);
+  assert.match(en, /transport write completed, but terminal native evidence was unavailable/i);
+  assert.match(en, /Inspect the recipient before retrying/);
+  assert.match(en, /outcome is unknown after an uncertain write/i);
+  assert.match(en, /Do not retry automatically/);
+  assert.match(en, /data-delivery-state="delivered"/);
+  assert.match(en, /data-delivery-state="unconfirmed"/);
+  assert.match(en, /data-delivery-state="ambiguous"/);
 
-  const incompatible = exampleSnapshot();
-  incompatible.routes = incompatible.routes.filter(
-    (route) => route.provider === "codex",
-  );
-  incompatible.availablePeers = incompatible.availablePeers.map((peer) => ({
-    ...peer,
-    state: "incompatible" as const,
-    compatibility: "incompatible" as const,
-    selected: false,
-  }));
+  const zh = renderDashboardHtml(dashboardFixture(), { locale: "zh-CN" });
+  assert.match(zh, /不表示模型已经读取或处理该消息/);
+  assert.match(zh, /重试前请检查接收方/);
+  assert.match(zh, /请勿自动重试/);
+});
+
+test("small dashboard text and quiet pills meet the 4.5:1 light-theme contrast floor", () => {
+  const html = renderDashboardHtml(dashboardFixture());
+  const color = (name: string): string => {
+    const match = html.match(new RegExp(`--${name}: #([0-9a-f]{6});`));
+    assert.ok(match, name);
+    return match[1]!;
+  };
+  const luminance = (hex: string): number => {
+    const channels = hex
+      .match(/../g)!
+      .map((entry) => Number.parseInt(entry, 16) / 255)
+      .map((entry) =>
+        entry <= 0.04045
+          ? entry / 12.92
+          : ((entry + 0.055) / 1.055) ** 2.4,
+      );
+    return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+  };
+  const ratio = (foreground: string, background: string): number => {
+    const left = luminance(foreground);
+    const right = luminance(background);
+    return (Math.max(left, right) + 0.05) / (Math.min(left, right) + 0.05);
+  };
+  assert.ok(ratio(color("muted"), color("paper-deep")) >= 4.5);
+  assert.ok(ratio(color("quiet"), color("quiet-soft")) >= 4.5);
+});
+
+test("canonical mark uses two facing ink arcs and only a cinnabar center", () => {
+  const html = renderDashboardHtml(dashboardFixture());
   assert.match(
-    renderDashboardHtml(incompatible),
-    /Claude sessions need a compatible version/,
+    html,
+    /\.brand-mark::before, \.seal-mark::before \{ left: 20%; border-right: 1px solid var\(--ink\); \}/,
   );
+  assert.match(
+    html,
+    /\.brand-mark::after, \.seal-mark::after \{ right: 20%; border-left: 1px solid var\(--ink\); \}/,
+  );
+  assert.match(
+    html,
+    /\.brand-mark span, \.seal-mark span \{[^}]*background: var\(--seal\);/,
+  );
+  assert.equal(html.includes("rotate(36deg)"), false);
 });
 
-test("dashboard escapes every public string and rejects free-form codes", () => {
+test("dashboard escapes public strings and allowlists public fields", () => {
   const payload = `alias<&"'>PAYLOAD_END`;
-  const snapshot = exampleSnapshot();
+  const snapshot = dashboardFixture() as DashboardSnapshot & Record<string, unknown>;
+  snapshot["nativeThreadId"] = "THREAD_ID_SECRET";
+  snapshot["rawError"] = "RAW_ERROR_SECRET";
   snapshot.routes = [
     {
+      ...snapshot.routes[0]!,
       alias: payload,
-      provider: "codex",
       host: `<img src=x onerror="HOST_ATTACK">`,
-      enabled: true,
-      state: "idle",
-      compatibility: "compatible",
-      busyPolicy: "queue",
-      queueDepth: 0,
-      lastSeenAt: "not-a-timestamp<TIME_ATTACK>",
-      counters: {
-        accepted: 0,
-        delivered: 0,
-        unconfirmed: 0,
-        failed: 0,
-        ambiguous: 0,
-        expired: 0,
-        cancelled: 0,
-        abandoned: 0,
-        rejected: 0,
-        bytesAccepted: 0,
-      },
-    },
+      sessionId: "SESSION_ID_SECRET",
+      routeHandle: "ROUTE_HANDLE_SECRET",
+    } as DashboardSnapshot["routes"][number],
   ];
   snapshot.connectors = [
     {
-      provider: "codex",
+      ...snapshot.connectors[0]!,
       host: payload,
-      health: "degraded",
-      compatibility: "compatible",
       protocol: `peer/1"><img src=x onerror=PROTOCOL_ATTACK>`,
-      protocolVersion: "1",
       safeErrorCode: "not safe <RAW_DIAGNOSTIC>",
-    },
-  ];
-  snapshot.availablePeers = [
-    {
-      alias: `peer<&"'>PEER_DISCOVERY_ATTACK`,
-      provider: "claude",
-      host: "this-mac",
-      state: "idle",
-      compatibility: "compatible",
-      selected: false,
-    },
+      socketPath: "SOCKET_PATH_SECRET",
+    } as DashboardSnapshot["connectors"][number],
   ];
   snapshot.messages = [
     {
-      sequence: 1,
-      direction: "codex_to_claude",
+      ...snapshot.messages[0]!,
       sourceAlias: payload,
       targetAlias: `<svg onload="MESSAGE_ATTACK">`,
-      messageIdSuffix: `LEAK_THIS_SUFFIX`,
-      state: "failed",
-      timestamp: "2026-08-07T16:29:56.000Z",
-      bytes: 12,
-      hopCount: 0,
-      safeErrorCode: "DELIVERY_FAILED",
-    },
+      messageIdSuffix: "LEAK_THIS_SUFFIX",
+      body: "MESSAGE_BODY_SECRET",
+      prompt: "PROMPT_SECRET",
+    } as DashboardSnapshot["messages"][number],
   ];
-  snapshot.alerts = [
+  snapshot.availablePeers = [
     {
-      code: "REOBSERVATION_REQUIRED",
-      severity: "warning",
-      timestamp: "2026-08-07T16:29:56.000Z",
-      provider: "codex",
-      host: "this-mac",
-      alias: payload,
-    },
+      ...snapshot.availablePeers[0]!,
+      cwd: "PEER_CWD_SECRET",
+    } as DashboardSnapshot["availablePeers"][number],
   ];
 
   const html = renderDashboardHtml(snapshot);
   assert.equal(html.includes(payload), false);
   assert.ok(html.includes(escapeDashboardHtml(payload)));
-  assert.equal(html.includes(`<img src=x onerror="HOST_ATTACK">`), false);
   assert.ok(html.includes("&lt;img src=x onerror=&quot;HOST_ATTACK&quot;&gt;"));
-  assert.equal(html.includes("PROTOCOL_ATTACK"), false);
-  assert.equal(html.includes("TIME_ATTACK"), false);
-  assert.equal(html.includes("RAW_DIAGNOSTIC"), false);
-  assert.equal(html.includes("PEER_DISCOVERY_ATTACK"), false);
-  assert.equal(html.includes(`<svg onload="MESSAGE_ATTACK">`), false);
   assert.ok(html.includes("&lt;svg onload=&quot;MESSAGE_ATTACK&quot;&gt;"));
-  assert.equal(html.includes("LEAK_THIS_SUFFIX"), false);
-  assert.ok(html.includes("DELIVERY_FAILED"));
-  assert.match(html, /embassy register-codex --alias &lt;alias&gt;/);
-});
-
-test("dashboard allowlist omits native identifiers, content, paths, and diagnostics", () => {
-  const snapshot = exampleSnapshot() as DashboardSnapshot &
-    Record<string, unknown>;
-  snapshot["nativeThreadId"] = "THREAD_ID_SECRET";
-  snapshot["cwd"] = "CWD_SECRET";
-  snapshot["rawError"] = "GATEWAY_RAW_ERROR_SECRET";
-  snapshot.connectors = [
-    {
-      ...snapshot.connectors[0]!,
-      socketPath: "SOCKET_PATH_SECRET",
-      pid: "PID_SECRET",
-      stderr: "CONNECTOR_STDERR_SECRET",
-    } as (typeof snapshot.connectors)[number],
-  ];
-  snapshot.availablePeers = [
-    {
-      ...snapshot.availablePeers[0]!,
-      targetId: "PEER_TARGET_ID_SECRET",
-      pid: "PEER_PID_SECRET",
-      cwd: "PEER_CWD_SECRET",
-      socketPath: "PEER_SOCKET_SECRET",
-      registryPayload: "PEER_REGISTRY_SECRET",
-    } as (typeof snapshot.availablePeers)[number],
-  ];
-  snapshot.routes = [
-    {
-      ...snapshot.routes[0]!,
-      sessionId: "SESSION_ID_SECRET",
-      title: "TITLE_SECRET",
-      configuration: "CONFIG_SECRET",
-      routeHandle: "ROUTE_HANDLE_SECRET",
-      generation: "GENERATION_SECRET",
-    } as (typeof snapshot.routes)[number],
-  ];
-  snapshot.messages = [
-    {
-      ...snapshot.messages[0]!,
-      messageId: "FULL_MESSAGE_ID_SECRET",
-      body: "MESSAGE_BODY_SECRET",
-      prompt: "PROMPT_SECRET",
-      output: "MODEL_OUTPUT_SECRET",
-      toolInput: "TOOL_INPUT_SECRET",
-      toolOutput: "TOOL_OUTPUT_SECRET",
-      rawError: "RAW_ERROR_SECRET",
-    } as (typeof snapshot.messages)[number],
-  ];
-
-  const html = renderDashboardHtml(snapshot);
   for (const sentinel of [
     "THREAD_ID_SECRET",
-    "CWD_SECRET",
-    "GATEWAY_RAW_ERROR_SECRET",
-    "SOCKET_PATH_SECRET",
-    "PID_SECRET",
-    "CONNECTOR_STDERR_SECRET",
-    "PEER_TARGET_ID_SECRET",
-    "PEER_PID_SECRET",
-    "PEER_CWD_SECRET",
-    "PEER_SOCKET_SECRET",
-    "PEER_REGISTRY_SECRET",
+    "RAW_ERROR_SECRET",
     "SESSION_ID_SECRET",
-    "TITLE_SECRET",
-    "CONFIG_SECRET",
     "ROUTE_HANDLE_SECRET",
-    "GENERATION_SECRET",
-    "FULL_MESSAGE_ID_SECRET",
+    "PROTOCOL_ATTACK",
+    "RAW_DIAGNOSTIC",
+    "SOCKET_PATH_SECRET",
+    "LEAK_THIS_SUFFIX",
     "MESSAGE_BODY_SECRET",
     "PROMPT_SECRET",
-    "MODEL_OUTPUT_SECRET",
-    "TOOL_INPUT_SECRET",
-    "TOOL_OUTPUT_SECRET",
-    "RAW_ERROR_SECRET",
+    "PEER_CWD_SECRET",
   ]) {
     assert.equal(html.includes(sentinel), false, sentinel);
   }
 });
 
-test("dashboard maps safe alerts to inert, actionable guidance", () => {
-  const snapshot = exampleSnapshot();
-  snapshot.routes[0] = {
-    ...snapshot.routes[0]!,
-    state: "stale",
-    compatibility: "expired",
-    safeErrorCode: "REOBSERVATION_REQUIRED",
-  };
-  snapshot.alerts = [
-    {
-      code: "REOBSERVATION_REQUIRED",
-      severity: "warning",
-      timestamp: "2026-08-07T16:29:58.000Z",
-      provider: "codex",
-      host: "this-mac",
-      alias: "codex-reviewer@this-mac",
-    },
-    {
-      code: "UNMAPPED_SAFE_ALERT",
-      severity: "info",
-      timestamp: "2026-08-07T16:29:57.000Z",
-      provider: "claude",
-      host: "this-mac",
-    },
-  ];
+test("dense dashboard projections remain independently bounded in both locales", () => {
+  const snapshot = dashboardFixture();
+  const route = snapshot.routes[0]!;
+  snapshot.connectors = Array.from({ length: DASHBOARD_CONNECTOR_LIMIT + 4 }, (_, index) => ({
+    ...snapshot.connectors[index % 2]!,
+    host: `host-${String(index).padStart(2, "0")}.local`,
+  }));
+  snapshot.availablePeers = Array.from({ length: DASHBOARD_AVAILABLE_PEER_LIMIT + 4 }, (_, index) => ({
+    alias: `peer${String(index).padStart(4, "0")}@host.local`,
+    provider: "claude" as const,
+    host: "host.local",
+    state: "idle" as const,
+    compatibility: "compatible" as const,
+    selected: index === 0,
+  }));
+  snapshot.routes = Array.from({ length: DASHBOARD_ROUTE_LIMIT + 4 }, (_, index) => ({
+    ...route,
+    alias: `route${String(index).padStart(4, "0")}@host.local`,
+    provider: index % 2 === 0 ? ("codex" as const) : ("claude" as const),
+    host: "host.local",
+    queueDepth: 0,
+    counters: routeCounters(),
+  }));
+  snapshot.messages = Array.from({ length: DASHBOARD_MESSAGE_LIMIT + 4 }, (_, index) => ({
+    sequence: index + 1,
+    timestamp: new Date(Date.UTC(2026, 7, 8, 10, 0, index)).toISOString(),
+    messageIdSuffix: index.toString(16).padStart(6, "0"),
+    direction: "claude_to_codex" as const,
+    sourceAlias: `peer${String(index).padStart(4, "0")}@host.local`,
+    targetAlias: `route${String(index).padStart(4, "0")}@host.local`,
+    state: "delivered" as const,
+    bytes: 16_384,
+    hopCount: 0,
+  }));
+  snapshot.alerts = Array.from({ length: DASHBOARD_ALERT_LIMIT + 4 }, (_, index) => ({
+    code: "UNMAPPED_SAFE_ALERT",
+    severity: "warning" as const,
+    timestamp: "2026-08-08T11:59:59.000Z",
+    provider: index % 2 === 0 ? ("codex" as const) : ("claude" as const),
+    host: "host.local",
+    alias: `route${String(index).padStart(4, "0")}@host.local`,
+  }));
 
-  const html = renderDashboardHtml(snapshot);
-  assert.match(html, /Action required/);
-  assert.match(html, /REOBSERVATION_REQUIRED/);
-  assert.match(html, /Codex registration must be observed again/);
-  assert.match(
-    html,
-    /embassy register-codex --alias codex-reviewer@this-mac/,
-  );
-  assert.match(html, /inside that exact Codex task/i);
-  assert.match(html, /UNMAPPED_SAFE_ALERT/);
-  assert.match(html, /no automatic repair mapped/);
-  assert.match(html, /Do not retry an ambiguous delivery automatically/);
+  for (const locale of ["en", "zh-CN"] as const) {
+    const html = renderDashboardHtml(snapshot, { locale });
+    assert.ok(Buffer.byteLength(html, "utf8") <= DASHBOARD_MAX_HTML_BYTES, locale);
+    assert.equal((html.match(/data-dashboard-row="message-summary"/g) ?? []).length, DASHBOARD_MESSAGE_LIMIT);
+  }
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.omissions.connectors, 4);
+  assert.equal(model.omissions.availablePeers, 4);
+  assert.equal(model.omissions.routes, 4);
+  assert.equal(model.omissions.upstreamMessageEvents, 0);
+  assert.equal(model.omissions.messageGroups, 4);
+  assert.equal(model.omissions.messageEvents, 0);
+  assert.equal(model.omissions.upstreamAlerts, 0);
+  assert.equal(model.omissions.attentionItems, 4);
 });
 
-test("dashboard groups message lifecycles without conflating matching suffixes", () => {
-  const snapshot = exampleSnapshot();
-  snapshot.messages = [
-    {
-      sequence: 1,
-      direction: "claude_to_codex",
-      sourceAlias: "claude-advisor@this-mac",
-      targetAlias: "codex-reviewer@this-mac",
-      messageIdSuffix: "a1b2c3",
-      state: "queued",
-      timestamp: "2026-08-07T16:29:50.000Z",
-      bytes: 342,
-      hopCount: 0,
-    },
-    {
-      sequence: 2,
-      direction: "claude_to_codex",
-      sourceAlias: "claude-advisor@this-mac",
-      targetAlias: "codex-reviewer@this-mac",
-      messageIdSuffix: "a1b2c3",
-      state: "dispatching",
-      timestamp: "2026-08-07T16:29:51.000Z",
-      latencyMs: 1_000,
-      bytes: 342,
-      hopCount: 0,
-    },
-    {
-      sequence: 3,
-      direction: "claude_to_codex",
-      sourceAlias: "claude-advisor@this-mac",
-      targetAlias: "codex-reviewer@this-mac",
-      messageIdSuffix: "a1b2c3",
-      state: "delivered",
-      timestamp: "2026-08-07T16:29:52.000Z",
-      latencyMs: 2_000,
-      bytes: 342,
-      hopCount: 0,
-    },
-    {
-      sequence: 4,
-      direction: "codex_to_claude",
-      sourceAlias: "codex-reviewer@this-mac",
-      targetAlias: "claude-advisor@this-mac",
-      messageIdSuffix: "a1b2c3",
-      state: "failed",
-      timestamp: "2026-08-07T16:29:49.000Z",
-      latencyMs: 500,
-      bytes: 120,
-      hopCount: 0,
-      safeErrorCode: "CODEX_DELIVERY_FAILED",
-    },
-  ];
-
-  const html = renderDashboardHtml(snapshot);
-  assert.equal(
-    (html.match(/data-dashboard-row="message-summary"/g) ?? []).length,
-    2,
-  );
-  assert.equal(
-    (html.match(/data-dashboard-row="message-event"/g) ?? []).length,
-    3,
-  );
-  assert.match(
-    html,
-    /data-dashboard-row="message-summary"[\s\S]*?Claude \u2192 Codex[\s\S]*?Delivered[\s\S]*?2\.0 s[\s\S]*?<\/tr>/,
-  );
-  const queuedIndex = html.indexOf(">Queued</span>");
-  const dispatchingIndex = html.indexOf(">Dispatching</span>");
-  const deliveredIndex = html.lastIndexOf(">Delivered</span>");
-  assert.ok(
-    queuedIndex >= 0 &&
-      dispatchingIndex > queuedIndex &&
-      deliveredIndex > dispatchingIndex,
-  );
+test("diagnostics disclose every lifetime accounting field", () => {
+  const html = renderDashboardHtml(dashboardFixture());
+  for (const label of [
+    "Accepted",
+    "Duplicates",
+    "Delivered",
+    "Unconfirmed",
+    "Ambiguous",
+    "Failed",
+    "Expired",
+    "Cancelled",
+    "Abandoned",
+    "Rejected",
+    "Bytes accepted",
+    "Bytes queued",
+  ]) {
+    assert.match(html, new RegExp(`<dt>${label}</dt>`), label);
+  }
 });
 
-test("message timeline is capped and keeps the newest grouped metadata", () => {
-  const snapshot = exampleSnapshot();
-  snapshot.messages = Array.from(
-    { length: DASHBOARD_MESSAGE_LIMIT + 5 },
-    (_, index) => ({
-      sequence: index + 1,
-      direction: "claude_to_codex" as const,
-      sourceAlias: `agent-${String(index).padStart(4, "0")}`,
-      targetAlias: "codex-reviewer@this-mac",
-      messageIdSuffix: index.toString(16).padStart(6, "0"),
-      state: "delivered" as const,
-      timestamp: new Date(Date.UTC(2026, 7, 7, 12, 0, index)).toISOString(),
-      latencyMs: index,
-      bytes: index + 1,
-      hopCount: 0,
-    }),
-  );
-
-  const html = renderDashboardHtml(snapshot);
-  assert.equal(
-    (html.match(/data-dashboard-row="message-summary"/g) ?? []).length,
-    DASHBOARD_MESSAGE_LIMIT,
-  );
-  assert.equal(html.includes("agent-0000"), false);
-  assert.equal(html.includes("agent-0004"), false);
-  assert.ok(html.includes("agent-0005"));
-  assert.ok(
-    html.includes(
-      `agent-${String(DASHBOARD_MESSAGE_LIMIT + 4).padStart(4, "0")}`,
-    ),
-  );
-  assert.match(html, /omitted 5 delivery records/);
-  assert.ok(Buffer.byteLength(html, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
-});
-
-test("available peer inventory is bounded and remains Claude-only", () => {
-  const snapshot = exampleSnapshot();
-  snapshot.availablePeers = Array.from(
-    { length: DASHBOARD_AVAILABLE_PEER_LIMIT + 2 },
-    (_, index) => ({
-      alias: `peer${String(index).padStart(4, "0")}@this-mac`,
-      provider: "claude" as const,
-      host: "this-mac",
-      state: "idle" as const,
-      compatibility: "compatible" as const,
-      selected: false,
-      lastSeenAt: "2026-08-07T16:29:59.000Z",
-    }),
-  );
-
-  const html = renderDashboardHtml(snapshot);
-  assert.match(
-    html,
-    new RegExp(`${DASHBOARD_AVAILABLE_PEER_LIMIT + 2} discovered`),
-  );
-  assert.match(html, /omitted 2 Claude sessions/);
-  assert.ok(html.includes("peer0000@this-mac"));
-  assert.ok(
-    html.includes(
-      `peer${String(DASHBOARD_AVAILABLE_PEER_LIMIT - 1).padStart(4, "0")}@this-mac`,
-    ),
-  );
-  assert.equal(
-    html.includes(
-      `peer${String(DASHBOARD_AVAILABLE_PEER_LIMIT).padStart(4, "0")}@this-mac`,
-    ),
-    false,
-  );
-  assert.equal(
-    html.includes(
-      `peer${String(DASHBOARD_AVAILABLE_PEER_LIMIT + 1).padStart(4, "0")}@this-mac`,
-    ),
-    false,
-  );
-
-  snapshot.availablePeers = [
-    {
-      alias: "codex-peer@this-mac",
-      provider: "codex",
-      host: "this-mac",
-      state: "idle",
-      compatibility: "compatible",
-      selected: false,
-    },
-  ];
-  const rejected = renderDashboardHtml(snapshot);
-  assert.equal(rejected.includes("codex-peer@this-mac"), false);
-  assert.match(rejected, /No Claude sessions are currently visible to Embassy/);
-  assert.ok(rejected.includes("codex-reviewer@this-mac"));
-});
-
-test("dense valid snapshots remain bounded and disclose local display caps", () => {
-  const snapshot = exampleSnapshot();
-  const routeTemplate = snapshot.routes[0]!;
-  snapshot.connectors = Array.from(
-    { length: DASHBOARD_CONNECTOR_LIMIT + 2 },
-    (_, index) => ({
-      ...snapshot.connectors[index % snapshot.connectors.length]!,
-      host: `host-${String(index).padStart(2, "0")}.local`,
-    }),
-  );
-  snapshot.availablePeers = Array.from(
-    { length: DASHBOARD_AVAILABLE_PEER_LIMIT + 2 },
-    (_, index) => ({
-      alias: `peer${String(index).padStart(4, "0")}@host.local`,
-      provider: "claude" as const,
-      host: "host.local",
-      state: "idle" as const,
-      compatibility: "compatible" as const,
-      selected: index === 0,
-    }),
-  );
-  snapshot.routes = Array.from(
-    { length: DASHBOARD_ROUTE_LIMIT + 2 },
-    (_, index) => ({
-      ...routeTemplate,
-      alias: `route${String(index).padStart(4, "0")}@host.local`,
-      provider: index % 2 === 0 ? ("codex" as const) : ("claude" as const),
-      host: "host.local",
-      queueDepth: 0,
-    }),
-  );
-  snapshot.messages = Array.from(
-    { length: DASHBOARD_MESSAGE_LIMIT + 2 },
-    (_, index) => ({
-      sequence: index + 1,
-      timestamp: new Date(Date.UTC(2026, 7, 7, 15, 0, index)).toISOString(),
-      messageIdSuffix: index.toString(16).padStart(6, "0"),
-      direction: "claude_to_codex" as const,
-      sourceAlias: `peer${String(index).padStart(4, "0")}@host.local`,
-      targetAlias: `route${String(index).padStart(4, "0")}@host.local`,
-      state: "delivered" as const,
-      bytes: 16_384,
-      hopCount: 0,
-      latencyMs: 2_000,
-    }),
-  );
-  snapshot.alerts = Array.from(
-    { length: DASHBOARD_ALERT_LIMIT + 2 },
-    (_, index) => ({
-      code: "UNMAPPED_SAFE_ALERT",
-      severity: "warning" as const,
-      timestamp: "2026-08-07T16:29:59.000Z",
-      provider: index % 2 === 0 ? ("codex" as const) : ("claude" as const),
-      host: "host.local",
-      alias: `route${String(index).padStart(4, "0")}@host.local`,
-    }),
-  );
-
-  const html = renderDashboardHtml(snapshot);
-  assert.ok(Buffer.byteLength(html, "utf8") <= DASHBOARD_MAX_HTML_BYTES);
-  assert.match(html, /omitted 2 connectors/);
-  assert.match(html, /2 Claude sessions/);
-  assert.match(html, /2 routes/);
-  assert.match(html, /2 delivery records/);
-  assert.match(html, /2 alerts/);
-});
-
-test("publisher atomically replaces a mode-0600 snapshot in private state", async () => {
-  const root = await mkdtemp(
-    path.join(await realpath(os.tmpdir()), "gateway-dashboard-test-"),
-  );
+test("publisher prepares and atomically replaces both private locale files", async () => {
+  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-dashboard-"));
   const stateDirectory = path.join(root, "state");
   try {
     await mkdir(stateDirectory, { mode: 0o700 });
     await chmod(stateDirectory, 0o700);
-    const first = exampleSnapshot();
-    const outputPath = await writeDashboardSnapshot(stateDirectory, first);
-    assert.equal(outputPath, path.join(stateDirectory, DASHBOARD_FILE_NAME));
-    assert.equal((await lstat(outputPath)).mode & 0o777, 0o600);
-    assert.equal(await readFile(outputPath, "utf8"), renderDashboardHtml(first));
-    assert.deepEqual(await readdir(stateDirectory), [DASHBOARD_FILE_NAME]);
+    const snapshot = dashboardFixture();
+    const outputPath = await writeDashboardSnapshot(stateDirectory, snapshot);
+    const enPath = path.join(stateDirectory, DASHBOARD_FILE_NAME);
+    const zhPath = path.join(stateDirectory, DASHBOARD_ZH_CN_FILE_NAME);
+    assert.equal(outputPath, enPath);
+    assert.equal((await lstat(enPath)).mode & 0o777, 0o600);
+    assert.equal((await lstat(zhPath)).mode & 0o777, 0o600);
+    assert.equal(await readFile(enPath, "utf8"), renderDashboardHtml(snapshot, { locale: "en" }));
+    assert.equal(await readFile(zhPath, "utf8"), renderDashboardHtml(snapshot, { locale: "zh-CN" }));
+    assert.deepEqual((await readdir(stateDirectory)).sort(), [DASHBOARD_FILE_NAME, DASHBOARD_ZH_CN_FILE_NAME].sort());
 
-    const replacement = exampleSnapshot();
-    replacement.health = "degraded";
-    replacement.alerts = [
-      {
-        code: "HOST_STALE",
-        severity: "warning",
-        timestamp: "2026-08-07T16:30:00.000Z",
-        provider: "codex",
-        host: "this-mac",
-      },
-    ];
-    await writeDashboardSnapshot(stateDirectory, replacement);
-    const body = await readFile(outputPath, "utf8");
-    assert.ok(body.includes("Degraded"));
-    assert.ok(body.includes("HOST_STALE"));
-    assert.equal((await lstat(outputPath)).mode & 0o777, 0o600);
-    assert.deepEqual(await readdir(stateDirectory), [DASHBOARD_FILE_NAME]);
+    snapshot.health = "degraded";
+    snapshot.alerts = [{ code: "ADAPTER_DEGRADED", severity: "warning", timestamp: snapshot.generatedAt }];
+    await writeDashboardSnapshot(stateDirectory, snapshot);
+    assert.match(await readFile(enPath, "utf8"), /The exchange is degraded/);
+    assert.match(await readFile(zhPath, "utf8"), /交换状态降级/);
+    assert.equal((await lstat(enPath)).mode & 0o777, 0o600);
+    assert.equal((await lstat(zhPath)).mode & 0o777, 0o600);
+    assert.equal((await readdir(stateDirectory)).some((name) => name.endsWith(".tmp")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("publisher rejects public or symlinked state and an existing symlink target", async () => {
-  const root = await mkdtemp(
-    path.join(await realpath(os.tmpdir()), "gateway-dashboard-unsafe-"),
-  );
+test("publisher rejects unsafe directories and either locale symlink before replacement", async () => {
+  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-dashboard-unsafe-"));
   const privateDirectory = path.join(root, "private");
   const publicDirectory = path.join(root, "public");
   const linkedDirectory = path.join(root, "linked");
@@ -770,23 +390,16 @@ test("publisher rejects public or symlinked state and an existing symlink target
     await mkdir(publicDirectory, { mode: 0o755 });
     await chmod(publicDirectory, 0o755);
     await symlink(privateDirectory, linkedDirectory);
+    await assert.rejects(writeDashboardSnapshot(publicDirectory, dashboardFixture()), { message: "DASHBOARD_STATE_DIRECTORY_UNSAFE" });
+    await assert.rejects(writeDashboardSnapshot(linkedDirectory, dashboardFixture()), { message: "DASHBOARD_STATE_DIRECTORY_UNSAFE" });
 
-    await assert.rejects(
-      writeDashboardSnapshot(publicDirectory, exampleSnapshot()),
-      { message: "DASHBOARD_STATE_DIRECTORY_UNSAFE" },
-    );
-    await assert.rejects(
-      writeDashboardSnapshot(linkedDirectory, exampleSnapshot()),
-      { message: "DASHBOARD_STATE_DIRECTORY_UNSAFE" },
-    );
-
+    const enPath = path.join(privateDirectory, DASHBOARD_FILE_NAME);
+    await writeFile(enPath, "old English", { mode: 0o600 });
     const outside = path.join(root, "outside.html");
     await writeFile(outside, "preserve me", { mode: 0o600 });
-    await symlink(outside, path.join(privateDirectory, DASHBOARD_FILE_NAME));
-    await assert.rejects(
-      writeDashboardSnapshot(privateDirectory, exampleSnapshot()),
-      { message: "DASHBOARD_TARGET_UNSAFE" },
-    );
+    await symlink(outside, path.join(privateDirectory, DASHBOARD_ZH_CN_FILE_NAME));
+    await assert.rejects(writeDashboardSnapshot(privateDirectory, dashboardFixture()), { message: "DASHBOARD_TARGET_UNSAFE" });
+    assert.equal(await readFile(enPath, "utf8"), "old English");
     assert.equal(await readFile(outside, "utf8"), "preserve me");
   } finally {
     await rm(root, { recursive: true, force: true });

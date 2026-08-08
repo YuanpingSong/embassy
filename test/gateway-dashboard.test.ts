@@ -1,313 +1,309 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import {
-  renderDashboardHtml,
-  type DashboardSnapshot,
-} from "../src/gateway/dashboard.js";
+  buildDashboardViewModel,
+  DASHBOARD_MODEL_LIMITS,
+} from "../src/gateway/dashboard-model.js";
+import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
 
-type DashboardRoute = DashboardSnapshot["routes"][number];
-
-function counters(): DashboardRoute["counters"] {
-  return {
-    accepted: 0,
-    delivered: 0,
-    unconfirmed: 0,
-    failed: 0,
-    ambiguous: 0,
-    expired: 0,
-    cancelled: 0,
-    abandoned: 0,
-    rejected: 0,
-    bytesAccepted: 0,
-  };
-}
-
-function route(
-  alias: string,
-  overrides: Partial<DashboardRoute> = {},
-): DashboardRoute {
-  return {
-    alias,
-    provider: "codex",
+test("view model derives deterministic route and global queue ages from generatedAt", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes.push({
+    alias: "claude-queue@this-mac",
+    provider: "claude",
     host: "this-mac",
     enabled: true,
     state: "busy",
     compatibility: "compatible",
     busyPolicy: "queue",
     queueDepth: 1,
-    counters: counters(),
-    ...overrides,
+    oldestQueuedAt: "2026-08-08T11:59:50.000Z",
+    counters: routeCounters(),
+  });
+  const first = buildDashboardViewModel(snapshot);
+  const second = buildDashboardViewModel(snapshot);
+  assert.deepEqual(first, second);
+  assert.equal(first.transit.queuedMessages, 3);
+  assert.equal(first.transit.oldestQueueAgeMs, 90_500);
+  assert.equal(first.transit.oldestQueuedAt, "2026-08-08T11:58:29.500Z");
+  assert.equal(first.routes.find((route) => route.alias === "claude-queue@this-mac")?.queueAgeMs, 10_000);
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /1m 30s/);
+  assert.match(zh, /1 分 30 秒/);
+});
+
+test("malformed, future, and empty-route queue timestamps never leak or become inferred alerts", () => {
+  const snapshot = dashboardFixture();
+  const { oldestQueuedAt: _oldestQueuedAt, ...routeWithoutTimestamp } =
+    snapshot.routes[1]!;
+  snapshot.routes = [
+    { ...routeWithoutTimestamp, alias: "codex-missing@this-mac" },
+    { ...snapshot.routes[1]!, alias: "codex-malformed@this-mac", oldestQueuedAt: `bad\"><script>QUEUE_SECRET</script>` },
+    { ...snapshot.routes[1]!, alias: "codex-future@this-mac", oldestQueuedAt: "2026-08-08T12:00:00.001Z" },
+    { ...snapshot.routes[1]!, alias: "codex-empty@this-mac", queueDepth: 0, oldestQueuedAt: "2026-08-01T00:00:00.000Z" },
+  ];
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.transit.queuedMessages, 6);
+  assert.equal(model.transit.oldestQueueAgeMs, undefined);
+  assert.equal(model.attention.length, 0);
+  const html = renderDashboardHtml(snapshot);
+  assert.equal(html.includes("QUEUE_SECRET"), false);
+  assert.equal(html.includes("QUEUE_STALLED"), false);
+  assert.match(html, /Timestamp unavailable/);
+});
+
+test("QUEUE_STALLED is rendered only from a provided normalized alert", () => {
+  const snapshot = dashboardFixture();
+  snapshot.alerts = [{
+    code: "QUEUE_STALLED",
+    severity: "warning",
+    timestamp: "2026-08-08T11:57:30.000Z",
+    provider: "codex",
+    host: "this-mac",
+    alias: "codex-reviewer@this-mac",
+    body: "ALERT_BODY_SECRET",
+  } as (typeof snapshot.alerts)[number]];
+  const html = renderDashboardHtml(snapshot);
+  assert.equal((html.match(/QUEUE_STALLED/g) ?? []).length, 1);
+  assert.match(html, /Queued delivery is stalled/);
+  assert.match(html, /past half of its delivery deadline/);
+  assert.match(html, /Do not resend accepted work/);
+  assert.equal(html.includes("ALERT_BODY_SECRET"), false);
+  assert.match(html, /id="attention-title"/);
+});
+
+test("non-ready routes surface one bounded derived attention item without inventing a stall", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes[1] = {
+    ...snapshot.routes[1]!,
+    state: "stale",
+    compatibility: "expired",
+    safeErrorCode: "REOBSERVATION_REQUIRED",
   };
-}
-
-function snapshot(routes: DashboardRoute[]): DashboardSnapshot {
-  return {
-    schemaVersion: 1,
-    generatedAt: "2026-08-08T12:00:00.000Z",
-    health: "healthy",
-    connectors: [],
-    availablePeers: [],
-    routes,
-    messages: [],
-    accounting: {
-      accepted: 0,
-      duplicates: 0,
-      delivered: 0,
-      unconfirmed: 0,
-      failed: 0,
-      ambiguous: 0,
-      expired: 0,
-      cancelled: 0,
-      abandoned: 0,
-      rejected: 0,
-      bytesAccepted: 0,
-      queuedBytes: 0,
-    },
-    alerts: [],
-    truncation: {
-      connectors: 0,
-      availablePeers: 0,
-      routes: 0,
-      messages: 0,
-      alerts: 0,
-    },
-  };
-}
-
-test("dashboard derives deterministic global and per-route queue ages at snapshot time", () => {
-  const oldest = "2026-08-08T11:58:29.500Z";
-  const newer = "2026-08-08T11:59:50.000Z";
-  const ignoredEmptyRouteTimestamp = "2026-08-01T00:00:00.000Z";
-  const input = snapshot([
-    route("codex-reviewer@this-mac", {
-      queueDepth: 2,
-      oldestQueuedAt: oldest,
-    }),
-    route("claude-advisor@this-mac", {
-      provider: "claude",
-      queueDepth: 1,
-      oldestQueuedAt: newer,
-    }),
-    route("codex-empty@this-mac", {
-      queueDepth: 0,
-      oldestQueuedAt: ignoredEmptyRouteTimestamp,
-    }),
-  ]);
-
-  const first = renderDashboardHtml(input);
-  const second = renderDashboardHtml(input);
-
-  assert.equal(first, second);
-  assert.match(
-    first,
-    /<dt>Queued messages<\/dt><dd>3<\/dd>/,
-  );
-  assert.match(
-    first,
-    new RegExp(
-      `<dt>Oldest queue age</dt><dd><time datetime="${oldest}"[^>]*>1m 30s</time>`,
-    ),
-  );
-  assert.match(
-    first,
-    new RegExp(
-      `claude-advisor@this-mac[\\s\\S]*?1 queued[\\s\\S]*?Oldest wait <time datetime="${newer}"[^>]*>10s</time>`,
-    ),
-  );
-  assert.match(
-    first,
-    new RegExp(
-      `codex-reviewer@this-mac[\\s\\S]*?2 queued[\\s\\S]*?Oldest wait <time datetime="${oldest}"[^>]*>1m 30s</time>`,
-    ),
-  );
-  assert.equal((first.match(/Oldest wait/g) ?? []).length, 2);
-  assert.equal(first.includes(ignoredEmptyRouteTimestamp), false);
-  assert.equal(first.includes("<script"), false);
-  assert.equal(first.includes("http://"), false);
-  assert.equal(first.includes("https://"), false);
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.overall, "attention");
+  assert.equal(model.attention.length, 1);
+  assert.equal(model.attention[0]?.kind, "route");
+  assert.equal(model.attention[0]?.guidance, "codex_stale");
+  const html = renderDashboardHtml(snapshot);
+  assert.match(html, /Codex route is stale/);
+  assert.match(html, /Re-run register-codex with the same alias/);
+  assert.match(html, /Do not unregister first/);
+  assert.equal(html.includes("Unregister and register"), false);
+  assert.equal(html.includes("QUEUE_STALLED"), false);
 });
 
-test("queue ages floor partial seconds and cross display-unit boundaries without wall-clock reads", () => {
-  const generatedAt = Date.parse("2026-08-08T12:00:00.000Z");
-  const cases = [
-    { elapsedMs: 999, label: "0s" },
-    { elapsedMs: 59_999, label: "59s" },
-    { elapsedMs: 60_000, label: "1m 0s" },
-    { elapsedMs: 3_661_000, label: "1h 1m" },
-    { elapsedMs: 49 * 60 * 60 * 1_000, label: "2d 1h" },
-  ] as const;
-
-  for (const { elapsedMs, label } of cases) {
-    const oldestQueuedAt = new Date(generatedAt - elapsedMs).toISOString();
-    const html = renderDashboardHtml(
-      snapshot([
-        route("codex-boundary@this-mac", { oldestQueuedAt }),
-      ]),
-    );
-    assert.match(
-      html,
-      new RegExp(
-        `<dt>Oldest queue age</dt><dd><time datetime="${oldestQueuedAt}"[^>]*>${label}</time>`,
-      ),
-      `${elapsedMs}ms global age`,
-    );
-    assert.match(
-      html,
-      new RegExp(
-        `Oldest wait <time datetime="${oldestQueuedAt}"[^>]*>${label}</time>`,
-      ),
-      `${elapsedMs}ms route age`,
-    );
-  }
-});
-
-test("dashboard treats absent, malformed, future, and inconsistent queue timestamps as unavailable", () => {
-  const malformed = `not-a-time"><script>QUEUE_BODY_SECRET</script>`;
-  const future = "2026-08-08T12:00:00.001Z";
-  const emptyTimestamp = "2026-08-08T11:00:00.000Z";
-  const input = snapshot([
-    route("codex-missing@this-mac"),
-    route("codex-malformed@this-mac", { oldestQueuedAt: malformed }),
-    route("codex-future@this-mac", { oldestQueuedAt: future }),
-    route("codex-empty@this-mac", {
-      queueDepth: 0,
-      oldestQueuedAt: emptyTimestamp,
-    }),
-  ]);
-
-  const html = renderDashboardHtml(input);
-
-  assert.match(
-    html,
-    /<dt>Queued messages<\/dt><dd>3<\/dd>/,
-  );
-  assert.match(
-    html,
-    /<dt>Oldest queue age<\/dt><dd><span class="quiet" aria-label="Queue age unavailable">\u2014<\/span> <span class="metric__detail">timestamp unavailable<\/span><\/dd>/,
-  );
-  assert.equal((html.match(/Oldest wait/g) ?? []).length, 3);
-  assert.equal(
-    (html.match(/aria-label="Queue age unavailable"/g) ?? []).length,
-    4,
-  );
-  assert.equal(html.includes("QUEUE_BODY_SECRET"), false);
-  assert.equal(html.includes(future), false);
-  assert.equal(html.includes(emptyTimestamp), false);
-});
-
-test("queue age uses the normalized snapshot timestamp and never Date.now", () => {
-  const input = snapshot([
-    route("codex-now@this-mac", {
-      oldestQueuedAt: "2026-08-08T08:00:00.000-04:00",
-    }),
-  ]);
-  const normalized = "2026-08-08T12:00:00.000Z";
-  const html = renderDashboardHtml(input);
-
-  assert.match(
-    html,
-    new RegExp(
-      `<dt>Oldest queue age</dt><dd><time datetime="${normalized}"[^>]*>0s</time>`,
-    ),
-  );
-  assert.match(
-    html,
-    new RegExp(
-      `Oldest wait <time datetime="${normalized}"[^>]*>0s</time>`,
-    ),
-  );
-
-  input.generatedAt = "not-a-snapshot-time";
-  const invalidReference = renderDashboardHtml(input);
-  assert.match(
-    invalidReference,
-    /<dt>Oldest queue age<\/dt><dd><span class="quiet" aria-label="Queue age unavailable">\u2014<\/span>/,
-  );
-  assert.equal(invalidReference.includes(normalized), false);
-});
-
-test("QUEUE_STALLED remains a normal store-provided safe alert and is never inferred by the dashboard", () => {
-  const input = snapshot([
-    route("codex-reviewer@this-mac", {
-      oldestQueuedAt: "2026-08-08T11:50:00.000Z",
-    }),
-  ]);
-  const withoutAlert = renderDashboardHtml(input);
-
-  assert.equal(withoutAlert.includes("QUEUE_STALLED"), false);
-  assert.match(
-    withoutAlert,
-    /<dt>Active alerts<\/dt><dd>0<\/dd>/,
-  );
-
-  input.alerts = [
+test("restart guidance warns about abandoning memory-only bodies", () => {
+  const snapshot = dashboardFixture();
+  snapshot.alerts = [
     {
-      code: "QUEUE_STALLED",
+      code: "ADAPTER_DEGRADED",
       severity: "warning",
-      timestamp: "2026-08-08T11:57:30.000Z",
+      timestamp: snapshot.generatedAt,
       provider: "codex",
       host: "this-mac",
-      alias: "codex-reviewer@this-mac",
-      body: "ALERT_BODY_SECRET",
-      routeHandle: "NATIVE_ROUTE_UUID_SECRET",
-    } as DashboardSnapshot["alerts"][number],
+    },
   ];
-  const withAlert = renderDashboardHtml(input);
-
-  assert.equal((withAlert.match(/QUEUE_STALLED/g) ?? []).length, 1);
-  assert.match(withAlert, /Queued delivery is stalled/);
-  assert.match(withAlert, /half of the delivery deadline/);
-  assert.match(withAlert, /embassy status/);
-  assert.match(withAlert, /Do not resend accepted work/);
+  const html = renderDashboardHtml(snapshot);
   assert.match(
-    withAlert,
-    /<dt>Active alerts<\/dt><dd>1<\/dd>/,
+    html,
+    /Restart only when queued messages and active deliveries are both zero/,
   );
-  assert.equal(withAlert.includes("ALERT_BODY_SECRET"), false);
-  assert.equal(withAlert.includes("NATIVE_ROUTE_UUID_SECRET"), false);
-  assert.equal(withAlert.includes("<script"), false);
+  assert.match(html, /restarting abandons memory-only message bodies/);
 });
 
-test("unconfirmed delivery is a warning with safe retry guidance", () => {
-  const input = snapshot([
-    route("codex-reviewer@this-mac", { queueDepth: 0 }),
-    route("claude-advisor@this-mac", {
-      provider: "claude",
-      queueDepth: 0,
-    }),
-  ]);
-  input.messages = [
+test("first-run exchange board gives truthful asymmetric setup actions", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes = [];
+  snapshot.availablePeers = snapshot.availablePeers.map((peer) => ({
+    ...peer,
+    selected: false,
+  }));
+  const visiblePeers = renderDashboardHtml(snapshot);
+  assert.match(visiblePeers, /embassy select-claude --alias &lt;alias&gt;/);
+  assert.match(visiblePeers, /embassy register-codex --alias codex-&lt;name&gt;@&lt;host&gt;/);
+
+  snapshot.availablePeers = [];
+  const noPeers = renderDashboardHtml(snapshot);
+  assert.match(noPeers, /crossSessionInbound/);
+  assert.match(noPeers, /embassy refresh-dashboard/);
+  assert.match(noPeers, /Every compatible live Claude session under the same OS user/);
+});
+
+test("only compatible live collision-free peers drive the select call to action", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes = snapshot.routes.filter((route) => route.provider === "codex");
+  snapshot.availablePeers = [
     {
-      sequence: 1,
-      timestamp: "2026-08-08T11:59:59.000Z",
-      messageIdSuffix: "c0ffee00",
-      direction: "codex_to_claude",
-      sourceAlias: "codex-reviewer@this-mac",
-      targetAlias: "claude-advisor@this-mac",
-      state: "unconfirmed",
-      bytes: 42,
-      hopCount: 0,
-      latencyMs: 1_000,
-      safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
-    },
-  ];
-  input.alerts = [
-    {
-      code: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
-      severity: "warning",
-      timestamp: "2026-08-08T11:59:59.000Z",
+      alias: "claude-collision@this-mac",
       provider: "claude",
       host: "this-mac",
-      alias: "claude-advisor@this-mac",
+      state: "incompatible",
+      compatibility: "incompatible",
+      selected: false,
+      safeErrorCode: "PEER_ALIAS_COLLISION",
+    },
+    {
+      alias: "claude-session@this-mac",
+      provider: "claude",
+      host: "this-mac",
+      state: "incompatible",
+      compatibility: "incompatible",
+      selected: false,
+      safeErrorCode: "PEER_SESSION_COLLISION",
+    },
+    {
+      alias: "claude-incomplete@this-mac",
+      provider: "claude",
+      host: "this-mac",
+      state: "incompatible",
+      compatibility: "incompatible",
+      selected: false,
+      safeErrorCode: "PEER_DISCOVERY_INCOMPLETE",
+    },
+    {
+      alias: "claude-offline@this-mac",
+      provider: "claude",
+      host: "this-mac",
+      state: "offline",
+      compatibility: "compatible",
+      selected: false,
     },
   ];
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.exchange.claude.selectable, 0);
+  assert.equal(model.exchange.claude.nextAction, "repair_claude_inventory");
+  assert.equal(model.peers.every((peer) => !peer.selectable), true);
+  const html = renderDashboardHtml(snapshot);
+  assert.equal(html.includes("embassy select-claude --alias"), false);
+  assert.equal((html.match(/>Not selectable<\/span>/g) ?? []).length, 4);
+  assert.match(html, /Alias collision: rename one Claude session/);
+  assert.match(html, /Session identity collision/);
+  assert.match(html, /Discovery was incomplete/);
+  assert.match(html, /not currently live/);
+});
 
-  const html = renderDashboardHtml(input);
-  assert.match(html, /status status--warn[^>]*>[\s\S]*?Unconfirmed<\/span>/);
-  assert.match(html, /Transport write confirmed; native receipt unavailable/);
-  assert.match(html, /Delivery could not be confirmed/);
-  assert.match(html, /Claude did not emit a native receipt for direct acceptance/);
-  assert.match(html, /Check the recipient before retrying/);
-  assert.match(html, /A retry could duplicate the message/);
+test("message lifecycles group by direction and route, not suffix alone", () => {
+  const snapshot = dashboardFixture();
+  snapshot.messages.push({
+    sequence: 5,
+    timestamp: "2026-08-08T11:59:59.500Z",
+    messageIdSuffix: "a1b2c3",
+    direction: "codex_to_claude",
+    sourceAlias: "codex-reviewer@this-mac",
+    targetAlias: "claude-advisor@this-mac",
+    state: "failed",
+    latencyMs: 500,
+    bytes: 42,
+    hopCount: 0,
+    safeErrorCode: "DELIVERY_FAILED",
+  });
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.activity.length, 4);
+  const delivered = model.activity.find((message) => message.state === "delivered");
+  assert.equal(delivered?.events.length, 2);
+  const html = renderDashboardHtml(snapshot);
+  assert.equal((html.match(/data-dashboard-row="message-summary"/g) ?? []).length, 4);
+  assert.equal((html.match(/data-dashboard-row="message-event"/g) ?? []).length, 2);
+});
+
+test("72 evidence events disclose 12 omitted rows under the global budget", () => {
+  const snapshot = dashboardFixture();
+  snapshot.messages = Array.from(
+    { length: DASHBOARD_MODEL_LIMITS.messageEvents + 12 },
+    (_, index) => ({
+      sequence: index + 1,
+      timestamp: new Date(Date.UTC(2026, 7, 8, 11, 0, index)).toISOString(),
+      messageIdSuffix: "bada55",
+      direction: "claude_to_codex" as const,
+      sourceAlias: "claude-advisor@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
+      state: index === DASHBOARD_MODEL_LIMITS.messageEvents + 11
+        ? ("delivered" as const)
+        : ("dispatching" as const),
+      bytes: 42,
+      hopCount: 0,
+    }),
+  );
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.activity.length, 1);
+  assert.equal(model.activity[0]?.events.length, DASHBOARD_MODEL_LIMITS.messageEvents);
+  assert.equal(model.omissions.messageEvents, 12);
+  assert.equal(model.omissions.messageGroups, 0);
+  const html = renderDashboardHtml(snapshot);
+  assert.equal(
+    (html.match(/data-dashboard-row="message-event"/g) ?? []).length,
+    DASHBOARD_MODEL_LIMITS.messageEvents,
+  );
+  assert.match(html, /12 evidence rows/);
+});
+
+test("51 active groups are counted before the 50-group display slice", () => {
+  const snapshot = dashboardFixture();
+  snapshot.messages = Array.from(
+    { length: DASHBOARD_MODEL_LIMITS.messages + 1 },
+    (_, index) => ({
+      sequence: index + 1,
+      timestamp: new Date(Date.UTC(2026, 7, 8, 11, index)).toISOString(),
+      messageIdSuffix: index.toString(16).padStart(6, "0"),
+      direction: "claude_to_codex" as const,
+      sourceAlias: `claude-${String(index).padStart(2, "0")}@this-mac`,
+      targetAlias: "codex-reviewer@this-mac",
+      state: "queued" as const,
+      bytes: 42,
+      hopCount: 0,
+    }),
+  );
+  snapshot.truncation.messages = 7;
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.transit.activeDeliveries, 51);
+  assert.equal(model.transit.activeCountIsLowerBound, true);
+  assert.equal(model.activity.length, 50);
+  assert.equal(model.omissions.messageGroups, 1);
+  assert.equal(model.omissions.upstreamMessageEvents, 7);
+  const html = renderDashboardHtml(snapshot);
+  assert.match(html, /At least 51/);
+  assert.match(html, /1 delivery groups/);
+  assert.match(html, /7 delivery events before dashboard projection/);
+});
+
+test("Chinese copy distinguishes static snapshots, stale routes, and expired deliveries", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes[1] = {
+    ...snapshot.routes[1]!,
+    state: "stale",
+    compatibility: "expired",
+  };
+  snapshot.messages = [
+    {
+      ...snapshot.messages[0]!,
+      state: "expired",
+    },
+  ];
+  const html = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.equal(html.includes("即时"), false);
+  assert.match(html, /一个时间点/);
+  assert.match(html, /需要重新观察/);
+  assert.match(html, /兼容性观察已失效/);
+  assert.match(html, /已超出投递期限/);
+});
+
+test("invalid available-peer inventory is rejected as a whole", () => {
+  const snapshot = dashboardFixture();
+  snapshot.availablePeers = [{
+    alias: "codex-impostor@this-mac",
+    provider: "codex",
+    host: "this-mac",
+    state: "idle",
+    compatibility: "compatible",
+    selected: false,
+  }];
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(model.peers, []);
+  assert.equal(model.exchange.claude.total, 0);
+  assert.equal(renderDashboardHtml(snapshot).includes("codex-impostor@this-mac"), false);
 });
