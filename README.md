@@ -149,7 +149,7 @@ Please review the current approach and identify the main risk.
 MSG
 ```
 
-The command returns a public conversation token. Because this send requests a reply, Claude's native response is correlated automatically and routed back to the registered Codex task. The side that has the token can also send a later follow-up:
+The command returns a public conversation token and a dlv_ delivery token. Because this send requests a reply, Claude's native response is correlated automatically and routed back to the registered Codex task. The side that has the token can also send a later follow-up:
 
 ```bash
 embassy reply \
@@ -199,7 +199,7 @@ Provider-authorized commands inherit exactly one identity: a Codex task's `CODEX
 - **Native failures.** A Claude-originated route or delivery failure settles as native `expired`, followed by one static `<gateway-delivery-diagnostic>` frame containing a safe error code. It contains no path, native identifier, exception, or message body. `denied` is reserved for a real user or policy refusal and is not authored by Embassy v1. `held` and transport-written are progress, never success.
 - **Retries are conservative.** Messages that have not been dispatched remain queued while their route is busy or temporarily unavailable. Re-running `register-codex` replaces a closed or faulted App Server connector and wakes held work when the recovered route is idle. An explicit clean adapter deferral can return the same body to the queue. A confirmed delivery failure settles; an ambiguous write is never retried automatically.
 - **Bounded by design.** Bodies, queues, rate windows, deduplication tables, deadlines, hop counts, and transient conversations all have fixed limits.
-- **Restarts do not replay text.** Queued and in-flight bodies live only in memory. If Embassy stops before settlement, metadata becomes abandoned, bodies are discarded, and nothing is replayed. A prior Claude binding remains stored but stale; after authorized live discovery, run `select-claude` again. No pending reply or conversation capability survives.
+- **Restarts do not replay text.** Queued and in-flight bodies live only in memory. If Embassy stops before settlement, metadata becomes abandoned, bodies are discarded, and nothing is replayed. A prior Claude binding remains stored but stale; after an authorized complete live discovery, an exact unique stored UUID reactivates automatically; explicit `select-claude` remains the optional fallback. No pending reply or conversation capability survives.
 
 Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. The dashboard distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.
 
@@ -298,8 +298,9 @@ binds `127.0.0.1` on an ephemeral port; the companion is not part of
 `embassy serve`, which remains socket-only with no TCP or HTTP listener.
 
 Access bootstraps through a one-use 256-bit URL-fragment token exchanged for a
-path-scoped `HttpOnly` `SameSite=Strict` session cookie. Host, Origin, and
-sentinel headers are checked on every request. There are no CORS headers, no
+path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header is checked on every request; navigation GETs permit a
+missing Origin and carry no sentinel, while non-navigation POSTs require the
+exact Origin plus the X-Embassy-Request sentinel. There are no CORS headers, no
 mutation or provider routes, no storage, no telemetry, and no external assets.
 The browser has zero authority to register, select, send, reply, approve, or
 interrupt — it receives a read-only sanitized metadata snapshot only, streamed

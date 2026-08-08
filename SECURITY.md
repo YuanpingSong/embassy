@@ -156,8 +156,9 @@ user can read them.
 `embassy dashboard --live` binds a read-only HTTP listener on `127.0.0.1` with
 an ephemeral port. It is a separate foreground process from `embassy serve`.
 Access requires a one-use 256-bit URL-fragment token exchanged for a
-path-scoped `HttpOnly` `SameSite=Strict` session cookie; Host, Origin, and
-sentinel headers are checked on every request. There are no CORS headers, no
+path-scoped `HttpOnly` `SameSite=Strict` session cookie; The exact Host header is checked on every request; navigation GETs permit a
+missing Origin and carry no sentinel, while non-navigation POSTs require the
+exact Origin plus the X-Embassy-Request sentinel. There are no CORS headers, no
 mutation or provider routes, no storage, no telemetry, and no external assets.
 The browser receives a read-only sanitized metadata snapshot and has no
 authority to register, select, send, reply, approve, or interrupt. Any process
