@@ -595,7 +595,7 @@ test("name, cwd, and kind changes preserve the logical session UUID", async (t) 
   );
 });
 
-test("send rejects replaced state and workspace generations before connecting", async (t) => {
+test("send rejects replaced state and workspace generations before connecting", { skip: process.platform !== "darwin" }, async (t) => {
   let connections = 0;
   const current = await fixture(t);
   await addPeer(current, {

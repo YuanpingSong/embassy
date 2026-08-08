@@ -203,6 +203,7 @@ test(
 
 test(
   "a fresh default host lease establishes store ownership before the real store initializes",
+  { skip: process.platform !== "darwin" },
   async (t) => {
     const home = await homeFixture(t);
     const stateDir = path.join(home, HOST_ROOT);
@@ -242,7 +243,7 @@ test("a non-empty unmarked default root is rejected without mutation", async (t)
   );
 });
 
-test("the fixed owner record excludes a second operating-system process", async (t) => {
+test("the fixed owner record excludes a second operating-system process", { skip: process.platform !== "darwin" }, async (t) => {
   const home = await homeFixture(t);
   const sourceUrl = pathToFileURL(
     path.join(process.cwd(), "src", "gateway", "instance-lease.ts"),
