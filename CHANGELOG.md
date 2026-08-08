@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Validated native records named `codex-*` are excluded from Claude destination discovery; they are gateway advertisements, not selectable Claude sessions.
 - After Embassy restarts, a persisted Claude binding starts stale. The next authorized, complete discovery may reactivate only the exact same Claude session UUID under the same provider, host, and owner lease, adopting its latest name after workspace/provider revalidation. Changed, missing, incomplete, or ambiguous identity stays stale. Queued text, callbacks, receipt handles, pending replies, and conversation capability are never restored.
 - Re-running `register-codex` replaces a closed or faulted App Server connector; an idle recovered route wakes held work without retrying any ambiguous write.
+- The first successful Codex registration now fixes its exact alias, task, and host for the lifetime of that Embassy process. Exact re-registration remains available for connector recovery, while unregistering does not permit an in-place rename or same-socket succession; unregister the current route, then restart Embassy to choose a different Codex identity.
+- Failed reactivation of a retained Codex route, or a fresh registration whose cleanup cannot be fully confirmed, pins that exact identity fail-closed until exact retry or confirmed unregister followed by restart.
 
 ### Removed
 

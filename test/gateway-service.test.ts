@@ -29,6 +29,7 @@ import type {
 import { BridgeError } from "../src/errors.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
+const OTHER_THREAD_ID = "00000000-0000-7000-8000-000000000702";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
 const SECRET = "SYNTHETIC_BODY_MUST_STAY_MEMORY_ONLY_8e24";
 async function fixture(): Promise<{
@@ -134,6 +135,14 @@ class FakeProvider implements GatewayProviderAdapter {
     alias: string;
     status: "idle" | "busy" | "waiting";
   }> = [];
+  nativeCodexAdvertisements: string[] = [];
+  nativeCodexAdvertisementFailures: Array<{
+    error: Error;
+    afterWrite?: boolean;
+  }> = [];
+  nativeCodexUnadvertisements: string[] = [];
+  nativeCodexUnadvertisementFailures: Error[] = [];
+  nativeCodexStatusFailures: Error[] = [];
   nativeInboundStatuses: Array<{
     receiptHandle: string;
     status: "held" | "delivered" | "denied" | "expired";
@@ -258,7 +267,27 @@ class FakeProvider implements GatewayProviderAdapter {
     alias: string,
     status: "idle" | "busy" | "waiting",
   ): Promise<void> {
+    const failure = this.nativeCodexStatusFailures.shift();
+    if (failure !== undefined) throw failure;
     this.nativeCodexStatuses.push({ alias, status });
+  }
+
+  async advertiseNativeCodexPeer(input: {
+    alias: string;
+    cwd: string;
+  }): Promise<void> {
+    const failure = this.nativeCodexAdvertisementFailures.shift();
+    if (failure?.afterWrite === true) {
+      this.nativeCodexAdvertisements.push(input.alias);
+    }
+    if (failure !== undefined) throw failure.error;
+    this.nativeCodexAdvertisements.push(input.alias);
+  }
+
+  async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
+    const failure = this.nativeCodexUnadvertisementFailures.shift();
+    if (failure !== undefined) throw failure;
+    this.nativeCodexUnadvertisements.push(alias);
   }
 
   async updateNativeInboundStatus(
@@ -545,6 +574,452 @@ test("Codex registration requires the native codex-* namespace", async (t) => {
     { accepted: false, code: "rejected" },
   );
   assert.equal((await service.handlers().listSnapshot()).routes.length, 0);
+});
+
+for (const failurePoint of [
+  "advertise_clean",
+  "advertise_after_write",
+  "status",
+] as const) {
+  test(`a fresh Codex ${failurePoint} failure rolls back and leaves identity unlocked`, async (t) => {
+    const { root, stateDir } = await fixture();
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider("codex");
+    if (failurePoint === "status") {
+      claude.nativeCodexStatusFailures.push(new Error("synthetic status failure"));
+    } else {
+      claude.nativeCodexAdvertisementFailures.push({
+        error: new Error("synthetic advertisement failure"),
+        ...(failurePoint === "advertise_after_write"
+          ? { afterWrite: true }
+          : {}),
+      });
+    }
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: stateDir,
+        EMBASSY_HOSTS: "this-mac",
+      }),
+      adapters: [claude, codex],
+    });
+    await service.start();
+    t.after(async () => {
+      await service.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const handlers = service.handlers();
+
+    assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+      accepted: false,
+      code: "rejected",
+    });
+    assert.deepEqual((await handlers.listSnapshot()).routes, []);
+    assert.deepEqual(codex.releasedRoutes, [THREAD_ID]);
+    assert.deepEqual(claude.nativeCodexUnadvertisements, [
+      "codex-main@this-mac",
+    ]);
+
+    assert.deepEqual(
+      await handlers.registerCodex({
+        ...codexRegistration(),
+        alias: "codex-next@this-mac",
+      }),
+      { accepted: true, code: "ok" },
+    );
+    assert.deepEqual(
+      (await handlers.listSnapshot()).routes.map(({ alias }) => alias),
+      ["codex-next@this-mac"],
+    );
+  });
+}
+
+test("incomplete fresh-registration rollback pins the provisional Codex identity", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.nativeCodexAdvertisementFailures.push({
+    error: new Error("synthetic post-write failure"),
+    afterWrite: true,
+  });
+  claude.nativeCodexUnadvertisementFailures.push(
+    new Error("synthetic cleanup failure"),
+  );
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: false,
+    code: "rejected",
+  });
+  assert.deepEqual((await handlers.listSnapshot()).routes, []);
+  const selectedBeforeConflict = codex.selectedRoutes.length;
+  assert.deepEqual(
+    await handlers.registerCodex({
+      ...codexRegistration(),
+      alias: "codex-next@this-mac",
+    }),
+    { accepted: false, code: "conflict" },
+  );
+  assert.equal(codex.selectedRoutes.length, selectedBeforeConflict);
+  assert.deepEqual(claude.nativeCodexAdvertisements, [
+    "codex-main@this-mac",
+  ]);
+});
+
+test("a failed exact Codex re-registration preserves its existing route and queue", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await discoverAndRegisterCodexOnly(handlers);
+  codex.state = "busy";
+  codex.emitRouteState(THREAD_ID, "busy");
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, state }) =>
+        alias === "codex-main@this-mac" && state === "busy",
+    ),
+  );
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "preserve this queued synthetic body",
+  });
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, queueDepth }) =>
+        alias === "codex-main@this-mac" && queueDepth === 1,
+    ),
+  );
+
+  claude.nativeCodexStatusFailures.push(new Error("synthetic status failure"));
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: false,
+    code: "rejected",
+  });
+  const snapshot = await handlers.listSnapshot();
+  assert.equal(
+    snapshot.routes.some(
+      ({ alias, queueDepth }) =>
+        alias === "codex-main@this-mac" && queueDepth === 1,
+    ),
+    true,
+  );
+  assert.equal(
+    snapshot.messages.some(
+      ({ direction, state }) =>
+        direction === "claude_to_codex" && state === "held",
+    ),
+    true,
+  );
+  assert.deepEqual(codex.releasedRoutes, []);
+  assert.deepEqual(claude.nativeCodexUnadvertisements, []);
+});
+
+test("failed post-restart Codex reactivation preserves and pins its persisted identity", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const first = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close();
+    await first.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  assert.deepEqual(
+    await first.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  await first.close();
+
+  const secondClaude = new FakeProvider("claude");
+  secondClaude.nativeCodexStatusFailures.push(
+    new Error("synthetic status failure"),
+  );
+  const secondCodex = new FakeProvider("codex");
+  second = new GatewayService({
+    config,
+    adapters: [secondClaude, secondCodex],
+  });
+  await second.start();
+  assert.deepEqual(
+    await second.handlers().registerCodex(codexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(
+    (await second.handlers().listSnapshot()).routes.some(
+      ({ alias }) => alias === "codex-main@this-mac",
+    ),
+    true,
+  );
+  const selectedBeforeConflict = secondCodex.selectedRoutes.length;
+  assert.deepEqual(
+    await second.handlers().registerCodex({
+      ...codexRegistration(),
+      alias: "codex-next@this-mac",
+    }),
+    { accepted: false, code: "conflict" },
+  );
+  assert.equal(secondCodex.selectedRoutes.length, selectedBeforeConflict);
+  assert.deepEqual(secondCodex.releasedRoutes, []);
+  assert.deepEqual(secondClaude.nativeCodexUnadvertisements, []);
+});
+
+test("a retained Codex route blocks a different alias and task before adapter selection", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const first = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close();
+    await first.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  assert.deepEqual(
+    await first.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  await first.close();
+
+  const secondClaude = new FakeProvider("claude");
+  const secondCodex = new FakeProvider("codex");
+  second = new GatewayService({
+    config,
+    adapters: [secondClaude, secondCodex],
+  });
+  await second.start();
+  assert.deepEqual(
+    await second.handlers().registerCodex({
+      ...codexRegistration(),
+      alias: "codex-next@this-mac",
+      threadId: OTHER_THREAD_ID,
+    }),
+    { accepted: false, code: "conflict" },
+  );
+  assert.deepEqual(secondCodex.selectedRoutes, []);
+  assert.deepEqual(secondClaude.nativeCodexAdvertisements, []);
+  assert.deepEqual(
+    (await second.handlers().listSnapshot()).routes.map(({ alias }) => alias),
+    ["codex-main@this-mac"],
+  );
+});
+
+test("concurrent first Codex registrations serialize to one immutable identity", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  assert.deepEqual(
+    await Promise.all([
+      service.handlers().registerCodex(codexRegistration()),
+      service.handlers().registerCodex({
+        ...codexRegistration(),
+        alias: "codex-next@this-mac",
+      }),
+    ]),
+    [
+      { accepted: true, code: "ok" },
+      { accepted: false, code: "conflict" },
+    ],
+  );
+  assert.deepEqual(codex.selectedRoutes, [
+    { alias: "codex-main@this-mac", routeHandle: THREAD_ID },
+  ]);
+  assert.deepEqual(claude.nativeCodexAdvertisements, [
+    "codex-main@this-mac",
+  ]);
+});
+
+test("Codex registration identity is immutable for one service lifetime", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(
+    await handlers.unregisterCodex({
+      alias: "codex-main@this-mac",
+      threadId: THREAD_ID,
+    }),
+    { accepted: true, code: "ok" },
+  );
+
+  const selectedBeforeRejectedRebinds = codex.selectedRoutes.length;
+  const advertisedBeforeRejectedRebinds =
+    claude.nativeCodexAdvertisements.length;
+  const statusesBeforeRejectedRebinds = claude.nativeCodexStatuses.length;
+  const releasesBeforeRejectedRebinds = codex.releasedRoutes.length;
+  const revisionBeforeRejectedRebinds = (await handlers.health()).revision;
+  assert.deepEqual(
+    await handlers.registerCodex({
+      ...codexRegistration(),
+      alias: "codex-renamed@this-mac",
+    }),
+    { accepted: false, code: "conflict" },
+  );
+  assert.deepEqual(
+    await handlers.registerCodex({
+      ...codexRegistration(),
+      threadId: OTHER_THREAD_ID,
+    }),
+    { accepted: false, code: "conflict" },
+  );
+  assert.equal(codex.selectedRoutes.length, selectedBeforeRejectedRebinds);
+  assert.equal(
+    claude.nativeCodexAdvertisements.length,
+    advertisedBeforeRejectedRebinds,
+  );
+  assert.equal(claude.nativeCodexStatuses.length, statusesBeforeRejectedRebinds);
+  assert.equal(codex.releasedRoutes.length, releasesBeforeRejectedRebinds);
+  assert.equal(
+    (await handlers.health()).revision,
+    revisionBeforeRejectedRebinds,
+  );
+  assert.deepEqual((await handlers.listSnapshot()).routes, []);
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(
+    codex.selectedRoutes.map(({ alias, routeHandle }) => ({ alias, routeHandle })),
+    [codexRegistration(), codexRegistration(), codexRegistration()].map(
+      ({ alias, threadId }) => ({ alias, routeHandle: threadId }),
+    ),
+  );
+  assert.deepEqual(claude.nativeCodexAdvertisements, [
+    "codex-main@this-mac",
+    "codex-main@this-mac",
+    "codex-main@this-mac",
+  ]);
+  assert.deepEqual(claude.nativeCodexUnadvertisements, [
+    "codex-main@this-mac",
+  ]);
+});
+
+test("a new service lifetime can choose a new Codex registration identity", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const first = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close();
+    await first.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  assert.deepEqual(
+    await first.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await first.handlers().unregisterCodex({
+      alias: "codex-main@this-mac",
+      threadId: THREAD_ID,
+    }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await first.handlers().registerCodex({
+      ...codexRegistration(),
+      alias: "codex-next@this-mac",
+    }),
+    { accepted: false, code: "conflict" },
+  );
+  await first.close();
+
+  const secondCodex = new FakeProvider("codex");
+  second = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), secondCodex],
+  });
+  await second.start();
+  assert.deepEqual(
+    await second.handlers().registerCodex({
+      ...codexRegistration(),
+      alias: "codex-next@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(secondCodex.selectedRoutes, [
+    { alias: "codex-next@this-mac", routeHandle: THREAD_ID },
+  ]);
 });
 
 test("fake end-to-end selection, dispatch, correlation, and reply authority stay metadata-only", async (t) => {

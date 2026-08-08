@@ -77,6 +77,10 @@ embassy register-codex --alias codex-reviewer@this-mac
 
 Let the CLI read that task's inherited `CODEX_THREAD_ID`. Never supply the thread ID as an argument, print it, persist it, or register another task by guessing its identity. The alias must start with `codex-`; a successful registration advertises that task for native inbound turns.
 
+The first successful Codex registration fixes the exact alias and task for that Embassy process. Exact re-registration may recover its connector, but unregistering does not release the name for another task or alias during that process lifetime. There is no in-place rename or succession option; unregister the current route, then restart Embassy before choosing a different Codex identity.
+
+Embassy also pins the exact identity fail-closed when a retained route cannot fully reactivate or a fresh registration cannot confirm complete rollback. Retry only that exact identity; choose another only after the old route is confirmed unregistered and Embassy is restarted.
+
 Unregister from the same Codex task:
 
 ```sh

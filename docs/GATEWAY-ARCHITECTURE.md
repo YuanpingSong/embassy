@@ -709,6 +709,16 @@ the preferred least-context setup, but it is not mandatory.
 - Explicit `register-codex` replaces a closed or faulted App Server connector;
   if the recovered route is idle, held undispatched work is woken. Ambiguous
   writes are not retried.
+- The first successful Codex registration locks its exact alias, task, and host
+  for that controller process. Exact re-registration and connector recovery
+  remain valid; unregister removes reachability but does not release the
+  process-lifetime identity. Choosing a different Codex identity requires
+  unregistering the current route and restarting the gateway. v1 has no
+  in-place alias succession or same-socket rename path.
+- A failed reactivation of a retained route, or any fresh-registration rollback
+  whose cleanup cannot be fully confirmed, pins that exact identity
+  fail-closed. Only exact retry is permitted until the old route is confirmed
+  unregistered and the controller is restarted.
 - No ambiguous mutation is retried automatically.
 - No queued body survives process loss.
 - Version-specific compatibility evidence expires on a provider or Desktop

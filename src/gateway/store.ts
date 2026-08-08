@@ -1340,6 +1340,34 @@ export class GatewayStore {
   }
 
   /**
+   * Controller-internal inventory used only to enforce the single Codex
+   * process identity across restart. Native task handles never cross the
+   * control protocol or enter a public projection.
+   */
+  async inspectPrivateCodexRoutes(): Promise<
+    GatewayPrivateRouteInspection[]
+  > {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      return state.routes
+        .filter(
+          (route) =>
+            route.binding.provider === "codex" &&
+            route.registrationMode === "explicit_opt_in",
+        )
+        .slice(0, this.config.limits.maxRoutes)
+        .map((route) => ({
+          alias: route.alias,
+          binding: { ...route.binding },
+          registrationMode: route.registrationMode,
+          enabled: route.enabled,
+          state: route.state,
+          compatibility: route.compatibility,
+        }));
+    });
+  }
+
+  /**
    * Controller-internal inventory used only for exact-UUID Claude restoration
    * and explicit offline unselection. The result is bounded by maxRoutes and
    * must never cross the control protocol or enter a public projection.

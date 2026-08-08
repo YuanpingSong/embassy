@@ -829,6 +829,17 @@ test("identity, stdin, and argument failures happen before any control request",
       code: "INVALID_ARGUMENTS",
     },
     {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-reviewer@this-mac",
+        "--succeed",
+        "codex-next@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
       argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: {},
       code: "CODEX_IDENTITY_REQUIRED",

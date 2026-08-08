@@ -355,6 +355,12 @@ function safeCode(value: string | undefined, fallback: string): string {
 
 type RejectedDecision = Extract<GatewayDecision, { accepted: false }>;
 
+type CodexRegistrationLock = Readonly<{
+  alias: string;
+  threadId: string;
+  hostId: string;
+}>;
+
 function decisionFor(error: unknown): RejectedDecision {
   if (!(error instanceof BridgeError)) {
     return { accepted: false, code: "rejected" };
@@ -425,6 +431,12 @@ export class GatewayService {
   private closeInFlight: Promise<void> | undefined;
   private acceptingCallbacks = true;
   private dashboardHealthy = true;
+  /**
+   * Process-lifetime identity guard. Unregistering removes reachability but
+   * cannot turn the same native callback socket into a differently named
+   * Codex peer. A new GatewayService process starts with no such lock.
+   */
+  private codexRegistrationLock: CodexRegistrationLock | undefined;
 
   constructor(options: GatewayServiceOptions) {
     this.config = options.config;
@@ -1038,6 +1050,40 @@ export class GatewayService {
         "A registered Codex alias must start with codex-.",
       );
     }
+    const registrationLock = this.codexRegistrationLock;
+    if (
+      registrationLock !== undefined &&
+      (registrationLock.alias !== params.alias ||
+        registrationLock.threadId !== params.threadId ||
+        registrationLock.hostId !== params.hostId)
+    ) {
+      throw new BridgeError(
+        "CODEX_REGISTRATION_REBIND_FORBIDDEN",
+        "A Codex registration cannot change alias, task, or host during one Embassy process lifetime.",
+      );
+    }
+    const persistedCodexRoutes = await this.store.inspectPrivateCodexRoutes();
+    const persistedCodexRoute =
+      persistedCodexRoutes.length === 1
+        ? persistedCodexRoutes[0]
+        : undefined;
+    if (
+      persistedCodexRoutes.length > 0 &&
+      (persistedCodexRoute === undefined ||
+        persistedCodexRoute.alias !== params.alias ||
+        persistedCodexRoute.binding.hostId !== params.hostId ||
+        persistedCodexRoute.binding.routeHandle !== params.threadId ||
+        persistedCodexRoute.binding.ownerLease !==
+          stableLease("codex", `${params.hostId}\0${params.threadId}`))
+    ) {
+      throw new BridgeError(
+        "CODEX_REGISTRATION_REBIND_FORBIDDEN",
+        "A retained Codex registration must be explicitly retired before another identity can register.",
+      );
+    }
+    const routeBeforeRegistration = await this.store.inspectPrivateRoute(
+      params.alias,
+    );
     const adapter = this.adapter("codex", params.hostId);
     const registered = await adapter.selectRoute({
       alias: params.alias,
@@ -1065,25 +1111,110 @@ export class GatewayService {
       await adapter.releaseRoute?.(params.threadId).catch(() => undefined);
       throw error;
     }
-    this.rememberBinding(params.alias, binding, registered.state);
-    await this.adapter("claude", params.hostId).advertiseNativeCodexPeer?.({
-      alias: params.alias,
-      cwd: this.nativePeerCwd,
-    });
-    await this.adapter("claude", params.hostId).updateNativeCodexPeerStatus?.(
-      params.alias,
-      registered.state === "idle"
-        ? "idle"
-        : registered.state === "awaiting_approval"
-          ? "waiting"
-          : "busy",
-    );
-    await this.changed();
+    let advertiseAttempted = false;
+    try {
+      this.rememberBinding(params.alias, binding, registered.state);
+      const claudeAdapter = this.adapter("claude", params.hostId);
+      const advertise = claudeAdapter.advertiseNativeCodexPeer;
+      if (advertise !== undefined) {
+        advertiseAttempted = true;
+        await advertise.call(claudeAdapter, {
+          alias: params.alias,
+          cwd: this.nativePeerCwd,
+        });
+      }
+      await claudeAdapter.updateNativeCodexPeerStatus?.(
+        params.alias,
+        registered.state === "idle"
+          ? "idle"
+          : registered.state === "awaiting_approval"
+            ? "waiting"
+            : "busy",
+      );
+      await this.changed();
+    } catch (error) {
+      if (routeBeforeRegistration !== undefined) {
+        // A persisted or live exact route, its queue, and any advertisement
+        // predate this invocation, so a later status/dashboard failure cannot
+        // safely delete them as "rollback". A post-restart reactivation also
+        // establishes the process-lifetime identity even if publication fails.
+        this.lockCodexRegistration(params);
+        this.dashboardHealthy = false;
+        throw error;
+      }
+      try {
+        await this.rollbackCodexRegistration(
+          params,
+          binding,
+          advertiseAttempted,
+        );
+      } catch (rollbackError) {
+        // Some exact side effect may remain. Pin the provisional identity so a
+        // second alias or task can never enter the adapter while cleanup is
+        // uncertain.
+        this.lockCodexRegistration(params);
+        throw rollbackError;
+      }
+      throw error;
+    }
+    this.lockCodexRegistration(params);
     // The provider may have reported its initial idle observation before this
     // binding was remembered. Explicit registration is itself an authoritative
     // wake-up point, so do not require a second route notification to release a
     // message that was already held for this exact target.
     if (registered.state === "idle") this.scheduleDispatch(params.alias);
+  }
+
+  private lockCodexRegistration(
+    params: ValidatedRegisterCodexParams,
+  ): void {
+    this.codexRegistrationLock ??= Object.freeze({
+      alias: params.alias,
+      threadId: params.threadId,
+      hostId: params.hostId,
+    });
+  }
+
+  private async rollbackCodexRegistration(
+    params: ValidatedRegisterCodexParams,
+    binding: PrivateRouteBinding,
+    advertiseAttempted: boolean,
+  ): Promise<void> {
+    let cleanupFailed = false;
+    try {
+      const settlements = await this.store.unregisterRoute(
+        params.alias,
+        binding.ownerLease,
+      );
+      for (const settlement of settlements) {
+        await this.applyTerminalSettlementLocked(settlement);
+      }
+    } catch {
+      cleanupFailed = true;
+    }
+    this.forgetBinding(params.alias);
+    await this.adapter("codex", params.hostId)
+      .releaseRoute?.(params.threadId)
+      .catch(() => {
+        cleanupFailed = true;
+      });
+    if (advertiseAttempted) {
+      await this.adapter("claude", params.hostId)
+        .unadvertiseNativeCodexPeer?.(params.alias)
+        .catch(() => {
+          cleanupFailed = true;
+        });
+    }
+    await this.changed().catch(() => {
+      cleanupFailed = true;
+    });
+    if (cleanupFailed) {
+      this.dashboardHealthy = false;
+      throw new BridgeError(
+        "CODEX_REGISTRATION_ROLLBACK_FAILED",
+        "The failed Codex registration could not be fully rolled back.",
+      );
+    }
   }
 
   private async unregisterCodex(params: UnregisterCodexParams): Promise<void> {
