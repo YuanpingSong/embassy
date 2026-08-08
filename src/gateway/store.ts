@@ -50,9 +50,12 @@ import {
   type QueuedMessageMetadata,
   type RebindStaleRouteInput,
   type RegisterRouteInput,
+  type RequeueInFlightMessageResult,
   type RouteCounters,
   type SafeGatewayAlert,
   type SettleMessageInput,
+  type SettleMessageResult,
+  type TerminalMessageSettlement,
   type TransientNativeClaudePeer,
   type TransientQueuedMessage,
 } from "./types.js";
@@ -675,6 +678,35 @@ function sameRouteTarget(
   return sameEndpoint(left, right) && left.routeHandle === right.routeHandle;
 }
 
+function renameRateBucket(
+  state: GatewayPersistedState,
+  previousAlias: string,
+  newAlias: string,
+): void {
+  const previous = state.rateBuckets.find(
+    (bucket) => bucket.sourceAlias === previousAlias,
+  );
+  if (previous === undefined) return;
+  const existing = state.rateBuckets.find(
+    (bucket) => bucket.sourceAlias === newAlias,
+  );
+  if (existing === undefined) {
+    previous.sourceAlias = newAlias;
+    return;
+  }
+  existing.windowStartedAt =
+    existing.windowStartedAt < previous.windowStartedAt
+      ? existing.windowStartedAt
+      : previous.windowStartedAt;
+  existing.count = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    existing.count + previous.count,
+  );
+  state.rateBuckets = state.rateBuckets.filter(
+    (bucket) => bucket !== previous,
+  );
+}
+
 function directionFor(
   source: GatewayRouteRecord,
   target: GatewayRouteRecord,
@@ -831,8 +863,8 @@ export class GatewayStore {
   async markConnectorOffline(
     identity: PrivateEndpointIdentity,
     safeErrorCode = "CONNECTOR_OFFLINE",
-  ): Promise<void> {
-    await this.mutate(async (state, now) => {
+  ): Promise<TerminalMessageSettlement[]> {
+    return await this.mutate(async (state, now) => {
       this.assertAllowedIdentity(identity);
       if (!SAFE_CODE_PATTERN.test(safeErrorCode)) {
         throw new BridgeError(
@@ -862,7 +894,7 @@ export class GatewayStore {
         route.safeErrorCode = safeErrorCode;
         affectedAliases.add(route.alias);
       }
-      this.terminateAffectedMessages(
+      return this.terminateAffectedMessages(
         state,
         affectedAliases,
         now,
@@ -1000,8 +1032,8 @@ export class GatewayStore {
   async invalidateRoute(
     binding: PrivateRouteBinding,
     safeErrorCode = "ROUTE_STALE",
-  ): Promise<void> {
-    await this.mutate(async (state, now) => {
+  ): Promise<TerminalMessageSettlement[]> {
+    return await this.mutate(async (state, now) => {
       if (
         !isPrivateRouteBinding(binding) ||
         !SAFE_CODE_PATTERN.test(safeErrorCode)
@@ -1025,7 +1057,7 @@ export class GatewayStore {
       route.compatibility = "expired";
       route.updatedAt = now.toISOString();
       route.safeErrorCode = safeErrorCode;
-      this.terminateAffectedMessages(
+      return this.terminateAffectedMessages(
         state,
         new Set([route.alias]),
         now,
@@ -1035,13 +1067,20 @@ export class GatewayStore {
   }
 
   /**
-   * Replaces only an already-invalidated binding. This is never an automatic
-   * reconnect: Codex must retain the exact task handle, while Claude requires
-   * an explicit peer reselection because display aliases are not authority.
+   * Replaces only an already-invalidated binding. Codex must retain the exact
+   * task handle. Claude must retain its exact session UUID and ownership lease;
+   * an authorized discovery may also atomically adopt that UUID's latest live
+   * display name. Names alone are never rebind authority.
    */
   async rebindStaleRoute(input: RebindStaleRouteInput): Promise<void> {
     await this.mutate(async (state, now) => {
-      if (!ALIAS_PATTERN.test(input.alias) || !isPrivateRouteBinding(input.newBinding)) {
+      const newAlias = input.newAlias ?? input.alias;
+      if (
+        !ALIAS_PATTERN.test(input.alias) ||
+        !ALIAS_PATTERN.test(newAlias) ||
+        !isPrivateRouteBinding(input.newBinding) ||
+        !newAlias.endsWith(`@${input.newBinding.hostId}`)
+      ) {
         throw new BridgeError(
           "INVALID_ROUTE_REBIND",
           "The stale-route rebind request is malformed.",
@@ -1081,16 +1120,21 @@ export class GatewayStore {
           "A route rebind cannot change provider or allowlisted host.",
         );
       }
+      const sameLogicalRoute =
+        route.binding.routeHandle === input.newBinding.routeHandle &&
+        route.binding.ownerLease === input.newBinding.ownerLease;
+      const claudeReasonAllowed =
+        input.reason === "peer_explicitly_reselected" ||
+        input.reason === "peer_identity_reobserved";
       if (
         (route.binding.provider === "codex" &&
-          (input.reason !== "endpoint_reobserved" ||
-            route.binding.routeHandle !== input.newBinding.routeHandle)) ||
+          (input.reason !== "endpoint_reobserved" || !sameLogicalRoute)) ||
         (route.binding.provider === "claude" &&
-          input.reason !== "peer_explicitly_reselected")
+          (!claudeReasonAllowed || !sameLogicalRoute))
       ) {
         throw new BridgeError(
           "ROUTE_RESELECTION_REQUIRED",
-          "Codex may rebind only the same task after endpoint observation; Claude requires explicit peer reselection.",
+          "A stale route may rebind only the same provider-native logical identity and ownership lease.",
         );
       }
       const connector = state.connectors.find((candidate) =>
@@ -1110,7 +1154,8 @@ export class GatewayStore {
         state.routes.some(
           (candidate) =>
             candidate !== route &&
-            (sameRouteTarget(candidate.binding, input.newBinding) ||
+            (candidate.alias === newAlias ||
+              sameRouteTarget(candidate.binding, input.newBinding) ||
               candidate.binding.ownerLease === input.newBinding.ownerLease),
         )
       ) {
@@ -1119,22 +1164,45 @@ export class GatewayStore {
           "The replacement private binding already belongs to another alias.",
         );
       }
+      const previousAlias = route.alias;
       route.binding = { ...input.newBinding };
+      route.alias = newAlias;
       route.state = input.state ?? "idle";
       route.compatibility = "compatible";
       route.updatedAt = now.toISOString();
       route.lastSeenAt = now.toISOString();
       delete route.safeErrorCode;
+      if (previousAlias !== newAlias) {
+        // Restart recovery has already emptied queue/in-flight state. Keep the
+        // metadata rewrite complete anyway so this mutation stays atomic if a
+        // future caller uses the same primitive after another invalidation.
+        for (const item of [...state.queue, ...state.inFlight]) {
+          if (item.sourceAlias === previousAlias) item.sourceAlias = newAlias;
+          if (item.targetAlias === previousAlias) item.targetAlias = newAlias;
+        }
+        for (const record of state.dedupe) {
+          if (record.sourceAlias === previousAlias) {
+            record.sourceAlias = newAlias;
+          }
+          if (record.targetAlias === previousAlias) {
+            record.targetAlias = newAlias;
+          }
+        }
+        renameRateBucket(state, previousAlias, newAlias);
+      }
     });
   }
 
-  async disableRoute(alias: string, ownerLease: string): Promise<void> {
-    await this.mutate(async (state, now) => {
+  async disableRoute(
+    alias: string,
+    ownerLease: string,
+  ): Promise<TerminalMessageSettlement[]> {
+    return await this.mutate(async (state, now) => {
       const route = this.requireOwnedRoute(state, alias, ownerLease);
       route.enabled = false;
       route.state = "disabled";
       route.updatedAt = now.toISOString();
-      this.terminateAffectedMessages(
+      return this.terminateAffectedMessages(
         state,
         new Set([route.alias]),
         now,
@@ -1143,10 +1211,13 @@ export class GatewayStore {
     });
   }
 
-  async unregisterRoute(alias: string, ownerLease: string): Promise<void> {
-    await this.mutate(async (state, now) => {
+  async unregisterRoute(
+    alias: string,
+    ownerLease: string,
+  ): Promise<TerminalMessageSettlement[]> {
+    return await this.mutate(async (state, now) => {
       const route = this.requireOwnedRoute(state, alias, ownerLease);
-      this.terminateAffectedMessages(
+      const settlements = this.terminateAffectedMessages(
         state,
         new Set([route.alias]),
         now,
@@ -1173,6 +1244,7 @@ export class GatewayStore {
           record.sourceAlias !== route.alias &&
           record.targetAlias !== route.alias,
       );
+      return settlements;
     });
   }
 
@@ -1214,9 +1286,7 @@ export class GatewayStore {
         if (record.sourceAlias === alias) record.sourceAlias = newAlias;
         if (record.targetAlias === alias) record.targetAlias = newAlias;
       }
-      for (const bucket of state.rateBuckets) {
-        if (bucket.sourceAlias === alias) bucket.sourceAlias = newAlias;
-      }
+      renameRateBucket(state, alias, newAlias);
     });
   }
 
@@ -1266,6 +1336,34 @@ export class GatewayStore {
         state: route.state,
         compatibility: route.compatibility,
       };
+    });
+  }
+
+  /**
+   * Controller-internal inventory used only for exact-UUID Claude restoration
+   * and explicit offline unselection. The result is bounded by maxRoutes and
+   * must never cross the control protocol or enter a public projection.
+   */
+  async inspectPrivateClaudeRoutes(): Promise<
+    GatewayPrivateRouteInspection[]
+  > {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      return state.routes
+        .filter(
+          (route) =>
+            route.binding.provider === "claude" &&
+            route.registrationMode === "selected_live_peer",
+        )
+        .slice(0, this.config.limits.maxRoutes)
+        .map((route) => ({
+          alias: route.alias,
+          binding: { ...route.binding },
+          registrationMode: route.registrationMode,
+          enabled: route.enabled,
+          state: route.state,
+          compatibility: route.compatibility,
+        }));
     });
   }
 
@@ -1386,8 +1484,73 @@ export class GatewayStore {
     });
   }
 
-  async settleMessage(input: SettleMessageInput): Promise<void> {
-    await this.mutate(async (state, now) => {
+  /**
+   * Atomically terminalizes every message whose delivery deadline is due.
+   * Returned settlements are emitted only by the mutation that removed the
+   * message, so callers can release service-owned capabilities exactly once.
+   */
+  async expireDueMessages(now?: Date): Promise<TerminalMessageSettlement[]> {
+    const requestedTime = now instanceof Date ? now.getTime() : undefined;
+    if (
+      now !== undefined &&
+      (!(now instanceof Date) || !Number.isFinite(requestedTime))
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_TIMESTAMP",
+        "The gateway expiry time must be a valid Date.",
+      );
+    }
+    return this.mutate(async (state, mutationNow) => {
+      const effectiveNow =
+        requestedTime === undefined ? mutationNow : new Date(requestedTime);
+      const settlements: TerminalMessageSettlement[] = [];
+      const retainedQueue: QueuedMessageMetadata[] = [];
+      for (const item of state.queue) {
+        if (Date.parse(item.deadlineAt) > effectiveNow.getTime()) {
+          retainedQueue.push(item);
+          continue;
+        }
+        this.transientBodies.delete(item.messageId);
+        state.accounting.queuedBytes -= item.bytes;
+        const target = state.routes.find(
+          (route) => route.alias === item.targetAlias,
+        );
+        if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
+        settlements.push(
+          this.finishMetadata(
+            state,
+            item,
+            "expired",
+            effectiveNow,
+            "MESSAGE_EXPIRED",
+          ),
+        );
+      }
+      state.queue = retainedQueue;
+
+      const retainedInFlight: InFlightMessageMetadata[] = [];
+      for (const item of state.inFlight) {
+        if (Date.parse(item.deadlineAt) > effectiveNow.getTime()) {
+          retainedInFlight.push(item);
+          continue;
+        }
+        settlements.push(
+          this.finishMetadata(
+            state,
+            item,
+            "ambiguous",
+            effectiveNow,
+            "DELIVERY_DEADLINE_EXPIRED",
+          ),
+        );
+      }
+      state.inFlight = retainedInFlight;
+      return settlements;
+    });
+  }
+
+  async settleMessage(input: SettleMessageInput): Promise<SettleMessageResult> {
+    return this.mutate(async (state, now) => {
       if (!MESSAGE_ID_PATTERN.test(input.messageId)) {
         throw new BridgeError(
           "INVALID_GATEWAY_MESSAGE_ID",
@@ -1403,28 +1566,43 @@ export class GatewayStore {
           "Delivery error codes must use the normalized safe-code grammar.",
         );
       }
+      if (
+        input.state !== "delivered" &&
+        input.state !== "failed" &&
+        input.state !== "ambiguous" &&
+        input.state !== "expired" &&
+        input.state !== "cancelled"
+      ) {
+        throw new BridgeError(
+          "INVALID_DELIVERY_SETTLEMENT",
+          "Gateway delivery settlement must use a fixed terminal state.",
+        );
+      }
       const index = state.inFlight.findIndex(
         (item) => item.messageId === input.messageId,
       );
       const metadata = state.inFlight[index];
       if (!metadata || index < 0) {
-        throw new BridgeError(
-          "MESSAGE_NOT_IN_FLIGHT",
-          "The gateway message is not owned by an active dispatch.",
-        );
+        return { status: "not_in_flight" };
       }
       state.inFlight.splice(index, 1);
-      this.finishMetadata(
-        state,
-        metadata,
-        input.state,
-        now,
-        input.safeErrorCode,
-      );
+      return {
+        status: "settled",
+        settlement: this.finishMetadata(
+          state,
+          metadata,
+          input.state,
+          now,
+          input.safeErrorCode,
+        ),
+      };
     });
   }
 
-  async requeueInFlightMessage(messageId: string, body: string): Promise<boolean> {
+  async requeueInFlightMessage(
+    messageId: string,
+    body: string,
+  ): Promise<RequeueInFlightMessageResult> {
     return this.mutate(async (state, now) => {
       if (!MESSAGE_ID_PATTERN.test(messageId) || typeof body !== "string") {
         throw new BridgeError(
@@ -1437,15 +1615,20 @@ export class GatewayStore {
       );
       const metadata = state.inFlight[index];
       if (metadata === undefined || index < 0) {
-        throw new BridgeError(
-          "MESSAGE_NOT_IN_FLIGHT",
-          "The gateway message is not owned by an active dispatch.",
-        );
+        return { status: "not_in_flight" };
       }
       state.inFlight.splice(index, 1);
       if (Date.parse(metadata.deadlineAt) <= now.getTime()) {
-        this.finishMetadata(state, metadata, "expired", now, "MESSAGE_EXPIRED");
-        return false;
+        return {
+          status: "settled",
+          settlement: this.finishMetadata(
+            state,
+            metadata,
+            "expired",
+            now,
+            "MESSAGE_EXPIRED",
+          ),
+        };
       }
       const { dispatchedAt: _dispatchedAt, ...queuedMetadata } = metadata;
       state.queue.unshift(queuedMetadata);
@@ -1469,7 +1652,7 @@ export class GatewayStore {
           now.getTime() - Date.parse(metadata.enqueuedAt),
         ),
       });
-      return true;
+      return { status: "requeued" };
     });
   }
 
@@ -1559,22 +1742,36 @@ export class GatewayStore {
             `${right.provider}:${right.host}`,
           ),
         );
+      const oldestQueuedAtByTarget = new Map<string, string>();
+      for (const item of state.queue) {
+        const oldest = oldestQueuedAtByTarget.get(item.targetAlias);
+        if (
+          oldest === undefined ||
+          Date.parse(item.enqueuedAt) < Date.parse(oldest)
+        ) {
+          oldestQueuedAtByTarget.set(item.targetAlias, item.enqueuedAt);
+        }
+      }
       const routes: PublicRouteSnapshot[] = state.routes
-        .map((route) => ({
-          alias: route.alias,
-          provider: route.binding.provider,
-          host: route.binding.hostId,
-          enabled: route.enabled,
-          state: route.state,
-          compatibility: route.compatibility,
-          busyPolicy: route.busyPolicy,
-          ...(route.lastSeenAt ? { lastSeenAt: route.lastSeenAt } : {}),
-          queueDepth: route.queueDepth,
-          counters: { ...route.counters },
-          ...(route.safeErrorCode
-            ? { safeErrorCode: route.safeErrorCode }
-            : {}),
-        }))
+        .map((route) => {
+          const oldestQueuedAt = oldestQueuedAtByTarget.get(route.alias);
+          return {
+            alias: route.alias,
+            provider: route.binding.provider,
+            host: route.binding.hostId,
+            enabled: route.enabled,
+            state: route.state,
+            compatibility: route.compatibility,
+            busyPolicy: route.busyPolicy,
+            ...(route.lastSeenAt ? { lastSeenAt: route.lastSeenAt } : {}),
+            queueDepth: route.queueDepth,
+            ...(oldestQueuedAt === undefined ? {} : { oldestQueuedAt }),
+            counters: { ...route.counters },
+            ...(route.safeErrorCode
+              ? { safeErrorCode: route.safeErrorCode }
+              : {}),
+          };
+        })
         .sort((left, right) => left.alias.localeCompare(right.alias));
       const health = this.aggregateHealth(connectors);
       const unsortedAlerts: SafeGatewayAlert[] = [
@@ -2085,7 +2282,7 @@ export class GatewayStore {
     >,
     now: Date,
     safeErrorCode?: string,
-  ): void {
+  ): TerminalMessageSettlement {
     const counterKey = deliveryState;
     state.accounting[counterKey] += 1;
     const target = state.routes.find(
@@ -2104,6 +2301,11 @@ export class GatewayStore {
       latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       ...(safeErrorCode ? { safeErrorCode } : {}),
     });
+    return {
+      messageId: metadata.messageId,
+      state: deliveryState,
+      ...(safeErrorCode ? { safeErrorCode } : {}),
+    };
   }
 
   private terminateAffectedMessages(
@@ -2111,7 +2313,8 @@ export class GatewayStore {
     aliases: Set<string>,
     now: Date,
     safeErrorCode: string,
-  ): void {
+  ): TerminalMessageSettlement[] {
+    const settlements: TerminalMessageSettlement[] = [];
     const queued = state.queue.filter(
       (item) =>
         aliases.has(item.sourceAlias) || aliases.has(item.targetAlias),
@@ -2125,7 +2328,9 @@ export class GatewayStore {
       state.accounting.queuedBytes -= item.bytes;
       const target = state.routes.find((route) => route.alias === item.targetAlias);
       if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      this.finishMetadata(state, item, "abandoned", now, safeErrorCode);
+      settlements.push(
+        this.finishMetadata(state, item, "abandoned", now, safeErrorCode),
+      );
     }
     const inFlight = state.inFlight.filter(
       (item) =>
@@ -2136,8 +2341,11 @@ export class GatewayStore {
         !aliases.has(item.sourceAlias) && !aliases.has(item.targetAlias),
     );
     for (const item of inFlight) {
-      this.finishMetadata(state, item, "ambiguous", now, safeErrorCode);
+      settlements.push(
+        this.finishMetadata(state, item, "ambiguous", now, safeErrorCode),
+      );
     }
+    return settlements;
   }
 
   private prune(now: Date): void {
@@ -2154,29 +2362,6 @@ export class GatewayStore {
         now.getTime() - Date.parse(bucket.windowStartedAt) <
         this.config.limits.rateWindowMs,
     );
-
-    const expired = state.queue.filter(
-      (item) => Date.parse(item.deadlineAt) <= now.getTime(),
-    );
-    state.queue = state.queue.filter(
-      (item) => Date.parse(item.deadlineAt) > now.getTime(),
-    );
-    for (const item of expired) {
-      this.transientBodies.delete(item.messageId);
-      state.accounting.queuedBytes -= item.bytes;
-      const target = state.routes.find((route) => route.alias === item.targetAlias);
-      if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      this.finishMetadata(state, item, "expired", now, "MESSAGE_EXPIRED");
-    }
-    const expiredInFlight = state.inFlight.filter(
-      (item) => Date.parse(item.deadlineAt) <= now.getTime(),
-    );
-    state.inFlight = state.inFlight.filter(
-      (item) => Date.parse(item.deadlineAt) > now.getTime(),
-    );
-    for (const item of expiredInFlight) {
-      this.finishMetadata(state, item, "ambiguous", now, "DELIVERY_DEADLINE_EXPIRED");
-    }
   }
 
   private recoverAfterRestart(now: Date): void {

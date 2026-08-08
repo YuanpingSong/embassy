@@ -26,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Compatibility pins re-established for this release: Claude Code **2.1.225** / peer protocol 1 (with still-running 2.1.224 sessions remaining discoverable during a patch-upgrade overlap window), and Codex App Server **0.147.0**, resolved by exact path. An unknown version on either surface fails closed.
 - The public v1 launcher is macOS-only and local-host-only.
 - Validated native records named `codex-*` are excluded from Claude destination discovery; they are gateway advertisements, not selectable Claude sessions.
-- After Embassy restarts, a persisted Claude binding remains stale and must be explicitly selected again after authorized live discovery. Queued text, pending replies, and conversation capability are never restored.
+- After Embassy restarts, a persisted Claude binding starts stale. The next authorized, complete discovery may reactivate only the exact same Claude session UUID under the same provider, host, and owner lease, adopting its latest name after workspace/provider revalidation. Changed, missing, incomplete, or ambiguous identity stays stale. Queued text, callbacks, receipt handles, pending replies, and conversation capability are never restored.
 - Re-running `register-codex` replaces a closed or faulted App Server connector; an idle recovered route wakes held work without retrying any ambiguous write.
 
 ### Removed

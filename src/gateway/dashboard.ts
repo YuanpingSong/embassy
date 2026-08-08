@@ -51,6 +51,11 @@ type MessageGroup = {
   events: readonly NormalizedMessageEvent[];
 };
 
+type QueueAge = {
+  oldestQueuedAt: string;
+  milliseconds: number;
+};
+
 const HTML_ESCAPE_PATTERN = /[&<>"']/g;
 const HTML_ESCAPES: Readonly<Record<string, string>> = {
   "&": "&amp;",
@@ -146,6 +151,59 @@ function normalizeTimestamp(value: unknown): string | undefined {
   const milliseconds = Date.parse(value);
   if (!Number.isFinite(milliseconds)) return undefined;
   return new Date(milliseconds).toISOString();
+}
+
+function queueAgeAtSnapshot(
+  route: PublicRouteSnapshot,
+  generatedAt: unknown,
+): QueueAge | undefined {
+  const depth = normalizedInteger(route.queueDepth);
+  const oldestQueuedAt = normalizeTimestamp(route.oldestQueuedAt);
+  const reference = normalizeTimestamp(generatedAt);
+  if (depth === undefined || depth === 0 || oldestQueuedAt === undefined) {
+    return undefined;
+  }
+  if (reference === undefined) return undefined;
+  const milliseconds = Date.parse(reference) - Date.parse(oldestQueuedAt);
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
+    return undefined;
+  }
+  return { oldestQueuedAt, milliseconds };
+}
+
+function oldestQueueAgeAtSnapshot(
+  routes: readonly PublicRouteSnapshot[],
+  generatedAt: unknown,
+): QueueAge | undefined {
+  let oldest: QueueAge | undefined;
+  for (const route of routes) {
+    const candidate = queueAgeAtSnapshot(route, generatedAt);
+    if (
+      candidate !== undefined &&
+      (oldest === undefined || candidate.milliseconds > oldest.milliseconds)
+    ) {
+      oldest = candidate;
+    }
+  }
+  return oldest;
+}
+
+function formatQueueAge(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function renderQueueAge(age: QueueAge | undefined): string {
+  if (age === undefined) {
+    return '<span class="quiet" aria-label="Queue age unavailable">\u2014</span>';
+  }
+  const label = formatQueueAge(age.milliseconds);
+  return `<time datetime="${age.oldestQueuedAt}" title="Queued since ${age.oldestQueuedAt}" aria-label="Oldest queued message waited ${label} at snapshot">${label}</time>`;
 }
 
 function renderTimestamp(value: unknown): string {
@@ -532,13 +590,14 @@ function renderRouteList(
       );
       const compatibility = compatibilityPresentation(route.compatibility);
       const depth = normalizedInteger(route.queueDepth) ?? 0;
+      const queueAge = queueAgeAtSnapshot(route, generatedAt);
       return `<li class="route ${isRouteReady(route) ? "route--ready" : "route--attention"}">
         <div class="route__main">
           <strong class="alias">${publicLabel(route.alias)}</strong>
           <span class="route__meta">${publicLabel(route.host)} \u00b7 observed ${renderTimestampAtSnapshot(route.lastSeenAt, generatedAt)}</span>
         </div>
         <div class="route__status">${statusPill(state.label, state.tone)} ${statusPill(compatibility.label, compatibility.tone)}</div>
-        <div class="route__queue"><span>${busyPolicyLabel(route.busyPolicy)}</span><strong>${depth === 0 ? "Queue empty" : `${formatInteger(depth)} queued`}</strong></div>
+        <div class="route__queue"><span>${busyPolicyLabel(route.busyPolicy)}</span><strong>${depth === 0 ? "Queue empty" : `${formatInteger(depth)} queued`}</strong>${depth === 0 ? "" : `<span class="route__queue-age">Oldest wait ${renderQueueAge(queueAge)}</span>`}</div>
         ${route.safeErrorCode === undefined ? "" : `<div class="route__code">${renderSafeCode(route.safeErrorCode)}</div>`}
         ${routeRepairHint(route)}
       </li>`;
@@ -809,6 +868,13 @@ function alertGuidance(alert: SafeGatewayAlert): {
             ? `Run ${command("embassy refresh-dashboard")}, then explicitly select the current Claude alias.`
             : `Re-run ${command(`embassy register-codex --alias ${alias}`)} inside that exact Codex task.`,
       };
+    case "QUEUE_STALLED":
+      return {
+        title: "Queued delivery is stalled",
+        description:
+          "The oldest accepted message on this route has remained queued past half of the delivery deadline.",
+        action: `Run ${command("embassy status")} to inspect the current route state. Do not resend accepted work; it remains tracked until delivery or expiry.`,
+      };
     case "ADAPTER_DEGRADED":
     case "ROUTE_DEGRADED":
       return {
@@ -908,6 +974,10 @@ export function renderGatewayDashboard(
     const depth = normalizedInteger(route.queueDepth) ?? 0;
     return Math.min(Number.MAX_SAFE_INTEGER, sum + depth);
   }, 0);
+  const oldestQueueAge = oldestQueueAgeAtSnapshot(
+    snapshot.routes,
+    snapshot.generatedAt,
+  );
   const peers = availableClaudePeers(snapshot.availablePeers);
   const claudeRoutes = sortRoutes(
     snapshot.routes.filter((route) => route.provider === "claude"),
@@ -1059,7 +1129,7 @@ export function renderGatewayDashboard(
     .snapshot-card strong { color: var(--ink); }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: .85rem;
       margin: 0 0 1rem;
     }
@@ -1121,8 +1191,9 @@ export function renderGatewayDashboard(
     .route__main strong, .route__meta { display: block; }
     .route__meta { margin-top: .15rem; color: var(--muted); font-size: .73rem; }
     .route__status { display: flex; align-items: flex-start; justify-content: flex-end; gap: .35rem; flex-wrap: wrap; }
-    .route__queue { display: flex; gap: .55rem; color: var(--muted); font-size: .74rem; }
+    .route__queue { display: flex; align-items: baseline; flex-wrap: wrap; gap: .2rem .55rem; color: var(--muted); font-size: .74rem; }
     .route__queue strong { color: var(--ink); }
+    .route__queue-age { white-space: nowrap; }
     .route__code { text-align: right; }
     .route__action { grid-column: 1 / -1; margin: .1rem 0 0; padding-top: .55rem; border-top: 1px solid var(--line); font-size: .78rem; }
     .empty-state { padding: 1rem; border: 1px dashed var(--line); border-radius: 10px; background: var(--surface-soft); }
@@ -1286,6 +1357,7 @@ export function renderGatewayDashboard(
       <div class="metric"><dt>Claude selection</dt><dd>${formatInteger(selectedClaude)} <span class="metric__detail">selected \u00b7 ${formatInteger(peers.length)} discovered</span></dd></div>
       <div class="metric"><dt>Codex targets</dt><dd>${formatInteger(readyCodex)} <span class="metric__detail">of ${formatInteger(codexRoutes.length)} ready</span></dd></div>
       <div class="metric"><dt>Queued messages</dt><dd>${formatInteger(queuedMessages)}</dd></div>
+      <div class="metric"><dt>Oldest queue age</dt><dd>${queuedMessages === 0 ? '<span class="quiet" aria-label="Queue empty">\u2014</span> <span class="metric__detail">queue empty</span>' : `${renderQueueAge(oldestQueueAge)} <span class="metric__detail">${oldestQueueAge === undefined ? "timestamp unavailable" : "oldest wait"}</span>`}</dd></div>
       <div class="metric"><dt>Active alerts</dt><dd>${formatInteger(snapshot.alerts.length)}</dd></div>
     </dl>
     ${renderTruncationNotice(snapshot, localOmissions)}

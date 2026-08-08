@@ -157,6 +157,7 @@ The status below is intentionally narrower than the target architecture.
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
 | Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
+| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, one bounded stall notice with pending age, opaque memory-only correlation handles, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
@@ -212,6 +213,18 @@ file/socket generations. Provider-owned Unix owner and mode bits are not
 treated as gateway policy; successful filesystem access is sufficient. A
 current name resolves to a UUID but never substitutes for it.
 
+A selected Claude UUID remains the durable route identity until explicit
+unselection. Startup never enumerates Claude sessions and every restored route
+begins stale. A later, separately authorized discovery operation may reactivate
+the selection only when the full bounded scan contains exactly one compatible
+interactive peer with the byte-identical UUID on the same provider, host, and
+ownership lease. The adapter revalidates the current workspace and provider
+selection before the store atomically adopts the current endpoint generation
+and latest name. An incomplete scan, duplicate name or UUID, changed UUID,
+workspace failure, or store collision leaves the route stale and releases any
+provider selection acquired by the failed attempt. A name alone never restores
+or retargets a durable selection.
+
 The dashboard is the single pane for the human. It shows both sanitized
 available/selected Claude aliases and explicitly registered Codex aliases,
 including their host, compatibility, state, last-seen age, and queue depth.
@@ -240,8 +253,10 @@ The thin skill/CLI exposes the same safe alias list to either provider.
 
 A transport write is not proof of successful model completion. The adapter
 distinguishes transport state from any hold/release/denial receipt supported
-by the pinned protocol. `transport_written` and `held` are progress states,
-not terminal success and not permission to retry.
+by the pinned protocol. `transport_written` and native `held` are adapter/native
+progress signals only, not public `delivery_status` states. The public tracker
+remains `queued` or `stalled` until a terminal state; neither signal proves
+terminal success or permits a retry.
 
 ### Claude to Codex
 
@@ -271,10 +286,16 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    is active or awaiting approval, version 1 queues the message internally.
    It does not emit Claude's approval-specific native `held` control frame for
    ordinary queueing.
-8. When the task becomes idle, the connector refreshes the exact task state and
+8. If the delivery remains pending for exactly
+   `floor(messageDeadlineMs / 2)`, the gateway may send
+   the originating Claude session at most one nonterminal
+   `<gateway-delivery-stall>` user frame for that receipt. It contains only an
+   allowlisted reason and a bounded `queued-for-ms` age; it is not a native
+   `held` receipt and does not settle the delivery.
+9. When the task becomes idle, the connector refreshes the exact task state and
    starts the held message. Explicit registration is sufficient authorization;
    Embassy does not run an additional workspace or policy classifier.
-9. Successful App Server acceptance returns Claude's native `delivered`
+10. Successful App Server acceptance returns Claude's native `delivered`
    receipt. A route or delivery error returns native `expired`, followed by a
    static `<gateway-delivery-diagnostic>` user frame containing one safe error
    code. This is the only way to make the reason visible to Claude Code 2.1.224,
@@ -284,8 +305,32 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    message body. `denied` is reserved for an actual user or policy refusal.
    A transient clean pre-dispatch failure returns the same message to the queue
    instead of terminally failing it.
-10. Completion is summarized into bounded normalized state and the correlated
-    reply is returned only to the exact originating Claude session generation.
+11. Completion is summarized into bounded normalized state and the correlated
+    reply is returned only to the same originating Claude session UUID after
+    its current coordinates are uniquely re-resolved and revalidated.
+
+The native receipt retains the originating Claude session's stable UUID, not
+its mutable name, PID, registry record, or socket. Before every stall or
+terminal receipt write, the adapter performs bounded discovery and revalidates
+the UUID's current exact coordinates. This permits a receipt to follow ordinary
+process/socket rotation without writing to a stale generation. If the UUID is
+not uniquely and compatibly re-observed, the write fails closed. A terminal
+write whose outcome is ambiguous is never replayed; only a proven pre-write
+failure may be retried while the bounded in-memory receipt remains live. The
+receipt correlation does not add the UUID or receipt handle to public output
+or durable state; a separately selected route may already persist that same
+Claude UUID as its private native route handle.
+
+Delivery callback arrival is timestamped at the service boundary. A terminal
+callback observed strictly before its message deadline is applied before the
+deadline sweep even when event-loop scheduling delays its worker; a callback
+observed at or after the exact deadline cannot reopen the expired attempt.
+Shutdown is likewise two-phase: provider ingress is first quiesced so no new
+user-message callback can enter and every already admitted callback completes,
+while receipt writes remain available. The service then drains callbacks,
+terminally settles accepted work, joins its bounded receipt writes, and only
+then closes provider adapters. This orders `GATEWAY_SHUTDOWN` receipts ahead of
+listener teardown instead of silently dropping late admitted work.
 
 Claude's native peer socket is itself an inbox, so Codex replies may be
 written while the Claude route is busy. The gateway still serializes its own
@@ -297,14 +342,61 @@ policy. `turn/interrupt` is permitted only for a turn that the same connector
 started and positively observed; there is no generic App Server RPC escape
 hatch.
 
+### Delivery status and bounded waits
+
+Every accepted control-plane `send_to_claude`, `send_to_codex`, or `reply`
+result contains both its conversation ID and a fresh opaque, memory-only
+delivery correlation handle called a delivery token.
+The token has the closed form `dlv_` followed by exactly 24 base64url
+characters (`A-Z`, `a-z`, `0-9`, `_`, or `-`). It addresses one bounded
+in-memory delivery tracker and is not a provider receipt handle or a provider
+native identifier.
+
+The read-only `delivery_status` method accepts only that token and returns one
+of these closed results:
+
+- `{ found: false }`; or
+- `{ found: true, state, terminal, updatedAt, deadlineAt, ... }`, where `state`
+  is one of `queued`, `stalled`, `delivered`, `expired`, `failed`, `ambiguous`,
+  or `cancelled`. `terminal` is false exactly for `queued` and `stalled`, and
+  true for every other state. `pendingForMs` may report the nonnegative age
+  since gateway acceptance, including time spent in flight, and
+  `safeErrorCode` may report one shape-constrained broker code.
+
+`updatedAt` and `deadlineAt` are ISO timestamps. A terminal result guarantees
+only that this gateway delivery attempt will not transition again. It does not
+guarantee a model reply or make an ambiguous outcome safe to retry. A stalled
+result is progress only, even after the one sender-visible stall notice.
+
+The CLI exposes `delivery-status --token <token>` for one read and
+`wait-delivery --token <token>` for a bounded wait. The waiter uses the same
+read-only method every 250 ms, emits only the terminal result, and stops no
+later than the delivery deadline plus the control client's 3-second allowance.
+An unknown token fails immediately. A wait timeout is not a terminal delivery
+state and does not authorize a resend.
+
+`wait-delivery` exits `0` only for `delivered`. It exits `6` for every other
+terminal state (`expired`, `failed`, `ambiguous`, or `cancelled`) while
+preserving the exact terminal result in its JSON output. An unknown token exits
+`3`; a local bounded-wait timeout exits `4` and is not a terminal state.
+
+The status table is bounded. Under capacity pressure Embassy evicts only the
+oldest terminal correlation handle; active `queued` or `stalled` handles are
+never displaced to admit a new send. A pressure-evicted handle returns
+`{ found: false }`, just like a handle whose retention window elapsed.
+
 ### Replies and process restarts
 
 Conversation IDs correlate replies, but callback addresses and message bodies
 exist only in memory. After a gateway restart, previously queued or in-flight
 metadata is marked abandoned; bodies are not recoverable and are never
 replayed. The prior Claude binding remains stored but stale. After authorized
-live discovery, the operator must run `select-claude` again; no queued text,
-pending reply, or conversation capability survives the restart.
+live discovery, one exact UUID-bound selection may be reactivated under its
+latest name. No queued text, pending reply, callback, native receipt handle,
+delivery token/status tracker, or conversation capability survives the
+restart; a prior token therefore returns `found: false`. A stale or offline
+selection can be explicitly removed by its stored alias or a user-supplied UUID
+without requiring discovery first.
 
 ## Gateway control plane
 
@@ -319,20 +411,21 @@ The small version 1 method family covers:
 - explicit Codex registration and unregister;
 - explicit Claude selection and unselection from the current sanitized
   available-peer inventory;
+- delivery-status lookup by an opaque, memory-only correlation handle;
 - provider-specific send operations;
 - a correlated reply operation; and
 - dashboard refresh.
 
 The installed binary is `embassy` (`claude-codex-gateway` is a one-release
 deprecated alias). Its implemented commands are
-`serve`, `health`, `status`, `refresh-dashboard`, `register-codex`,
-`unregister-codex`, `select-claude`, `unselect-claude`, `send-to-claude`,
-`send-to-codex`, and `reply`. Message bodies are non-empty UTF-8 from standard
-input only, with a 16 KiB ceiling; they are never accepted in an argument or
-file. The client emits one bounded normalized JSON line and never returns a
-thread ID, provider-native ID, path, address, or message body. These commands
-require the foreground broker, except that `serve` starts it in the current
-terminal. It never daemonizes itself.
+`serve`, `health`, `status`, `delivery-status`, `wait-delivery`,
+`refresh-dashboard`, `register-codex`, `unregister-codex`, `select-claude`,
+`unselect-claude`, `send-to-claude`, `send-to-codex`, and `reply`. Message
+bodies are non-empty UTF-8 from standard input only, with a 16 KiB ceiling;
+they are never accepted in an argument or file. The client emits one bounded
+normalized JSON line and never returns a thread ID, provider-native ID, path,
+address, or message body. These commands require the foreground broker, except
+that `serve` starts it in the current terminal. It never daemonizes itself.
 
 `select-claude --alias <current-name@host>` and
 `select-claude --session <uuid>` select the same logical session.
@@ -529,7 +622,8 @@ The private store may retain:
 - aliases, enabled state, ownership leases, and exact provider-native route
   handles inside the closed controller-private binding schema;
 - endpoint-generation and compatibility markers;
-- bounded queue and delivery metadata;
+- bounded durable queue-ledger and normalized delivery metadata used for
+  accounting and dashboard projection;
 - timestamps, counters, dedupe/rate-limit records, and safe error codes.
 
 It must never retain message bodies, provider output, prompts, replies, tool
@@ -539,9 +633,18 @@ strict projection that also removes private route handles and endpoint
 generations. The state directory is mode 0700 and binding state is mode 0600;
 provider-native identifiers never enter normalized events, public snapshots,
 the dashboard, CLI arguments/output, aliases, logs, or error text. On restart,
-every restored route is stale and unusable. A prior Claude binding is not
-automatically selected: after authorized live discovery, the operator runs
-`select-claude` again. No queued body or reply capability is restored.
+every restored route begins stale and unusable. An authorized discovery may
+reactivate only the byte-identical durable Claude UUID after the current
+provider endpoint, workspace, complete unique discovery, and ownership lease
+all revalidate. The public `selected` bit flips only after that atomic private
+rebind succeeds. No queued body, callback, receipt handle, conversation, or
+reply capability is restored, and no delivery token or status tracker is
+reconstructed.
+
+The delivery-token mapping, queryable status tracker, native receipt handle,
+and one-stall-notice state are always memory-only. Durable delivery metadata
+does not contain enough information to reconstruct any of those capabilities
+or replay a body after restart.
 
 ## Minimum filesystem and process access
 

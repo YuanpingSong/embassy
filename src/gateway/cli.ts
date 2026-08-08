@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
 import {
+  GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS,
   GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   GATEWAY_CONTROL_MAX_RESPONSE_BYTES,
   GATEWAY_CONTROL_PROTOCOL_VERSION,
@@ -21,6 +22,7 @@ import {
   isClaudeSessionSelector,
   isGatewayAlias,
   isGatewayConversationId,
+  isGatewayDeliveryToken,
   isGatewayHostId,
   isGatewayReplyAddress,
   sendGatewayControlRequest,
@@ -39,6 +41,8 @@ const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_HOST_ID = "this-mac";
 const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
+const DELIVERY_POLL_INTERVAL_MS = 250;
+const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
 export const EMBASSY_VERSION = "1.0.0";
 const FIXED_STDERR = {
   input: "[embassy] request rejected.\n",
@@ -53,6 +57,8 @@ export const gatewayCliCommands = [
   "serve",
   "health",
   "status",
+  "delivery-status",
+  "wait-delivery",
   "refresh-dashboard",
   "register-codex",
   "unregister-codex",
@@ -97,6 +103,8 @@ export type GatewayCliDependencies = {
     stateDir: string,
     socketPath: string,
   ) => Promise<void>;
+  now?: () => number;
+  delay?: (milliseconds: number) => Promise<void>;
 };
 
 type ParsedOptions = Readonly<Record<string, string | true>>;
@@ -197,6 +205,14 @@ function requireClaudeSelector(options: ParsedOptions, name: string): string {
     throw new CliFault("INVALID_ARGUMENTS");
   }
   return selector;
+}
+
+function requireDeliveryToken(options: ParsedOptions, name: string): string {
+  const token = requireString(options, name);
+  if (!isGatewayDeliveryToken(token)) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  return token;
 }
 
 function requireCodexThreadId(env: NodeJS.ProcessEnv): string {
@@ -313,6 +329,16 @@ async function buildRequest(
         method: "list_snapshot",
         params: emptyParams(args),
       };
+    case "delivery-status":
+    case "wait-delivery": {
+      const options = parseOptions(args, ["token"]);
+      assertExactOptionCount(options, 1);
+      return {
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        method: "delivery_status",
+        params: { token: requireDeliveryToken(options, "token") },
+      };
+    }
     case "refresh-dashboard":
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
@@ -540,6 +566,116 @@ function responseExitCode(response: GatewayControlResponse): number {
   return gatewayCliExitCodes.ok;
 }
 
+function waitDeliveryExitCode(
+  response: GatewayControlResponse<"delivery_status">,
+): number {
+  if (
+    !response.ok ||
+    !response.result.found ||
+    !response.result.terminal
+  ) {
+    return gatewayCliExitCodes.failure;
+  }
+  return response.result.state === "delivered"
+    ? gatewayCliExitCodes.ok
+    : gatewayCliExitCodes.failure;
+}
+
+type DeliveryStatusRequest = Extract<
+  GatewayControlRequest,
+  { method: "delivery_status" }
+>;
+
+type WaitDeliveryOutcome =
+  | {
+      kind: "response";
+      response: GatewayControlResponse<"delivery_status">;
+    }
+  | { kind: "unknown" }
+  | { kind: "timeout" };
+
+async function defaultDelay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForDelivery(
+  socketPath: string,
+  request: DeliveryStatusRequest,
+  sendRequest: GatewayControlSender,
+  now: () => number,
+  delay: (milliseconds: number) => Promise<void>,
+): Promise<WaitDeliveryOutcome> {
+  let clientDeadlineMs: number | undefined;
+
+  while (true) {
+    const beforeRequest = now();
+    let requestTimeoutMs = GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS;
+    if (clientDeadlineMs !== undefined) {
+      const remainingMs = clientDeadlineMs - beforeRequest;
+      if (remainingMs <= 0) return { kind: "timeout" };
+      if (remainingMs < DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS) {
+        await delay(remainingMs);
+        return { kind: "timeout" };
+      }
+      requestTimeoutMs = Math.min(
+        GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS,
+        Math.floor(remainingMs),
+      );
+    }
+
+    let response: GatewayControlResponse<"delivery_status">;
+    try {
+      response = await sendRequest({
+        socketPath,
+        request,
+        timeoutMs: requestTimeoutMs,
+      });
+    } catch (error) {
+      if (
+        clientDeadlineMs !== undefined &&
+        now() >= clientDeadlineMs &&
+        error instanceof GatewayControlTransportError &&
+        error.recoverable
+      ) {
+        return { kind: "timeout" };
+      }
+      throw error;
+    }
+
+    if (!response.ok) {
+      if (
+        response.error.code === "REQUEST_TIMEOUT" &&
+        clientDeadlineMs !== undefined &&
+        now() >= clientDeadlineMs
+      ) {
+        return { kind: "timeout" };
+      }
+      return { kind: "response", response };
+    }
+    if (!response.result.found) return { kind: "unknown" };
+    // A retained terminal decision is authoritative even when the command is
+    // invoked after the original delivery deadline and client grace window.
+    if (response.result.terminal) {
+      return { kind: "response", response };
+    }
+
+    const parsedDeadlineMs = Date.parse(response.result.deadlineAt);
+    if (!Number.isFinite(parsedDeadlineMs)) {
+      throw new Error("invalid validated delivery deadline");
+    }
+    const observedClientDeadlineMs =
+      parsedDeadlineMs + GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS;
+    clientDeadlineMs =
+      clientDeadlineMs === undefined
+        ? observedClientDeadlineMs
+        : Math.min(clientDeadlineMs, observedClientDeadlineMs);
+    const afterRequest = now();
+    const remainingMs = clientDeadlineMs - afterRequest;
+    if (remainingMs <= 0) return { kind: "timeout" };
+    await delay(Math.min(DELIVERY_POLL_INTERVAL_MS, remainingMs));
+  }
+}
+
 /** Run one client command without installing process-level signal handlers. */
 export async function runGatewayCli(
   argv: readonly string[] = process.argv.slice(2),
@@ -554,6 +690,8 @@ export async function runGatewayCli(
   const validateControlSocket =
     dependencies.validateControlSocket ?? validatePrivateGatewayControlSocket;
   const runServer = dependencies.runServer ?? runGatewayServer;
+  const now = dependencies.now ?? Date.now;
+  const delay = dependencies.delay ?? defaultDelay;
   if (
     argv.length === 1 &&
     (argv[0] === "--version" || argv[0] === "-v")
@@ -595,10 +733,42 @@ export async function runGatewayCli(
     const request = await buildRequest(command, argv.slice(1), env, stdin);
     const config = loadConfig(env);
     await validateControlSocket(config.stateDir, config.controlSocketPath);
-    const response = await sendRequest({
-      socketPath: config.controlSocketPath,
-      request,
-    });
+    let response: GatewayControlResponse;
+    let waitedDeliveryResponse:
+      | GatewayControlResponse<"delivery_status">
+      | undefined;
+    if (command === "wait-delivery") {
+      if (request.method !== "delivery_status") {
+        throw new CliFault("INVALID_ARGUMENTS");
+      }
+      const outcome = await waitForDelivery(
+        config.controlSocketPath,
+        request,
+        sendRequest,
+        now,
+        delay,
+      );
+      if (outcome.kind === "unknown") {
+        writeFailure(stdout, stderr, command, "DELIVERY_TOKEN_UNKNOWN", {
+          kind: "decision",
+        });
+        return gatewayCliExitCodes.rejected;
+      }
+      if (outcome.kind === "timeout") {
+        writeFailure(stdout, stderr, command, "DELIVERY_WAIT_TIMEOUT", {
+          retryable: true,
+          kind: "unavailable",
+        });
+        return gatewayCliExitCodes.unavailable;
+      }
+      waitedDeliveryResponse = outcome.response;
+      response = waitedDeliveryResponse;
+    } else {
+      response = await sendRequest({
+        socketPath: config.controlSocketPath,
+        request,
+      });
+    }
     if (!response.ok) {
       writeFailure(stdout, stderr, command, response.error.code, {
         kind: "failure",
@@ -613,9 +783,17 @@ export async function runGatewayCli(
         result: response.result,
       }),
     );
-    const exitCode = responseExitCode(response);
+    const exitCode =
+      waitedDeliveryResponse === undefined
+        ? responseExitCode(response)
+        : waitDeliveryExitCode(waitedDeliveryResponse);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(FIXED_STDERR.decision);
+    } else if (
+      command === "wait-delivery" &&
+      exitCode === gatewayCliExitCodes.failure
+    ) {
+      stderr.write(FIXED_STDERR.failure);
     }
     return exitCode;
   } catch (error) {

@@ -27,6 +27,7 @@ import {
   gatewayControlMethods,
   isGatewayAlias,
   isGatewayConversationId,
+  isGatewayDeliveryToken,
   isGatewayHostId,
   isGatewayReplyAddress,
   sendGatewayControlRequest,
@@ -38,7 +39,9 @@ import {
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
+const DELIVERY_TOKEN = "dlv_0123456789abcdefghijklmn";
 const NOW = "2026-08-07T12:34:56.000Z";
+const DEADLINE = "2026-08-07T12:35:56.000Z";
 
 const roots = new Set<string>();
 
@@ -124,7 +127,8 @@ function snapshot(): GatewaySnapshot {
         compatibility: "compatible",
         busyPolicy: "queue",
         lastSeenAt: NOW,
-        queueDepth: 0,
+        queueDepth: 1,
+        oldestQueuedAt: NOW,
         counters: { ...counters },
       },
       {
@@ -199,17 +203,31 @@ function handlers(
     selectClaude: () => ({ accepted: true, code: "ok" }),
     unselectClaude: () => ({ accepted: true, code: "ok" }),
     listSnapshot: () => snapshot(),
+    deliveryStatus: () => ({
+      found: true,
+      state: "delivered",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+    }),
     sendToClaude: () => ({
       accepted: true,
       code: "ok",
       conversationId: CONVERSATION_ID,
+      deliveryToken: DELIVERY_TOKEN,
     }),
     sendToCodex: () => ({
       accepted: true,
       code: "ok",
       conversationId: CONVERSATION_ID,
+      deliveryToken: DELIVERY_TOKEN,
     }),
-    reply: () => ({ accepted: true, code: "ok" }),
+    reply: () => ({
+      accepted: true,
+      code: "ok",
+      conversationId: CONVERSATION_ID,
+      deliveryToken: DELIVERY_TOKEN,
+    }),
     refreshDashboard: () => ({
       accepted: true,
       code: "ok",
@@ -308,6 +326,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
           accepted: true,
           code: "ok",
           conversationId: CONVERSATION_ID,
+          deliveryToken: DELIVERY_TOKEN,
         };
       },
       sendToCodex: (params) => {
@@ -316,11 +335,17 @@ test("serves the two directional routes and emits metadata-only responses", asyn
           accepted: true,
           code: "ok",
           conversationId: CONVERSATION_ID,
+          deliveryToken: DELIVERY_TOKEN,
         };
       },
       reply: (params) => {
         reply = structuredClone(params);
-        return { accepted: true, code: "ok" };
+        return {
+          accepted: true,
+          code: "ok",
+          conversationId: CONVERSATION_ID,
+          deliveryToken: DELIVERY_TOKEN,
+        };
       },
     }),
   });
@@ -396,6 +421,34 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   });
   assert.equal(JSON.stringify(outbound).includes(THREAD_ID), false);
   assert.equal(JSON.stringify(outbound).includes(secretText), false);
+  assert.equal(
+    outbound.ok && outbound.result.accepted
+      ? outbound.result.deliveryToken
+      : undefined,
+    DELIVERY_TOKEN,
+  );
+
+  assert.deepEqual(
+    await sendGatewayControlRequest({
+      socketPath,
+      request: {
+        protocolVersion: 1,
+        method: "delivery_status",
+        params: { token: DELIVERY_TOKEN },
+      },
+    }),
+    {
+      protocolVersion: 1,
+      ok: true,
+      result: {
+        found: true,
+        state: "delivered",
+        terminal: true,
+        updatedAt: NOW,
+        deadlineAt: DEADLINE,
+      },
+    },
+  );
 
   await sendGatewayControlRequest({
     socketPath,
@@ -495,6 +548,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "select_claude",
     "unselect_claude",
     "list_snapshot",
+    "delivery_status",
     "send_to_claude",
     "send_to_codex",
     "reply",
@@ -506,6 +560,9 @@ test("only exposes queue-mode lifecycle methods", () => {
   assert.equal(isGatewayHostId("lab-mac.example"), true);
   assert.equal(isGatewayHostId("Max WS"), false);
   assert.equal(isGatewayConversationId(createGatewayConversationId()), true);
+  assert.equal(isGatewayDeliveryToken(DELIVERY_TOKEN), true);
+  assert.equal(isGatewayDeliveryToken(`${DELIVERY_TOKEN}x`), false);
+  assert.equal(isGatewayDeliveryToken("dlv_not+base64url____________"), false);
   assert.equal(isGatewayReplyAddress("uds:/tmp/cc-socks/123.sock"), true);
   assert.equal(isGatewayReplyAddress("/tmp/cc-socks/123.sock"), false);
   assert.equal(isGatewayReplyAddress("uds:relative.sock"), false);
@@ -519,13 +576,26 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     called += 1;
     return { accepted: true, code: "ok" };
   };
+  const countSend = () => {
+    called += 1;
+    return {
+      accepted: true as const,
+      code: "ok" as const,
+      conversationId: CONVERSATION_ID,
+      deliveryToken: DELIVERY_TOKEN,
+    };
+  };
   const server = await startGatewayControlServer({
     stateDir,
     socketPath,
     handlers: handlers({
       registerCodex: count,
       unregisterCodex: count,
-      reply: count,
+      deliveryStatus: () => {
+        called += 1;
+        return { found: false };
+      },
+      reply: countSend,
     }),
   });
 
@@ -608,6 +678,8 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
         replyAddress: "uds:../outside.sock",
       },
     ],
+    ["delivery_status", { token: "dlv_too-short" }],
+    ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     [
       "reply",
       {
@@ -663,6 +735,156 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       })}\n`,
     ),
     "INVALID_REQUEST",
+  );
+  await server.close();
+});
+
+test("delivery status and receipt results are closed and internally consistent", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const statusCandidates: unknown[] = [
+    { found: false },
+    {
+      found: true,
+      state: "queued",
+      terminal: false,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      pendingForMs: 125,
+    },
+    {
+      found: true,
+      state: "stalled",
+      terminal: false,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      pendingForMs: 5_000,
+      safeErrorCode: "DELIVERY_STALLED",
+    },
+    {
+      found: true,
+      state: "cancelled",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+    },
+    {
+      found: true,
+      state: "delivered",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+    },
+    {
+      found: true,
+      state: "expired",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      safeErrorCode: "DELIVERY_DEADLINE_EXPIRED",
+    },
+    {
+      found: true,
+      state: "failed",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      safeErrorCode: "DELIVERY_FAILED",
+    },
+    {
+      found: true,
+      state: "ambiguous",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      safeErrorCode: "DELIVERY_AMBIGUOUS",
+    },
+    {
+      found: true,
+      state: "queued",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+    },
+    {
+      found: true,
+      state: "delivered",
+      terminal: true,
+      updatedAt: "not-a-timestamp",
+      deadlineAt: DEADLINE,
+    },
+    {
+      found: true,
+      state: "failed",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      pendingForMs: -1,
+    },
+    { found: false, safeErrorCode: "MUST_NOT_BE_PRESENT" },
+  ];
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      deliveryStatus: () => statusCandidates.shift() as never,
+      sendToClaude: () =>
+        ({
+          accepted: true,
+          code: "ok",
+          conversationId: CONVERSATION_ID,
+        }) as never,
+      reply: () => ({
+        accepted: true,
+        code: "ok",
+        conversationId: CONVERSATION_ID,
+        deliveryToken: "dlv_invalid+token___________",
+      }) as never,
+    }),
+  });
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const response = await rawRequest(
+      socketPath,
+      wireRequest("delivery_status", { token: DELIVERY_TOKEN }),
+    );
+    assert.equal(response.ok, true);
+  }
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    assertWireError(
+      await rawRequest(
+        socketPath,
+        wireRequest("delivery_status", { token: DELIVERY_TOKEN }),
+      ),
+      "INVALID_HANDLER_RESPONSE",
+    );
+  }
+
+  assertWireError(
+    await rawRequest(
+      socketPath,
+      wireRequest("send_to_claude", {
+        fromAlias: "codex-main@this-mac",
+        threadId: THREAD_ID,
+        toAlias: "claude-one@build-mac",
+        text: "bounded body",
+      }),
+    ),
+    "INVALID_HANDLER_RESPONSE",
+  );
+  assertWireError(
+    await rawRequest(
+      socketPath,
+      wireRequest("reply", {
+        conversationId: CONVERSATION_ID,
+        text: "bounded reply",
+        caller: {
+          kind: "codex",
+          alias: "codex-main@this-mac",
+          threadId: THREAD_ID,
+        },
+      }),
+    ),
+    "INVALID_HANDLER_RESPONSE",
   );
   await server.close();
 });
@@ -755,6 +977,12 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   const { truncation: _omitted, ...withoutTruncation } = snapshot();
   const invalidCount = snapshot();
   invalidCount.truncation.messages = -1;
+  const inconsistentQueueAge = snapshot();
+  const queuedRoute = inconsistentQueueAge.routes.find(
+    (route) => route.oldestQueuedAt !== undefined,
+  );
+  assert.ok(queuedRoute);
+  queuedRoute.queueDepth = 0;
   const unprojected = snapshot();
   const baseEvent = unprojected.messages[0];
   assert.ok(baseEvent);
@@ -765,7 +993,12 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     sourceAlias: `${"a".repeat(32)}@${"b".repeat(63)}`,
     targetAlias: `${"c".repeat(32)}@${"d".repeat(63)}`,
   }));
-  const candidates = [withoutTruncation, invalidCount, unprojected];
+  const candidates = [
+    withoutTruncation,
+    invalidCount,
+    inconsistentQueueAge,
+    unprojected,
+  ];
   const server = await startGatewayControlServer({
     stateDir,
     socketPath,
@@ -774,7 +1007,7 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     }),
   });
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     const response = await rawRequest(
       socketPath,
       wireRequest("list_snapshot", {}),
@@ -988,7 +1221,7 @@ test("client bounds time and output and rejects malformed responses", async () =
   await closeTrackedServer(malformed.server, malformed.connections);
 });
 
-test("client marks a lost mutation response ambiguous only after write starts", async () => {
+test("client marks only lost mutation responses ambiguous after write starts", async () => {
   const { stateDir, socketPath } = await privateState();
   const executedThenClosed = trackedServer((socket) => {
     socket.once("data", () => socket.destroy());
@@ -1021,6 +1254,33 @@ test("client marks a lost mutation response ambiguous only after write starts", 
   await closeTrackedServer(
     executedThenClosed.server,
     executedThenClosed.connections,
+  );
+
+  const statusThenClosed = trackedServer((socket) => {
+    socket.once("data", () => socket.destroy());
+  });
+  await new Promise<void>((resolve, reject) => {
+    statusThenClosed.server.once("error", reject);
+    statusThenClosed.server.listen(socketPath, resolve);
+  });
+  await assert.rejects(
+    sendGatewayControlRequest({
+      socketPath,
+      request: {
+        protocolVersion: 1,
+        method: "delivery_status",
+        params: { token: DELIVERY_TOKEN },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof GatewayControlTransportError &&
+      error.code === "CONTROL_CONNECTION_CLOSED" &&
+      !error.ambiguous &&
+      error.recoverable,
+  );
+  await closeTrackedServer(
+    statusThenClosed.server,
+    statusThenClosed.connections,
   );
 
   await assert.rejects(

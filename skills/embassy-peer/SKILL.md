@@ -65,7 +65,7 @@ Remove the selected route without touching the Claude session:
 embassy unselect-claude --alias advisor@this-mac
 ```
 
-Selection and removal manage only the gateway route. They do not start, interrupt, configure, or terminate Claude Code.
+If the selected session is offline or was renamed while Embassy was stopped, the user may instead supply its UUID with `--session`. Selection and removal manage only the gateway route. They do not start, interrupt, configure, or terminate Claude Code.
 
 ## Register a Codex task
 
@@ -106,7 +106,9 @@ Let the CLI read the current `CODEX_THREAD_ID`; do not inspect or forward it.
 
 The foreground launcher supports native bidirectional messaging for one explicitly registered `codex-*` task. Claude discovers it with native `ListAgents` and sends with native `SendMessage`. Every exact compatible live same-UID Claude session may reach the registered `codex-*` task after Claude's own native registry and generation checks; the Codex task's existing native approval and sandbox policy governs that turn. Claude Code's `crossSessionInbound` instead controls messages entering a Claude session, including Embassy's outbound Codex-to-Claude delivery. Claude-to-Codex reachability does not select the sending Claude session for Embassy's outbound route. Embassy starts the Codex turn and returns its final reply to the originating Claude session.
 
-Use exactly one send for one user-authorized message. Do not automatically retry, fan out, poll, or fall back to Claude Code's native `SendMessage`.
+An accepted send returns a public conversation token and a fresh delivery token. The delivery token is an opaque, memory-only correlation handle, exactly `dlv_` plus 24 base64url characters. Copy the exact returned value; do not construct, shorten, log, or persist it.
+
+Use exactly one send for one user-authorized message. Do not automatically retry, fan out, hand-roll a poll loop, or fall back to Claude Code's native `SendMessage`.
 
 ## Reply to a conversation
 
@@ -122,11 +124,33 @@ GATEWAY_MESSAGE
 
 The CLI infers the caller from the inherited environment. In a Codex task it uses `CODEX_THREAD_ID`; in Claude Code it uses `CLAUDE_CODE_MESSAGING_SOCKET` transiently. Never echo it or pass it as an argument. If both identities or neither identity are present, stop on the fail-closed result instead of selecting one.
 
+An accepted reply returns its own fresh delivery token under the same rules as a send.
+
+## Check or wait for delivery
+
+Use the exact delivery token returned by the accepted send or reply. For one current observation, run:
+
+```sh
+embassy delivery-status --token dlv_0123456789abcdefghijklmn
+```
+
+The token above is a format-only placeholder. Substitute the exact returned token. The result is either `{"found":false}` or a found result with `state`, `terminal`, `updatedAt`, and `deadlineAt`, plus optional `pendingForMs` and `safeErrorCode`. `pendingForMs` is age since gateway acceptance, including time spent in flight. The closed state vocabulary is `queued`, `stalled`, `delivered`, `expired`, `failed`, `ambiguous`, and `cancelled`. Only `queued` and `stalled` are nonterminal.
+
+When the user explicitly asks to wait for finality, run the bounded waiter once:
+
+```sh
+embassy wait-delivery --token dlv_0123456789abcdefghijklmn
+```
+
+It checks every 250 ms and emits only a terminal result. It stops at the delivery deadline plus 3 seconds; an unknown token fails immediately. Exit `0` means `delivered`; every other terminal state (`expired`, `failed`, `ambiguous`, or `cancelled`) preserves its exact JSON result and uses the shared delivery-failure exit `6`. An unknown token exits `3`. A local waiter timeout exits `4`, is not a terminal result, and is not permission to resend. A terminal result closes only that delivery attempt: `delivered` does not promise a reply, and `ambiguous` must never be retried automatically.
+
+The in-memory status table is bounded. Under pressure, only its oldest terminal handle may be evicted; active `queued` or `stalled` handles are retained. An evicted handle returns `{"found":false}`.
+
 ## Interpret queue state
 
-Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `status` or the dashboard once when the user asks for progress. The v1 busy policy is queue-only: an active or temporarily unavailable destination may remain queued until its exact route is ready. If a registered Codex connector is closed or faulted, an explicit `register-codex` replaces it and wakes held work when the recovered route is idle; it never retries an ambiguous write.
+Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `delivery-status` for the accepted delivery, or `status` and the dashboard for aggregate route state, when the user asks for progress. The optional `pendingForMs` field is age since acceptance, including in-flight time. `stalled` remains nonterminal. For native Claude-to-Codex ingress, Embassy sends at most one nonterminal stall notice exactly at `floor(messageDeadlineMs / 2)`, containing only a bounded pending age and allowlisted reason; it is not an approval-like `held` receipt. The v1 busy policy is queue-only: an active or temporarily unavailable destination may remain queued until its exact route is ready. If a registered Codex connector is closed or faulted, an explicit `register-codex` replaces it and wakes held work when the recovered route is idle; it never retries an ambiguous write.
 
-Do not steer an active turn, approve permissions, widen tools, or alter inbound-message policy. Report held, refused, incompatible, full, expired, or unavailable states without retrying. Ordinary process/socket rotation for the same Claude UUID is refreshed automatically and is not a reason to ask for reselection while the same gateway process remains live. After a gateway restart, the prior Claude binding is stored but stale: run `select-claude` again after authorized discovery. Queued or in-flight text, pending replies, and conversation capabilities do not survive.
+Do not steer an active turn, approve permissions, widen tools, or alter inbound-message policy. Report `held`, refused, incompatible, full, expired, or unavailable command/provider outcomes or safe error codes without treating them as additional `delivery-status` states and without retrying. Native receipt settlement follows the originating Claude session's stable UUID and revalidates its current endpoint before every stall or terminal write; names, PIDs, and sockets are not receipt identity. Ordinary process/socket rotation for the same Claude UUID is therefore refreshed automatically. After a gateway restart, the prior UUID-bound selection starts stale, but the next authorized complete discovery may reactivate exactly that UUID and adopt its latest name. A changed UUID, name or UUID collision, incomplete discovery, or failed workspace/provider revalidation stays stale; do not retry around it. Queued or in-flight text, callbacks, native receipt handles, delivery tokens/status trackers, pending replies, and conversation capabilities do not survive. A pre-restart delivery token is unknown and no body is replayed.
 
 ## Preserve the boundary
 
@@ -136,4 +160,4 @@ Do not steer an active turn, approve permissions, widen tools, or alter inbound-
 - Publish only the gateway process's registered `codex-*` peer record and remove it on shutdown.
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
-- Return only the CLI's concise public outcome: selectors, normalized state, and public conversation token when present.
+- Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.

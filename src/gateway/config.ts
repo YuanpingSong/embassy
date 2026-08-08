@@ -10,6 +10,8 @@ export type GatewayConfig = {
   stateDir: string;
   controlSocketPath: string;
   allowedHosts: readonly string[];
+  /** One sender-visible progress notice is due this long after enqueue. */
+  stallNoticeMs: number;
   limits: GatewayStoreLimits;
 };
 
@@ -93,6 +95,15 @@ export function loadGatewayConfig(
     );
   }
 
+  const messageDeadlineMs = boundedInteger(
+    "EMBASSY_MESSAGE_DEADLINE_MS",
+    env.EMBASSY_MESSAGE_DEADLINE_MS,
+    300_000,
+    1_000,
+    3_600_000,
+  );
+  const stallNoticeMs = Math.floor(messageDeadlineMs / 2);
+
   const limits: GatewayStoreLimits = {
     maxRoutes: boundedInteger(
       "EMBASSY_MAX_ROUTES",
@@ -164,13 +175,7 @@ export function loadGatewayConfig(
       1,
       1_048_576,
     ),
-    messageDeadlineMs: boundedInteger(
-      "EMBASSY_MESSAGE_DEADLINE_MS",
-      env.EMBASSY_MESSAGE_DEADLINE_MS,
-      300_000,
-      1_000,
-      3_600_000,
-    ),
+    messageDeadlineMs,
     maxHopCount: boundedInteger(
       "EMBASSY_MAX_HOPS",
       env.EMBASSY_MAX_HOPS,
@@ -228,6 +233,7 @@ export function loadGatewayConfig(
     stateDir,
     controlSocketPath,
     allowedHosts: parseAllowedHosts(env.EMBASSY_HOSTS),
+    stallNoticeMs,
     limits,
   };
 }

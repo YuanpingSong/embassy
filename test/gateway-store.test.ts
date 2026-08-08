@@ -88,6 +88,7 @@ async function fixture(): Promise<{
     stateDir,
     controlSocketPath: path.join(stateDir, "control.sock"),
     allowedHosts: ["this-mac", "build-mac"],
+    stallNoticeMs: 2_500,
     limits: limits(),
   };
   const testClock = clock();
@@ -197,7 +198,15 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   });
   assert.deepEqual(config.allowedHosts, ["this-mac", "build-mac"]);
   assert.equal(config.controlSocketPath, "/tmp/private-gateway-test/control.sock");
+  assert.equal(config.stallNoticeMs, 150_000);
   assert.equal(config.limits.maxMessageBytes, 16_384);
+
+  const configuredDeadline = loadGatewayConfig({
+    EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+    EMBASSY_MESSAGE_DEADLINE_MS: "1001",
+  });
+  assert.equal(configuredDeadline.limits.messageDeadlineMs, 1_001);
+  assert.equal(configuredDeadline.stallNoticeMs, 500);
 
   const xdgDefault = loadGatewayConfig({
     XDG_STATE_HOME: "/tmp/synthetic-xdg-state",
@@ -603,12 +612,12 @@ test("a correlated native reply retains transient-target queue semantics and no 
   const firstDispatch = await store.dequeueMessage(transientClaudePeer.alias);
   assert.equal(firstDispatch?.body, "correlated native reply");
   assert.equal(firstDispatch?.direction, "codex_to_claude");
-  assert.equal(
+  assert.deepEqual(
     await store.requeueInFlightMessage(
       reply.messageId,
       firstDispatch?.body ?? "",
     ),
-    true,
+    { status: "requeued" },
   );
   const retry = await store.dequeueMessage(transientClaudePeer.alias);
   assert.equal(retry?.messageId, reply.messageId);
@@ -908,6 +917,28 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
   });
   assert.ok(accepted.messageId);
   await store.cancelQueuedMessage(accepted.messageId);
+  const selectedSource = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "selected source rate bucket",
+    dedupeKey: "selected-source-rate-bucket",
+  });
+  assert.ok(selectedSource.messageId);
+  await store.cancelQueuedMessage(selectedSource.messageId);
+  const currentNameSource = await store.enqueueNativeIngress({
+    source: {
+      alias: "mentor@this-mac",
+      binding: {
+        ...transientClaudePeer.binding,
+        routeHandle: "00000000-0000-4000-8000-000000000188",
+      },
+    },
+    targetAlias: "reviewer@this-mac",
+    body: "current name rate bucket",
+    dedupeKey: "current-name-rate-bucket",
+  });
+  assert.ok(currentNameSource.messageId);
+  await store.cancelQueuedMessage(currentNameSource.messageId);
   await store.invalidateRoute(claudeBinding, "PEER_LEASE_EXPIRED");
 
   const replacement = {
@@ -920,26 +951,72 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
       alias: "advisor@this-mac",
       currentOwnerLease: claudeBinding.ownerLease,
       newBinding: replacement,
-      reason: "endpoint_reobserved",
+      reason: "peer_explicitly_reselected",
     }),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "ROUTE_RESELECTION_REQUIRED",
   );
+  await assert.rejects(
+    store.rebindStaleRoute({
+      alias: "advisor@this-mac",
+      currentOwnerLease: claudeBinding.ownerLease,
+      newBinding: {
+        ...claudeBinding,
+        ownerLease: "claude-owner-lease-wrong",
+      },
+      reason: "peer_identity_reobserved",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "ROUTE_RESELECTION_REQUIRED",
+  );
+  for (const [newBinding, newAlias] of [
+    [{ ...claudeBinding, hostId: "build-mac" }, "advisor@build-mac"],
+    [{ ...claudeBinding, provider: "codex" as const }, "advisor@this-mac"],
+  ] as const) {
+    await assert.rejects(
+      store.rebindStaleRoute({
+        alias: "advisor@this-mac",
+        newAlias,
+        currentOwnerLease: claudeBinding.ownerLease,
+        newBinding: newBinding as PrivateRouteBinding,
+        reason: "peer_identity_reobserved",
+      }),
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "ROUTE_REBIND_SCOPE_MISMATCH",
+    );
+  }
   await store.rebindStaleRoute({
     alias: "advisor@this-mac",
+    newAlias: "mentor@this-mac",
     currentOwnerLease: claudeBinding.ownerLease,
-    newBinding: replacement,
-    reason: "peer_explicitly_reselected",
+    newBinding: claudeBinding,
+    reason: "peer_identity_reobserved",
   });
   assert.equal(
     (await store.publicSnapshot()).routes.find(
-      (route) => route.alias === "advisor@this-mac",
+      (route) => route.alias === "mentor@this-mac",
     )?.counters.cancelled,
     1,
   );
-  assert.deepEqual(await store.resolveRoute("advisor@this-mac"), replacement);
+  assert.deepEqual(await store.resolveRoute("mentor@this-mac"), claudeBinding);
+  await assert.rejects(
+    store.resolveRoute("advisor@this-mac"),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
+  );
   await store.close();
+  const persisted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as { rateBuckets: Array<{ sourceAlias: string; count: number }> };
+  assert.deepEqual(
+    persisted.rateBuckets.filter(
+      (bucket) => bucket.sourceAlias === "mentor@this-mac",
+    ).map(({ sourceAlias, count }) => ({ sourceAlias, count })),
+    [{ sourceAlias: "mentor@this-mac", count: 2 }],
+  );
 });
 
 test("queue, dedupe, delivery, and accounting stay bounded", async () => {
@@ -1000,6 +1077,363 @@ test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   await store.close();
 });
 
+test("public route queue age is exact, optional, and metadata-only", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const firstReviewer = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "OLDEST_REVIEWER_BODY_MUST_NOT_ESCAPE",
+    dedupeKey: "oldest-reviewer",
+  });
+  assert.ok(firstReviewer.messageId);
+  const firstReviewerAt = testClock.now().toISOString();
+  testClock.advance(100);
+  const secondReviewer = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "NEWER_REVIEWER_BODY_MUST_NOT_ESCAPE",
+    dedupeKey: "newer-reviewer",
+  });
+  assert.ok(secondReviewer.messageId);
+  const secondReviewerAt = testClock.now().toISOString();
+  testClock.advance(100);
+  const advisor = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "ADVISOR_BODY_MUST_NOT_ESCAPE",
+    dedupeKey: "advisor-queue-age",
+  });
+  assert.ok(advisor.messageId);
+  const advisorAt = testClock.now().toISOString();
+
+  const queued = await store.publicSnapshot();
+  assert.deepEqual(
+    queued.routes.map(({ alias, queueDepth, oldestQueuedAt }) => ({
+      alias,
+      queueDepth,
+      oldestQueuedAt,
+    })),
+    [
+      {
+        alias: "advisor@this-mac",
+        queueDepth: 1,
+        oldestQueuedAt: advisorAt,
+      },
+      {
+        alias: "reviewer@this-mac",
+        queueDepth: 2,
+        oldestQueuedAt: firstReviewerAt,
+      },
+    ],
+  );
+  const serialized = JSON.stringify(queued);
+  for (const privateValue of [
+    firstReviewer.messageId,
+    secondReviewer.messageId,
+    advisor.messageId,
+    "OLDEST_REVIEWER_BODY_MUST_NOT_ESCAPE",
+    "NEWER_REVIEWER_BODY_MUST_NOT_ESCAPE",
+    "ADVISOR_BODY_MUST_NOT_ESCAPE",
+    codexBinding.routeHandle,
+    claudeBinding.routeHandle,
+  ]) {
+    assert.equal(serialized.includes(privateValue), false);
+  }
+
+  assert.equal(await store.cancelQueuedMessage(firstReviewer.messageId), true);
+  const afterOldestCancellation = await store.publicSnapshot();
+  assert.equal(
+    afterOldestCancellation.routes.find(
+      (route) => route.alias === "reviewer@this-mac",
+    )?.oldestQueuedAt,
+    secondReviewerAt,
+  );
+  assert.equal(
+    (await store.dequeueMessage("advisor@this-mac"))?.messageId,
+    advisor.messageId,
+  );
+  const afterAdvisorDispatch = await store.publicSnapshot();
+  const advisorRoute = afterAdvisorDispatch.routes.find(
+    (route) => route.alias === "advisor@this-mac",
+  );
+  assert.equal(advisorRoute?.queueDepth, 0);
+  assert.equal(Object.hasOwn(advisorRoute ?? {}, "oldestQueuedAt"), false);
+  await store.close();
+});
+
+test("requeue preserves the original enqueue time as the public queue age", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const queued = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "REQUEUED_BODY_MUST_STAY_TRANSIENT",
+    dedupeKey: "requeue-preserves-age",
+  });
+  assert.ok(queued.messageId);
+  const originalEnqueuedAt = testClock.now().toISOString();
+
+  testClock.advance(400);
+  const dispatched = await store.dequeueMessage("reviewer@this-mac");
+  assert.equal(dispatched?.messageId, queued.messageId);
+  const whileInFlight = (await store.publicSnapshot()).routes.find(
+    (route) => route.alias === "reviewer@this-mac",
+  );
+  assert.equal(whileInFlight?.queueDepth, 0);
+  assert.equal(Object.hasOwn(whileInFlight ?? {}, "oldestQueuedAt"), false);
+
+  testClock.advance(600);
+  assert.deepEqual(
+    await store.requeueInFlightMessage(
+      queued.messageId,
+      dispatched?.body ?? "",
+    ),
+    { status: "requeued" },
+  );
+  const afterRequeue = (await store.publicSnapshot()).routes.find(
+    (route) => route.alias === "reviewer@this-mac",
+  );
+  assert.equal(afterRequeue?.queueDepth, 1);
+  assert.equal(afterRequeue?.oldestQueuedAt, originalEnqueuedAt);
+  assert.notEqual(afterRequeue?.oldestQueuedAt, testClock.now().toISOString());
+  await store.close();
+});
+
+test("due expiry is explicit, atomic, stable, and returned exactly once", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  const startedAt = testClock.now().getTime();
+
+  const inFlightDue = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "in-flight due",
+    dedupeKey: "in-flight-due",
+    deadlineAt: new Date(startedAt + 1_000).toISOString(),
+  });
+  const inFlightFuture = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "in-flight future",
+    dedupeKey: "in-flight-future",
+    deadlineAt: new Date(startedAt + 3_000).toISOString(),
+  });
+  assert.ok(inFlightDue.messageId);
+  assert.ok(inFlightFuture.messageId);
+  assert.equal(
+    (await store.dequeueMessage("advisor@this-mac"))?.messageId,
+    inFlightDue.messageId,
+  );
+  assert.equal(
+    (await store.dequeueMessage("reviewer@this-mac"))?.messageId,
+    inFlightFuture.messageId,
+  );
+
+  const queuedDue = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "queued due",
+    dedupeKey: "queued-due",
+    deadlineAt: new Date(startedAt + 1_500).toISOString(),
+  });
+  const queuedFuture = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "queued future",
+    dedupeKey: "queued-future",
+    deadlineAt: new Date(startedAt + 3_000).toISOString(),
+  });
+  assert.ok(queuedDue.messageId);
+  assert.ok(queuedFuture.messageId);
+
+  testClock.advance(1_500);
+  const retainedByGenericPrune = await store.publicSnapshot();
+  assert.equal(retainedByGenericPrune.accounting.expired, 0);
+  assert.equal(retainedByGenericPrune.accounting.ambiguous, 0);
+  assert.deepEqual(
+    retainedByGenericPrune.routes.map(({ alias, queueDepth }) => ({
+      alias,
+      queueDepth,
+    })),
+    [
+      { alias: "advisor@this-mac", queueDepth: 1 },
+      { alias: "reviewer@this-mac", queueDepth: 1 },
+    ],
+  );
+
+  const expiryTime = testClock.now();
+  assert.deepEqual(await store.expireDueMessages(expiryTime), [
+    {
+      messageId: queuedDue.messageId,
+      state: "expired",
+      safeErrorCode: "MESSAGE_EXPIRED",
+    },
+    {
+      messageId: inFlightDue.messageId,
+      state: "ambiguous",
+      safeErrorCode: "DELIVERY_DEADLINE_EXPIRED",
+    },
+  ]);
+  assert.deepEqual(await store.expireDueMessages(expiryTime), []);
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: inFlightDue.messageId,
+      state: "delivered",
+    }),
+    { status: "not_in_flight" },
+  );
+  assert.deepEqual(
+    await store.requeueInFlightMessage(inFlightDue.messageId, "late body"),
+    { status: "not_in_flight" },
+  );
+
+  const afterExpiry = await store.publicSnapshot();
+  assert.equal(afterExpiry.accounting.expired, 1);
+  assert.equal(afterExpiry.accounting.ambiguous, 1);
+  assert.equal(afterExpiry.accounting.delivered, 0);
+  assert.deepEqual(
+    afterExpiry.messages.slice(-2).map(({ state, safeErrorCode }) => ({
+      state,
+      safeErrorCode,
+    })),
+    [
+      { state: "expired", safeErrorCode: "MESSAGE_EXPIRED" },
+      {
+        state: "ambiguous",
+        safeErrorCode: "DELIVERY_DEADLINE_EXPIRED",
+      },
+    ],
+  );
+  assert.equal(
+    afterExpiry.routes.find((route) => route.alias === "advisor@this-mac")
+      ?.queueDepth,
+    0,
+  );
+  assert.equal(
+    afterExpiry.routes.find((route) => route.alias === "reviewer@this-mac")
+      ?.queueDepth,
+    1,
+  );
+
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: inFlightFuture.messageId,
+      state: "delivered",
+    }),
+    {
+      status: "settled",
+      settlement: {
+        messageId: inFlightFuture.messageId,
+        state: "delivered",
+      },
+    },
+  );
+  assert.equal(await store.cancelQueuedMessage(queuedFuture.messageId), true);
+  await store.close();
+});
+
+test("settlement and deadline requeue races are first-terminal-wins", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const delivered = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "settle once",
+    dedupeKey: "settle-once",
+  });
+  assert.ok(delivered.messageId);
+  await store.dequeueMessage("advisor@this-mac");
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: delivered.messageId,
+      state: "delivered",
+    }),
+    {
+      status: "settled",
+      settlement: { messageId: delivered.messageId, state: "delivered" },
+    },
+  );
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: delivered.messageId,
+      state: "failed",
+      safeErrorCode: "LATE_FAILURE",
+    }),
+    { status: "not_in_flight" },
+  );
+
+  const requeueDue = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "expire during clean requeue",
+    dedupeKey: "expire-during-requeue",
+    deadlineAt: new Date(testClock.now().getTime() + 500).toISOString(),
+  });
+  assert.ok(requeueDue.messageId);
+  const dispatch = await store.dequeueMessage("advisor@this-mac");
+  assert.equal(dispatch?.messageId, requeueDue.messageId);
+  testClock.advance(500);
+  assert.deepEqual(
+    await store.requeueInFlightMessage(
+      requeueDue.messageId,
+      dispatch?.body ?? "",
+    ),
+    {
+      status: "settled",
+      settlement: {
+        messageId: requeueDue.messageId,
+        state: "expired",
+        safeErrorCode: "MESSAGE_EXPIRED",
+      },
+    },
+  );
+  assert.deepEqual(
+    await store.requeueInFlightMessage(
+      requeueDue.messageId,
+      dispatch?.body ?? "",
+    ),
+    { status: "not_in_flight" },
+  );
+  assert.deepEqual(await store.expireDueMessages(), []);
+
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.accounting.delivered, 1);
+  assert.equal(snapshot.accounting.failed, 0);
+  assert.equal(snapshot.accounting.expired, 1);
+  assert.equal(
+    snapshot.messages.filter(
+      (event) => event.messageIdSuffix === delivered.messageIdSuffix &&
+        ["delivered", "failed", "ambiguous", "expired", "cancelled"].includes(
+          event.state,
+        ),
+    ).length,
+    1,
+  );
+  assert.equal(
+    snapshot.messages.filter(
+      (event) => event.messageIdSuffix === requeueDue.messageIdSuffix &&
+        ["delivered", "failed", "ambiguous", "expired", "cancelled"].includes(
+          event.state,
+        ),
+    ).length,
+    1,
+  );
+  await assert.rejects(
+    store.expireDueMessages(new Date(Number.NaN)),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_GATEWAY_TIMESTAMP",
+  );
+  await store.close();
+});
+
 test("a transient dispatch can return to the held queue without leaking in-flight metadata", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();
@@ -1014,12 +1448,12 @@ test("a transient dispatch can return to the held queue without leaking in-fligh
   const firstDispatch = await store.dequeueMessage("advisor@this-mac");
   assert.equal(firstDispatch?.body, "retry me after the target becomes available");
 
-  assert.equal(
+  assert.deepEqual(
     await store.requeueInFlightMessage(
       accepted.messageId,
       firstDispatch?.body ?? "",
     ),
-    true,
+    { status: "requeued" },
   );
   const held = await store.publicSnapshot();
   assert.equal(

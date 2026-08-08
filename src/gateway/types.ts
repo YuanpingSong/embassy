@@ -258,6 +258,8 @@ export type PublicRouteSnapshot = {
   busyPolicy: BusyPolicy;
   lastSeenAt?: string;
   queueDepth: number;
+  /** Earliest enqueue time for this route's current queue, if non-empty. */
+  oldestQueuedAt?: string;
   counters: RouteCounters;
   safeErrorCode?: string;
 };
@@ -626,10 +628,16 @@ export type ObserveRouteInput = {
 };
 
 export type RebindStaleRouteInput = {
+  /** The currently persisted alias. */
   alias: string;
+  /** The provider's latest live display name for the same logical route. */
+  newAlias?: string;
   currentOwnerLease: string;
   newBinding: PrivateRouteBinding;
-  reason: "endpoint_reobserved" | "peer_explicitly_reselected";
+  reason:
+    | "endpoint_reobserved"
+    | "peer_explicitly_reselected"
+    | "peer_identity_reobserved";
   state?: "idle" | "busy" | "awaiting_approval";
 };
 
@@ -688,6 +696,46 @@ export type SettleMessageInput = {
   >;
   safeErrorCode?: string;
 };
+
+/**
+ * Controller-internal proof that one message won its terminal-state race.
+ * Full message IDs are required only for in-memory service correlation; this
+ * structure must never enter a public snapshot or persisted event.
+ */
+export type TerminalMessageSettlement = {
+  messageId: string;
+  state: Extract<
+    DeliveryState,
+    | "delivered"
+    | "failed"
+    | "ambiguous"
+    | "expired"
+    | "cancelled"
+    | "abandoned"
+  >;
+  safeErrorCode?: string;
+};
+
+export type SettleMessageResult =
+  | {
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }
+  | {
+      status: "not_in_flight";
+    };
+
+export type RequeueInFlightMessageResult =
+  | {
+      status: "requeued";
+    }
+  | {
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }
+  | {
+      status: "not_in_flight";
+    };
 
 export type GatewayStoreLimits = {
   maxRoutes: number;

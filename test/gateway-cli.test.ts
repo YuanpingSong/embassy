@@ -30,6 +30,9 @@ const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
 const CLAUDE_SOCKET_PATH = "/tmp/cc-socks/45201.sock";
 const REPLY_ADDRESS = `uds:${CLAUDE_SOCKET_PATH}`;
 const CONVERSATION_ID = "conv_0123456789abcdef";
+const DELIVERY_TOKEN = "dlv_0123456789abcdefghijklmn";
+const NOW = "2026-08-07T12:34:56.000Z";
+const DEADLINE = "2099-08-07T12:35:56.000Z";
 const SECRET_BODY = "BODY_SENTINEL_NEVER_RENDER";
 const BOTH_IDENTITIES = {
   CODEX_THREAD_ID: THREAD_ID,
@@ -184,6 +187,7 @@ test("all client commands use one private control socket and expose only normali
   const sendsToClaude: ValidatedSendToClaudeParams[] = [];
   const sendsToCodex: ValidatedSendToCodexParams[] = [];
   const replies: ReplyParams[] = [];
+  const deliveryStatuses: string[] = [];
   const handlers: GatewayControlHandlers = {
     health: () => ({ status: "ok", revision: 1 }),
     registerCodex: (params) => {
@@ -203,12 +207,23 @@ test("all client commands use one private control socket and expose only normali
       return { accepted: true, code: "ok" };
     },
     listSnapshot: () => emptySnapshot(),
+    deliveryStatus: ({ token }) => {
+      deliveryStatuses.push(token);
+      return {
+        found: true,
+        state: "delivered",
+        terminal: true,
+        updatedAt: NOW,
+        deadlineAt: DEADLINE,
+      };
+    },
     sendToClaude: (params) => {
       sendsToClaude.push({ ...params });
       return {
         accepted: true,
         code: "ok",
         conversationId: CONVERSATION_ID,
+        deliveryToken: DELIVERY_TOKEN,
       };
     },
     sendToCodex: (params) => {
@@ -217,6 +232,7 @@ test("all client commands use one private control socket and expose only normali
         accepted: true,
         code: "ok",
         conversationId: CONVERSATION_ID,
+        deliveryToken: DELIVERY_TOKEN,
       };
     },
     reply: (params) => {
@@ -224,7 +240,12 @@ test("all client commands use one private control socket and expose only normali
         ...params,
         caller: { ...params.caller },
       });
-      return { accepted: true, code: "ok" };
+      return {
+        accepted: true,
+        code: "ok",
+        conversationId: CONVERSATION_ID,
+        deliveryToken: DELIVERY_TOKEN,
+      };
     },
     refreshDashboard: () => ({
       accepted: true,
@@ -246,6 +267,14 @@ test("all client commands use one private control socket and expose only normali
   }> = [
     { argv: ["health"], env: BOTH_IDENTITIES },
     { argv: ["status"], env: BOTH_IDENTITIES },
+    {
+      argv: ["delivery-status", "--token", DELIVERY_TOKEN],
+      env: BOTH_IDENTITIES,
+    },
+    {
+      argv: ["wait-delivery", "--token", DELIVERY_TOKEN],
+      env: BOTH_IDENTITIES,
+    },
     { argv: ["refresh-dashboard"], env: BOTH_IDENTITIES },
     {
       argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
@@ -332,12 +361,20 @@ test("all client commands use one private control socket and expose only normali
     const parsed = JSON.parse(result.stdout) as {
       ok: boolean;
       command: string;
+      result?: { deliveryToken?: string };
     };
     assert.equal(parsed.ok, true);
     assert.equal(parsed.command, current.argv[0]);
     assert.ok(Buffer.byteLength(result.stdout) <= 256 * 1024);
     assert.doesNotMatch(result.stdout, new RegExp(THREAD_ID, "i"));
     assert.doesNotMatch(result.stdout, /cc-socks|45201|BODY_SENTINEL/);
+    if (
+      current.argv[0] === "send-to-claude" ||
+      current.argv[0] === "send-to-codex" ||
+      current.argv[0] === "reply"
+    ) {
+      assert.equal(parsed.result?.deliveryToken, DELIVERY_TOKEN);
+    }
   }
 
   assert.deepEqual(registrations, [
@@ -353,6 +390,7 @@ test("all client commands use one private control socket and expose only normali
   ]);
   assert.deepEqual(selected, ["advisor@this-mac", CLAUDE_SESSION_ID]);
   assert.deepEqual(unselected, ["advisor@this-mac"]);
+  assert.deepEqual(deliveryStatuses, [DELIVERY_TOKEN, DELIVERY_TOKEN]);
   assert.deepEqual(sendsToClaude, [
     {
       fromAlias: "codex-reviewer@this-mac",
@@ -400,6 +438,282 @@ test("all client commands use one private control socket and expose only normali
   ]);
 });
 
+test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  const startedAt = Date.parse(NOW);
+  const deadlineAt = new Date(startedAt + 10_000).toISOString();
+  let clock = startedAt;
+  const delays: number[] = [];
+  const requestTimeouts: Array<number | undefined> = [];
+  const statuses = [
+    {
+      found: true,
+      state: "queued",
+      terminal: false,
+      updatedAt: NOW,
+      deadlineAt,
+      pendingForMs: 0,
+    },
+    {
+      found: true,
+      state: "stalled",
+      terminal: false,
+      updatedAt: new Date(startedAt + 250).toISOString(),
+      deadlineAt,
+      pendingForMs: 250,
+      safeErrorCode: "DELIVERY_STALLED",
+    },
+    {
+      found: true,
+      state: "delivered",
+      terminal: true,
+      updatedAt: new Date(startedAt + 500).toISOString(),
+      deadlineAt,
+    },
+  ] as const;
+  let attempts = 0;
+  const code = await runGatewayCli(
+    ["wait-delivery", "--token", DELIVERY_TOKEN],
+    {
+      env: {},
+      stdout,
+      stderr,
+      loadConfig: () => ({
+        stateDir: "/private/fake-state",
+        controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"],
+        stallNoticeMs: 30_000,
+        limits: {} as never,
+      }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async (options: {
+        request: { method: string; params: { token?: string } };
+        timeoutMs?: number;
+      }) => {
+        assert.equal(options.request.method, "delivery_status");
+        assert.equal(options.request.params.token, DELIVERY_TOKEN);
+        requestTimeouts.push(options.timeoutMs);
+        const result = statuses[attempts];
+        attempts += 1;
+        assert.ok(result);
+        return { protocolVersion: 1, ok: true, result };
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      now: () => clock,
+      delay: async (milliseconds) => {
+        delays.push(milliseconds);
+        clock += milliseconds;
+      },
+    },
+  );
+
+  assert.equal(code, gatewayCliExitCodes.ok);
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [250, 250]);
+  assert.deepEqual(requestTimeouts, [3_000, 3_000, 3_000]);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: true,
+    command: "wait-delivery",
+    result: statuses[2],
+  });
+  assert.equal(stdout.chunks.length, 1);
+  assert.equal(stderr.chunks.join(""), "");
+});
+
+test("wait-delivery returns a retained terminal result after its deadline window", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  const deadlineAt = "2026-08-08T12:05:00.000Z";
+  const result = {
+    found: true as const,
+    state: "delivered" as const,
+    terminal: true as const,
+    updatedAt: "2026-08-08T12:01:00.000Z",
+    deadlineAt,
+  };
+  let attempts = 0;
+  const code = await runGatewayCli(
+    ["wait-delivery", "--token", DELIVERY_TOKEN],
+    {
+      env: {},
+      stdout,
+      stderr,
+      loadConfig: () => ({
+        stateDir: "/private/fake-state",
+        controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"],
+        stallNoticeMs: 30_000,
+        limits: {} as never,
+      }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => {
+        attempts += 1;
+        return { protocolVersion: 1, ok: true, result };
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      now: () => Date.parse("2026-08-08T12:10:00.000Z"),
+    },
+  );
+
+  assert.equal(code, gatewayCliExitCodes.ok);
+  assert.equal(attempts, 1);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: true,
+    command: "wait-delivery",
+    result,
+  });
+  assert.equal(stderr.chunks.join(""), "");
+});
+
+test("wait-delivery preserves every non-delivered terminal state and uses one failure exit", async () => {
+  const states = ["expired", "failed", "ambiguous", "cancelled"] as const;
+
+  for (const state of states) {
+    const stdout = capture();
+    const stderr = capture();
+    const result = {
+      found: true as const,
+      state,
+      terminal: true as const,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      pendingForMs: 750,
+      safeErrorCode: `DELIVERY_${state.toUpperCase()}`,
+    };
+    let attempts = 0;
+    const code = await runGatewayCli(
+      ["wait-delivery", "--token", DELIVERY_TOKEN],
+      {
+        env: {},
+        stdout,
+        stderr,
+        loadConfig: () => ({
+          stateDir: "/private/fake-state",
+          controlSocketPath: "/private/fake-state/control.sock",
+          allowedHosts: ["this-mac"],
+          stallNoticeMs: 30_000,
+          limits: {} as never,
+        }),
+        validateControlSocket: async () => undefined,
+        sendRequest: (async () => {
+          attempts += 1;
+          return { protocolVersion: 1, ok: true, result };
+        }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      },
+    );
+
+    assert.equal(code, gatewayCliExitCodes.failure, state);
+    assert.equal(attempts, 1, state);
+    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+      ok: true,
+      command: "wait-delivery",
+      result,
+    });
+    assert.equal(stderr.chunks.join(""), "[embassy] command failed.\n");
+  }
+});
+
+test("wait-delivery distinguishes an unknown token from its bounded deadline", async () => {
+  const fakeConfig = () => ({
+    stateDir: "/private/fake-state",
+    controlSocketPath: "/private/fake-state/control.sock",
+    allowedHosts: ["this-mac"],
+    stallNoticeMs: 30_000,
+    limits: {} as never,
+  });
+
+  const unknownOut = capture();
+  const unknownErr = capture();
+  let unknownAttempts = 0;
+  const unknownCode = await runGatewayCli(
+    ["wait-delivery", "--token", DELIVERY_TOKEN],
+    {
+      env: {},
+      stdout: unknownOut,
+      stderr: unknownErr,
+      loadConfig: fakeConfig,
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => {
+        unknownAttempts += 1;
+        return {
+          protocolVersion: 1,
+          ok: true,
+          result: { found: false },
+        };
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    },
+  );
+  assert.equal(unknownCode, gatewayCliExitCodes.rejected);
+  assert.equal(unknownAttempts, 1);
+  assert.deepEqual(JSON.parse(unknownOut.chunks.join("")), {
+    ok: false,
+    command: "wait-delivery",
+    error: {
+      code: "DELIVERY_TOKEN_UNKNOWN",
+      ambiguous: false,
+      retryable: false,
+    },
+  });
+  assert.equal(
+    unknownErr.chunks.join(""),
+    "[embassy] gateway rejected the request.\n",
+  );
+
+  const timeoutOut = capture();
+  const timeoutErr = capture();
+  const startedAt = Date.parse(NOW);
+  const deliveryDeadlineAt = new Date(startedAt - 2_750).toISOString();
+  const clientDeadlineAt = Date.parse(deliveryDeadlineAt) + 3_000;
+  let clock = startedAt;
+  const delays: number[] = [];
+  let timeoutAttempts = 0;
+  const timeoutCode = await runGatewayCli(
+    ["wait-delivery", "--token", DELIVERY_TOKEN],
+    {
+      env: {},
+      stdout: timeoutOut,
+      stderr: timeoutErr,
+      loadConfig: fakeConfig,
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => {
+        timeoutAttempts += 1;
+        return {
+          protocolVersion: 1,
+          ok: true,
+          result: {
+            found: true,
+            state: "queued",
+            terminal: false,
+            updatedAt: NOW,
+            deadlineAt: deliveryDeadlineAt,
+          },
+        };
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      now: () => clock,
+      delay: async (milliseconds) => {
+        delays.push(milliseconds);
+        clock += milliseconds;
+      },
+    },
+  );
+  assert.equal(timeoutCode, gatewayCliExitCodes.unavailable);
+  assert.equal(timeoutAttempts, 1);
+  assert.deepEqual(delays, [250]);
+  assert.equal(clock, clientDeadlineAt);
+  assert.deepEqual(JSON.parse(timeoutOut.chunks.join("")), {
+    ok: false,
+    command: "wait-delivery",
+    error: {
+      code: "DELIVERY_WAIT_TIMEOUT",
+      ambiguous: false,
+      retryable: true,
+    },
+  });
+  assert.equal(
+    timeoutErr.chunks.join(""),
+    "[embassy] gateway unavailable.\n",
+  );
+});
+
 test("mutation response loss is normalized as ambiguous and is never retried", async () => {
   const stdout = capture();
   const stderr = capture();
@@ -421,6 +735,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
         allowedHosts: ["this-mac"],
+        stallNoticeMs: 30_000,
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -467,6 +782,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
         allowedHosts: ["this-mac"],
+        stallNoticeMs: 30_000,
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -497,6 +813,16 @@ test("identity, stdin, and argument failures happen before any control request",
     body?: string;
     code: string;
   }> = [
+    {
+      argv: ["wait-delivery", "--token", "dlv_too-short"],
+      env: {},
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: ["delivery-status", "--token", `${DELIVERY_TOKEN}x`],
+      env: {},
+      code: "INVALID_ARGUMENTS",
+    },
     {
       argv: ["register-codex", "--alias", "reviewer@this-mac"],
       env: { CODEX_THREAD_ID: THREAD_ID },
@@ -758,17 +1084,25 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
       listSnapshot: () => emptySnapshot(),
+      deliveryStatus: () => ({ found: false }),
       sendToClaude: () => ({
         accepted: true,
         code: "ok",
         conversationId: CONVERSATION_ID,
+        deliveryToken: DELIVERY_TOKEN,
       }),
       sendToCodex: () => ({
         accepted: true,
         code: "ok",
         conversationId: CONVERSATION_ID,
+        deliveryToken: DELIVERY_TOKEN,
       }),
-      reply: () => ({ accepted: true, code: "ok" }),
+      reply: () => ({
+        accepted: true,
+        code: "ok",
+        conversationId: CONVERSATION_ID,
+        deliveryToken: DELIVERY_TOKEN,
+      }),
       refreshDashboard: () => ({
         accepted: true,
         code: "ok",

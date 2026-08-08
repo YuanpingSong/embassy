@@ -114,6 +114,24 @@ export type ClaudePeerDeliveryDiagnostic = {
   code: string;
 };
 
+export const claudePeerInboundStallReasons = [
+  "ROUTE_BUSY",
+  "ROUTE_UNAVAILABLE",
+  "AWAITING_EXTERNAL_APPROVAL",
+] as const;
+export type ClaudePeerInboundStallReason =
+  (typeof claudePeerInboundStallReasons)[number];
+
+export type ClaudePeerInboundProgress = {
+  kind: "stall";
+  reason: ClaudePeerInboundStallReason;
+  queuedForMs: number;
+};
+
+export type ClaudePeerAcknowledgmentResult = {
+  transportStatus: "transport_written";
+};
+
 export type ClaudePeerTransportEvent = {
   messageId: string;
   status: ClaudePeerTransportStatus;
@@ -147,6 +165,7 @@ export type ClaudePeerProtocolNotice = {
     | "UNREGISTERED_REPLY_ADDRESS"
     | "UNKNOWN_RECEIPT"
     | "INVALID_RECEIPT_TRANSITION"
+    | "RECEIPT_LIMIT"
     | "CONNECTION_LIMIT"
     | "CONNECTION_TIMEOUT"
     | "CALLBACK_ERROR";
@@ -293,6 +312,18 @@ type PendingReceipt = {
   timer: NodeJS.Timeout;
 };
 
+type InboundReceipt = {
+  sourceSessionId: string;
+  originalMessageId: string;
+  stallNotification: "available" | "writing" | "settled";
+};
+
+type CapacitySettlement = {
+  receipt: InboundReceipt;
+  attempts: number;
+  retryTimer?: NodeJS.Timeout;
+};
+
 type AdapterLimits = {
   maxRegistryEntries: number;
   maxRegistryBytes: number;
@@ -305,6 +336,10 @@ type AdapterLimits = {
   connectionIdleMs: number;
   maxFramesPerConnection: number;
 };
+
+const MAX_CLAUDE_STALL_QUEUED_MS = 3_600_000;
+const CAPACITY_SETTLEMENT_MAX_ATTEMPTS = 3;
+const CAPACITY_SETTLEMENT_RETRY_MS = 25;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -459,6 +494,17 @@ function configuredLimit(
     );
   }
   return resolved;
+}
+
+function boundedStallQueuedForMs(value: number): number {
+  if (Number.isNaN(value) || value === Number.NEGATIVE_INFINITY) return 0;
+  if (value === Number.POSITIVE_INFINITY) {
+    return MAX_CLAUDE_STALL_QUEUED_MS;
+  }
+  return Math.min(
+    MAX_CLAUDE_STALL_QUEUED_MS,
+    Math.max(0, Math.trunc(value)),
+  );
 }
 
 function parseRegistryRecord(
@@ -1484,6 +1530,28 @@ export class ClaudePeerAdapter {
       connect: this.#connect,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
+      resolveSessionBinding: async (sessionId) => {
+        // Native receipt handles retain only the stable Claude session UUID.
+        // Registry names, PIDs, and sockets are replaceable coordinates, so
+        // refresh discovery before every receipt or progress write.
+        const discovery = await this.discover();
+        if (discovery.truncated) {
+          throw new BridgeError(
+            "CLAUDE_PEER_DISCOVERY_INCOMPLETE",
+            "The Claude peer receipt target cannot be proven from an incomplete registry scan.",
+            true,
+          );
+        }
+        const target = this.#targets.get(sessionId);
+        if (target === undefined) {
+          throw new BridgeError(
+            "CLAUDE_PEER_TARGET_UNKNOWN",
+            "The Claude peer receipt target is no longer discoverable.",
+            true,
+          );
+        }
+        return await this.#revalidateBinding(target);
+      },
       revalidateBinding: async (binding) =>
         await this.#revalidateBinding(binding),
       options,
@@ -1679,6 +1747,7 @@ type ListenerCreateOptions = {
   createId: () => string;
   connect: ClaudePeerConnect;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
+  resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   options: ClaudePeerListenerOptions;
   onClosed: () => void;
@@ -1694,16 +1763,23 @@ export class ClaudePeerListener {
   readonly #createId: () => string;
   readonly #connect: ClaudePeerConnect;
   readonly #resolveReplyAddress: (address: string) => Promise<TargetBinding>;
+  readonly #resolveSessionBinding: (
+    sessionId: string,
+  ) => Promise<TargetBinding>;
   readonly #revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   readonly #options: ClaudePeerListenerOptions;
   readonly #onClosed: () => void;
   readonly #connections = new Set<Socket>();
   readonly #pending = new Map<string, PendingReceipt>();
-  readonly #inboundReceipts = new Map<
-    string,
-    { binding: TargetBinding; originalMessageId: string }
-  >();
+  readonly #inboundReceipts = new Map<string, InboundReceipt>();
+  // One bounded exception slot owns an overflow message only long enough to
+  // return its terminal capacity rejection. It never forwards content to the
+  // service, retries only proven pre-write failures, and is released after a
+  // successful, ambiguous, non-retryable, or exhausted write.
+  #capacitySettlement: CapacitySettlement | undefined;
   #queuedFrames = 0;
+  #inboundQuiesced = false;
+  readonly #inboundQuiesceWaiters = new Set<() => void>();
   #advertisedRecord: Record<string, unknown> | undefined;
   #closed = false;
 
@@ -1722,6 +1798,7 @@ export class ClaudePeerListener {
     this.#createId = options.createId;
     this.#connect = options.connect;
     this.#resolveReplyAddress = options.resolveReplyAddress;
+    this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
     this.#options = options.options;
     this.#onClosed = options.onClosed;
@@ -1942,9 +2019,20 @@ export class ClaudePeerListener {
     receiptHandle: string,
     status: "held" | "delivered" | "denied" | "expired",
     diagnostic?: ClaudePeerDeliveryDiagnostic,
-  ): Promise<void> {
+  ): Promise<ClaudePeerAcknowledgmentResult> {
+    if (this.#closed) {
+      throw new BridgeError(
+        "CLAUDE_PEER_LISTENER_CLOSED",
+        "The Claude peer callback listener is closed.",
+      );
+    }
     const receipt = this.#inboundReceipts.get(receiptHandle);
-    if (this.#closed || receipt === undefined) return;
+    if (receipt === undefined) {
+      throw new BridgeError(
+        "CLAUDE_PEER_RECEIPT_UNKNOWN",
+        "The native Claude peer receipt is unknown or already settled.",
+      );
+    }
     if (
       diagnostic !== undefined &&
       (status !== "expired" ||
@@ -1955,7 +2043,148 @@ export class ClaudePeerListener {
         "A peer delivery diagnostic requires an expired receipt and a safe code.",
       );
     }
-    const binding = await this.#revalidateBinding(receipt.binding);
+
+    try {
+      const result = await this.#writeInboundStatus(
+        receipt,
+        status,
+        diagnostic,
+      );
+      if (status !== "held") this.#inboundReceipts.delete(receiptHandle);
+      return result;
+    } catch (error) {
+      // A terminal write that may have started must never be replayed. A
+      // proven pre-write failure retains the handle for a bounded caller retry.
+      if (
+        status !== "held" &&
+        error instanceof BridgeError &&
+        !error.recoverable
+      ) {
+        this.#inboundReceipts.delete(receiptHandle);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Writes one nonterminal gateway progress frame without synthesizing a
+   * native peer_message_status transition. The receipt remains available for
+   * its later exact terminal acknowledgement or explicit release.
+   */
+  async notifyInboundProgress(
+    receiptHandle: string,
+    progress: ClaudePeerInboundProgress,
+  ): Promise<ClaudePeerAcknowledgmentResult> {
+    if (this.#closed) {
+      throw new BridgeError(
+        "CLAUDE_PEER_LISTENER_CLOSED",
+        "The Claude peer callback listener is closed.",
+      );
+    }
+    const receipt = this.#inboundReceipts.get(receiptHandle);
+    if (receipt === undefined) {
+      throw new BridgeError(
+        "CLAUDE_PEER_RECEIPT_UNKNOWN",
+        "The native Claude peer receipt is unknown or already settled.",
+      );
+    }
+    if (
+      !isObject(progress) ||
+      !hasExactKeys(progress, ["kind", "reason", "queuedForMs"]) ||
+      progress.kind !== "stall" ||
+      !claudePeerInboundStallReasons.includes(
+        progress.reason as ClaudePeerInboundStallReason,
+      ) ||
+      typeof progress.queuedForMs !== "number"
+    ) {
+      throw new BridgeError(
+        "INVALID_PEER_PROGRESS",
+        "Claude peer progress must be one bounded gateway stall notice.",
+      );
+    }
+    if (receipt.stallNotification !== "available") {
+      throw new BridgeError(
+        "CLAUDE_PEER_PROGRESS_ALREADY_NOTIFIED",
+        "The native Claude peer receipt already has a stall notification.",
+      );
+    }
+
+    const queuedForMs = boundedStallQueuedForMs(progress.queuedForMs);
+    const openingTag =
+      `<gateway-delivery-stall terminal="false" reason="${progress.reason}" ` +
+      `queued-for-ms="${queuedForMs}">`;
+    const detailedContent = [
+      openingTag,
+      "The local gateway is still waiting to deliver the preceding message. Inspect its dashboard for details.",
+      "</gateway-delivery-stall>",
+    ].join("\n");
+    const messageId = this.#createId();
+    let progressFrame: Buffer;
+    try {
+      progressFrame = encodeClaudePeerUserFrame({
+        messageId,
+        content: detailedContent,
+        maxFrameBytes: this.#limits.maxFrameBytes,
+      });
+    } catch (error) {
+      if (!(error instanceof BridgeError) || error.code !== "PEER_FRAME_TOO_LARGE") {
+        throw error;
+      }
+      progressFrame = encodeClaudePeerUserFrame({
+        messageId,
+        content: `${openingTag.slice(0, -1)}/>`,
+        maxFrameBytes: this.#limits.maxFrameBytes,
+      });
+    }
+
+    receipt.stallNotification = "writing";
+    try {
+      const result = await this.#writeInboundPayload(receipt, progressFrame);
+      receipt.stallNotification = "settled";
+      return result;
+    } catch (error) {
+      // A proven pre-write failure can be retried; an ambiguous write counts
+      // as the one allowed notice so the peer is never spammed by a replay.
+      receipt.stallNotification =
+        error instanceof BridgeError && error.recoverable
+          ? "available"
+          : "settled";
+      throw error;
+    }
+  }
+
+  /**
+   * Releases a listener-owned native receipt capability without writing to the
+   * peer. The service uses this after a terminal notification becomes
+   * definitively undeliverable so bounded receipt capacity cannot leak.
+   */
+  releaseInboundReceipt(receiptHandle: string): boolean {
+    return this.#inboundReceipts.delete(receiptHandle);
+  }
+
+  /**
+   * Stop admitting new user-message frames while keeping the listener alive
+   * for terminal receipt writes. The promise joins every frame already
+   * admitted, so controller shutdown can drain service receipt work before
+   * closing the provider socket.
+   */
+  async quiesceInbound(): Promise<void> {
+    this.#inboundQuiesced = true;
+    if (this.#queuedFrames === 0) return;
+    await new Promise<void>((resolve) => {
+      this.#inboundQuiesceWaiters.add(resolve);
+      if (this.#queuedFrames === 0) {
+        this.#inboundQuiesceWaiters.delete(resolve);
+        resolve();
+      }
+    });
+  }
+
+  async #writeInboundStatus(
+    receipt: { sourceSessionId: string; originalMessageId: string },
+    status: "held" | "delivered" | "denied" | "expired",
+    diagnostic?: ClaudePeerDeliveryDiagnostic,
+  ): Promise<ClaudePeerAcknowledgmentResult> {
     const statusFrame = Buffer.from(
       `${JSON.stringify({
         type: "control",
@@ -1985,25 +2214,56 @@ export class ClaudePeerListener {
       diagnosticFrame === undefined
         ? statusFrame
         : Buffer.concat([statusFrame, diagnosticFrame]);
-    await new Promise<void>((resolve, reject) => {
-      const socket = this.#connect(binding.record.messagingSocketPath);
-      let settled = false;
-      const finish = (error?: Error): void => {
-        if (settled) return;
-        settled = true;
-        socket.destroy();
-        if (error === undefined) resolve();
-        else reject(error);
-      };
-      socket.setTimeout(this.#limits.connectTimeoutMs, () =>
-        finish(new Error("peer status timeout")),
+    return await this.#writeInboundPayload(receipt, payload);
+  }
+
+  async #writeInboundPayload(
+    receipt: { sourceSessionId: string },
+    payload: Buffer,
+  ): Promise<ClaudePeerAcknowledgmentResult> {
+    let writeStarted = false;
+    try {
+      const binding = await this.#resolveSessionBinding(
+        receipt.sourceSessionId,
       );
-      socket.once("error", finish);
-      socket.once("connect", () => {
-        socket.end(payload, () => finish());
+      await new Promise<void>((resolve, reject) => {
+        const socket = this.#connect(binding.record.messagingSocketPath);
+        let settled = false;
+        const finish = (error?: Error): void => {
+          if (settled) return;
+          settled = true;
+          socket.destroy();
+          if (error === undefined) resolve();
+          else reject(error);
+        };
+        socket.setTimeout(this.#limits.connectTimeoutMs, () =>
+          finish(new Error("peer status timeout")),
+        );
+        socket.once("error", finish);
+        socket.once("connect", () => {
+          writeStarted = true;
+          try {
+            socket.end(payload, () => finish());
+          } catch (error) {
+            finish(error as Error);
+          }
+        });
       });
-    });
-    if (status !== "held") this.#inboundReceipts.delete(receiptHandle);
+    } catch (error) {
+      if (writeStarted) {
+        throw new BridgeError(
+          "CLAUDE_PEER_RECEIPT_WRITE_AMBIGUOUS",
+          "The Claude peer receipt write began but its outcome is ambiguous; do not retry automatically.",
+        );
+      }
+      if (error instanceof BridgeError && !error.recoverable) throw error;
+      throw new BridgeError(
+        "CLAUDE_PEER_RECEIPT_NOT_WRITTEN",
+        "The Claude peer receipt was not confirmed written.",
+        true,
+      );
+    }
+    return { transportStatus: "transport_written" };
   }
 
   track(messageId: string, binding: TargetBinding): void {
@@ -2121,10 +2381,21 @@ export class ClaudePeerListener {
         }
         this.#queuedFrames += 1;
         chain = chain
-          .then(async () => this.#handleFrame(frame))
+          .then(async () => {
+            if (rejected) return;
+            await this.#handleFrame(frame, () => {
+              if (rejected) return;
+              rejected = true;
+              socket.destroy();
+            });
+          })
           .catch(async () => this.#notice("CALLBACK_ERROR"))
           .finally(() => {
             this.#queuedFrames -= 1;
+            if (this.#queuedFrames === 0) {
+              for (const resolve of this.#inboundQuiesceWaiters) resolve();
+              this.#inboundQuiesceWaiters.clear();
+            }
           });
       }
       if (!rejected && buffered.length > this.#limits.maxFrameBytes) {
@@ -2136,10 +2407,17 @@ export class ClaudePeerListener {
     });
   }
 
-  async #handleFrame(frame: ParsedFrame): Promise<void> {
+  async #handleFrame(
+    frame: ParsedFrame,
+    rejectTransport: () => void,
+  ): Promise<void> {
     if (this.#closed) return;
     if (frame.type === "control") {
       await this.#handleControl(frame);
+      return;
+    }
+    if (this.#inboundQuiesced) {
+      rejectTransport();
       return;
     }
     let binding: TargetBinding | undefined;
@@ -2152,14 +2430,34 @@ export class ClaudePeerListener {
       }
     }
     const inboundId = this.#createId();
-    if (
-      binding !== undefined &&
-      frame.messageId !== undefined &&
-      this.#inboundReceipts.size < this.#limits.maxPendingReceipts
-    ) {
+    if (binding !== undefined && frame.messageId !== undefined) {
+      if (
+        this.#inboundReceipts.size >= this.#limits.maxPendingReceipts
+      ) {
+        await this.#notice("RECEIPT_LIMIT");
+        if (this.#capacitySettlement !== undefined) {
+          // Both the configured receipt table and its single terminal-only
+          // overflow slot are occupied. Close this transport rather than
+          // making another native send appear accepted without settlement.
+          rejectTransport();
+          return;
+        }
+        const settlement: CapacitySettlement = {
+          receipt: {
+            sourceSessionId: binding.targetId,
+            originalMessageId: frame.messageId,
+            stallNotification: "settled",
+          },
+          attempts: 0,
+        };
+        this.#capacitySettlement = settlement;
+        await this.#attemptCapacitySettlement(settlement);
+        return;
+      }
       this.#inboundReceipts.set(inboundId, {
-        binding,
+        sourceSessionId: binding.targetId,
         originalMessageId: frame.messageId,
+        stallNotification: "available",
       });
     }
     await invokeHook(this.#options.onMessage, {
@@ -2180,6 +2478,43 @@ export class ClaudePeerListener {
           ? "untrusted_anonymous_local_peer"
           : "untrusted_same_uid_peer",
     });
+  }
+
+  async #attemptCapacitySettlement(
+    settlement: CapacitySettlement,
+  ): Promise<void> {
+    if (this.#closed || this.#capacitySettlement !== settlement) return;
+    settlement.attempts += 1;
+    try {
+      await this.#writeInboundStatus(
+        settlement.receipt,
+        "expired",
+        { code: "GATEWAY_RECEIPT_CAPACITY" },
+      );
+      if (this.#capacitySettlement === settlement) {
+        this.#capacitySettlement = undefined;
+      }
+    } catch (error) {
+      if (this.#capacitySettlement !== settlement) return;
+      const retryable =
+        error instanceof BridgeError && error.recoverable && !this.#closed;
+      if (
+        !retryable ||
+        settlement.attempts >= CAPACITY_SETTLEMENT_MAX_ATTEMPTS
+      ) {
+        // An ambiguous write must never be replayed. Exhausted clean
+        // pre-write failures are released with a local protocol notice rather
+        // than leaking the bounded overflow slot or an unhandled rejection.
+        this.#capacitySettlement = undefined;
+        await this.#notice("CALLBACK_ERROR");
+        return;
+      }
+      settlement.retryTimer = setTimeout(() => {
+        delete settlement.retryTimer;
+        void this.#attemptCapacitySettlement(settlement);
+      }, CAPACITY_SETTLEMENT_RETRY_MS);
+      settlement.retryTimer.unref();
+    }
   }
 
   async #handleControl(frame: ParsedControlFrame): Promise<void> {
@@ -2243,11 +2578,16 @@ export class ClaudePeerListener {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#inboundQuiesced = true;
     await this.unadvertise();
     const unsettledMessageIds = [...this.#pending.keys()];
     for (const pending of this.#pending.values()) clearTimeout(pending.timer);
     this.#pending.clear();
     this.#inboundReceipts.clear();
+    if (this.#capacitySettlement?.retryTimer !== undefined) {
+      clearTimeout(this.#capacitySettlement.retryTimer);
+    }
+    this.#capacitySettlement = undefined;
     await Promise.allSettled(
       unsettledMessageIds.map(async (messageId) =>
         this.#emitReceipt({

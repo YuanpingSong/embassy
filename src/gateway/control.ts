@@ -53,6 +53,7 @@ const ALIAS_PATTERN =
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
+const DELIVERY_TOKEN_PATTERN = /^dlv_[A-Za-z0-9_-]{24}$/;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROTOCOL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -68,6 +69,7 @@ export const gatewayControlMethods = [
   "select_claude",
   "unselect_claude",
   "list_snapshot",
+  "delivery_status",
   "send_to_claude",
   "send_to_codex",
   "reply",
@@ -154,6 +156,10 @@ export type ReplyParams = {
   caller: GatewayReplyCaller;
 };
 
+export type DeliveryStatusParams = {
+  token: string;
+};
+
 export type GatewayControlRequest =
   | {
       protocolVersion: 1;
@@ -187,6 +193,11 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
+      method: "delivery_status";
+      params: DeliveryStatusParams;
+    }
+  | {
+      protocolVersion: 1;
       method: "send_to_claude";
       params: SendToClaudeParams;
     }
@@ -217,6 +228,7 @@ type ValidatedGatewayControlRequest =
   | Extract<GatewayControlRequest, { method: "select_claude" }>
   | Extract<GatewayControlRequest, { method: "unselect_claude" }>
   | Extract<GatewayControlRequest, { method: "list_snapshot" }>
+  | Extract<GatewayControlRequest, { method: "delivery_status" }>
   | {
       protocolVersion: 1;
       method: "send_to_claude";
@@ -255,6 +267,7 @@ export type GatewaySendResult =
       accepted: true;
       code: "ok";
       conversationId: string;
+      deliveryToken: string;
     }
   | {
       accepted: false;
@@ -270,6 +283,27 @@ export type GatewayRefreshResult = GatewayDecision & {
   revision: number;
 };
 
+export type GatewayDeliveryStatusState =
+  | "queued"
+  | "stalled"
+  | "delivered"
+  | "expired"
+  | "failed"
+  | "ambiguous"
+  | "cancelled";
+
+export type GatewayDeliveryStatusResult =
+  | { found: false }
+  | {
+      found: true;
+      state: GatewayDeliveryStatusState;
+      terminal: boolean;
+      updatedAt: string;
+      deadlineAt: string;
+      pendingForMs?: number;
+      safeErrorCode?: string;
+    };
+
 export type GatewaySnapshot = GatewayPublicSnapshot;
 
 type ResultByMethod = {
@@ -279,9 +313,10 @@ type ResultByMethod = {
   select_claude: GatewayDecision;
   unselect_claude: GatewayDecision;
   list_snapshot: GatewaySnapshot;
+  delivery_status: GatewayDeliveryStatusResult;
   send_to_claude: GatewaySendResult;
   send_to_codex: GatewaySendResult;
-  reply: GatewayDecision;
+  reply: GatewaySendResult;
   refresh_dashboard: GatewayRefreshResult;
 };
 
@@ -302,13 +337,16 @@ export type GatewayControlHandlers = {
     params: Readonly<SelectClaudeParams>,
   ) => MaybePromise<GatewayDecision>;
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
+  deliveryStatus: (
+    params: Readonly<DeliveryStatusParams>,
+  ) => MaybePromise<GatewayDeliveryStatusResult>;
   sendToClaude: (
     params: Readonly<ValidatedSendToClaudeParams>,
   ) => MaybePromise<GatewaySendResult>;
   sendToCodex: (
     params: Readonly<ValidatedSendToCodexParams>,
   ) => MaybePromise<GatewaySendResult>;
-  reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewayDecision>;
+  reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewaySendResult>;
   refreshDashboard: () => MaybePromise<GatewayRefreshResult>;
 };
 
@@ -420,6 +458,10 @@ export function isGatewayHostId(value: string): boolean {
 
 export function isGatewayConversationId(value: string): boolean {
   return CONVERSATION_ID_PATTERN.test(value);
+}
+
+export function isGatewayDeliveryToken(value: string): boolean {
+  return DELIVERY_TOKEN_PATTERN.test(value);
 }
 
 export function isGatewayReplyAddress(value: string): boolean {
@@ -555,6 +597,16 @@ function normalizeParams(
         throw new ProtocolFault("INVALID_REQUEST");
       }
       return {};
+    case "delivery_status": {
+      if (
+        !hasExactKeys(value, ["token"]) ||
+        typeof value.token !== "string" ||
+        !isGatewayDeliveryToken(value.token)
+      ) {
+        throw new ProtocolFault("INVALID_REQUEST");
+      }
+      return { token: value.token };
+    }
     case "register_codex": {
       if (
         !hasExactKeys(
@@ -751,9 +803,16 @@ function isSendResult(value: unknown): value is GatewaySendResult {
   if (!isRecord(value)) return false;
   if (value.accepted === true) {
     return (
-      hasExactKeys(value, ["accepted", "code", "conversationId"]) &&
+      hasExactKeys(value, [
+        "accepted",
+        "code",
+        "conversationId",
+        "deliveryToken",
+      ]) &&
       value.code === "ok" &&
-      isConversationId(value.conversationId)
+      isConversationId(value.conversationId) &&
+      typeof value.deliveryToken === "string" &&
+      isGatewayDeliveryToken(value.deliveryToken)
     );
   }
   return isDecision(value);
@@ -796,6 +855,53 @@ function isCompatibility(value: unknown): boolean {
 
 function isSafeCode(value: unknown): value is string {
   return typeof value === "string" && SAFE_CODE_PATTERN.test(value);
+}
+
+const TERMINAL_DELIVERY_STATUS_STATES = new Set<GatewayDeliveryStatusState>([
+  "delivered",
+  "expired",
+  "failed",
+  "ambiguous",
+  "cancelled",
+]);
+
+function isDeliveryStatusState(
+  value: unknown,
+): value is GatewayDeliveryStatusState {
+  return (
+    value === "queued" ||
+    value === "stalled" ||
+    value === "delivered" ||
+    value === "expired" ||
+    value === "failed" ||
+    value === "ambiguous" ||
+    value === "cancelled"
+  );
+}
+
+function isDeliveryStatusResult(
+  value: unknown,
+): value is GatewayDeliveryStatusResult {
+  if (!isRecord(value) || typeof value.found !== "boolean") return false;
+  if (!value.found) return hasExactKeys(value, ["found"]);
+  if (
+    !hasExactKeys(
+      value,
+      ["found", "state", "terminal", "updatedAt", "deadlineAt"],
+      ["pendingForMs", "safeErrorCode"],
+    ) ||
+    !isDeliveryStatusState(value.state) ||
+    typeof value.terminal !== "boolean" ||
+    value.terminal !== TERMINAL_DELIVERY_STATUS_STATES.has(value.state) ||
+    !isIsoTimestamp(value.updatedAt) ||
+    !isIsoTimestamp(value.deadlineAt) ||
+    (value.pendingForMs !== undefined &&
+      !isNonNegativeInteger(value.pendingForMs)) ||
+    (value.safeErrorCode !== undefined && !isSafeCode(value.safeErrorCode))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isRouteCounters(value: unknown): value is RouteCounters {
@@ -864,7 +970,7 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
         "queueDepth",
         "counters",
       ],
-      ["lastSeenAt", "safeErrorCode"],
+      ["lastSeenAt", "oldestQueuedAt", "safeErrorCode"],
     ) &&
     isAlias(value.alias) &&
     isProvider(value.provider) &&
@@ -882,6 +988,9 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
     value.busyPolicy === "queue" &&
     (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
     isNonNegativeInteger(value.queueDepth) &&
+    (value.oldestQueuedAt === undefined
+      ? value.queueDepth === 0
+      : value.queueDepth > 0 && isIsoTimestamp(value.oldestQueuedAt)) &&
     isRouteCounters(value.counters) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
   );
@@ -1090,12 +1199,14 @@ function isResultForMethod<M extends GatewayControlMethod>(
     case "unregister_codex":
     case "select_claude":
     case "unselect_claude":
-    case "reply":
       return isDecision(value);
     case "list_snapshot":
       return isSnapshot(value);
+    case "delivery_status":
+      return isDeliveryStatusResult(value);
     case "send_to_claude":
     case "send_to_codex":
+    case "reply":
       return isSendResult(value);
     case "refresh_dashboard":
       return isRefreshResult(value);
@@ -1136,6 +1247,9 @@ async function dispatch(
         break;
       case "list_snapshot":
         result = await handlers.listSnapshot();
+        break;
+      case "delivery_status":
+        result = await handlers.deliveryStatus(request.params);
         break;
       case "send_to_claude":
         result = await handlers.sendToClaude(request.params);

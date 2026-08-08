@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { BridgeError } from "../src/errors.js";
 import type {
   ClaudePeerDescriptor,
+  ClaudePeerInboundMessage,
+  ClaudePeerInboundProgress,
   ClaudePeerListener,
   ClaudePeerListenerOptions,
   ClaudePeerSendOptions,
@@ -107,6 +109,7 @@ class FakeClaudePeer {
   listenerOptions: ClaudePeerListenerOptions | undefined;
   listenerUsed = false;
   sendCalls = 0;
+  truncated = false;
   asserted: Array<{ routeHandle: string; stateRoot: string }> = [];
   closed = false;
   sendMode: "success" | "postwrite_ambiguous" | "prewrite_failure" =
@@ -117,6 +120,22 @@ class FakeClaudePeer {
     status: "held" | "delivered" | "denied" | "expired";
     diagnosticCode?: string;
   }> = [];
+  acknowledgeAttempts: Array<{
+    receiptHandle: string;
+    status: "held" | "delivered" | "denied" | "expired";
+    diagnosticCode?: string;
+  }> = [];
+  progressed: Array<{
+    receiptHandle: string;
+    progress: ClaudePeerInboundProgress;
+  }> = [];
+  releasedInboundReceipts: string[] = [];
+  acknowledgeError: Error | undefined;
+  acknowledgeErrors: Error[] = [];
+  progressError: Error | undefined;
+  private readonly liveInboundReceipts = new Set([
+    "synthetic-receipt-handle",
+  ]);
   private nextDiscoveryHold:
     | { markStarted: () => void; wait: Promise<void> }
     | undefined;
@@ -131,14 +150,32 @@ class FakeClaudePeer {
       status: "held" | "delivered" | "denied" | "expired",
       diagnostic?: { code: string },
     ) => {
-      this.acknowledged.push({
+      const attempt = {
         receiptHandle,
         status,
         ...(diagnostic === undefined
           ? {}
           : { diagnosticCode: diagnostic.code }),
-      });
+      };
+      this.acknowledgeAttempts.push(attempt);
+      const error = this.acknowledgeErrors.shift() ?? this.acknowledgeError;
+      if (error !== undefined) throw error;
+      this.acknowledged.push(attempt);
+      return { transportStatus: "transport_written" as const };
     },
+    notifyInboundProgress: async (
+      receiptHandle: string,
+      progress: ClaudePeerInboundProgress,
+    ) => {
+      if (this.progressError !== undefined) throw this.progressError;
+      this.progressed.push({ receiptHandle, progress: { ...progress } });
+      return { transportStatus: "transport_written" as const };
+    },
+    releaseInboundReceipt: (receiptHandle: string) => {
+      this.releasedInboundReceipts.push(receiptHandle);
+      return this.liveInboundReceipts.delete(receiptHandle);
+    },
+    quiesceInbound: async () => undefined,
   } as unknown as ClaudePeerListener;
 
   async listen(options: ClaudePeerListenerOptions): Promise<ClaudePeerListener> {
@@ -149,7 +186,7 @@ class FakeClaudePeer {
   async discover(): Promise<{
     peers: ClaudePeerDescriptor[];
     rejected: Record<string, never>;
-    truncated: false;
+    truncated: boolean;
   }> {
     const peers = this.peers.map((peer) => ({ ...peer }));
     const hold = this.nextDiscoveryHold;
@@ -158,7 +195,7 @@ class FakeClaudePeer {
       hold.markStarted();
       await hold.wait;
     }
-    return { peers, rejected: {}, truncated: false };
+    return { peers, rejected: {}, truncated: this.truncated };
   }
 
   holdNextDiscovery(): { release: () => void; started: Promise<void> } {
@@ -240,7 +277,7 @@ class FakeClaudePeer {
     targetId = "target-selected",
     text = "synthetic reply",
   ): Promise<void> {
-    await this.listenerOptions?.onMessage({
+    await this.emitInboundFrame({
       inboundId: "inbound-private-id",
       content: text,
       sourceTargetId: targetId,
@@ -249,6 +286,13 @@ class FakeClaudePeer {
       replySupported: true,
       trust: "untrusted_same_uid_peer",
     });
+  }
+
+  async emitInboundFrame(message: ClaudePeerInboundMessage): Promise<void> {
+    if (message.receiptHandle !== undefined) {
+      this.liveInboundReceipts.add(message.receiptHandle);
+    }
+    await this.listenerOptions?.onMessage(message);
   }
 
   setSelectedStatus(status: "idle" | "busy" | "shell" | "waiting"): void {
@@ -381,19 +425,26 @@ test("local Claude provider publishes only canonical interactive names and gener
   });
 
   const discovered = await provider.discoverClaudePeers();
-  assert.deepEqual(discovered, [
-    {
-      alias: "advisor@this-mac",
-      routeHandle: "target-selected",
-      kind: "interactive",
-      state: "idle",
-      compatibility: "compatible",
-    },
-  ]);
+  assert.deepEqual(discovered, {
+    complete: true,
+    peers: [
+      {
+        alias: "advisor@this-mac",
+        routeHandle: "target-selected",
+        kind: "interactive",
+        state: "idle",
+        compatibility: "compatible",
+      },
+    ],
+  });
   assert.equal(
-    discovered.some((peer) => peer.alias.startsWith("codex-")),
+    discovered.peers.some((peer) => peer.alias.startsWith("codex-")),
     false,
   );
+  fake.truncated = true;
+  assert.equal((await provider.discoverClaudePeers()).complete, false);
+  fake.truncated = false;
+  assert.equal((await provider.discoverClaudePeers()).complete, true);
   await provider.assertWorkspaceDisjoint(
     "target-selected",
     "/synthetic/controller-state",
@@ -434,13 +485,19 @@ test("local Claude provider publishes only canonical interactive names and gener
   assert.equal(fake.listenerUsed, true);
   assert.deepEqual(observed.deliveries, [
     { messageId: GATEWAY_MESSAGE_ID, state: "transport_written" },
-    { messageId: GATEWAY_MESSAGE_ID, state: "released" },
   ]);
   assert.equal(JSON.stringify(observed.deliveries).includes(PROVIDER_MESSAGE_ID), false);
 
   fake.emitReceipt("held");
+  assert.deepEqual(observed.deliveries.at(-1), {
+    messageId: GATEWAY_MESSAGE_ID,
+    state: "held",
+  });
   fake.emitReceipt("released");
-  assert.deepEqual(observed.deliveries.slice(2), []);
+  assert.deepEqual(observed.deliveries.at(-1), {
+    messageId: GATEWAY_MESSAGE_ID,
+    state: "released",
+  });
   const routesBeforeRefresh = observed.routes.length;
   // A receipt settles inbox delivery only; it cannot assert native idleness.
   assert.equal(observed.routes.length, routesBeforeRefresh);
@@ -531,6 +588,20 @@ test("an exact live native sender stays outbound-unselected but can receive its 
   assert.equal(fake.sendCalls, 1);
   assert.deepEqual(observed.routes, []);
 
+  fake.peers[0]!.alias = "renamed-advisor";
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "native_reply",
+      binding: binding(provider),
+      messageId: "gateway-message-native-reply-after-rename",
+      text: "correlated native reply after same-session rename",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.sendCalls, 2);
+
   fake.peers.splice(0, 1);
   assert.deepEqual(
     await provider.dispatch({
@@ -543,7 +614,282 @@ test("an exact live native sender stays outbound-unselected but can receive its 
     }),
     { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" },
   );
-  assert.equal(fake.sendCalls, 1);
+  assert.equal(fake.sendCalls, 2);
+  await provider.close();
+});
+
+test("provider-owned invalid, stale, and capacity rejections retry only clean prewrites", async (t) => {
+  const recoverable = () =>
+    new BridgeError(
+      "CLAUDE_PEER_RECEIPT_NOT_WRITTEN",
+      "synthetic clean prewrite",
+      true,
+    );
+
+  await t.test("invalid source", async () => {
+    const fake = new FakeClaudePeer();
+    fake.acknowledgeErrors.push(recoverable());
+    const provider = createLocalClaudeGatewayProvider({
+      runtime: claudeRuntime(),
+      discoveryPollMs: 30_000,
+      peerFactory: () => fake as never,
+    });
+    await provider.initialize(callbacks().callbacks);
+    await fake.emitInboundFrame({
+      inboundId: "invalid-inbound",
+      content: "invalid source",
+      receiptHandle: "invalid-receipt",
+      replySupported: false,
+      trust: "untrusted_anonymous_local_peer",
+    });
+    assert.equal(fake.acknowledgeAttempts.length, 2);
+    assert.deepEqual(fake.acknowledged, [
+      {
+        receiptHandle: "invalid-receipt",
+        status: "expired",
+        diagnosticCode: "CLAUDE_SOURCE_ROUTE_INVALID",
+      },
+    ]);
+    assert.deepEqual(fake.releasedInboundReceipts, []);
+    await provider.close();
+  });
+
+  await t.test("stale source", async () => {
+    const fake = new FakeClaudePeer();
+    fake.acknowledgeErrors.push(recoverable());
+    const provider = createLocalClaudeGatewayProvider({
+      runtime: claudeRuntime(),
+      discoveryPollMs: 30_000,
+      peerFactory: () => fake as never,
+    });
+    await provider.initialize(callbacks().callbacks);
+    await fake.emitInboundFrame({
+      inboundId: "stale-inbound",
+      content: "stale source",
+      sourceTargetId: "missing-session-uuid",
+      sourceAlias: "missing",
+      receiptHandle: "stale-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    });
+    assert.equal(fake.acknowledgeAttempts.length, 2);
+    assert.deepEqual(fake.acknowledged, [
+      {
+        receiptHandle: "stale-receipt",
+        status: "expired",
+        diagnosticCode: "CLAUDE_SOURCE_ROUTE_STALE",
+      },
+    ]);
+    assert.deepEqual(fake.releasedInboundReceipts, []);
+    await provider.close();
+  });
+
+  await t.test("native ingress capacity", async () => {
+    const fake = new FakeClaudePeer();
+    fake.peers.push({
+      targetId: "target-second",
+      alias: "second",
+      kind: "interactive",
+      status: "idle",
+      compatibility: "compatible",
+    });
+    const provider = createLocalClaudeGatewayProvider({
+      runtime: claudeRuntime(),
+      discoveryPollMs: 30_000,
+      maxPendingMessages: 1,
+      peerFactory: () => fake as never,
+    });
+    const observed = callbacks();
+    await provider.initialize(observed.callbacks);
+    await provider.advertiseNativeCodexPeer({
+      alias: "codex-reviewer@this-mac",
+      cwd: SAFE_WORKSPACE,
+    });
+    await fake.emitInbound("target-selected", "occupy native capacity");
+    fake.acknowledgeErrors.push(recoverable());
+    await fake.emitInboundFrame({
+      inboundId: "capacity-inbound",
+      content: "must be rejected at capacity",
+      sourceTargetId: "target-second",
+      sourceAlias: "second",
+      receiptHandle: "capacity-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    });
+    assert.equal(observed.messages.length, 1);
+    assert.equal(fake.acknowledgeAttempts.length, 2);
+    assert.deepEqual(fake.acknowledged, [
+      {
+        receiptHandle: "capacity-receipt",
+        status: "expired",
+        diagnosticCode: "CLAUDE_NATIVE_INGRESS_CAPACITY",
+      },
+    ]);
+    assert.deepEqual(fake.releasedInboundReceipts, []);
+    await provider.close();
+  });
+});
+
+test("provider-owned rejection never replays ambiguity and releases exhausted or closing receipts", async (t) => {
+  const invalidFrame = (receiptHandle: string): ClaudePeerInboundMessage => ({
+    inboundId: `inbound-${receiptHandle}`,
+    content: "invalid source",
+    receiptHandle,
+    replySupported: false,
+    trust: "untrusted_anonymous_local_peer",
+  });
+
+  await t.test("ambiguous outcome", async () => {
+    const fake = new FakeClaudePeer();
+    fake.acknowledgeError = new BridgeError(
+      "CLAUDE_PEER_RECEIPT_WRITE_AMBIGUOUS",
+      "synthetic ambiguous receipt write",
+    );
+    const provider = createLocalClaudeGatewayProvider({
+      runtime: claudeRuntime(),
+      discoveryPollMs: 30_000,
+      peerFactory: () => fake as never,
+    });
+    await provider.initialize(callbacks().callbacks);
+    await fake.emitInboundFrame(invalidFrame("ambiguous-receipt"));
+    assert.equal(fake.acknowledgeAttempts.length, 1);
+    assert.deepEqual(fake.releasedInboundReceipts, ["ambiguous-receipt"]);
+    await provider.close();
+  });
+
+  await t.test("retry budget exhausted", async () => {
+    const fake = new FakeClaudePeer();
+    fake.acknowledgeError = new BridgeError(
+      "CLAUDE_PEER_RECEIPT_NOT_WRITTEN",
+      "synthetic clean prewrite",
+      true,
+    );
+    const provider = createLocalClaudeGatewayProvider({
+      runtime: claudeRuntime(),
+      discoveryPollMs: 30_000,
+      peerFactory: () => fake as never,
+    });
+    await provider.initialize(callbacks().callbacks);
+    await fake.emitInboundFrame(invalidFrame("exhausted-receipt"));
+    assert.equal(fake.acknowledgeAttempts.length, 4);
+    assert.deepEqual(fake.releasedInboundReceipts, ["exhausted-receipt"]);
+    await provider.close();
+  });
+
+  await t.test("provider close", async () => {
+    const fake = new FakeClaudePeer();
+    fake.acknowledgeError = new BridgeError(
+      "CLAUDE_PEER_RECEIPT_NOT_WRITTEN",
+      "synthetic clean prewrite",
+      true,
+    );
+    const provider = createLocalClaudeGatewayProvider({
+      runtime: claudeRuntime(),
+      discoveryPollMs: 30_000,
+      peerFactory: () => fake as never,
+    });
+    await provider.initialize(callbacks().callbacks);
+    const inbound = fake.emitInboundFrame(invalidFrame("closing-receipt"));
+    await waitFor(() => fake.acknowledgeAttempts.length === 1);
+    await provider.close();
+    await inbound;
+    assert.equal(fake.acknowledgeAttempts.length, 1);
+    assert.deepEqual(fake.releasedInboundReceipts, ["closing-receipt"]);
+  });
+});
+
+test("local Claude provider keeps progress distinct and propagates receipt outcomes", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+
+  await assert.rejects(
+    provider.updateNativeInboundStatus(
+      "synthetic-receipt-handle",
+      "delivered",
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PROVIDER_UNAVAILABLE",
+  );
+
+  await provider.initialize(callbacks().callbacks);
+  await provider.notifyNativeInboundProgress(
+    "synthetic-receipt-handle",
+    {
+      kind: "stall",
+      reason: "ROUTE_BUSY",
+      queuedForMs: 12_345,
+    },
+  );
+  assert.deepEqual(fake.progressed, [
+    {
+      receiptHandle: "synthetic-receipt-handle",
+      progress: {
+        kind: "stall",
+        reason: "ROUTE_BUSY",
+        queuedForMs: 12_345,
+      },
+    },
+  ]);
+  assert.deepEqual(fake.acknowledged, []);
+
+  await provider.updateNativeInboundStatus(
+    "terminal-success",
+    "expired",
+    "ROUTE_UNAVAILABLE",
+  );
+  assert.deepEqual(fake.acknowledged, [
+    {
+      receiptHandle: "terminal-success",
+      status: "expired",
+      diagnosticCode: "ROUTE_UNAVAILABLE",
+    },
+  ]);
+
+  const terminalFailure = new BridgeError(
+    "SYNTHETIC_ACK_FAILURE",
+    "synthetic terminal failure",
+  );
+  fake.acknowledgeError = terminalFailure;
+  await assert.rejects(
+    provider.updateNativeInboundStatus("terminal-failure", "denied"),
+    (error: unknown) => error === terminalFailure,
+  );
+
+  const progressFailure = new BridgeError(
+    "SYNTHETIC_PROGRESS_FAILURE",
+    "synthetic progress failure",
+  );
+  fake.progressError = progressFailure;
+  await assert.rejects(
+    provider.notifyNativeInboundProgress("progress-failure", {
+      kind: "stall",
+      reason: "ROUTE_UNAVAILABLE",
+      queuedForMs: 5_000,
+    }),
+    (error: unknown) => error === progressFailure,
+  );
+
+  assert.equal(
+    await provider.releaseNativeInboundReceipt(
+      "synthetic-receipt-handle",
+    ),
+    true,
+  );
+  assert.equal(
+    await provider.releaseNativeInboundReceipt(
+      "synthetic-receipt-handle",
+    ),
+    false,
+  );
+  assert.deepEqual(fake.releasedInboundReceipts, [
+    "synthetic-receipt-handle",
+    "synthetic-receipt-handle",
+  ]);
   await provider.close();
 });
 
@@ -630,14 +976,15 @@ test("Claude idle discovery overlapping an entire dispatch remains stale until t
   );
   heldDiscovery.release();
   await staleDiscovery;
-  assert.equal(observed.routes.at(-1)?.state, "idle");
+  assert.equal(observed.routes.at(-1)?.state, "busy");
 
+  fake.emitReceipt("released");
   await provider.discoverClaudePeers();
   assert.equal(observed.routes.at(-1)?.state, "idle");
   await provider.close();
 });
 
-test("local Claude provider releases successful socket writes without waiting for receipts", async () => {
+test("local Claude provider retains successful socket writes until exact receipts release capacity", async () => {
   const fake = new FakeClaudePeer();
   const provider = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
@@ -667,6 +1014,11 @@ test("local Claude provider releases successful socket writes without waiting fo
     }),
     { state: "pending" },
   );
+  assert.equal(
+    observed.deliveries.filter((event) => event.state === "released").length,
+    0,
+  );
+  fake.emitReceipt("released");
   assert.deepEqual(
     await provider.dispatch({
     authorization: "selected_route",
@@ -678,6 +1030,7 @@ test("local Claude provider releases successful socket writes without waiting fo
     }),
     { state: "pending" },
   );
+  fake.emitReceipt("released");
   assert.equal(
     observed.deliveries.filter((event) => event.state === "released").length,
     2,
@@ -685,7 +1038,7 @@ test("local Claude provider releases successful socket writes without waiting fo
   await provider.close();
 });
 
-test("successful Claude socket writes immediately unlock a second queued gateway send", async () => {
+test("an exact Claude receipt unlocks a second queued gateway send", async () => {
   const created = await mkdtemp(
     path.join(os.tmpdir(), "gateway-provider-repeat-"),
   );
@@ -734,14 +1087,10 @@ test("successful Claude socket writes immediately unlock a second queued gateway
     await waitFor(() => fake.sendCalls === 1);
     assert.equal((await send("second synthetic body")).accepted, true);
 
-    // A successful native socket write is terminal for gateway delivery.
-    fake.setSelectedStatus("idle");
-    const heldDiscovery = fake.holdNextDiscovery();
-    const preTerminalDiscovery = claude.discoverClaudePeers();
-    await heldDiscovery.started;
-    heldDiscovery.release();
-    await preTerminalDiscovery;
+    assert.equal(fake.sendCalls, 1);
+    fake.emitReceipt("released");
     await waitFor(() => fake.sendCalls === 2);
+    fake.emitReceipt("released");
   } finally {
     await service.close();
     await rm(root, { recursive: true, force: true });
@@ -962,7 +1311,7 @@ test("local Codex provider attaches one exact route, refreshes it before write, 
       expectsReply: true,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
-    { state: "pending" },
+    { state: "accepted" },
   );
   const transport = factory.transports[0]!;
   assert.equal(
@@ -1042,7 +1391,7 @@ for (const failureMode of ["disconnect", "fault"] as const) {
         expectsReply: false,
         deadlineAt: new Date(Date.now() + 60_000).toISOString(),
       }),
-      { state: "pending" },
+      { state: "accepted" },
     );
     assert.equal(
       first.sent.filter((message) => message.method === "turn/start").length,
@@ -1216,7 +1565,7 @@ test("an explicitly registered Codex route uses its native policy and remains re
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
-    { state: "pending" },
+    { state: "accepted" },
   );
   assert.equal(
     transport.sent.filter((message) => message.method === "turn/start").length,

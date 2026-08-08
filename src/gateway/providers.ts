@@ -6,6 +6,7 @@ import {
   CLAUDE_PEER_COMPATIBILITY,
   ClaudePeerAdapter,
   type ClaudePeerDescriptor,
+  type ClaudePeerInboundProgress,
   type ClaudePeerListener,
   type ClaudePeerReceiptEvent,
   type ClaudePeerTransportEvent,
@@ -27,6 +28,7 @@ import type {
   GatewayAdapterCallbacks,
   GatewayAdapterDelivery,
   GatewayAdapterDiscovery,
+  GatewayAdapterDiscoverySnapshot,
   GatewayAdapterDispatchResult,
   GatewayAdapterRouteState,
   GatewayAdapterStart,
@@ -44,6 +46,7 @@ const PUBLIC_ALIAS =
 const OPAQUE_ROUTE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_CLAUDE_PENDING = 1_024;
 const DEFAULT_CLAUDE_DISCOVERY_POLL_MS = 1_000;
+const CLAUDE_REJECTION_RECEIPT_RETRY_DELAYS_MS = [25, 100, 250] as const;
 const MAX_CODEX_ROUTES = 128;
 const MAX_CODEX_CALLBACKS = 512;
 const MAX_TRANSIENT_REPLY_BYTES = 64 * 1024;
@@ -69,6 +72,14 @@ type ClaudePending = {
   gatewayMessageId: string;
   targetId: string;
   timer: NodeJS.Timeout;
+};
+
+type ClaudeRejectedInbound = {
+  receiptHandle: string;
+  listener: ClaudePeerListener;
+  released: boolean;
+  cancelRetry?: () => void;
+  operation: Promise<void>;
 };
 
 function exactLocalHost(hostId: string | undefined): "this-mac" {
@@ -209,8 +220,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly providerIdByGatewayId = new Map<string, string>();
   /** Includes the pre-write reservation through exact terminal settlement. */
   private readonly pendingTargetByGatewayId = new Map<string, string>();
+  /** Provider-owned terminal rejections that never enter the service queue. */
+  private readonly rejectedNativeInbound = new Map<
+    string,
+    ClaudeRejectedInbound
+  >();
   private discoveryInFlight:
-    | Promise<readonly GatewayAdapterDiscovery[]>
+    | Promise<GatewayAdapterDiscoverySnapshot>
     | undefined;
   private monitorTimer: NodeJS.Timeout | undefined;
   private callbacks: GatewayAdapterCallbacks | undefined;
@@ -272,18 +288,18 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
             !message.replySupported
           ) {
             if (message.receiptHandle !== undefined) {
-              await this.listener?.acknowledge?.(
+              await this.rejectNativeInboundReceipt(
                 message.receiptHandle,
-                "expired",
-                { code: "CLAUDE_SOURCE_ROUTE_INVALID" },
+                "CLAUDE_SOURCE_ROUTE_INVALID",
               );
             }
             return;
           }
+          const sourceTargetId = message.sourceTargetId;
           let sourceAlias: string | undefined;
           try {
             await this.refreshClaudeDiscovery();
-            const current = this.discovered.get(message.sourceTargetId);
+            const current = this.discovered.get(sourceTargetId);
             const expectedAlias = `${message.sourceAlias}@${this.identity.hostId}`;
             if (current?.alias === expectedAlias) sourceAlias = expectedAlias;
           } catch {
@@ -291,60 +307,47 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           }
           if (sourceAlias === undefined) {
             if (message.receiptHandle !== undefined) {
-              await this.listener?.acknowledge?.(
+              await this.rejectNativeInboundReceipt(
                 message.receiptHandle,
-                "expired",
-                { code: "CLAUDE_SOURCE_ROUTE_STALE" },
+                "CLAUDE_SOURCE_ROUTE_STALE",
               );
             }
             return;
           }
-          invokeCallback(() => {
-            if (this.advertisedCodexAlias !== undefined) {
-              if (
-                !this.nativeInbound.has(message.sourceTargetId as string) &&
-                this.nativeInbound.size >= this.maxPending
-              ) {
-                if (message.receiptHandle !== undefined) {
-                  void this.listener?.acknowledge?.(
-                    message.receiptHandle,
-                    "expired",
-                    { code: "CLAUDE_NATIVE_INGRESS_CAPACITY" },
-                  );
-                }
-                return;
+          if (this.advertisedCodexAlias !== undefined) {
+            const targetAlias = this.advertisedCodexAlias;
+            if (
+              !this.nativeInbound.has(sourceTargetId) &&
+              this.nativeInbound.size >= this.maxPending
+            ) {
+              if (message.receiptHandle !== undefined) {
+                await this.rejectNativeInboundReceipt(
+                  message.receiptHandle,
+                  "CLAUDE_NATIVE_INGRESS_CAPACITY",
+                );
               }
-              this.nativeInbound.set(
-                message.sourceTargetId as string,
-                sourceAlias as string,
-              );
+              return;
+            }
+            this.nativeInbound.set(sourceTargetId, sourceAlias);
+            invokeCallback(() => {
               callbacks.onClaudeMessage?.({
-                endpoint: callbackEndpoint(
-                  this.identity,
-                  message.sourceTargetId as string,
-                ),
+                endpoint: callbackEndpoint(this.identity, sourceTargetId),
                 sourceAlias,
-                targetAlias: this.advertisedCodexAlias,
+                targetAlias,
                 text: message.content,
                 ...(message.receiptHandle === undefined
                   ? {}
                   : { receiptHandle: message.receiptHandle }),
               });
-            } else {
-              if (
-                this.selected.get(message.sourceTargetId as string) ===
-                sourceAlias
-              ) {
-                callbacks.onClaudeReply({
-                  endpoint: callbackEndpoint(
-                    this.identity,
-                    message.sourceTargetId as string,
-                  ),
-                  text: message.content,
-                });
-              }
-            }
-          });
+            });
+          } else if (this.selected.get(sourceTargetId) === sourceAlias) {
+            invokeCallback(() => {
+              callbacks.onClaudeReply({
+                endpoint: callbackEndpoint(this.identity, sourceTargetId),
+                text: message.content,
+              });
+            });
+          }
         },
         onReceipt: (event) => this.onReceipt(event),
       });
@@ -367,7 +370,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  async discoverClaudePeers(): Promise<readonly GatewayAdapterDiscovery[]> {
+  async discoverClaudePeers(): Promise<GatewayAdapterDiscoverySnapshot> {
     this.assertReady();
     return await this.refreshClaudeDiscovery();
   }
@@ -475,11 +478,32 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     status: "held" | "delivered" | "denied" | "expired",
     diagnosticCode?: string,
   ): Promise<void> {
-    await this.listener?.acknowledge?.(
+    const listener = this.requireNativeInboundListener();
+    await listener.acknowledge(
       receiptHandle,
       status,
       diagnosticCode === undefined ? undefined : { code: diagnosticCode },
     );
+  }
+
+  async notifyNativeInboundProgress(
+    receiptHandle: string,
+    progress: ClaudePeerInboundProgress,
+  ): Promise<void> {
+    const listener = this.requireNativeInboundListener();
+    await listener.notifyInboundProgress(receiptHandle, progress);
+  }
+
+  async releaseNativeInboundReceipt(
+    receiptHandle: string,
+  ): Promise<boolean> {
+    const listener = this.requireNativeInboundListener();
+    return listener.releaseInboundReceipt(receiptHandle);
+  }
+
+  async quiesceNativeInbound(): Promise<void> {
+    if (this.closed) return;
+    await this.listener?.quiesceInbound();
   }
 
   async dispatch(input: {
@@ -615,8 +639,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         }
         return { state: "ambiguous", safeErrorCode: "CLAUDE_RECEIPT_TRACKING_FAILED" };
       }
-      this.listener.untrack(result.messageId);
-      this.finishClaudeMessage(result.messageId, "released");
       if (input.authorization === "selected_route") {
         this.selectedObservationDirty.delete(input.binding.routeHandle);
         this.emitClaudeRouteObservation(
@@ -673,6 +695,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    for (const rejection of this.rejectedNativeInbound.values()) {
+      this.releaseRejectedNativeInbound(rejection);
+    }
+    this.rejectedNativeInbound.clear();
     try {
       await this.peer.close();
     } finally {
@@ -703,6 +729,133 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         "The local Claude provider is not available.",
         true,
       );
+    }
+  }
+
+  private requireNativeInboundListener(): ClaudePeerListener {
+    this.assertReady();
+    if (this.listener === undefined) {
+      throw new BridgeError(
+        "CLAUDE_CALLBACK_UNAVAILABLE",
+        "The private Claude callback listener is unavailable.",
+        true,
+      );
+    }
+    return this.listener;
+  }
+
+  private rejectNativeInboundReceipt(
+    receiptHandle: string,
+    diagnosticCode: string,
+  ): Promise<void> {
+    const existing = this.rejectedNativeInbound.get(receiptHandle);
+    if (existing !== undefined) return existing.operation;
+    const listener = this.listener;
+    if (listener === undefined || this.closed) {
+      try {
+        listener?.releaseInboundReceipt(receiptHandle);
+      } catch {
+        // A missing/closing listener leaves no safe terminal write path.
+      }
+      return Promise.resolve();
+    }
+    const rejection: ClaudeRejectedInbound = {
+      receiptHandle,
+      listener,
+      released: false,
+      operation: Promise.resolve(),
+    };
+    this.rejectedNativeInbound.set(receiptHandle, rejection);
+    rejection.operation = this.settleRejectedNativeInbound(
+      rejection,
+      diagnosticCode,
+    ).finally(() => {
+      if (this.rejectedNativeInbound.get(receiptHandle) === rejection) {
+        this.rejectedNativeInbound.delete(receiptHandle);
+      }
+    });
+    return rejection.operation;
+  }
+
+  private async settleRejectedNativeInbound(
+    rejection: ClaudeRejectedInbound,
+    diagnosticCode: string,
+  ): Promise<void> {
+    for (
+      let attempt = 0;
+      attempt <= CLAUDE_REJECTION_RECEIPT_RETRY_DELAYS_MS.length;
+      attempt += 1
+    ) {
+      if (
+        this.closed ||
+        rejection.released ||
+        rejection.listener.closed ||
+        this.listener !== rejection.listener
+      ) {
+        this.releaseRejectedNativeInbound(rejection);
+        return;
+      }
+      try {
+        await rejection.listener.acknowledge(
+          rejection.receiptHandle,
+          "expired",
+          { code: diagnosticCode },
+        );
+        return;
+      } catch (error) {
+        if (rejection.released) return;
+        const cleanPrewrite =
+          error instanceof BridgeError && error.recoverable;
+        if (
+          !cleanPrewrite ||
+          attempt === CLAUDE_REJECTION_RECEIPT_RETRY_DELAYS_MS.length
+        ) {
+          // Ambiguous/nonrecoverable writes are never replayed. Explicit
+          // release is idempotent even if the listener already consumed the
+          // terminal capability after a possibly-written attempt.
+          this.releaseRejectedNativeInbound(rejection);
+          return;
+        }
+      }
+      await this.waitForRejectedNativeInboundRetry(
+        rejection,
+        CLAUDE_REJECTION_RECEIPT_RETRY_DELAYS_MS[attempt]!,
+      );
+    }
+  }
+
+  private async waitForRejectedNativeInboundRetry(
+    rejection: ClaudeRejectedInbound,
+    delayMs: number,
+  ): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (rejection.cancelRetry === finish) {
+          delete rejection.cancelRetry;
+        }
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      rejection.cancelRetry = finish;
+      if (this.closed || rejection.released) finish();
+    });
+  }
+
+  private releaseRejectedNativeInbound(
+    rejection: ClaudeRejectedInbound,
+  ): void {
+    if (rejection.released) return;
+    rejection.released = true;
+    rejection.cancelRetry?.();
+    try {
+      rejection.listener.releaseInboundReceipt(rejection.receiptHandle);
+    } catch {
+      // The listener owns a bounded process-lifetime capability. Closing must
+      // remain best-effort even if its explicit release path is unavailable.
     }
   }
 
@@ -791,9 +944,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     invokeCallback(() => callbacks.onDelivery(event));
   }
 
-  private async refreshClaudeDiscovery(): Promise<
-    readonly GatewayAdapterDiscovery[]
-  > {
+  private async refreshClaudeDiscovery(): Promise<GatewayAdapterDiscoverySnapshot> {
     if (this.discoveryInFlight !== undefined) {
       return await this.discoveryInFlight;
     }
@@ -808,9 +959,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  private async refreshClaudeDiscoveryOnce(): Promise<
-    readonly GatewayAdapterDiscovery[]
-  > {
+  private async refreshClaudeDiscoveryOnce(): Promise<GatewayAdapterDiscoverySnapshot> {
     const dispatchEpochAtStart = new Map<string, number>();
     for (const routeHandle of this.selected.keys()) {
       dispatchEpochAtStart.set(
@@ -842,8 +991,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.discovered.set(peer.targetId, row);
       rows.push(row);
     }
-    for (const [routeHandle, alias] of this.nativeInbound) {
-      if (this.discovered.get(routeHandle)?.alias !== alias) {
+    for (const [routeHandle] of this.nativeInbound) {
+      const current = this.discovered.get(routeHandle);
+      if (current !== undefined) {
+        // The stable session UUID owns native reply authority. A rename only
+        // updates its current public coordinate.
+        this.nativeInbound.set(routeHandle, current.alias);
+      } else if (!discovery.truncated) {
         this.nativeInbound.delete(routeHandle);
       }
     }
@@ -877,7 +1031,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         this.emitClaudeRouteObservation(routeHandle, row.state, undefined, true);
       }
     }
-    return rows;
+    return { peers: rows, complete: !discovery.truncated };
   }
 
   private emitClaudeRouteObservation(
@@ -1197,7 +1351,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         messageId: input.messageId,
         text: input.text,
       });
-      return { state: "pending" };
+      return { state: "accepted" };
     } catch (error) {
       if (!this.expectsReply.has(input.messageId)) {
         // The connector synchronously handed off an exact terminal result.
