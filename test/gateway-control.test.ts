@@ -36,7 +36,7 @@ import {
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
 
-const THREAD_ID = "019f9a56-9fca-75b1-80e4-48ccef693abc";
+const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
 const NOW = "2026-08-07T12:34:56.000Z";
 

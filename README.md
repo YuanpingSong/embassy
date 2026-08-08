@@ -255,7 +255,7 @@ The dashboard is deliberately a file rather than a web application. Anything alr
 
 Embassy is the public gateway extracted from an unpublished internal prototype.
 
-- The prototype's one-way MCP task lifecycle is retired and is not part of Embassy v1. Its final code is preserved at the `mcp-lifecycle-final` tag.
+- The prototype's one-way MCP task lifecycle is retired and is not part of Embassy v1.
 - Embassy starts with clean state under `agent-embassy`; it does not migrate prototype state. Register the Codex task and select the Claude destination again.
 - `claude-codex-gateway` remains as a deprecated binary alias for one release. New usage should call `embassy`.
 

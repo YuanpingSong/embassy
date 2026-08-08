@@ -312,7 +312,7 @@ test("discovery accepts live same-protocol records across a Claude Code patch up
   const current = await fixture(t);
   const manual = await addPeer(current, {
     pid: 41_111,
-    name: "claude-computer-monitor",
+    name: "manual-monitor",
     version: "2.1.224",
     nameSource: null,
   });
@@ -336,7 +336,7 @@ test("discovery accepts live same-protocol records across a Claude Code patch up
   assert.deepEqual(result.rejected, {});
   assert.deepEqual(
     result.peers.map((peer) => peer.alias).sort(),
-    ["claude-computer-monitor", "derived-peer", "print-session"],
+    ["derived-peer", "manual-monitor", "print-session"],
   );
   assert.equal(
     result.peers.find((peer) => peer.alias === "print-session")?.status,

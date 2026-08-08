@@ -8,9 +8,10 @@
  * error text. Only `serve` owns the long-lived provider capabilities and
  * private control server; every other command is a bounded client operation.
  */
+import { realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
 import {
   GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
@@ -662,7 +663,10 @@ function isDirectExecution(): boolean {
   const entry = process.argv[1];
   if (entry === undefined) return false;
   try {
-    return import.meta.url === pathToFileURL(path.resolve(entry)).href;
+    // npm exposes package binaries through symlinks. Compare canonical paths
+    // so an installed `embassy` executable is recognized as the entry point,
+    // while importing this module in tests remains side-effect free.
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
   } catch {
     return false;
   }

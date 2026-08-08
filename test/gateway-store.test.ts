@@ -184,7 +184,7 @@ const transientClaudePeer = {
   alias: "native-advisor@this-mac",
   binding: {
     ...claudeBinding,
-    routeHandle: "79fa18fc-1486-4e2f-a549-a8d922573477",
+    routeHandle: "00000000-0000-4000-8000-000000000187",
     ownerLease: "native-claude-call-proof-0001",
   },
 } as const;

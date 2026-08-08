@@ -29,8 +29,8 @@ import {
   validateManagedCodexBinary,
 } from "../scripts/probe-codex-local.js";
 
-const CURRENT_THREAD = "019f9a56-9fca-75b1-80e4-48ccef693abc";
-const OTHER_THREAD = "019f9a1f-93f3-7512-8815-0d140adad0f3";
+const CURRENT_THREAD = "00000000-0000-7000-8000-000000000701";
+const OTHER_THREAD = "00000000-0000-7000-8000-000000000702";
 
 class FakeProtocolSocket extends EventEmitter {
   readonly sent: string[] = [];

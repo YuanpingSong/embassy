@@ -86,7 +86,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     EMBASSY_CLAUDE_BIN: SYNTHETIC_LAUNCHER,
     ANTHROPIC_API_KEY: SYNTHETIC_SECRET,
     CLAUDE_CODE_MESSAGING_SOCKET: "/synthetic/private/provider.sock",
-    CODEX_THREAD_ID: "019f9a56-9fca-75b1-80e4-48ccef693abc",
+    CODEX_THREAD_ID: "00000000-0000-7000-8000-000000000701",
   };
   const config = loadGatewayConfig(env);
   const store = new GatewayStore(config);

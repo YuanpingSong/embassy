@@ -26,7 +26,7 @@ import type {
 } from "../src/gateway/types.js";
 import { BridgeError } from "../src/errors.js";
 
-const THREAD_ID = "019f9a56-9fca-75b1-80e4-48ccef693abc";
+const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
 const SECRET = "SYNTHETIC_BODY_MUST_STAY_MEMORY_ONLY_8e24";
 async function fixture(): Promise<{

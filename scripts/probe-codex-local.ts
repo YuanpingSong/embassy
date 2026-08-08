@@ -300,7 +300,7 @@ export function buildLocalInitializeRequest(): string {
       clientInfo: {
         name: "agent_embassy_local_probe",
         title: "Embassy Local Probe",
-        version: "0.1.0",
+        version: "1.0.0",
       },
     },
   });

@@ -646,7 +646,7 @@ async function runProtocol(socket: WebSocket): Promise<number> {
           clientInfo: {
             name: "agent_embassy_probe",
             title: "Embassy Probe",
-            version: "0.1.0",
+            version: "1.0.0",
           },
         },
       }),

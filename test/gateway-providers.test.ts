@@ -39,7 +39,7 @@ import type {
   PrivateRouteBinding,
 } from "../src/gateway/types.js";
 
-const THREAD_ID = "019f9a56-9fca-75b1-80e4-48ccef693abc";
+const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const PROVIDER_MESSAGE_ID = "11111111-1111-4111-8111-111111111111";
 const GATEWAY_MESSAGE_ID = "gateway-message-001";
 const SAFE_WORKSPACE = "/workspace/synthetic-project";

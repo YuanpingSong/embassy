@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { BridgeError } from "../src/errors.js";
 import {
   GatewayControlTransportError,
@@ -22,7 +25,7 @@ import {
   runGatewayCli,
 } from "../src/gateway/cli.js";
 
-const THREAD_ID = "019f9a56-9fca-75b1-80e4-48ccef693abc";
+const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
 const CLAUDE_SOCKET_PATH = "/tmp/cc-socks/45201.sock";
 const REPLY_ADDRESS = `uds:${CLAUDE_SOCKET_PATH}`;
@@ -33,6 +36,7 @@ const BOTH_IDENTITIES = {
   CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
 } as const;
 const roots = new Set<string>();
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(
@@ -61,6 +65,24 @@ test("version flags are deterministic and never contact the gateway", async () =
     assert.equal(stdout.chunks.join(""), `embassy ${EMBASSY_VERSION}\n`);
     assert.equal(stderr.chunks.join(""), "");
   }
+});
+
+test("an npm-style symlink invokes the installed CLI", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "embassy-bin-"));
+  roots.add(root);
+  const installedBin = path.join(root, "embassy");
+  const compiledCli = fileURLToPath(
+    new URL("../dist/src/gateway/cli.js", import.meta.url),
+  );
+  await symlink(compiledCli, installedBin);
+
+  const result = await execFileAsync(
+    process.execPath,
+    [installedBin, "--version"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.stdout, `embassy ${EMBASSY_VERSION}\n`);
+  assert.equal(result.stderr, "");
 });
 
 function emptySnapshot(): GatewaySnapshot {
