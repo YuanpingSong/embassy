@@ -39,6 +39,7 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "assets/social-preview.png",
     "docs/DESIGN.md",
     "docs/GATEWAY-ARCHITECTURE.md",
+    "README.zh-CN.md",
     "dist/src/gateway/codex-registration-succession.js",
     "dist/src/gateway/delivery-machine.js",
     "dist/src/gateway/live-dashboard.js",

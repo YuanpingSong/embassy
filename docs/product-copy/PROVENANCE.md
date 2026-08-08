@@ -30,6 +30,12 @@ dashboard string catalogs. Nothing in this directory is canon.
   to `embassy serve`, documented the live companion in the architecture canon,
   corrected the static dashboard's refresh and filename claims, and published
   the `unconfirmed` delivery state and the delivery-token commands.
+- **2026-08-08 — public zh-CN localization.** The corrected English README and
+  marketing page were translated through the same authorized, one-shot,
+  tool-free model workflow. Only atomically completed outputs were integrated;
+  heading structure, executable command blocks, protocol tokens, page
+  structure, locale links, and inert-site constraints were then checked
+  against the English canon.
 - **2026-08-08 — drafts retired.** The raw drafts and the writer brief were
   removed from the published tree once their content had been edited into the
   shipped surfaces. They were superseded copies, not documentation, and would

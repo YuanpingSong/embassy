@@ -18,6 +18,7 @@ const PUBLIC_PACKAGE_PATHS = [
   "CONTRIBUTING.md",
   "LICENSE",
   "README.md",
+  "README.zh-CN.md",
   "SECURITY.md",
   "assets/mark-seal.svg",
   "assets/mark.svg",
