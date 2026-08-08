@@ -198,6 +198,76 @@ test("shutdown derives terminal truth from transport evidence", () => {
   );
 });
 
+test("route termination preserves write evidence and exact deadline precedence", () => {
+  const cancellation = {
+    type: "route_terminated",
+    at: 20,
+    unwrittenOutcome: "cancelled",
+    safeErrorCode: "ROUTE_UNREGISTERED",
+  } satisfies DeliveryEvent;
+  assert.equal(
+    terminal(transitionDelivery(started(), cancellation).state, "cancelled")
+      .safeErrorCode,
+    "ROUTE_UNREGISTERED",
+  );
+
+  const confirmed = transitionDelivery(written(), cancellation);
+  assert.equal(
+    terminal(confirmed.state, "unconfirmed").safeErrorCode,
+    "DELIVERY_UNCONFIRMED",
+  );
+
+  const uncertain = step(started(), {
+    type: "dispatch_ambiguous",
+    at: 10,
+    safeErrorCode: "TRANSPORT_OUTCOME_UNCERTAIN",
+  });
+  assert.equal(
+    terminal(
+      transitionDelivery(uncertain, {
+        ...cancellation,
+        unwrittenOutcome: "failed",
+        safeErrorCode: "PEER_NOT_OBSERVED",
+      }).state,
+      "ambiguous",
+    ).safeErrorCode,
+    "TRANSPORT_OUTCOME_UNCERTAIN",
+  );
+
+  for (const state of [started(), written(), uncertain]) {
+    const exact = transitionDelivery(state, {
+      ...cancellation,
+      at: DEADLINE_AT,
+    }).state;
+    assert.equal(exact.phase, "terminal");
+    assert.equal(exact.terminalAt, DEADLINE_AT);
+  }
+  assert.equal(
+    terminal(
+      transitionDelivery(started(), {
+        ...cancellation,
+        at: DEADLINE_AT,
+      }).state,
+      "expired",
+    ).safeErrorCode,
+    "DELIVERY_DEADLINE_EXPIRED",
+  );
+  terminal(
+    transitionDelivery(written(), {
+      ...cancellation,
+      at: DEADLINE_AT,
+    }).state,
+    "unconfirmed",
+  );
+  terminal(
+    transitionDelivery(uncertain, {
+      ...cancellation,
+      at: DEADLINE_AT,
+    }).state,
+    "ambiguous",
+  );
+});
+
 test("a delivery with no evidence expires at its deadline", () => {
   const result = transitionDelivery(started(), {
     type: "deadline_due",
@@ -708,6 +778,12 @@ function eventFixtures(): DeliveryEvent[] {
       type: "external_settlement",
       at: DEADLINE_AT - 1,
       outcome: "failed",
+      safeErrorCode: "ROUTE_REMOVED",
+    },
+    {
+      type: "route_terminated",
+      at: DEADLINE_AT - 1,
+      unwrittenOutcome: "failed",
       safeErrorCode: "ROUTE_REMOVED",
     },
     { type: "shutdown", at: DEADLINE_AT - 1 },

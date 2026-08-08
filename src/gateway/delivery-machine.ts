@@ -123,6 +123,7 @@ export const deliveryEventTypes = [
   "provider_expired",
   "provider_failed",
   "provider_unconfirmed",
+  "route_terminated",
   "external_settlement",
   "stall_due",
   "deadline_due",
@@ -168,6 +169,12 @@ export type DeliveryEvent =
   | {
       type: "provider_unconfirmed";
       observedAt: number;
+      safeErrorCode: string;
+    }
+  | {
+      type: "route_terminated";
+      at: number;
+      unwrittenOutcome: "cancelled" | "failed";
       safeErrorCode: string;
     }
   | {
@@ -572,6 +579,33 @@ export function transitionDelivery(
         },
         "unconfirmed",
         event.observedAt,
+        event.safeErrorCode,
+      );
+
+    case "route_terminated":
+      if (event.at >= state.deadlineAt) {
+        return settleAtDeadline(state, event.at);
+      }
+      if (state.writeEvidence === "transport_written") {
+        return terminalize(
+          state,
+          "unconfirmed",
+          event.at,
+          "DELIVERY_UNCONFIRMED",
+        );
+      }
+      if (state.writeEvidence === "transport_uncertain") {
+        return terminalize(
+          state,
+          "ambiguous",
+          event.at,
+          state.uncertaintyCode ?? "DISPATCH_OUTCOME_AMBIGUOUS",
+        );
+      }
+      return terminalize(
+        state,
+        event.unwrittenOutcome,
+        event.at,
         event.safeErrorCode,
       );
 

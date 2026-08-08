@@ -105,6 +105,17 @@ export type SettleQueuedMessageResult =
       status: "not_queued";
     };
 
+export type AffectedInFlightMessageInspection = Readonly<{
+  messageId: string;
+  deadlineAt: string;
+}>;
+
+export type RouteInFlightSettlementInput = Readonly<{
+  messageId: string;
+  state: SettleMessageInput["state"];
+  safeErrorCode?: string;
+}>;
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -951,6 +962,7 @@ export class GatewayStore {
   async markConnectorOffline(
     identity: PrivateEndpointIdentity,
     safeErrorCode = "CONNECTOR_OFFLINE",
+    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
   ): Promise<TerminalMessageSettlement[]> {
     return await this.mutate(async (state, now) => {
       this.assertAllowedIdentity(identity);
@@ -969,24 +981,32 @@ export class GatewayStore {
           "No connector matches the exact private endpoint generation.",
         );
       }
+      const affectedAliases = new Set<string>();
+      for (const route of state.routes) {
+        if (!sameEndpoint(route.binding, identity)) continue;
+        affectedAliases.add(route.alias);
+      }
+      const settlementPlan = this.validateAffectedInFlightSettlements(
+        state,
+        affectedAliases,
+        inFlightSettlements,
+      );
       connector.health = "offline";
       connector.updatedAt = now.toISOString();
       connector.safeErrorCode = safeErrorCode;
-
-      const affectedAliases = new Set<string>();
       for (const route of state.routes) {
         if (!sameEndpoint(route.binding, identity)) continue;
         route.state = route.enabled ? "stale" : "disabled";
         route.compatibility = "expired";
         route.updatedAt = now.toISOString();
         route.safeErrorCode = safeErrorCode;
-        affectedAliases.add(route.alias);
       }
       return this.terminateAffectedMessages(
         state,
         affectedAliases,
         now,
         safeErrorCode,
+        settlementPlan,
       );
     });
   }
@@ -1120,6 +1140,7 @@ export class GatewayStore {
   async invalidateRoute(
     binding: PrivateRouteBinding,
     safeErrorCode = "ROUTE_STALE",
+    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
   ): Promise<TerminalMessageSettlement[]> {
     return await this.mutate(async (state, now) => {
       if (
@@ -1141,15 +1162,22 @@ export class GatewayStore {
           "No enabled route matches the exact private binding and ownership lease.",
         );
       }
+      const aliases = new Set([route.alias]);
+      const settlementPlan = this.validateAffectedInFlightSettlements(
+        state,
+        aliases,
+        inFlightSettlements,
+      );
       route.state = "stale";
       route.compatibility = "expired";
       route.updatedAt = now.toISOString();
       route.safeErrorCode = safeErrorCode;
       return this.terminateAffectedMessages(
         state,
-        new Set([route.alias]),
+        aliases,
         now,
         safeErrorCode,
+        settlementPlan,
       );
     });
   }
@@ -1284,17 +1312,25 @@ export class GatewayStore {
   async disableRoute(
     alias: string,
     ownerLease: string,
+    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
   ): Promise<TerminalMessageSettlement[]> {
     return await this.mutate(async (state, now) => {
       const route = this.requireOwnedRoute(state, alias, ownerLease);
+      const aliases = new Set([route.alias]);
+      const settlementPlan = this.validateAffectedInFlightSettlements(
+        state,
+        aliases,
+        inFlightSettlements,
+      );
       route.enabled = false;
       route.state = "disabled";
       route.updatedAt = now.toISOString();
       return this.terminateAffectedMessages(
         state,
-        new Set([route.alias]),
+        aliases,
         now,
         "ROUTE_DISABLED",
+        settlementPlan,
       );
     });
   }
@@ -1302,14 +1338,22 @@ export class GatewayStore {
   async unregisterRoute(
     alias: string,
     ownerLease: string,
+    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
   ): Promise<TerminalMessageSettlement[]> {
     return await this.mutate(async (state, now) => {
       const route = this.requireOwnedRoute(state, alias, ownerLease);
+      const aliases = new Set([route.alias]);
+      const settlementPlan = this.validateAffectedInFlightSettlements(
+        state,
+        aliases,
+        inFlightSettlements,
+      );
       const settlements = this.terminateAffectedMessages(
         state,
-        new Set([route.alias]),
+        aliases,
         now,
         "ROUTE_UNREGISTERED",
+        settlementPlan,
       );
       state.routes = state.routes.filter((candidate) => candidate !== route);
       const remainingCodexHosts = new Set(
@@ -1483,6 +1527,37 @@ export class GatewayStore {
     });
   }
 
+  /**
+   * Controller-internal inventory used to prepare an exact, evidence-aware
+   * terminal plan before a route mutation. Message bodies and route handles
+   * never cross this boundary. The route mutation validates the returned set
+   * again so a stale or incomplete plan cannot partially settle the ledger.
+   */
+  async inspectAffectedInFlightMessages(
+    aliases: readonly string[],
+  ): Promise<AffectedInFlightMessageInspection[]> {
+    if (
+      aliases.length < 1 ||
+      aliases.length > this.config.limits.maxRoutes ||
+      aliases.some((alias) => !ALIAS_PATTERN.test(alias))
+    ) {
+      throw new BridgeError(
+        "INVALID_ROUTE_TERMINATION_SCOPE",
+        "Affected in-flight inspection requires a bounded list of valid route aliases.",
+      );
+    }
+    const scope = new Set(aliases);
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      return state.inFlight
+        .filter(
+          (item) =>
+            scope.has(item.sourceAlias) || scope.has(item.targetAlias),
+        )
+        .map(({ messageId, deadlineAt }) => ({ messageId, deadlineAt }));
+    });
+  }
+
   async enqueueMessage(
     input: EnqueueMessageInput,
   ): Promise<EnqueueMessageResult> {
@@ -1604,6 +1679,11 @@ export class GatewayStore {
    * Atomically terminalizes every message whose delivery deadline is due.
    * Returned settlements are emitted only by the mutation that removed the
    * message, so callers can release service-owned capabilities exactly once.
+   *
+   * @deprecated GatewayService must arbitrate deadlines through the delivery
+   * reducer because only the service owns transport-write evidence. Retained
+   * temporarily as a store-level recovery/test primitive; production service
+   * code must not call it.
    */
   async expireDueMessages(now?: Date): Promise<TerminalMessageSettlement[]> {
     const requestedTime = now instanceof Date ? now.getTime() : undefined;
@@ -2476,11 +2556,69 @@ export class GatewayStore {
     };
   }
 
+  private validateAffectedInFlightSettlements(
+    state: GatewayPersistedState,
+    aliases: Set<string>,
+    requested: readonly RouteInFlightSettlementInput[],
+  ): ReadonlyMap<string, RouteInFlightSettlementInput> {
+    if (requested.length > this.config.limits.maxInFlightMessages) {
+      throw new BridgeError(
+        "INVALID_ROUTE_TERMINATION_PLAN",
+        "Route termination requires one normalized terminal settlement per affected in-flight message.",
+      );
+    }
+    const affectedIds = new Set(
+      state.inFlight
+        .filter(
+          (item) =>
+            aliases.has(item.sourceAlias) || aliases.has(item.targetAlias),
+        )
+        .map((item) => item.messageId),
+    );
+    const byMessageId = new Map<string, RouteInFlightSettlementInput>();
+    for (const settlement of requested) {
+      if (
+        !MESSAGE_ID_PATTERN.test(settlement.messageId) ||
+        (settlement.state !== "delivered" &&
+          settlement.state !== "unconfirmed" &&
+          settlement.state !== "failed" &&
+          settlement.state !== "ambiguous" &&
+          settlement.state !== "expired" &&
+          settlement.state !== "cancelled") ||
+        (settlement.safeErrorCode !== undefined &&
+          !SAFE_CODE_PATTERN.test(settlement.safeErrorCode)) ||
+        byMessageId.has(settlement.messageId)
+      ) {
+        throw new BridgeError(
+          "INVALID_ROUTE_TERMINATION_PLAN",
+          "Route termination requires one normalized terminal settlement per affected in-flight message.",
+        );
+      }
+      byMessageId.set(settlement.messageId, settlement);
+    }
+    if (
+      byMessageId.size !== affectedIds.size ||
+      [...affectedIds].some((messageId) => !byMessageId.has(messageId)) ||
+      [...byMessageId].some(([messageId]) => !affectedIds.has(messageId))
+    ) {
+      throw new BridgeError(
+        "ROUTE_TERMINATION_PLAN_MISMATCH",
+        "The exact in-flight route termination plan no longer matches the affected message set.",
+        true,
+      );
+    }
+    return byMessageId;
+  }
+
   private terminateAffectedMessages(
     state: GatewayPersistedState,
     aliases: Set<string>,
     now: Date,
     safeErrorCode: string,
+    inFlightSettlements: ReadonlyMap<
+      string,
+      RouteInFlightSettlementInput
+    >,
   ): TerminalMessageSettlement[] {
     const settlements: TerminalMessageSettlement[] = [];
     const queued = state.queue.filter(
@@ -2496,8 +2634,15 @@ export class GatewayStore {
       state.accounting.queuedBytes -= item.bytes;
       const target = state.routes.find((route) => route.alias === item.targetAlias);
       if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
+      const deadlineReached = Date.parse(item.deadlineAt) <= now.getTime();
       settlements.push(
-        this.finishMetadata(state, item, "abandoned", now, safeErrorCode),
+        this.finishMetadata(
+          state,
+          item,
+          deadlineReached ? "expired" : "abandoned",
+          now,
+          deadlineReached ? "MESSAGE_EXPIRED" : safeErrorCode,
+        ),
       );
     }
     const inFlight = state.inFlight.filter(
@@ -2509,8 +2654,22 @@ export class GatewayStore {
         !aliases.has(item.sourceAlias) && !aliases.has(item.targetAlias),
     );
     for (const item of inFlight) {
+      const requested = inFlightSettlements.get(item.messageId);
+      if (requested === undefined) {
+        throw new BridgeError(
+          "ROUTE_TERMINATION_PLAN_MISMATCH",
+          "The exact in-flight route termination plan no longer matches the affected message set.",
+          true,
+        );
+      }
       settlements.push(
-        this.finishMetadata(state, item, "ambiguous", now, safeErrorCode),
+        this.finishMetadata(
+          state,
+          item,
+          requested.state,
+          now,
+          requested.safeErrorCode,
+        ),
       );
     }
     return settlements;

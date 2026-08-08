@@ -1784,6 +1784,207 @@ test("a stale Claude selection can be unselected by stored alias or bounded UUID
   }
 });
 
+test("unselect settles in-flight delivery from exact write evidence once", async () => {
+  const cases = [
+    {
+      label: "unwritten",
+      delivery: undefined,
+      state: "cancelled",
+      safeErrorCode: "ROUTE_UNREGISTERED",
+    },
+    {
+      label: "confirmed",
+      delivery: { state: "transport_written" } as const,
+      state: "unconfirmed",
+      safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+    },
+    {
+      label: "held",
+      delivery: { state: "held" } as const,
+      state: "unconfirmed",
+      safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+    },
+    {
+      label: "uncertain",
+      delivery: {
+        state: "transport_uncertain",
+        safeErrorCode: "SYNTHETIC_TRANSPORT_OUTCOME_UNCERTAIN",
+      } as const,
+      state: "ambiguous",
+      safeErrorCode: "SYNTHETIC_TRANSPORT_OUTCOME_UNCERTAIN",
+    },
+  ] as const;
+
+  for (const candidate of cases) {
+    const { root, stateDir } = await fixture();
+    const claude = new FakeProvider("claude");
+    claude.discoveries = [
+      {
+        alias: "claude-one@this-mac",
+        routeHandle: "claude_target_1",
+        kind: "interactive",
+        state: "idle",
+        compatibility: "compatible",
+      },
+    ];
+    claude.dispatchResults.push({ state: "pending" });
+    const codex = new FakeProvider("codex");
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: stateDir,
+        EMBASSY_HOSTS: "this-mac",
+      }),
+      adapters: [claude, codex],
+    });
+    try {
+      await service.start();
+      await selectAndRegister(service.handlers());
+      const accepted = await service.handlers().sendToClaude({
+        ...toClaude(`route teardown ${candidate.label}`),
+        expectsReply: false,
+      });
+      assert.equal(accepted.accepted, true, candidate.label);
+      if (!accepted.accepted) continue;
+      await waitFor(() => claude.dispatches.length === 1);
+      if (candidate.delivery !== undefined) {
+        claude.emitDelivery({
+          messageId: claude.dispatches[0]!.messageId,
+          ...candidate.delivery,
+        });
+      }
+      assert.deepEqual(
+        await service.handlers().unselectClaude({
+          alias: "claude-one@this-mac",
+        }),
+        { accepted: true, code: "ok" },
+        candidate.label,
+      );
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const status = await service.handlers().deliveryStatus({
+          token: accepted.deliveryToken,
+        });
+        assert.equal(status.found, true, candidate.label);
+        if (status.found) {
+          assert.equal(status.state, candidate.state, candidate.label);
+          assert.equal(
+            status.safeErrorCode,
+            candidate.safeErrorCode,
+            candidate.label,
+          );
+        }
+      }
+      const snapshot = await service.handlers().listSnapshot();
+      assert.equal(snapshot.accounting[candidate.state], 1, candidate.label);
+      assert.equal(
+        snapshot.messages.filter(
+          ({ state }) => state === candidate.state,
+        ).length,
+        1,
+        candidate.label,
+      );
+    } finally {
+      await service.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("discovery invalidation fails only unwritten in-flight delivery", async () => {
+  const cases = [
+    {
+      label: "unwritten",
+      delivery: undefined,
+      state: "failed",
+      safeErrorCode: "PEER_NOT_OBSERVED",
+    },
+    {
+      label: "confirmed",
+      delivery: { state: "transport_written" } as const,
+      state: "unconfirmed",
+      safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+    },
+    {
+      label: "uncertain",
+      delivery: {
+        state: "transport_uncertain",
+        safeErrorCode: "SYNTHETIC_TRANSPORT_OUTCOME_UNCERTAIN",
+      } as const,
+      state: "ambiguous",
+      safeErrorCode: "SYNTHETIC_TRANSPORT_OUTCOME_UNCERTAIN",
+    },
+  ] as const;
+
+  for (const candidate of cases) {
+    const { root, stateDir } = await fixture();
+    const claude = new FakeProvider("claude");
+    claude.discoveries = [
+      {
+        alias: "claude-one@this-mac",
+        routeHandle: "claude_target_1",
+        kind: "interactive",
+        state: "idle",
+        compatibility: "compatible",
+      },
+    ];
+    claude.dispatchResults.push({ state: "pending" });
+    const codex = new FakeProvider("codex");
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: stateDir,
+        EMBASSY_HOSTS: "this-mac",
+      }),
+      adapters: [claude, codex],
+    });
+    try {
+      await service.start();
+      await selectAndRegister(service.handlers());
+      const accepted = await service.handlers().sendToClaude({
+        ...toClaude(`route invalidation ${candidate.label}`),
+        expectsReply: false,
+      });
+      assert.equal(accepted.accepted, true, candidate.label);
+      if (!accepted.accepted) continue;
+      await waitFor(() => claude.dispatches.length === 1);
+      if (candidate.delivery !== undefined) {
+        claude.emitDelivery({
+          messageId: claude.dispatches[0]!.messageId,
+          ...candidate.delivery,
+        });
+      }
+      claude.discoveries = [];
+      assert.equal(
+        (await service.handlers().refreshDashboard()).accepted,
+        true,
+        candidate.label,
+      );
+      const status = await service.handlers().deliveryStatus({
+        token: accepted.deliveryToken,
+      });
+      assert.equal(status.found, true, candidate.label);
+      if (status.found) {
+        assert.equal(status.state, candidate.state, candidate.label);
+        assert.equal(
+          status.safeErrorCode,
+          candidate.safeErrorCode,
+          candidate.label,
+        );
+      }
+      const snapshot = await service.handlers().listSnapshot();
+      assert.equal(snapshot.accounting[candidate.state], 1, candidate.label);
+      assert.equal(
+        snapshot.routes.find(
+          ({ alias }) => alias === "claude-one@this-mac",
+        )?.state,
+        "stale",
+        candidate.label,
+      );
+    } finally {
+      await service.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("restoring a durable Claude UUID never replays pre-restart queue or conversation state", async (t) => {
   const { root, stateDir } = await fixture();
   const config = loadGatewayConfig({
@@ -2382,6 +2583,164 @@ test("a synchronous terminal callback wins over explicit provider acceptance", a
     ),
     false,
   );
+});
+
+test("dispatch drains predeadline write evidence before exact-cutoff result or throw", async () => {
+  const cases = [
+    {
+      label: "terminal return after confirmed write",
+      delivery: { state: "transport_written" } as const,
+      throws: false,
+      expectedState: "unconfirmed",
+      expectedCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+    },
+    {
+      label: "throw after uncertain write",
+      delivery: {
+        state: "transport_uncertain",
+        safeErrorCode: "SYNTHETIC_TRANSPORT_OUTCOME_UNCERTAIN",
+      } as const,
+      throws: true,
+      expectedState: "ambiguous",
+      expectedCode: "SYNTHETIC_TRANSPORT_OUTCOME_UNCERTAIN",
+    },
+  ] as const;
+
+  for (const candidate of cases) {
+    const { root, stateDir } = await fixture();
+    const clock = new ManualGatewayClock();
+    const claude = new FakeProvider("claude");
+    claude.discoveries = [
+      {
+        alias: "claude-one@this-mac",
+        routeHandle: "claude_target_1",
+        kind: "interactive",
+        state: "idle",
+        compatibility: "compatible",
+      },
+    ];
+    claude.dispatch = async (input) => {
+      claude.dispatches.push({ ...input, binding: { ...input.binding } });
+      clock.nowMs += 999;
+      claude.callbacks?.onDelivery({
+        messageId: input.messageId,
+        ...candidate.delivery,
+      });
+      clock.nowMs += 1;
+      if (candidate.throws) {
+        throw new Error("synthetic dispatch throw after write evidence");
+      }
+      return {
+        state: "failed",
+        safeErrorCode: "SYNTHETIC_TERMINAL_RETURN_AT_CUTOFF",
+      };
+    };
+    const codex = new FakeProvider("codex");
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: stateDir,
+        EMBASSY_HOSTS: "this-mac",
+        EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+      }),
+      adapters: [claude, codex],
+      now: clock.now,
+      timers: clock,
+    });
+    try {
+      await service.start();
+      await selectAndRegister(service.handlers());
+      const accepted = await service.handlers().sendToClaude({
+        ...toClaude(candidate.label),
+        expectsReply: false,
+      });
+      assert.equal(accepted.accepted, true, candidate.label);
+      if (!accepted.accepted) continue;
+      await waitFor(() => claude.dispatches.length === 1);
+      const status = await service.handlers().deliveryStatus({
+        token: accepted.deliveryToken,
+      });
+      assert.equal(status.found, true, candidate.label);
+      if (status.found) {
+        assert.equal(status.state, candidate.expectedState, candidate.label);
+        assert.equal(status.safeErrorCode, candidate.expectedCode, candidate.label);
+      }
+      const snapshot = await service.handlers().listSnapshot();
+      assert.equal(
+        snapshot.accounting[candidate.expectedState],
+        1,
+        candidate.label,
+      );
+      assert.equal(snapshot.accounting.failed, 0, candidate.label);
+      assert.equal(snapshot.accounting.expired, 0, candidate.label);
+    } finally {
+      await service.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("write evidence overrides a contradictory deferred return without replay", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  claude.synchronousDispatchDelivery = {
+    messageId: "msg_placeholder",
+    state: "transport_written",
+  };
+  claude.dispatchResults.push({
+    state: "deferred",
+    safeErrorCode: "SYNTHETIC_CLEAN_PREWRITE_CONTRADICTION",
+  });
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, new FakeProvider("codex")],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const accepted = await service.handlers().sendToClaude({
+    ...toClaude("contradictory deferred result must not replay"),
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  await clock.advanceBy(500);
+  assert.equal(claude.dispatches.length, 1);
+  const pending = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(pending.found, true);
+  if (pending.found) assert.equal(pending.terminal, false);
+
+  await clock.advanceBy(500);
+  const terminal = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(terminal.found, true);
+  if (terminal.found) {
+    assert.equal(terminal.state, "unconfirmed");
+    assert.equal(terminal.safeErrorCode, "CLAUDE_RECEIPT_UNCONFIRMED");
+  }
+  assert.equal(claude.dispatches.length, 1);
 });
 
 test("terminal callback arrival time arbitrates the exact delivery deadline", async (t) => {
@@ -3766,6 +4125,84 @@ test("a failed terminal ledger write retries before the machine absorbs it", asy
     "reply correlation survives the ledger retry",
   );
   assert.equal((await service.handlers().listSnapshot()).accounting.queuedBytes, 0);
+});
+
+test("route teardown preserves a reply retained by a failed terminal ledger write", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const originalSettleMessage = service.store.settleMessage.bind(service.store);
+  let failFirstTerminal = true;
+  service.store.settleMessage = async (input) => {
+    if (failFirstTerminal) {
+      failFirstTerminal = false;
+      throw new BridgeError(
+        "SYNTHETIC_LEDGER_WRITE_FAILED",
+        "Synthetic atomic write failure before route teardown.",
+        true,
+      );
+    }
+    return await originalSettleMessage(input);
+  };
+
+  const accepted = await service.handlers().sendToClaude(
+    toClaude("route teardown resolves retained reply"),
+  );
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  claude.emitDelivery({
+    messageId: claude.dispatches[0]!.messageId,
+    state: "released",
+    replyText: "retained reply survives atomic route teardown settlement",
+  });
+  await waitFor(() => failFirstTerminal === false);
+
+  assert.deepEqual(
+    await service.handlers().unselectClaude({
+      alias: "claude-one@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  const status = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found, true);
+  if (status.found) assert.equal(status.state, "delivered");
+  await waitFor(() => codex.dispatches.length === 1);
+  assert.equal(
+    codex.dispatches[0]?.text,
+    "retained reply survives atomic route teardown settlement",
+  );
+  await waitForAsync(async () =>
+    (await service.handlers().listSnapshot()).accounting.delivered === 2,
+  );
+  assert.equal(
+    (await service.handlers().listSnapshot()).accounting.delivered,
+    2,
+  );
 });
 
 test("a Claude rename migrates an enqueue that is already scheduled to dispatch", async (t) => {

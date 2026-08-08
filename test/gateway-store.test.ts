@@ -1021,6 +1021,109 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
   );
 });
 
+test("route invalidation atomically applies an exact in-flight terminal plan once", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  const towardClaude = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "confirmed route teardown",
+    dedupeKey: "route-plan-confirmed",
+  });
+  const fromClaude = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "uncertain route teardown",
+    dedupeKey: "route-plan-uncertain",
+  });
+  assert.ok(towardClaude.messageId);
+  assert.ok(fromClaude.messageId);
+  await store.dequeueMessage("advisor@this-mac");
+  await store.dequeueMessage("reviewer@this-mac");
+  const queuedDue = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "queued deadline wins route teardown",
+    dedupeKey: "route-plan-queued-due",
+    deadlineAt: new Date(testClock.now().getTime() + 100).toISOString(),
+  });
+  assert.ok(queuedDue.messageId);
+
+  assert.deepEqual(
+    (await store.inspectAffectedInFlightMessages(["advisor@this-mac"]))
+      .map(({ messageId }) => messageId)
+      .sort(),
+    [towardClaude.messageId, fromClaude.messageId].sort(),
+  );
+  await assert.rejects(
+    store.invalidateRoute(claudeBinding, "PEER_NOT_OBSERVED"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "ROUTE_TERMINATION_PLAN_MISMATCH",
+  );
+  assert.equal(
+    (await store.inspectPrivateRoute("advisor@this-mac"))?.compatibility,
+    "compatible",
+  );
+
+  testClock.advance(100);
+  const settlements = await store.invalidateRoute(
+    claudeBinding,
+    "PEER_NOT_OBSERVED",
+    [
+      {
+        messageId: towardClaude.messageId,
+        state: "unconfirmed",
+        safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+      },
+      {
+        messageId: fromClaude.messageId,
+        state: "ambiguous",
+        safeErrorCode: "TRANSPORT_OUTCOME_UNCERTAIN",
+      },
+    ],
+  );
+  assert.deepEqual(settlements, [
+    {
+      messageId: queuedDue.messageId,
+      state: "expired",
+      safeErrorCode: "MESSAGE_EXPIRED",
+    },
+    {
+      messageId: towardClaude.messageId,
+      state: "unconfirmed",
+      safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+    },
+    {
+      messageId: fromClaude.messageId,
+      state: "ambiguous",
+      safeErrorCode: "TRANSPORT_OUTCOME_UNCERTAIN",
+    },
+  ]);
+  assert.deepEqual(
+    await store.inspectAffectedInFlightMessages(["advisor@this-mac"]),
+    [],
+  );
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.accounting.unconfirmed, 1);
+  assert.equal(snapshot.accounting.ambiguous, 1);
+  assert.equal(snapshot.accounting.expired, 1);
+  assert.equal(snapshot.accounting.failed, 0);
+  assert.deepEqual(
+    await store.invalidateRoute(
+      claudeBinding,
+      "PEER_NOT_OBSERVED",
+      [],
+    ),
+    [],
+  );
+  const afterDuplicate = await store.publicSnapshot();
+  assert.equal(afterDuplicate.accounting.unconfirmed, 1);
+  assert.equal(afterDuplicate.accounting.ambiguous, 1);
+  await store.close();
+});
+
 test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();

@@ -32,7 +32,10 @@ import {
   type DeliveryTerminalOutcome,
   type NativeReceiptNotification,
 } from "./delivery-machine.js";
-import { GatewayStore } from "./store.js";
+import {
+  GatewayStore,
+  type RouteInFlightSettlementInput,
+} from "./store.js";
 import {
   arePublicAvailablePeerSnapshots,
   projectGatewayPublicSnapshot,
@@ -1247,9 +1250,15 @@ export class GatewayService {
     let cleanupFailed = false;
     try {
       await this.drainPreDeadlineDeliveryCallbacksLocked();
+      const inFlightSettlements =
+        await this.planRouteInFlightSettlementsLocked(params.alias, {
+          unwrittenOutcome: "failed",
+          safeErrorCode: "CODEX_REGISTRATION_ROLLBACK",
+        });
       const settlements = await this.store.unregisterRoute(
         params.alias,
         binding.ownerLease,
+        inFlightSettlements,
       );
       for (const settlement of settlements) {
         await this.applyTerminalSettlementLocked(settlement);
@@ -1286,7 +1295,16 @@ export class GatewayService {
     const host = params.alias.slice(params.alias.lastIndexOf("@") + 1);
     const lease = stableLease("codex", `${host}\0${params.threadId}`);
     await this.drainPreDeadlineDeliveryCallbacksLocked();
-    const settlements = await this.store.unregisterRoute(params.alias, lease);
+    const inFlightSettlements =
+      await this.planRouteInFlightSettlementsLocked(params.alias, {
+        unwrittenOutcome: "cancelled",
+        safeErrorCode: "ROUTE_UNREGISTERED",
+      });
+    const settlements = await this.store.unregisterRoute(
+      params.alias,
+      lease,
+      inFlightSettlements,
+    );
     for (const settlement of settlements) {
       await this.applyTerminalSettlementLocked(settlement);
     }
@@ -1518,9 +1536,15 @@ export class GatewayService {
         inspection.compatibility === "compatible"
       ) {
         await this.drainPreDeadlineDeliveryCallbacksLocked();
+        const inFlightSettlements =
+          await this.planRouteInFlightSettlementsLocked(alias, {
+            unwrittenOutcome: "failed",
+            safeErrorCode: "PEER_NOT_OBSERVED",
+          });
         const settlements = await this.store.invalidateRoute(
           binding,
           "PEER_NOT_OBSERVED",
+          inFlightSettlements,
         );
         for (const settlement of settlements) {
           await this.applyTerminalSettlementLocked(settlement);
@@ -1780,9 +1804,15 @@ export class GatewayService {
     if (selected === undefined) throw new BridgeError("PEER_NOT_FOUND", "No selected Claude session matches that selector.");
     const { alias, binding } = selected;
     await this.drainPreDeadlineDeliveryCallbacksLocked();
+    const inFlightSettlements =
+      await this.planRouteInFlightSettlementsLocked(alias, {
+        unwrittenOutcome: "cancelled",
+        safeErrorCode: "ROUTE_UNREGISTERED",
+      });
     const settlements = await this.store.unregisterRoute(
       alias,
       binding.ownerLease,
+      inFlightSettlements,
     );
     for (const settlement of settlements) {
       await this.applyTerminalSettlementLocked(settlement);
@@ -2175,6 +2205,61 @@ export class GatewayService {
       : (normalized ?? "DELIVERY_UNCONFIRMED");
   }
 
+  private async planRouteInFlightSettlementsLocked(
+    alias: string,
+    input: {
+      unwrittenOutcome: "cancelled" | "failed";
+      safeErrorCode: string;
+    },
+  ): Promise<RouteInFlightSettlementInput[]> {
+    const affected = await this.store.inspectAffectedInFlightMessages([alias]);
+    const observedAt = this.now().getTime();
+    return affected.map(({ messageId }) => {
+      const tracker = this.deliveryTrackers.get(messageId);
+      if (tracker === undefined) {
+        return {
+          messageId,
+          // In-flight without its reducer means write evidence is unknowable;
+          // never downgrade that corruption to a proven clean cancellation.
+          state: "ambiguous",
+          safeErrorCode: "DELIVERY_TRACKER_MISSING",
+        };
+      }
+      const event =
+        tracker.pendingTerminalEvent ??
+        ({
+          type: "route_terminated",
+          at: observedAt,
+          unwrittenOutcome: input.unwrittenOutcome,
+          safeErrorCode: input.safeErrorCode,
+        } satisfies DeliveryEvent);
+      const transition = transitionDelivery(tracker.machine, event);
+      const settlement = transition.effects.find(
+        (
+          effect,
+        ): effect is Extract<DeliveryEffect, { type: "settle_delivery" }> =>
+          effect.type === "settle_delivery",
+      );
+      if (settlement === undefined) {
+        throw new BridgeError(
+          "ROUTE_TERMINATION_STATE_MISMATCH",
+          "An affected in-flight delivery could not produce an exact terminal route settlement.",
+          true,
+        );
+      }
+      const safeErrorCode = this.normalizeDeliverySafeCode(
+        tracker,
+        settlement.outcome,
+        settlement.safeErrorCode,
+      );
+      return {
+        messageId,
+        state: settlement.outcome,
+        ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
+      };
+    });
+  }
+
   private async settleDeliveryStoreLocked(
     tracker: MessageDeliveryTracker,
     outcome: DeliveryTerminalOutcome,
@@ -2338,8 +2423,8 @@ export class GatewayService {
     // precedence over later lifecycle events. If the store has already
     // supplied a different authoritative settlement, mirror that proof.
     const hasSuppliedSettlement = suppliedSettlement !== undefined;
-    const retryingPending =
-      tracker.pendingTerminalEvent !== undefined && !hasSuppliedSettlement;
+    const resolvingPendingTerminal =
+      tracker.pendingTerminalEvent !== undefined;
     const transitionEvent =
       tracker.pendingTerminalEvent !== undefined && !hasSuppliedSettlement
         ? tracker.pendingTerminalEvent
@@ -2419,10 +2504,15 @@ export class GatewayService {
       transition.effects,
       authoritativeSettlement,
     );
-    if (retryingPending) {
+    if (resolvingPendingTerminal) {
       const replyText = tracker.pendingTerminalReplyText;
       delete tracker.pendingTerminalReplyText;
-      await this.finishDeliveredReplyLocked(context, replyText);
+      if (
+        isTerminalDeliveryMachine(tracker.machine) &&
+        tracker.machine.outcome === "delivered"
+      ) {
+        await this.finishDeliveredReplyLocked(context, replyText);
+      }
       return undefined;
     }
     if (hasSuppliedSettlement) {
@@ -2444,6 +2534,19 @@ export class GatewayService {
     settlement: TerminalMessageSettlement,
   ): Promise<MessageContext | undefined> {
     const state = this.settlementDeliveryState(settlement);
+    if (!this.deliveryTrackers.has(settlement.messageId)) {
+      const context = this.takeMessageContextLocked(
+        settlement.messageId,
+        state,
+      );
+      for (const [token, messageId] of this.deliveryTokens) {
+        if (messageId === settlement.messageId) this.deliveryTokens.delete(token);
+      }
+      this.addRuntimeAlert("DELIVERY_TRACKER_MISSING", "error", {
+        ...(context === undefined ? {} : { alias: context.targetAlias }),
+      });
+      return context;
+    }
     return await this.advanceDeliveryLocked(
       settlement.messageId,
       {
@@ -2985,6 +3088,78 @@ export class GatewayService {
     };
   }
 
+  /**
+   * A provider reply observed before route teardown remains valid evidence
+   * even when the same atomic mutation removes its selected Claude route.
+   * Re-enter that already-observed reply through the existing transient
+   * native-ingress boundary; this preserves the exact connector generation
+   * without recreating route authority or accepting a new unsolicited send.
+   */
+  private async enqueueObservedClaudeReplyAfterRouteTeardownLocked(
+    conversation: Conversation,
+    sourceBinding: PrivateRouteBinding,
+    text: string,
+    requestedHopCount: number,
+  ): Promise<void> {
+    const target = await this.store.resolveRoute(conversation.sourceAlias);
+    if (
+      sourceBinding.provider !== "claude" ||
+      target.provider !== "codex" ||
+      sourceBinding.hostId !== target.hostId
+    ) {
+      throw new BridgeError(
+        "RECOVERED_REPLY_ROUTE_MISMATCH",
+        "The retained provider reply no longer matches an exact same-host Codex target.",
+      );
+    }
+    const sequence = conversation.nextSequence;
+    const enqueuedAt = this.now().getTime();
+    const deadlineAt = new Date(
+      enqueuedAt + this.config.limits.messageDeadlineMs,
+    ).toISOString();
+    const queued = await this.store.enqueueNativeIngress({
+      source: {
+        alias: conversation.targetAlias,
+        binding: sourceBinding,
+      },
+      targetAlias: conversation.sourceAlias,
+      body: text,
+      dedupeKey: `${conversation.id}:${sequence}`,
+      hopCount: requestedHopCount,
+      deadlineAt,
+    });
+    if (!queued.accepted || queued.messageId === undefined) {
+      throw new BridgeError(
+        "MESSAGE_REJECTED",
+        "The retained provider reply was not accepted.",
+      );
+    }
+    conversation.nextSequence += 1;
+    conversation.lastHopCount = requestedHopCount;
+    conversation.lastActivityAt = this.now().toISOString();
+    this.messageContexts.set(queued.messageId, {
+      conversationId: conversation.id,
+      isReply: true,
+      expectsReply: false,
+      hopCount: requestedHopCount,
+      sequence,
+      targetBindingKey: bindingKey(target),
+      authorization: "selected_route",
+      targetAlias: conversation.sourceAlias,
+      deadlineAt,
+    });
+    this.armDeliveryTracker({
+      messageId: queued.messageId,
+      conversationId: conversation.id,
+      targetAlias: conversation.sourceAlias,
+      enqueuedAt,
+      deadlineAt,
+    });
+    await this.changed();
+    await this.setNativeCodexStatus(conversation.sourceAlias, "waiting");
+    this.scheduleDispatch(conversation.sourceAlias);
+  }
+
   private pruneTransient(): void {
     const now = this.now().getTime();
     // Message deadlines are owned by the service lifecycle sweep. Never drop
@@ -3152,8 +3327,9 @@ export class GatewayService {
       this.scheduleLifecycleWakeLocked();
       return;
     }
+    let result: GatewayAdapterDispatchResult;
     try {
-      const result = await this.adapter(binding.provider, binding.hostId).dispatch({
+      result = await this.adapter(binding.provider, binding.hostId).dispatch({
         binding,
         authorization: context.authorization,
         messageId: item.messageId,
@@ -3161,76 +3337,106 @@ export class GatewayService {
         expectsReply: context?.expectsReply ?? false,
         deadlineAt: item.deadlineAt,
       });
-      if (result.state === "deferred") {
-        const currentTargetAlias =
-          this.bindingAliases.get(bindingKey(binding)) ?? targetAlias;
-        const now = this.now().getTime();
-        await this.advanceDeliveryLocked(item.messageId, {
-          type: "dispatch_clean_prewrite_failed",
-          at: now,
-          retryAt: now + 500,
-          safeErrorCode: safeCode(
-            result.safeErrorCode,
-            "PROVIDER_DISPATCH_DEFERRED",
-          ),
-        });
-        if (isTerminalDeliveryMachine(tracker.machine)) {
-          await this.changed();
-          return;
-        }
-        const requeued = await this.store.requeueInFlightMessage(
-          item.messageId,
-          item.body,
-        );
-        this.activeDispatchByTarget.delete(currentTargetAlias);
-        if (requeued.status === "requeued") {
-          if (context.authorization === "selected_route") {
-            this.routeStates.set(currentTargetAlias, "idle");
-            await this.store.observeRoute({
-              binding,
-              state: "idle",
-              compatibility: "compatible",
-            });
-            await this.setNativeCodexStatus(currentTargetAlias, "waiting");
-          }
-        } else if (requeued.status === "settled") {
-          await this.applyTerminalSettlementLocked(requeued.settlement);
-        }
+    } catch {
+      await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
+      if (await this.processLifecycleLocked()) {
         await this.changed();
+      }
+      if (!this.messageContexts.has(item.messageId)) {
+        this.scheduleDispatch(
+          this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
+        );
         return;
       }
-      if (result.state === "pending" || result.state === "accepted") {
-        await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
-        if (await this.processLifecycleLocked()) {
-          await this.changed();
-        }
-        if (!this.messageContexts.has(item.messageId)) {
-          this.scheduleDispatch(
-            this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
-          );
-          return;
-        }
-        if (
-          result.state === "accepted" &&
-          (await this.acceptProviderDeliveryLocked(item.messageId))
-        ) {
-          await this.changed();
-        } else if (result.state === "pending") {
-          await this.advanceDeliveryLocked(item.messageId, {
-            type: "await_terminal",
-            at: this.now().getTime(),
-          });
-        }
-      } else {
-        await this.finishDelivery({ messageId: item.messageId, state: result.state, ...(result.safeErrorCode === undefined ? {} : { safeErrorCode: result.safeErrorCode }), ...(result.replyText === undefined ? {} : { replyText: result.replyText }) });
-      }
-    } catch {
       await this.advanceDeliveryLocked(item.messageId, {
         type: "dispatch_ambiguous",
         at: this.now().getTime(),
         safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
       });
       await this.changed();
+      this.scheduleDispatch(
+        this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
+      );
+      return;
+    }
+    await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
+    if (await this.processLifecycleLocked()) {
+      await this.changed();
+    }
+    if (!this.messageContexts.has(item.messageId)) {
+      this.scheduleDispatch(
+        this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
+      );
+      return;
+    }
+    if (result.state === "deferred") {
+      const currentTargetAlias =
+        this.bindingAliases.get(bindingKey(binding)) ?? targetAlias;
+      const now = this.now().getTime();
+      await this.advanceDeliveryLocked(item.messageId, {
+        type: "dispatch_clean_prewrite_failed",
+        at: now,
+        retryAt: now + 500,
+        safeErrorCode: safeCode(
+          result.safeErrorCode,
+          "PROVIDER_DISPATCH_DEFERRED",
+        ),
+      });
+      const postDeferred = this.deliveryTrackers.get(item.messageId)?.machine;
+      if (
+        postDeferred === undefined ||
+        isTerminalDeliveryMachine(postDeferred)
+      ) {
+        await this.changed();
+        return;
+      }
+      // A provider's clean-prewrite return cannot authorize replay after a
+      // callback from the same dispatch has already established write
+      // evidence. Only the reducer's explicit queued retry phase may return
+      // the body to the store queue.
+      if (postDeferred.phase !== "queued") {
+        await this.advanceDeliveryLocked(item.messageId, {
+          type: "await_terminal",
+          at: this.now().getTime(),
+        });
+        await this.changed();
+        return;
+      }
+      const requeued = await this.store.requeueInFlightMessage(
+        item.messageId,
+        item.body,
+      );
+      this.activeDispatchByTarget.delete(currentTargetAlias);
+      if (requeued.status === "requeued") {
+        if (context.authorization === "selected_route") {
+          this.routeStates.set(currentTargetAlias, "idle");
+          await this.store.observeRoute({
+            binding,
+            state: "idle",
+            compatibility: "compatible",
+          });
+          await this.setNativeCodexStatus(currentTargetAlias, "waiting");
+        }
+      } else if (requeued.status === "settled") {
+        await this.applyTerminalSettlementLocked(requeued.settlement);
+      }
+      await this.changed();
+      return;
+    }
+    if (result.state === "pending" || result.state === "accepted") {
+      if (
+        result.state === "accepted" &&
+        (await this.acceptProviderDeliveryLocked(item.messageId))
+      ) {
+        await this.changed();
+      } else if (result.state === "pending") {
+        await this.advanceDeliveryLocked(item.messageId, {
+          type: "await_terminal",
+          at: this.now().getTime(),
+        });
+      }
+    } else {
+      await this.finishDelivery({ messageId: item.messageId, state: result.state, ...(result.safeErrorCode === undefined ? {} : { safeErrorCode: result.safeErrorCode }), ...(result.replyText === undefined ? {} : { replyText: result.replyText }) });
     }
     this.scheduleDispatch(
       this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
@@ -3478,16 +3684,35 @@ export class GatewayService {
             false,
           );
         } else {
-          await this.enqueue(
+          const sourceBinding = this.routeBindings.get(
             conversation.targetAlias,
-            conversation.sourceAlias,
-            replyText,
-            false,
-            true,
-            conversation.id,
-            context.hopCount + 1,
-            false,
           );
+          const sourceStillRoutable = await this.store
+            .resolveRoute(conversation.targetAlias)
+            .then(() => true)
+            .catch(() => false);
+          if (
+            !sourceStillRoutable &&
+            sourceBinding?.provider === "claude"
+          ) {
+            await this.enqueueObservedClaudeReplyAfterRouteTeardownLocked(
+              conversation,
+              sourceBinding,
+              replyText,
+              context.hopCount + 1,
+            );
+          } else {
+            await this.enqueue(
+              conversation.targetAlias,
+              conversation.sourceAlias,
+              replyText,
+              false,
+              true,
+              conversation.id,
+              context.hopCount + 1,
+              false,
+            );
+          }
         }
       } catch {
         this.dashboardHealthy = false;
