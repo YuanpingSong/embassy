@@ -89,7 +89,8 @@ truth, real dashboard proof, quickstart/security.
 1. **Exchange board** — Claude selection ↔ queue/pouch ↔ Codex registration;
    broker readiness and the next action inline.
 2. **Needs attention** — ordered, actionable, hidden when empty.
-3. **In transit** — queue count, oldest wait, stall state *(queue-age and stall data land with receipt Phase B; target until then)*.
+3. **In transit** — queue count, oldest wait, and explicit stall state from the
+   bounded public snapshot.
 4. **Activity ledger** — receipt lifecycle; details on demand.
 5. **Sessions & routes** — secondary.
 6. **Compatibility & diagnostics** — collapsed by default.
@@ -103,9 +104,11 @@ and correct ambiguity/restart/version semantics.
 
 ## Localization
 
-Target state (not yet implemented): all user-facing strings come from a typed catalog; surfaces render per-locale
-(`en`, `zh-CN`) from one source. Commands, JSON keys, enums, aliases, and
-safe codes stay English. English is canonical for security meaning.
+Runtime dashboards, CLI guidance, and native gateway notices render from
+closed, parity-tested `en` / `zh-CN` catalogs. Commands, JSON keys, enums,
+aliases, protocol tags, and safe codes stay English. English remains canonical
+for security meaning. The marketing site and README ship parallel locale
+artifacts rather than changing the runtime protocol.
 
 ## Review gate
 

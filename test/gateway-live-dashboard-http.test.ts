@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import test from "node:test";
 
 import type { DashboardViewModel } from "../src/gateway/dashboard-model.js";
+import type { DashboardLocale } from "../src/gateway/locale.js";
 import {
   createLiveDashboardRequestHandler,
   type LiveDashboardRequestHandler,
@@ -119,6 +120,7 @@ class SyntheticHub implements LiveDashboardStreamHub {
 
 function createHandler(
   hub: LiveDashboardStreamHub = new SyntheticHub(),
+  lang: DashboardLocale = "en",
 ): LiveDashboardRequestHandler {
   return createLiveDashboardRequestHandler({
     instancePath: INSTANCE_PATH,
@@ -127,6 +129,7 @@ function createHandler(
     capability: CAPABILITY,
     sessionSecret: SESSION_SECRET,
     cookieName: COOKIE_NAME,
+    lang,
     assets: ASSETS,
     hub,
   });
@@ -232,6 +235,150 @@ test("serves only the three inert same-origin assets with security headers", asy
       rawHeaders: navigationHeaders(),
     });
     assert.equal(response.statusCode, 404);
+    assertSecurityHeaders(response);
+  }
+});
+
+test("localizes every human HTTP fallback without changing status or security headers", async () => {
+  class FailingHub extends SyntheticHub {
+    override async refresh(): Promise<LiveDashboardStreamEvent | undefined> {
+      throw new Error("synthetic refresh failure");
+    }
+  }
+
+  const fixtures: ReadonlyArray<
+    readonly [number, string, Promise<SyntheticResponse>]
+  > = [
+    [
+      400,
+      "请求无效。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "GET",
+        target: `${INSTANCE_PATH}/bootstrap`,
+        rawHeaders: ["Host", HOST, "Host", HOST],
+      }),
+    ],
+    [
+      403,
+      "禁止访问。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "POST",
+        target: `${INSTANCE_PATH}/snapshot`,
+        rawHeaders: ["Host", HOST, "Origin", ORIGIN],
+      }),
+    ],
+    [
+      404,
+      "未找到。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "GET",
+        target: `${INSTANCE_PATH}/missing`,
+        rawHeaders: navigationHeaders(),
+      }),
+    ],
+    [
+      405,
+      "不允许使用此方法。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "OPTIONS",
+        target: `${INSTANCE_PATH}/snapshot`,
+        rawHeaders: postHeaders(),
+      }),
+    ],
+    [
+      413,
+      "请求正文过大。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "POST",
+        target: `${INSTANCE_PATH}/session`,
+        rawHeaders: postHeaders([
+          "Content-Type",
+          "text/plain",
+          "Content-Length",
+          String(LIVE_DASHBOARD_LIMITS.maximumSessionBodyBytes + 1),
+        ]),
+      }),
+    ],
+    [
+      414,
+      "请求目标过长。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "GET",
+        target: `/${"x".repeat(LIVE_DASHBOARD_LIMITS.maximumRequestTargetBytes)}`,
+        rawHeaders: navigationHeaders(),
+      }),
+    ],
+    [
+      415,
+      "不支持此媒体类型。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "POST",
+        target: `${INSTANCE_PATH}/session`,
+        rawHeaders: postHeaders([
+          "Content-Type",
+          "application/json",
+          "Content-Length",
+          "0",
+        ]),
+      }),
+    ],
+    [
+      429,
+      "实时流数量过多。\n",
+      invoke(
+        createHandler(
+          new SyntheticHub(LATEST, LIVE_DASHBOARD_LIMITS.maximumStreams),
+          "zh-CN",
+        ),
+        {
+          method: "POST",
+          target: `${INSTANCE_PATH}/stream`,
+          rawHeaders: authenticatedHeaders(),
+        },
+      ),
+    ],
+    [
+      431,
+      "请求头过大。\n",
+      invoke(createHandler(undefined, "zh-CN"), {
+        method: "GET",
+        target: `${INSTANCE_PATH}/bootstrap`,
+        rawHeaders: [
+          "Host",
+          HOST,
+          "X-Fill",
+          "x".repeat(LIVE_DASHBOARD_LIMITS.maximumHeaderBytes),
+        ],
+      }),
+    ],
+    [
+      503,
+      "面板快照不可用。\n",
+      invoke(createHandler(new SyntheticHub(null), "zh-CN"), {
+        method: "POST",
+        target: `${INSTANCE_PATH}/snapshot`,
+        rawHeaders: authenticatedHeaders(),
+      }),
+    ],
+    [
+      500,
+      "请求失败。\n",
+      invoke(createHandler(new FailingHub(), "zh-CN"), {
+        method: "POST",
+        target: `${INSTANCE_PATH}/snapshot`,
+        rawHeaders: authenticatedHeaders(),
+      }),
+    ],
+  ];
+
+  for (const [statusCode, body, responsePromise] of fixtures) {
+    const response = await responsePromise;
+    assert.equal(response.statusCode, statusCode);
+    assert.equal(response.bodyText(), body);
+    assert.equal(
+      response.headers["Content-Length"],
+      String(Buffer.byteLength(body, "utf8")),
+    );
     assertSecurityHeaders(response);
   }
 });
@@ -484,6 +631,7 @@ test("rejects invalid construction secrets and non-loopback origins", () => {
         capability: CAPABILITY,
         sessionSecret: SESSION_SECRET,
         cookieName: COOKIE_NAME,
+        lang: "en",
         assets: ASSETS,
         hub: new SyntheticHub(),
       }),
@@ -498,6 +646,7 @@ test("rejects invalid construction secrets and non-loopback origins", () => {
         capability: "not-a-capability",
         sessionSecret: SESSION_SECRET,
         cookieName: COOKIE_NAME,
+        lang: "en",
         assets: ASSETS,
         hub: new SyntheticHub(),
       }),

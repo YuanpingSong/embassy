@@ -2179,9 +2179,10 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   const originalPayloads: string[] = [];
   const replacementPayloads: string[] = [];
   const current = await fixture(t, {
+    locale: "zh-CN",
     now: () => now,
     targetLeaseMs: 100,
-    maxFrameBytes: 256,
+    maxFrameBytes: 512,
   });
   const original = await addPeer(current, {
     pid: 47_158,
@@ -2251,7 +2252,7 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   assert.deepEqual(progressResult, { transportStatus: "transport_written" });
   await eventually(() => replacementPayloads.length === 1);
   assert.equal(originalPayloads.length, 0);
-  assert.ok(Buffer.byteLength(replacementPayloads[0]!, "utf8") <= 257);
+  assert.ok(Buffer.byteLength(replacementPayloads[0]!, "utf8") <= 513);
   const progressFrame = JSON.parse(
     replacementPayloads[0]!.trim(),
   ) as Record<string, unknown>;
@@ -2266,6 +2267,7 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   assert.match(progressContent, /terminal="false"/);
   assert.match(progressContent, /reason="AWAITING_EXTERNAL_APPROVAL"/);
   assert.match(progressContent, /queued-for-ms="3600000"/);
+  assert.match(progressContent, /本地网关仍在等待投递前一条消息/);
   assert.equal(progressContent.includes("peer_message_status"), false);
 
   await assert.rejects(
@@ -2721,10 +2723,10 @@ test("capacity clean-write retries release on exhaustion and stop on listener cl
   assert.equal(messages.length, 1);
 });
 
-test("listener pairs an expired native receipt with a readable safe diagnostic", async (t) => {
+test("listener pairs an expired native receipt with a localized readable safe diagnostic", async (t) => {
   let receiptHandle: string | undefined;
   const frames: Array<Record<string, unknown>> = [];
-  const current = await fixture(t);
+  const current = await fixture(t, { locale: "zh-CN" });
   const peer = await addPeer(current, {
     pid: 47_152,
     handler: (socket) => {
@@ -2764,10 +2766,14 @@ test("listener pairs an expired native receipt with a readable safe diagnostic",
   assert.equal(frames[0]?.status, "expired");
   assert.equal(frames[0]?.reason, "CODEX_ROUTE_STALE");
   assert.equal(frames[1]?.type, "user");
+  const diagnosticContent = String(
+    (frames[1]?.message as Record<string, unknown>)?.content,
+  );
   assert.match(
-    String((frames[1]?.message as Record<string, unknown>)?.content),
+    diagnosticContent,
     /gateway-delivery-diagnostic status="expired" code="CODEX_ROUTE_STALE"/,
   );
+  assert.match(diagnosticContent, /本地网关无法投递前一条消息/);
   assert.equal(frames[1]?.from, undefined);
 });
 

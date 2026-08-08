@@ -10,7 +10,8 @@ export const dashboardCopyZhCn = {
   "brand.title": "Embassy",
   "brand.subtitle": "Claude Code 与 Codex 路由在一个时间点的仅元数据记录。",
   "snapshot.asOf": "快照时间 {time}",
-  "snapshot.static": "此文件不会自动更新。请重新载入以读取最新发布的快照。",
+  "snapshot.static":
+    "此文件不会自行更新。运行 embassy refresh-dashboard 后重新加载；或者运行 embassy dashboard --live 查看流式视图。",
   "overall.ready": "交换已就绪",
   "overall.setup": "设置尚未完成",
   "overall.attention": "需要处理",
@@ -42,7 +43,7 @@ export const dashboardCopyZhCn = {
   "next.label": "下一步",
   "next.none": "无需操作。",
   "next.discoverClaude":
-    "保持 Claude Code 运行并启用 crossSessionInbound，然后运行 embassy refresh-dashboard。",
+    "启动或保持一个 Claude Code 会话运行，然后运行 embassy refresh-dashboard。",
   "next.selectClaude":
     "运行 embassy select-claude --alias <alias>，明确选择一个可见会话。",
   "next.restoreClaude": "刷新发现；若未自动恢复，请明确选择 Claude 当前别名。",
@@ -88,7 +89,8 @@ export const dashboardCopyZhCn = {
   "guidance.queueStalled.action":
     "运行 embassy status。不要重发已接受的工作；Embassy 会跟踪到结算或过期。",
   "guidance.unconfirmed.title": "无法确认投递",
-  "guidance.unconfirmed.body": "本地传输写入已完成，但截止前未收到终结原生回执。",
+  "guidance.unconfirmed.body":
+    "本地传输写入已完成，但该次尝试结算时没有可用的终结原生证据。",
   "guidance.unconfirmed.action": "重试前检查接收方；重试可能造成重复消息。",
   "guidance.degraded.title": "交换状态降级",
   "guidance.degraded.body": "Embassy 保留了一条规范化的兼容性或连接器警告。",
@@ -97,6 +99,16 @@ export const dashboardCopyZhCn = {
   "guidance.generic.title": "Embassy 报告了规范化警告",
   "guidance.generic.body": "面板没有为此安全代码映射自动修复方案。",
   "guidance.generic.action": "检查 embassy status。绝不要自动重试结果不确定的投递。",
+  "guidance.codexSuccessionBusy.title": "更换 Codex 任务需要等待静默边界",
+  "guidance.codexSuccessionBusy.body":
+    "由于已接受或正在进行的工作尚未完全排空，Embassy 保留了当前 Codex 注册。",
+  "guidance.codexSuccessionBusy.action":
+    "等待当前工作进入终结状态，运行 embassy status，然后重试同一条 register-codex --alias <new> --succeeds <old> 命令。",
+  "guidance.codexSuccessionRecovery.title": "更换 Codex 任务需要手动恢复",
+  "guidance.codexSuccessionRecovery.body":
+    "任务更换未能到达安全的活跃代次。Embassy 会让 Codex 注册保持离线，而不会猜测哪个任务拥有路由。",
+  "guidance.codexSuccessionRecovery.action":
+    "请勿发送消息、重试任务更换或假定任一任务处于活跃状态。运行 embassy status，并保留当前状态以供手动恢复。",
   "transit.eyebrow": "传输中",
   "transit.title": "队列状态",
   "transit.queued": "排队消息",
@@ -118,8 +130,10 @@ export const dashboardCopyZhCn = {
   "activity.column.history": "证据",
   "activity.history.one": "1 个阶段",
   "activity.history.many": "{count} 个阶段",
-  "activity.meaning.delivered":
-    "已观察到提供方特定的终结证据。Claude 的 released 回执表示消息已进入接收方队列，不表示模型已经读取或处理该消息。",
+  "activity.meaning.delivered.codexToClaude":
+    "Claude 返回了终结 released 回执：消息已进入接收方队列。这不表示模型已经读取或处理该消息。",
+  "activity.meaning.delivered.claudeToCodex":
+    "Codex App Server 已接受该轮输入。这不表示模型已经完成或处理该输入。",
   "activity.meaning.unconfirmed":
     "传输写入已完成，但终结原生证据不可用。重试前请检查接收方。",
   "activity.meaning.ambiguous": "不确定写入后的结果未知。请勿自动重试。",
@@ -222,5 +236,45 @@ export const dashboardCopyZhCn = {
   "time.beforeSnapshot": "快照前 {age}",
   "time.afterSnapshot": "快照后 {age}",
   "time.unavailable": "—",
+  "live.title": "Embassy — 实时面板",
+  "live.noscript":
+    "此实时视图需要 JavaScript。状态目录中的静态 gateway-dashboard.html 仍为离线底线。",
+  "live.label": "实时伴侣",
+  "live.mastheadSubtitle": "只读实时元数据流。serve 仍限套接字通道。",
+  "live.readonlyFooter":
+    "此视图无权执行 register、select、send、reply、approve 或 interrupt。",
+  "live.connection.connecting": "正在连接…",
+  "live.connection.connected": "数据流已连接",
+  "live.connection.unavailable": "观察器不可用 — 正在重试",
+  "live.connection.disconnected": "连接已断开 — 请点击“重新连接”",
+  "live.connection.fatal": "面板会话不可用",
+  "live.connection.paused": "更新已暂停",
+  "live.connection.stopped": "面板已停止",
+  "live.control.pause": "暂停",
+  "live.control.reconnect": "重新连接",
+  "live.control.refresh": "立即读取",
+  "live.filter.placeholder": "筛选别名与活动",
+  "live.metric.queued": "排队中",
+  "live.metric.active": "活跃",
+  "live.attention.empty": "当前没有需要处理的项目。",
+  "live.activity.empty": "尚无投递元数据。",
+  "live.sessions.title": "会话",
+  "live.diagnostics.title": "诊断",
+  "live.metric.revision": "流版本",
+  "live.stream.reset": "来源已重启；视图已重新同步。",
+  "live.bootstrap.title": "打开 Embassy 实时面板",
+  "live.bootstrap.open": "打开 Embassy 实时面板",
+  "live.http.badRequest": "请求无效。",
+  "live.http.forbidden": "禁止访问。",
+  "live.http.notFound": "未找到。",
+  "live.http.methodNotAllowed": "不允许使用此方法。",
+  "live.http.bodyTooLarge": "请求正文过大。",
+  "live.http.targetTooLarge": "请求目标过长。",
+  "live.http.unsupportedMediaType": "不支持此媒体类型。",
+  "live.http.tooManyStreams": "实时流数量过多。",
+  "live.http.headersTooLarge": "请求头过大。",
+  "live.http.snapshotUnavailable": "面板快照不可用。",
+  "live.http.requestFailed": "请求失败。",
+  "live.http.starting": "面板正在启动。",
   footer: "只读元数据快照。无脚本、修改控件、外部资源、遥测或网络请求。",
 } satisfies DashboardCopy;

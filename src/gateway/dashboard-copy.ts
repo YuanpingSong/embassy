@@ -1,8 +1,13 @@
 import { dashboardCopyEn } from "./dashboard-copy.en.js";
 import { dashboardCopyZhCn } from "./dashboard-copy.zh-CN.js";
+import type { DashboardLocale } from "./locale.js";
 
-export const dashboardLocales = ["en", "zh-CN"] as const;
-export type DashboardLocale = (typeof dashboardLocales)[number];
+export {
+  assertDashboardLocale,
+  dashboardLocales,
+  isDashboardLocale,
+  type DashboardLocale,
+} from "./locale.js";
 
 export const dashboardCopyKeys = [
   "meta.title",
@@ -88,6 +93,12 @@ export const dashboardCopyKeys = [
   "guidance.generic.title",
   "guidance.generic.body",
   "guidance.generic.action",
+  "guidance.codexSuccessionBusy.title",
+  "guidance.codexSuccessionBusy.body",
+  "guidance.codexSuccessionBusy.action",
+  "guidance.codexSuccessionRecovery.title",
+  "guidance.codexSuccessionRecovery.body",
+  "guidance.codexSuccessionRecovery.action",
   "transit.eyebrow",
   "transit.title",
   "transit.queued",
@@ -109,7 +120,8 @@ export const dashboardCopyKeys = [
   "activity.column.history",
   "activity.history.one",
   "activity.history.many",
-  "activity.meaning.delivered",
+  "activity.meaning.delivered.codexToClaude",
+  "activity.meaning.delivered.claudeToCodex",
   "activity.meaning.unconfirmed",
   "activity.meaning.ambiguous",
   "activity.meaning.other",
@@ -208,6 +220,44 @@ export const dashboardCopyKeys = [
   "time.beforeSnapshot",
   "time.afterSnapshot",
   "time.unavailable",
+  "live.title",
+  "live.noscript",
+  "live.label",
+  "live.mastheadSubtitle",
+  "live.readonlyFooter",
+  "live.connection.connecting",
+  "live.connection.connected",
+  "live.connection.unavailable",
+  "live.connection.disconnected",
+  "live.connection.fatal",
+  "live.connection.paused",
+  "live.connection.stopped",
+  "live.control.pause",
+  "live.control.reconnect",
+  "live.control.refresh",
+  "live.filter.placeholder",
+  "live.metric.queued",
+  "live.metric.active",
+  "live.attention.empty",
+  "live.activity.empty",
+  "live.sessions.title",
+  "live.diagnostics.title",
+  "live.metric.revision",
+  "live.stream.reset",
+  "live.bootstrap.title",
+  "live.bootstrap.open",
+  "live.http.badRequest",
+  "live.http.forbidden",
+  "live.http.notFound",
+  "live.http.methodNotAllowed",
+  "live.http.bodyTooLarge",
+  "live.http.targetTooLarge",
+  "live.http.unsupportedMediaType",
+  "live.http.tooManyStreams",
+  "live.http.headersTooLarge",
+  "live.http.snapshotUnavailable",
+  "live.http.requestFailed",
+  "live.http.starting",
   "footer",
 ] as const;
 

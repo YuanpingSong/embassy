@@ -4,12 +4,14 @@ import {
   request as httpRequest,
   type IncomingHttpHeaders,
   type IncomingMessage,
+  type ServerResponse,
 } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Script } from "node:vm";
 
+import { getDashboardCopy } from "../src/gateway/dashboard-copy.js";
 import { renderLiveDashboardAssets } from "../src/gateway/live-dashboard-assets.js";
 import {
   createLiveDashboardBootstrap,
@@ -293,9 +295,14 @@ test("private bootstrap uses a fragment capability and exact-owned cleanup", asy
       privateStateRoot: temporary,
       bootstrapTargetWithoutFragment:
         "http://127.0.0.1:48123/abcdefghijklmnopqrstuv/bootstrap",
+      lang: "zh-CN",
       random: (size) => new Uint8Array(size).fill(++call),
     });
     const document = await readFile(artifacts.bootstrapPath, "utf8");
+    assert.match(document, /^<!doctype html>\n<html lang="zh-CN">/u);
+    assert.match(document, /<title>打开 Embassy 实时面板<\/title>/u);
+    assert.match(document, />打开 Embassy 实时面板<\/a>/u);
+    assert.doesNotMatch(document, /hreflang/u);
     assert.match(
       document,
       /http:\/\/127\.0\.0\.1:48123\/abcdefghijklmnopqrstuv\/bootstrap#[A-Za-z0-9_-]{43}/u,
@@ -502,16 +509,33 @@ test("blocked streams are disconnected after five seconds", async () => {
 test("browser assets use the shared bilingual catalog and DOM text nodes", () => {
   for (const locale of ["en", "zh-CN"] as const) {
     const assets = renderLiveDashboardAssets(locale);
+    const copy = getDashboardCopy(locale);
     assert.match(assets.shellHtml, new RegExp(`<html lang="${locale}"`, "u"));
+    assert.equal(assets.shellHtml.includes(`<title>${copy["live.title"]}</title>`), true);
+    assert.equal(assets.shellHtml.includes(`<noscript>${copy["live.noscript"]}</noscript>`), true);
+    assert.equal(
+      assets.clientJavaScript.includes(JSON.stringify(copy["live.mastheadSubtitle"])),
+      true,
+    );
+    assert.equal(
+      assets.clientJavaScript.includes(JSON.stringify(copy["live.readonlyFooter"])),
+      true,
+    );
+    assert.doesNotMatch(assets.shellHtml, /hreflang/u);
     assert.match(assets.clientJavaScript, /textContent/u);
     assert.match(assets.clientJavaScript, /zh-CN/u);
+    assert.doesNotMatch(assets.clientJavaScript, /const LIVE=/u);
     assert.doesNotThrow(() => new Script(assets.clientJavaScript));
     assert.doesNotMatch(
       assets.clientJavaScript,
-      /innerHTML|eval\(|localStorage|sessionStorage|serviceWorker/u,
+      /innerHTML|eval\(|localStorage|sessionStorage|document\.cookie|serviceWorker/u,
     );
     assert.equal(assets.shellHtml.includes("<script type=\"module\" src=\"client.js\">"), true);
   }
+  assert.throws(
+    () => renderLiveDashboardAssets("zh-cn" as "zh-CN"),
+    /DASHBOARD_LOCALE_UNSUPPORTED/u,
+  );
 });
 
 class FakeBrowserNode {
@@ -565,6 +589,7 @@ test("browser runtime preserves truthful state and reads fresh data while paused
   root.id = "embassy-live";
   documentElement.append(root);
   const document = {
+    title: "",
     documentElement,
     createElement: (name: string) => new FakeBrowserNode(name),
     getElementById: (id: string) =>
@@ -577,11 +602,21 @@ test("browser runtime preserves truthful state and reads fresh data while paused
       );
     },
   };
+  const liveFixture = dashboardFixture();
+  liveFixture.alerts = [
+    {
+      code: "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+      severity: "error",
+      timestamp: liveFixture.generatedAt,
+      provider: "codex",
+      host: "this-mac",
+    },
+  ];
   const event = {
     streamRevision: 1,
     snapshotRevision: 1,
     reset: false,
-    model: buildDashboardViewModel(dashboardFixture()),
+    model: buildDashboardViewModel(liveFixture),
   };
   const refreshedEvent = {
     ...event,
@@ -630,6 +665,21 @@ test("browser runtime preserves truthful state and reads fresh data while paused
     document.getElementById("live-status")?.textContent,
     "Connection ended — use Reconnect",
   );
+  assert.equal(document.title, "Embassy — live dashboard");
+  assert.ok(
+    documentElement.find(
+      (node) =>
+        node.tagName === "strong" &&
+        node.textContent === "Codex task change requires manual recovery",
+    ),
+  );
+  assert.ok(
+    documentElement.find(
+      (node) =>
+        node.tagName === "code" &&
+        node.textContent === "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+    ),
+  );
   const filter = document.querySelector(".filter");
   assert.ok(filter);
   filter.value = "codex";
@@ -665,10 +715,20 @@ test("browser runtime preserves truthful state and reads fresh data while paused
   language.value = "zh-CN";
   language.trigger("change");
   assert.equal(document.getElementById("live-status")?.textContent, "更新已暂停");
+  assert.equal(document.documentElement.lang, "zh-CN");
+  assert.equal(document.title, "Embassy — 实时面板");
+  assert.ok(
+    documentElement.find(
+      (node) =>
+        node.tagName === "strong" &&
+        node.textContent === "更换 Codex 任务需要手动恢复",
+    ),
+  );
 });
 
 type FakeHttpHarness = Readonly<{
   factory: LiveDashboardHttpFactory;
+  dispatch(request: IncomingMessage, response: ServerResponse): void;
   server: LiveDashboardHttpServer & {
     closed: boolean;
     closeCalls: number;
@@ -691,6 +751,9 @@ function fakeHttpHarness(
   options: Readonly<{ blockedConnection?: boolean }> = {},
 ): FakeHttpHarness {
   const callbacks = new Map<string, Set<(...arguments_: never[]) => void>>();
+  let requestListener:
+    | ((request: IncomingMessage, response: ServerResponse) => void)
+    | undefined;
   let pendingClose: ((error?: Error) => void) | undefined;
   const serverObject = {
     maxConnections: 0,
@@ -751,8 +814,15 @@ function fakeHttpHarness(
   const server = serverObject as unknown as FakeHttpHarness["server"];
   return {
     server,
+    dispatch: (request, response) => {
+      assert.ok(requestListener);
+      requestListener(request, response);
+    },
     factory: {
-      createServer: (_listener) => server,
+      createServer: (listener) => {
+        requestListener = listener;
+        return server;
+      },
     },
   };
 }
@@ -788,6 +858,9 @@ test("top-level start is ready only after verified loopback bind and private boo
     });
     assert.deepEqual(running.address, { host: "127.0.0.1", port: 48123 });
     assert.equal(openedPath, running.bootstrapPath);
+    const bootstrapDocument = await readFile(running.bootstrapPath, "utf8");
+    assert.match(bootstrapDocument, /<html lang="zh-CN">/u);
+    assert.match(bootstrapDocument, /打开 Embassy 实时面板/u);
     assert.equal(observerCalls, 0);
     assert.deepEqual(harness.server.listenOptions, {
       host: "127.0.0.1",
@@ -1042,6 +1115,7 @@ test("abort during a hung bootstrap closes the listener and exact-cleans late co
   try {
     const starting = startLiveDashboard({
       privateStateRoot: temporary,
+      locale: "zh-CN",
       signal: controller.signal,
       observer: {
         observe: async () => {
@@ -1060,6 +1134,36 @@ test("abort during a hung bootstrap closes the listener and exact-cleans late co
     });
     await openStarted;
     assert.equal(harness.server.closed, false);
+    const startupResponse = {
+      headersSent: false,
+      writableEnded: false,
+      statusCode: 0,
+      headers: {} as Record<string, string>,
+      body: "",
+      writeHead(statusCode: number, headers: Record<string, string>) {
+        this.statusCode = statusCode;
+        this.headers = { ...headers };
+        this.headersSent = true;
+        return this;
+      },
+      end(chunk?: string | Buffer) {
+        if (chunk !== undefined) {
+          this.body += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+        }
+        this.writableEnded = true;
+        return this;
+      },
+    };
+    harness.dispatch(
+      {} as IncomingMessage,
+      startupResponse as unknown as ServerResponse,
+    );
+    assert.equal(startupResponse.statusCode, 503);
+    assert.equal(startupResponse.body, "面板正在启动。\n");
+    assert.equal(
+      startupResponse.headers["Content-Length"],
+      String(Buffer.byteLength(startupResponse.body, "utf8")),
+    );
     controller.abort();
     const outcome = await Promise.race([
       starting.then(

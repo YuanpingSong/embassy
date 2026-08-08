@@ -104,15 +104,22 @@ function cliHarness(
   };
 }
 
-test("dashboard --live accepts only its closed locale grammar and ignores ambient locale", async () => {
+test("dashboard --live preserves its closed grammar and uses common locale precedence", async () => {
   const valid = [
-    { argv: ["dashboard", "--live"], expected: "en" },
+    { argv: ["dashboard", "--live"], env: {}, expected: "en" },
+    {
+      argv: ["dashboard", "--live"],
+      env: { EMBASSY_LOCALE: "zh-CN" },
+      expected: "zh-CN",
+    },
     {
       argv: ["dashboard", "--live", "--lang", "en"],
+      env: { EMBASSY_LOCALE: "zh-CN" },
       expected: "en",
     },
     {
       argv: ["dashboard", "--lang", "zh-CN", "--live"],
+      env: { EMBASSY_LOCALE: "unsupported" },
       expected: "zh-CN",
     },
   ] as const;
@@ -129,8 +136,10 @@ test("dashboard --live accepts only its closed locale grammar and ignores ambien
     }, {
       LANG: "zh_CN.UTF-8",
       LC_ALL: "zh_CN.UTF-8",
+      LANGUAGE: "zh_CN:zh",
       CODEX_THREAD_ID: THREAD_ID,
       CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
+      ...current.env,
     });
     const code = await runGatewayCli(current.argv, harness.dependencies);
     assert.equal(code, gatewayCliExitCodes.ok);
@@ -175,8 +184,37 @@ test("dashboard --live accepts only its closed locale grammar and ignores ambien
         retryable: false,
       },
     });
-    assert.equal(harness.stderr.chunks.join(""), "[embassy] request rejected.\n");
+    assert.equal(
+      harness.stderr.chunks.join(""),
+      argv.length === 1 || argv[1] === "--lang"
+        ? "[embassy] request rejected.\n[embassy] dashboard requires --live; static files are published by serve and refresh-dashboard.\n"
+        : "[embassy] request rejected.\n",
+    );
   }
+
+  let ranWithInvalidEnvironment = false;
+  const invalidEnvironment = cliHarness(async () => {
+    ranWithInvalidEnvironment = true;
+  }, { EMBASSY_LOCALE: "zh" });
+  const invalidEnvironmentCode = await runGatewayCli(
+    ["dashboard", "--live"],
+    invalidEnvironment.dependencies,
+  );
+  assert.equal(invalidEnvironmentCode, gatewayCliExitCodes.invalidInput);
+  assert.equal(ranWithInvalidEnvironment, false);
+  assert.deepEqual(JSON.parse(invalidEnvironment.stdout.chunks.join("")), {
+    ok: false,
+    command: "dashboard",
+    error: {
+      code: "INVALID_ARGUMENTS",
+      ambiguous: false,
+      retryable: false,
+    },
+  });
+  assert.equal(
+    invalidEnvironment.stderr.chunks.join(""),
+    "[embassy] request rejected.\n",
+  );
 });
 
 test("live dashboard ready output is one safe result with no private launch material", async () => {

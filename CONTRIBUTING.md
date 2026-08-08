@@ -89,9 +89,13 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
 
 ### Local control surface
 
-Embassy may use one private same-user control UDS and a static metadata-only
-dashboard. Do not add TCP, HTTP, a network dashboard, JavaScript, telemetry,
-storage, or mutation endpoints. Keep the public v1 launcher foreground,
+`embassy serve` may use one private same-user control UDS and publish two inert,
+metadata-only static dashboard files. It must not listen on TCP or HTTP. The
+only reviewed exception is the separately invoked foreground
+`embassy dashboard --live` companion, which binds an authenticated OS-assigned
+port on exact IPv4 loopback and exposes no mutation or provider method. Do not
+add a wildcard/remote listener, external assets, storage, service workers,
+telemetry, or mutation endpoints. Keep the public v1 launcher foreground,
 macOS-only, and local-host-only.
 
 ## Live validation

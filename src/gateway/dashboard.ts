@@ -392,6 +392,10 @@ function guidanceKeys(guidance: DashboardAttentionItem["guidance"]): readonly [D
       return ["guidance.unconfirmed.title", "guidance.unconfirmed.body", "guidance.unconfirmed.action"];
     case "degraded":
       return ["guidance.degraded.title", "guidance.degraded.body", "guidance.degraded.action"];
+    case "codex_succession_busy":
+      return ["guidance.codexSuccessionBusy.title", "guidance.codexSuccessionBusy.body", "guidance.codexSuccessionBusy.action"];
+    case "codex_succession_recovery":
+      return ["guidance.codexSuccessionRecovery.title", "guidance.codexSuccessionRecovery.body", "guidance.codexSuccessionRecovery.action"];
     default:
       return ["guidance.generic.title", "guidance.generic.body", "guidance.generic.action"];
   }
@@ -458,8 +462,15 @@ function deliveryLabelKey(state: DeliveryState): DashboardCopyKey {
   }
 }
 
-function deliveryMeaningKey(state: DeliveryState): DashboardCopyKey {
-  if (state === "delivered") return "activity.meaning.delivered";
+function deliveryMeaningKey(
+  state: DeliveryState,
+  direction: DashboardMessageGroup["direction"],
+): DashboardCopyKey {
+  if (state === "delivered") {
+    return direction === "codex_to_claude"
+      ? "activity.meaning.delivered.codexToClaude"
+      : "activity.meaning.delivered.claudeToCodex";
+  }
   if (state === "unconfirmed") return "activity.meaning.unconfirmed";
   if (state === "ambiguous") return "activity.meaning.ambiguous";
   return "activity.meaning.other";
@@ -485,7 +496,7 @@ function renderActivity(context: RenderContext): string {
             <td data-label="${t(context, "activity.column.updated")}">${renderTimestampAtSnapshot(context, message.timestamp)}</td>
             <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${t(context, message.direction === "claude_to_codex" ? "direction.claudeToCodex" : "direction.codexToClaude")}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
             <td data-label="${t(context, "activity.column.id")}"><code>…${message.messageIdSuffix ?? "—"}</code></td>
-            <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state))}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
+            <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction))}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
             <td data-label="${t(context, "activity.column.elapsed")}" class="numeric">${formatDuration(message.latencyMs)}</td>
             <td data-label="${t(context, "activity.column.size")}" class="numeric">${formatBytes(message.bytes)}</td>
             <td data-label="${t(context, "activity.column.history")}">${renderMessageHistory(context, message)}</td>

@@ -1,7 +1,10 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { DashboardLocale } from "./dashboard-copy.js";
+import {
+  getDashboardCopy,
+  type DashboardLocale,
+} from "./dashboard-copy.js";
 import { renderLiveDashboardAssets } from "./live-dashboard-assets.js";
 import {
   createLiveDashboardBootstrap,
@@ -130,20 +133,21 @@ function randomBase64Url(
 }
 
 function notReadyHandler(
-  _request: IncomingMessage,
-  response: ServerResponse,
-): void {
-  if (response.headersSent) {
-    response.end();
-    return;
-  }
-  const body = "Dashboard is starting.\n";
-  response.writeHead(503, {
-    ...liveDashboardSecurityHeaders(),
-    "Content-Type": "text/plain; charset=utf-8",
-    "Content-Length": String(Buffer.byteLength(body, "utf8")),
-  });
-  response.end(body);
+  lang: DashboardLocale,
+): (request: IncomingMessage, response: ServerResponse) => void {
+  const body = `${getDashboardCopy(lang)["live.http.starting"]}\n`;
+  return (_request, response) => {
+    if (response.headersSent) {
+      response.end();
+      return;
+    }
+    response.writeHead(503, {
+      ...liveDashboardSecurityHeaders(),
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": String(Buffer.byteLength(body, "utf8")),
+    });
+    response.end(body);
+  };
 }
 
 export async function startLiveDashboard(
@@ -162,7 +166,7 @@ export async function startLiveDashboard(
     ...(dependencies.clock === undefined ? {} : { clock: dependencies.clock }),
   });
 
-  let activeHandler = notReadyHandler;
+  let activeHandler = notReadyHandler(locale);
   const server = http.createServer((request, response) => {
     void activeHandler(request, response);
   });
@@ -180,6 +184,7 @@ export async function startLiveDashboard(
     const bootstrapOperation = createLiveDashboardBootstrap({
       privateStateRoot: options.privateStateRoot,
       bootstrapTargetWithoutFragment: `${expectedOrigin}${instancePath}/bootstrap`,
+      lang: locale,
       random,
       ...(dependencies.fileSystem === undefined
         ? {}
@@ -198,6 +203,7 @@ export async function startLiveDashboard(
       capability: bootstrap.capability,
       sessionSecret,
       cookieName: "embassy_live",
+      lang: locale,
       assets,
       hub,
     });

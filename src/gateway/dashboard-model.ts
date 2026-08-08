@@ -61,6 +61,8 @@ export type DashboardAttentionItem = Readonly<{
     | "queue_stalled"
     | "unconfirmed"
     | "degraded"
+    | "codex_succession_busy"
+    | "codex_succession_recovery"
     | "generic";
 }>;
 
@@ -282,6 +284,12 @@ function guidanceFor(
   code: string | undefined,
   provider: GatewayProvider | undefined,
 ): DashboardAttentionItem["guidance"] {
+  if (code === "CODEX_SUCCESSION_BARRIER_BUSY") {
+    return "codex_succession_busy";
+  }
+  if (code?.startsWith("CODEX_SUCCESSION_") === true) {
+    return "codex_succession_recovery";
+  }
   switch (code) {
     case "REOBSERVATION_REQUIRED":
       return provider === "claude" ? "reobserve_claude" : "reobserve_codex";

@@ -17,7 +17,12 @@ import path from "node:path";
 
 import { dashboardCopyEn } from "../src/gateway/dashboard-copy.en.js";
 import { dashboardCopyZhCn } from "../src/gateway/dashboard-copy.zh-CN.js";
-import { dashboardCopyKeys } from "../src/gateway/dashboard-copy.js";
+import {
+  assertDashboardLocale,
+  dashboardCopyKeys,
+  dashboardLocales,
+  isDashboardLocale,
+} from "../src/gateway/dashboard-copy.js";
 import {
   DASHBOARD_ALERT_LIMIT,
   DASHBOARD_AVAILABLE_PEER_LIMIT,
@@ -51,6 +56,20 @@ test("dashboard catalogs have exact key parity", () => {
       placeholders(dashboardCopyEn[key]),
       `placeholder parity for ${key}`,
     );
+  }
+});
+
+test("dashboard locale grammar is one exact shared allowlist", () => {
+  assert.deepEqual(dashboardLocales, ["en", "zh-CN"]);
+  for (const locale of dashboardLocales) {
+    assert.equal(isDashboardLocale(locale), true);
+    assert.doesNotThrow(() => assertDashboardLocale(locale));
+  }
+  for (const value of [undefined, null, "", "EN", "zh-cn", "zh-CN ", 1]) {
+    assert.equal(isDashboardLocale(value), false);
+    assert.throws(() => assertDashboardLocale(value), {
+      message: "DASHBOARD_LOCALE_UNSUPPORTED",
+    });
   }
 });
 
@@ -147,9 +166,8 @@ test("information architecture is ordered and calm when no alert exists", () => 
 
 test("delivery language preserves delivered, unconfirmed, and ambiguous semantics", () => {
   const en = renderDashboardHtml(dashboardFixture(), { locale: "en" });
-  assert.match(en, /Provider-specific terminal evidence was observed/);
-  assert.match(en, /acceptance into the recipient queue/);
-  assert.match(en, /not that the model read or acted on the message/);
+  assert.match(en, /Codex App Server accepted the turn/);
+  assert.match(en, /does not mean the model completed or acted on it/);
   assert.match(en, /transport write completed, but terminal native evidence was unavailable/i);
   assert.match(en, /Inspect the recipient before retrying/);
   assert.match(en, /outcome is unknown after an uncertain write/i);
@@ -159,9 +177,24 @@ test("delivery language preserves delivered, unconfirmed, and ambiguous semantic
   assert.match(en, /data-delivery-state="ambiguous"/);
 
   const zh = renderDashboardHtml(dashboardFixture(), { locale: "zh-CN" });
-  assert.match(zh, /不表示模型已经读取或处理该消息/);
+  assert.match(zh, /Codex App Server 已接受该轮输入/);
+  assert.match(zh, /不表示模型已经完成或处理该输入/);
   assert.match(zh, /重试前请检查接收方/);
   assert.match(zh, /请勿自动重试/);
+
+  const released = dashboardFixture();
+  released.messages = released.messages.map((message) => {
+    if (message.messageIdSuffix !== "c0ffee") return message;
+    const { safeErrorCode: _safeErrorCode, ...withoutSafeErrorCode } = message;
+    return { ...withoutSafeErrorCode, state: "delivered" as const };
+  });
+  const releasedEn = renderDashboardHtml(released, { locale: "en" });
+  assert.match(releasedEn, /Claude returned a terminal released receipt/);
+  assert.match(releasedEn, /message entered the recipient queue/);
+  assert.match(releasedEn, /does not mean the model read or acted on it/);
+  const releasedZh = renderDashboardHtml(released, { locale: "zh-CN" });
+  assert.match(releasedZh, /Claude 返回了终结 released 回执/);
+  assert.match(releasedZh, /不表示模型已经读取或处理该消息/);
 });
 
 test("small dashboard text and quiet pills meet the 4.5:1 light-theme contrast floor", () => {

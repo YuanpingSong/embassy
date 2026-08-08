@@ -21,6 +21,7 @@ import {
 import {
   EMBASSY_VERSION,
   type GatewayCliDependencies,
+  gatewayCliCommands,
   gatewayCliExitCodes,
   runGatewayCli,
 } from "../src/gateway/cli.js";
@@ -56,6 +57,12 @@ test("version flags are deterministic and never contact the gateway", async () =
     const stdout = capture();
     const stderr = capture();
     const exitCode = await runGatewayCli([flag], {
+      env: {
+        EMBASSY_LOCALE: "zh-CN",
+        LANG: "zh_CN.UTF-8",
+        LC_ALL: "zh_CN.UTF-8",
+        LANGUAGE: "zh_CN:zh",
+      },
       stdout,
       stderr,
       loadConfig: () => {
@@ -67,6 +74,41 @@ test("version flags are deterministic and never contact the gateway", async () =
     });
     assert.equal(exitCode, gatewayCliExitCodes.ok);
     assert.equal(stdout.chunks.join(""), `embassy ${EMBASSY_VERSION}\n`);
+    assert.equal(stderr.chunks.join(""), "");
+  }
+});
+
+test("bare invocation and help flags print localized usage without side effects", async () => {
+  const cases = [
+    { argv: [] as string[], env: {}, expected: /Usage:/ },
+    { argv: ["-h"], env: {}, expected: /dashboard --live/ },
+    {
+      argv: ["--help", "--lang", "zh-CN"],
+      env: { EMBASSY_LOCALE: "unsupported" },
+      expected: /用法：/,
+    },
+  ];
+  for (const current of cases) {
+    const stdout = capture();
+    const stderr = capture();
+    const exitCode = await runGatewayCli(current.argv, {
+      env: current.env,
+      stdout,
+      stderr,
+      loadConfig: () => {
+        throw new Error("help must not load configuration");
+      },
+      sendRequest: async () => {
+        throw new Error("help must not contact the gateway");
+      },
+      runServer: async () => {
+        throw new Error("help must not start the broker");
+      },
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.ok);
+    assert.match(stdout.chunks.join(""), current.expected);
+    assert.match(stdout.chunks.join(""), /refresh-dashboard/);
+    assert.match(stdout.chunks.join(""), /wait-delivery/);
     assert.equal(stderr.chunks.join(""), "");
   }
 });
@@ -374,7 +416,18 @@ test("all client commands use one private control socket and expose only normali
   ];
 
   for (const current of cases) {
-    const result = await invoke(state.stateDir, current.argv, current);
+    const result = await invoke(
+      state.stateDir,
+      [...current.argv, "--lang", "zh-CN"],
+      {
+        ...current,
+        env: {
+          ...current.env,
+          // A valid explicit option must override an invalid environment.
+          EMBASSY_LOCALE: "unsupported",
+        },
+      },
+    );
     assert.equal(result.code, gatewayCliExitCodes.ok);
     assert.equal(result.stderr, "");
     const parsed = JSON.parse(result.stdout) as {
@@ -466,6 +519,309 @@ test("all client commands use one private control socket and expose only normali
       },
     },
   ]);
+});
+
+test("common locale precedence is exact and malformed locale input fails before all command work", async () => {
+  const precedenceCases = [
+    {
+      argv: ["health", "--unexpected"],
+      env: {},
+      stderr: "[embassy] request rejected.\n",
+    },
+    {
+      argv: ["health", "--unexpected"],
+      env: { EMBASSY_LOCALE: "" },
+      stderr: "[embassy] request rejected.\n",
+    },
+    {
+      argv: ["health", "--unexpected"],
+      env: {
+        LANG: "zh_CN.UTF-8",
+        LC_ALL: "zh_CN.UTF-8",
+        LANGUAGE: "zh_CN:zh",
+      },
+      stderr: "[embassy] request rejected.\n",
+    },
+    {
+      argv: ["health", "--unexpected"],
+      env: { EMBASSY_LOCALE: "zh-CN" },
+      stderr: "[embassy] 请求被拒绝。\n",
+    },
+    {
+      argv: ["health", "--unexpected", "--lang", "en"],
+      env: { EMBASSY_LOCALE: "zh-CN" },
+      stderr: "[embassy] request rejected.\n",
+    },
+    {
+      argv: ["health", "--unexpected", "--lang", "zh-CN"],
+      env: { EMBASSY_LOCALE: "not-a-locale" },
+      stderr: "[embassy] 请求被拒绝。\n",
+    },
+  ] as const;
+
+  for (const current of precedenceCases) {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(current.argv, {
+      env: current.env,
+      stdout,
+      stderr,
+      loadConfig: () => {
+        throw new Error("locale/argument failure must precede configuration");
+      },
+      validateControlSocket: async () => {
+        throw new Error("locale/argument failure must precede socket work");
+      },
+      sendRequest: async () => {
+        throw new Error("locale/argument failure must precede a request");
+      },
+    });
+    assert.equal(code, gatewayCliExitCodes.invalidInput);
+    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+      ok: false,
+      command: "health",
+      error: {
+        code: "INVALID_ARGUMENTS",
+        ambiguous: false,
+        retryable: false,
+      },
+    });
+    assert.equal(stderr.chunks.join(""), current.stderr);
+  }
+
+  const malformed = [
+    ["--lang"],
+    ["--lang", "zh"],
+    ["--lang", "EN"],
+    ["--lang=zh-CN"],
+    ["--lang", "en", "--lang", "zh-CN"],
+  ] as const;
+  for (const command of gatewayCliCommands) {
+    for (const suffix of malformed) {
+      const stdout = capture();
+      const stderr = capture();
+      let worked = false;
+      const code = await runGatewayCli([command, ...suffix], {
+        env: {},
+        stdin: {
+          async *[Symbol.asyncIterator]() {
+            worked = true;
+            yield SECRET_BODY;
+          },
+        },
+        stdout,
+        stderr,
+        loadConfig: () => {
+          worked = true;
+          throw new Error("must not load configuration");
+        },
+        validateControlSocket: async () => {
+          worked = true;
+        },
+        sendRequest: async () => {
+          worked = true;
+          throw new Error("must not send");
+        },
+        runServer: async () => {
+          worked = true;
+        },
+        runLiveDashboard: async () => {
+          worked = true;
+        },
+      });
+      assert.equal(
+        code,
+        gatewayCliExitCodes.invalidInput,
+        `${command} ${suffix.join(" ")}`,
+      );
+      assert.equal(worked, false, `${command} ${suffix.join(" ")}`);
+      assert.equal(
+        (JSON.parse(stdout.chunks.join("")) as { error: { code: string } })
+          .error.code,
+        "INVALID_ARGUMENTS",
+      );
+      assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
+    }
+  }
+
+  for (const command of gatewayCliCommands) {
+    let worked = false;
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli([command], {
+      env: { EMBASSY_LOCALE: "unsupported" },
+      stdin: {
+        async *[Symbol.asyncIterator]() {
+          worked = true;
+          yield SECRET_BODY;
+        },
+      },
+      stdout,
+      stderr,
+      loadConfig: () => {
+        worked = true;
+        throw new Error("must not load configuration");
+      },
+      validateControlSocket: async () => {
+        worked = true;
+      },
+      sendRequest: async () => {
+        worked = true;
+        throw new Error("must not send");
+      },
+      runServer: async () => {
+        worked = true;
+      },
+      runLiveDashboard: async () => {
+        worked = true;
+      },
+    });
+    assert.equal(code, gatewayCliExitCodes.invalidInput, command);
+    assert.equal(worked, false, command);
+    assert.equal(
+      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error
+        .code,
+      "INVALID_ARGUMENTS",
+    );
+    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
+  }
+
+  for (const invalidEnvironment of ["zh", "EN", " zh-CN", "zh-CN "]) {
+    let worked = false;
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(["health"], {
+      env: { EMBASSY_LOCALE: invalidEnvironment },
+      stdout,
+      stderr,
+      loadConfig: () => {
+        worked = true;
+        throw new Error("must not load configuration");
+      },
+    });
+    assert.equal(code, gatewayCliExitCodes.invalidInput);
+    assert.equal(worked, false);
+    assert.equal(
+      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error
+        .code,
+      "INVALID_ARGUMENTS",
+    );
+    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
+  }
+});
+
+test("all five stderr categories localize without changing stdout protocol", async () => {
+  const fakeConfig = () => ({
+    stateDir: "/private/fake-state",
+    controlSocketPath: "/private/fake-state/control.sock",
+    allowedHosts: ["this-mac"],
+    stallNoticeMs: 30_000,
+    limits: {} as never,
+  });
+  const scenarios = [
+    {
+      kind: "input",
+      argv: ["health", "--unexpected"],
+      code: gatewayCliExitCodes.invalidInput,
+      sendRequest: async () => {
+        throw new Error("input failure must precede the request");
+      },
+    },
+    {
+      kind: "decision",
+      argv: ["select-claude", "--alias", "advisor@this-mac"],
+      code: gatewayCliExitCodes.rejected,
+      sendRequest: async () => ({
+        protocolVersion: 1 as const,
+        ok: true as const,
+        result: { accepted: false as const, code: "not_found" },
+      }),
+    },
+    {
+      kind: "unavailable",
+      argv: ["health"],
+      code: gatewayCliExitCodes.unavailable,
+      sendRequest: async () => {
+        throw new GatewayControlTransportError(
+          "CONTROL_CONNECT_FAILED",
+          "private diagnostic",
+        );
+      },
+    },
+    {
+      kind: "ambiguous",
+      argv: ["health"],
+      code: gatewayCliExitCodes.ambiguous,
+      sendRequest: async () => {
+        throw new GatewayControlTransportError(
+          "CONTROL_OUTCOME_AMBIGUOUS",
+          "private diagnostic",
+          true,
+        );
+      },
+    },
+    {
+      kind: "failure",
+      argv: ["health"],
+      code: gatewayCliExitCodes.failure,
+      sendRequest: async () => ({
+        protocolVersion: 1 as const,
+        ok: false as const,
+        error: {
+          code: "HANDLER_FAILURE" as const,
+          message: "private diagnostic",
+        },
+      }),
+    },
+  ] as const;
+  const expected = {
+    en: {
+      input: "[embassy] request rejected.\n",
+      decision: "[embassy] gateway rejected the request.\n",
+      unavailable: "[embassy] gateway unavailable.\n",
+      ambiguous:
+        "[embassy] outcome ambiguous; do not retry automatically.\n",
+      failure: "[embassy] command failed.\n",
+    },
+    "zh-CN": {
+      input: "[embassy] 请求被拒绝。\n",
+      decision: "[embassy] 网关拒绝了该请求。\n",
+      unavailable: "[embassy] 网关不可用。\n",
+      ambiguous: "[embassy] 结果不确定；请勿自动重试。\n",
+      failure: "[embassy] 命令失败。\n",
+    },
+  } as const;
+
+  for (const scenario of scenarios) {
+    let englishStdout: string | undefined;
+    for (const locale of ["en", "zh-CN"] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const code = await runGatewayCli(
+        [...scenario.argv, "--lang", locale],
+        {
+          env: {},
+          stdin: input(),
+          stdout,
+          stderr,
+          loadConfig: fakeConfig,
+          validateControlSocket: async () => undefined,
+          sendRequest:
+            scenario.sendRequest as NonNullable<
+              GatewayCliDependencies["sendRequest"]
+            >,
+        },
+      );
+      assert.equal(code, scenario.code, scenario.kind);
+      assert.equal(stderr.chunks.join(""), expected[locale][scenario.kind]);
+      assert.doesNotMatch(stdout.chunks.join(""), /private|zh-CN|\u8bf7求|\u7f51关/);
+      if (englishStdout === undefined) {
+        englishStdout = stdout.chunks.join("");
+      } else {
+        assert.equal(stdout.chunks.join(""), englishStdout, scenario.kind);
+      }
+    }
+  }
 });
 
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
@@ -1088,12 +1444,13 @@ test("serve emits one normalized ready result without using the client socket or
   const stdout = capture();
   const stderr = capture();
   const env = {
+    EMBASSY_LOCALE: "unsupported",
     CODEX_THREAD_ID: THREAD_ID,
     CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
     SECRET_SENTINEL: SECRET_BODY,
   };
   let calls = 0;
-  const exitCode = await runGatewayCli(["serve"], {
+  const exitCode = await runGatewayCli(["serve", "--lang", "zh-CN"], {
     env,
     stdin: {
       async *[Symbol.asyncIterator]() {
@@ -1114,6 +1471,7 @@ test("serve emits one normalized ready result without using the client socket or
     runServer: async (options) => {
       calls += 1;
       assert.equal(options.env, env);
+      assert.equal(options.locale, "zh-CN");
       await options.onReady({
         status: "ready",
         hostId: "this-mac",

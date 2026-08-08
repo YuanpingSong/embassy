@@ -26,6 +26,7 @@ import type {
   LocalCodexOwnedTransport,
   LocalCodexTransportFactory,
 } from "./codex-local-transport.js";
+import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import type {
   GatewayAdapterCallbacks,
   GatewayAdapterDelivery,
@@ -57,12 +58,15 @@ const DEFAULT_CODEX_CLEANUP_POLL_MS = 25;
 
 type ClaudePeerFactory = (
   runtime: AttestedClaudePeerRuntime,
+  locale: DashboardLocale,
 ) => ClaudePeerAdapter;
 
 export type LocalClaudeGatewayProviderOptions = {
   /** Exact result of attestClaudePeerRuntime; paths are never rediscovered. */
   runtime: AttestedClaudePeerRuntime;
   hostId?: "this-mac";
+  /** Locale for bounded notices written into native Claude sessions. */
+  locale?: DashboardLocale;
   discoveryPollMs?: number;
   maxPendingMessages?: number;
   now?: () => number;
@@ -316,6 +320,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   constructor(options: LocalClaudeGatewayProviderOptions) {
     validateAttestedClaudeRuntime(options.runtime);
+    if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
+      throw new BridgeError(
+        "DASHBOARD_LOCALE_UNSUPPORTED",
+        "The Claude provider notice locale is unsupported.",
+      );
+    }
     const hostId = exactLocalHost(options.hostId);
     this.identity = {
       provider: "claude",
@@ -334,12 +344,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     );
     this.now = options.now ?? Date.now;
     this.peer = (options.peerFactory ??
-      ((runtime) =>
+      ((runtime, locale) =>
         new ClaudePeerAdapter({
           sessionsDir: runtime.sessionsDir,
           socketDir: runtime.socketDir,
           attestedClaudeCodeVersion: runtime.claudeCodeVersion,
-        })))(options.runtime);
+          locale,
+        })))(options.runtime, options.locale ?? "en");
   }
 
   async initialize(

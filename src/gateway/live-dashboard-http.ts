@@ -1,6 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
+  assertDashboardLocale,
+  getDashboardCopy,
+  type DashboardCopy,
+  type DashboardLocale,
+} from "./dashboard-copy.js";
+import {
   equalSecret,
   LIVE_DASHBOARD_LIMITS,
   liveDashboardSecurityHeaders,
@@ -33,6 +39,7 @@ export type LiveDashboardRequestHandlerOptions = Readonly<{
   capability: string;
   sessionSecret: string;
   cookieName: string;
+  lang: DashboardLocale;
   assets: LiveDashboardHttpAssets;
   hub: LiveDashboardStreamHub;
 }>;
@@ -56,6 +63,7 @@ function isCanonical256BitBase64Url(value: string): boolean {
 }
 
 function assertOptions(options: LiveDashboardRequestHandlerOptions): void {
+  assertDashboardLocale(options.lang);
   if (!/^\/[A-Za-z0-9_-]{16,128}$/u.test(options.instancePath)) {
     throw new Error("LIVE_DASHBOARD_INSTANCE_PATH_INVALID");
   }
@@ -98,37 +106,38 @@ function routeFor(target: string | undefined, instancePath: string): Route | und
   }
 }
 
-function statusBody(statusCode: number): string {
+function statusBody(copy: DashboardCopy, statusCode: number): string {
   switch (statusCode) {
     case 400:
-      return "Bad request.\n";
+      return `${copy["live.http.badRequest"]}\n`;
     case 403:
-      return "Forbidden.\n";
+      return `${copy["live.http.forbidden"]}\n`;
     case 404:
-      return "Not found.\n";
+      return `${copy["live.http.notFound"]}\n`;
     case 405:
-      return "Method not allowed.\n";
+      return `${copy["live.http.methodNotAllowed"]}\n`;
     case 413:
-      return "Request body too large.\n";
+      return `${copy["live.http.bodyTooLarge"]}\n`;
     case 414:
-      return "Request target too large.\n";
+      return `${copy["live.http.targetTooLarge"]}\n`;
     case 415:
-      return "Unsupported media type.\n";
+      return `${copy["live.http.unsupportedMediaType"]}\n`;
     case 429:
-      return "Too many live streams.\n";
+      return `${copy["live.http.tooManyStreams"]}\n`;
     case 431:
-      return "Request headers too large.\n";
+      return `${copy["live.http.headersTooLarge"]}\n`;
     case 503:
-      return "Dashboard snapshot unavailable.\n";
+      return `${copy["live.http.snapshotUnavailable"]}\n`;
     default:
-      return "Request failed.\n";
+      return `${copy["live.http.requestFailed"]}\n`;
   }
 }
 
 function respond(
   response: ServerResponse,
+  copy: DashboardCopy,
   statusCode: number,
-  body = statusBody(statusCode),
+  body = statusBody(copy, statusCode),
   contentType = "text/plain; charset=utf-8",
   additionalHeaders: Readonly<Record<string, string>> = {},
   contentSecurityPolicy?: string,
@@ -277,8 +286,10 @@ export function createLiveDashboardRequestHandler(
     expectedOrigin,
     hub,
     instancePath,
+    lang,
     sessionSecret,
   } = options;
+  const copy = getDashboardCopy(lang);
   const cookieHeader = sessionCookieHeader(
     cookieName,
     sessionSecret,
@@ -304,11 +315,11 @@ export function createLiveDashboardRequestHandler(
         },
       );
       if (!validation.ok) {
-        respond(response, validation.statusCode);
+        respond(response, copy, validation.statusCode);
         return;
       }
       if (route === undefined) {
-        respond(response, 404);
+        respond(response, copy, 404);
         return;
       }
 
@@ -316,6 +327,7 @@ export function createLiveDashboardRequestHandler(
         case "bootstrap":
           respond(
             response,
+            copy,
             200,
             assets.shellHtml,
             "text/html; charset=utf-8",
@@ -326,6 +338,7 @@ export function createLiveDashboardRequestHandler(
         case "client":
           respond(
             response,
+            copy,
             200,
             assets.clientJavaScript,
             "text/javascript; charset=utf-8",
@@ -334,6 +347,7 @@ export function createLiveDashboardRequestHandler(
         case "style":
           respond(
             response,
+            copy,
             200,
             assets.styleSheet,
             "text/css; charset=utf-8",
@@ -345,7 +359,7 @@ export function createLiveDashboardRequestHandler(
             contentType !== "text/plain" &&
             contentType !== "text/plain;charset=UTF-8"
           ) {
-            respond(response, 415);
+            respond(response, copy, 415);
             return;
           }
           const contentLength = parseContentLength(
@@ -356,11 +370,11 @@ export function createLiveDashboardRequestHandler(
             !Number.isFinite(contentLength) ||
             contentLength < 0
           ) {
-            respond(response, 400);
+            respond(response, copy, 400);
             return;
           }
           if (contentLength > LIVE_DASHBOARD_LIMITS.maximumSessionBodyBytes) {
-            respond(response, 413);
+            respond(response, copy, 413);
             return;
           }
           const body = await readBoundedBody(
@@ -369,11 +383,11 @@ export function createLiveDashboardRequestHandler(
             LIVE_DASHBOARD_LIMITS.maximumSessionBodyBytes,
           );
           if (!body.ok) {
-            respond(response, body.statusCode);
+            respond(response, copy, body.statusCode);
             return;
           }
           if (!equalSecret(body.body, remainingCapability)) {
-            respond(response, 403);
+            respond(response, copy, 403);
             return;
           }
           remainingCapability = undefined;
@@ -383,20 +397,21 @@ export function createLiveDashboardRequestHandler(
         case "snapshot": {
           const bodyError = validateEmptyPostBody(validation);
           if (bodyError !== undefined) {
-            respond(response, bodyError);
+            respond(response, copy, bodyError);
             return;
           }
           if (!authenticated(validation, cookieName, sessionSecret)) {
-            respond(response, 403);
+            respond(response, copy, 403);
             return;
           }
           const refreshed = await hub.refresh();
           if (refreshed === undefined) {
-            respond(response, 503);
+            respond(response, copy, 503);
             return;
           }
           respond(
             response,
+            copy,
             200,
             JSON.stringify(refreshed),
             "application/json; charset=utf-8",
@@ -406,15 +421,15 @@ export function createLiveDashboardRequestHandler(
         case "stream": {
           const bodyError = validateEmptyPostBody(validation);
           if (bodyError !== undefined) {
-            respond(response, bodyError);
+            respond(response, copy, bodyError);
             return;
           }
           if (!authenticated(validation, cookieName, sessionSecret)) {
-            respond(response, 403);
+            respond(response, copy, 403);
             return;
           }
           if (hub.streamCount() >= LIVE_DASHBOARD_LIMITS.maximumStreams) {
-            respond(response, 429);
+            respond(response, copy, 429);
             return;
           }
           response.writeHead(200, {
@@ -429,7 +444,7 @@ export function createLiveDashboardRequestHandler(
       }
     } catch {
       if (!response.headersSent) {
-        respond(response, 500);
+        respond(response, copy, 500);
       } else if (!response.writableEnded) {
         response.end();
       }

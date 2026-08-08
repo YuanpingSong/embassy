@@ -19,7 +19,10 @@ live sends routine. Never enable a real provider message in CI.
 ## Product invariants
 
 - Keep the shipped v1 launcher macOS-only, foreground, same-machine, and
-  local-host-only. It must not daemonize or listen on TCP or HTTP.
+  local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP.
+  The only network listener is the separately invoked, foreground
+  `embassy dashboard --live` companion: exact IPv4 loopback, OS-assigned
+  ephemeral port, authenticated, read-only, and closed with its command.
 - Keep the control plane on one private Unix-domain socket inside the
   controller-owned mode-0700 state directory. Controller files are mode 0600.
 - A Codex task self-registers using its inherited `CODEX_THREAD_ID` and a
@@ -63,6 +66,9 @@ live sends routine. Never enable a real provider message in CI.
 - The dashboard remains an atomically replaced, metadata-only static HTML file
   with no JavaScript, external assets, storage, telemetry, mutation endpoint,
   or network listener.
+- The opt-in live companion may render that same bounded public model with
+  local JavaScript, but it must have no provider or mutation methods, external
+  assets, storage, service worker, telemetry, or non-loopback listener.
 - Never read, print, copy, accept, persist, or forward credentials, OAuth
   material, Keychain data, transcripts, provider histories, tool data, or raw
   diagnostics. Never write protocol diagnostics to stdout.

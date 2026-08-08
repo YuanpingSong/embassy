@@ -22,6 +22,7 @@ import {
   createCodexRegistrationGeneration,
   isCodexRegistrationGeneration,
 } from "./codex-registration-generation.js";
+import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 
 /**
  * This adapter intentionally pins the inspected, implementation-specific
@@ -43,6 +44,21 @@ export const CLAUDE_PEER_COMPATIBLE_SESSION_VERSIONS = Object.freeze([
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+const CLAUDE_PEER_NOTICE_COPY = {
+  en: {
+    stall:
+      "The local gateway is still waiting to deliver the preceding message. Inspect its dashboard for details.",
+    diagnostic:
+      "The local gateway could not deliver the preceding message. Inspect its dashboard for details.",
+  },
+  "zh-CN": {
+    stall: "本地网关仍在等待投递前一条消息。请查看其仪表盘了解详情。",
+    diagnostic: "本地网关无法投递前一条消息。请查看其仪表盘了解详情。",
+  },
+} as const satisfies Readonly<
+  Record<DashboardLocale, Readonly<Record<"stall" | "diagnostic", string>>>
+>;
 const REGISTRY_FILE_PATTERN = /^([1-9][0-9]{0,9})\.json$/;
 const SOCKET_FILE_PATTERN = /^([1-9][0-9]{0,9})\.sock$/;
 const MAX_PID = 2_147_483_647;
@@ -196,6 +212,8 @@ export type ClaudePeerAdapterOptions = {
   socketDir: string;
   /** Exact version attested by the trusted launcher, never user input. */
   attestedClaudeCodeVersion: string;
+  /** Locale for bounded user-visible gateway notices written to Claude. */
+  locale?: DashboardLocale;
   maxRegistryEntries?: number;
   maxRegistryBytes?: number;
   maxFrameBytes?: number;
@@ -884,6 +902,7 @@ export class ClaudePeerAdapter {
   readonly #now: () => number;
   readonly #createId: () => string;
   readonly #createGeneration: () => string;
+  readonly #locale: DashboardLocale;
   readonly #registryRename: (
     source: string,
     destination: string,
@@ -921,6 +940,13 @@ export class ClaudePeerAdapter {
         `Claude peer compatibility is pinned to Claude Code ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}.`,
       );
     }
+    if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
+      throw new BridgeError(
+        "DASHBOARD_LOCALE_UNSUPPORTED",
+        "The Claude peer notice locale is unsupported.",
+      );
+    }
+    this.#locale = options.locale ?? "en";
     this.#sessionsDir = assertAbsoluteConfiguredPath(
       options.sessionsDir,
       "sessionsDir",
@@ -1610,6 +1636,7 @@ export class ClaudePeerAdapter {
       createId: this.#createId,
       connect: this.#connect,
       now: this.#now,
+      locale: this.#locale,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
       resolveSessionBinding: async (sessionId) => {
@@ -1941,6 +1968,7 @@ type ListenerCreateOptions = {
   createId: () => string;
   connect: ClaudePeerConnect;
   now: () => number;
+  locale: DashboardLocale;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
@@ -1987,6 +2015,7 @@ export class ClaudePeerListener {
   readonly #createId: () => string;
   readonly #connect: ClaudePeerConnect;
   readonly #now: () => number;
+  readonly #locale: DashboardLocale;
   readonly #resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   readonly #resolveSessionBinding: (
     sessionId: string,
@@ -2050,6 +2079,7 @@ export class ClaudePeerListener {
     this.#createId = options.createId;
     this.#connect = options.connect;
     this.#now = options.now;
+    this.#locale = options.locale;
     this.#resolveReplyAddress = options.resolveReplyAddress;
     this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
@@ -2931,7 +2961,7 @@ export class ClaudePeerListener {
       `queued-for-ms="${queuedForMs}">`;
     const detailedContent = [
       openingTag,
-      "The local gateway is still waiting to deliver the preceding message. Inspect its dashboard for details.",
+      CLAUDE_PEER_NOTICE_COPY[this.#locale].stall,
       "</gateway-delivery-stall>",
     ].join("\n");
     const messageId = this.#createId();
@@ -3021,7 +3051,7 @@ export class ClaudePeerListener {
             messageId: this.#createId(),
             content: [
               `<gateway-delivery-diagnostic status="expired" code="${diagnostic.code}">`,
-              "The local gateway could not deliver the preceding message. Inspect its dashboard for details.",
+              CLAUDE_PEER_NOTICE_COPY[this.#locale].diagnostic,
               "</gateway-delivery-diagnostic>",
             ].join("\n"),
             maxFrameBytes: this.#limits.maxFrameBytes,

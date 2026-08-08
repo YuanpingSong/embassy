@@ -116,6 +116,51 @@ test("restart guidance warns about abandoning memory-only bodies", () => {
   assert.match(html, /restarting abandons memory-only message bodies/);
 });
 
+test("Codex succession alerts distinguish a busy boundary from manual recovery", () => {
+  const snapshot = dashboardFixture();
+  snapshot.alerts = [
+    {
+      code: "CODEX_SUCCESSION_BARRIER_BUSY",
+      severity: "warning",
+      timestamp: snapshot.generatedAt,
+      provider: "codex",
+      host: "this-mac",
+    },
+    {
+      code: "CODEX_SUCCESSION_PUBLICATION_UNKNOWN",
+      severity: "error",
+      timestamp: snapshot.generatedAt,
+      provider: "codex",
+      host: "this-mac",
+    },
+  ];
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(
+    model.attention.find(
+      (item) => item.code === "CODEX_SUCCESSION_BARRIER_BUSY",
+    )?.guidance,
+    "codex_succession_busy",
+  );
+  assert.equal(
+    model.attention.find(
+      (item) => item.code === "CODEX_SUCCESSION_PUBLICATION_UNKNOWN",
+    )?.guidance,
+    "codex_succession_recovery",
+  );
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  assert.match(en, /Codex task change needs a quiet boundary/);
+  assert.match(en, /kept the current Codex registration/);
+  assert.match(en, /Codex task change requires manual recovery/);
+  assert.match(en, /keeps Codex registration offline instead of guessing/);
+  assert.match(en, /Do not send, retry the task change, or assume either task is active/);
+
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(zh, /更换 Codex 任务需要等待静默边界/);
+  assert.match(zh, /更换 Codex 任务需要手动恢复/);
+  assert.match(zh, /不会猜测哪个任务拥有路由/);
+});
+
 test("first-run exchange board gives truthful asymmetric setup actions", () => {
   const snapshot = dashboardFixture();
   snapshot.routes = [];
@@ -129,7 +174,7 @@ test("first-run exchange board gives truthful asymmetric setup actions", () => {
 
   snapshot.availablePeers = [];
   const noPeers = renderDashboardHtml(snapshot);
-  assert.match(noPeers, /crossSessionInbound/);
+  assert.match(noPeers, /Start or keep a Claude Code session running/);
   assert.match(noPeers, /embassy refresh-dashboard/);
   assert.match(noPeers, /Every compatible live Claude session under the same OS user/);
 });

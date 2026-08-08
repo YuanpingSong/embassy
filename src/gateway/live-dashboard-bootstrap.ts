@@ -11,6 +11,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  assertDashboardLocale,
+  getDashboardCopy,
+  type DashboardLocale,
+} from "./dashboard-copy.js";
+
 export type LiveDashboardRandomBytes = (size: number) => Uint8Array;
 
 type FileIdentity = Readonly<{
@@ -73,14 +79,19 @@ function base64Url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-function bootstrapDocument(target: string): string {
-  const escaped = target
+function escapeHtml(value: string): string {
+  return value
     .replaceAll("&", "&amp;")
     .replaceAll('"', "&quot;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function bootstrapDocument(target: string, lang: DashboardLocale): string {
+  const copy = getDashboardCopy(lang);
+  const escaped = escapeHtml(target);
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; navigate-to http://127.0.0.1:*"><meta http-equiv="refresh" content="0;url=${escaped}"><title>Open Embassy live dashboard</title></head><body><p><a rel="noreferrer" href="${escaped}">Open Embassy live dashboard</a></p></body></html>`;
+<html lang="${lang}"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; navigate-to http://127.0.0.1:*"><meta http-equiv="refresh" content="0;url=${escaped}"><title>${escapeHtml(copy["live.bootstrap.title"])}</title></head><body><p><a rel="noreferrer" href="${escaped}">${escapeHtml(copy["live.bootstrap.open"])}</a></p></body></html>`;
 }
 
 export type LiveDashboardBootstrapArtifacts = Readonly<{
@@ -93,10 +104,12 @@ export async function createLiveDashboardBootstrap(
   options: Readonly<{
     privateStateRoot: string;
     bootstrapTargetWithoutFragment: string;
+    lang: DashboardLocale;
     fileSystem?: LiveDashboardFileSystem;
     random?: LiveDashboardRandomBytes;
   }>,
 ): Promise<LiveDashboardBootstrapArtifacts> {
+  assertDashboardLocale(options.lang);
   const fileSystem = options.fileSystem ?? defaultLiveDashboardFileSystem;
   const random = options.random ?? randomBytes;
   const targetMatch =
@@ -172,7 +185,9 @@ export async function createLiveDashboardBootstrap(
       throw new Error("LIVE_DASHBOARD_BOOTSTRAP_NOT_PRIVATE");
     }
     bootstrapIdentity = identity(openedStat);
-    await handle.writeFile(bootstrapDocument(target), { encoding: "utf8" });
+    await handle.writeFile(bootstrapDocument(target, options.lang), {
+      encoding: "utf8",
+    });
     await handle.sync();
     await handle.close();
     handle = undefined;

@@ -12,7 +12,7 @@ export const dashboardCopyEn = {
     "A point-in-time, metadata-only register of routes between Claude Code and Codex.",
   "snapshot.asOf": "Snapshot {time}",
   "snapshot.static":
-    "This file does not update itself. Reload it to read the latest published snapshot.",
+    "This file does not update itself. Run embassy refresh-dashboard, then reload — or run embassy dashboard --live for a streaming view.",
   "overall.ready": "Exchange ready",
   "overall.setup": "Setup incomplete",
   "overall.attention": "Needs attention",
@@ -44,7 +44,7 @@ export const dashboardCopyEn = {
   "next.label": "Next",
   "next.none": "No action needed.",
   "next.discoverClaude":
-    "Keep Claude Code running with crossSessionInbound enabled, then run embassy refresh-dashboard.",
+    "Start or keep a Claude Code session running, then run embassy refresh-dashboard.",
   "next.selectClaude":
     "Run embassy select-claude --alias <alias> to choose a visible session explicitly.",
   "next.restoreClaude":
@@ -101,7 +101,7 @@ export const dashboardCopyEn = {
     "Run embassy status. Do not resend accepted work; Embassy still tracks it until settlement or expiry.",
   "guidance.unconfirmed.title": "Delivery could not be confirmed",
   "guidance.unconfirmed.body":
-    "The local transport write completed, but no terminal native receipt arrived before the deadline.",
+    "The local transport write completed, but terminal native evidence was unavailable when the attempt settled.",
   "guidance.unconfirmed.action":
     "Inspect the recipient before retrying; a retry could duplicate the message.",
   "guidance.degraded.title": "The exchange is degraded",
@@ -114,6 +114,17 @@ export const dashboardCopyEn = {
     "This safe code has no automatic repair mapped in the dashboard.",
   "guidance.generic.action":
     "Review embassy status. Never automatically retry an ambiguous delivery.",
+  "guidance.codexSuccessionBusy.title": "Codex task change needs a quiet boundary",
+  "guidance.codexSuccessionBusy.body":
+    "Embassy kept the current Codex registration because accepted or active work had not fully drained.",
+  "guidance.codexSuccessionBusy.action":
+    "Let current work reach a terminal state, run embassy status, then retry the same register-codex --alias <new> --succeeds <old> command.",
+  "guidance.codexSuccessionRecovery.title":
+    "Codex task change requires manual recovery",
+  "guidance.codexSuccessionRecovery.body":
+    "The task change did not reach a safe active generation. Embassy keeps Codex registration offline instead of guessing which task owns the route.",
+  "guidance.codexSuccessionRecovery.action":
+    "Do not send, retry the task change, or assume either task is active. Run embassy status and preserve the current state for manual recovery.",
   "transit.eyebrow": "In transit",
   "transit.title": "Queue posture",
   "transit.queued": "Queued messages",
@@ -135,8 +146,10 @@ export const dashboardCopyEn = {
   "activity.column.history": "Evidence",
   "activity.history.one": "1 stage",
   "activity.history.many": "{count} stages",
-  "activity.meaning.delivered":
-    "Provider-specific terminal evidence was observed. A released Claude receipt means acceptance into the recipient queue, not that the model read or acted on the message.",
+  "activity.meaning.delivered.codexToClaude":
+    "Claude returned a terminal released receipt: the message entered the recipient queue. This does not mean the model read or acted on it.",
+  "activity.meaning.delivered.claudeToCodex":
+    "Codex App Server accepted the turn. This does not mean the model completed or acted on it.",
   "activity.meaning.unconfirmed":
     "The transport write completed, but terminal native evidence was unavailable. Inspect the recipient before retrying.",
   "activity.meaning.ambiguous":
@@ -243,6 +256,47 @@ export const dashboardCopyEn = {
   "time.beforeSnapshot": "{age} before snapshot",
   "time.afterSnapshot": "{age} after snapshot",
   "time.unavailable": "—",
+  "live.title": "Embassy — live dashboard",
+  "live.noscript":
+    "This live view requires JavaScript. The static gateway-dashboard.html in the state directory remains the offline floor.",
+  "live.label": "Live companion",
+  "live.mastheadSubtitle":
+    "Read-only live metadata stream. serve remains socket-only.",
+  "live.readonlyFooter":
+    "This view has no authority to register, select, send, reply, approve, or interrupt.",
+  "live.connection.connecting": "Connecting…",
+  "live.connection.connected": "Stream connected",
+  "live.connection.unavailable": "Observer unavailable — retrying",
+  "live.connection.disconnected": "Connection ended — use Reconnect",
+  "live.connection.fatal": "Dashboard session unavailable",
+  "live.connection.paused": "Updates paused",
+  "live.connection.stopped": "Dashboard stopped",
+  "live.control.pause": "Pause",
+  "live.control.reconnect": "Reconnect",
+  "live.control.refresh": "Read now",
+  "live.filter.placeholder": "Filter aliases and activity",
+  "live.metric.queued": "Queued",
+  "live.metric.active": "Active",
+  "live.attention.empty": "No active attention items.",
+  "live.activity.empty": "No delivery metadata yet.",
+  "live.sessions.title": "Sessions",
+  "live.diagnostics.title": "Diagnostics",
+  "live.metric.revision": "Stream revision",
+  "live.stream.reset": "Source restarted; view resynchronized.",
+  "live.bootstrap.title": "Open Embassy live dashboard",
+  "live.bootstrap.open": "Open Embassy live dashboard",
+  "live.http.badRequest": "Bad request.",
+  "live.http.forbidden": "Forbidden.",
+  "live.http.notFound": "Not found.",
+  "live.http.methodNotAllowed": "Method not allowed.",
+  "live.http.bodyTooLarge": "Request body too large.",
+  "live.http.targetTooLarge": "Request target too large.",
+  "live.http.unsupportedMediaType": "Unsupported media type.",
+  "live.http.tooManyStreams": "Too many live streams.",
+  "live.http.headersTooLarge": "Request headers too large.",
+  "live.http.snapshotUnavailable": "Dashboard snapshot unavailable.",
+  "live.http.requestFailed": "Request failed.",
+  "live.http.starting": "Dashboard is starting.",
   footer:
     "Read-only metadata snapshot. No scripts, mutation controls, external assets, telemetry, or network requests.",
 } satisfies DashboardCopy;

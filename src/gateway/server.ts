@@ -21,6 +21,7 @@ import {
   acquireGatewayInstanceLease,
   type GatewayInstanceLease,
 } from "./instance-lease.js";
+import type { DashboardLocale } from "./locale.js";
 import {
   createLocalClaudeGatewayProvider,
   createLocalCodexGatewayProvider,
@@ -48,6 +49,8 @@ export type GatewayServerReadyResult = Readonly<{
 
 export type GatewayServerOptions = {
   env?: NodeJS.ProcessEnv;
+  /** Locale for bounded user-visible notices emitted by the broker. */
+  locale?: DashboardLocale;
   signal?: AbortSignal;
   onReady: (
     result: GatewayServerReadyResult,
@@ -331,7 +334,10 @@ export async function runGatewayServer(
         attestClaudeRuntime({ claudeExecutable }),
       ),
     );
-    claudeProvider = createClaudeProvider({ runtime });
+    claudeProvider = createClaudeProvider({
+      runtime,
+      locale: options.locale ?? "en",
+    });
     store = createStore(config);
     const createdCodexFactory = await awaitWhileLeaseHeld(
       Promise.resolve().then(() =>

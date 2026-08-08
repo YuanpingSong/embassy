@@ -13,8 +13,9 @@
 
 ## Security-invariant checklist
 
-- [ ] No new TCP, HTTP, public API, or outbound provider connection; only the
-      documented private Unix-domain control and callback surfaces remain
+- [ ] `embassy serve` adds no TCP, HTTP, public API, or outbound provider
+      connection; any live-dashboard change preserves its sole documented
+      authenticated `127.0.0.1:0`, read-only, foreground exception
 - [ ] No new credential, Keychain, OAuth, or transcript access
 - [ ] No message body, prompt, reply, raw provider frame, or socket path is
       persisted (bodies stay memory-only; only closed route-binding metadata

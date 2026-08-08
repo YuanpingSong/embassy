@@ -146,6 +146,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
   await runGatewayServer(
     {
       env,
+      locale: "zh-CN",
       signal: abort.signal,
       onReady: (result) => {
         events.push("ready");
@@ -175,6 +176,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
       createClaudeProvider: (options) => {
         events.push("create-claude");
         assert.deepEqual(options.runtime, runtime());
+        assert.equal(options.locale, "zh-CN");
         return provider(() => events.push("close-claude"));
       },
       createStore: (received) => {

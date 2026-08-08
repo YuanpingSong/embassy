@@ -14,6 +14,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
 import {
+  getCliCopy,
+  type CliCopyKey,
+  type CliStderrKind,
+} from "./cli-copy.js";
+import {
   GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS,
   GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   GATEWAY_CONTROL_MAX_RESPONSE_BYTES,
@@ -32,7 +37,10 @@ import {
   type SendGatewayControlRequestOptions,
 } from "./control.js";
 import { loadGatewayConfig, type GatewayConfig } from "./config.js";
-import type { DashboardLocale } from "./dashboard-copy.js";
+import {
+  isDashboardLocale,
+  type DashboardLocale,
+} from "./locale.js";
 import {
   runLiveDashboardCommand,
   type LiveDashboardCommandOutcome,
@@ -50,14 +58,7 @@ const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
 const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
 export const EMBASSY_VERSION = "1.0.0";
-const FIXED_STDERR = {
-  input: "[embassy] request rejected.\n",
-  decision: "[embassy] gateway rejected the request.\n",
-  unavailable: "[embassy] gateway unavailable.\n",
-  ambiguous:
-    "[embassy] outcome ambiguous; do not retry automatically.\n",
-  failure: "[embassy] command failed.\n",
-} as const;
+const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
   "serve",
@@ -121,15 +122,26 @@ export type GatewayCliDependencies = {
 
 type ParsedOptions = Readonly<Record<string, string | true>>;
 
+type CommonCliOptions = Readonly<{
+  args: readonly string[];
+  locale: DashboardLocale;
+}>;
+
 class CliFault extends Error {
   readonly code: string;
   readonly retryable: boolean;
+  readonly hint: CliCopyKey | undefined;
 
-  constructor(code: string, retryable = false) {
+  constructor(
+    code: string,
+    retryable = false,
+    hint?: CliCopyKey,
+  ) {
     super("The gateway client rejected the request.");
     this.name = "CliFault";
     this.code = code;
     this.retryable = retryable;
+    this.hint = hint;
   }
 }
 
@@ -177,6 +189,72 @@ function parseOptions(
   }
 
   return parsed;
+}
+
+function environmentLocale(env: NodeJS.ProcessEnv): DashboardLocale {
+  const value = env.EMBASSY_LOCALE;
+  if (value === undefined || value.length === 0) return DEFAULT_CLI_LOCALE;
+  if (!isDashboardLocale(value)) throw new CliFault("INVALID_ARGUMENTS");
+  return value;
+}
+
+function resolveCommonCliOptions(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): CommonCliOptions {
+  const stripped: string[] = [];
+  let locale: DashboardLocale | undefined;
+  let sawLocale = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token !== "--lang") {
+      if (token !== undefined) stripped.push(token);
+      continue;
+    }
+    if (sawLocale) throw new CliFault("INVALID_ARGUMENTS");
+    sawLocale = true;
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--") || value.length === 0) {
+      throw new CliFault("INVALID_ARGUMENTS");
+    }
+    if (!isDashboardLocale(value)) {
+      throw new CliFault("INVALID_ARGUMENTS");
+    }
+    locale = value;
+    index += 1;
+  }
+
+  return {
+    args: stripped,
+    // Resolve the environment only when no valid explicit flag exists. This
+    // lets an exact flag intentionally override even a malformed environment.
+    locale: locale ?? environmentLocale(env),
+  };
+}
+
+function fallbackCliLocale(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): DashboardLocale {
+  const localeFlagIndices: number[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--lang") localeFlagIndices.push(index);
+  }
+  if (localeFlagIndices.length === 1) {
+    const value = args[(localeFlagIndices[0] ?? -1) + 1];
+    if (isDashboardLocale(value)) return value;
+  }
+  return isDashboardLocale(env.EMBASSY_LOCALE)
+    ? env.EMBASSY_LOCALE
+    : DEFAULT_CLI_LOCALE;
+}
+
+function fixedStderr(
+  locale: DashboardLocale,
+  kind: CliStderrKind,
+): string {
+  return `[embassy] ${getCliCopy(locale)[`error.${kind}`]}\n`;
 }
 
 function requireString(
@@ -324,15 +402,17 @@ function emptyParams(args: readonly string[]): Record<string, never> {
   return {};
 }
 
-function liveDashboardLocale(args: readonly string[]): DashboardLocale {
-  const options = parseOptions(args, ["lang"], ["live"]);
-  assertExactOptionCount(options, 1, 2);
-  if (options.live !== true) throw new CliFault("INVALID_ARGUMENTS");
-  const locale = options.lang ?? "en";
-  if (locale !== "en" && locale !== "zh-CN") {
-    throw new CliFault("INVALID_ARGUMENTS");
+function validateLiveDashboardArgs(args: readonly string[]): void {
+  if (args.length === 0) {
+    throw new CliFault(
+      "INVALID_ARGUMENTS",
+      false,
+      "hint.dashboardLiveRequired",
+    );
   }
-  return locale;
+  const options = parseOptions(args, [], ["live"]);
+  assertExactOptionCount(options, 1);
+  if (options.live !== true) throw new CliFault("INVALID_ARGUMENTS");
 }
 
 async function buildRequest(
@@ -581,9 +661,10 @@ function serializedOutput(value: unknown): string {
 function writeFailure(
   stdout: Writable,
   stderr: Writable,
+  locale: DashboardLocale,
   command: GatewayCliCommand | undefined,
   code: string,
-  options: { ambiguous?: boolean; retryable?: boolean; kind: keyof typeof FIXED_STDERR },
+  options: { ambiguous?: boolean; retryable?: boolean; kind: CliStderrKind },
 ): void {
   const ambiguous = options.ambiguous ?? false;
   const retryable = options.retryable ?? false;
@@ -594,7 +675,7 @@ function writeFailure(
       error: { code, ambiguous, retryable },
     }),
   );
-  stderr.write(FIXED_STDERR[options.kind]);
+  stderr.write(fixedStderr(locale, options.kind));
 }
 
 function isRejectedResult(result: unknown): boolean {
@@ -748,15 +829,28 @@ export async function runGatewayCli(
     return gatewayCliExitCodes.ok;
   }
   const command = isCommand(argv[0]) ? argv[0] : undefined;
+  let locale = fallbackCliLocale(argv.slice(1), env);
   let serverReadyEmitted = false;
   let liveDashboardReadyEmitted = false;
 
   try {
+    const common = resolveCommonCliOptions(argv.slice(1), env);
+    locale = common.locale;
+    if (
+      argv.length === 0 ||
+      argv[0] === "--help" ||
+      argv[0] === "-h"
+    ) {
+      emptyParams(common.args);
+      stdout.write(getCliCopy(locale)["help.usage"]);
+      return gatewayCliExitCodes.ok;
+    }
     if (command === undefined) throw new CliFault("UNKNOWN_COMMAND");
     if (command === "serve") {
-      emptyParams(argv.slice(1));
+      emptyParams(common.args);
       await runServer({
         env,
+        locale,
         ...(dependencies.serverSignal === undefined
           ? {}
           : { signal: dependencies.serverSignal }),
@@ -780,7 +874,7 @@ export async function runGatewayCli(
       return gatewayCliExitCodes.ok;
     }
     if (command === "dashboard") {
-      const locale = liveDashboardLocale(argv.slice(1));
+      validateLiveDashboardArgs(common.args);
       const outcome = await runLiveDashboard({
         env,
         locale,
@@ -812,7 +906,7 @@ export async function runGatewayCli(
       }
       return gatewayCliExitCodes.ok;
     }
-    const request = await buildRequest(command, argv.slice(1), env, stdin);
+    const request = await buildRequest(command, common.args, env, stdin);
     const config = loadConfig(env);
     await validateControlSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;
@@ -831,13 +925,13 @@ export async function runGatewayCli(
         delay,
       );
       if (outcome.kind === "unknown") {
-        writeFailure(stdout, stderr, command, "DELIVERY_TOKEN_UNKNOWN", {
+        writeFailure(stdout, stderr, locale, command, "DELIVERY_TOKEN_UNKNOWN", {
           kind: "decision",
         });
         return gatewayCliExitCodes.rejected;
       }
       if (outcome.kind === "timeout") {
-        writeFailure(stdout, stderr, command, "DELIVERY_WAIT_TIMEOUT", {
+        writeFailure(stdout, stderr, locale, command, "DELIVERY_WAIT_TIMEOUT", {
           retryable: true,
           kind: "unavailable",
         });
@@ -852,7 +946,7 @@ export async function runGatewayCli(
       });
     }
     if (!response.ok) {
-      writeFailure(stdout, stderr, command, response.error.code, {
+      writeFailure(stdout, stderr, locale, command, response.error.code, {
         kind: "failure",
       });
       return gatewayCliExitCodes.failure;
@@ -870,12 +964,12 @@ export async function runGatewayCli(
         ? responseExitCode(response)
         : waitDeliveryExitCode(waitedDeliveryResponse);
     if (exitCode === gatewayCliExitCodes.rejected) {
-      stderr.write(FIXED_STDERR.decision);
+      stderr.write(fixedStderr(locale, "decision"));
     } else if (
       command === "wait-delivery" &&
       exitCode === gatewayCliExitCodes.failure
     ) {
-      stderr.write(FIXED_STDERR.failure);
+      stderr.write(fixedStderr(locale, "failure"));
     }
     return exitCode;
   } catch (error) {
@@ -883,12 +977,12 @@ export async function runGatewayCli(
       (command === "serve" && serverReadyEmitted) ||
       (command === "dashboard" && liveDashboardReadyEmitted)
     ) {
-      stderr.write(FIXED_STDERR.failure);
+      stderr.write(fixedStderr(locale, "failure"));
       return gatewayCliExitCodes.failure;
     }
     if (error instanceof GatewayControlTransportError) {
       const ambiguous = error.ambiguous;
-      writeFailure(stdout, stderr, command, error.code, {
+      writeFailure(stdout, stderr, locale, command, error.code, {
         ambiguous,
         retryable: ambiguous ? false : error.recoverable,
         kind: ambiguous ? "ambiguous" : "unavailable",
@@ -898,16 +992,19 @@ export async function runGatewayCli(
         : gatewayCliExitCodes.unavailable;
     }
     if (error instanceof CliFault) {
-      writeFailure(stdout, stderr, command, error.code, {
+      writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.retryable,
         kind: error.retryable ? "unavailable" : "input",
       });
+      if (error.hint !== undefined) {
+        stderr.write(`[embassy] ${getCliCopy(locale)[error.hint]}\n`);
+      }
       return error.retryable
         ? gatewayCliExitCodes.unavailable
         : gatewayCliExitCodes.invalidInput;
     }
     if (error instanceof BridgeError) {
-      writeFailure(stdout, stderr, command, error.code, {
+      writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.recoverable,
         kind: error.recoverable ? "unavailable" : "input",
       });
@@ -915,7 +1012,7 @@ export async function runGatewayCli(
         ? gatewayCliExitCodes.unavailable
         : gatewayCliExitCodes.invalidInput;
     }
-    writeFailure(stdout, stderr, command, "INTERNAL_ERROR", {
+    writeFailure(stdout, stderr, locale, command, "INTERNAL_ERROR", {
       kind: "failure",
     });
     return gatewayCliExitCodes.failure;
@@ -941,7 +1038,12 @@ if (isDirectExecution()) {
       process.exitCode = exitCode;
     },
     () => {
-      process.stderr.write(FIXED_STDERR.failure);
+      process.stderr.write(
+        fixedStderr(
+          fallbackCliLocale(process.argv.slice(3), process.env),
+          "failure",
+        ),
+      );
       process.exitCode = gatewayCliExitCodes.failure;
     },
   );
