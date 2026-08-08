@@ -840,6 +840,59 @@ test("recoverable advertisement failure retains provisional identity after re-en
   await provider.close();
 });
 
+test("overlapping same-alias advertisements reassert ownership after a clean first failure", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  await provider.initialize(callbacks().callbacks);
+  let advertiseCalls = 0;
+  let markFirstStarted!: () => void;
+  let releaseFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const firstMayFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  fake.afterAdvertiseVisible = async () => {
+    advertiseCalls += 1;
+    if (advertiseCalls !== 1) return;
+    markFirstStarted();
+    await firstMayFinish;
+    throw new BridgeError(
+      "CLAUDE_PEER_RECEIPT_NOT_WRITTEN",
+      "synthetic clean first advertisement failure",
+      true,
+    );
+  };
+  const first = provider.advertiseNativeCodexPeer({
+    alias: "codex-overlap@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  const firstRejected = assert.rejects(
+    first,
+    (error: unknown) =>
+      error instanceof BridgeError && error.recoverable,
+  );
+  await firstStarted;
+  const second = provider.advertiseNativeCodexPeer({
+    alias: "codex-overlap@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  releaseFirst();
+  await firstRejected;
+  await second;
+  assert.equal(advertiseCalls, 2);
+  assert.equal(
+    provider.currentNativeCodexPeerGeneration("codex-overlap@this-mac"),
+    INITIAL_LISTENER_GENERATION,
+  );
+  await provider.close();
+});
+
 test("native Codex succession fences callbacks and retires only the exact old listener", async () => {
   const fake = new FakeClaudePeer();
   const provider = createLocalClaudeGatewayProvider({

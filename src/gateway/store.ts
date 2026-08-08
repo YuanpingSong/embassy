@@ -80,6 +80,18 @@ const MESSAGE_ID_PATTERN =
 const MESSAGE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
 const FINGERPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
+class PostRenamePersistenceError extends BridgeError {
+  constructor(verified: boolean) {
+    super(
+      "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
+      verified
+        ? "The gateway state rename was installed, but directory durability could not be confirmed. The exact installed state was retained; retry is forbidden until recovery is reconciled."
+        : "The gateway state rename was installed, but the exact installed state could not be verified. The controller was disabled and must be recovered before reuse.",
+    );
+    this.name = "PostRenamePersistenceError";
+  }
+}
+
 const PROVIDERS = new Set<string>(gatewayProviders);
 const CONNECTOR_HEALTH = new Set<string>(connectorHealthStates);
 const COMPATIBILITY = new Set<string>(compatibilityStates);
@@ -1096,6 +1108,9 @@ export class GatewayStore {
   rootDir: string;
   private readonly now: () => Date;
   private readonly randomId: () => string;
+  private readonly afterStateFileRename:
+    | (() => void | Promise<void>)
+    | undefined;
   private readonly mutex = new KeyedMutex();
   private readonly transientBodies = new Map<string, string>();
   private state: GatewayPersistedState | undefined;
@@ -1107,6 +1122,7 @@ export class GatewayStore {
     this.rootDir = path.resolve(config.stateDir);
     this.now = dependencies.now ?? (() => new Date());
     this.randomId = dependencies.randomId ?? randomUUID;
+    this.afterStateFileRename = dependencies.afterStateFileRename;
   }
 
   get stateFilePath(): string {
@@ -2637,6 +2653,12 @@ export class GatewayStore {
       try {
         await this.persist();
       } catch (persistError) {
+        if (persistError instanceof PostRenamePersistenceError) {
+          // Rename is the commit point. `persist` reloaded and verified the
+          // installed state, so restoring `stateBefore` would create two
+          // conflicting authorities inside one controller.
+          throw persistError;
+        }
         // A failed durable commit must not leave a newer in-memory authority.
         this.state = stateBefore;
         this.transientBodies.clear();
@@ -3865,40 +3887,68 @@ export class GatewayStore {
       );
     }
     let handle: FileHandle | undefined;
+    let renamed = false;
     try {
-      handle = await open(
-        temporary,
-        constants.O_CREAT |
-          constants.O_EXCL |
-          constants.O_WRONLY |
-          (constants.O_NOFOLLOW ?? 0),
-        0o600,
-      );
-      await handle.writeFile(body, "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
       try {
-        const existing = await lstat(this.stateFilePath);
-        if (existing.isSymbolicLink() || !existing.isFile()) {
-          throw new BridgeError(
-            "UNSAFE_GATEWAY_STATE_FILE",
-            "The gateway state target is not a regular file.",
-          );
+        handle = await open(
+          temporary,
+          constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_WRONLY |
+            (constants.O_NOFOLLOW ?? 0),
+          0o600,
+        );
+        await handle.writeFile(body, "utf8");
+        await handle.chmod(0o600);
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        try {
+          const existing = await lstat(this.stateFilePath);
+          if (existing.isSymbolicLink() || !existing.isFile()) {
+            throw new BridgeError(
+              "UNSAFE_GATEWAY_STATE_FILE",
+              "The gateway state target is not a regular file.",
+            );
+          }
+          this.assertOwnedPrivate(existing.uid, existing.mode, "state file");
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "ENOENT"
+          ) {
+            throw error;
+          }
         }
-        this.assertOwnedPrivate(existing.uid, existing.mode, "state file");
+        await rename(temporary, this.stateFilePath);
+        renamed = true;
+        await this.afterStateFileRename?.();
+        const directory = await open(this.rootDir, constants.O_RDONLY);
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
       } catch (error) {
-        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
-          throw error;
+        if (!renamed) throw error;
+        let installed: GatewayPersistedState | undefined;
+        try {
+          installed = await this.loadStateFile();
+        } catch {
+          // Rename crossed the commit point. Keep the intended in-memory
+          // authority even if verification itself is unavailable; never
+          // manufacture an old-state rollback after an installed rename.
         }
-      }
-      await rename(temporary, this.stateFilePath);
-      await chmod(this.stateFilePath, 0o600);
-      const directory = await open(this.rootDir, constants.O_RDONLY);
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
+        const verified =
+          installed !== undefined &&
+          JSON.stringify(installed) === JSON.stringify(state);
+        if (verified && installed !== undefined) {
+          this.state = installed;
+        } else {
+          this.state = undefined;
+        }
+        throw new PostRenamePersistenceError(verified);
       }
     } finally {
       await handle?.close().catch(() => undefined);

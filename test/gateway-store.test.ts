@@ -22,6 +22,7 @@ import {
   GatewayStore,
 } from "../src/gateway/store.js";
 import type {
+  GatewayStoreDependencies,
   PrivateRouteBinding,
   RegisterRouteInput,
 } from "../src/gateway/types.js";
@@ -71,7 +72,9 @@ function limits(): GatewayConfig["limits"] {
   };
 }
 
-async function fixture(): Promise<{
+async function fixture(
+  dependencies: Pick<GatewayStoreDependencies, "afterStateFileRename"> = {},
+): Promise<{
   root: string;
   workspace: string;
   stateDir: string;
@@ -95,6 +98,7 @@ async function fixture(): Promise<{
   const store = new GatewayStore(config, {
     now: testClock.now,
     randomId: testClock.randomId,
+    ...dependencies,
   });
   return {
     root,
@@ -922,6 +926,177 @@ test("every durable succession stage has explicit restart authority", async () =
       await recovered.inspectCodexSuccessionRecoveryAuthority(),
       { authority: "none" },
       stage,
+    );
+    await recovered.close();
+  }
+});
+
+test("post-rename persistence failures never roll succession authority back in memory", async () => {
+  const scenarios = [
+    {
+      name: "prepare successor",
+      setup: async (_store: GatewayStore) => {},
+      commit: async (store: GatewayStore) => {
+        await store.prepareCodexSuccession({
+          old: oldSuccessionIdentity,
+          new: newSuccessionIdentity,
+        });
+      },
+      immediateStage: "prepared",
+      immediateAlias: oldSuccessionIdentity.alias,
+      restartStage: "prepared",
+      restartAlias: oldSuccessionIdentity.alias,
+    },
+    {
+      name: "arm publication",
+      setup: async (store: GatewayStore) => {
+        await store.prepareCodexSuccession({
+          old: oldSuccessionIdentity,
+          new: newSuccessionIdentity,
+        });
+      },
+      commit: async (store: GatewayStore) => {
+        await store.armCodexSuccessionPublication(exactSuccession);
+      },
+      immediateStage: "publication_armed",
+      immediateAlias: oldSuccessionIdentity.alias,
+      restartStage: "recovery_forbidden",
+      restartAlias: newSuccessionIdentity.alias,
+    },
+    {
+      name: "activate successor",
+      setup: async (store: GatewayStore) => {
+        await store.prepareCodexSuccession({
+          old: oldSuccessionIdentity,
+          new: newSuccessionIdentity,
+        });
+        await store.armCodexSuccessionPublication(exactSuccession);
+        await store.markCodexSuccessionPublished(exactSuccession);
+      },
+      commit: async (store: GatewayStore) => {
+        await store.activateCodexSuccession({
+          ...exactSuccession,
+          state: "idle",
+        });
+      },
+      immediateStage: "activated",
+      immediateAlias: newSuccessionIdentity.alias,
+      restartStage: "recovery_forbidden",
+      restartAlias: newSuccessionIdentity.alias,
+    },
+    {
+      name: "complete successor",
+      setup: async (store: GatewayStore) => {
+        await store.prepareCodexSuccession({
+          old: oldSuccessionIdentity,
+          new: newSuccessionIdentity,
+        });
+        await store.armCodexSuccessionPublication(exactSuccession);
+        await store.markCodexSuccessionPublished(exactSuccession);
+        await store.activateCodexSuccession({
+          ...exactSuccession,
+          state: "idle",
+        });
+      },
+      commit: async (store: GatewayStore) => {
+        await store.completeCodexSuccession(exactSuccession);
+      },
+      immediateStage: null,
+      immediateAlias: newSuccessionIdentity.alias,
+      restartStage: null,
+      restartAlias: newSuccessionIdentity.alias,
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    let failNextRename = false;
+    const { store, config, clock: testClock } = await fixture({
+      afterStateFileRename: () => {
+        if (!failNextRename) return;
+        failNextRename = false;
+        throw new Error(`synthetic post-rename failure: ${scenario.name}`);
+      },
+    });
+    await store.initialize();
+    await observeAndRegisterSuccessionRoutes(store);
+    await scenario.setup(store);
+
+    failNextRename = true;
+    await assert.rejects(
+      scenario.commit(store),
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN" &&
+        error.recoverable === false,
+      scenario.name,
+    );
+
+    // These are read-only observations made before any second mutation.
+    const memoryAuthority =
+      await store.inspectCodexSuccessionRecoveryAuthority();
+    const memoryStage =
+      memoryAuthority.authority === "none"
+        ? null
+        : memoryAuthority.journal.stage;
+    const memoryRoutes = await store.inspectPrivateCodexRoutes();
+    const disk = JSON.parse(
+      await readFile(store.stateFilePath, "utf8"),
+    ) as {
+      codexSuccession: null | { stage: string };
+      routes: Array<{ alias: string; binding: { provider: string } }>;
+    };
+    const diskCodexAliases = disk.routes
+      .filter((route) => route.binding.provider === "codex")
+      .map((route) => route.alias);
+    assert.equal(memoryStage, scenario.immediateStage, scenario.name);
+    assert.equal(
+      disk.codexSuccession?.stage ?? null,
+      scenario.immediateStage,
+      scenario.name,
+    );
+    assert.deepEqual(
+      memoryRoutes.map((route) => route.alias),
+      [scenario.immediateAlias],
+      scenario.name,
+    );
+    assert.deepEqual(diskCodexAliases, [scenario.immediateAlias], scenario.name);
+
+    await store.close();
+    const recovered = new GatewayStore(config, {
+      now: testClock.now,
+      randomId: testClock.randomId,
+    });
+    await recovered.initialize();
+    const recoveredAuthority =
+      await recovered.inspectCodexSuccessionRecoveryAuthority();
+    const recoveredStage =
+      recoveredAuthority.authority === "none"
+        ? null
+        : recoveredAuthority.journal.stage;
+    const recoveredRoutes = await recovered.inspectPrivateCodexRoutes();
+    const recoveredDisk = JSON.parse(
+      await readFile(recovered.stateFilePath, "utf8"),
+    ) as {
+      codexSuccession: null | { stage: string };
+      routes: Array<{ alias: string; binding: { provider: string } }>;
+    };
+    assert.equal(recoveredStage, scenario.restartStage, scenario.name);
+    assert.equal(
+      recoveredDisk.codexSuccession?.stage ?? null,
+      scenario.restartStage,
+      scenario.name,
+    );
+    assert.deepEqual(
+      recoveredRoutes.map((route) => route.alias),
+      [scenario.restartAlias],
+      scenario.name,
+    );
+    assert.deepEqual(
+      recoveredDisk.routes
+        .filter((route) => route.binding.provider === "codex")
+        .map((route) => route.alias),
+      [scenario.restartAlias],
+      scenario.name,
     );
     await recovered.close();
   }

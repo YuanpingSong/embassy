@@ -1646,19 +1646,14 @@ test("prepared generations validate syntax and reject foreign adapter ownership"
   const active = await current.adapter.listen({ onMessage: () => undefined });
   await active.advertise("codex-before", current.workspace);
   await active.quiesceInbound();
-  const duplicateGeneration = await current.adapter.listenPrepared(
-    active.generation,
-    { onMessage: () => undefined },
-  );
   await assert.rejects(
-    duplicateGeneration.publishReplacing(
-      active,
-      "codex-duplicate-generation",
-      current.workspace,
+    current.adapter.listenPrepared(
+      active.generation,
+      { onMessage: () => undefined },
     ),
     (error: unknown) =>
       error instanceof BridgeError &&
-      error.code === "CODEX_PEER_SUCCESSION_INVALID",
+      error.code === "CODEX_PEER_GENERATION_EXISTS",
   );
   const foreignAdapter = new ClaudePeerAdapter(
     {
@@ -1827,6 +1822,10 @@ test("publication proves a post-rename failure as published by exact reread", as
   await active.advertise("codex-before", current.workspace);
   await active.quiesceInbound();
 
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "published",
+  );
   assert.equal(
     await prepared.publishReplacing(active, "codex-after", current.workspace),
     "published",
@@ -2799,6 +2798,57 @@ test("listener shutdown preserves confirmed-write evidence as unconfirmed", asyn
     status: "unconfirmed",
     trust: "untrusted_same_uid_peer",
   });
+});
+
+test("close is single-flight and shuts the socket after registry cleanup failure", async (t) => {
+  let failUnadvertise = true;
+  let received = 0;
+  const current = await fixture(t, {
+    registryOperationHook: (event) => {
+      if (
+        failUnadvertise &&
+        event.operation === "unadvertise" &&
+        event.phase === "entered"
+      ) {
+        failUnadvertise = false;
+        throw new Error("synthetic unadvertise failure");
+      }
+    },
+  });
+  const listener = await current.adapter.listen({
+    onMessage: () => {
+      received += 1;
+    },
+  });
+  await listener.advertise("codex-close-failure", current.workspace);
+  const callbackPath = listener.address.slice(4);
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+
+  const firstClose = listener.close();
+  const concurrentClose = listener.close();
+  assert.strictEqual(concurrentClose, firstClose);
+  await assert.rejects(firstClose, /synthetic unadvertise failure/);
+  assert.equal(listener.closed, true);
+  await assert.rejects(lstat(callbackPath), { code: "ENOENT" });
+  assert.equal(
+    (JSON.parse(await readFile(registryPath, "utf8")) as Record<string, unknown>)
+      .name,
+    "codex-close-failure",
+  );
+  await sendLines(callbackPath, [
+    `${JSON.stringify({
+      type: "user",
+      message: { role: "user", content: "must not arrive" },
+      msgV: 1,
+      msg_id: MESSAGE_ONE,
+      priority: "next",
+    })}\n`,
+  ]).catch(() => undefined);
+  assert.equal(received, 0);
+
+  const retryClose = listener.close();
+  assert.strictEqual(retryClose, firstClose);
+  await assert.rejects(retryClose, /synthetic unadvertise failure/);
 });
 
 test("callback cleanup preserves an observed foreign path replacement", async (t) => {

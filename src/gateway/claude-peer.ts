@@ -1591,6 +1591,17 @@ export class ClaudePeerAdapter {
         "A native Codex listener requires one bounded opaque generation.",
       );
     }
+    if (
+      [...this.#listeners].some(
+        (listener) =>
+          !listener.closed && listener.generation === generation,
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_GENERATION_EXISTS",
+        "A live native Codex listener already owns this exact generation.",
+      );
+    }
     const listener = await ClaudePeerListener.create({
       sessionsDir: this.#sessionsDir,
       socketDir: this.#socketDir,
@@ -2016,7 +2027,9 @@ export class ClaudePeerListener {
   #publicationSourceGeneration: FileGeneration | undefined;
   #publicationConfirmed = false;
   #activationGranted = false;
+  #closing = false;
   #closed = false;
+  #closeOperation: Promise<void> | undefined;
 
   private constructor(
     options: ListenerCreateOptions,
@@ -2179,7 +2192,11 @@ export class ClaudePeerListener {
   }
 
   get closed(): boolean {
-    return this.#closed;
+    return this.#closing || this.#closed;
+  }
+
+  #isClosingOrClosed(): boolean {
+    return this.#closing || this.#closed;
   }
 
   #registryPath(): string {
@@ -2494,7 +2511,7 @@ export class ClaudePeerListener {
 
   async advertise(name: string, cwd: string): Promise<void> {
     await this.#mutateRegistry("advertise", async () => {
-      if (this.#closed) {
+      if (this.#isClosingOrClosed()) {
         throw new BridgeError(
           "CLAUDE_PEER_LISTENER_CLOSED",
           "The Claude peer callback listener is closed.",
@@ -2582,8 +2599,8 @@ export class ClaudePeerListener {
     cwd: string,
   ): Promise<ClaudePeerRegistryPublicationOutcome> {
     if (
-      this.#closed ||
-      current.#closed ||
+      this.#isClosingOrClosed() ||
+      current.#isClosingOrClosed() ||
       this === current ||
       this.#preparedGeneration === undefined ||
       this.generation === current.generation ||
@@ -2648,8 +2665,8 @@ export class ClaudePeerListener {
       this.#publicationSourceGeneration = temporary.generation;
       await this.#registryPublicationHook?.("before_rename");
       if (
-        this.#closed ||
-        current.#closed ||
+        this.#isClosingOrClosed() ||
+        current.#isClosingOrClosed() ||
         !this.#inboundQuiesced ||
         !current.#inboundQuiesced
       ) {
@@ -2697,7 +2714,7 @@ export class ClaudePeerListener {
     status: ClaudePeerStatus,
   ): Promise<void> {
     if (
-      this.#closed ||
+      this.#isClosingOrClosed() ||
       this.#advertisedRecord === undefined ||
       this.#advertisedRecord.status === status
     ) {
@@ -2772,7 +2789,7 @@ export class ClaudePeerListener {
   }
 
   grantSuccessionActivation(): void {
-    if (this.#closed) {
+    if (this.#isClosingOrClosed()) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -2799,7 +2816,7 @@ export class ClaudePeerListener {
   }
 
   resumeInbound(): void {
-    if (this.#closed) {
+    if (this.#isClosingOrClosed()) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -2819,7 +2836,7 @@ export class ClaudePeerListener {
     status: "held" | "delivered" | "denied" | "expired",
     diagnostic?: ClaudePeerDeliveryDiagnostic,
   ): Promise<ClaudePeerAcknowledgmentResult> {
-    if (this.#closed) {
+    if (this.#isClosingOrClosed()) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -2874,7 +2891,7 @@ export class ClaudePeerListener {
     receiptHandle: string,
     progress: ClaudePeerInboundProgress,
   ): Promise<ClaudePeerAcknowledgmentResult> {
-    if (this.#closed) {
+    if (this.#isClosingOrClosed()) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -3070,7 +3087,7 @@ export class ClaudePeerListener {
     binding: TargetBinding,
     receiptDeadlineAt?: number,
   ): void {
-    if (this.#closed) {
+    if (this.#isClosingOrClosed()) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -3134,7 +3151,10 @@ export class ClaudePeerListener {
   }
 
   #accept(socket: Socket): void {
-    if (this.#closed || this.#connections.size >= this.#limits.maxConnections) {
+    if (
+      this.#isClosingOrClosed() ||
+      this.#connections.size >= this.#limits.maxConnections
+    ) {
       socket.destroy();
       void this.#notice("CONNECTION_LIMIT");
       return;
@@ -3237,7 +3257,7 @@ export class ClaudePeerListener {
     frame: ParsedFrame,
     rejectTransport: () => void,
   ): Promise<void> {
-    if (this.#closed) return;
+    if (this.#isClosingOrClosed()) return;
     if (frame.type === "control") {
       await this.#handleControl(frame);
       return;
@@ -3309,7 +3329,9 @@ export class ClaudePeerListener {
   async #attemptCapacitySettlement(
     settlement: CapacitySettlement,
   ): Promise<void> {
-    if (this.#closed || this.#capacitySettlement !== settlement) return;
+    if (this.#isClosingOrClosed() || this.#capacitySettlement !== settlement) {
+      return;
+    }
     settlement.attempts += 1;
     try {
       await this.#writeInboundStatus(
@@ -3323,7 +3345,9 @@ export class ClaudePeerListener {
     } catch (error) {
       if (this.#capacitySettlement !== settlement) return;
       const retryable =
-        error instanceof BridgeError && error.recoverable && !this.#closed;
+        error instanceof BridgeError &&
+        error.recoverable &&
+        !this.#isClosingOrClosed();
       if (
         !retryable ||
         settlement.attempts >= CAPACITY_SETTLEMENT_MAX_ATTEMPTS
@@ -3412,11 +3436,23 @@ export class ClaudePeerListener {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
+  close(): Promise<void> {
+    if (this.#closeOperation !== undefined) return this.#closeOperation;
+    if (this.#closed) return Promise.resolve();
+    this.#closing = true;
     this.#inboundQuiesced = true;
-    await this.unadvertise();
+    const operation = this.#performClose();
+    this.#closeOperation = operation;
+    return operation;
+  }
+
+  async #performClose(): Promise<void> {
+    const errors: unknown[] = [];
+    try {
+      await this.unadvertise();
+    } catch (error) {
+      errors.push(error);
+    }
     const unsettledReceipts = [...this.#pending.entries()];
     for (const pending of this.#pending.values()) clearTimeout(pending.timer);
     this.#pending.clear();
@@ -3425,7 +3461,7 @@ export class ClaudePeerListener {
       clearTimeout(this.#capacitySettlement.retryTimer);
     }
     this.#capacitySettlement = undefined;
-    await Promise.allSettled(
+    const receiptResults = await Promise.allSettled(
       unsettledReceipts.map(async ([messageId, pending]) =>
         this.#emitReceipt({
           messageId,
@@ -3437,8 +3473,12 @@ export class ClaudePeerListener {
         }),
       ),
     );
+    for (const result of receiptResults) {
+      if (result.status === "rejected") errors.push(result.reason);
+    }
     for (const socket of this.#connections) socket.destroy();
     this.#connections.clear();
+    let callbackPathOwned = false;
     try {
       const beforeClose = await lstat(this.#socketPath);
       if (
@@ -3453,42 +3493,71 @@ export class ClaudePeerListener {
         // observed generation change. The now-unreachable descriptor is
         // unref'd and left for process exit rather than deleting foreign data.
         this.#server.unref();
-        this.#onClosed();
-        throw new BridgeError(
-          "CLAUDE_PEER_CALLBACK_CHANGED",
-          "The callback path changed; foreign replacement was preserved.",
+        errors.push(
+          new BridgeError(
+            "CLAUDE_PEER_CALLBACK_CHANGED",
+            "The callback path changed; foreign replacement was preserved.",
+          ),
         );
+      } else {
+        callbackPathOwned = true;
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         this.#server.unref();
-        this.#onClosed();
-        throw new BridgeError(
-          "CLAUDE_PEER_CALLBACK_CHANGED",
-          "The callback path disappeared; cleanup failed closed.",
+        errors.push(
+          new BridgeError(
+            "CLAUDE_PEER_CALLBACK_CHANGED",
+            "The callback path disappeared; cleanup failed closed.",
+          ),
         );
+      } else {
+        this.#server.unref();
+        errors.push(error);
       }
-      if (error instanceof BridgeError) throw error;
-      this.#server.unref();
-      this.#onClosed();
-      throw error;
     }
-    await new Promise<void>((resolve) => this.#server.close(() => resolve()));
-    try {
-      const stat = await lstat(this.#socketPath);
-      if (
-        stat.isSocket() &&
-        sameSocketGeneration(
-          { dev: stat.dev, ino: stat.ino },
-          this.#socketGeneration,
-        )
-      ) {
-        await unlink(this.#socketPath);
+
+    if (callbackPathOwned) {
+      try {
+        await new Promise<void>((resolve, reject) =>
+          this.#server.close((error) =>
+            error === undefined ? resolve() : reject(error),
+          ),
+        );
+      } catch (error) {
+        errors.push(error);
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    } finally {
+      try {
+        const stat = await lstat(this.#socketPath);
+        if (
+          stat.isSocket() &&
+          sameSocketGeneration(
+            { dev: stat.dev, ino: stat.ino },
+            this.#socketGeneration,
+          )
+        ) {
+          await unlink(this.#socketPath);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          errors.push(error);
+        }
+      }
+    }
+
+    this.#closing = false;
+    this.#closed = true;
+    try {
       this.#onClosed();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        "The Claude peer listener closed with multiple cleanup failures.",
+      );
     }
   }
 }

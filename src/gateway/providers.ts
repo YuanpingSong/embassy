@@ -296,6 +296,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     | Promise<GatewayAdapterDiscoverySnapshot>
     | undefined;
   private monitorTimer: NodeJS.Timeout | undefined;
+  /** Invocation-ordered registry mutations; the tail itself never rejects. */
+  private nativeCodexRegistrationTail: Promise<void> = Promise.resolve();
   private callbacks: GatewayAdapterCallbacks | undefined;
   private activeNativeCodexListener:
     | NativeCodexListenerGeneration
@@ -461,41 +463,46 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     alias: string;
     cwd: string;
   }): Promise<void> {
-    this.assertReady();
     const registration = this.nativeCodexRegistration(input);
-    const active = this.requireActiveNativeCodexListener();
-    if (
-      active.registration !== undefined &&
-      active.registration.alias !== registration.alias
-    ) {
-      throw new BridgeError(
-        "CODEX_PEER_ALREADY_ADVERTISED",
-        "This listener generation already advertises another Codex peer.",
-      );
-    }
-    const installedProvisional = active.registration === undefined;
-    if (installedProvisional) {
-      active.registration = registration;
-      active.registrationProvisional = true;
-      active.provisionalIngressForwarded = false;
-    }
-    try {
-      await active.listener.advertise(registration.name, registration.cwd);
-      active.registrationProvisional = false;
-      active.provisionalIngressForwarded = false;
-    } catch (error) {
+    await this.serializeNativeCodexRegistration(async () => {
+      this.assertReady();
+      const active = this.requireActiveNativeCodexListener();
       if (
-        error instanceof BridgeError &&
-        error.recoverable &&
-        installedProvisional &&
-        active.registration === registration &&
-        !active.provisionalIngressForwarded
+        active.registration !== undefined &&
+        active.registration.alias !== registration.alias
       ) {
-        delete active.registration;
-        active.registrationProvisional = false;
+        throw new BridgeError(
+          "CODEX_PEER_ALREADY_ADVERTISED",
+          "This listener generation already advertises another Codex peer.",
+        );
       }
-      throw error;
-    }
+      const installedProvisional = active.registration === undefined;
+      if (installedProvisional) {
+        active.registration = registration;
+        active.registrationProvisional = true;
+        active.provisionalIngressForwarded = false;
+      }
+      try {
+        await active.listener.advertise(registration.name, registration.cwd);
+        // Reassert exact ownership after publication. A preceding serialized
+        // attempt may have removed its own clean provisional registration.
+        active.registration = registration;
+        active.registrationProvisional = false;
+        active.provisionalIngressForwarded = false;
+      } catch (error) {
+        if (
+          error instanceof BridgeError &&
+          error.recoverable &&
+          installedProvisional &&
+          active.registration === registration &&
+          !active.provisionalIngressForwarded
+        ) {
+          delete active.registration;
+          active.registrationProvisional = false;
+        }
+        throw error;
+      }
+    });
   }
 
   currentNativeCodexPeerGeneration(alias: string): string {
@@ -866,13 +873,15 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   }
 
   async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
-    const active = this.activeNativeCodexListener;
-    if (active?.registration?.alias !== alias) return;
-    await active.listener.unadvertise(active.registration.name);
-    this.purgeNativeCodexPeerGenerationReplyCapabilities(active.generation);
-    delete active.registration;
-    active.registrationProvisional = false;
-    active.provisionalIngressForwarded = false;
+    await this.serializeNativeCodexRegistration(async () => {
+      const active = this.activeNativeCodexListener;
+      if (active?.registration?.alias !== alias) return;
+      await active.listener.unadvertise(active.registration.name);
+      this.purgeNativeCodexPeerGenerationReplyCapabilities(active.generation);
+      delete active.registration;
+      active.registrationProvisional = false;
+      active.provisionalIngressForwarded = false;
+    });
   }
 
   async updateNativeCodexPeerStatus(
@@ -1201,6 +1210,17 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         true,
       );
     }
+  }
+
+  private serializeNativeCodexRegistration<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const queued = this.nativeCodexRegistrationTail.then(operation);
+    this.nativeCodexRegistrationTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
   }
 
   private nativeCodexRegistration(input: {

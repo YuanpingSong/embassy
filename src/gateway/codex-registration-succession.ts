@@ -25,6 +25,7 @@ export const codexRegistrationSuccessionPhases = [
   "active_new",
   "offline_poisoned",
   "recovery_required",
+  "resuming_old",
 ] as const;
 
 export type CodexRegistrationSuccessionPhase =
@@ -57,6 +58,7 @@ export const codexSuccessionFailurePhases = [
   "activation",
   "retirement",
   "cleanup",
+  "resume",
 ] as const;
 
 export type CodexSuccessionFailurePhase =
@@ -120,6 +122,13 @@ export type RecoveryRequiredSuccessionState = SuccessionContext &
     publicationBoundary: PublicationBoundary;
   }>;
 
+export type ResumingOldSuccessionState = SuccessionContext &
+  Readonly<{
+    phase: "resuming_old";
+    failedPhase: CodexSuccessionFailurePhase | "abort" | "barrier_busy";
+    safeErrorCode: string;
+  }>;
+
 export type CodexRegistrationSuccessionState =
   | ActiveOldSuccessionState
   | ActiveNewSuccessionState
@@ -127,7 +136,8 @@ export type CodexRegistrationSuccessionState =
   | PreparedNewSuccessionState
   | PublishedNewSuccessionState
   | OfflinePoisonedSuccessionState
-  | RecoveryRequiredSuccessionState;
+  | RecoveryRequiredSuccessionState
+  | ResumingOldSuccessionState;
 
 type CorrelatedEvent = Readonly<{ generation: string }>;
 
@@ -146,6 +156,7 @@ export type CodexRegistrationSuccessionEvent =
   | (CorrelatedEvent & Readonly<{ type: "registry_published" }>)
   | (CorrelatedEvent & Readonly<{ type: "activate" }>)
   | (CorrelatedEvent & Readonly<{ type: "cleanup_confirmed" }>)
+  | (CorrelatedEvent & Readonly<{ type: "resume_confirmed" }>)
   | (CorrelatedEvent &
       Readonly<{
         type: "abort";
@@ -414,6 +425,9 @@ export function transitionCodexRegistrationSuccession(
     case "cleanup_confirmed":
       return cleanupConfirmed(state);
 
+    case "resume_confirmed":
+      return resumeConfirmed(state);
+
     case "abort":
       return abortSuccession(state, event.safeErrorCode);
 
@@ -488,6 +502,10 @@ export function assertCodexRegistrationSuccessionInvariant(
           "Codex succession rollback must agree with publication evidence.",
         );
       }
+      return;
+    case "resuming_old":
+      assertContext(state);
+      validateSafeErrorCode(state.safeErrorCode);
       return;
   }
 }
@@ -589,6 +607,15 @@ function phaseFailed(
       event.phase,
       event.safeErrorCode,
       state.publicationBoundary,
+    );
+  }
+
+  if (state.phase === "resuming_old" && event.phase === "resume") {
+    return poisonOffline(
+      state,
+      event.phase,
+      event.safeErrorCode,
+      "not_armed",
     );
   }
 
@@ -742,17 +769,18 @@ function cleanupConfirmed(
   }
 
   if (state.phase === "recovery_required") {
-    if (state.rollback === "forbidden") return unchanged(state);
-    const restored =
-      state.priorStablePhase === "active_old"
-        ? ({ phase: "active_old", active: state.oldRegistration } as const)
-        : ({
-            phase: "active_new",
-            active: state.oldRegistration,
-            retired: null,
-          } as const);
+    if (state.rollback === "forbidden" || state.failedPhase === "resume") {
+      return unchanged(state);
+    }
     return checked({
-      state: restored,
+      state: {
+        phase: "resuming_old",
+        oldRegistration: state.oldRegistration,
+        newRegistration: state.newRegistration,
+        priorStablePhase: state.priorStablePhase,
+        failedPhase: state.failedPhase,
+        safeErrorCode: state.safeErrorCode,
+      },
       effects: [
         {
           type: "resume_old_ingress",
@@ -767,7 +795,7 @@ function cleanupConfirmed(
   }
 
   if (state.phase === "offline_poisoned") {
-    if (state.rollback === "old_allowed") {
+    if (state.rollback === "old_allowed" && state.failedPhase !== "resume") {
       const recoverable: RecoveryRequiredSuccessionState = {
         ...state,
         phase: "recovery_required",
@@ -787,6 +815,21 @@ function cleanupConfirmed(
   }
 
   return unchanged(state);
+}
+
+function resumeConfirmed(
+  state: CodexRegistrationSuccessionState,
+): CodexRegistrationSuccessionTransition {
+  if (state.phase !== "resuming_old") return unchanged(state);
+  const restored =
+    state.priorStablePhase === "active_old"
+      ? ({ phase: "active_old", active: state.oldRegistration } as const)
+      : ({
+          phase: "active_new",
+          active: state.oldRegistration,
+          retired: null,
+        } as const);
+  return checked({ state: restored, effects: [] });
 }
 
 function prepublicationRecovery(
@@ -887,6 +930,7 @@ function successionContext(
     case "published_new":
     case "offline_poisoned":
     case "recovery_required":
+    case "resuming_old":
       return state;
     case "active_old":
       return null;

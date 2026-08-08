@@ -115,6 +115,7 @@ test("the pure machine exposes the closed v1 phase and failure vocabularies", ()
     "active_new",
     "offline_poisoned",
     "recovery_required",
+    "resuming_old",
   ]);
   assert.deepEqual(codexSuccessionFailurePhases, [
     "freeze",
@@ -126,6 +127,7 @@ test("the pure machine exposes the closed v1 phase and failure vocabularies", ()
     "activation",
     "retirement",
     "cleanup",
+    "resume",
   ]);
 });
 
@@ -249,8 +251,17 @@ test("barrier busy fails fast and restores the old registration only after clean
     "cleanup_unpublished_generation",
   ]);
 
-  const restored = transition(busy.state, {
+  const resuming = transition(busy.state, {
     type: "cleanup_confirmed",
+    generation: NEXT.generation,
+  });
+  assert.equal(resuming.state.phase, "resuming_old");
+  assert.deepEqual(effectTypes(resuming.effects), [
+    "resume_old_ingress",
+    "resume_old_dispatch",
+  ]);
+  const restored = transition(resuming.state, {
+    type: "resume_confirmed",
     generation: NEXT.generation,
   });
   assert.equal(restored.state.phase, "active_old");
@@ -258,10 +269,6 @@ test("barrier busy fails fast and restores the old registration only after clean
     restored.state.phase === "active_old" ? restored.state.active : undefined,
     OLD,
   );
-  assert.deepEqual(effectTypes(restored.effects), [
-    "resume_old_ingress",
-    "resume_old_dispatch",
-  ]);
 });
 
 test("phase-specific failures recover before arming and poison once arming begins", () => {
@@ -374,8 +381,13 @@ test("positive durable absence can recover after an armed abort or error, but ne
         : undefined,
       "old_allowed",
     );
-    const restored = step(provenAbsent.state, {
+    const resuming = step(provenAbsent.state, {
       type: "cleanup_confirmed",
+      generation: NEXT.generation,
+    });
+    assert.equal(resuming.phase, "resuming_old");
+    const restored = step(resuming, {
+      type: "resume_confirmed",
       generation: NEXT.generation,
     });
     assert.equal(restored.phase, "active_old");
@@ -443,7 +455,7 @@ test("activation, retirement, and post-publication abort failures never roll bac
   }
 });
 
-test("cleanup failure stays offline and preserves whether old rollback is still legal", () => {
+test("cleanup recovery stays non-stable until old ingress and dispatch resume are confirmed", () => {
   const recovering = step(begun(), {
     type: "abort",
     generation: NEXT.generation,
@@ -467,11 +479,65 @@ test("cleanup failure stays offline and preserves whether old rollback is still 
     type: "cleanup_confirmed",
     generation: NEXT.generation,
   });
-  assert.equal(cleaned.state.phase, "active_old");
+  assert.equal(cleaned.state.phase, "resuming_old");
+  assert.deepEqual(effectTypes(cleaned.effects), [
+    "resume_old_ingress",
+    "resume_old_dispatch",
+  ]);
+  const restored = transition(cleaned.state, {
+    type: "resume_confirmed",
+    generation: NEXT.generation,
+  });
+  assert.equal(restored.state.phase, "active_old");
   assert.deepEqual(
-    cleaned.state.phase === "active_old" ? cleaned.state.active : undefined,
+    restored.state.phase === "active_old" ? restored.state.active : undefined,
     OLD,
   );
+});
+
+test("a failed old-ingress resume stays poisoned and requires manual recovery", () => {
+  const recovering = step(begun(), {
+    type: "barrier_busy",
+    generation: NEXT.generation,
+    safeErrorCode: "SUCCESSION_BARRIER_BUSY",
+  });
+  const resuming = step(recovering, {
+    type: "cleanup_confirmed",
+    generation: NEXT.generation,
+  });
+  assert.equal(resuming.phase, "resuming_old");
+
+  const failed = transition(resuming, {
+    type: "phase_failed",
+    generation: NEXT.generation,
+    phase: "resume",
+    safeErrorCode: "SUCCESSION_RESUME_FAILED",
+  });
+  assert.equal(failed.state.phase, "offline_poisoned");
+  assert.equal(
+    failed.state.phase === "offline_poisoned"
+      ? failed.state.failedPhase
+      : undefined,
+    "resume",
+  );
+  assert.deepEqual(effectTypes(failed.effects), [
+    "poison_new_generation",
+    "take_registrations_offline",
+    "cleanup_poisoned_generations",
+  ]);
+
+  const manual = transition(failed.state, {
+    type: "cleanup_confirmed",
+    generation: NEXT.generation,
+  });
+  assert.equal(manual.state.phase, "recovery_required");
+  assert.deepEqual(effectTypes(manual.effects), ["manual_recovery_required"]);
+  const duplicateCleanup = transition(manual.state, {
+    type: "cleanup_confirmed",
+    generation: NEXT.generation,
+  });
+  assert.equal(duplicateCleanup.state, manual.state);
+  assert.deepEqual(duplicateCleanup.effects, []);
 });
 
 test("restart evidence is fail-closed after arming and recovers only on positive absence", () => {
@@ -593,6 +659,7 @@ test("all follow-up events are fenced to the immutable exact new generation", ()
     { type: "registry_published", generation: OLD.generation },
     { type: "activate", generation: OLD.generation },
     { type: "cleanup_confirmed", generation: OLD.generation },
+    { type: "resume_confirmed", generation: OLD.generation },
     {
       type: "abort",
       generation: OLD.generation,
@@ -650,6 +717,7 @@ test("the transition table is deterministic and every declared phase is BFS-reac
     { type: "registry_published", generation: NEXT.generation },
     { type: "activate", generation: NEXT.generation },
     { type: "cleanup_confirmed", generation: NEXT.generation },
+    { type: "resume_confirmed", generation: NEXT.generation },
     {
       type: "abort",
       generation: NEXT.generation,

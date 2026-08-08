@@ -22,7 +22,10 @@ import {
   type GatewayAdapterRouteState,
   type GatewayProviderAdapter,
 } from "../src/gateway/service.js";
-import { GatewayStore } from "../src/gateway/store.js";
+import {
+  GatewayStore,
+  type CodexSuccessionRecoveryAuthority,
+} from "../src/gateway/store.js";
 import type {
   GatewayPublicSnapshot,
   PrivateEndpointIdentity,
@@ -117,6 +120,23 @@ class MutableSnapshotStore extends GatewayStore {
 
   override async publicSnapshot(): Promise<GatewayPublicSnapshot> {
     return structuredClone(this.current);
+  }
+}
+
+class UnprovablePreparedAuthorityStore extends GatewayStore {
+  maskNextPreparedAuthority = false;
+
+  override async inspectCodexSuccessionRecoveryAuthority(): Promise<CodexSuccessionRecoveryAuthority> {
+    const authority = await super.inspectCodexSuccessionRecoveryAuthority();
+    if (
+      this.maskNextPreparedAuthority &&
+      authority.authority === "old" &&
+      authority.journal.stage === "prepared"
+    ) {
+      this.maskNextPreparedAuthority = false;
+      return { authority: "none" };
+    }
+    return authority;
   }
 }
 
@@ -275,6 +295,9 @@ class FakeProvider implements GatewayProviderAdapter {
   releasedNativeReceipts: string[] = [];
   lifecycleEvents: string[] = [];
   nativeMessageOnQuiesce:
+    | Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0]
+    | undefined;
+  nativeMessageAfterSuccessionActivation:
     | Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0]
     | undefined;
   assertWorkspaceDisjoint?: (
@@ -553,6 +576,12 @@ class FakeProvider implements GatewayProviderAdapter {
     this.nativeCodexPreparedGeneration = undefined;
     this.nativeCodexIngressQuiesced = false;
     this.nativeCodexMonitorFrozen = false;
+    if (this.nativeMessageAfterSuccessionActivation !== undefined) {
+      this.callbacks?.onClaudeMessage?.(
+        this.nativeMessageAfterSuccessionActivation,
+      );
+      this.nativeMessageAfterSuccessionActivation = undefined;
+    }
   }
 
   async cleanupPreparedNativeCodexPeerGeneration(
@@ -1658,6 +1687,246 @@ test("a failed first cleanup is retried under the reducer before the old registr
   });
 });
 
+test("an installed prepare journal is reconciled and cleared after a post-rename failure", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  let failNextRename = false;
+  const store = new GatewayStore(config, {
+    afterStateFileRename: () => {
+      if (!failNextRename) return;
+      failNextRename = false;
+      throw new Error("synthetic installed prepare commit failure");
+    },
+  });
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const generations = [
+    "successor_prepare_unknown",
+    "successor_after_reconcile",
+  ];
+  const service = new GatewayService({
+    config,
+    store,
+    adapters: [claude, codex],
+    successionGeneration: () => generations.shift() ?? "unexpected_generation",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  failNextRename = true;
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  assert.deepEqual(
+    await service.store.inspectCodexSuccessionRecoveryAuthority(),
+    { authority: "none" },
+  );
+  assert.equal(claude.nativeCodexActiveAlias, "codex-main@this-mac");
+  assert.equal(claude.nativeCodexActiveGeneration, "initial");
+  assert.equal(claude.nativeCodexPreparedGeneration, undefined);
+  assert.equal(claude.nativeCodexIngressQuiesced, false);
+  assert.equal(claude.nativeCodexMonitorFrozen, false);
+
+  codex.dispatchResults.push({ state: "delivered" });
+  const oldRouteSend = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    expectsReply: false,
+  });
+  assert.equal(oldRouteSend.accepted, true);
+  await waitFor(() => codex.dispatches.length === 1);
+  assert.equal(codex.dispatches[0]?.binding.routeHandle, THREAD_ID);
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await service.store.inspectCodexSuccessionRecoveryAuthority(),
+    { authority: "none" },
+  );
+  assert.equal(claude.nativeCodexActiveAlias, "codex-next@this-mac");
+  assert.equal(
+    claude.nativeCodexActiveGeneration,
+    "successor_after_reconcile",
+  );
+});
+
+test("an unprovable prepare commit stays poisoned and requires manual recovery", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  let failNextRename = false;
+  const store = new UnprovablePreparedAuthorityStore(config, {
+    afterStateFileRename: () => {
+      if (!failNextRename) return;
+      failNextRename = false;
+      throw new Error("synthetic unprovable prepare commit failure");
+    },
+  });
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config,
+    store,
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_unprovable_prepare",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  store.maskNextPreparedAuthority = true;
+  failNextRename = true;
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  const authority =
+    await service.store.inspectCodexSuccessionRecoveryAuthority();
+  assert.equal(authority.authority, "old");
+  assert.equal(
+    authority.authority === "old" ? authority.journal.stage : undefined,
+    "prepared",
+  );
+  assert.equal(claude.closed, true);
+  assert.equal(codex.closed, true);
+  assert.equal(
+    (await handlers.registerCodex(codexRegistration())).accepted,
+    false,
+  );
+  assert.equal(
+    (
+      await handlers.sendToClaude({
+        ...toClaude("unprovable prepare must reject bodies"),
+        expectsReply: false,
+      })
+    ).accepted,
+    false,
+  );
+  assert.equal(
+    (await handlers.listSnapshot()).routes.every(
+      ({ enabled, state, compatibility }) =>
+        !enabled && state === "disabled" && compatibility === "expired",
+    ),
+    true,
+  );
+});
+
+test("a failed old-generation resume stays poisoned, offline, and closed to new work", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.successionFailures.set("prepare", [
+    new Error("synthetic listener preparation failure before resume"),
+  ]);
+  claude.successionFailures.set("resume", [
+    new Error("synthetic old-ingress resume failure"),
+  ]);
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_resume_failure",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  const succession = await handlers.registerCodex(
+    successorCodexRegistration(),
+  );
+  assert.equal(succession.accepted, false);
+  const resumeIndex = claude.lifecycleEvents.indexOf(
+    "succession:resume:initial",
+  );
+  const requiesceIndex = claude.lifecycleEvents.lastIndexOf(
+    "succession:quiesce:initial",
+  );
+  const closeIndex = claude.lifecycleEvents.lastIndexOf("provider:close");
+  assert.equal(resumeIndex >= 0, true);
+  assert.equal(requiesceIndex > resumeIndex, true);
+  assert.equal(closeIndex > requiesceIndex, true);
+  assert.equal(claude.nativeCodexIngressQuiesced, true);
+  assert.equal(claude.nativeCodexMonitorFrozen, true);
+  assert.equal(claude.closed, true);
+  assert.equal(codex.closed, true);
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes.map(({ alias, enabled, state, compatibility }) => ({
+      alias,
+      enabled,
+      state,
+      compatibility,
+    })),
+    [
+      {
+        alias: "codex-main@this-mac",
+        enabled: false,
+        state: "disabled",
+        compatibility: "expired",
+      },
+    ],
+  );
+  assert.deepEqual(
+    await service.store.inspectCodexSuccessionRecoveryAuthority(),
+    { authority: "none" },
+  );
+  assert.equal(
+    (await handlers.registerCodex(codexRegistration())).accepted,
+    false,
+  );
+  assert.equal(
+    (
+      await handlers.sendToClaude({
+        ...toClaude("resume failure must reject new bodies"),
+        expectsReply: false,
+      })
+    ).accepted,
+    false,
+  );
+  const barrier = await service.store.inspectCodexSuccessionBarrier();
+  assert.equal(barrier.clean, true);
+  assert.equal(barrier.queueCount, 0);
+  assert.equal(barrier.inFlightCount, 0);
+  assert.equal(barrier.transientBodyCount, 0);
+});
+
 test("an unknown succession publication outcome takes both registrations offline and forbids old rollback", async (t) => {
   const { root, stateDir } = await fixture();
   const claude = new FakeProvider("claude");
@@ -1752,6 +2021,168 @@ for (const failurePoint of ["activate", "retire"] as const) {
     );
   });
 }
+
+test("post-activation poison drains an admitted native frame and its terminal receipt before close", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_admitted_ingress",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  const poisonBody = "synthetic successor ingress must be terminally rejected";
+  const receiptHandle = "receipt-successor-poison";
+  claude.nativeMessageAfterSuccessionActivation = {
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-next@this-mac",
+    text: poisonBody,
+    receiptHandle,
+  };
+  // The initial registration status is already complete. This failure lands
+  // after listener activation, while the synthetic native callback is queued.
+  claude.nativeCodexStatusFailures.push(
+    new Error("synthetic post-activation status failure"),
+  );
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  assert.deepEqual(claude.nativeInboundStatusAttempts, [
+    {
+      receiptHandle,
+      status: "expired",
+      diagnosticCode: "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+    },
+  ]);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle,
+      status: "expired",
+      diagnosticCode: "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+    },
+  ]);
+  assert.equal(
+    claude.nativeInboundStatuses.some(
+      ({ status }) => status === "held" || status === "delivered",
+    ),
+    false,
+  );
+  assert.equal(codex.dispatches.length, 0);
+  const activateIndex = claude.lifecycleEvents.indexOf(
+    "succession:activate:successor_admitted_ingress",
+  );
+  const quiesceIndex = claude.lifecycleEvents.indexOf(
+    "succession:quiesce:successor_admitted_ingress",
+  );
+  const receiptIndex = claude.lifecycleEvents.indexOf("status:expired");
+  const closeIndex = claude.lifecycleEvents.lastIndexOf("provider:close");
+  assert.equal(activateIndex >= 0, true);
+  assert.equal(quiesceIndex > activateIndex, true);
+  assert.equal(receiptIndex > quiesceIndex, true);
+  assert.equal(closeIndex > receiptIndex, true);
+
+  const barrier = await service.store.inspectCodexSuccessionBarrier();
+  assert.deepEqual(
+    {
+      clean: barrier.clean,
+      queueCount: barrier.queueCount,
+      inFlightCount: barrier.inFlightCount,
+      transientBodyCount: barrier.transientBodyCount,
+      codexQueueDepth: barrier.codexQueueDepth,
+    },
+    {
+      clean: true,
+      queueCount: 0,
+      inFlightCount: 0,
+      transientBodyCount: 0,
+      codexQueueDepth: 0,
+    },
+  );
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes.map(
+      ({ alias, enabled, state, compatibility, queueDepth }) => ({
+        alias,
+        enabled,
+        state,
+        compatibility,
+        queueDepth,
+      }),
+    ),
+    [
+      {
+        alias: "codex-next@this-mac",
+        enabled: false,
+        state: "disabled",
+        compatibility: "expired",
+        queueDepth: 0,
+      },
+    ],
+  );
+  assert.equal(claude.closed, true);
+  assert.equal(codex.closed, true);
+  const internal = service as unknown as {
+    conversations: Map<string, unknown>;
+    messageContexts: Map<string, unknown>;
+    providerTurnContinuations: Map<string, unknown>;
+    activeDispatchByTarget: Map<string, unknown>;
+    scheduledDispatchTargets: Set<string>;
+    dispatchRunnerTargets: Set<string>;
+    pendingClaudeReplies: Map<string, unknown>;
+    deliveryTrackers: Map<string, unknown>;
+    detachedReceiptWrites: Set<Promise<void>>;
+    nativeIngressByConversation: Map<string, unknown>;
+    callbackQueue: unknown[];
+  };
+  assert.deepEqual(
+    {
+      conversations: internal.conversations.size,
+      messageContexts: internal.messageContexts.size,
+      providerTurns: internal.providerTurnContinuations.size,
+      activeDispatches: internal.activeDispatchByTarget.size,
+      scheduledDispatches: internal.scheduledDispatchTargets.size,
+      dispatchRunners: internal.dispatchRunnerTargets.size,
+      pendingReplies: internal.pendingClaudeReplies.size,
+      deliveryTrackers: internal.deliveryTrackers.size,
+      detachedReceipts: internal.detachedReceiptWrites.size,
+      nativeIngress: internal.nativeIngressByConversation.size,
+      callbacks: internal.callbackQueue.length,
+    },
+    {
+      conversations: 0,
+      messageContexts: 0,
+      providerTurns: 0,
+      activeDispatches: 0,
+      scheduledDispatches: 0,
+      dispatchRunners: 0,
+      pendingReplies: 0,
+      deliveryTrackers: 0,
+      detachedReceipts: 0,
+      nativeIngress: 0,
+      callbacks: 0,
+    },
+  );
+  const stateText = await readFile(service.store.stateFilePath, "utf8");
+  assert.equal(stateText.includes(poisonBody), false);
+  assert.equal(stateText.includes(receiptHandle), false);
+});
 
 test("restart recovery after an irreversible succession authorizes only exact successor re-registration", async (t) => {
   const { root, stateDir } = await fixture();

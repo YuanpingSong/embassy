@@ -769,4 +769,6 @@ export type GatewayStoreLimits = {
 export type GatewayStoreDependencies = {
   now?: () => Date;
   randomId?: () => string;
+  /** Deterministic durability-fault seam; production callers leave this unset. */
+  afterStateFileRename?: () => void | Promise<void>;
 };
