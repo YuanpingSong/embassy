@@ -76,7 +76,7 @@ function exampleSnapshot(): DashboardSnapshot {
     ],
     routes: [
       {
-        alias: "reviewer@this-mac",
+        alias: "codex-reviewer@this-mac",
         provider: "codex",
         host: "this-mac",
         enabled: true,
@@ -125,7 +125,7 @@ function exampleSnapshot(): DashboardSnapshot {
         sequence: 1,
         direction: "claude_to_codex",
         sourceAlias: "claude-advisor@this-mac",
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "codex-reviewer@this-mac",
         messageIdSuffix: "a1b2c3",
         state: "delivered",
         timestamp: "2026-08-07T16:29:56.000Z",
@@ -250,7 +250,7 @@ test("dashboard renders actionable first-run states", () => {
   assert.match(routesHtml, /embassy select-claude --alias &lt;alias&gt;/);
   assert.match(routesHtml, /No Codex tasks registered/);
   assert.match(routesHtml, /Inside the Codex task/);
-  assert.match(routesHtml, /embassy register-codex --alias &lt;name&gt;@&lt;host&gt;/);
+  assert.match(routesHtml, /embassy register-codex --alias codex-&lt;name&gt;@&lt;host&gt;/);
 
   const noClaude = exampleSnapshot();
   noClaude.availablePeers = [];
@@ -457,7 +457,7 @@ test("dashboard maps safe alerts to inert, actionable guidance", () => {
       timestamp: "2026-08-07T16:29:58.000Z",
       provider: "codex",
       host: "this-mac",
-      alias: "reviewer@this-mac",
+      alias: "codex-reviewer@this-mac",
     },
     {
       code: "UNMAPPED_SAFE_ALERT",
@@ -474,7 +474,7 @@ test("dashboard maps safe alerts to inert, actionable guidance", () => {
   assert.match(html, /Codex registration must be observed again/);
   assert.match(
     html,
-    /embassy register-codex --alias reviewer@this-mac/,
+    /embassy register-codex --alias codex-reviewer@this-mac/,
   );
   assert.match(html, /inside that exact Codex task/i);
   assert.match(html, /UNMAPPED_SAFE_ALERT/);
@@ -489,7 +489,7 @@ test("dashboard groups message lifecycles without conflating matching suffixes",
       sequence: 1,
       direction: "claude_to_codex",
       sourceAlias: "claude-advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       messageIdSuffix: "a1b2c3",
       state: "queued",
       timestamp: "2026-08-07T16:29:50.000Z",
@@ -500,7 +500,7 @@ test("dashboard groups message lifecycles without conflating matching suffixes",
       sequence: 2,
       direction: "claude_to_codex",
       sourceAlias: "claude-advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       messageIdSuffix: "a1b2c3",
       state: "dispatching",
       timestamp: "2026-08-07T16:29:51.000Z",
@@ -512,7 +512,7 @@ test("dashboard groups message lifecycles without conflating matching suffixes",
       sequence: 3,
       direction: "claude_to_codex",
       sourceAlias: "claude-advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       messageIdSuffix: "a1b2c3",
       state: "delivered",
       timestamp: "2026-08-07T16:29:52.000Z",
@@ -523,7 +523,7 @@ test("dashboard groups message lifecycles without conflating matching suffixes",
     {
       sequence: 4,
       direction: "codex_to_claude",
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "claude-advisor@this-mac",
       messageIdSuffix: "a1b2c3",
       state: "failed",
@@ -566,7 +566,7 @@ test("message timeline is capped and keeps the newest grouped metadata", () => {
       sequence: index + 1,
       direction: "claude_to_codex" as const,
       sourceAlias: `agent-${String(index).padStart(4, "0")}`,
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       messageIdSuffix: index.toString(16).padStart(6, "0"),
       state: "delivered" as const,
       timestamp: new Date(Date.UTC(2026, 7, 7, 12, 0, index)).toISOString(),
@@ -646,7 +646,7 @@ test("available peer inventory is bounded and remains Claude-only", () => {
   const rejected = renderDashboardHtml(snapshot);
   assert.equal(rejected.includes("codex-peer@this-mac"), false);
   assert.match(rejected, /No Claude sessions are currently visible to Embassy/);
-  assert.ok(rejected.includes("reviewer@this-mac"));
+  assert.ok(rejected.includes("codex-reviewer@this-mac"));
 });
 
 test("dense valid snapshots remain bounded and disclose local display caps", () => {

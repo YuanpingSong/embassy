@@ -597,7 +597,7 @@ function renderDirectionCard(
   const content =
     visibleRoutes.length > 0
       ? renderRouteList(visibleRoutes, generatedAt)
-      : `<div class="empty-state"><h3>No Codex tasks registered.</h3><p>Inside the Codex task you want Claude to reach, run:</p><p class="empty-state__action">${command("embassy register-codex --alias &lt;name&gt;@&lt;host&gt;")}</p></div>`;
+      : `<div class="empty-state"><h3>No Codex tasks registered.</h3><p>Inside the Codex task you want Claude to reach, run:</p><p class="empty-state__action">${command("embassy register-codex --alias codex-&lt;name&gt;@&lt;host&gt;")}</p></div>`;
   return `<section class="direction-card" aria-labelledby="claude-to-codex-heading">
     <div class="direction-card__heading">
       <div><p class="direction-card__eyebrow">Claude \u2192 Codex</p><h2 id="claude-to-codex-heading">Registered Codex targets</h2></div>
