@@ -12,6 +12,7 @@ function counters(): DashboardRoute["counters"] {
   return {
     accepted: 0,
     delivered: 0,
+    unconfirmed: 0,
     failed: 0,
     ambiguous: 0,
     expired: 0,
@@ -53,6 +54,7 @@ function snapshot(routes: DashboardRoute[]): DashboardSnapshot {
       accepted: 0,
       duplicates: 0,
       delivered: 0,
+      unconfirmed: 0,
       failed: 0,
       ambiguous: 0,
       expired: 0,
@@ -265,4 +267,47 @@ test("QUEUE_STALLED remains a normal store-provided safe alert and is never infe
   assert.equal(withAlert.includes("ALERT_BODY_SECRET"), false);
   assert.equal(withAlert.includes("NATIVE_ROUTE_UUID_SECRET"), false);
   assert.equal(withAlert.includes("<script"), false);
+});
+
+test("unconfirmed delivery is a warning with safe retry guidance", () => {
+  const input = snapshot([
+    route("codex-reviewer@this-mac", { queueDepth: 0 }),
+    route("claude-advisor@this-mac", {
+      provider: "claude",
+      queueDepth: 0,
+    }),
+  ]);
+  input.messages = [
+    {
+      sequence: 1,
+      timestamp: "2026-08-08T11:59:59.000Z",
+      messageIdSuffix: "c0ffee00",
+      direction: "codex_to_claude",
+      sourceAlias: "codex-reviewer@this-mac",
+      targetAlias: "claude-advisor@this-mac",
+      state: "unconfirmed",
+      bytes: 42,
+      hopCount: 0,
+      latencyMs: 1_000,
+      safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+    },
+  ];
+  input.alerts = [
+    {
+      code: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+      severity: "warning",
+      timestamp: "2026-08-08T11:59:59.000Z",
+      provider: "claude",
+      host: "this-mac",
+      alias: "claude-advisor@this-mac",
+    },
+  ];
+
+  const html = renderDashboardHtml(input);
+  assert.match(html, /status status--warn[^>]*>[\s\S]*?Unconfirmed<\/span>/);
+  assert.match(html, /Transport write confirmed; native receipt unavailable/);
+  assert.match(html, /Delivery could not be confirmed/);
+  assert.match(html, /Claude did not emit a native receipt for direct acceptance/);
+  assert.match(html, /Check the recipient before retrying/);
+  assert.match(html, /A retry could duplicate the message/);
 });

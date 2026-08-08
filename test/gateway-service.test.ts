@@ -2466,7 +2466,7 @@ test("terminal callback arrival time arbitrates the exact delivery deadline", as
   });
   assert.equal(exactStatus.found, true);
   if (exactStatus.found) {
-    assert.equal(exactStatus.state, "ambiguous");
+    assert.equal(exactStatus.state, "expired");
     assert.equal(exactStatus.safeErrorCode, "DELIVERY_DEADLINE_EXPIRED");
   }
 });
@@ -2515,10 +2515,124 @@ test("plain pending remains nonterminal and expires instead of leaking forever",
   assert.equal(status.found, true);
   if (status.found) {
     assert.equal(status.terminal, true);
-    assert.equal(status.state, "ambiguous");
+    assert.equal(status.state, "expired");
     assert.equal(status.safeErrorCode, "DELIVERY_DEADLINE_EXPIRED");
   }
   assert.equal((await service.handlers().listSnapshot()).accounting.queuedBytes, 0);
+});
+
+test("predeadline transport uncertainty survives callback delay and settles ambiguous", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const accepted = await service.handlers().sendToClaude({
+    ...toClaude("write began but never produced a native receipt"),
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+
+  await clock.advanceBy(999);
+  claude.emitDelivery({
+    messageId: claude.dispatches[0]!.messageId,
+    state: "transport_uncertain",
+    safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+  });
+  // Do not yield the callback worker. Its service-boundary timestamp is still
+  // predeadline and must be reduced before the deadline event below.
+  clock.nowMs += 1;
+  const status = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found, true);
+  if (status.found) {
+    assert.equal(status.terminal, true);
+    assert.equal(status.state, "ambiguous");
+    assert.equal(
+      status.safeErrorCode,
+      "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+    );
+  }
+});
+
+test("confirmed Claude transport without a native receipt settles unconfirmed", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const accepted = await service.handlers().sendToClaude({
+    ...toClaude("confirmed socket write without universal native ack"),
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  claude.emitDelivery({
+    messageId: claude.dispatches[0]!.messageId,
+    state: "transport_written",
+  });
+  await clock.advanceBy(1_000);
+  const status = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found, true);
+  if (status.found) {
+    assert.equal(status.terminal, true);
+    assert.equal(status.state, "unconfirmed");
+    assert.equal(status.safeErrorCode, "CLAUDE_RECEIPT_UNCONFIRMED");
+  }
 });
 
 test("Codex acceptance settles the body while preserving final reply correlation", async (t) => {
@@ -2560,6 +2674,64 @@ test("Codex acceptance settles the body while preserving final reply correlation
   await waitFor(() => claude.dispatches.length === 1);
   assert.equal(claude.dispatches[0]?.authorization, "native_reply");
   assert.equal(claude.dispatches[0]?.text, "final reply survives acceptance");
+});
+
+test("accepted provider-turn correlation expires independently and releases its dispatch slot", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "accepted body whose provider turn never completes",
+  });
+  await waitFor(() => codex.dispatches.length === 1);
+  await waitForAsync(async () =>
+    (await service.handlers().listSnapshot()).messages.some(
+      ({ state }) => state === "delivered",
+    ),
+  );
+
+  await clock.advanceBy(500);
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "next body waits only for the provider continuation slot",
+  });
+  await waitForAsync(async () =>
+    (await service.handlers().listSnapshot()).routes.some(
+      ({ alias, queueDepth }) =>
+        alias === "codex-main@this-mac" && queueDepth === 1,
+    ),
+  );
+  await clock.advanceBy(500);
+  codex.emitRouteState(THREAD_ID, "idle");
+  await waitFor(() => codex.dispatches.length === 2);
+  assert.equal(
+    (await service.handlers().listSnapshot()).alerts.some(
+      ({ code }) => code === "PROVIDER_REPLY_DEADLINE_EXPIRED",
+    ),
+    true,
+  );
 });
 
 test("close terminally settles a native callback already queued for service handling", async () => {
@@ -2999,12 +3171,21 @@ test("ambiguous native acknowledgement is never replayed and releases its receip
   ]);
   await clock.advanceBy(5_000);
   assert.equal(claude.nativeInboundStatusAttempts.length, 1);
+  const snapshot = await service.handlers().listSnapshot();
   assert.equal(
-    (await service.handlers().listSnapshot()).alerts.some(
+    snapshot.alerts.some(
       ({ code }) => code === "NATIVE_RECEIPT_UNCONFIRMED",
     ),
     true,
   );
+  assert.equal(
+    snapshot.messages.some(
+      ({ state, safeErrorCode }) =>
+        state === "expired" && safeErrorCode === "MESSAGE_EXPIRED",
+    ),
+    true,
+  );
+  assert.equal(JSON.stringify(snapshot).includes("SYNTHETIC_AMBIGUOUS"), false);
 });
 
 test("shutdown settles native ingress before closing its provider", async () => {
@@ -3187,7 +3368,7 @@ test("queued bodies are cancelled on close and never replayed after restart", as
     snapshot.messages.some(
       (event) =>
         event.state === "cancelled" &&
-        event.safeErrorCode === "MESSAGE_CANCELLED",
+        event.safeErrorCode === "GATEWAY_SHUTDOWN",
     ),
     true,
   );
@@ -3298,4 +3479,344 @@ test("adapter cleanup failures reject close after controller cleanup completes",
     await service.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("callback pressure never evicts authoritative delivery write evidence", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const accepted = await service.handlers().sendToClaude({
+    ...toClaude("write evidence must survive callback pressure"),
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  await clock.advanceBy(999);
+  const messageId = claude.dispatches[0]!.messageId;
+  claude.emitDelivery({
+    messageId,
+    state: "transport_uncertain",
+    safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+  });
+
+  const internal = service as unknown as {
+    callbackCapacity: number;
+    callbackQueue: Array<{
+      type: string;
+      value?: { messageId?: string };
+    }>;
+    enqueueCallback(event: unknown): boolean;
+  };
+  while (internal.callbackQueue.length < internal.callbackCapacity) {
+    internal.callbackQueue.push({
+      type: "delivery",
+      value: { messageId: `synthetic-capacity-${internal.callbackQueue.length}` },
+    });
+  }
+  assert.equal(
+    internal.enqueueCallback({
+      type: "route",
+      source: { ...claude.identity },
+      value: { routeHandle: "capacity-probe", state: "idle" },
+    }),
+    false,
+  );
+  assert.equal(
+    internal.callbackQueue.some(
+      (candidate) => candidate.value?.messageId === messageId,
+    ),
+    true,
+  );
+
+  clock.nowMs += 1;
+  const status = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found, true);
+  if (status.found) {
+    assert.equal(status.state, "ambiguous");
+    assert.equal(
+      status.safeErrorCode,
+      "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+    );
+  }
+});
+
+test("a missing delivery tracker settles the ledger and releases the target", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const first = await service.handlers().sendToClaude({
+    ...toClaude("synthetic missing tracker"),
+    expectsReply: false,
+  });
+  assert.equal(first.accepted, true);
+  if (!first.accepted) return;
+  const internal = service as unknown as {
+    deliveryTokens: Map<string, string>;
+    deliveryTrackers: Map<string, unknown>;
+  };
+  const messageId = internal.deliveryTokens.get(first.deliveryToken);
+  assert.ok(messageId);
+  internal.deliveryTrackers.delete(messageId);
+
+  await waitForAsync(async () =>
+    (await service.handlers().listSnapshot()).alerts.some(
+      ({ code }) => code === "DELIVERY_TRACKER_MISSING",
+    ),
+  );
+  const snapshot = await service.handlers().listSnapshot();
+  assert.equal(snapshot.accounting.queuedBytes, 0);
+  assert.equal(
+    snapshot.messages.some(
+      ({ state, safeErrorCode }) =>
+        state === "failed" && safeErrorCode === "DELIVERY_TRACKER_MISSING",
+    ),
+    true,
+  );
+  assert.equal(claude.dispatches.length, 0);
+
+  const second = await service.handlers().sendToClaude({
+    ...toClaude("target remains usable after recovery"),
+    expectsReply: false,
+  });
+  assert.equal(second.accepted, true);
+  await waitFor(() => claude.dispatches.length === 1);
+});
+
+test("terminal write ambiguity releases the expired reply authority", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const first = await service.handlers().sendToClaude(
+    toClaude("ambiguous request with reply authority"),
+  );
+  assert.equal(first.accepted, true);
+  if (!first.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  claude.emitDelivery({
+    messageId: claude.dispatches[0]!.messageId,
+    state: "transport_uncertain",
+    safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+  });
+  await clock.advanceBy(1_000);
+  const terminal = await service.handlers().deliveryStatus({
+    token: first.deliveryToken,
+  });
+  assert.equal(terminal.found, true);
+  if (terminal.found) assert.equal(terminal.state, "ambiguous");
+
+  const next = await service.handlers().sendToClaude(
+    toClaude("new reply authority after ambiguity cutoff"),
+  );
+  assert.equal(next.accepted, true);
+});
+
+test("a failed terminal ledger write retries before the machine absorbs it", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await selectAndRegister(service.handlers());
+  const originalSettleMessage = service.store.settleMessage.bind(service.store);
+  let settlementAttempts = 0;
+  service.store.settleMessage = async (input) => {
+    settlementAttempts += 1;
+    if (settlementAttempts === 1) {
+      throw new BridgeError(
+        "SYNTHETIC_LEDGER_WRITE_FAILED",
+        "Synthetic atomic write failure.",
+        true,
+      );
+    }
+    return await originalSettleMessage(input);
+  };
+
+  const accepted = await service.handlers().sendToClaude({
+    ...toClaude("terminal settlement must retry"),
+    expectsReply: true,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  claude.emitDelivery({
+    messageId: claude.dispatches[0]!.messageId,
+    state: "released",
+    replyText: "reply correlation survives the ledger retry",
+  });
+  await waitFor(() => settlementAttempts === 1);
+  const beforeRetry = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(beforeRetry.found, true);
+  if (beforeRetry.found) assert.equal(beforeRetry.terminal, false);
+
+  await clock.advanceBy(250);
+  await waitFor(() => settlementAttempts === 2);
+  const afterRetry = await service.handlers().deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(afterRetry.found, true);
+  if (afterRetry.found) {
+    assert.equal(afterRetry.terminal, true);
+    assert.equal(afterRetry.state, "delivered");
+  }
+  await waitFor(() => codex.dispatches.length === 1);
+  assert.equal(
+    codex.dispatches[0]?.text,
+    "reply correlation survives the ledger retry",
+  );
+  assert.equal((await service.handlers().listSnapshot()).accounting.queuedBytes, 0);
+});
+
+test("a Claude rename migrates an enqueue that is already scheduled to dispatch", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "old-name@this-mac",
+      routeHandle: CLAUDE_SESSION_ID,
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.refreshDashboard();
+  await handlers.selectClaude({ alias: "old-name@this-mac" });
+  await handlers.registerCodex(codexRegistration());
+
+  const accepted = await handlers.sendToClaude({
+    ...toClaude("scheduled body follows exact UUID rename"),
+    toAlias: "old-name@this-mac",
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+  claude.discoveries = [
+    {
+      alias: "new-name@this-mac",
+      routeHandle: CLAUDE_SESSION_ID,
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  await handlers.refreshDashboard();
+  await waitFor(() => claude.dispatches.length === 1);
+  assert.equal(
+    claude.dispatches[0]?.text,
+    "scheduled body follows exact UUID rename",
+  );
 });

@@ -20,6 +20,18 @@ import {
   type ValidatedSendToCodexParams,
 } from "./control.js";
 import { publishGatewayDashboard } from "./dashboard.js";
+import {
+  createDeliveryMachine,
+  isTerminalDeliveryMachine,
+  projectDelivery,
+  projectDeliveryWakeups,
+  transitionDelivery,
+  type DeliveryEffect,
+  type DeliveryEvent,
+  type DeliveryMachine,
+  type DeliveryTerminalOutcome,
+  type NativeReceiptNotification,
+} from "./delivery-machine.js";
 import { GatewayStore } from "./store.js";
 import {
   arePublicAvailablePeerSnapshots,
@@ -45,7 +57,7 @@ const DELIVERY_TOKEN = /^dlv_[A-Za-z0-9_-]{24}$/;
 const PRIVATE_HANDLE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_CONVERSATIONS = 1_024;
 const DELIVERY_ACK_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
-const DELIVERY_ACK_GRACE_MS = 5_000;
+const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
 
 export type GatewayAdapterRouteState = Extract<
@@ -74,9 +86,11 @@ export type GatewayAdapterDiscoverySnapshot = {
 };
 
 export type GatewayAdapterDeliveryState =
+  | "transport_uncertain"
   | "transport_written"
   | "held"
   | "released"
+  | "unconfirmed"
   | "denied"
   | "expired"
   | "ambiguous"
@@ -215,31 +229,19 @@ type MessageContext = {
   authorization: "selected_route" | "native_reply";
   targetAlias: string;
   deadlineAt: string;
-  /** Store/body delivery settled at provider acceptance; reply turn still live. */
-  providerAccepted?: boolean;
 };
 
 type DeliveryTerminalState =
   | "delivered"
+  | "unconfirmed"
   | "expired"
   | "failed"
   | "ambiguous"
   | "cancelled";
 
-type DeliveryTrackerState = "queued" | "stalled" | DeliveryTerminalState;
-
-type NativeTerminalNotification = {
-  status: "delivered" | "denied" | "expired";
-  diagnosticCode?: string;
-  attempt: number;
-  nextAttemptAt: number;
-  retryUntil: number;
-};
-
 type NativeReceiptTracker = {
   hostId: string;
   receiptHandle: string;
-  terminal?: NativeTerminalNotification;
 };
 
 type MessageDeliveryTracker = {
@@ -247,18 +249,27 @@ type MessageDeliveryTracker = {
   conversationId: string;
   targetAlias: string;
   enqueuedAt: number;
-  stallAt: number;
   deadlineAt: number;
-  state: DeliveryTrackerState;
+  machine: DeliveryMachine;
   updatedAt: number;
-  stallSent: boolean;
-  stallAttempt: number;
-  stallNextAttemptAt: number;
+  deliverySafeErrorCode?: string;
+  /** Retains an observed terminal decision until its atomic ledger write wins. */
+  pendingTerminalEvent?: DeliveryEvent;
+  pendingTerminalReplyText?: string;
+  settlementRetryAt?: number;
+  stallNoticeSent: boolean;
+  stallNoticeAttempt: number;
+  stallNoticeNextAttemptAt: number;
   deliveryToken?: string;
-  terminalAt?: number;
-  safeErrorCode?: string;
   nativeReceipt?: NativeReceiptTracker;
 };
+
+/**
+ * A provider turn may outlive terminal delivery of its original body. This
+ * map retains only bounded correlation needed for a later final result/reply;
+ * it is deliberately separate from the once-settled delivery machine.
+ */
+type ProviderTurnContinuation = MessageContext;
 
 type EnqueuedMessageResult = {
   conversationId: string;
@@ -407,7 +418,13 @@ export class GatewayService {
   private availablePeers: PublicAvailablePeerSnapshot[] = [];
   private readonly conversations = new Map<string, Conversation>();
   private readonly messageContexts = new Map<string, MessageContext>();
+  private readonly providerTurnContinuations = new Map<
+    string,
+    ProviderTurnContinuation
+  >();
   private readonly activeDispatchByTarget = new Map<string, string>();
+  private readonly scheduledDispatchTargets = new Set<string>();
+  private readonly dispatchRunnerTargets = new Set<string>();
   private readonly pendingClaudeReplies = new Map<string, PendingClaudeReply>();
   private readonly deliveryTrackers = new Map<string, MessageDeliveryTracker>();
   private readonly deliveryTokens = new Map<string, string>();
@@ -421,6 +438,7 @@ export class GatewayService {
   private callbackWorker: Promise<void> | undefined;
   private callbackScheduled = false;
   private readonly callbackCapacity: number;
+  private readonly deliveryCallbackReserve: number;
   private readonly deliveryTokenCapacity: number;
   private lifecycleTimer: GatewayServiceTimer | undefined;
   private nextDashboardRefreshAt: number | undefined;
@@ -454,6 +472,15 @@ export class GatewayService {
       64,
       options.config.limits.maxRoutes +
         options.config.limits.maxInFlightMessages * 8,
+    );
+    // A callback flood must never crowd out write evidence. One selected route
+    // may retain one accepted provider continuation, while each store-owned
+    // in-flight message may contribute uncertain/written/held plus one first
+    // terminal observation. Other callback kinds use only the remaining slots.
+    this.deliveryCallbackReserve = Math.min(
+      this.callbackCapacity,
+      options.config.limits.maxRoutes +
+        options.config.limits.maxInFlightMessages * 4,
     );
     this.deliveryTokenCapacity = Math.max(
       64,
@@ -564,39 +591,51 @@ export class GatewayService {
           closeFailed = true;
         }
         await this.drainCallbackQueueLocked();
-        for (const messageId of [...this.messageContexts.keys()]) {
-          const cancelled = await this.store.cancelQueuedMessage(messageId);
-          if (cancelled) {
-            await this.applyTerminalSettlementLocked({
-              messageId,
-              state: "cancelled",
-              safeErrorCode: "GATEWAY_SHUTDOWN",
-            });
-            continue;
-          }
-          const settled = await this.store.settleMessage({
+        for (const messageId of [...this.providerTurnContinuations.keys()]) {
+          await this.finishProviderTurnContinuationLocked(
             messageId,
-            state: "ambiguous",
+            "cancelled",
+          );
+        }
+        for (const messageId of [...this.messageContexts.keys()]) {
+          const queued = await this.store.settleQueuedMessage({
+            messageId,
+            state: "cancelled",
             safeErrorCode: "GATEWAY_SHUTDOWN",
           });
-          if (settled.status === "settled") {
-            await this.applyTerminalSettlementLocked(settled.settlement);
+          if (queued.status === "settled") {
+            await this.applyTerminalSettlementLocked(queued.settlement);
+            continue;
           }
+          await this.advanceDeliveryLocked(messageId, {
+            type: "shutdown",
+            at: this.now().getTime(),
+          });
         }
         for (const tracker of this.deliveryTrackers.values()) {
-          if (!this.isTerminalDeliveryState(tracker.state)) {
-            await this.markSenderTerminalLocked(
-              tracker.messageId,
-              "cancelled",
-              "GATEWAY_SHUTDOWN",
-            );
+          if (!isTerminalDeliveryMachine(tracker.machine)) {
+            await this.advanceDeliveryLocked(tracker.messageId, {
+              type: "shutdown",
+              at: this.now().getTime(),
+            });
           }
-          if (tracker.nativeReceipt?.terminal !== undefined) {
-            await this.flushNativeReceiptLocked(
-              tracker,
-              this.now().getTime(),
-              true,
-            );
+          for (
+            let attempt = 0;
+            attempt <= DELIVERY_ACK_RETRY_DELAYS_MS.length &&
+            tracker.nativeReceipt !== undefined &&
+            (tracker.machine.nativeReceipt.phase === "sending" ||
+              tracker.machine.nativeReceipt.phase === "retry_wait");
+            attempt += 1
+          ) {
+            const native = tracker.machine.nativeReceipt;
+            if (native.phase === "retry_wait") {
+              await this.advanceDeliveryLocked(tracker.messageId, {
+                type: "native_receipt_retry_due",
+                at: native.retryAt,
+              });
+            } else {
+              await this.sendNativeReceiptLocked(tracker);
+            }
           }
         }
         await this.drainDetachedReceiptWritesLocked();
@@ -613,7 +652,10 @@ export class GatewayService {
       try {
         this.conversations.clear();
         this.messageContexts.clear();
+        this.providerTurnContinuations.clear();
         this.activeDispatchByTarget.clear();
+        this.scheduledDispatchTargets.clear();
+        this.dispatchRunnerTargets.clear();
         this.pendingClaudeReplies.clear();
         this.deliveryTrackers.clear();
         this.deliveryTokens.clear();
@@ -686,7 +728,7 @@ export class GatewayService {
         if (
           !this.running ||
           !MESSAGE_ID.test(event.messageId) ||
-          !this.messageContexts.has(event.messageId) ||
+          this.deliveryCorrelation(event.messageId) === undefined ||
           (event.safeErrorCode !== undefined && !SAFE_CODE.test(event.safeErrorCode)) ||
           (event.replyText !== undefined &&
             (event.replyText.length === 0 ||
@@ -695,7 +737,7 @@ export class GatewayService {
         ) {
           return;
         }
-        const context = this.messageContexts.get(event.messageId);
+        const context = this.deliveryCorrelation(event.messageId);
         const target =
           context === undefined
             ? undefined
@@ -832,29 +874,52 @@ export class GatewayService {
       );
       if (duplicate >= 0) {
         const retained = this.callbackQueue[duplicate];
-        // A terminal's first service-boundary observation is authoritative.
-        // Replacing it with a duplicate received at/after the deadline would
-        // erase proof that the provider settled before the cutoff.
+        // The first service-boundary observation is authoritative. Replacing
+        // delivery evidence with a duplicate observed at/after the cutoff
+        // would erase proof that the provider acted before the deadline.
         if (
           retained?.type !== "delivery" ||
-          !this.isTerminalAdapterDelivery(event.value) ||
           event.receivedAt < retained.receivedAt
         ) {
           this.callbackQueue[duplicate] = event;
         }
         return true;
       }
+      if (this.isTerminalAdapterDelivery(event.value)) {
+        const firstTerminal = this.callbackQueue.findIndex(
+          (candidate) =>
+            candidate.type === "delivery" &&
+            candidate.value.messageId === event.value.messageId &&
+            this.isTerminalAdapterDelivery(candidate.value),
+        );
+        if (firstTerminal >= 0) {
+          const retained = this.callbackQueue[firstTerminal];
+          if (
+            retained?.type !== "delivery" ||
+            event.receivedAt < retained.receivedAt
+          ) {
+            this.callbackQueue[firstTerminal] = event;
+          }
+          return true;
+        }
+      }
+    } else if (
+      this.callbackQueue.length >=
+      this.callbackCapacity - this.deliveryCallbackReserve
+    ) {
+      // Preserve a fixed authority-bearing delivery reserve. Native ingress
+      // gets an immediate terminal receipt from its caller when this returns
+      // false; route observations are refreshable and replies remain bounded
+      // by their one-owner capability.
+      this.dashboardHealthy = false;
+      return false;
     }
     if (this.callbackQueue.length >= this.callbackCapacity) {
-      // Preserve bounded terminal/correlation events by evicting only an older
-      // nonterminal observation. If none exists, fail closed and retain the
-      // older authority-bearing event rather than creating an unbounded queue.
+      // Delivery write/approval observations are authoritative evidence for
+      // no-replay and deadline arbitration. Never evict them. A stale route
+      // observation is safe to replace because discovery re-observes it.
       const replaceable = this.callbackQueue.findIndex(
-        (candidate) =>
-          candidate.type === "route" ||
-          (candidate.type === "delivery" &&
-            (candidate.value.state === "transport_written" ||
-              candidate.value.state === "held")),
+        (candidate) => candidate.type === "route",
       );
       if (replaceable < 0) {
         this.dashboardHealthy = false;
@@ -919,7 +984,7 @@ export class GatewayService {
       if (event === undefined) continue;
       try {
         if (event.type === "delivery") {
-          await this.onDelivery(event.source, event.value);
+          await this.onDelivery(event.source, event.value, event.receivedAt);
         } else if (event.type === "route") {
           await this.onRouteState(event.source, event.value);
         } else if (event.type === "claude_reply") {
@@ -934,25 +999,25 @@ export class GatewayService {
   }
 
   private isTerminalAdapterDelivery(event: GatewayAdapterDelivery): boolean {
-    return event.state !== "transport_written" && event.state !== "held";
+    return (
+      event.state !== "transport_uncertain" &&
+      event.state !== "transport_written" &&
+      event.state !== "held"
+    );
   }
 
   /**
-   * A terminal observed strictly before its delivery deadline must win even
-   * if event-loop scheduling delays its callback worker until after that
-   * deadline. Events observed at/after the cutoff remain behind the lifecycle
-   * sweep and cannot reopen an expired attempt.
+   * Delivery evidence observed strictly before the deadline must reach the
+   * reducer before its deadline event, even when callback scheduling is late.
+   * Evidence observed at/after the cutoff cannot reopen the terminal machine.
    */
-  private async drainPreDeadlineTerminalCallbacksLocked(): Promise<void> {
+  private async drainPreDeadlineDeliveryCallbacksLocked(): Promise<void> {
     while (true) {
       const index = this.callbackQueue.findIndex((candidate) => {
-        if (
-          candidate.type !== "delivery" ||
-          !this.isTerminalAdapterDelivery(candidate.value)
-        ) {
+        if (candidate.type !== "delivery") {
           return false;
         }
-        const context = this.messageContexts.get(candidate.value.messageId);
+        const context = this.deliveryCorrelation(candidate.value.messageId);
         return (
           context !== undefined &&
           candidate.receivedAt < Date.parse(context.deadlineAt)
@@ -961,7 +1026,7 @@ export class GatewayService {
       if (index < 0) return;
       const [event] = this.callbackQueue.splice(index, 1);
       if (event?.type === "delivery") {
-        await this.onDelivery(event.source, event.value);
+        await this.onDelivery(event.source, event.value, event.receivedAt);
       }
     }
   }
@@ -984,8 +1049,7 @@ export class GatewayService {
         ) {
           return false;
         }
-        if (!this.isTerminalAdapterDelivery(candidate.value)) return true;
-        const context = this.messageContexts.get(messageId);
+        const context = this.deliveryCorrelation(messageId);
         return (
           context !== undefined &&
           candidate.receivedAt < Date.parse(context.deadlineAt)
@@ -994,7 +1058,7 @@ export class GatewayService {
       if (index < 0) return;
       const [event] = this.callbackQueue.splice(index, 1);
       if (event?.type === "delivery") {
-        await this.onDelivery(event.source, event.value);
+        await this.onDelivery(event.source, event.value, event.receivedAt);
       }
     }
   }
@@ -1182,6 +1246,7 @@ export class GatewayService {
   ): Promise<void> {
     let cleanupFailed = false;
     try {
+      await this.drainPreDeadlineDeliveryCallbacksLocked();
       const settlements = await this.store.unregisterRoute(
         params.alias,
         binding.ownerLease,
@@ -1220,6 +1285,7 @@ export class GatewayService {
   private async unregisterCodex(params: UnregisterCodexParams): Promise<void> {
     const host = params.alias.slice(params.alias.lastIndexOf("@") + 1);
     const lease = stableLease("codex", `${host}\0${params.threadId}`);
+    await this.drainPreDeadlineDeliveryCallbacksLocked();
     const settlements = await this.store.unregisterRoute(params.alias, lease);
     for (const settlement of settlements) {
       await this.applyTerminalSettlementLocked(settlement);
@@ -1451,6 +1517,7 @@ export class GatewayService {
         inspection.enabled &&
         inspection.compatibility === "compatible"
       ) {
+        await this.drainPreDeadlineDeliveryCallbacksLocked();
         const settlements = await this.store.invalidateRoute(
           binding,
           "PEER_NOT_OBSERVED",
@@ -1496,6 +1563,11 @@ export class GatewayService {
     for (const context of this.messageContexts.values()) {
       if (context.targetAlias === oldAlias) context.targetAlias = newAlias;
     }
+    for (const continuation of this.providerTurnContinuations.values()) {
+      if (continuation.targetAlias === oldAlias) {
+        continuation.targetAlias = newAlias;
+      }
+    }
     for (const tracker of this.deliveryTrackers.values()) {
       if (tracker.targetAlias === oldAlias) tracker.targetAlias = newAlias;
     }
@@ -1503,6 +1575,12 @@ export class GatewayService {
     if (active !== undefined) {
       this.activeDispatchByTarget.delete(oldAlias);
       this.activeDispatchByTarget.set(newAlias, active);
+    }
+    if (this.scheduledDispatchTargets.delete(oldAlias)) {
+      // The already-created old-alias setImmediate may still run, but it can
+      // only observe an empty queue. Give the renamed durable queue its own
+      // runner so a rename between enqueue and dispatch cannot strand it.
+      this.scheduleDispatch(newAlias);
     }
   }
 
@@ -1701,6 +1779,7 @@ export class GatewayService {
       : persisted.find((route) => route.alias === params.alias);
     if (selected === undefined) throw new BridgeError("PEER_NOT_FOUND", "No selected Claude session matches that selector.");
     const { alias, binding } = selected;
+    await this.drainPreDeadlineDeliveryCallbacksLocked();
     const settlements = await this.store.unregisterRoute(
       alias,
       binding.ownerLease,
@@ -1771,6 +1850,19 @@ export class GatewayService {
     }
     this.routeBindings.delete(alias);
     this.routeStates.delete(alias);
+    for (const [messageId, continuation] of this.providerTurnContinuations) {
+      if (continuation.targetAlias !== alias) continue;
+      this.providerTurnContinuations.delete(messageId);
+      if (this.activeDispatchByTarget.get(alias) === messageId) {
+        this.activeDispatchByTarget.delete(alias);
+      }
+      const conversation = this.conversations.get(continuation.conversationId);
+      this.releasePendingClaude(conversation);
+      this.nativeIngressByConversation.delete(continuation.conversationId);
+      this.addRuntimeAlert("PROVIDER_TURN_ROUTE_REMOVED", "warning", {
+        alias,
+      });
+    }
   }
 
   private async verifyCodex(alias: string, threadId: string): Promise<PrivateRouteBinding> {
@@ -1814,12 +1906,16 @@ export class GatewayService {
         .filter(
           (tracker) =>
             tracker.deliveryToken !== undefined &&
-            this.isTerminalDeliveryState(tracker.state),
+            this.isTerminalDeliveryState(tracker.machine),
         )
         .sort(
           (left, right) =>
-            (left.terminalAt ?? left.updatedAt) -
-              (right.terminalAt ?? right.updatedAt) ||
+            (isTerminalDeliveryMachine(left.machine)
+              ? left.machine.terminalAt
+              : left.updatedAt) -
+              (isTerminalDeliveryMachine(right.machine)
+                ? right.machine.terminalAt
+                : right.updatedAt) ||
             left.messageId.localeCompare(right.messageId),
         )[0];
       if (oldestTerminal?.deliveryToken === undefined) break;
@@ -1856,26 +1952,43 @@ export class GatewayService {
     enqueuedAt: number;
     deadlineAt: string;
     deliveryToken?: string;
+    nativeReceipt?: NativeReceiptTracker;
   }): void {
     const deadlineAt = Date.parse(input.deadlineAt);
+    const stallAt = Math.min(
+      input.enqueuedAt + this.config.stallNoticeMs,
+      deadlineAt - 1,
+    );
     const tracker: MessageDeliveryTracker = {
       messageId: input.messageId,
       conversationId: input.conversationId,
       targetAlias: input.targetAlias,
       enqueuedAt: input.enqueuedAt,
-      stallAt: Math.min(
-        input.enqueuedAt + this.config.stallNoticeMs,
-        deadlineAt - 1,
-      ),
       deadlineAt,
-      state: "queued",
+      machine: createDeliveryMachine({
+        enqueuedAt: input.enqueuedAt,
+        stallAt,
+        deadlineAt,
+        // Deferred means the provider proved no write. Permit one bounded
+        // attempt per 500 ms slice until this message's immutable deadline.
+        maxCleanPrewriteRetries: Math.max(
+          0,
+          Math.ceil((deadlineAt - input.enqueuedAt) / 500),
+        ),
+        nativeReceipt: input.nativeReceipt !== undefined,
+        maxNativeReceiptCleanPrewriteRetries:
+          DELIVERY_ACK_RETRY_DELAYS_MS.length,
+      }),
       updatedAt: input.enqueuedAt,
-      stallSent: false,
-      stallAttempt: 0,
-      stallNextAttemptAt: input.enqueuedAt + this.config.stallNoticeMs,
+      stallNoticeSent: false,
+      stallNoticeAttempt: 0,
+      stallNoticeNextAttemptAt: stallAt,
       ...(input.deliveryToken === undefined
         ? {}
         : { deliveryToken: input.deliveryToken }),
+      ...(input.nativeReceipt === undefined
+        ? {}
+        : { nativeReceipt: { ...input.nativeReceipt } }),
     };
     this.deliveryTrackers.set(input.messageId, tracker);
     if (input.deliveryToken !== undefined) {
@@ -1887,15 +2000,9 @@ export class GatewayService {
   }
 
   private isTerminalDeliveryState(
-    state: DeliveryTrackerState,
-  ): state is DeliveryTerminalState {
-    return (
-      state === "delivered" ||
-      state === "expired" ||
-      state === "failed" ||
-      state === "ambiguous" ||
-      state === "cancelled"
-    );
+    state: DeliveryMachine,
+  ): state is Extract<DeliveryMachine, { phase: "terminal" }> {
+    return isTerminalDeliveryMachine(state);
   }
 
   private settlementDeliveryState(
@@ -1910,10 +2017,10 @@ export class GatewayService {
       this.config.limits.messageDeadlineMs * 2,
     );
     for (const [messageId, tracker] of this.deliveryTrackers) {
-      if (!this.isTerminalDeliveryState(tracker.state)) continue;
+      if (!this.isTerminalDeliveryState(tracker.machine)) continue;
       const tokenExpired =
         tracker.deliveryToken === undefined ||
-        (tracker.terminalAt ?? tracker.updatedAt) + retentionMs <= now;
+        tracker.machine.terminalAt + retentionMs <= now;
       if (!tokenExpired || tracker.nativeReceipt !== undefined) continue;
       this.deliveryTrackers.delete(messageId);
       if (tracker.deliveryToken !== undefined) {
@@ -1938,28 +2045,8 @@ export class GatewayService {
     }
   }
 
-  private setNativeTerminalLocked(
-    tracker: MessageDeliveryTracker,
-    status: NativeTerminalNotification["status"],
-    diagnosticCode?: string,
-  ): void {
-    const receipt = tracker.nativeReceipt;
-    if (receipt === undefined || receipt.terminal !== undefined) return;
-    const now = this.now().getTime();
-    receipt.terminal = {
-      status,
-      ...(diagnosticCode === undefined
-        ? {}
-        : { diagnosticCode: safeCode(diagnosticCode, "CODEX_DELIVERY_FAILED") }),
-      attempt: 0,
-      nextAttemptAt: now,
-      retryUntil: Math.max(tracker.deadlineAt, now + DELIVERY_ACK_GRACE_MS),
-    };
-  }
-
   private async releaseNativeReceiptLocked(
     tracker: MessageDeliveryTracker,
-    diagnosticCode: string,
   ): Promise<void> {
     const receipt = tracker.nativeReceipt;
     if (receipt === undefined) return;
@@ -1976,21 +2063,38 @@ export class GatewayService {
       host: receipt.hostId,
       alias: tracker.targetAlias,
     });
-    tracker.safeErrorCode ??= safeCode(
-      diagnosticCode,
-      "NATIVE_RECEIPT_UNCONFIRMED",
-    );
   }
 
-  private async flushNativeReceiptLocked(
+  private nativeReceiptNotificationFor(
     tracker: MessageDeliveryTracker,
-    now: number,
-    shutdown = false,
+  ): NativeReceiptNotification | undefined {
+    if (!isTerminalDeliveryMachine(tracker.machine)) return undefined;
+    return tracker.machine.outcome === "delivered"
+      ? { status: "delivered" }
+      : {
+          status: "expired",
+          diagnosticCode:
+            tracker.deliverySafeErrorCode ??
+            (tracker.machine.outcome === "unconfirmed"
+              ? "DELIVERY_UNCONFIRMED"
+              : `DELIVERY_${tracker.machine.outcome.toUpperCase()}`),
+        };
+  }
+
+  private async sendNativeReceiptLocked(
+    tracker: MessageDeliveryTracker,
   ): Promise<boolean> {
     const receipt = tracker.nativeReceipt;
-    const terminal = receipt?.terminal;
-    if (receipt === undefined || terminal === undefined) return false;
-    if (!shutdown && terminal.nextAttemptAt > now) return false;
+    const native = tracker.machine.nativeReceipt;
+    const notification = this.nativeReceiptNotificationFor(tracker);
+    if (
+      receipt === undefined ||
+      native.phase !== "sending" ||
+      notification === undefined
+    ) {
+      return false;
+    }
+    const now = this.now().getTime();
     try {
       const adapter = this.adapter("claude", receipt.hostId);
       const update = adapter.updateNativeInboundStatus;
@@ -2003,97 +2107,367 @@ export class GatewayService {
       await update.call(
         adapter,
         receipt.receiptHandle,
-        terminal.status,
-        terminal.diagnosticCode,
+        notification.status,
+        notification.status === "expired"
+          ? notification.diagnosticCode
+          : undefined,
       );
-      delete tracker.nativeReceipt;
+      await this.advanceDeliveryLocked(tracker.messageId, {
+        type: "native_receipt_confirmed",
+        at: now,
+      });
       return true;
     } catch (error) {
       const cleanPrewrite = error instanceof BridgeError && error.recoverable;
-      terminal.attempt += 1;
       const delay =
         DELIVERY_ACK_RETRY_DELAYS_MS[
           Math.min(
-            terminal.attempt - 1,
+            native.attempt - 1,
             DELIVERY_ACK_RETRY_DELAYS_MS.length - 1,
           )
         ] ?? DELIVERY_ACK_RETRY_DELAYS_MS.at(-1) ?? 2_000;
       const nextAttemptAt = now + delay;
-      if (
-        !shutdown &&
-        cleanPrewrite &&
-        terminal.attempt <= DELIVERY_ACK_RETRY_DELAYS_MS.length &&
-        nextAttemptAt <= terminal.retryUntil
-      ) {
-        terminal.nextAttemptAt = nextAttemptAt;
-        return true;
-      }
-      await this.releaseNativeReceiptLocked(
-        tracker,
-        error instanceof BridgeError
-          ? error.code
-          : "NATIVE_RECEIPT_UNCONFIRMED",
+      await this.advanceDeliveryLocked(
+        tracker.messageId,
+        cleanPrewrite
+          ? {
+              type: "native_receipt_clean_prewrite_failed",
+              at: now,
+              retryAt: nextAttemptAt,
+            }
+          : { type: "native_receipt_ambiguous", at: now },
       );
       return true;
     }
   }
 
-  private async markSenderTerminalLocked(
+  private deliveryCorrelation(
     messageId: string,
-    state: DeliveryTerminalState,
-    safeErrorCode?: string,
-  ): Promise<boolean> {
-    const tracker = this.deliveryTrackers.get(messageId);
-    if (tracker === undefined || this.isTerminalDeliveryState(tracker.state)) {
-      return false;
-    }
-    const now = this.now().getTime();
-    tracker.state = state;
-    tracker.updatedAt = now;
-    tracker.terminalAt = now;
-    if (safeErrorCode !== undefined) {
-      tracker.safeErrorCode = safeCode(
-        safeErrorCode,
-        state === "delivered" ? "DELIVERED" : "CODEX_DELIVERY_FAILED",
-      );
-    }
-    this.setNativeTerminalLocked(
-      tracker,
-      state === "delivered" ? "delivered" : "expired",
-      state === "delivered"
-        ? undefined
-        : safeCode(safeErrorCode, "CODEX_DELIVERY_FAILED"),
+  ): MessageContext | ProviderTurnContinuation | undefined {
+    return (
+      this.messageContexts.get(messageId) ??
+      this.providerTurnContinuations.get(messageId)
     );
-    await this.flushNativeReceiptLocked(tracker, now);
+  }
+
+  private eventTime(event: DeliveryEvent): number {
+    if ("observedAt" in event) return event.observedAt;
+    return event.at;
+  }
+
+  private normalizeDeliverySafeCode(
+    tracker: MessageDeliveryTracker,
+    outcome: DeliveryTerminalOutcome,
+    candidate: string | undefined,
+  ): string | undefined {
+    const normalized =
+      candidate === undefined
+        ? undefined
+        : safeCode(candidate, "PROVIDER_DELIVERY_FAILED");
+    if (outcome !== "unconfirmed") return normalized;
+    const correlation = this.deliveryCorrelation(tracker.messageId);
+    const target =
+      correlation === undefined
+        ? undefined
+        : this.contextTargetBinding(correlation);
+    return target?.provider === "claude"
+      ? "CLAUDE_RECEIPT_UNCONFIRMED"
+      : (normalized ?? "DELIVERY_UNCONFIRMED");
+  }
+
+  private async settleDeliveryStoreLocked(
+    tracker: MessageDeliveryTracker,
+    outcome: DeliveryTerminalOutcome,
+    safeErrorCode?: string,
+  ): Promise<TerminalMessageSettlement | undefined> {
     if (
+      outcome === "failed" ||
+      outcome === "expired" ||
+      outcome === "cancelled"
+    ) {
+      const queued = await this.store.settleQueuedMessage({
+        messageId: tracker.messageId,
+        state: outcome,
+        ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
+      });
+      if (queued.status === "settled") return queued.settlement;
+    }
+    const settled = await this.store.settleMessage({
+      messageId: tracker.messageId,
+      state: outcome,
+      ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
+    });
+    return settled.status === "settled" ? settled.settlement : undefined;
+  }
+
+  private async publishStallNoticeLocked(
+    tracker: MessageDeliveryTracker,
+    queuedForMs: number,
+  ): Promise<void> {
+    const receipt = tracker.nativeReceipt;
+    if (receipt === undefined) {
+      tracker.stallNoticeSent = true;
+      return;
+    }
+    try {
+      const adapter = this.adapter("claude", receipt.hostId);
+      const notify = adapter.notifyNativeInboundProgress;
+      if (notify === undefined) {
+        throw new BridgeError(
+          "NATIVE_PROGRESS_TRANSPORT_UNAVAILABLE",
+          "The Claude adapter cannot publish delivery progress.",
+        );
+      }
+      await notify.call(adapter, receipt.receiptHandle, {
+        kind: "stall",
+        reason: this.stallReasonFor(tracker),
+        queuedForMs,
+      });
+      tracker.stallNoticeSent = true;
+    } catch (error) {
+      const cleanPrewrite = error instanceof BridgeError && error.recoverable;
+      tracker.stallNoticeAttempt += 1;
+      const delay =
+        DELIVERY_ACK_RETRY_DELAYS_MS[
+          Math.min(
+            tracker.stallNoticeAttempt - 1,
+            DELIVERY_ACK_RETRY_DELAYS_MS.length - 1,
+          )
+        ] ?? DELIVERY_ACK_RETRY_DELAYS_MS.at(-1) ?? 2_000;
+      const retryAt = this.now().getTime() + delay;
+      if (
+        cleanPrewrite &&
+        tracker.stallNoticeAttempt <= DELIVERY_ACK_RETRY_DELAYS_MS.length &&
+        retryAt < tracker.deadlineAt
+      ) {
+        tracker.stallNoticeNextAttemptAt = retryAt;
+        return;
+      }
+      tracker.stallNoticeSent = true;
+      this.addRuntimeAlert("NATIVE_STALL_NOTICE_UNCONFIRMED", "warning", {
+        provider: "claude",
+        host: receipt.hostId,
+        alias: tracker.targetAlias,
+      });
+    }
+  }
+
+  private async applyDeliveryEffectsLocked(
+    tracker: MessageDeliveryTracker,
+    effects: readonly DeliveryEffect[],
+    suppliedSettlement?: TerminalMessageSettlement,
+  ): Promise<MessageContext | undefined> {
+    let terminalContext: MessageContext | undefined;
+    for (const effect of effects) {
+      if (effect.type === "dispatch") {
+        // dispatchOne owns provider I/O. This effect is the reducer's proof
+        // that the exact attempt was authorized, not a second dispatch call.
+        continue;
+      }
+      if (effect.type === "record_progress") {
+        if (effect.progress !== "transport_uncertain") {
+          await this.store
+            .markMessageProgress(tracker.messageId, effect.progress)
+            .catch(() => undefined);
+        }
+        continue;
+      }
+      if (effect.type === "publish_stall") {
+        await this.publishStallNoticeLocked(tracker, effect.pendingForMs);
+        continue;
+      }
+      if (effect.type === "settle_delivery") {
+        const code = this.normalizeDeliverySafeCode(
+          tracker,
+          effect.outcome,
+          effect.safeErrorCode,
+        );
+        if (code === undefined) delete tracker.deliverySafeErrorCode;
+        else tracker.deliverySafeErrorCode = code;
+        const settlement =
+          suppliedSettlement ??
+          (await this.settleDeliveryStoreLocked(
+            tracker,
+            effect.outcome,
+            code,
+          ));
+        if (settlement !== undefined) {
+          const settledCode = this.normalizeDeliverySafeCode(
+            tracker,
+            effect.outcome,
+            settlement.safeErrorCode ?? code,
+          );
+          if (settledCode === undefined) delete tracker.deliverySafeErrorCode;
+          else tracker.deliverySafeErrorCode = settledCode;
+        }
+        terminalContext = this.takeMessageContextLocked(
+          tracker.messageId,
+          effect.outcome,
+          this.providerTurnContinuations.has(tracker.messageId),
+        );
+        continue;
+      }
+      if (effect.type === "send_native_receipt") {
+        await this.sendNativeReceiptLocked(tracker);
+        continue;
+      }
+      if (effect.type === "release_native_receipt") {
+        await this.releaseNativeReceiptLocked(tracker);
+      }
+      // Retry effects are projected into the one lifecycle timer below.
+    }
+    if (
+      isTerminalDeliveryMachine(tracker.machine) &&
       tracker.deliveryToken === undefined &&
       tracker.nativeReceipt === undefined
     ) {
-      this.deliveryTrackers.delete(messageId);
+      this.deliveryTrackers.delete(tracker.messageId);
     }
-    return true;
+    return terminalContext;
+  }
+
+  private async advanceDeliveryLocked(
+    messageId: string,
+    event: DeliveryEvent,
+    suppliedSettlement?: TerminalMessageSettlement,
+    terminalReplyText?: string,
+  ): Promise<MessageContext | undefined> {
+    const tracker = this.deliveryTrackers.get(messageId);
+    if (tracker === undefined) return undefined;
+    // A pre-observed terminal event whose ledger write failed retains
+    // precedence over later lifecycle events. If the store has already
+    // supplied a different authoritative settlement, mirror that proof.
+    const hasSuppliedSettlement = suppliedSettlement !== undefined;
+    const retryingPending =
+      tracker.pendingTerminalEvent !== undefined && !hasSuppliedSettlement;
+    const transitionEvent =
+      tracker.pendingTerminalEvent !== undefined && !hasSuppliedSettlement
+        ? tracker.pendingTerminalEvent
+        : event;
+    let transition = transitionDelivery(tracker.machine, transitionEvent);
+    if (transition.state === tracker.machine && transition.effects.length === 0) {
+      return undefined;
+    }
+    const settlementEffect = transition.effects.find(
+      (effect): effect is Extract<DeliveryEffect, { type: "settle_delivery" }> =>
+        effect.type === "settle_delivery",
+    );
+    let authoritativeSettlement = suppliedSettlement;
+    if (settlementEffect !== undefined && authoritativeSettlement === undefined) {
+      const code = this.normalizeDeliverySafeCode(
+        tracker,
+        settlementEffect.outcome,
+        settlementEffect.safeErrorCode,
+      );
+      try {
+        authoritativeSettlement = await this.settleDeliveryStoreLocked(
+          tracker,
+          settlementEffect.outcome,
+          code,
+        );
+        if (authoritativeSettlement === undefined) {
+          throw new BridgeError(
+            "DELIVERY_SETTLEMENT_UNAVAILABLE",
+            "The delivery ledger could not find the accepted message to settle.",
+            true,
+          );
+        }
+      } catch (error) {
+        const firstFailure = tracker.pendingTerminalEvent === undefined;
+        tracker.pendingTerminalEvent ??= transitionEvent;
+        if (firstFailure && terminalReplyText !== undefined) {
+          tracker.pendingTerminalReplyText = terminalReplyText;
+        }
+        tracker.settlementRetryAt =
+          this.now().getTime() + DELIVERY_SETTLEMENT_RETRY_MS;
+        if (firstFailure) {
+          this.addRuntimeAlert("DELIVERY_SETTLEMENT_RETRY", "error", {
+            alias: tracker.targetAlias,
+          });
+        }
+        this.scheduleLifecycleWakeLocked();
+        throw error;
+      }
+    }
+    if (settlementEffect !== undefined && authoritativeSettlement !== undefined) {
+      const authoritativeOutcome = this.settlementDeliveryState(
+        authoritativeSettlement,
+      );
+      if (
+        authoritativeOutcome !== settlementEffect.outcome ||
+        authoritativeSettlement.safeErrorCode !==
+          settlementEffect.safeErrorCode
+      ) {
+        transition = transitionDelivery(tracker.machine, {
+          type: "external_settlement",
+          at: this.eventTime(transitionEvent),
+          outcome: authoritativeOutcome,
+          ...(authoritativeSettlement.safeErrorCode === undefined
+            ? {}
+            : { safeErrorCode: authoritativeSettlement.safeErrorCode }),
+        });
+      }
+    }
+    tracker.machine = transition.state;
+    tracker.updatedAt = isTerminalDeliveryMachine(transition.state)
+      ? transition.state.terminalAt
+      : this.eventTime(transitionEvent);
+    delete tracker.pendingTerminalEvent;
+    delete tracker.settlementRetryAt;
+    const context = await this.applyDeliveryEffectsLocked(
+      tracker,
+      transition.effects,
+      authoritativeSettlement,
+    );
+    if (retryingPending) {
+      const replyText = tracker.pendingTerminalReplyText;
+      delete tracker.pendingTerminalReplyText;
+      await this.finishDeliveredReplyLocked(context, replyText);
+      return undefined;
+    }
+    if (hasSuppliedSettlement) {
+      delete tracker.pendingTerminalReplyText;
+    }
+    if (tracker.machine.nativeReceipt.phase === "confirmed") {
+      delete tracker.nativeReceipt;
+      if (
+        isTerminalDeliveryMachine(tracker.machine) &&
+        tracker.deliveryToken === undefined
+      ) {
+        this.deliveryTrackers.delete(tracker.messageId);
+      }
+    }
+    return context;
   }
 
   private async applyTerminalSettlementLocked(
     settlement: TerminalMessageSettlement,
   ): Promise<MessageContext | undefined> {
     const state = this.settlementDeliveryState(settlement);
-    await this.markSenderTerminalLocked(
+    return await this.advanceDeliveryLocked(
       settlement.messageId,
-      state,
-      settlement.safeErrorCode,
+      {
+        type: "external_settlement",
+        at: this.now().getTime(),
+        outcome: state,
+        ...(settlement.safeErrorCode === undefined
+          ? {}
+          : { safeErrorCode: settlement.safeErrorCode }),
+      },
+      settlement,
     );
-    return this.takeMessageContextLocked(settlement.messageId, state);
   }
 
   private takeMessageContextLocked(
     messageId: string,
     state: DeliveryTerminalState,
+    retainProviderTurn = false,
   ): MessageContext | undefined {
     const context = this.messageContexts.get(messageId);
     if (context === undefined) return undefined;
     this.messageContexts.delete(messageId);
     if (
+      !retainProviderTurn &&
       this.activeDispatchByTarget.get(context.targetAlias) ===
       messageId
     ) {
@@ -2101,7 +2475,9 @@ export class GatewayService {
       if (!this.closing) this.scheduleDispatch(context.targetAlias);
     }
     const conversation = this.conversations.get(context.conversationId);
-    if (state !== "delivered" && state !== "ambiguous") {
+    // Ambiguity remains active in the reducer until the immutable deadline;
+    // once it becomes terminal there is no remaining reply window to own.
+    if (state !== "delivered") {
       this.releasePendingClaude(conversation);
     }
     if (state !== "delivered") {
@@ -2117,16 +2493,21 @@ export class GatewayService {
    * correlation until completion or the original deadline.
    */
   private async acceptProviderDeliveryLocked(messageId: string): Promise<boolean> {
-    const result = await this.store.settleMessage({
-      messageId,
-      state: "delivered",
-    });
-    if (result.status !== "settled") return false;
     const context = this.messageContexts.get(messageId);
     if (context === undefined) return false;
-    context.providerAccepted = true;
-    await this.markSenderTerminalLocked(messageId, "delivered");
-    return true;
+    this.providerTurnContinuations.set(messageId, { ...context });
+    await this.advanceDeliveryLocked(messageId, {
+      type: "provider_released",
+      observedAt: this.now().getTime(),
+    });
+    if (
+      !this.messageContexts.has(messageId) &&
+      this.providerTurnContinuations.has(messageId)
+    ) {
+      return true;
+    }
+    this.providerTurnContinuations.delete(messageId);
+    return false;
   }
 
   private stallReasonFor(
@@ -2142,99 +2523,79 @@ export class GatewayService {
   }
 
   private async processLifecycleLocked(): Promise<boolean> {
-    const nowDate = this.now();
-    const now = nowDate.getTime();
+    const now = this.now().getTime();
     let changed = false;
-    await this.drainPreDeadlineTerminalCallbacksLocked();
-    const due = await this.store.expireDueMessages(nowDate);
-    for (const settlement of due) {
-      await this.applyTerminalSettlementLocked(settlement);
-      changed = true;
-    }
-    for (const [messageId, context] of this.messageContexts) {
-      if (
-        context.providerAccepted !== true ||
-        Date.parse(context.deadlineAt) > now
-      ) {
-        continue;
+    await this.drainPreDeadlineDeliveryCallbacksLocked();
+    for (const tracker of this.deliveryTrackers.values()) {
+      if (tracker.pendingTerminalEvent !== undefined) {
+        if ((tracker.settlementRetryAt ?? 0) <= now) {
+          await this.advanceDeliveryLocked(
+            tracker.messageId,
+            tracker.pendingTerminalEvent,
+          );
+          changed = true;
+        }
+        if (tracker.pendingTerminalEvent !== undefined) continue;
       }
-      this.takeMessageContextLocked(messageId, "expired");
+      if (!isTerminalDeliveryMachine(tracker.machine)) {
+        const wakeups = projectDeliveryWakeups(tracker.machine);
+        if (wakeups.stallAt !== undefined && wakeups.stallAt <= now) {
+          await this.advanceDeliveryLocked(tracker.messageId, {
+            type: "stall_due",
+            at: now,
+          });
+          changed = true;
+        }
+        if (
+          !isTerminalDeliveryMachine(tracker.machine) &&
+          tracker.machine.dispatchRetryAt !== null &&
+          tracker.machine.dispatchRetryAt <= now
+        ) {
+          if (!this.dispatchRunnerTargets.has(tracker.targetAlias)) {
+            this.scheduleDispatch(tracker.targetAlias);
+          }
+        }
+        if (
+          !isTerminalDeliveryMachine(tracker.machine) &&
+          tracker.deadlineAt <= now
+        ) {
+          await this.advanceDeliveryLocked(tracker.messageId, {
+            type: "deadline_due",
+            at: now,
+          });
+          changed = true;
+        }
+      }
+      if (
+        tracker.machine.stall === "emitted" &&
+        !tracker.stallNoticeSent &&
+        tracker.stallNoticeNextAttemptAt <= now &&
+        !isTerminalDeliveryMachine(tracker.machine)
+      ) {
+        await this.publishStallNoticeLocked(
+          tracker,
+          Math.max(0, now - tracker.enqueuedAt),
+        );
+        changed = true;
+      }
+      const receiptRetryAt = projectDeliveryWakeups(
+        tracker.machine,
+      ).nativeReceiptRetryAt;
+      if (receiptRetryAt !== undefined && receiptRetryAt <= now) {
+        await this.advanceDeliveryLocked(tracker.messageId, {
+          type: "native_receipt_retry_due",
+          at: now,
+        });
+        changed = true;
+      }
+    }
+    for (const [messageId, continuation] of this.providerTurnContinuations) {
+      if (Date.parse(continuation.deadlineAt) > now) continue;
+      await this.finishProviderTurnContinuationLocked(messageId, "expired");
       this.addRuntimeAlert("PROVIDER_REPLY_DEADLINE_EXPIRED", "warning", {
-        alias: context.targetAlias,
+        alias: continuation.targetAlias,
       });
       changed = true;
-    }
-    for (const tracker of this.deliveryTrackers.values()) {
-      if (
-        this.closing ||
-        this.isTerminalDeliveryState(tracker.state) ||
-        tracker.stallSent ||
-        tracker.stallAt > now ||
-        tracker.stallNextAttemptAt > now
-      ) {
-        continue;
-      }
-      tracker.state = "stalled";
-      tracker.updatedAt = now;
-      changed = true;
-      const receipt = tracker.nativeReceipt;
-      if (receipt === undefined) {
-        tracker.stallSent = true;
-        continue;
-      }
-      try {
-        const adapter = this.adapter("claude", receipt.hostId);
-        const notify = adapter.notifyNativeInboundProgress;
-        if (notify === undefined) {
-          throw new BridgeError(
-            "NATIVE_PROGRESS_TRANSPORT_UNAVAILABLE",
-            "The Claude adapter cannot publish delivery progress.",
-          );
-        }
-        await notify.call(adapter, receipt.receiptHandle, {
-          kind: "stall",
-          reason: this.stallReasonFor(tracker),
-          queuedForMs: Math.max(0, now - tracker.enqueuedAt),
-        });
-        tracker.stallSent = true;
-      } catch (error) {
-        const cleanPrewrite = error instanceof BridgeError && error.recoverable;
-        tracker.stallAttempt += 1;
-        const delay =
-          DELIVERY_ACK_RETRY_DELAYS_MS[
-            Math.min(
-              tracker.stallAttempt - 1,
-              DELIVERY_ACK_RETRY_DELAYS_MS.length - 1,
-            )
-          ] ?? DELIVERY_ACK_RETRY_DELAYS_MS.at(-1) ?? 2_000;
-        const nextAttemptAt = now + delay;
-        if (
-          cleanPrewrite &&
-          tracker.stallAttempt <= DELIVERY_ACK_RETRY_DELAYS_MS.length &&
-          nextAttemptAt < tracker.deadlineAt
-        ) {
-          tracker.stallNextAttemptAt = nextAttemptAt;
-          continue;
-        }
-        // A non-recoverable/ambiguous write may already have reached Claude;
-        // never replay it. Exhausted clean pre-write retries are also bounded.
-        tracker.stallSent = true;
-        this.addRuntimeAlert("NATIVE_STALL_NOTICE_UNCONFIRMED", "warning", {
-          provider: "claude",
-          host: receipt.hostId,
-          alias: tracker.targetAlias,
-        });
-      }
-    }
-    for (const tracker of this.deliveryTrackers.values()) {
-      const receipt = tracker.nativeReceipt;
-      if (
-        receipt?.terminal !== undefined &&
-        receipt.terminal.nextAttemptAt <= now
-      ) {
-        changed =
-          (await this.flushNativeReceiptLocked(tracker, now)) || changed;
-      }
     }
     if (
       this.nextDashboardRefreshAt !== undefined &&
@@ -2262,21 +2623,37 @@ export class GatewayService {
       wakeAt = wakeAt === undefined ? candidate : Math.min(wakeAt, candidate);
     };
     for (const tracker of this.deliveryTrackers.values()) {
-      if (!this.isTerminalDeliveryState(tracker.state)) {
-        hasNonterminal = true;
-        if (!tracker.stallSent) {
-          consider(Math.max(tracker.stallAt, tracker.stallNextAttemptAt));
-        }
-        consider(tracker.deadlineAt);
+      const wakeups = projectDeliveryWakeups(tracker.machine);
+      if (tracker.settlementRetryAt !== undefined) {
+        consider(tracker.settlementRetryAt);
       }
-      const nextAttemptAt = tracker.nativeReceipt?.terminal?.nextAttemptAt;
-      if (nextAttemptAt !== undefined) consider(nextAttemptAt);
+      if (!isTerminalDeliveryMachine(tracker.machine)) {
+        hasNonterminal = true;
+        if (wakeups.stallAt !== undefined) consider(wakeups.stallAt);
+        if (
+          tracker.machine.stall === "emitted" &&
+          !tracker.stallNoticeSent
+        ) {
+          consider(tracker.stallNoticeNextAttemptAt);
+        }
+        if (wakeups.deadlineAt !== undefined) consider(wakeups.deadlineAt);
+        if (
+          wakeups.dispatchRetryAt !== undefined &&
+          !this.scheduledDispatchTargets.has(tracker.targetAlias) &&
+          !this.dispatchRunnerTargets.has(tracker.targetAlias)
+        ) {
+          consider(wakeups.dispatchRetryAt);
+        }
+      }
+      if (wakeups.nativeReceiptRetryAt !== undefined) {
+        consider(wakeups.nativeReceiptRetryAt);
+      }
       if (
-        this.isTerminalDeliveryState(tracker.state) &&
+        isTerminalDeliveryMachine(tracker.machine) &&
         tracker.deliveryToken !== undefined
       ) {
         consider(
-          (tracker.terminalAt ?? tracker.updatedAt) +
+          tracker.machine.terminalAt +
             Math.max(60_000, this.config.limits.messageDeadlineMs * 2),
         );
       }
@@ -2284,8 +2661,8 @@ export class GatewayService {
     // Provider acceptance may settle the original body while its bounded
     // reply correlation remains live; plain pending stays nonterminal. Keep
     // every retained reply context's deadline scheduled independently.
-    for (const context of this.messageContexts.values()) {
-      const deadlineAt = Date.parse(context.deadlineAt);
+    for (const continuation of this.providerTurnContinuations.values()) {
+      const deadlineAt = Date.parse(continuation.deadlineAt);
       if (Number.isFinite(deadlineAt)) consider(deadlineAt);
     }
     if (hasNonterminal) {
@@ -2332,19 +2709,24 @@ export class GatewayService {
       if (tracker === undefined || tracker.deliveryToken !== token) {
         return { found: false };
       }
-      const terminal = this.isTerminalDeliveryState(tracker.state);
+      const projection = projectDelivery(tracker.machine, this.now().getTime());
+      const terminal = projection.terminal;
       return {
         found: true,
-        state: tracker.state,
+        state: terminal
+          ? projection.outcome!
+          : projection.stalled
+            ? "stalled"
+            : "queued",
         terminal,
         updatedAt: new Date(tracker.updatedAt).toISOString(),
         deadlineAt: new Date(tracker.deadlineAt).toISOString(),
         ...(!terminal
           ? { pendingForMs: Math.max(0, this.now().getTime() - tracker.enqueuedAt) }
           : {}),
-        ...(tracker.safeErrorCode === undefined
+        ...(tracker.deliverySafeErrorCode === undefined
           ? {}
-          : { safeErrorCode: tracker.safeErrorCode }),
+          : { safeErrorCode: tracker.deliverySafeErrorCode }),
       };
     });
   }
@@ -2620,6 +3002,9 @@ export class GatewayService {
     const active = new Set(
       [...this.messageContexts.values()].map((context) => context.conversationId),
     );
+    for (const continuation of this.providerTurnContinuations.values()) {
+      active.add(continuation.conversationId);
+    }
     for (const pending of this.pendingClaudeReplies.values()) {
       active.add(pending.conversationId);
     }
@@ -2720,6 +3105,53 @@ export class GatewayService {
     }
 
     this.activeDispatchByTarget.set(targetAlias, item.messageId);
+    const tracker = this.deliveryTrackers.get(item.messageId);
+    if (tracker === undefined) {
+      const settled = await this.store.settleMessage({
+        messageId: item.messageId,
+        state: "failed",
+        safeErrorCode: "DELIVERY_TRACKER_MISSING",
+      });
+      this.takeMessageContextLocked(item.messageId, "failed");
+      if (this.activeDispatchByTarget.get(targetAlias) === item.messageId) {
+        this.activeDispatchByTarget.delete(targetAlias);
+      }
+      for (const [token, messageId] of this.deliveryTokens) {
+        if (messageId === item.messageId) this.deliveryTokens.delete(token);
+      }
+      this.addRuntimeAlert("DELIVERY_TRACKER_MISSING", "error", {
+        alias: targetAlias,
+      });
+      if (settled.status !== "settled") {
+        this.addRuntimeAlert("DELIVERY_LEDGER_RECOVERY_FAILED", "error", {
+          alias: targetAlias,
+        });
+      }
+      await this.changed();
+      return;
+    }
+    const dispatchEvent: DeliveryEvent =
+      tracker.machine.phase !== "terminal" &&
+      tracker.machine.dispatchRetryAt !== null
+        ? {
+            type: "dispatch_retry_due",
+            at: this.now().getTime(),
+          }
+        : { type: "dispatch_requested", at: this.now().getTime() };
+    await this.advanceDeliveryLocked(item.messageId, dispatchEvent);
+    if (isTerminalDeliveryMachine(tracker.machine)) return;
+    if (tracker.machine.phase !== "dispatching") {
+      const requeued = await this.store.requeueInFlightMessage(
+        item.messageId,
+        item.body,
+      );
+      this.activeDispatchByTarget.delete(targetAlias);
+      if (requeued.status === "settled") {
+        await this.applyTerminalSettlementLocked(requeued.settlement);
+      }
+      this.scheduleLifecycleWakeLocked();
+      return;
+    }
     try {
       const result = await this.adapter(binding.provider, binding.hostId).dispatch({
         binding,
@@ -2732,6 +3164,20 @@ export class GatewayService {
       if (result.state === "deferred") {
         const currentTargetAlias =
           this.bindingAliases.get(bindingKey(binding)) ?? targetAlias;
+        const now = this.now().getTime();
+        await this.advanceDeliveryLocked(item.messageId, {
+          type: "dispatch_clean_prewrite_failed",
+          at: now,
+          retryAt: now + 500,
+          safeErrorCode: safeCode(
+            result.safeErrorCode,
+            "PROVIDER_DISPATCH_DEFERRED",
+          ),
+        });
+        if (isTerminalDeliveryMachine(tracker.machine)) {
+          await this.changed();
+          return;
+        }
         const requeued = await this.store.requeueInFlightMessage(
           item.messageId,
           item.body,
@@ -2747,11 +3193,6 @@ export class GatewayService {
             });
             await this.setNativeCodexStatus(currentTargetAlias, "waiting");
           }
-          const retry = this.timers.setTimeout(
-            () => this.scheduleDispatch(currentTargetAlias),
-            500,
-          );
-          (retry as { unref?: () => void }).unref?.();
         } else if (requeued.status === "settled") {
           await this.applyTerminalSettlementLocked(requeued.settlement);
         }
@@ -2774,12 +3215,22 @@ export class GatewayService {
           (await this.acceptProviderDeliveryLocked(item.messageId))
         ) {
           await this.changed();
+        } else if (result.state === "pending") {
+          await this.advanceDeliveryLocked(item.messageId, {
+            type: "await_terminal",
+            at: this.now().getTime(),
+          });
         }
       } else {
         await this.finishDelivery({ messageId: item.messageId, state: result.state, ...(result.safeErrorCode === undefined ? {} : { safeErrorCode: result.safeErrorCode }), ...(result.replyText === undefined ? {} : { replyText: result.replyText }) });
       }
     } catch {
-      await this.finishDelivery({ messageId: item.messageId, state: "ambiguous", safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS" });
+      await this.advanceDeliveryLocked(item.messageId, {
+        type: "dispatch_ambiguous",
+        at: this.now().getTime(),
+        safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
+      });
+      await this.changed();
     }
     this.scheduleDispatch(
       this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
@@ -2787,9 +3238,20 @@ export class GatewayService {
   }
 
   private scheduleDispatch(targetAlias: string): void {
+    if (this.scheduledDispatchTargets.has(targetAlias)) return;
+    this.scheduledDispatchTargets.add(targetAlias);
     setImmediate(() => {
       this.mutex
-        .run("service", async () => this.dispatchOne(targetAlias))
+        .run("service", async () => {
+          this.scheduledDispatchTargets.delete(targetAlias);
+          this.dispatchRunnerTargets.add(targetAlias);
+          try {
+            await this.dispatchOne(targetAlias);
+          } finally {
+            this.dispatchRunnerTargets.delete(targetAlias);
+            this.scheduleLifecycleWakeLocked();
+          }
+        })
         .catch(() => {
           this.dashboardHealthy = false;
         });
@@ -2799,8 +3261,9 @@ export class GatewayService {
   private async onDelivery(
     source: PrivateEndpointIdentity,
     event: GatewayAdapterDelivery,
+    receivedAt: number,
   ): Promise<void> {
-    const context = this.messageContexts.get(event.messageId);
+    const context = this.deliveryCorrelation(event.messageId);
     if (context === undefined) return;
     const target = this.contextTargetBinding(context);
     if (
@@ -2811,70 +3274,197 @@ export class GatewayService {
     ) {
       return;
     }
-    if (event.state === "transport_written" || event.state === "held") {
-      try {
-        await this.store.markMessageProgress(event.messageId, event.state);
-      } catch {
-        // A duplicate/late progress event is observational and cannot reopen a
-        // settled delivery.
+    if (
+      this.providerTurnContinuations.has(event.messageId) &&
+      !this.messageContexts.has(event.messageId)
+    ) {
+      if (
+        event.state === "transport_uncertain" ||
+        event.state === "transport_written" ||
+        event.state === "held"
+      ) {
+        return;
       }
+      const state =
+        event.state === "released" || event.state === "completed"
+          ? "delivered"
+          : event.state === "expired"
+            ? "expired"
+            : event.state === "cancelled"
+              ? "cancelled"
+              : event.state === "ambiguous"
+                ? "ambiguous"
+                : "failed";
+      await this.finishProviderTurnContinuationLocked(
+        event.messageId,
+        state,
+        event.replyText,
+      );
+      await this.changed();
       return;
     }
-    const state =
-      event.state === "released" || event.state === "completed"
-        ? "delivered"
-        : event.state === "expired"
-          ? "expired"
-          : event.state === "denied" || event.state === "failed"
-            ? "failed"
-            : event.state;
-    await this.finishDelivery({ messageId: event.messageId, state, ...(event.safeErrorCode === undefined ? {} : { safeErrorCode: event.safeErrorCode }), ...(event.replyText === undefined ? {} : { replyText: event.replyText }) });
+    const deliveryEvent: DeliveryEvent =
+      event.state === "transport_uncertain"
+        ? {
+            type: "dispatch_ambiguous",
+            at: receivedAt,
+            safeErrorCode: safeCode(
+              event.safeErrorCode,
+              "DISPATCH_OUTCOME_AMBIGUOUS",
+            ),
+          }
+        : event.state === "transport_written"
+        ? { type: "transport_written", observedAt: receivedAt }
+        : event.state === "held"
+          ? { type: "provider_held", observedAt: receivedAt }
+          : event.state === "released" || event.state === "completed"
+            ? { type: "provider_released", observedAt: receivedAt }
+            : event.state === "unconfirmed"
+              ? {
+                  type: "provider_unconfirmed",
+                  observedAt: receivedAt,
+                  safeErrorCode: safeCode(
+                    event.safeErrorCode,
+                    "DELIVERY_UNCONFIRMED",
+                  ),
+                }
+              : event.state === "expired"
+                ? {
+                    type: "provider_expired",
+                    observedAt: receivedAt,
+                    safeErrorCode: safeCode(
+                      event.safeErrorCode,
+                      "MESSAGE_EXPIRED",
+                    ),
+                  }
+                : event.state === "denied" || event.state === "failed"
+                  ? {
+                      type: "provider_failed",
+                      observedAt: receivedAt,
+                      safeErrorCode: safeCode(
+                        event.safeErrorCode,
+                        "PROVIDER_DELIVERY_FAILED",
+                      ),
+                    }
+                  : event.state === "ambiguous"
+                    ? {
+                        type: "dispatch_ambiguous",
+                        at: receivedAt,
+                        safeErrorCode: safeCode(
+                          event.safeErrorCode,
+                          "DISPATCH_OUTCOME_AMBIGUOUS",
+                        ),
+                      }
+                    : {
+                        type: "cancel",
+                        at: receivedAt,
+                        safeErrorCode: safeCode(
+                          event.safeErrorCode,
+                          "PROVIDER_DELIVERY_CANCELLED",
+                        ),
+                      };
+    const terminalContext = await this.advanceDeliveryLocked(
+      event.messageId,
+      deliveryEvent,
+      undefined,
+      event.replyText,
+    );
+    await this.finishDeliveredReplyLocked(
+      terminalContext,
+      event.replyText,
+    );
+    await this.changed();
   }
 
   private async finishDelivery(event: {
     messageId: string;
-    state: "delivered" | "failed" | "ambiguous" | "expired" | "cancelled";
+    state:
+      | "delivered"
+      | "unconfirmed"
+      | "failed"
+      | "ambiguous"
+      | "expired"
+      | "cancelled";
     safeErrorCode?: string;
     replyText?: string;
   }): Promise<void> {
-    const result = await this.store.settleMessage({
-      messageId: event.messageId,
-      state: event.state,
-      ...(event.safeErrorCode === undefined
-        ? {}
-        : {
-            safeErrorCode: safeCode(
-              event.safeErrorCode,
-              "PROVIDER_DELIVERY_FAILED",
-            ),
-          }),
-    });
-    let context: MessageContext | undefined;
-    let terminalState: DeliveryTerminalState;
-    if (result.status === "settled") {
-      terminalState = this.settlementDeliveryState(result.settlement);
-      context = await this.applyTerminalSettlementLocked(result.settlement);
-    } else {
-      const accepted = this.messageContexts.get(event.messageId);
-      if (accepted?.providerAccepted !== true) return;
-      terminalState = event.state;
-      context = this.takeMessageContextLocked(event.messageId, terminalState);
-      if (terminalState !== "delivered") {
-        this.addRuntimeAlert("PROVIDER_TURN_FAILED_AFTER_ACCEPTANCE", "warning", {
-          alias: accepted.targetAlias,
-        });
-      }
-    }
-    if (context === undefined) {
+    if (
+      this.providerTurnContinuations.has(event.messageId) &&
+      !this.messageContexts.has(event.messageId)
+    ) {
+      await this.finishProviderTurnContinuationLocked(
+        event.messageId,
+        event.state,
+        event.replyText,
+      );
       await this.changed();
       return;
     }
+    const now = this.now().getTime();
+    const deliveryEvent: DeliveryEvent =
+      event.state === "delivered"
+        ? { type: "provider_released", observedAt: now }
+        : event.state === "unconfirmed"
+          ? {
+              type: "provider_unconfirmed",
+              observedAt: now,
+              safeErrorCode: safeCode(
+                event.safeErrorCode,
+                "DELIVERY_UNCONFIRMED",
+              ),
+            }
+          : event.state === "expired"
+            ? {
+                type: "provider_expired",
+                observedAt: now,
+                safeErrorCode: safeCode(event.safeErrorCode, "MESSAGE_EXPIRED"),
+              }
+            : event.state === "failed"
+              ? {
+                  type: "provider_failed",
+                  observedAt: now,
+                  safeErrorCode: safeCode(
+                    event.safeErrorCode,
+                    "PROVIDER_DELIVERY_FAILED",
+                  ),
+                }
+              : event.state === "ambiguous"
+                ? {
+                    type: "dispatch_ambiguous",
+                    at: now,
+                    safeErrorCode: safeCode(
+                      event.safeErrorCode,
+                      "DISPATCH_OUTCOME_AMBIGUOUS",
+                    ),
+                  }
+                : {
+                    type: "cancel",
+                    at: now,
+                    safeErrorCode: safeCode(
+                      event.safeErrorCode,
+                      "PROVIDER_DELIVERY_CANCELLED",
+                    ),
+                  };
+    const context = await this.advanceDeliveryLocked(
+      event.messageId,
+      deliveryEvent,
+      undefined,
+      event.replyText,
+    );
+    await this.finishDeliveredReplyLocked(context, event.replyText);
+    await this.changed();
+  }
+
+  private async finishDeliveredReplyLocked(
+    context: MessageContext | undefined,
+    replyText: string | undefined,
+  ): Promise<void> {
+    if (context === undefined) return;
     const conversation = this.conversations.get(context.conversationId);
     if (
       !this.closing &&
-      terminalState === "delivered" &&
-      event.replyText !== undefined &&
-      event.replyText.length > 0 &&
+      replyText !== undefined &&
+      replyText.length > 0 &&
       context.expectsReply &&
       conversation !== undefined
     ) {
@@ -2883,7 +3473,7 @@ export class GatewayService {
           await this.enqueueNativeReply(
             conversation,
             conversation.targetAlias,
-            event.replyText,
+            replyText,
             context.hopCount + 1,
             false,
           );
@@ -2891,7 +3481,7 @@ export class GatewayService {
           await this.enqueue(
             conversation.targetAlias,
             conversation.sourceAlias,
-            event.replyText,
+            replyText,
             false,
             true,
             conversation.id,
@@ -2903,7 +3493,36 @@ export class GatewayService {
         this.dashboardHealthy = false;
       }
     }
-    await this.changed();
+  }
+
+  private async finishProviderTurnContinuationLocked(
+    messageId: string,
+    state: DeliveryTerminalState,
+    replyText?: string,
+  ): Promise<boolean> {
+    const continuation = this.providerTurnContinuations.get(messageId);
+    if (continuation === undefined) return false;
+    this.providerTurnContinuations.delete(messageId);
+    if (
+      this.activeDispatchByTarget.get(continuation.targetAlias) === messageId
+    ) {
+      this.activeDispatchByTarget.delete(continuation.targetAlias);
+      if (!this.closing) this.scheduleDispatch(continuation.targetAlias);
+    }
+    const conversation = this.conversations.get(continuation.conversationId);
+    if (state !== "delivered") {
+      this.releasePendingClaude(conversation);
+      this.nativeIngressByConversation.delete(continuation.conversationId);
+      this.addRuntimeAlert("PROVIDER_TURN_FAILED_AFTER_ACCEPTANCE", "warning", {
+        alias: continuation.targetAlias,
+      });
+      return true;
+    }
+    await this.finishDeliveredReplyLocked(continuation, replyText);
+    if (replyText === undefined || replyText.length === 0) {
+      this.nativeIngressByConversation.delete(continuation.conversationId);
+    }
+    return true;
   }
 
   private async onClaudeReply(event: {
@@ -3038,25 +3657,20 @@ export class GatewayService {
         targetAlias: event.targetAlias,
         enqueuedAt,
         deadlineAt,
+        ...(event.receiptHandle === undefined
+          ? {}
+          : {
+              nativeReceipt: {
+                hostId: event.endpoint.hostId,
+                receiptHandle: event.receiptHandle,
+              },
+            }),
       });
       this.nativeIngressByConversation.set(conversationId, {
         sourceAlias: event.sourceAlias,
         binding: sourceBinding,
         deadlineAt,
       });
-      if (event.receiptHandle !== undefined) {
-        const tracker = this.deliveryTrackers.get(queued.messageId);
-        if (tracker === undefined) {
-          throw new BridgeError(
-            "DELIVERY_TRACKER_MISSING",
-            "The accepted native message lost its delivery tracker.",
-          );
-        }
-        tracker.nativeReceipt = {
-          hostId: event.endpoint.hostId,
-          receiptHandle: event.receiptHandle,
-        };
-      }
       await this.changed();
       await this.setNativeCodexStatus(event.targetAlias, "waiting");
       this.scheduleDispatch(event.targetAlias);
@@ -3066,15 +3680,13 @@ export class GatewayService {
         "NATIVE_INGRESS_REJECTED",
       );
       if (acceptedMessageId !== undefined) {
-        const cancelled = await this.store.cancelQueuedMessage(
-          acceptedMessageId,
-        );
-        if (cancelled) {
-          await this.applyTerminalSettlementLocked({
-            messageId: acceptedMessageId,
-            state: "expired",
-            safeErrorCode: code,
-          });
+        const cancelled = await this.store.settleQueuedMessage({
+          messageId: acceptedMessageId,
+          state: "expired",
+          safeErrorCode: code,
+        });
+        if (cancelled.status === "settled") {
+          await this.applyTerminalSettlementLocked(cancelled.settlement);
           await this.changed();
         }
         return;

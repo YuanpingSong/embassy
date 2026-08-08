@@ -55,6 +55,7 @@ export const deliveryStates = [
   "transport_written",
   "held",
   "delivered",
+  "unconfirmed",
   "failed",
   "ambiguous",
   "expired",
@@ -67,6 +68,7 @@ export type DeliveryState = (typeof deliveryStates)[number];
 
 export const terminalDeliveryStates = new Set<DeliveryState>([
   "delivered",
+  "unconfirmed",
   "failed",
   "ambiguous",
   "expired",
@@ -116,6 +118,7 @@ export type PrivateRouteBinding = PrivateEndpointIdentity & {
 export type RouteCounters = {
   accepted: number;
   delivered: number;
+  unconfirmed: number;
   failed: number;
   ambiguous: number;
   expired: number;
@@ -223,6 +226,7 @@ export type GatewayAccounting = {
   accepted: number;
   duplicates: number;
   delivered: number;
+  unconfirmed: number;
   failed: number;
   ambiguous: number;
   expired: number;
@@ -692,7 +696,12 @@ export type SettleMessageInput = {
   messageId: string;
   state: Extract<
     DeliveryState,
-    "delivered" | "failed" | "ambiguous" | "expired" | "cancelled"
+    | "delivered"
+    | "unconfirmed"
+    | "failed"
+    | "ambiguous"
+    | "expired"
+    | "cancelled"
   >;
   safeErrorCode?: string;
 };
@@ -707,6 +716,7 @@ export type TerminalMessageSettlement = {
   state: Extract<
     DeliveryState,
     | "delivered"
+    | "unconfirmed"
     | "failed"
     | "ambiguous"
     | "expired"

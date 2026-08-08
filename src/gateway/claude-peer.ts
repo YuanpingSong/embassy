@@ -98,15 +98,18 @@ export type ClaudePeerDiscovery = {
 
 export type ClaudePeerTransportStatus =
   | "connecting"
+  | "write_started"
   | "transport_written"
   | "ambiguous"
   | "not_written";
 
 export type ClaudePeerReceiptStatus =
   | "held"
+  /** Native `delivered`: approval released the frame to Claude's queue. */
   | "released"
   | "denied"
   | "expired"
+  | "unconfirmed"
   | "ambiguous";
 
 export type ClaudePeerDeliveryDiagnostic = {
@@ -220,6 +223,8 @@ export type ClaudePeerListenerOptions = {
 
 export type ClaudePeerSendOptions = {
   listener?: ClaudePeerListener;
+  /** Exact gateway message deadline as an epoch-millisecond timestamp. */
+  receiptDeadlineAt?: number;
   onTransportStatus?: (
     event: ClaudePeerTransportEvent,
   ) => void | Promise<void>;
@@ -309,8 +314,24 @@ type ParsedFrame = ParsedUserFrame | ParsedControlFrame;
 type PendingReceipt = {
   binding: TargetBinding;
   state: "pending" | "held";
+  writeEvidence: "none" | "transport_written" | "transport_uncertain";
+  deadlineAt: number;
   timer: NodeJS.Timeout;
 };
+
+function pendingReceiptDeadlineStatus(
+  pending: PendingReceipt,
+): "unconfirmed" | "ambiguous" | "expired" {
+  if (
+    pending.writeEvidence === "transport_written" ||
+    pending.state === "held"
+  ) {
+    return "unconfirmed";
+  }
+  return pending.writeEvidence === "transport_uncertain"
+    ? "ambiguous"
+    : "expired";
+}
 
 type InboundReceipt = {
   sourceSessionId: string;
@@ -1528,6 +1549,7 @@ export class ClaudePeerAdapter {
       limits: this.#limits,
       createId: this.#createId,
       connect: this.#connect,
+      now: this.#now,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
       resolveSessionBinding: async (sessionId) => {
@@ -1640,38 +1662,114 @@ export class ClaudePeerAdapter {
       ...(listener === undefined ? {} : { from: listener.address }),
       maxFrameBytes: this.#limits.maxFrameBytes,
     });
-    if (listener !== undefined) listener.track(messageId, binding);
+    if (
+      options.receiptDeadlineAt !== undefined &&
+      (!Number.isSafeInteger(options.receiptDeadlineAt) ||
+        options.receiptDeadlineAt < 0)
+    ) {
+      throw new BridgeError(
+        "INVALID_PEER_RECEIPT_DEADLINE",
+        "The Claude peer receipt deadline must be an epoch-millisecond timestamp.",
+      );
+    }
+    if (
+      options.receiptDeadlineAt !== undefined &&
+      options.receiptDeadlineAt <= this.#now()
+    ) {
+      throw new BridgeError(
+        "CLAUDE_PEER_MESSAGE_EXPIRED",
+        "The Claude peer message deadline elapsed before any socket write.",
+        true,
+      );
+    }
+    if (listener !== undefined) {
+      listener.track(messageId, binding, options.receiptDeadlineAt);
+    }
 
     await invokeObservationalHook(options.onTransportStatus, {
       messageId,
       status: "connecting",
     });
+    if (
+      options.receiptDeadlineAt !== undefined &&
+      options.receiptDeadlineAt <= this.#now()
+    ) {
+      listener?.untrack(messageId);
+      await invokeObservationalHook(options.onTransportStatus, {
+        messageId,
+        status: "not_written",
+      });
+      throw new BridgeError(
+        "CLAUDE_PEER_MESSAGE_EXPIRED",
+        "The Claude peer message deadline elapsed before any socket write.",
+        true,
+      );
+    }
     let written = false;
     let writeStarted = false;
     try {
       await new Promise<void>((resolve, reject) => {
         const socket = this.#connect(binding.record.messagingSocketPath);
+        const timeoutMs = Math.max(
+          1,
+          Math.min(
+            this.#limits.connectTimeoutMs,
+            options.receiptDeadlineAt === undefined
+              ? this.#limits.connectTimeoutMs
+              : options.receiptDeadlineAt - this.#now(),
+          ),
+        );
         const timer = setTimeout(() => {
           socket.destroy();
+          const deadlineElapsed =
+            options.receiptDeadlineAt !== undefined &&
+            this.#now() >= options.receiptDeadlineAt;
           reject(
             new BridgeError(
               writeStarted
                 ? "CLAUDE_PEER_WRITE_AMBIGUOUS"
-                : "CLAUDE_PEER_CONNECT_TIMEOUT",
+                : deadlineElapsed
+                  ? "CLAUDE_PEER_MESSAGE_EXPIRED"
+                  : "CLAUDE_PEER_CONNECT_TIMEOUT",
               writeStarted
                 ? "The Claude peer write began but did not finish in time; do not retry automatically."
-                : "The Claude peer socket did not accept the write in time.",
+                : deadlineElapsed
+                  ? "The Claude peer message deadline elapsed before any socket write."
+                  : "The Claude peer socket did not accept the write in time.",
               !writeStarted,
             ),
           );
-        }, this.#limits.connectTimeoutMs);
+        }, timeoutMs);
         timer.unref();
         socket.once("error", (error) => {
           clearTimeout(timer);
           reject(error);
         });
         socket.once("connect", () => {
+          if (
+            options.receiptDeadlineAt !== undefined &&
+            options.receiptDeadlineAt <= this.#now()
+          ) {
+            clearTimeout(timer);
+            socket.destroy();
+            reject(
+              new BridgeError(
+                "CLAUDE_PEER_MESSAGE_EXPIRED",
+                "The Claude peer message deadline elapsed before any socket write.",
+                true,
+              ),
+            );
+            return;
+          }
           writeStarted = true;
+          listener?.recordTransportOutcome(
+            messageId,
+            "transport_uncertain",
+          );
+          void invokeObservationalHook(options.onTransportStatus, {
+            messageId,
+            status: "write_started",
+          });
           try {
             socket.end(frame, () => {
               written = true;
@@ -1687,7 +1785,13 @@ export class ClaudePeerAdapter {
         });
       });
     } catch (error) {
-      if (!writeStarted && listener !== undefined) listener.untrack(messageId);
+      if (listener !== undefined) {
+        if (writeStarted) {
+          listener.recordTransportOutcome(messageId, "transport_uncertain");
+        } else {
+          listener.untrack(messageId);
+        }
+      }
       await invokeObservationalHook(
         options.onTransportStatus,
         {
@@ -1709,12 +1813,13 @@ export class ClaudePeerAdapter {
       );
     }
     if (!written) {
-      if (listener !== undefined) listener.untrack(messageId);
+      listener?.recordTransportOutcome(messageId, "transport_uncertain");
       throw new BridgeError(
         "CLAUDE_PEER_WRITE_AMBIGUOUS",
         "The Claude peer write outcome is ambiguous; do not retry automatically.",
       );
     }
+    listener?.recordTransportOutcome(messageId, "transport_written");
     await invokeObservationalHook(options.onTransportStatus, {
       messageId,
       status: "transport_written",
@@ -1746,6 +1851,7 @@ type ListenerCreateOptions = {
   limits: AdapterLimits;
   createId: () => string;
   connect: ClaudePeerConnect;
+  now: () => number;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
@@ -1762,6 +1868,7 @@ export class ClaudePeerListener {
   readonly #limits: AdapterLimits;
   readonly #createId: () => string;
   readonly #connect: ClaudePeerConnect;
+  readonly #now: () => number;
   readonly #resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   readonly #resolveSessionBinding: (
     sessionId: string,
@@ -1797,6 +1904,7 @@ export class ClaudePeerListener {
     this.#limits = options.limits;
     this.#createId = options.createId;
     this.#connect = options.connect;
+    this.#now = options.now;
     this.#resolveReplyAddress = options.resolveReplyAddress;
     this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
@@ -2266,7 +2374,11 @@ export class ClaudePeerListener {
     return { transportStatus: "transport_written" };
   }
 
-  track(messageId: string, binding: TargetBinding): void {
+  track(
+    messageId: string,
+    binding: TargetBinding,
+    receiptDeadlineAt?: number,
+  ): void {
     if (this.#closed) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
@@ -2286,18 +2398,41 @@ export class ClaudePeerListener {
         "The peer message ID collided with an outstanding receipt.",
       );
     }
+    const now = this.#now();
+    const deadlineAt =
+      receiptDeadlineAt ?? now + this.#limits.receiptDeadlineMs;
     const timer = setTimeout(() => {
       const pending = this.#pending.get(messageId);
       if (pending === undefined) return;
       this.#pending.delete(messageId);
       void this.#emitReceipt({
         messageId,
-        status: "ambiguous",
+        status: pendingReceiptDeadlineStatus(pending),
         trust: "untrusted_same_uid_peer",
       });
-    }, this.#limits.receiptDeadlineMs);
+    }, Math.max(1, deadlineAt - now));
     timer.unref();
-    this.#pending.set(messageId, { binding, state: "pending", timer });
+    this.#pending.set(messageId, {
+      binding,
+      state: "pending",
+      writeEvidence: "none",
+      deadlineAt,
+      timer,
+    });
+  }
+
+  recordTransportOutcome(
+    messageId: string,
+    outcome: "transport_written" | "transport_uncertain",
+  ): void {
+    const pending = this.#pending.get(messageId);
+    if (pending === undefined) return;
+    if (
+      pending.writeEvidence !== "transport_written" ||
+      outcome === "transport_written"
+    ) {
+      pending.writeEvidence = outcome;
+    }
   }
 
   untrack(messageId: string): void {
@@ -2533,12 +2668,23 @@ export class ClaudePeerListener {
       await this.#notice("UNKNOWN_RECEIPT");
       return;
     }
+    if (this.#now() >= pending.deadlineAt) {
+      clearTimeout(pending.timer);
+      this.#pending.delete(frame.originalMessageId);
+      await this.#emitReceipt({
+        messageId: frame.originalMessageId,
+        status: pendingReceiptDeadlineStatus(pending),
+        trust: "untrusted_same_uid_peer",
+      });
+      return;
+    }
     if (frame.status === "held") {
       if (pending.state !== "pending") {
         await this.#notice("INVALID_RECEIPT_TRANSITION");
         return;
       }
       pending.state = "held";
+      pending.writeEvidence = "transport_written";
       await this.#emitReceipt({
         messageId: frame.originalMessageId,
         status: "held",
@@ -2580,7 +2726,7 @@ export class ClaudePeerListener {
     this.#closed = true;
     this.#inboundQuiesced = true;
     await this.unadvertise();
-    const unsettledMessageIds = [...this.#pending.keys()];
+    const unsettledReceipts = [...this.#pending.entries()];
     for (const pending of this.#pending.values()) clearTimeout(pending.timer);
     this.#pending.clear();
     this.#inboundReceipts.clear();
@@ -2589,10 +2735,13 @@ export class ClaudePeerListener {
     }
     this.#capacitySettlement = undefined;
     await Promise.allSettled(
-      unsettledMessageIds.map(async (messageId) =>
+      unsettledReceipts.map(async ([messageId, pending]) =>
         this.#emitReceipt({
           messageId,
-          status: "ambiguous",
+          status:
+            pendingReceiptDeadlineStatus(pending) === "unconfirmed"
+              ? "unconfirmed"
+              : "ambiguous",
           trust: "untrusted_same_uid_peer",
         }),
       ),

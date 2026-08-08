@@ -88,6 +88,7 @@ function exampleSnapshot(): DashboardSnapshot {
         counters: {
           accepted: 4,
           delivered: 3,
+          unconfirmed: 0,
           failed: 0,
           ambiguous: 0,
           expired: 0,
@@ -110,6 +111,7 @@ function exampleSnapshot(): DashboardSnapshot {
         counters: {
           accepted: 1,
           delivered: 1,
+          unconfirmed: 0,
           failed: 0,
           ambiguous: 0,
           expired: 0,
@@ -139,6 +141,7 @@ function exampleSnapshot(): DashboardSnapshot {
       accepted: 4,
       duplicates: 0,
       delivered: 3,
+      unconfirmed: 0,
       failed: 0,
       ambiguous: 0,
       expired: 0,
@@ -293,6 +296,7 @@ test("dashboard escapes every public string and rejects free-form codes", () => 
       counters: {
         accepted: 0,
         delivered: 0,
+        unconfirmed: 0,
         failed: 0,
         ambiguous: 0,
         expired: 0,

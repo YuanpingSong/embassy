@@ -287,6 +287,7 @@ export type GatewayDeliveryStatusState =
   | "queued"
   | "stalled"
   | "delivered"
+  | "unconfirmed"
   | "expired"
   | "failed"
   | "ambiguous"
@@ -859,6 +860,7 @@ function isSafeCode(value: unknown): value is string {
 
 const TERMINAL_DELIVERY_STATUS_STATES = new Set<GatewayDeliveryStatusState>([
   "delivered",
+  "unconfirmed",
   "expired",
   "failed",
   "ambiguous",
@@ -872,6 +874,7 @@ function isDeliveryStatusState(
     value === "queued" ||
     value === "stalled" ||
     value === "delivered" ||
+    value === "unconfirmed" ||
     value === "expired" ||
     value === "failed" ||
     value === "ambiguous" ||
@@ -910,6 +913,7 @@ function isRouteCounters(value: unknown): value is RouteCounters {
     !hasExactKeys(value, [
       "accepted",
       "delivered",
+      "unconfirmed",
       "failed",
       "ambiguous",
       "expired",
@@ -1063,6 +1067,7 @@ function isNormalizedMessageEvent(
       value.state === "transport_written" ||
       value.state === "held" ||
       value.state === "delivered" ||
+      value.state === "unconfirmed" ||
       value.state === "failed" ||
       value.state === "ambiguous" ||
       value.state === "expired" ||
@@ -1083,6 +1088,7 @@ function isAccounting(value: unknown): value is GatewayAccounting {
       "accepted",
       "duplicates",
       "delivered",
+      "unconfirmed",
       "failed",
       "ambiguous",
       "expired",

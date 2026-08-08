@@ -124,6 +124,80 @@ test("confirmed transport without a terminal frame becomes unconfirmed at deadli
   ]);
 });
 
+test("an authoritative provider unconfirmed outcome records confirmed-write evidence", () => {
+  const result = transitionDelivery(started(), {
+    type: "provider_unconfirmed",
+    observedAt: DEADLINE_AT - 1,
+    safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+  });
+  const settled = terminal(result.state, "unconfirmed");
+  assert.equal(settled.writeEvidence, "transport_written");
+  assert.equal(settled.terminalAt, DEADLINE_AT - 1);
+  assert.equal(
+    settled.safeErrorCode,
+    "CLAUDE_RECEIPT_UNCONFIRMED",
+  );
+
+  const exactWithoutPriorEvidence = transitionDelivery(started(), {
+    type: "provider_unconfirmed",
+    observedAt: DEADLINE_AT,
+    safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+  });
+  assert.equal(
+    terminal(exactWithoutPriorEvidence.state, "expired").safeErrorCode,
+    "DELIVERY_DEADLINE_EXPIRED",
+  );
+});
+
+test("an external store settlement reconciles active state without reopening terminal truth", () => {
+  const result = transitionDelivery(machine(), {
+    type: "external_settlement",
+    at: DEADLINE_AT - 1,
+    outcome: "failed",
+    safeErrorCode: "ROUTE_REMOVED",
+  });
+  const settled = terminal(result.state, "failed");
+  assert.equal(settled.safeErrorCode, "ROUTE_REMOVED");
+
+  const duplicate = transitionDelivery(settled, {
+    type: "external_settlement",
+    at: DEADLINE_AT,
+    outcome: "delivered",
+  });
+  assert.equal(duplicate.state, settled);
+  assert.deepEqual(duplicate.effects, []);
+});
+
+test("shutdown derives terminal truth from transport evidence", () => {
+  const queued = transitionDelivery(machine(), { type: "shutdown", at: 20 });
+  assert.equal(terminal(queued.state, "cancelled").safeErrorCode, "GATEWAY_SHUTDOWN");
+
+  let written = started();
+  written = step(written, {
+    type: "transport_written",
+    observedAt: 15,
+  });
+  const unconfirmed = transitionDelivery(written, {
+    type: "shutdown",
+    at: 20,
+  });
+  assert.equal(terminal(unconfirmed.state, "unconfirmed").safeErrorCode, "DELIVERY_UNCONFIRMED");
+
+  const uncertain = step(started(), {
+    type: "dispatch_ambiguous",
+    at: 15,
+    safeErrorCode: "CLAUDE_DISPATCH_OUTCOME_AMBIGUOUS",
+  });
+  const ambiguous = transitionDelivery(uncertain, {
+    type: "shutdown",
+    at: 20,
+  });
+  assert.equal(
+    terminal(ambiguous.state, "ambiguous").safeErrorCode,
+    "CLAUDE_DISPATCH_OUTCOME_AMBIGUOUS",
+  );
+});
+
 test("a delivery with no evidence expires at its deadline", () => {
   const result = transitionDelivery(started(), {
     type: "deadline_due",
@@ -318,6 +392,26 @@ test("only a proven clean pre-write failure is retryable", () => {
     step(ambiguous.state, { type: "deadline_due", at: DEADLINE_AT }),
     "ambiguous",
   );
+});
+
+test("late transport uncertainty strengthens an already-pending attempt", () => {
+  const awaiting = step(started(), { type: "await_terminal", at: 10 });
+  const uncertain = transitionDelivery(awaiting, {
+    type: "dispatch_ambiguous",
+    at: DEADLINE_AT - 1,
+    safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+  });
+  assert.equal(uncertain.state.phase, "awaiting_terminal");
+  assert.equal(uncertain.state.writeEvidence, "transport_uncertain");
+  assert.deepEqual(uncertain.effects, [
+    { type: "record_progress", progress: "transport_uncertain" },
+  ]);
+  const settled = transitionDelivery(uncertain.state, {
+    type: "deadline_due",
+    at: DEADLINE_AT,
+  });
+  assert.equal(terminal(settled.state, "ambiguous").safeErrorCode,
+    "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN");
 });
 
 test("stall is orthogonal to phase and emitted once", () => {
@@ -605,6 +699,18 @@ function eventFixtures(): DeliveryEvent[] {
       observedAt: DEADLINE_AT - 1,
       safeErrorCode: "PROVIDER_FAILED",
     },
+    {
+      type: "provider_unconfirmed",
+      observedAt: DEADLINE_AT,
+      safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+    },
+    {
+      type: "external_settlement",
+      at: DEADLINE_AT - 1,
+      outcome: "failed",
+      safeErrorCode: "ROUTE_REMOVED",
+    },
+    { type: "shutdown", at: DEADLINE_AT - 1 },
     { type: "stall_due", at: STALL_AT - 1 },
     { type: "stall_due", at: STALL_AT },
     { type: "stall_due", at: DEADLINE_AT },

@@ -26,6 +26,7 @@ import {
   type ClaudePeerAdapterOptions,
   type ClaudePeerAdapterTestOverrides,
   type ClaudePeerInboundMessage,
+  type ClaudePeerListener,
   type ClaudePeerProtocolNotice,
   type ClaudePeerReceiptEvent,
   type ClaudeProcessIdentity,
@@ -799,7 +800,11 @@ test("send writes exactly one canonical frame and reports transport, not deliver
   });
   await eventually(() => wire.includes(0x0a));
   assert.equal(connections, 1);
-  assert.deepEqual(statuses, ["connecting", "transport_written"]);
+  assert.deepEqual(statuses, [
+    "connecting",
+    "write_started",
+    "transport_written",
+  ]);
   assert.deepEqual(result, {
     messageId: MESSAGE_ONE,
     transportStatus: "transport_written",
@@ -809,6 +814,40 @@ test("send writes exactly one canonical frame and reports transport, not deliver
   assert.equal(parsed.type, "user");
   assert.equal(parsed.msgV, 1);
   assert.equal(parsed.from, undefined);
+});
+
+test("send never opens a peer socket after its canonical deadline", async (t) => {
+  let connections = 0;
+  let now = 1_786_150_000_000;
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    now: () => now,
+  });
+  await addPeer(current, {
+    pid: 44_102,
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const deadlineAt = now + 1;
+  const statuses: string[] = [];
+  await assert.rejects(
+    current.adapter.send(target.targetId, "already expired", {
+      receiptDeadlineAt: deadlineAt,
+      onTransportStatus: (event) => {
+        statuses.push(event.status);
+        if (event.status === "connecting") now = deadlineAt;
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_MESSAGE_EXPIRED" &&
+      error.recoverable,
+  );
+  assert.equal(connections, 0);
+  assert.deepEqual(statuses, ["connecting", "not_written"]);
 });
 
 test("transport observer failures cannot turn a written message into a retry signal", async (t) => {
@@ -872,9 +911,70 @@ test("a post-connect error is ambiguous, non-retryable, and retains late receipt
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       error.recoverable === false,
   );
-  assert.deepEqual(transport, ["connecting", "ambiguous"]);
+  assert.deepEqual(transport, ["connecting", "write_started", "ambiguous"]);
   await eventually(() => receipts.length === 1);
   assert.equal(receipts[0]?.status, "ambiguous");
+});
+
+test("a held receipt cannot be downgraded by a later transport error", async (t) => {
+  const fakeSocket = new EventEmitter() as net.Socket;
+  fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
+  let listener: ClaudePeerListener | undefined;
+  let peerSocketPath = "";
+  let heldThenError: Promise<void> | undefined;
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  fakeSocket.end = ((_frame: Buffer, _callback: () => void) => {
+    heldThenError = (async () => {
+      assert.ok(listener !== undefined);
+      await sendLines(listener.address.slice(4), [
+        `${JSON.stringify({
+          type: "control",
+          action: "peer_message_status",
+          status: "held",
+          reason: "not surfaced",
+          from: `uds:${peerSocketPath}`,
+          orig_msg_id: MESSAGE_ONE,
+          msgV: 1,
+          msg_id: MESSAGE_TWO,
+        })}\n`,
+      ]);
+      await eventually(() => receipts.some((event) => event.status === "held"));
+      fakeSocket.emit("error", new Error("reset after native hold"));
+    })();
+    return fakeSocket;
+  }) as net.Socket["end"];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    receiptDeadlineMs: 200,
+    connect: () => {
+      queueMicrotask(() => fakeSocket.emit("connect"));
+      return fakeSocket;
+    },
+  });
+  const peer = await addPeer(current, { pid: 44_303 });
+  peerSocketPath = peer.socketPath;
+  listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  await assert.rejects(
+    current.adapter.send(target.targetId, "held before reset", {
+      listener,
+      receiptDeadlineAt: Date.now() + 200,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS",
+  );
+  await heldThenError;
+  await eventually(() => receipts.length === 2, 500);
+  assert.deepEqual(
+    receipts.map((event) => event.status),
+    ["held", "unconfirmed"],
+  );
 });
 
 test("a post-connect timeout is ambiguous rather than not-written", async (t) => {
@@ -903,7 +1003,54 @@ test("a post-connect timeout is ambiguous rather than not-written", async (t) =>
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       error.recoverable === false,
   );
-  assert.deepEqual(transport, ["connecting", "ambiguous"]);
+  assert.deepEqual(transport, ["connecting", "write_started", "ambiguous"]);
+});
+
+test("a write that hangs across the canonical deadline is ambiguous, not expired", async (t) => {
+  const fakeSocket = new EventEmitter() as net.Socket;
+  fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
+  fakeSocket.end = (() => fakeSocket) as net.Socket["end"];
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  const transport: string[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    connectTimeoutMs: 500,
+    receiptDeadlineMs: 1_000,
+    connect: () => {
+      queueMicrotask(() => fakeSocket.emit("connect"));
+      return fakeSocket;
+    },
+  });
+  await addPeer(current, { pid: 44_304 });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  await assert.rejects(
+    current.adapter.send(target.targetId, "deadline-crossing write", {
+      listener,
+      receiptDeadlineAt: Date.now() + 200,
+      onTransportStatus: (event) => {
+        transport.push(event.status);
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
+      !error.recoverable,
+  );
+  await eventually(() => receipts.length === 1);
+  assert.deepEqual(transport, ["connecting", "write_started", "ambiguous"]);
+  assert.deepEqual(receipts, [
+    {
+      messageId: MESSAGE_ONE,
+      status: "ambiguous",
+      trust: "untrusted_same_uid_peer",
+    },
+  ]);
 });
 
 test("anonymous callback listener bounds NDJSON and marks registered peers untrusted", async (t) => {
@@ -1053,7 +1200,7 @@ test("known held receipt flow is normalized without claiming task completion", a
   });
 });
 
-test("anonymous callback listener does not advertise until explicitly requested", async (t) => {
+test("a confirmed write without a native terminal becomes unconfirmed", async (t) => {
   const receipts: ClaudePeerReceiptEvent[] = [];
   const current = await fixture(t, {
     createId: () => MESSAGE_ONE,
@@ -1072,13 +1219,105 @@ test("anonymous callback listener does not advertise until explicitly requested"
   await eventually(() => receipts.length === 1);
   assert.deepEqual(receipts[0], {
     messageId: MESSAGE_ONE,
-    status: "ambiguous",
+    status: "unconfirmed",
     trust: "untrusted_same_uid_peer",
   });
   const registryNames = await readdir(current.sessionsDir);
   assert.ok(!registryNames.includes(`${process.pid}.json`));
   await listener.close();
   await assert.rejects(lstat(callbackPath), { code: "ENOENT" });
+});
+
+test("a held receipt uses the exact per-message deadline before becoming unconfirmed", async (t) => {
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    receiptDeadlineMs: 1_000,
+  });
+  const peer = await addPeer(current, {
+    pid: 47_102,
+    handler: (socket) => socket.resume(),
+  });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const deadlineAt = Date.now() + 250;
+  await current.adapter.send(target.targetId, "held without release", {
+    listener,
+    receiptDeadlineAt: deadlineAt,
+  });
+  await sendLines(listener.address.slice(4), [
+    `${JSON.stringify({
+      type: "control",
+      action: "peer_message_status",
+      status: "held",
+      reason: "not surfaced",
+      from: `uds:${peer.socketPath}`,
+      orig_msg_id: MESSAGE_ONE,
+      msgV: 1,
+      msg_id: MESSAGE_TWO,
+    })}\n`,
+  ]);
+  await eventually(() => receipts.length === 1);
+  assert.equal(receipts[0]?.status, "held");
+  await eventually(() => receipts.length === 2, 500);
+  assert.deepEqual(receipts[1], {
+    messageId: MESSAGE_ONE,
+    status: "unconfirmed",
+    trust: "untrusted_same_uid_peer",
+  });
+  assert.ok(Date.now() < deadlineAt + 400);
+});
+
+test("a native terminal at the exact canonical cutoff cannot override write evidence", async (t) => {
+  let clock = 1_786_150_000_000;
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    receiptDeadlineMs: 1_000,
+    now: () => clock,
+  });
+  const peer = await addPeer(current, {
+    pid: 47_103,
+    handler: (socket) => socket.resume(),
+  });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const deadlineAt = clock + 1_000;
+  await current.adapter.send(target.targetId, "cutoff race", {
+    listener,
+    receiptDeadlineAt: deadlineAt,
+  });
+  clock = deadlineAt;
+  await sendLines(listener.address.slice(4), [
+    `${JSON.stringify({
+      type: "control",
+      action: "peer_message_status",
+      status: "delivered",
+      reason: "not surfaced",
+      from: `uds:${peer.socketPath}`,
+      orig_msg_id: MESSAGE_ONE,
+      msgV: 1,
+      msg_id: MESSAGE_TWO,
+    })}\n`,
+  ]);
+  await eventually(() => receipts.length === 1);
+  assert.deepEqual(receipts, [
+    {
+      messageId: MESSAGE_ONE,
+      status: "unconfirmed",
+      trust: "untrusted_same_uid_peer",
+    },
+  ]);
 });
 
 test("listener advertises one native codex peer and removes it on close", async (t) => {
@@ -1982,7 +2221,7 @@ test("listener pairs an expired native receipt with a readable safe diagnostic",
   assert.equal(frames[1]?.from, undefined);
 });
 
-test("listener shutdown settles every pending transport as ambiguous", async (t) => {
+test("listener shutdown preserves confirmed-write evidence as unconfirmed", async (t) => {
   const receipts: ClaudePeerReceiptEvent[] = [];
   let asyncSettlementFinished = false;
   const current = await fixture(t, {
@@ -2006,7 +2245,7 @@ test("listener shutdown settles every pending transport as ambiguous", async (t)
   assert.equal(asyncSettlementFinished, true);
   assert.deepEqual(receipts[0], {
     messageId: MESSAGE_ONE,
-    status: "ambiguous",
+    status: "unconfirmed",
     trust: "untrusted_same_uid_peer",
   });
 });

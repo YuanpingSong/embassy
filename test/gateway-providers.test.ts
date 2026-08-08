@@ -108,12 +108,16 @@ class FakeClaudePeer {
   ];
   listenerOptions: ClaudePeerListenerOptions | undefined;
   listenerUsed = false;
+  lastReceiptDeadlineAt: number | undefined;
   sendCalls = 0;
   truncated = false;
   asserted: Array<{ routeHandle: string; stateRoot: string }> = [];
   closed = false;
-  sendMode: "success" | "postwrite_ambiguous" | "prewrite_failure" =
-    "success";
+  sendMode:
+    | "success"
+    | "postwrite_ambiguous"
+    | "held_then_postwrite_ambiguous"
+    | "prewrite_failure" = "success";
   untracked: string[] = [];
   acknowledged: Array<{
     receiptHandle: string;
@@ -236,6 +240,7 @@ class FakeClaudePeer {
   ): Promise<ClaudePeerSendResult> {
     this.sendCalls += 1;
     this.listenerUsed = options.listener === this.listener;
+    this.lastReceiptDeadlineAt = options.receiptDeadlineAt;
     if (this.sendMode === "prewrite_failure") {
       throw new BridgeError("CLAUDE_PEER_TARGET_STALE", "synthetic");
     }
@@ -243,7 +248,21 @@ class FakeClaudePeer {
       messageId: PROVIDER_MESSAGE_ID,
       status: "connecting",
     });
-    if (this.sendMode === "postwrite_ambiguous") {
+    await options.onTransportStatus?.({
+      messageId: PROVIDER_MESSAGE_ID,
+      status: "write_started",
+    });
+    if (
+      this.sendMode === "postwrite_ambiguous" ||
+      this.sendMode === "held_then_postwrite_ambiguous"
+    ) {
+      if (this.sendMode === "held_then_postwrite_ambiguous") {
+        await this.listenerOptions?.onReceipt?.({
+          messageId: PROVIDER_MESSAGE_ID,
+          status: "held",
+          trust: "untrusted_same_uid_peer",
+        });
+      }
       await options.onTransportStatus?.({
         messageId: PROVIDER_MESSAGE_ID,
         status: "ambiguous",
@@ -265,7 +284,15 @@ class FakeClaudePeer {
     this.closed = true;
   }
 
-  emitReceipt(status: "held" | "released" | "denied" | "expired" | "ambiguous"): void {
+  emitReceipt(
+    status:
+      | "held"
+      | "released"
+      | "denied"
+      | "expired"
+      | "unconfirmed"
+      | "ambiguous",
+  ): void {
     void this.listenerOptions?.onReceipt?.({
       messageId: PROVIDER_MESSAGE_ID,
       status,
@@ -484,6 +511,11 @@ test("local Claude provider publishes only canonical interactive names and gener
   assert.deepEqual(result, { state: "pending" });
   assert.equal(fake.listenerUsed, true);
   assert.deepEqual(observed.deliveries, [
+    {
+      messageId: GATEWAY_MESSAGE_ID,
+      state: "transport_uncertain",
+      safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+    },
     { messageId: GATEWAY_MESSAGE_ID, state: "transport_written" },
   ]);
   assert.equal(JSON.stringify(observed.deliveries).includes(PROVIDER_MESSAGE_ID), false);
@@ -924,9 +956,20 @@ test("local Claude provider waits for a late exact receipt after post-write ambi
     }),
     { state: "pending" },
   );
-  assert.deepEqual(observed.deliveries, []);
+  assert.deepEqual(observed.deliveries, [
+    {
+      messageId: GATEWAY_MESSAGE_ID,
+      state: "transport_uncertain",
+      safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+    },
+  ]);
   fake.emitReceipt("released");
   assert.deepEqual(observed.deliveries, [
+    {
+      messageId: GATEWAY_MESSAGE_ID,
+      state: "transport_uncertain",
+      safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+    },
     { messageId: GATEWAY_MESSAGE_ID, state: "released" },
   ]);
 
@@ -941,6 +984,136 @@ test("local Claude provider waits for a late exact receipt after post-write ambi
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
     { state: "failed", safeErrorCode: "CLAUDE_DISPATCH_REJECTED" },
+  );
+  await provider.close();
+});
+
+test("Claude provider settles deadline outcomes from transport evidence", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.discoverClaudePeers();
+  await provider.assertWorkspaceDisjoint(
+    "target-selected",
+    "/synthetic/controller-state",
+  );
+  await provider.selectRoute({
+    alias: "advisor@this-mac",
+    routeHandle: "target-selected",
+  });
+
+  const confirmedDeadline = Date.now() + 120;
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-confirmed-no-native-ack",
+      text: "confirmed transport only",
+      expectsReply: false,
+      deadlineAt: new Date(confirmedDeadline).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.lastReceiptDeadlineAt, confirmedDeadline);
+  await waitFor(() =>
+    observed.deliveries.some(
+      (event) =>
+        event.messageId === "gateway-confirmed-no-native-ack" &&
+        event.state === "unconfirmed",
+    ),
+  );
+  assert.deepEqual(observed.deliveries.at(-1), {
+    messageId: "gateway-confirmed-no-native-ack",
+    state: "unconfirmed",
+    safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+  });
+
+  const heldDeadline = Date.now() + 120;
+  await provider.dispatch({
+    authorization: "selected_route",
+    binding: binding(provider),
+    messageId: "gateway-held-no-terminal",
+    text: "held transport",
+    expectsReply: false,
+    deadlineAt: new Date(heldDeadline).toISOString(),
+  });
+  fake.emitReceipt("held");
+  await waitFor(() =>
+    observed.deliveries.some(
+      (event) =>
+        event.messageId === "gateway-held-no-terminal" &&
+        event.state === "unconfirmed",
+    ),
+  );
+  assert.deepEqual(observed.deliveries.at(-1), {
+    messageId: "gateway-held-no-terminal",
+    state: "unconfirmed",
+    safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+  });
+
+  fake.sendMode = "postwrite_ambiguous";
+  const uncertainDeadline = Date.now() + 120;
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-uncertain-no-terminal",
+      text: "uncertain transport",
+      expectsReply: false,
+      deadlineAt: new Date(uncertainDeadline).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  await waitFor(() =>
+    observed.deliveries.some(
+      (event) =>
+        event.messageId === "gateway-uncertain-no-terminal" &&
+        event.state === "ambiguous",
+    ),
+  );
+  assert.deepEqual(observed.deliveries.at(-1), {
+    messageId: "gateway-uncertain-no-terminal",
+    state: "ambiguous",
+    safeErrorCode: "CLAUDE_DISPATCH_OUTCOME_AMBIGUOUS",
+  });
+
+  fake.sendMode = "held_then_postwrite_ambiguous";
+  const heldThenUncertainDeadline = Date.now() + 120;
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-held-then-uncertain",
+      text: "held proves the write despite a later transport error",
+      expectsReply: false,
+      deadlineAt: new Date(heldThenUncertainDeadline).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  await waitFor(() =>
+    observed.deliveries.some(
+      (event) =>
+        event.messageId === "gateway-held-then-uncertain" &&
+        event.state === "unconfirmed",
+    ),
+  );
+  assert.deepEqual(observed.deliveries.at(-1), {
+    messageId: "gateway-held-then-uncertain",
+    state: "unconfirmed",
+    safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
+  });
+  assert.equal(
+    observed.deliveries.some(
+      (event) =>
+        event.messageId === "gateway-held-then-uncertain" &&
+        event.state === "ambiguous",
+    ),
+    false,
   );
   await provider.close();
 });

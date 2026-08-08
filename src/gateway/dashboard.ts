@@ -336,6 +336,8 @@ function messageStatePresentation(value: unknown): {
   switch (value) {
     case "delivered":
       return { label: "Delivered", tone: "good" };
+    case "unconfirmed":
+      return { label: "Unconfirmed", tone: "warn" };
     case "queued":
     case "dispatching":
     case "transport_written":
@@ -788,7 +790,7 @@ function renderMessages(
         <td data-label="Updated">${renderTimestampAtSnapshot(message.timestamp, generatedAt)}</td>
         <td data-label="Route" class="message-route"><strong>${directionLabel(message.direction)}</strong><span class="alias">${publicLabel(message.sourceAlias)} \u2192 ${publicLabel(message.targetAlias)}</span></td>
         <td data-label="ID"><code>\u2026${shortOpaqueSuffix(message.messageIdSuffix)}</code></td>
-        <td data-label="Result">${statusPill(state.label, state.tone)}${message.safeErrorCode === undefined ? "" : `<span class="cell-note">${renderSafeCode(message.safeErrorCode)}</span>`}</td>
+        <td data-label="Result">${statusPill(state.label, state.tone)}${message.state === "unconfirmed" ? '<span class="cell-note">Transport write confirmed; native receipt unavailable. Check the recipient before retrying.</span>' : ""}${message.safeErrorCode === undefined ? "" : `<span class="cell-note">${renderSafeCode(message.safeErrorCode)}</span>`}</td>
         <td data-label="Elapsed" class="numeric">${formatDuration(message.latencyMs)}</td>
         <td data-label="Size" class="numeric">${formatBytes(message.bytes)}</td>
         <td data-label="History">${history.html}</td>
@@ -874,6 +876,15 @@ function alertGuidance(alert: SafeGatewayAlert): {
         description:
           "The oldest accepted message on this route has remained queued past half of the delivery deadline.",
         action: `Run ${command("embassy status")} to inspect the current route state. Do not resend accepted work; it remains tracked until delivery or expiry.`,
+      };
+    case "CLAUDE_NATIVE_ACK_UNAVAILABLE":
+    case "CLAUDE_RECEIPT_UNCONFIRMED":
+      return {
+        title: "Delivery could not be confirmed",
+        description:
+          "Embassy completed the local transport write, but Claude did not emit a native receipt for direct acceptance.",
+        action:
+          "Check the recipient before retrying. A retry could duplicate the message.",
       };
     case "ADAPTER_DEGRADED":
     case "ROUTE_DEGRADED":

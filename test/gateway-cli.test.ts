@@ -101,6 +101,7 @@ function emptySnapshot(): GatewaySnapshot {
       accepted: 0,
       duplicates: 0,
       delivered: 0,
+      unconfirmed: 0,
       failed: 0,
       ambiguous: 0,
       expired: 0,
@@ -565,7 +566,13 @@ test("wait-delivery returns a retained terminal result after its deadline window
 });
 
 test("wait-delivery preserves every non-delivered terminal state and uses one failure exit", async () => {
-  const states = ["expired", "failed", "ambiguous", "cancelled"] as const;
+  const states = [
+    "unconfirmed",
+    "expired",
+    "failed",
+    "ambiguous",
+    "cancelled",
+  ] as const;
 
   for (const state of states) {
     const stdout = capture();

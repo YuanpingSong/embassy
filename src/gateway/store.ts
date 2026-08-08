@@ -188,6 +188,7 @@ function isRouteCounters(value: unknown): value is RouteCounters {
     !hasOnlyKeys(value, [
       "accepted",
       "delivered",
+      "unconfirmed",
       "failed",
       "ambiguous",
       "expired",
@@ -404,6 +405,7 @@ function isAccounting(value: unknown): value is GatewayAccounting {
       "accepted",
       "duplicates",
       "delivered",
+      "unconfirmed",
       "failed",
       "ambiguous",
       "expired",
@@ -417,6 +419,72 @@ function isAccounting(value: unknown): value is GatewayAccounting {
     return false;
   }
   return Object.values(value).every(isNonNegativeInteger);
+}
+
+const PRE_UNCONFIRMED_ROUTE_COUNTER_KEYS = [
+  "accepted",
+  "delivered",
+  "failed",
+  "ambiguous",
+  "expired",
+  "cancelled",
+  "abandoned",
+  "rejected",
+  "bytesAccepted",
+] as const;
+
+const PRE_UNCONFIRMED_ACCOUNTING_KEYS = [
+  "accepted",
+  "duplicates",
+  "delivered",
+  "failed",
+  "ambiguous",
+  "expired",
+  "cancelled",
+  "abandoned",
+  "rejected",
+  "bytesAccepted",
+  "queuedBytes",
+] as const;
+
+/**
+ * One narrow migration for unpublished dogfood state created before the
+ * `unconfirmed` terminal outcome existed. Atomic state replacement means a
+ * valid old file has either every old counter shape or none of them; mixed or
+ * otherwise unfamiliar shapes continue to fail strict validation.
+ */
+function migratePreUnconfirmedCounters(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !isObject(value.accounting) ||
+    !hasOnlyKeys(value.accounting, PRE_UNCONFIRMED_ACCOUNTING_KEYS) ||
+    Object.hasOwn(value.accounting, "unconfirmed") ||
+    !Array.isArray(value.routes) ||
+    !value.routes.every(
+      (route) =>
+        isObject(route) &&
+        isObject(route.counters) &&
+        hasOnlyKeys(route.counters, PRE_UNCONFIRMED_ROUTE_COUNTER_KEYS) &&
+        !Object.hasOwn(route.counters, "unconfirmed"),
+    )
+  ) {
+    return value;
+  }
+  return {
+    ...value,
+    accounting: { ...value.accounting, unconfirmed: 0 },
+    routes: value.routes.map((route) => {
+      const record = route as Record<string, unknown>;
+      return {
+        ...record,
+        counters: {
+          ...(record.counters as Record<string, unknown>),
+          unconfirmed: 0,
+        },
+      };
+    }),
+  };
 }
 
 function isPersistedState(value: unknown): value is GatewayPersistedState {
@@ -583,6 +651,7 @@ function emptyCounters(): RouteCounters {
   return {
     accepted: 0,
     delivered: 0,
+    unconfirmed: 0,
     failed: 0,
     ambiguous: 0,
     expired: 0,
@@ -598,6 +667,7 @@ function emptyAccounting(): GatewayAccounting {
     accepted: 0,
     duplicates: 0,
     delivered: 0,
+    unconfirmed: 0,
     failed: 0,
     ambiguous: 0,
     expired: 0,
@@ -1614,6 +1684,7 @@ export class GatewayStore {
       }
       if (
         input.state !== "delivered" &&
+        input.state !== "unconfirmed" &&
         input.state !== "failed" &&
         input.state !== "ambiguous" &&
         input.state !== "expired" &&
@@ -2370,6 +2441,7 @@ export class GatewayStore {
     deliveryState: Extract<
       DeliveryState,
       | "delivered"
+      | "unconfirmed"
       | "failed"
       | "ambiguous"
       | "expired"
@@ -2838,6 +2910,7 @@ export class GatewayStore {
         "The gateway controller state is not valid JSON.",
       );
     }
+    parsed = migratePreUnconfirmedCounters(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

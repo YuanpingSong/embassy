@@ -74,6 +74,7 @@ function snapshot(): GatewaySnapshot {
   const counters = {
     accepted: 1,
     delivered: 1,
+    unconfirmed: 0,
     failed: 0,
     ambiguous: 0,
     expired: 0,
@@ -168,11 +169,24 @@ function snapshot(): GatewaySnapshot {
         bytes: 8,
         hopCount: 0,
       },
+      {
+        sequence: 3,
+        timestamp: NOW,
+        messageIdSuffix: "fedcba98",
+        direction: "codex_to_claude",
+        sourceAlias: "codex-main@this-mac",
+        targetAlias: "claude-one@build-mac",
+        state: "unconfirmed",
+        bytes: 14,
+        hopCount: 0,
+        safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+      },
     ],
     accounting: {
       accepted: 1,
       duplicates: 0,
       delivered: 1,
+      unconfirmed: 1,
       failed: 0,
       ambiguous: 0,
       expired: 0,
@@ -505,7 +519,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   if (!listed.ok) assert.fail("expected a projected public snapshot");
   assert.deepEqual(
     listed.result.messages.map((event) => event.state),
-    ["transport_written", "held"],
+    ["transport_written", "held", "unconfirmed"],
   );
   assert.deepEqual(listed.result.truncation, {
     connectors: 0,
@@ -776,6 +790,14 @@ test("delivery status and receipt results are closed and internally consistent",
     },
     {
       found: true,
+      state: "unconfirmed",
+      terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+      safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+    },
+    {
+      found: true,
       state: "expired",
       terminal: true,
       updatedAt: NOW,
@@ -802,6 +824,13 @@ test("delivery status and receipt results are closed and internally consistent",
       found: true,
       state: "queued",
       terminal: true,
+      updatedAt: NOW,
+      deadlineAt: DEADLINE,
+    },
+    {
+      found: true,
+      state: "unconfirmed",
+      terminal: false,
       updatedAt: NOW,
       deadlineAt: DEADLINE,
     },
@@ -842,14 +871,14 @@ test("delivery status and receipt results are closed and internally consistent",
     }),
   });
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 9; attempt += 1) {
     const response = await rawRequest(
       socketPath,
       wireRequest("delivery_status", { token: DELIVERY_TOKEN }),
     );
     assert.equal(response.ok, true);
   }
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     assertWireError(
       await rawRequest(
         socketPath,

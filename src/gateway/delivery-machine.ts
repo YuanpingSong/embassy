@@ -122,9 +122,12 @@ export const deliveryEventTypes = [
   "provider_denied",
   "provider_expired",
   "provider_failed",
+  "provider_unconfirmed",
+  "external_settlement",
   "stall_due",
   "deadline_due",
   "cancel",
+  "shutdown",
   "native_receipt_confirmed",
   "native_receipt_clean_prewrite_failed",
   "native_receipt_retry_due",
@@ -162,9 +165,21 @@ export type DeliveryEvent =
       observedAt: number;
       safeErrorCode: string;
     }
+  | {
+      type: "provider_unconfirmed";
+      observedAt: number;
+      safeErrorCode: string;
+    }
+  | {
+      type: "external_settlement";
+      at: number;
+      outcome: DeliveryTerminalOutcome;
+      safeErrorCode?: string;
+    }
   | { type: "stall_due"; at: number }
   | { type: "deadline_due"; at: number }
   | { type: "cancel"; at: number; safeErrorCode: string }
+  | { type: "shutdown"; at: number }
   | { type: "native_receipt_confirmed"; at: number }
   | {
       type: "native_receipt_clean_prewrite_failed";
@@ -428,7 +443,18 @@ export function transitionDelivery(
     }
 
     case "dispatch_ambiguous": {
-      if (state.phase !== "dispatching") return unchanged(state);
+      if (!hasDispatchStarted(state)) return unchanged(state);
+      if (state.writeEvidence === "transport_written") {
+        return event.at >= state.deadlineAt
+          ? settleAtDeadline(state, event.at)
+          : unchanged(state);
+      }
+      if (
+        state.writeEvidence === "transport_uncertain" &&
+        event.at < state.deadlineAt
+      ) {
+        return unchanged(state);
+      }
       const uncertain: ActiveDeliveryMachine = {
         ...state,
         phase: "awaiting_terminal",
@@ -533,6 +559,30 @@ export function transitionDelivery(
         event.safeErrorCode,
       );
 
+    case "provider_unconfirmed":
+      if (!hasDispatchStarted(state)) return unchanged(state);
+      if (event.observedAt >= state.deadlineAt) {
+        return settleAtDeadline(state, event.observedAt);
+      }
+      return terminalize(
+        {
+          ...state,
+          writeEvidence: "transport_written",
+          uncertaintyCode: null,
+        },
+        "unconfirmed",
+        event.observedAt,
+        event.safeErrorCode,
+      );
+
+    case "external_settlement":
+      return terminalize(
+        state,
+        event.outcome,
+        event.at,
+        event.safeErrorCode,
+      );
+
     case "stall_due":
       if (event.at >= state.deadlineAt) return settleAtDeadline(state, event.at);
       if (state.stall === "emitted" || event.at < state.stallAt) {
@@ -561,6 +611,26 @@ export function transitionDelivery(
         event.at,
         event.safeErrorCode,
       );
+
+    case "shutdown":
+      if (event.at >= state.deadlineAt) return settleAtDeadline(state, event.at);
+      if (state.writeEvidence === "transport_written") {
+        return terminalize(
+          state,
+          "unconfirmed",
+          event.at,
+          "DELIVERY_UNCONFIRMED",
+        );
+      }
+      if (state.writeEvidence === "transport_uncertain") {
+        return terminalize(
+          state,
+          "ambiguous",
+          event.at,
+          state.uncertaintyCode ?? "DISPATCH_OUTCOME_AMBIGUOUS",
+        );
+      }
+      return terminalize(state, "cancelled", event.at, "GATEWAY_SHUTDOWN");
 
     default:
       return assertNever(event);

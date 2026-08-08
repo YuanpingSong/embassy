@@ -71,6 +71,7 @@ export type LocalClaudeGatewayProviderOptions = {
 type ClaudePending = {
   gatewayMessageId: string;
   targetId: string;
+  writeEvidence: "none" | "transport_written" | "transport_uncertain";
   timer: NodeJS.Timeout;
 };
 
@@ -587,10 +588,26 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         return;
       }
       if (event.status === "transport_written") {
+        this.recordClaudeWriteEvidence(event.messageId, "transport_written");
         this.emitDelivery({
           messageId: input.messageId,
           state: "transport_written",
         });
+      } else if (
+        event.status === "write_started" ||
+        event.status === "ambiguous"
+      ) {
+        const newlyUncertain = this.recordClaudeWriteEvidence(
+          event.messageId,
+          "transport_uncertain",
+        );
+        if (newlyUncertain) {
+          this.emitDelivery({
+            messageId: input.messageId,
+            state: "transport_uncertain",
+            safeErrorCode: "CLAUDE_TRANSPORT_OUTCOME_UNCERTAIN",
+          });
+        }
       } else if (event.status === "not_written") {
         terminalDuringSend = true;
         this.finishClaudeMessage(
@@ -609,6 +626,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         input.text,
         {
           listener: this.listener,
+          receiptDeadlineAt: deadline,
           onTransportStatus,
         },
       );
@@ -676,6 +694,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
       this.providerIdByGatewayId.delete(input.messageId);
       this.pendingTargetByGatewayId.delete(input.messageId);
+      if (
+        error instanceof BridgeError &&
+        error.code === "CLAUDE_PEER_MESSAGE_EXPIRED"
+      ) {
+        return { state: "failed", safeErrorCode: "MESSAGE_EXPIRED" };
+      }
       return { state: "failed", safeErrorCode: "CLAUDE_DISPATCH_REJECTED" };
     }
   }
@@ -873,13 +897,30 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       return false;
     }
     const timer = setTimeout(() => {
+      const pending = this.pendingByProviderId.get(providerId);
+      if (pending === undefined) return;
       this.listener?.untrack(providerId);
-      this.finishClaudeMessage(providerId, "expired", "MESSAGE_EXPIRED");
+      if (pending.writeEvidence === "transport_written") {
+        this.finishClaudeMessage(
+          providerId,
+          "unconfirmed",
+          "CLAUDE_RECEIPT_UNCONFIRMED",
+        );
+      } else if (pending.writeEvidence === "transport_uncertain") {
+        this.finishClaudeMessage(
+          providerId,
+          "ambiguous",
+          "CLAUDE_DISPATCH_OUTCOME_AMBIGUOUS",
+        );
+      } else {
+        this.finishClaudeMessage(providerId, "expired", "MESSAGE_EXPIRED");
+      }
     }, Math.max(1, deadline - this.now()));
     timer.unref();
     this.pendingByProviderId.set(providerId, {
       gatewayMessageId,
       targetId,
+      writeEvidence: "none",
       timer,
     });
     this.providerIdByGatewayId.set(gatewayMessageId, providerId);
@@ -906,9 +947,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     const pending = this.pendingByProviderId.get(event.messageId);
     if (pending === undefined) return;
     if (event.status === "held") {
+      pending.writeEvidence = "transport_written";
       this.emitDelivery({ messageId: pending.gatewayMessageId, state: "held" });
       return;
     }
+    // `released` is Claude's native approval-gate terminal: the frame reached
+    // the recipient queue. It does not claim a model read or task completion.
     const state =
       event.status === "released"
         ? "released"
@@ -916,8 +960,32 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           ? "denied"
           : event.status === "expired"
             ? "expired"
-            : "ambiguous";
-    this.finishClaudeMessage(event.messageId, state);
+            : event.status === "unconfirmed"
+              ? "unconfirmed"
+              : "ambiguous";
+    this.finishClaudeMessage(
+      event.messageId,
+      state,
+      event.status === "unconfirmed"
+        ? "CLAUDE_RECEIPT_UNCONFIRMED"
+        : undefined,
+    );
+  }
+
+  private recordClaudeWriteEvidence(
+    providerId: string,
+    evidence: ClaudePending["writeEvidence"],
+  ): boolean {
+    const pending = this.pendingByProviderId.get(providerId);
+    if (pending === undefined) return false;
+    const previous = pending.writeEvidence;
+    if (
+      pending.writeEvidence !== "transport_written" ||
+      evidence === "transport_written"
+    ) {
+      pending.writeEvidence = evidence;
+    }
+    return pending.writeEvidence !== previous;
   }
 
   private finishClaudeMessage(

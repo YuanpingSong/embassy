@@ -785,6 +785,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
   const counters = {
     accepted: maximum,
     delivered: maximum,
+    unconfirmed: maximum,
     failed: maximum,
     ambiguous: maximum,
     expired: maximum,
@@ -849,6 +850,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       accepted: maximum,
       duplicates: maximum,
       delivered: maximum,
+      unconfirmed: maximum,
       failed: maximum,
       ambiguous: maximum,
       expired: maximum,
@@ -1434,6 +1436,69 @@ test("settlement and deadline requeue races are first-terminal-wins", async () =
   await store.close();
 });
 
+test("unconfirmed is an exact-once in-flight terminal outcome", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const accepted = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "transport accepted without a native direct receipt",
+    dedupeKey: "unconfirmed-native-receipt",
+  });
+  assert.ok(accepted.messageId);
+  await store.dequeueMessage("advisor@this-mac");
+  await store.markMessageProgress(accepted.messageId, "transport_written");
+
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: accepted.messageId,
+      state: "unconfirmed",
+      safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+    }),
+    {
+      status: "settled",
+      settlement: {
+        messageId: accepted.messageId,
+        state: "unconfirmed",
+        safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+      },
+    },
+  );
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: accepted.messageId,
+      state: "delivered",
+    }),
+    { status: "not_in_flight" },
+  );
+
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.accounting.unconfirmed, 1);
+  assert.equal(snapshot.accounting.delivered, 0);
+  assert.equal(
+    snapshot.routes.find((route) => route.alias === "advisor@this-mac")
+      ?.counters.unconfirmed,
+    1,
+  );
+  assert.deepEqual(
+    snapshot.messages
+      .filter((event) => event.messageIdSuffix === accepted.messageIdSuffix)
+      .map(({ state, safeErrorCode }) => ({ state, safeErrorCode })),
+    [
+      { state: "queued", safeErrorCode: undefined },
+      { state: "dispatching", safeErrorCode: undefined },
+      { state: "transport_written", safeErrorCode: undefined },
+      {
+        state: "unconfirmed",
+        safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
+      },
+    ],
+  );
+  await store.close();
+});
+
 test("a transient dispatch can return to the held queue without leaking in-flight metadata", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();
@@ -1553,6 +1618,16 @@ test("queued terminal settlement is authoritative, exact-once, and fully account
     store.settleQueuedMessage({
       messageId: stillQueued.messageId,
       state: "delivered",
+      safeErrorCode: "INVALID_QUEUE_TERMINAL",
+    } as unknown as Parameters<typeof store.settleQueuedMessage>[0]),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_DELIVERY_SETTLEMENT",
+  );
+  await assert.rejects(
+    store.settleQueuedMessage({
+      messageId: stillQueued.messageId,
+      state: "unconfirmed",
       safeErrorCode: "INVALID_QUEUE_TERMINAL",
     } as unknown as Parameters<typeof store.settleQueuedMessage>[0]),
     (error: unknown) =>
@@ -1744,6 +1819,44 @@ test("restart stales routes and never replays bodyless queued or ambiguous write
       error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
   );
   await recovered.close();
+});
+
+test("one narrow migration adds zeroed unconfirmed counters to old dogfood state", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  await store.close();
+
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    accounting: Record<string, unknown>;
+    routes: Array<{ counters: Record<string, unknown> }>;
+  };
+  delete legacy.accounting.unconfirmed;
+  for (const route of legacy.routes) delete route.counters.unconfirmed;
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
+
+  const migrated = new GatewayStore(config);
+  await migrated.initialize();
+  const snapshot = await migrated.publicSnapshot();
+  assert.equal(snapshot.accounting.unconfirmed, 0);
+  assert.ok(
+    snapshot.routes.every((route) => route.counters.unconfirmed === 0),
+  );
+  const persisted = JSON.parse(
+    await readFile(migrated.stateFilePath, "utf8"),
+  ) as {
+    accounting: Record<string, unknown>;
+    routes: Array<{ counters: Record<string, unknown> }>;
+  };
+  assert.equal(persisted.accounting.unconfirmed, 0);
+  assert.ok(
+    persisted.routes.every((route) => route.counters.unconfirmed === 0),
+  );
+  await migrated.close();
 });
 
 test("strict state schema rejects unknown content-bearing fields", async () => {
