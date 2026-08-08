@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/social-preview-a.png" alt="Embassy — two buildings joined by a glowing message line" width="720">
-</p>
-
 # Embassy
 
 **A local embassy for your AI agents.**
@@ -124,7 +120,7 @@ embassy select-claude --session 123e4567-e89b-42d3-a456-426614174000
 
 Embassy never prints or discovers that UUID for you.
 
-After Embassy itself restarts, the prior Claude binding remains stored but stale. Run `select-claude` again after an authorized live discovery before sending. No queued text, pending reply, or conversation capability survives the restart.
+After Embassy itself restarts, the prior Claude binding remains stored but stale and cannot route immediately. The next authorized, complete live discovery automatically reactivates it only when exactly one compatible interactive peer has the same session UUID, provider, host, and owner lease; Embassy then adopts that peer's latest name. A changed UUID, ambiguous or incomplete discovery, or failed workspace/provider revalidation leaves the route stale. You may also run `select-claude` explicitly. No queued text, pending reply, callback, receipt handle, or conversation capability survives the restart.
 
 ### 4. Send a message
 
@@ -251,11 +247,6 @@ The public launcher accepts only host `this-mac`; remote connectors remain a fut
 
 Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of connector health, available and selected Claude peers, the registered Codex route, recent delivery states, queue depth, latency, and safe alerts.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/dashboard.png" alt="Embassy dashboard — a metadata-only snapshot with per-direction route cards, recent deliveries, and discovered Claude sessions" width="900">
-</p>
-
-*(Rendered by the dashboard's own renderer from the deterministic test fixture — message content and internal identifiers are never shown.)*
 
 The dashboard is deliberately a file rather than a web application. Anything already running as your OS user can read it, so place `EMBASSY_STATE_DIR` outside agent workspaces if that distinction matters to you.
 

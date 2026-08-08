@@ -89,7 +89,7 @@ truth, real dashboard proof, quickstart/security.
 1. **Exchange board** — Claude selection ↔ queue/pouch ↔ Codex registration;
    broker readiness and the next action inline.
 2. **Needs attention** — ordered, actionable, hidden when empty.
-3. **In transit** — queue count, oldest wait, stall state.
+3. **In transit** — queue count, oldest wait, stall state *(queue-age and stall data land with receipt Phase B; target until then)*.
 4. **Activity ledger** — receipt lifecycle; details on demand.
 5. **Sessions & routes** — secondary.
 6. **Compatibility & diagnostics** — collapsed by default.
