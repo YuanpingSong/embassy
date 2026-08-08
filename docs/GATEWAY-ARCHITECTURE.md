@@ -657,9 +657,10 @@ gateway as unavailable when nothing is serving.
 - **Exchange.** The capability is single-use. It is exchanged once for a
   path-scoped `HttpOnly` `SameSite=Strict` session cookie; the fragment never
   reaches the server as part of a request line.
-- **Request checks.** Host, Origin, and an `X-Embassy-Request` sentinel header
-  are validated on every request. There are no CORS headers, no cross-origin
-  reads, and no routes outside the instance path.
+- **Request checks.** The exact Host header is validated on every request.
+  Navigation GETs may omit Origin and carry no sentinel; non-navigation POSTs
+  require the exact Origin plus `X-Embassy-Request`. There are no CORS headers,
+  no cross-origin reads, and no routes outside the instance path.
 - **Projection.** The only control method the companion calls is the read-only
   `observe_snapshot`. It cannot register, unregister, succeed, select,
   unselect, send, reply, approve, or interrupt, and it exposes no provider,
