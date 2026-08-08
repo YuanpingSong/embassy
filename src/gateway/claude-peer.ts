@@ -48,13 +48,15 @@ const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CLAUDE_PEER_NOTICE_COPY = {
   en: {
     stall:
-      "The local gateway is still waiting to deliver the preceding message. Inspect its dashboard for details.",
+      "The local gateway is still waiting to deliver the preceding message. Run `embassy status` or inspect the dashboard for details.",
     diagnostic:
-      "The local gateway could not deliver the preceding message. Inspect its dashboard for details.",
+      "The local gateway could not deliver the preceding message. Run `embassy status` or inspect the dashboard for details.",
   },
   "zh-CN": {
-    stall: "本地网关仍在等待投递前一条消息。请查看其仪表盘了解详情。",
-    diagnostic: "本地网关无法投递前一条消息。请查看其仪表盘了解详情。",
+    stall:
+      "本地网关仍在等待投递前一条消息。运行 `embassy status` 或查看仪表盘了解详情。",
+    diagnostic:
+      "本地网关无法投递前一条消息。运行 `embassy status` 或查看仪表盘了解详情。",
   },
 } as const satisfies Readonly<
   Record<DashboardLocale, Readonly<Record<"stall" | "diagnostic", string>>>

@@ -2268,6 +2268,7 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   assert.match(progressContent, /reason="AWAITING_EXTERNAL_APPROVAL"/);
   assert.match(progressContent, /queued-for-ms="3600000"/);
   assert.match(progressContent, /本地网关仍在等待投递前一条消息/);
+  assert.match(progressContent, /embassy status/);
   assert.equal(progressContent.includes("peer_message_status"), false);
 
   await assert.rejects(
@@ -2774,6 +2775,7 @@ test("listener pairs an expired native receipt with a localized readable safe di
     /gateway-delivery-diagnostic status="expired" code="CODEX_ROUTE_STALE"/,
   );
   assert.match(diagnosticContent, /本地网关无法投递前一条消息/);
+  assert.match(diagnosticContent, /embassy status/);
   assert.equal(frames[1]?.from, undefined);
 });
 
