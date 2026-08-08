@@ -250,7 +250,7 @@ The public launcher accepts only host `this-mac`; remote connectors remain a fut
 Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of connector health, available and selected Claude peers, the registered Codex route, recent delivery states, queue depth, latency, and safe alerts.
 
 <p align="center">
-  <img src="assets/dashboard.png" alt="Embassy dashboard — a metadata-only snapshot with per-direction route cards, recent deliveries, and discovered Claude sessions" width="900">
+  <img src="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/dashboard.png" alt="Embassy dashboard — a metadata-only snapshot with per-direction route cards, recent deliveries, and discovered Claude sessions" width="900">
 </p>
 
 *(Rendered by the dashboard's own renderer from the deterministic test fixture — message content and internal identifiers are never shown.)*
