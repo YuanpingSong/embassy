@@ -87,6 +87,24 @@ const REGISTRATION_MODES = new Set<string>(routeRegistrationModes);
 const DIRECTIONS = new Set<string>(messageDirections);
 const DELIVERY_STATES = new Set<string>(deliveryStates);
 
+export type SettleQueuedMessageInput = {
+  messageId: string;
+  state: Extract<
+    DeliveryState,
+    "failed" | "expired" | "cancelled" | "abandoned"
+  >;
+  safeErrorCode?: string;
+};
+
+export type SettleQueuedMessageResult =
+  | {
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }
+  | {
+      status: "not_queued";
+    };
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -1727,27 +1745,77 @@ export class GatewayStore {
     });
   }
 
-  async cancelQueuedMessage(messageId: string): Promise<boolean> {
+  /**
+   * Atomically terminalize one queued message and return the authoritative
+   * settlement produced by the winning mutation. A later contender observes
+   * `not_queued` and must not infer or publish another terminal outcome. At
+   * or beyond the delivery deadline, expiry is authoritative regardless of
+   * the caller's requested terminal state.
+   */
+  async settleQueuedMessage(
+    input: SettleQueuedMessageInput,
+  ): Promise<SettleQueuedMessageResult> {
     return this.mutate(async (state, now) => {
-      if (!MESSAGE_ID_PATTERN.test(messageId)) {
+      if (!MESSAGE_ID_PATTERN.test(input.messageId)) {
         throw new BridgeError(
           "INVALID_GATEWAY_MESSAGE_ID",
           "The gateway message identifier is invalid.",
         );
       }
-      const index = state.queue.findIndex((item) => item.messageId === messageId);
+      if (
+        input.safeErrorCode !== undefined &&
+        !SAFE_CODE_PATTERN.test(input.safeErrorCode)
+      ) {
+        throw new BridgeError(
+          "INVALID_SAFE_ERROR_CODE",
+          "Delivery error codes must use the normalized safe-code grammar.",
+        );
+      }
+      if (
+        input.state !== "failed" &&
+        input.state !== "expired" &&
+        input.state !== "cancelled" &&
+        input.state !== "abandoned"
+      ) {
+        throw new BridgeError(
+          "INVALID_DELIVERY_SETTLEMENT",
+          "Queued delivery settlement must use an applicable terminal state.",
+        );
+      }
+      const index = state.queue.findIndex(
+        (item) => item.messageId === input.messageId,
+      );
       const metadata = state.queue[index];
-      if (!metadata || index < 0) return false;
+      if (!metadata || index < 0) return { status: "not_queued" };
       state.queue.splice(index, 1);
-      this.transientBodies.delete(messageId);
+      this.transientBodies.delete(input.messageId);
       state.accounting.queuedBytes -= metadata.bytes;
       const target = state.routes.find(
         (route) => route.alias === metadata.targetAlias,
       );
       if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      this.finishMetadata(state, metadata, "cancelled", now, "MESSAGE_CANCELLED");
-      return true;
+      const deadlineReached = Date.parse(metadata.deadlineAt) <= now.getTime();
+      return {
+        status: "settled",
+        settlement: this.finishMetadata(
+          state,
+          metadata,
+          deadlineReached ? "expired" : input.state,
+          now,
+          deadlineReached ? "MESSAGE_EXPIRED" : input.safeErrorCode,
+        ),
+      };
     });
+  }
+
+  /** @deprecated Prefer settleQueuedMessage so callers retain terminal proof. */
+  async cancelQueuedMessage(messageId: string): Promise<boolean> {
+    const result = await this.settleQueuedMessage({
+      messageId,
+      state: "cancelled",
+      safeErrorCode: "MESSAGE_CANCELLED",
+    });
+    return result.status === "settled";
   }
 
   async publicSnapshot(): Promise<GatewayPublicSnapshot> {

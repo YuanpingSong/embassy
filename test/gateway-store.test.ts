@@ -1468,6 +1468,185 @@ test("a transient dispatch can return to the held queue without leaking in-fligh
   await store.close();
 });
 
+test("queued terminal settlement is authoritative, exact-once, and fully accounted", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const cases = [
+    { state: "failed", safeErrorCode: "QUEUE_DISPATCH_FAILED" },
+    { state: "expired", safeErrorCode: "MESSAGE_EXPIRED" },
+    { state: "cancelled", safeErrorCode: "MESSAGE_CANCELLED" },
+    { state: "abandoned", safeErrorCode: "QUEUE_OWNERSHIP_ABANDONED" },
+  ] as const;
+
+  for (const [index, expected] of cases.entries()) {
+    const accepted = await store.enqueueMessage({
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: "advisor@this-mac",
+      body: `canonical queued settlement ${index}`,
+      dedupeKey: `canonical-queued-settlement-${index}`,
+    });
+    assert.ok(accepted.messageId);
+
+    assert.deepEqual(
+      await store.settleQueuedMessage({
+        messageId: accepted.messageId,
+        ...expected,
+      }),
+      {
+        status: "settled",
+        settlement: {
+          messageId: accepted.messageId,
+          ...expected,
+        },
+      },
+    );
+    assert.deepEqual(
+      await store.settleQueuedMessage({
+        messageId: accepted.messageId,
+        state: "failed",
+        safeErrorCode: "LATE_COMPETING_SETTLEMENT",
+      }),
+      { status: "not_queued" },
+    );
+
+    const snapshot = await store.publicSnapshot();
+    assert.equal(snapshot.accounting[expected.state], 1);
+    assert.equal(snapshot.accounting.queuedBytes, 0);
+    const route = snapshot.routes.find(
+      (candidate) => candidate.alias === "advisor@this-mac",
+    );
+    assert.equal(route?.queueDepth, 0);
+    assert.equal(route?.counters[expected.state], 1);
+    assert.deepEqual(
+      snapshot.messages
+        .filter(
+          (event) => event.messageIdSuffix === accepted.messageIdSuffix,
+        )
+        .map(({ state, safeErrorCode }) => ({ state, safeErrorCode })),
+      [
+        { state: "queued", safeErrorCode: undefined },
+        expected,
+      ],
+    );
+    assert.equal(await store.dequeueMessage("advisor@this-mac"), undefined);
+  }
+
+  const stillQueued = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "invalid settlements must retain queue ownership",
+    dedupeKey: "invalid-queued-settlement",
+  });
+  assert.ok(stillQueued.messageId);
+  await assert.rejects(
+    store.settleQueuedMessage({
+      messageId: stillQueued.messageId,
+      state: "failed",
+      safeErrorCode: "not-normalized",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_SAFE_ERROR_CODE",
+  );
+  await assert.rejects(
+    store.settleQueuedMessage({
+      messageId: stillQueued.messageId,
+      state: "delivered",
+      safeErrorCode: "INVALID_QUEUE_TERMINAL",
+    } as unknown as Parameters<typeof store.settleQueuedMessage>[0]),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_DELIVERY_SETTLEMENT",
+  );
+  assert.equal(await store.cancelQueuedMessage(stillQueued.messageId), true);
+  assert.equal(await store.cancelQueuedMessage(stillQueued.messageId), false);
+  await store.close();
+});
+
+test("queued settlement and due expiry are first-terminal-wins", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const setterFirstAtCutoff = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "deadline wins even when manual settlement enters first",
+    dedupeKey: "queued-manual-first-at-deadline",
+    deadlineAt: new Date(testClock.now().getTime() + 500).toISOString(),
+  });
+  assert.ok(setterFirstAtCutoff.messageId);
+  testClock.advance(500);
+  const [setterWinner, expirySweepLoser] = await Promise.all([
+    store.settleQueuedMessage({
+      messageId: setterFirstAtCutoff.messageId,
+      state: "failed",
+      safeErrorCode: "DISPATCH_ABORTED_AT_DEADLINE",
+    }),
+    store.expireDueMessages(testClock.now()),
+  ]);
+  assert.deepEqual(setterWinner, {
+    status: "settled",
+    settlement: {
+      messageId: setterFirstAtCutoff.messageId,
+      state: "expired",
+      safeErrorCode: "MESSAGE_EXPIRED",
+    },
+  });
+  assert.deepEqual(expirySweepLoser, []);
+
+  const expiryFirst = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "expiry settlement wins at the deadline",
+    dedupeKey: "queued-expiry-first-at-deadline",
+    deadlineAt: new Date(testClock.now().getTime() + 500).toISOString(),
+  });
+  assert.ok(expiryFirst.messageId);
+  testClock.advance(500);
+  const [expiryWinner, manualLoser] = await Promise.all([
+    store.expireDueMessages(testClock.now()),
+    store.settleQueuedMessage({
+      messageId: expiryFirst.messageId,
+      state: "cancelled",
+      safeErrorCode: "LATE_MANUAL_CANCELLATION",
+    }),
+  ]);
+  assert.deepEqual(expiryWinner, [
+    {
+      messageId: expiryFirst.messageId,
+      state: "expired",
+      safeErrorCode: "MESSAGE_EXPIRED",
+    },
+  ]);
+  assert.deepEqual(manualLoser, { status: "not_queued" });
+
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.accounting.failed, 0);
+  assert.equal(snapshot.accounting.expired, 2);
+  assert.equal(snapshot.accounting.cancelled, 0);
+  assert.equal(snapshot.accounting.queuedBytes, 0);
+  assert.equal(
+    snapshot.routes.find((route) => route.alias === "advisor@this-mac")
+      ?.queueDepth,
+    0,
+  );
+  for (const message of [setterFirstAtCutoff, expiryFirst]) {
+    assert.equal(
+      snapshot.messages.filter(
+        (event) =>
+          event.messageIdSuffix === message.messageIdSuffix &&
+          ["failed", "expired", "cancelled", "abandoned"].includes(
+            event.state,
+          ),
+      ).length,
+      1,
+    );
+  }
+  await store.close();
+});
+
 test("in-flight expiry is terminal while progress remains nonterminal", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();
