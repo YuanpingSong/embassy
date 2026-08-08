@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YuanpingSong/agent-embassy.git"
+    "url": "git+https://github.com/YuanpingSong/embassy.git"
   },
   "bugs": {
-    "url": "https://github.com/YuanpingSong/agent-embassy/issues"
+    "url": "https://github.com/YuanpingSong/embassy/issues"
   },
-  "homepage": "https://github.com/YuanpingSong/agent-embassy#readme",
+  "homepage": "https://github.com/YuanpingSong/embassy#readme",
   "keywords": [
     "ai-agents",
     "gateway",

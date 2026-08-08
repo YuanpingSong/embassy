@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Before filing, re-read the
-        [Quickstart](https://github.com/YuanpingSong/agent-embassy#quickstart).
+        [Quickstart](https://github.com/YuanpingSong/embassy#quickstart).
         Do not paste message bodies, prompts, replies, credentials, OAuth
         material, raw provider output, or unreviewed status metadata into
         this form. Embassy never changes a Codex task's native approval or

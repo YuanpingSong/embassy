@@ -1,14 +1,14 @@
 [English](README.md) · 简体中文
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/social-preview.png" alt="Embassy — 一个本地网关，用于在 Claude Code 会话与 Codex 桌面任务之间实现双向消息传递" width="720">
+  <img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/social-preview.png" alt="Embassy — 一个本地网关，用于在 Claude Code 会话与 Codex 桌面任务之间实现双向消息传递" width="720">
 </p>
 
 # Embassy
 
 **属于你的 AI 代理本地使馆。**
 
-[![CI](https://github.com/YuanpingSong/agent-embassy/actions/workflows/ci.yml/badge.svg)](https://github.com/YuanpingSong/agent-embassy/actions/workflows/ci.yml)
+[![CI](https://github.com/YuanpingSong/embassy/actions/workflows/ci.yml/badge.svg)](https://github.com/YuanpingSong/embassy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-43853d)](package.json)
 
@@ -19,7 +19,7 @@ npm install -g agent-embassy
 embassy serve
 ```
 
-或从源码构建：`git clone https://github.com/YuanpingSong/agent-embassy && cd agent-embassy && npm ci && npm run build && npm link`。
+或从源码构建：`git clone https://github.com/YuanpingSong/embassy && cd embassy && npm ci && npm run build && npm link`。
 
 Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份运行的代理而设计。本项目是非官方的社区项目，与 Anthropic 或 OpenAI 没有任何关联或背书关系。
 
