@@ -858,15 +858,18 @@ test("package metadata publishes the client and its runtime dependency", async (
   assert.equal(packageJson.version, "1.0.0");
   assert.equal(packageJson.version, EMBASSY_VERSION);
   assert.deepEqual(packageJson.os, ["darwin"]);
-  assert.equal(packageJson.bin.embassy, "./dist/src/gateway/cli.js");
+  assert.equal(packageJson.bin.embassy, "dist/src/gateway/cli.js");
   assert.equal(
     packageJson.bin["claude-codex-gateway"],
-    "./dist/src/gateway/cli.js",
+    "dist/src/gateway/cli.js",
   );
   assert.equal(packageJson.scripts.embassy, "node dist/src/gateway/cli.js");
   assert.match(packageJson.scripts.build ?? "", /npm run clean/);
   assert.ok(packageJson.files.includes("skills/embassy-peer"));
   assert.ok(packageJson.files.includes("dist/src/gateway"));
+  assert.ok(packageJson.files.includes("SECURITY.md"));
+  assert.ok(packageJson.files.includes("CONTRIBUTING.md"));
+  assert.ok(packageJson.files.includes("CHANGELOG.md"));
   assert.equal(packageJson.files.includes("dist/src"), false);
   assert.equal(packageJson.dependencies.ws, "8.21.3");
   assert.equal(packageJson.devDependencies.ws, undefined);

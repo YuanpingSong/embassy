@@ -24,8 +24,8 @@
     "darwin"
   ],
   "bin": {
-    "embassy": "./dist/src/gateway/cli.js",
-    "claude-codex-gateway": "./dist/src/gateway/cli.js"
+    "embassy": "dist/src/gateway/cli.js",
+    "claude-codex-gateway": "dist/src/gateway/cli.js"
   },
   "files": [
     "dist/src/gateway",
@@ -37,7 +37,10 @@
     "dist/src/mutex.d.ts",
     "skills/embassy-peer",
     "docs/GATEWAY-ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
     "README.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {

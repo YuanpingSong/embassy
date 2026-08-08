@@ -124,7 +124,7 @@ The CLI infers the caller from the inherited environment. In a Codex task it use
 
 ## Interpret queue state
 
-Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `status` or the dashboard once when the user asks for progress. The v1 busy policy is queue-only: an active or temporarily unavailable selected task may remain queued until its exact route is ready.
+Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `status` or the dashboard once when the user asks for progress. The v1 busy policy is queue-only: an active or temporarily unavailable destination may remain queued until its exact route is ready.
 
 Do not steer an active turn, approve permissions, widen tools, or alter inbound-message policy. Report held, refused, incompatible, full, expired, or unavailable states without retrying. Ordinary process/socket rotation for the same Claude UUID is refreshed automatically and is not a reason to ask for reselection. Message bodies exist only in gateway memory; after a gateway restart, queued or in-flight bodies are discarded and routes must be re-observed before a new send.
 
@@ -133,7 +133,7 @@ Do not steer an active turn, approve permissions, widen tools, or alter inbound-
 - Keep the gateway local, single-user, and non-hosted.
 - Keep the shipped launcher local-host-only.
 - Never read provider credentials, authentication state, history, settings, registries, raw sockets, or Keychain entries.
-- Publish only the gateway process's selected `codex-*` peer record and remove it on shutdown.
+- Publish only the gateway process's registered `codex-*` peer record and remove it on shutdown.
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
 - Return only the CLI's concise public outcome: selectors, normalized state, and public conversation token when present.

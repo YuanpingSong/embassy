@@ -1731,7 +1731,7 @@ export class ClaudePeerListener {
     options: ListenerCreateOptions,
   ): Promise<ClaudePeerListener> {
     // One gateway process owns one native peer socket. It may advertise one
-    // selected Codex task through Claude's native session registry.
+    // registered Codex task through Claude's native session registry.
     const socketPath = path.join(options.socketDir, `${process.pid}.sock`);
     try {
       await lstat(socketPath);

@@ -746,8 +746,16 @@ export class GatewayService {
     }
     const adapter = this.adapter("codex", params.hostId);
     await adapter.assertWorkspaceDisjoint(params.threadId, this.store.rootDir);
-    const selected = await adapter.selectRoute({ alias: params.alias, routeHandle: params.threadId });
-    if (selected.routeHandle !== params.threadId) throw new BridgeError("ROUTE_MISMATCH", "The connector selected a different task.");
+    const registered = await adapter.selectRoute({
+      alias: params.alias,
+      routeHandle: params.threadId,
+    });
+    if (registered.routeHandle !== params.threadId) {
+      throw new BridgeError(
+        "ROUTE_MISMATCH",
+        "The connector registered a different task.",
+      );
+    }
     const binding: PrivateRouteBinding = {
       ...adapter.identity,
       routeHandle: params.threadId,
@@ -758,22 +766,22 @@ export class GatewayService {
         params.alias,
         binding,
         "endpoint_reobserved",
-        selected.state,
+        registered.state,
       );
     } catch (error) {
       await adapter.releaseRoute?.(params.threadId).catch(() => undefined);
       throw error;
     }
-    this.rememberBinding(params.alias, binding, selected.state);
+    this.rememberBinding(params.alias, binding, registered.state);
     await this.adapter("claude", params.hostId).advertiseNativeCodexPeer?.({
       alias: params.alias,
       cwd: this.nativePeerCwd,
     });
     await this.adapter("claude", params.hostId).updateNativeCodexPeerStatus?.(
       params.alias,
-      selected.state === "idle"
+      registered.state === "idle"
         ? "idle"
-        : selected.state === "awaiting_approval"
+        : registered.state === "awaiting_approval"
           ? "waiting"
           : "busy",
     );

@@ -12,7 +12,7 @@ This document uses four evidence labels:
 - **Planned**: designed but not yet integrated or live-validated.
 
 A bounded real test completed native Claude discovery and messaging, held a
-message while the selected Codex task was active, automatically started the
+message while the registered Codex task was active, automatically started the
 queued turn after idle, and delivered the exact final reply back to Claude.
 
 ## Purpose and boundary
@@ -127,7 +127,7 @@ probed by this project.
   │ private control UDS │ transient bodies │ metadata state │ static HTML  │
   └──────────┬──────────┴──────────────────┴────────────────┴──────────────┘
              │
-             ├─ local Codex App Server ─ selected native local tasks
+             ├─ local Codex App Server ─ registered native local tasks
              │
              ├─ planned attach-only SSH proxy ─ build-mac App Server
              │
@@ -195,7 +195,7 @@ working directories, endpoint paths, and socket paths are never public
 selectors or output fields. A Claude UUID may be supplied explicitly as a
 destination, but the gateway never prints or invents one for the caller.
 
-Codex registration is explicit. A selected task registers its own alias and
+Codex registration is explicit. A task registers its own alias and
 authoritative `CODEX_THREAD_ID`; the gateway does not enumerate global Codex
 history to invent routes. A route becomes usable only after the matching host
 connector positively observes that exact task on the current endpoint
@@ -219,7 +219,7 @@ The thin skill/CLI exposes the same safe alias list to either provider.
 
 ### Codex to Claude
 
-1. A selected Codex task calls the repo-shipped gateway skill/CLI with its own
+1. A registered Codex task calls the repo-shipped gateway skill/CLI with its own
    thread identity, source alias, target Claude current name or session UUID,
    and bounded text.
 2. The gateway checks thread ownership, selector state, rate and size limits,
@@ -389,7 +389,7 @@ it, and does not edit a shell profile. The two installations therefore do not
 conflict.
 
 The connector has a fixed App Server method allowlist. It may initialize,
-observe loaded tasks, resume/unsubscribe the exact selected task, start a
+observe loaded tasks, resume/unsubscribe the exact registered task, start a
 dedicated turn, and interrupt only its own confirmed turn. Archive, delete,
 history, shell, configuration, authentication, plugin, approval-response, and
 generic RPC methods are excluded.

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/social-preview-a.png" alt="Embassy — two buildings joined by a glowing message line" width="720">
+  <img src="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/social-preview-a.png" alt="Embassy — two buildings joined by a glowing message line" width="720">
 </p>
 
 # Embassy
