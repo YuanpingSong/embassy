@@ -1,3 +1,5 @@
+import { assertCodexRegistrationGeneration } from "./codex-registration-generation.js";
+
 /**
  * Pure lifecycle for replacing one registered Codex task with another.
  *
@@ -952,7 +954,10 @@ function validateIdentity(
   validateToken(identity.alias, `${label}.alias`);
   validateToken(identity.threadId, `${label}.threadId`);
   validateToken(identity.hostId, `${label}.hostId`);
-  validateToken(identity.generation, `${label}.generation`);
+  assertCodexRegistrationGeneration(
+    identity.generation,
+    `${label}.generation`,
+  );
 }
 
 function validateToken(value: string, label: string): void {

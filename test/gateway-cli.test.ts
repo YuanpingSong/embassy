@@ -26,6 +26,7 @@ import {
 } from "../src/gateway/cli.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
+const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
 const CLAUDE_SOCKET_PATH = "/tmp/cc-socks/45201.sock";
 const REPLY_ADDRESS = `uds:${CLAUDE_SOCKET_PATH}`;
@@ -286,6 +287,19 @@ test("all client commands use one private control socket and expose only normali
       env: { CODEX_THREAD_ID: THREAD_ID },
     },
     {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@build-mac",
+        "--succeeds",
+        "codex-reviewer@build-mac",
+      ],
+      env: {
+        CODEX_THREAD_ID: THREAD_ID,
+        OLD_CODEX_THREAD_ID: OLD_THREAD_ID_SENTINEL,
+      },
+    },
+    {
       argv: ["unregister-codex", "--alias", "codex-reviewer@this-mac"],
       env: { CODEX_THREAD_ID: THREAD_ID },
     },
@@ -372,6 +386,10 @@ test("all client commands use one private control socket and expose only normali
     assert.equal(parsed.command, current.argv[0]);
     assert.ok(Buffer.byteLength(result.stdout) <= 256 * 1024);
     assert.doesNotMatch(result.stdout, new RegExp(THREAD_ID, "i"));
+    assert.doesNotMatch(
+      result.stdout,
+      new RegExp(OLD_THREAD_ID_SENTINEL, "i"),
+    );
     assert.doesNotMatch(result.stdout, /cc-socks|45201|BODY_SENTINEL/);
     if (
       current.argv[0] === "send-to-claude" ||
@@ -388,6 +406,13 @@ test("all client commands use one private control socket and expose only normali
       threadId: THREAD_ID,
       hostId: "this-mac",
       busyPolicy: "queue",
+    },
+    {
+      alias: "codex-next@build-mac",
+      threadId: THREAD_ID,
+      hostId: "build-mac",
+      busyPolicy: "queue",
+      succeedsAlias: "codex-reviewer@build-mac",
     },
   ]);
   assert.deepEqual(unregisters, [
@@ -836,6 +861,84 @@ test("identity, stdin, and argument failures happen before any control request",
     },
     {
       argv: ["register-codex", "--alias", "reviewer@this-mac"],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@this-mac",
+        "--succeeds",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--succeeds",
+        "codex-reviewer@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@this-mac",
+        "--succeeds",
+        "codex-reviewer@build-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@this-mac",
+        "--succeeds",
+        "codex-next@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@build-mac",
+        "--succeeds",
+        "codex-reviewer@build-mac",
+        "--host",
+        "build-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@this-mac",
+        "--succeeds",
+        "reviewer@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-next@this-mac",
+        "--succeeds",
+        "codex-reviewer@this-mac",
+        "--old-thread-id",
+        OLD_THREAD_ID_SENTINEL,
+      ],
       env: { CODEX_THREAD_ID: THREAD_ID },
       code: "INVALID_ARGUMENTS",
     },

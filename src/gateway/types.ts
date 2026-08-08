@@ -250,6 +250,8 @@ export type GatewayPersistedState = {
   dedupe: DedupeRecord[];
   rateBuckets: RateBucket[];
   accounting: GatewayAccounting;
+  /** Strictly validated internal restart journal; never publicly projected. */
+  codexSuccession?: unknown;
 };
 
 export type PublicRouteSnapshot = {

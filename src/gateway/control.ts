@@ -85,6 +85,7 @@ export type RegisterCodexParams = {
   threadId: string;
   hostId?: string;
   busyPolicy?: GatewayBusyPolicy;
+  succeedsAlias?: string;
 };
 
 export type ValidatedRegisterCodexParams = {
@@ -92,6 +93,7 @@ export type ValidatedRegisterCodexParams = {
   threadId: string;
   hostId: string;
   busyPolicy: GatewayBusyPolicy;
+  succeedsAlias?: string;
 };
 
 export type UnregisterCodexParams = {
@@ -634,19 +636,27 @@ function normalizeParams(
         !hasExactKeys(
           value,
           ["alias", "threadId"],
-          ["hostId", "busyPolicy"],
+          ["hostId", "busyPolicy", "succeedsAlias"],
         ) ||
         !isAlias(value.alias) ||
         !value.alias.startsWith("codex-") ||
         !isUuid(value.threadId) ||
         (value.hostId !== undefined && !isHostId(value.hostId)) ||
         (value.busyPolicy !== undefined &&
-          value.busyPolicy !== "queue")
+          value.busyPolicy !== "queue") ||
+        (value.succeedsAlias !== undefined &&
+          (!isAlias(value.succeedsAlias) ||
+            !value.succeedsAlias.startsWith("codex-")))
       ) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
       const hostId = value.hostId ?? DEFAULT_HOST_ID;
-      if (!value.alias.endsWith(`@${hostId}`)) {
+      if (
+        !value.alias.endsWith(`@${hostId}`) ||
+        (value.succeedsAlias !== undefined &&
+          (value.succeedsAlias === value.alias ||
+            !value.succeedsAlias.endsWith(`@${hostId}`)))
+      ) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
       return {
@@ -654,6 +664,9 @@ function normalizeParams(
         threadId: value.threadId.toLowerCase(),
         hostId,
         busyPolicy: value.busyPolicy ?? DEFAULT_BUSY_POLICY,
+        ...(value.succeedsAlias === undefined
+          ? {}
+          : { succeedsAlias: value.succeedsAlias }),
       };
     }
     case "unregister_codex": {

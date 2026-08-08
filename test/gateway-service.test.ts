@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -230,6 +231,19 @@ class FakeProvider implements GatewayProviderAdapter {
   nativeCodexUnadvertisements: string[] = [];
   nativeCodexUnadvertisementFailures: Error[] = [];
   nativeCodexStatusFailures: Error[] = [];
+  nativeCodexActiveAlias: string | undefined;
+  nativeCodexPreparedAlias: string | undefined;
+  nativeCodexActiveGeneration = "initial";
+  nativeCodexPreparedGeneration: string | undefined;
+  nativeCodexRetiredGeneration: string | undefined;
+  nativeCodexIngressQuiesced = false;
+  nativeCodexMonitorFrozen = false;
+  nativeSuccessionBarrierClean = true;
+  codexSuccessionBarrierClean = true;
+  nativeSuccessionPublishOutcomes: Array<
+    "published" | "not_published" | "unknown"
+  > = [];
+  successionFailures = new Map<string, Error[]>();
   nativeInboundStatuses: Array<{
     receiptHandle: string;
     status: "held" | "delivered" | "denied" | "expired";
@@ -366,15 +380,20 @@ class FakeProvider implements GatewayProviderAdapter {
     const failure = this.nativeCodexAdvertisementFailures.shift();
     if (failure?.afterWrite === true) {
       this.nativeCodexAdvertisements.push(input.alias);
+      this.nativeCodexActiveAlias = input.alias;
     }
     if (failure !== undefined) throw failure.error;
     this.nativeCodexAdvertisements.push(input.alias);
+    this.nativeCodexActiveAlias = input.alias;
   }
 
   async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
     const failure = this.nativeCodexUnadvertisementFailures.shift();
     if (failure !== undefined) throw failure;
     this.nativeCodexUnadvertisements.push(alias);
+    if (this.nativeCodexActiveAlias === alias) {
+      this.nativeCodexActiveAlias = undefined;
+    }
   }
 
   async updateNativeInboundStatus(
@@ -434,6 +453,204 @@ class FakeProvider implements GatewayProviderAdapter {
     }
   }
 
+  private maybeFailSuccession(step: string): void {
+    const failures = this.successionFailures.get(step);
+    const failure = failures?.shift();
+    if (failure !== undefined) throw failure;
+  }
+
+  currentNativeCodexPeerGeneration(alias: string): string {
+    this.maybeFailSuccession("current");
+    if (this.nativeCodexActiveAlias !== alias) {
+      throw new BridgeError(
+        "CODEX_PEER_GENERATION_MISMATCH",
+        "Synthetic active alias mismatch.",
+      );
+    }
+    return this.nativeCodexActiveGeneration;
+  }
+
+  async prepareNativeCodexPeerGeneration(input: {
+    alias: string;
+    cwd: string;
+    generation: string;
+  }): Promise<void> {
+    this.lifecycleEvents.push(`succession:prepare:${input.generation}`);
+    this.maybeFailSuccession("prepare");
+    this.nativeCodexPreparedGeneration = input.generation;
+    this.nativeCodexPreparedAlias = input.alias;
+  }
+
+  async quiesceNativeCodexPeerGeneration(generation: string): Promise<void> {
+    this.lifecycleEvents.push(`succession:quiesce:${generation}`);
+    this.maybeFailSuccession("quiesce");
+    if (generation !== this.nativeCodexActiveGeneration) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "Synthetic quiesce generation mismatch.",
+      );
+    }
+    this.nativeCodexIngressQuiesced = true;
+    this.nativeCodexMonitorFrozen = true;
+  }
+
+  observeNativeCodexSuccessionBarrier(generation: string): {
+    generation: string;
+    activeGenerationMatched: boolean;
+    ingressQuiesced: boolean;
+    monitorFrozen: boolean;
+    discoveryInFlight: boolean;
+    pendingOutboundReceipts: number;
+    pendingInboundReceipts: number;
+    rejectedInboundSettlements: number;
+    clean: boolean;
+  } {
+    this.lifecycleEvents.push(`succession:barrier-claude:${generation}`);
+    this.maybeFailSuccession("claude_barrier");
+    const activeGenerationMatched =
+      generation === this.nativeCodexActiveGeneration;
+    return {
+      generation,
+      activeGenerationMatched,
+      ingressQuiesced: this.nativeCodexIngressQuiesced,
+      monitorFrozen: this.nativeCodexMonitorFrozen,
+      discoveryInFlight: false,
+      pendingOutboundReceipts: 0,
+      pendingInboundReceipts: 0,
+      rejectedInboundSettlements: 0,
+      clean:
+        this.nativeSuccessionBarrierClean &&
+        activeGenerationMatched &&
+        this.nativeCodexIngressQuiesced &&
+        this.nativeCodexMonitorFrozen,
+    };
+  }
+
+  async publishPreparedNativeCodexPeer(input: {
+    currentGeneration: string;
+    preparedGeneration: string;
+  }): Promise<"published" | "not_published" | "unknown"> {
+    this.lifecycleEvents.push(
+      `succession:publish:${input.currentGeneration}:${input.preparedGeneration}`,
+    );
+    this.maybeFailSuccession("publish");
+    return this.nativeSuccessionPublishOutcomes.shift() ?? "published";
+  }
+
+  activatePreparedNativeCodexPeerGeneration(generation: string): void {
+    this.lifecycleEvents.push(`succession:activate:${generation}`);
+    this.maybeFailSuccession("activate");
+    if (this.nativeCodexPreparedGeneration !== generation) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "Synthetic activation generation mismatch.",
+      );
+    }
+    this.nativeCodexRetiredGeneration = this.nativeCodexActiveGeneration;
+    this.nativeCodexActiveGeneration = generation;
+    this.nativeCodexActiveAlias = this.nativeCodexPreparedAlias;
+    this.nativeCodexPreparedAlias = undefined;
+    this.nativeCodexPreparedGeneration = undefined;
+    this.nativeCodexIngressQuiesced = false;
+    this.nativeCodexMonitorFrozen = false;
+  }
+
+  async cleanupPreparedNativeCodexPeerGeneration(
+    generation: string,
+  ): Promise<void> {
+    this.lifecycleEvents.push(`succession:cleanup-prepared:${generation}`);
+    this.maybeFailSuccession("cleanup_prepared");
+    if (this.nativeCodexPreparedGeneration === generation) {
+      this.nativeCodexPreparedGeneration = undefined;
+      this.nativeCodexPreparedAlias = undefined;
+    }
+  }
+
+  resumeNativeCodexPeerGeneration(generation: string): void {
+    this.lifecycleEvents.push(`succession:resume:${generation}`);
+    this.maybeFailSuccession("resume");
+    if (generation !== this.nativeCodexActiveGeneration) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "Synthetic resume generation mismatch.",
+      );
+    }
+    this.nativeCodexIngressQuiesced = false;
+    this.nativeCodexMonitorFrozen = false;
+  }
+
+  async rollbackPreparedNativeCodexPeerGeneration(input: {
+    preparedGeneration: string;
+    resumeGeneration: string;
+  }): Promise<void> {
+    await this.cleanupPreparedNativeCodexPeerGeneration(
+      input.preparedGeneration,
+    );
+    this.resumeNativeCodexPeerGeneration(input.resumeGeneration);
+  }
+
+  async retireNativeCodexPeerGeneration(input: {
+    retiredGeneration: string;
+    protectedActiveGeneration: string;
+  }): Promise<void> {
+    this.lifecycleEvents.push(
+      `succession:retire:${input.retiredGeneration}:${input.protectedActiveGeneration}`,
+    );
+    this.maybeFailSuccession("retire");
+    if (
+      this.nativeCodexRetiredGeneration !== input.retiredGeneration ||
+      this.nativeCodexActiveGeneration !== input.protectedActiveGeneration
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "Synthetic retirement generation mismatch.",
+      );
+    }
+    this.nativeCodexRetiredGeneration = undefined;
+  }
+
+  purgeNativeCodexPeerGenerationReplyCapabilities(generation: string): number {
+    this.lifecycleEvents.push(`succession:purge:${generation}`);
+    this.maybeFailSuccession("purge");
+    return 0;
+  }
+
+  observeRouteSuccessionBarrier(routeHandle: string): {
+    routePresent: boolean;
+    connection: string;
+    routeStatus: string;
+    queueDepth: number;
+    hasActiveTurn: boolean;
+    requestInFlight: boolean;
+    routeCreationInFlight: boolean;
+    routeReleaseInFlight: boolean;
+    pendingReplyCorrelations: number;
+    pendingCallbacks: number;
+    clean: boolean;
+  } {
+    this.lifecycleEvents.push(`succession:barrier-codex:${routeHandle}`);
+    this.maybeFailSuccession("codex_barrier");
+    const routePresent = this.selectedRoutes.some(
+      (route) => route.routeHandle === routeHandle,
+    ) && !this.releasedRoutes.includes(routeHandle);
+    return {
+      routePresent,
+      connection: routePresent ? "ready" : "absent",
+      routeStatus: routePresent ? this.state : "absent",
+      queueDepth: 0,
+      hasActiveTurn: false,
+      requestInFlight: false,
+      routeCreationInFlight: false,
+      routeReleaseInFlight: false,
+      pendingReplyCorrelations: 0,
+      pendingCallbacks: 0,
+      clean:
+        this.codexSuccessionBarrierClean &&
+        routePresent &&
+        this.state === "idle",
+    };
+  }
+
   emitDelivery(event: GatewayAdapterDelivery): void {
     this.callbacks?.onDelivery(event);
   }
@@ -463,6 +680,25 @@ function codexRegistration(): ValidatedRegisterCodexParams {
   return {
     alias: "codex-main@this-mac",
     threadId: THREAD_ID,
+    hostId: "this-mac",
+    busyPolicy: "queue",
+  };
+}
+
+function successorCodexRegistration(): ValidatedRegisterCodexParams {
+  return {
+    alias: "codex-next@this-mac",
+    threadId: OTHER_THREAD_ID,
+    hostId: "this-mac",
+    busyPolicy: "queue",
+    succeedsAlias: "codex-main@this-mac",
+  };
+}
+
+function successorExactRegistration(): ValidatedRegisterCodexParams {
+  return {
+    alias: "codex-next@this-mac",
+    threadId: OTHER_THREAD_ID,
     hostId: "this-mac",
     busyPolicy: "queue",
   };
@@ -1106,6 +1342,543 @@ test("a new service lifetime can choose a new Codex registration identity", asyn
   );
   assert.deepEqual(secondCodex.selectedRoutes, [
     { alias: "codex-next@this-mac", routeHandle: THREAD_ID },
+  ]);
+});
+
+test("Codex succession atomically replaces one quiescent registration and retires the old generation", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_gen_1",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    (await handlers.listSnapshot()).routes.map(({ alias, state }) => ({
+      alias,
+      state,
+    })),
+    [{ alias: "codex-next@this-mac", state: "idle" }],
+  );
+  assert.deepEqual(await service.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+  assert.deepEqual(codex.selectedRoutes, [
+    { alias: "codex-main@this-mac", routeHandle: THREAD_ID },
+    { alias: "codex-next@this-mac", routeHandle: OTHER_THREAD_ID },
+  ]);
+  assert.deepEqual(codex.releasedRoutes, [THREAD_ID]);
+  assert.equal(claude.nativeCodexActiveAlias, "codex-next@this-mac");
+  assert.equal(claude.nativeCodexActiveGeneration, "successor_gen_1");
+  assert.equal(claude.nativeCodexRetiredGeneration, undefined);
+  const publishIndex = claude.lifecycleEvents.indexOf(
+    "succession:publish:initial:successor_gen_1",
+  );
+  const activateIndex = claude.lifecycleEvents.indexOf(
+    "succession:activate:successor_gen_1",
+  );
+  const retireIndex = claude.lifecycleEvents.indexOf(
+    "succession:retire:initial:successor_gen_1",
+  );
+  assert.equal(publishIndex >= 0, true);
+  assert.equal(activateIndex > publishIndex, true);
+  assert.equal(retireIndex > activateIndex, true);
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: false,
+    code: "conflict",
+  });
+  assert.deepEqual(
+    await handlers.registerCodex(successorExactRegistration()),
+    { accepted: true, code: "ok" },
+  );
+});
+
+test("Codex succession preserves terminal delivery-token status but transfers no conversation or reply authority", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_gen_token",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+  const accepted = await handlers.sendToClaude({
+    ...toClaude("terminal token survives succession"),
+    expectsReply: false,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) throw new Error("synthetic send was rejected");
+  await waitFor(() => claude.dispatches.length === 1);
+  const dispatched = claude.dispatches[0];
+  assert.ok(dispatched);
+  claude.emitDelivery({
+    messageId: dispatched.messageId,
+    state: "transport_written",
+  });
+  claude.emitDelivery({
+    messageId: dispatched.messageId,
+    state: "released",
+  });
+  await waitForAsync(async () => {
+    const status = await handlers.deliveryStatus({
+      token: accepted.deliveryToken,
+    });
+    return status.found && status.terminal;
+  });
+  const before = await handlers.deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(before.found, true);
+  if (!before.found) throw new Error("synthetic token was not retained");
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  const status = await handlers.deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found, true);
+  if (status.found) assert.equal(status.state, before.state);
+  assert.deepEqual(
+    await handlers.reply({
+      conversationId: accepted.conversationId,
+      text: "must not cross the identity boundary",
+      caller: {
+        kind: "codex",
+        alias: "codex-next@this-mac",
+        threadId: OTHER_THREAD_ID,
+      },
+    }),
+    { accepted: false, code: "not_found" },
+  );
+});
+
+test("a busy succession barrier rolls back the freeze without preparing or renaming anything", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_gen_2",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  codex.codexSuccessionBarrierClean = false;
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "busy" },
+  );
+  assert.deepEqual(
+    (await handlers.listSnapshot()).routes.map(({ alias }) => alias),
+    ["codex-main@this-mac"],
+  );
+  assert.equal(claude.nativeCodexPreparedGeneration, undefined);
+  assert.equal(claude.nativeCodexIngressQuiesced, false);
+  assert.equal(claude.nativeCodexMonitorFrozen, false);
+  assert.deepEqual(codex.selectedRoutes, [
+    { alias: "codex-main@this-mac", routeHandle: THREAD_ID },
+  ]);
+  assert.deepEqual(await service.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+});
+
+test("known-absent succession publication cleans the successor and resumes the exact old registration", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  claude.nativeSuccessionPublishOutcomes.push("not_published");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_gen_3",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  assert.deepEqual(
+    (await handlers.listSnapshot()).routes.map(({ alias }) => alias),
+    ["codex-main@this-mac"],
+  );
+  assert.equal(claude.nativeCodexActiveAlias, "codex-main@this-mac");
+  assert.equal(claude.nativeCodexActiveGeneration, "initial");
+  assert.equal(claude.nativeCodexPreparedGeneration, undefined);
+  assert.equal(claude.nativeCodexIngressQuiesced, false);
+  assert.deepEqual(codex.releasedRoutes, [OTHER_THREAD_ID]);
+  assert.deepEqual(await service.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+});
+
+test("a pre-publication listener failure resumes the exact old registration without a durable journal", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.successionFailures.set("prepare", [
+    new Error("synthetic listener preparation failure"),
+  ]);
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_prearm",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.deepEqual(
+    await service.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await service.handlers().registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(claude.nativeCodexActiveAlias, "codex-main@this-mac");
+  assert.equal(claude.nativeCodexIngressQuiesced, false);
+  assert.deepEqual(codex.selectedRoutes, [
+    { alias: "codex-main@this-mac", routeHandle: THREAD_ID },
+  ]);
+  assert.deepEqual(await service.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+});
+
+test("a failed first cleanup is retried under the reducer before the old registration resumes", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.nativeSuccessionPublishOutcomes.push("not_published");
+  claude.successionFailures.set("cleanup_prepared", [
+    new Error("synthetic first cleanup failure"),
+  ]);
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_cleanup_retry",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.deepEqual(
+    await service.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await service.handlers().registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(
+    claude.lifecycleEvents.filter((event) =>
+      event.startsWith("succession:cleanup-prepared:"),
+    ).length,
+    2,
+  );
+  assert.equal(claude.nativeCodexActiveAlias, "codex-main@this-mac");
+  assert.equal(claude.nativeCodexIngressQuiesced, false);
+  assert.deepEqual(await service.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+});
+
+test("an unknown succession publication outcome takes both registrations offline and forbids old rollback", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  claude.nativeSuccessionPublishOutcomes.push("unknown");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    successionGeneration: () => "successor_gen_4",
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  assert.deepEqual(
+    await handlers.registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  const snapshot = await handlers.listSnapshot();
+  assert.equal(
+    snapshot.routes.every(
+      ({ enabled, state, compatibility }) =>
+        !enabled && state === "disabled" && compatibility === "expired",
+    ),
+    true,
+  );
+  const authority =
+    await service.store.inspectCodexSuccessionRecoveryAuthority();
+  assert.equal(authority.authority, "new");
+  assert.equal(claude.closed, true);
+  assert.equal(codex.closed, true);
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: false,
+    code: "rejected",
+  });
+});
+
+for (const failurePoint of ["activate", "retire"] as const) {
+  test(`a post-publication ${failurePoint} failure never restores the old registration`, async (t) => {
+    const { root, stateDir } = await fixture();
+    const claude = new FakeProvider("claude");
+    claude.successionFailures.set(failurePoint, [
+      new Error(`synthetic ${failurePoint} failure`),
+    ]);
+    const codex = new FakeProvider("codex");
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: stateDir,
+        EMBASSY_HOSTS: "this-mac",
+      }),
+      adapters: [claude, codex],
+      successionGeneration: () => `successor_${failurePoint}`,
+    });
+    await service.start();
+    t.after(async () => {
+      await service.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    });
+    assert.deepEqual(
+      await service.handlers().registerCodex(codexRegistration()),
+      { accepted: true, code: "ok" },
+    );
+    assert.deepEqual(
+      await service.handlers().registerCodex(successorCodexRegistration()),
+      { accepted: false, code: "rejected" },
+    );
+    assert.equal(
+      (await service.store.inspectCodexSuccessionRecoveryAuthority()).authority,
+      "new",
+    );
+    assert.equal(claude.closed, true);
+    assert.equal(codex.closed, true);
+    assert.deepEqual(
+      (await service.handlers().listSnapshot()).routes.map(({ alias }) => alias),
+      ["codex-next@this-mac"],
+    );
+    assert.equal(
+      (await service.handlers().listSnapshot()).routes.every(
+        ({ enabled }) => !enabled,
+      ),
+      true,
+    );
+  });
+}
+
+test("restart recovery after an irreversible succession authorizes only exact successor re-registration", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstClaude = new FakeProvider("claude");
+  firstClaude.nativeSuccessionPublishOutcomes.push("unknown");
+  const first = new GatewayService({
+    config,
+    adapters: [firstClaude, new FakeProvider("codex")],
+    successionGeneration: () => "successor_restart",
+  });
+  let second: GatewayService | undefined;
+  await first.start();
+  t.after(async () => {
+    await second?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.deepEqual(
+    await first.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await first.handlers().registerCodex(successorCodexRegistration()),
+    { accepted: false, code: "rejected" },
+  );
+  await first.close();
+
+  const secondClaude = new FakeProvider("claude");
+  const secondCodex = new FakeProvider("codex");
+  second = new GatewayService({
+    config,
+    adapters: [secondClaude, secondCodex],
+  });
+  await second.start();
+  assert.deepEqual(
+    await second.handlers().registerCodex(codexRegistration()),
+    { accepted: false, code: "conflict" },
+  );
+  assert.deepEqual(secondCodex.selectedRoutes, []);
+  assert.deepEqual(
+    await second.handlers().registerCodex(successorExactRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(await second.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+  assert.deepEqual(
+    (await second.handlers().listSnapshot()).routes.map(({ alias, state }) => ({
+      alias,
+      state,
+    })),
+    [{ alias: "codex-next@this-mac", state: "idle" }],
+  );
+});
+
+test("restart clears a pre-publication succession journal and preserves only the old registration authority", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstCodex = new FakeProvider("codex");
+  const first = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), firstCodex],
+  });
+  let second: GatewayService | undefined;
+  await first.start();
+  t.after(async () => {
+    await second?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.deepEqual(
+    await first.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  const oldRoute = await first.store.inspectPrivateRoute(
+    "codex-main@this-mac",
+  );
+  assert.ok(oldRoute);
+  const newBinding: PrivateRouteBinding = {
+    ...firstCodex.identity,
+    routeHandle: OTHER_THREAD_ID,
+    ownerLease: `lease_${createHash("sha256")
+      .update("codex")
+      .update("\0")
+      .update(`this-mac\0${OTHER_THREAD_ID}`)
+      .digest("base64url")}`,
+  };
+  await first.store.prepareCodexSuccession({
+    old: {
+      alias: "codex-main@this-mac",
+      threadId: THREAD_ID,
+      hostId: "this-mac",
+      generation: "initial",
+      binding: oldRoute.binding,
+    },
+    new: {
+      alias: "codex-next@this-mac",
+      threadId: OTHER_THREAD_ID,
+      hostId: "this-mac",
+      generation: "prepared_restart",
+      binding: newBinding,
+    },
+  });
+  await first.close();
+
+  const secondCodex = new FakeProvider("codex");
+  second = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), secondCodex],
+  });
+  await second.start();
+  assert.deepEqual(await second.store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+  assert.deepEqual(
+    await second.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(secondCodex.selectedRoutes, [
+    { alias: "codex-main@this-mac", routeHandle: THREAD_ID },
   ]);
 });
 

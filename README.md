@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/social-preview.png" alt="Embassy — two facing arcs sheltering a sealed center" width="720">
+</p>
+
 # Embassy
 
 **A local embassy for your AI agents.**
@@ -249,6 +253,31 @@ Open `gateway-dashboard.html` inside the configured state directory. It gives a 
 
 
 The dashboard is deliberately a file rather than a web application. Anything already running as your OS user can read it, so place `EMBASSY_STATE_DIR` outside agent workspaces if that distinction matters to you.
+
+
+### Live dashboard
+
+`embassy dashboard --live` starts a separate foreground companion process that
+streams the same metadata shown by the static dashboard into a browser tab. It
+binds `127.0.0.1` on an ephemeral port; the companion is not part of
+`embassy serve`, which remains socket-only with no TCP or HTTP listener.
+
+Access bootstraps through a one-use 256-bit URL-fragment token exchanged for a
+path-scoped `HttpOnly` `SameSite=Strict` session cookie. Host, Origin, and
+sentinel headers are checked on every request. There are no CORS headers, no
+mutation or provider routes, no storage, no telemetry, and no external assets.
+The browser has zero authority to register, select, send, reply, approve, or
+interrupt — it receives a read-only sanitized metadata snapshot only, streamed
+via authenticated `fetch`. A snapshot observation may settle already-due
+lifecycle deliveries before projecting state.
+
+An optional `--lang en|zh-CN` flag selects the display language.
+
+**Caveat.** Any process running as your OS user — including root and browser
+extensions with local filesystem access — can read what the browser can read.
+
+The static `gateway-dashboard.html` file remains the inert offline floor:
+mode 0600, no script, no network.
 
 ## Migrating from the prototype
 

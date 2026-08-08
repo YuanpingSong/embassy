@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   symlink,
   unlink,
@@ -88,7 +89,16 @@ async function fixture(
   await chmod(home, 0o700);
   const processes = new Map<number, ClaudeProcessIdentity>();
   const servers: Server[] = [];
-  const { connect, now, createId, ...productionOverrides } = overrides;
+  const {
+    connect,
+    now,
+    createId,
+    createGeneration,
+    registryRename,
+    registryOperationHook,
+    registryPublicationHook,
+    ...productionOverrides
+  } = overrides;
   const adapter = new ClaudePeerAdapter(
     {
       sessionsDir,
@@ -105,6 +115,14 @@ async function fixture(
       ...(connect === undefined ? {} : { connect }),
       ...(now === undefined ? {} : { now }),
       ...(createId === undefined ? {} : { createId }),
+      ...(createGeneration === undefined ? {} : { createGeneration }),
+      ...(registryRename === undefined ? {} : { registryRename }),
+      ...(registryOperationHook === undefined
+        ? {}
+        : { registryOperationHook }),
+      ...(registryPublicationHook === undefined
+        ? {}
+        : { registryPublicationHook }),
       userHome: home,
       tempRoots: [systemTemp],
     },
@@ -1346,6 +1364,539 @@ test("listener advertises one native codex peer and removes it on close", async 
   await assert.rejects(lstat(registryPath), { code: "ENOENT" });
 });
 
+test("prepared listener generations coexist, publish atomically, and activate explicitly", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO, MESSAGE_ONE];
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_TWO,
+    createGeneration: () => "active_01",
+  });
+  let preparedMessages = 0;
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("successor_01", {
+    onMessage: () => {
+      preparedMessages += 1;
+    },
+  });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+
+  assert.equal(active.generation, "active_01");
+  assert.equal(prepared.generation, "successor_01");
+  assert.notEqual(active.address, prepared.address);
+  assert.match(prepared.address, new RegExp(`${process.pid}\\.successor_01\\.sock$`, "u"));
+  assert.equal((await lstat(active.address.slice(4))).isSocket(), true);
+  assert.equal((await lstat(prepared.address.slice(4))).isSocket(), true);
+
+  await active.advertise("codex-before", current.workspace);
+  const before = JSON.parse(await readFile(registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(before.name, "codex-before");
+  assert.equal(before.messagingSocketPath, active.address.slice(4));
+  await assert.rejects(
+    prepared.advertise("codex-bypass", current.workspace),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  assert.throws(
+    () => prepared.resumeInbound(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  await assert.rejects(
+    prepared.publishReplacing(active, "codex-after", current.workspace),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_SUCCESSION_NOT_QUIESCED",
+  );
+
+  const inboundFrame = `${JSON.stringify({
+    type: "user",
+    message: { role: "user", content: "generation fence" },
+    msgV: 1,
+    msg_id: MESSAGE_ONE,
+    priority: "next",
+  })}\n`;
+  await sendLines(prepared.address.slice(4), [inboundFrame]).catch(
+    () => undefined,
+  );
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(preparedMessages, 0);
+
+  await active.quiesceInbound();
+  const outcome = await prepared.publishReplacing(
+    active,
+    "codex-after",
+    current.workspace,
+  );
+  assert.equal(outcome, "published");
+  const after = JSON.parse(await readFile(registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(after.name, "codex-after");
+  assert.equal(after.sessionId, SESSION_TWO);
+  assert.equal(after.messagingSocketPath, prepared.address.slice(4));
+  assert.equal((await lstat(registryPath)).mode & 0o777, 0o600);
+  assert.deepEqual(
+    (await readdir(current.sessionsDir)).filter((name) => name.includes("tmp")),
+    [],
+  );
+
+  await sendLines(prepared.address.slice(4), [inboundFrame]).catch(
+    () => undefined,
+  );
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(preparedMessages, 0);
+  assert.throws(
+    () => prepared.resumeInbound(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  prepared.grantSuccessionActivation();
+  prepared.grantSuccessionActivation();
+  prepared.resumeInbound();
+  prepared.resumeInbound();
+  await sendLines(prepared.address.slice(4), [inboundFrame]);
+  await eventually(() => preparedMessages === 1);
+
+  await active.close();
+  const preserved = JSON.parse(await readFile(registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(preserved.name, "codex-after");
+  assert.equal(preserved.messagingSocketPath, prepared.address.slice(4));
+  await prepared.updateAdvertisedStatus("waiting");
+  const waiting = JSON.parse(await readFile(registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(waiting.status, "waiting");
+  await prepared.close();
+  await assert.rejects(lstat(registryPath), { code: "ENOENT" });
+});
+
+test("sibling status mutation cannot interleave across succession publication", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  const events: string[] = [];
+  let publicationPausedResolve: (() => void) | undefined;
+  const publicationPaused = new Promise<void>((resolve) => {
+    publicationPausedResolve = resolve;
+  });
+  let releasePublication: (() => void) | undefined;
+  const publicationRelease = new Promise<void>((resolve) => {
+    releasePublication = resolve;
+  });
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+    registryOperationHook: (event) => {
+      events.push(
+        `${event.operation}:${event.phase}:${event.generation}`,
+      );
+    },
+    registryPublicationHook: async (stage) => {
+      if (stage !== "before_rename") return;
+      publicationPausedResolve?.();
+      await publicationRelease;
+    },
+  });
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("status_race_01", {
+    onMessage: () => undefined,
+  });
+  await active.advertise("codex-before", current.workspace);
+  events.length = 0;
+  await active.quiesceInbound();
+
+  const publication = prepared.publishReplacing(
+    active,
+    "codex-after",
+    current.workspace,
+  );
+  await publicationPaused;
+  const staleStatus = active.updateAdvertisedStatus("waiting");
+  await Promise.resolve();
+  releasePublication?.();
+
+  assert.equal(await publication, "published");
+  await staleStatus;
+  assert.deepEqual(events, [
+    `publish:entered:${prepared.generation}`,
+    `publish:exited:${prepared.generation}`,
+    `status:entered:${active.generation}`,
+    `status:exited:${active.generation}`,
+  ]);
+  const registry = JSON.parse(
+    await readFile(
+      path.join(current.sessionsDir, `${process.pid}.json`),
+      "utf8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(registry.name, "codex-after");
+  assert.equal(registry.status, "idle");
+});
+
+test("old close waits behind post-rename proof and preserves the new registry", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  const events: string[] = [];
+  let publicationPausedResolve: (() => void) | undefined;
+  const publicationPaused = new Promise<void>((resolve) => {
+    publicationPausedResolve = resolve;
+  });
+  let releasePublication: (() => void) | undefined;
+  const publicationRelease = new Promise<void>((resolve) => {
+    releasePublication = resolve;
+  });
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+    registryOperationHook: (event) => {
+      events.push(
+        `${event.operation}:${event.phase}:${event.generation}`,
+      );
+    },
+    registryPublicationHook: async (stage) => {
+      if (stage !== "after_rename") return;
+      publicationPausedResolve?.();
+      await publicationRelease;
+    },
+  });
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("close_race_01", {
+    onMessage: () => undefined,
+  });
+  await active.advertise("codex-before", current.workspace);
+  events.length = 0;
+  await active.quiesceInbound();
+
+  const publication = prepared.publishReplacing(
+    active,
+    "codex-after",
+    current.workspace,
+  );
+  await publicationPaused;
+  const staleClose = active.close();
+  await Promise.resolve();
+  releasePublication?.();
+
+  assert.equal(await publication, "published");
+  await staleClose;
+  assert.deepEqual(events, [
+    `publish:entered:${prepared.generation}`,
+    `publish:exited:${prepared.generation}`,
+    `unadvertise:entered:${active.generation}`,
+    `unadvertise:exited:${active.generation}`,
+  ]);
+  const registry = JSON.parse(
+    await readFile(
+      path.join(current.sessionsDir, `${process.pid}.json`),
+      "utf8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(registry.name, "codex-after");
+  assert.equal(registry.messagingSocketPath, prepared.address.slice(4));
+});
+
+test("succession refuses a byte-identical registry with a foreign inode generation", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+  });
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("successor_02", {
+    onMessage: () => undefined,
+  });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+  await active.advertise("codex-before", current.workspace);
+  await active.quiesceInbound();
+  const serialized = await readFile(registryPath, "utf8");
+  const replacement = path.join(current.sessionsDir, "foreign-identical.tmp");
+  await writeFile(replacement, serialized, { mode: 0o600 });
+  await rename(replacement, registryPath);
+
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "unknown",
+  );
+  assert.equal(await readFile(registryPath, "utf8"), serialized);
+  assert.throws(
+    () => prepared.resumeInbound(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+});
+
+test("prepared generations validate syntax and reject foreign adapter ownership", async (t) => {
+  const current = await fixture(t, { createId: () => SESSION_ONE });
+  for (const generation of ["", "../escape", "with.dot", "x".repeat(33)]) {
+    await assert.rejects(
+      current.adapter.listenPrepared(generation, {
+        onMessage: () => undefined,
+      }),
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "INVALID_CODEX_PEER_GENERATION",
+    );
+  }
+
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  await active.advertise("codex-before", current.workspace);
+  await active.quiesceInbound();
+  const duplicateGeneration = await current.adapter.listenPrepared(
+    active.generation,
+    { onMessage: () => undefined },
+  );
+  await assert.rejects(
+    duplicateGeneration.publishReplacing(
+      active,
+      "codex-duplicate-generation",
+      current.workspace,
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_SUCCESSION_INVALID",
+  );
+  const foreignAdapter = new ClaudePeerAdapter(
+    {
+      sessionsDir: current.sessionsDir,
+      socketDir: current.socketDir,
+      attestedClaudeCodeVersion:
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+    },
+    {
+      createId: () => SESSION_TWO,
+      userHome: current.home,
+      tempRoots: [current.systemTemp],
+    },
+  );
+  try {
+    const foreignPrepared = await foreignAdapter.listenPrepared("foreign_01", {
+      onMessage: () => undefined,
+    });
+    await assert.rejects(
+      foreignPrepared.publishReplacing(
+        active,
+        "codex-after",
+        current.workspace,
+      ),
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "CODEX_PEER_SUCCESSION_INVALID",
+    );
+  } finally {
+    await foreignAdapter.close();
+  }
+});
+
+test("ordinary listener generations are fresh across process-lifecycle replacements", async (t) => {
+  const current = await fixture(t, {
+    createGeneration: () => "ordinary_old_01",
+  });
+  const oldListener = await current.adapter.listen({
+    onMessage: () => undefined,
+  });
+  const persistedOldGeneration = oldListener.generation;
+  assert.equal(persistedOldGeneration, "ordinary_old_01");
+  await oldListener.close();
+  await current.adapter.close();
+
+  const replacementAdapter = new ClaudePeerAdapter(
+    {
+      sessionsDir: current.sessionsDir,
+      socketDir: current.socketDir,
+      attestedClaudeCodeVersion:
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+    },
+    {
+      createGeneration: () => "ordinary_new_02",
+      userHome: current.home,
+      tempRoots: [current.systemTemp],
+    },
+  );
+  try {
+    const replacement = await replacementAdapter.listen({
+      onMessage: () => undefined,
+    });
+    assert.equal(replacement.generation, "ordinary_new_02");
+    assert.notEqual(replacement.generation, persistedOldGeneration);
+    await replacement.close();
+  } finally {
+    await replacementAdapter.close();
+  }
+});
+
+test("ordinary listener generation factories fail closed on invalid output", async (t) => {
+  const current = await fixture(t, {
+    createGeneration: () => "invalid.generation",
+  });
+  await assert.rejects(
+    current.adapter.listen({ onMessage: () => undefined }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_CODEX_PEER_GENERATION",
+  );
+});
+
+test("publication classifies pre-rename failure as not published", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+    registryPublicationHook: (stage) => {
+      if (stage === "before_rename") throw new Error("synthetic pre-rename");
+    },
+  });
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("successor_03", {
+    onMessage: () => undefined,
+  });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+  await active.advertise("codex-before", current.workspace);
+  await active.quiesceInbound();
+
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "not_published",
+  );
+  assert.equal(
+    (JSON.parse(await readFile(registryPath, "utf8")) as Record<string, unknown>)
+      .name,
+    "codex-before",
+  );
+  active.resumeInbound();
+});
+
+test("publication proves syscall rename failure left the exact old inode unpublished", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+    registryRename: async (source, destination) => {
+      if (source.includes(".successor_syscall.registry.tmp")) {
+        throw Object.assign(new Error("synthetic rename failure"), {
+          code: "EIO",
+        });
+      }
+      await rename(source, destination);
+    },
+  });
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("successor_syscall", {
+    onMessage: () => undefined,
+  });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+  await active.advertise("codex-before", current.workspace);
+  const before = await lstat(registryPath);
+  await active.quiesceInbound();
+
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "not_published",
+  );
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "not_published",
+  );
+  const after = await lstat(registryPath);
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
+  assert.throws(
+    () => prepared.grantSuccessionActivation(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  active.resumeInbound();
+});
+
+test("publication proves a post-rename failure as published by exact reread", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+    registryPublicationHook: (stage) => {
+      if (stage === "after_rename") throw new Error("synthetic post-rename");
+    },
+  });
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("successor_04", {
+    onMessage: () => undefined,
+  });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+  await active.advertise("codex-before", current.workspace);
+  await active.quiesceInbound();
+
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "published",
+  );
+  assert.throws(
+    () => prepared.resumeInbound(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  prepared.grantSuccessionActivation();
+  prepared.resumeInbound();
+  assert.equal(
+    (JSON.parse(await readFile(registryPath, "utf8")) as Record<string, unknown>)
+      .name,
+    "codex-after",
+  );
+});
+
+test("publication never adopts a byte-identical foreign post-rename inode", async (t) => {
+  const identifiers = [SESSION_ONE, SESSION_TWO];
+  let registryPath = "";
+  let foreignSerialized = "";
+  const current = await fixture(t, {
+    createId: () => identifiers.shift() ?? MESSAGE_ONE,
+    registryPublicationHook: async (stage) => {
+      if (stage !== "after_rename") return;
+      foreignSerialized = await readFile(registryPath, "utf8");
+      const replacement = path.join(
+        path.dirname(registryPath),
+        "foreign-byte-identical.tmp",
+      );
+      await writeFile(replacement, foreignSerialized, { mode: 0o600 });
+      await rename(replacement, registryPath);
+      throw new Error("synthetic indeterminate publication");
+    },
+  });
+  registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+  const active = await current.adapter.listen({ onMessage: () => undefined });
+  const prepared = await current.adapter.listenPrepared("successor_05", {
+    onMessage: () => undefined,
+  });
+  await active.advertise("codex-before", current.workspace);
+  await active.quiesceInbound();
+
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "unknown",
+  );
+  assert.equal(
+    await prepared.publishReplacing(active, "codex-after", current.workspace),
+    "unknown",
+  );
+  assert.equal(await readFile(registryPath, "utf8"), foreignSerialized);
+  assert.throws(
+    () => prepared.grantSuccessionActivation(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  assert.throws(
+    () => prepared.resumeInbound(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
+  );
+  await active.close();
+  assert.equal(await readFile(registryPath, "utf8"), foreignSerialized);
+});
+
 test("listener returns native held and delivered statuses to the sending peer", async (t) => {
   let receiptHandle: string | undefined;
   const statuses: Array<Record<string, unknown>> = [];
@@ -2263,4 +2814,24 @@ test("callback cleanup preserves an observed foreign path replacement", async (t
       error.code === "CLAUDE_PEER_CALLBACK_CHANGED",
   );
   assert.equal(await readFile(callbackPath, "utf8"), "foreign replacement");
+});
+
+test("prepared callback cleanup preserves an observed foreign path replacement", async (t) => {
+  const current = await fixture(t);
+  const listener = await current.adapter.listenPrepared("cleanup_01", {
+    onMessage: () => undefined,
+  });
+  const callbackPath = listener.address.slice(4);
+  await unlink(callbackPath);
+  await writeFile(callbackPath, "foreign prepared replacement", { mode: 0o600 });
+  await assert.rejects(
+    listener.close(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_CALLBACK_CHANGED",
+  );
+  assert.equal(
+    await readFile(callbackPath, "utf8"),
+    "foreign prepared replacement",
+  );
 });

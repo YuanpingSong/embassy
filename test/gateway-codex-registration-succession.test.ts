@@ -557,8 +557,14 @@ test("identity validation requires a distinct alias, thread, host-local fresh ge
   }
   assert.throws(
     () => createCodexRegistrationSuccession({ ...OLD, generation: " bad" }),
-    /non-empty, trimmed string/,
+    /bounded opaque generation grammar/,
   );
+  for (const generation of ["with.dot", "with:colon", "x".repeat(33)]) {
+    assert.throws(
+      () => createCodexRegistrationSuccession({ ...OLD, generation }),
+      /bounded opaque generation grammar/,
+    );
+  }
 
   const mutable = { ...NEXT };
   const result = transition(initial(), { type: "begin", registration: mutable });

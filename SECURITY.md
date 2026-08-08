@@ -143,6 +143,27 @@ contains allowlisted metadata only and has no JavaScript, external assets,
 storage, telemetry, or mutation endpoint. Any process already running as the
 same OS user can read it.
 
+### Live companion boundary
+
+`embassy dashboard --live` binds a read-only HTTP listener on `127.0.0.1` with
+an ephemeral port. It is a separate foreground process from `embassy serve`.
+Access requires a one-use 256-bit URL-fragment token exchanged for a
+path-scoped `HttpOnly` `SameSite=Strict` session cookie; Host, Origin, and
+sentinel headers are checked on every request. There are no CORS headers, no
+mutation or provider routes, no storage, no telemetry, and no external assets.
+The browser receives a read-only sanitized metadata snapshot and has no
+authority to register, select, send, reply, approve, or interrupt. Any process
+running as your OS user — including root and browser extensions with local
+filesystem access — can read what the browser can read.
+
+Reports involving the live companion are in scope if they demonstrate a path by
+which a remote origin, a cross-site request, or a process running as a
+different OS user can read the authenticated stream or bypass the token-to-cookie
+exchange. Same-UID local reads are within the documented containment model and
+are not treated as vulnerabilities unless they bypass an explicit control such
+as accessing a session without presenting the cookie.
+
+
 ## Validation boundary
 
 Routine tests use temporary directories, fake peers, and fake App Server

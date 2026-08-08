@@ -17,6 +17,11 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 
 import { BridgeError } from "../errors.js";
+import { KeyedMutex } from "../mutex.js";
+import {
+  createCodexRegistrationGeneration,
+  isCodexRegistrationGeneration,
+} from "./codex-registration-generation.js";
 
 /**
  * This adapter intentionally pins the inspected, implementation-specific
@@ -209,9 +214,25 @@ export type ClaudePeerAdapterTestOverrides = {
   connect?: ClaudePeerConnect;
   now?: () => number;
   createId?: () => string;
+  /** Separate from protocol/message UUID generation so lifecycle tests cannot alias it. */
+  createGeneration?: () => string;
+  registryRename?: (source: string, destination: string) => Promise<void>;
+  registryOperationHook?: (event: {
+    operation: "advertise" | "publish" | "status" | "unadvertise";
+    phase: "entered" | "exited";
+    generation: string;
+  }) => void | Promise<void>;
   userHome?: string;
   tempRoots?: readonly string[];
+  registryPublicationHook?: (
+    stage: "before_rename" | "after_rename",
+  ) => void | Promise<void>;
 };
+
+export type ClaudePeerRegistryPublicationOutcome =
+  | "published"
+  | "not_published"
+  | "unknown";
 
 export type ClaudePeerListenerOptions = {
   onMessage: (message: ClaudePeerInboundMessage) => void | Promise<void>;
@@ -862,8 +883,21 @@ export class ClaudePeerAdapter {
   readonly #connect: ClaudePeerConnect;
   readonly #now: () => number;
   readonly #createId: () => string;
+  readonly #createGeneration: () => string;
+  readonly #registryRename: (
+    source: string,
+    destination: string,
+  ) => Promise<void>;
+  readonly #registryOperationHook:
+    | ClaudePeerAdapterTestOverrides["registryOperationHook"]
+    | undefined;
   readonly #userHome: string;
   readonly #tempRoots: readonly string[];
+  readonly #listenerOwner = Object.freeze({});
+  readonly #registryMutex = new KeyedMutex();
+  readonly #registryPublicationHook:
+    | ((stage: "before_rename" | "after_rename") => void | Promise<void>)
+    | undefined;
   readonly #targets = new Map<string, TargetBinding>();
   readonly #workspacePolicies = new Map<string, WorkspacePolicy>();
   readonly #listeners = new Set<ClaudePeerListener>();
@@ -980,6 +1014,10 @@ export class ClaudePeerAdapter {
       ((socketPath) => net.createConnection({ path: socketPath }));
     this.#now = testing.now ?? Date.now;
     this.#createId = testing.createId ?? randomUUID;
+    this.#createGeneration =
+      testing.createGeneration ?? createCodexRegistrationGeneration;
+    this.#registryRename = testing.registryRename ?? rename;
+    this.#registryOperationHook = testing.registryOperationHook;
     this.#userHome = assertAbsoluteConfiguredPath(
       testing.userHome ?? os.userInfo().homedir,
       "userHome",
@@ -989,6 +1027,7 @@ export class ClaudePeerAdapter {
         ...(testing.tempRoots ?? ["/tmp", "/private/tmp", os.tmpdir()]),
       ].map((root) => assertAbsoluteConfiguredPath(root, "tempRoot")),
     );
+    this.#registryPublicationHook = testing.registryPublicationHook;
   }
 
   async #validatePrivateDirectory(directory: string): Promise<void> {
@@ -1537,11 +1576,21 @@ export class ClaudePeerAdapter {
     };
   }
 
-  async listen(options: ClaudePeerListenerOptions): Promise<ClaudePeerListener> {
+  async #listen(
+    options: ClaudePeerListenerOptions,
+    preparedGeneration?: string,
+  ): Promise<ClaudePeerListener> {
     await Promise.all([
       this.#validatePrivateDirectory(this.#sessionsDir),
       this.#validatePrivateDirectory(this.#socketDir),
     ]);
+    const generation = preparedGeneration ?? this.#createGeneration();
+    if (!isCodexRegistrationGeneration(generation)) {
+      throw new BridgeError(
+        "INVALID_CODEX_PEER_GENERATION",
+        "A native Codex listener requires one bounded opaque generation.",
+      );
+    }
     const listener = await ClaudePeerListener.create({
       sessionsDir: this.#sessionsDir,
       socketDir: this.#socketDir,
@@ -1577,10 +1626,39 @@ export class ClaudePeerAdapter {
       revalidateBinding: async (binding) =>
         await this.#revalidateBinding(binding),
       options,
+      owner: this.#listenerOwner,
+      generation,
+      registryRename: this.#registryRename,
+      ...(this.#registryOperationHook === undefined
+        ? {}
+        : { registryOperationHook: this.#registryOperationHook }),
+      runRegistryMutation: async (operation) =>
+        await this.#registryMutex.run("codex-registry", operation),
+      ...(preparedGeneration === undefined ? {} : { preparedGeneration }),
+      ...(this.#registryPublicationHook === undefined
+        ? {}
+        : { registryPublicationHook: this.#registryPublicationHook }),
       onClosed: () => this.#listeners.delete(listener),
     });
     this.#listeners.add(listener);
     return listener;
+  }
+
+  async listen(options: ClaudePeerListenerOptions): Promise<ClaudePeerListener> {
+    return await this.#listen(options);
+  }
+
+  async listenPrepared(
+    generation: string,
+    options: ClaudePeerListenerOptions,
+  ): Promise<ClaudePeerListener> {
+    if (!isCodexRegistrationGeneration(generation)) {
+      throw new BridgeError(
+        "INVALID_CODEX_PEER_GENERATION",
+        "A prepared native Codex listener requires one bounded opaque generation.",
+      );
+    }
+    return await this.#listen(options, generation);
   }
 
   async send(
@@ -1856,12 +1934,41 @@ type ListenerCreateOptions = {
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   options: ClaudePeerListenerOptions;
+  owner: object;
+  generation: string;
+  registryRename: (source: string, destination: string) => Promise<void>;
+  registryOperationHook?: ClaudePeerAdapterTestOverrides["registryOperationHook"];
+  runRegistryMutation: <T>(operation: () => Promise<T>) => Promise<T>;
+  preparedGeneration?: string;
+  registryPublicationHook?: (
+    stage: "before_rename" | "after_rename",
+  ) => void | Promise<void>;
   onClosed: () => void;
+};
+
+type AdvertisedCodexRegistryRecord = {
+  pid: number;
+  sessionId: string;
+  cwd: string;
+  startedAt: number;
+  procStart: string;
+  version: string;
+  peerProtocol: 1;
+  kind: "interactive";
+  entrypoint: "cli";
+  messagingSocketPath: string;
+  name: string;
+  status: ClaudePeerStatus;
+  updatedAt: number;
+  statusUpdatedAt: number;
 };
 
 export class ClaudePeerListener {
   readonly address: string;
+  readonly generation: string;
   readonly #sessionsDir: string;
+  readonly #sessionsGeneration: DirectoryGeneration;
+  readonly #expectedUid: number;
   readonly #socketPath: string;
   readonly #socketGeneration: SocketGeneration;
   readonly #server: Server;
@@ -1875,6 +1982,21 @@ export class ClaudePeerListener {
   ) => Promise<TargetBinding>;
   readonly #revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   readonly #options: ClaudePeerListenerOptions;
+  readonly #owner: object;
+  readonly #registryRename: (
+    source: string,
+    destination: string,
+  ) => Promise<void>;
+  readonly #registryOperationHook:
+    | ClaudePeerAdapterTestOverrides["registryOperationHook"]
+    | undefined;
+  readonly #runRegistryMutation: <T>(
+    operation: () => Promise<T>,
+  ) => Promise<T>;
+  readonly #preparedGeneration: string | undefined;
+  readonly #registryPublicationHook:
+    | ((stage: "before_rename" | "after_rename") => void | Promise<void>)
+    | undefined;
   readonly #onClosed: () => void;
   readonly #connections = new Set<Socket>();
   readonly #pending = new Map<string, PendingReceipt>();
@@ -1887,7 +2009,13 @@ export class ClaudePeerListener {
   #queuedFrames = 0;
   #inboundQuiesced = false;
   readonly #inboundQuiesceWaiters = new Set<() => void>();
-  #advertisedRecord: Record<string, unknown> | undefined;
+  #advertisedRecord: AdvertisedCodexRegistryRecord | undefined;
+  #advertisedGeneration: FileGeneration | undefined;
+  #preparedRecord: AdvertisedCodexRegistryRecord | undefined;
+  #publicationAttempted = false;
+  #publicationSourceGeneration: FileGeneration | undefined;
+  #publicationConfirmed = false;
+  #activationGranted = false;
   #closed = false;
 
   private constructor(
@@ -1895,9 +2023,13 @@ export class ClaudePeerListener {
     server: Server,
     socketPath: string,
     generation: SocketGeneration,
+    sessionsGeneration: DirectoryGeneration,
   ) {
     this.address = `uds:${socketPath}`;
+    this.generation = options.generation;
     this.#sessionsDir = options.sessionsDir;
+    this.#sessionsGeneration = sessionsGeneration;
+    this.#expectedUid = options.expectedUid;
     this.#socketPath = socketPath;
     this.#socketGeneration = generation;
     this.#server = server;
@@ -1909,7 +2041,15 @@ export class ClaudePeerListener {
     this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
     this.#options = options.options;
+    this.#owner = options.owner;
+    this.#registryRename = options.registryRename;
+    this.#registryOperationHook = options.registryOperationHook;
+    this.#runRegistryMutation = options.runRegistryMutation;
+    this.#preparedGeneration = options.preparedGeneration;
+    this.#registryPublicationHook = options.registryPublicationHook;
     this.#onClosed = options.onClosed;
+    this.#inboundQuiesced = options.preparedGeneration !== undefined;
+    this.#activationGranted = options.preparedGeneration === undefined;
   }
 
   static async create(
@@ -1917,7 +2057,12 @@ export class ClaudePeerListener {
   ): Promise<ClaudePeerListener> {
     // One gateway process owns one native peer socket. It may advertise one
     // registered Codex task through Claude's native session registry.
-    const socketPath = path.join(options.socketDir, `${process.pid}.sock`);
+    const socketPath = path.join(
+      options.socketDir,
+      options.preparedGeneration === undefined
+        ? `${process.pid}.sock`
+        : `${process.pid}.${options.preparedGeneration}.sock`,
+    );
     try {
       await lstat(socketPath);
       throw new BridgeError(
@@ -1988,11 +2133,24 @@ export class ClaudePeerListener {
           "The gateway callback socket did not satisfy its ownership policy.",
         );
       }
+      const sessions = await lstat(options.sessionsDir);
+      if (
+        sessions.isSymbolicLink() ||
+        !sessions.isDirectory() ||
+        sessions.uid !== options.expectedUid ||
+        exactMode(sessions.mode) !== 0o700
+      ) {
+        throw new BridgeError(
+          "UNSAFE_PEER_DIRECTORY",
+          "The native peer registry directory failed its ownership policy.",
+        );
+      }
       listener = new ClaudePeerListener(
         options,
         server,
         socketPath,
         createdGeneration,
+        { dev: sessions.dev, ino: sessions.ino },
       );
       return listener;
     } catch (error) {
@@ -2024,13 +2182,256 @@ export class ClaudePeerListener {
     return this.#closed;
   }
 
-  async advertise(name: string, cwd: string): Promise<void> {
-    if (this.#closed) {
+  #registryPath(): string {
+    return path.join(this.#sessionsDir, `${process.pid}.json`);
+  }
+
+  #registryTemporaryPath(): string {
+    return path.join(
+      this.#sessionsDir,
+      `.${process.pid}.${this.generation}.registry.tmp`,
+    );
+  }
+
+  #serializeRecord(record: AdvertisedCodexRegistryRecord): string {
+    return `${JSON.stringify(record)}\n`;
+  }
+
+  #recordBelongsToThisListener(
+    record: AdvertisedCodexRegistryRecord,
+  ): boolean {
+    return (
+      record.pid === process.pid &&
+      UUID_PATTERN.test(record.sessionId) &&
+      record.messagingSocketPath === this.#socketPath &&
+      record.version === CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion &&
+      record.peerProtocol === CLAUDE_PEER_COMPATIBILITY.peerProtocol &&
+      record.kind === "interactive" &&
+      record.entrypoint === "cli" &&
+      record.name.startsWith("codex-") &&
+      ALIAS_PATTERN.test(record.name)
+    );
+  }
+
+  async #assertRegistryDirectory(): Promise<void> {
+    const current = await lstat(this.#sessionsDir);
+    if (
+      current.isSymbolicLink() ||
+      !current.isDirectory() ||
+      current.uid !== this.#expectedUid ||
+      exactMode(current.mode) !== 0o700 ||
+      !sameDirectoryGeneration(
+        { dev: current.dev, ino: current.ino },
+        this.#sessionsGeneration,
+      )
+    ) {
       throw new BridgeError(
-        "CLAUDE_PEER_LISTENER_CLOSED",
-        "The Claude peer callback listener is closed.",
+        "UNSAFE_PEER_DIRECTORY",
+        "The native peer registry directory changed or failed its ownership policy.",
       );
     }
+  }
+
+  async #readRegistryExact(): Promise<
+    | Readonly<{ serialized: string; generation: FileGeneration }>
+    | undefined
+  > {
+    await this.#assertRegistryDirectory();
+    const registryPath = this.#registryPath();
+    let before: Awaited<ReturnType<typeof lstat>>;
+    try {
+      before = await lstat(registryPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    if (
+      before.isSymbolicLink() ||
+      !before.isFile() ||
+      before.uid !== this.#expectedUid ||
+      exactMode(before.mode) !== 0o600 ||
+      before.size > this.#limits.maxRegistryBytes
+    ) {
+      throw new BridgeError(
+        "REGISTRY_RACED",
+        "The native Codex registry record failed its exact ownership policy.",
+      );
+    }
+    const beforeGeneration = generationOf(before);
+    const handle = await open(
+      registryPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    try {
+      const opened = await handle.stat();
+      const openedGeneration = generationOf(opened);
+      if (
+        !opened.isFile() ||
+        opened.uid !== this.#expectedUid ||
+        exactMode(opened.mode) !== 0o600 ||
+        !sameFileGeneration(beforeGeneration, openedGeneration)
+      ) {
+        throw new BridgeError(
+          "REGISTRY_RACED",
+          "The native Codex registry record changed while opening.",
+        );
+      }
+      const serialized = await handle.readFile({ encoding: "utf8" });
+      if (byteLength(serialized) > this.#limits.maxRegistryBytes) {
+        throw new BridgeError(
+          "REGISTRY_TOO_LARGE",
+          "The native Codex registry record exceeded its bound.",
+        );
+      }
+      const after = await lstat(registryPath);
+      if (
+        after.isSymbolicLink() ||
+        !after.isFile() ||
+        after.uid !== this.#expectedUid ||
+        exactMode(after.mode) !== 0o600 ||
+        !sameFileGeneration(openedGeneration, generationOf(after))
+      ) {
+        throw new BridgeError(
+          "REGISTRY_RACED",
+          "The native Codex registry record changed while reading.",
+        );
+      }
+      return { serialized, generation: openedGeneration };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async #recordMatches(
+    record: AdvertisedCodexRegistryRecord,
+    generation?: FileGeneration,
+  ): Promise<
+    | Readonly<{ matches: true; generation: FileGeneration }>
+    | Readonly<{ matches: false }>
+  > {
+    try {
+      const current = await this.#readRegistryExact();
+      if (
+        current === undefined ||
+        current.serialized !== this.#serializeRecord(record) ||
+        (generation !== undefined &&
+          !sameFileGeneration(current.generation, generation))
+      ) {
+        return { matches: false };
+      }
+      return { matches: true, generation: current.generation };
+    } catch {
+      return { matches: false };
+    }
+  }
+
+  async #createRegistryTemporary(
+    record: AdvertisedCodexRegistryRecord,
+  ): Promise<Readonly<{ path: string; generation: FileGeneration }>> {
+    await this.#assertRegistryDirectory();
+    const temporaryPath = this.#registryTemporaryPath();
+    await writeFile(temporaryPath, this.#serializeRecord(record), {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    let generation: FileGeneration | undefined;
+    try {
+      const created = await lstat(temporaryPath);
+      if (
+        created.isSymbolicLink() ||
+        !created.isFile() ||
+        created.uid !== this.#expectedUid ||
+        exactMode(created.mode) !== 0o600
+      ) {
+        throw new BridgeError(
+          "REGISTRY_RACED",
+          "The native Codex temporary registry record is unsafe.",
+        );
+      }
+      generation = generationOf(created);
+      const handle = await open(
+        temporaryPath,
+        fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      );
+      try {
+        const openedStat = await handle.stat();
+        const opened = generationOf(openedStat);
+        if (
+          !openedStat.isFile() ||
+          openedStat.uid !== this.#expectedUid ||
+          exactMode(openedStat.mode) !== 0o600 ||
+          !sameFileGeneration(generation, opened)
+        ) {
+          throw new BridgeError(
+            "REGISTRY_RACED",
+            "The native Codex temporary registry record changed while opening.",
+          );
+        }
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return { path: temporaryPath, generation };
+    } catch (error) {
+      if (generation !== undefined) {
+        await this.#cleanupOwnedFile(temporaryPath, generation).catch(
+          () => undefined,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async #cleanupOwnedFile(
+    candidate: string,
+    generation: FileGeneration,
+  ): Promise<void> {
+    try {
+      const current = await lstat(candidate);
+      if (
+        current.isFile() &&
+        !current.isSymbolicLink() &&
+        current.uid === this.#expectedUid &&
+        exactMode(current.mode) === 0o600 &&
+        sameFileGeneration(generationOf(current), generation)
+      ) {
+        await unlink(candidate);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  async #syncRegistryDirectory(): Promise<void> {
+    await this.#assertRegistryDirectory();
+    const handle = await open(this.#sessionsDir, fsConstants.O_RDONLY);
+    try {
+      const opened = await handle.stat();
+      if (
+        !opened.isDirectory() ||
+        opened.uid !== this.#expectedUid ||
+        exactMode(opened.mode) !== 0o700 ||
+        !sameDirectoryGeneration(
+          { dev: opened.dev, ino: opened.ino },
+          this.#sessionsGeneration,
+        )
+      ) {
+        throw new BridgeError(
+          "UNSAFE_PEER_DIRECTORY",
+          "The native peer registry directory changed while syncing.",
+        );
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  #newAdvertisedRecord(
+    name: string,
+    cwd: string,
+  ): AdvertisedCodexRegistryRecord {
     if (!name.startsWith("codex-") || !ALIAS_PATTERN.test(name)) {
       throw new BridgeError(
         "INVALID_CODEX_PEER_NAME",
@@ -2043,21 +2444,17 @@ export class ClaudePeerListener {
         "A native Codex peer requires an absolute working directory.",
       );
     }
-    if (
-      this.#advertisedRecord !== undefined &&
-      this.#advertisedRecord.name !== name
-    ) {
+    const sessionId = this.#createId();
+    if (!UUID_PATTERN.test(sessionId)) {
       throw new BridgeError(
-        "CODEX_PEER_ALREADY_ADVERTISED",
-        "This gateway process already advertises another Codex peer.",
+        "INVALID_CODEX_PEER_SESSION_ID",
+        "The configured ID source did not produce a native peer session UUID.",
       );
     }
-    if (this.#advertisedRecord?.name === name) return;
     const now = Date.now();
-    const registryPath = path.join(this.#sessionsDir, `${process.pid}.json`);
-    const record: Record<string, unknown> = {
+    return {
       pid: process.pid,
-      sessionId: this.#createId(),
+      sessionId,
       cwd,
       startedAt: now,
       procStart: new Date(now - process.uptime() * 1_000).toString(),
@@ -2071,15 +2468,234 @@ export class ClaudePeerListener {
       updatedAt: now,
       statusUpdatedAt: now,
     };
-    await writeFile(
-      registryPath,
-      `${JSON.stringify(record)}\n`,
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
+  }
+
+  async #mutateRegistry<T>(
+    operation: "advertise" | "publish" | "status" | "unadvertise",
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    return await this.#runRegistryMutation(async () => {
+      await this.#registryOperationHook?.({
+        operation,
+        phase: "entered",
+        generation: this.generation,
+      });
+      try {
+        return await mutation();
+      } finally {
+        await this.#registryOperationHook?.({
+          operation,
+          phase: "exited",
+          generation: this.generation,
+        });
+      }
+    });
+  }
+
+  async advertise(name: string, cwd: string): Promise<void> {
+    await this.#mutateRegistry("advertise", async () => {
+      if (this.#closed) {
+        throw new BridgeError(
+          "CLAUDE_PEER_LISTENER_CLOSED",
+          "The Claude peer callback listener is closed.",
+        );
+      }
+      if (this.#preparedGeneration !== undefined) {
+        throw new BridgeError(
+          "CODEX_PEER_PREPARED_NOT_ACTIVE",
+          "A prepared native Codex listener must use atomic succession publication.",
+        );
+      }
+      if (
+        this.#advertisedRecord !== undefined &&
+        this.#advertisedRecord.name !== name
+      ) {
+        throw new BridgeError(
+          "CODEX_PEER_ALREADY_ADVERTISED",
+          "This gateway process already advertises another Codex peer.",
+        );
+      }
+      if (this.#advertisedRecord?.name === name) return;
+      const record = this.#newAdvertisedRecord(name, cwd);
+      await this.#assertRegistryDirectory();
+      await writeFile(this.#registryPath(), this.#serializeRecord(record), {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      const exact = await this.#recordMatches(record);
+      if (!exact.matches) {
+        throw new BridgeError(
+          "REGISTRY_RACED",
+          "The native Codex registry record could not be exactly confirmed.",
+        );
+      }
+      this.#advertisedRecord = record;
+      this.#advertisedGeneration = exact.generation;
+    });
+  }
+
+  async #classifyPublication(
+    current: ClaudePeerListener,
+    record: AdvertisedCodexRegistryRecord,
+  ): Promise<ClaudePeerRegistryPublicationOutcome> {
+    const sourceGeneration = this.#publicationSourceGeneration;
+    if (sourceGeneration !== undefined) {
+      const published = await this.#recordMatches(record, sourceGeneration);
+      if (published.matches) {
+        this.#advertisedRecord = record;
+        this.#advertisedGeneration = published.generation;
+        this.#publicationConfirmed = true;
+        return "published";
+      }
+    }
+    return (await this.#oldPublicationStillPresent(current))
+      ? "not_published"
+      : "unknown";
+  }
+
+  async #oldPublicationStillPresent(
+    current: ClaudePeerListener,
+  ): Promise<boolean> {
+    const oldRecord = current.#advertisedRecord;
+    const oldGeneration = current.#advertisedGeneration;
+    if (oldRecord === undefined || oldGeneration === undefined) return false;
+    return (
+      await current.#recordMatches(oldRecord, oldGeneration)
+    ).matches;
+  }
+
+  async publishReplacing(
+    current: ClaudePeerListener,
+    name: string,
+    cwd: string,
+  ): Promise<ClaudePeerRegistryPublicationOutcome> {
+    return await this.#mutateRegistry(
+      "publish",
+      async () => await this.#publishReplacingLocked(current, name, cwd),
     );
-    this.#advertisedRecord = record;
+  }
+
+  async #publishReplacingLocked(
+    current: ClaudePeerListener,
+    name: string,
+    cwd: string,
+  ): Promise<ClaudePeerRegistryPublicationOutcome> {
+    if (
+      this.#closed ||
+      current.#closed ||
+      this === current ||
+      this.#preparedGeneration === undefined ||
+      this.generation === current.generation ||
+      !current.#activationGranted ||
+      this.#owner !== current.#owner ||
+      this.#sessionsDir !== current.#sessionsDir ||
+      this.#expectedUid !== current.#expectedUid ||
+      !sameDirectoryGeneration(
+        this.#sessionsGeneration,
+        current.#sessionsGeneration,
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_INVALID",
+        "Native Codex listener succession requires two live generations from one adapter owner.",
+      );
+    }
+    if (!this.#inboundQuiesced || !current.#inboundQuiesced) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_NOT_QUIESCED",
+        "Both native Codex listener generations must be inbound-quiesced before publication.",
+      );
+    }
+    if (
+      current.#advertisedRecord === undefined ||
+      current.#advertisedGeneration === undefined ||
+      !current.#recordBelongsToThisListener(current.#advertisedRecord)
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_CURRENT_UNOWNED",
+        "The current native Codex listener does not own an exact advertised record.",
+      );
+    }
+    if (name === current.#advertisedRecord.name) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_ALIAS_UNCHANGED",
+        "Native Codex succession requires a distinct alias.",
+      );
+    }
+    if (this.#preparedRecord === undefined) {
+      this.#preparedRecord = this.#newAdvertisedRecord(name, cwd);
+    } else if (
+      this.#preparedRecord.name !== name ||
+      this.#preparedRecord.cwd !== cwd
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_CHANGED",
+        "A prepared native Codex publication cannot change identity after preparation.",
+      );
+    }
+    const record = this.#preparedRecord;
+    if (this.#publicationAttempted) {
+      return await this.#classifyPublication(current, record);
+    }
+
+    let temporary:
+      | Readonly<{ path: string; generation: FileGeneration }>
+      | undefined;
+    let renameInvoked = false;
+    try {
+      temporary = await this.#createRegistryTemporary(record);
+      this.#publicationSourceGeneration = temporary.generation;
+      await this.#registryPublicationHook?.("before_rename");
+      if (
+        this.#closed ||
+        current.#closed ||
+        !this.#inboundQuiesced ||
+        !current.#inboundQuiesced
+      ) {
+        return (await this.#oldPublicationStillPresent(current))
+          ? "not_published"
+          : "unknown";
+      }
+      const currentExact = await current.#recordMatches(
+        current.#advertisedRecord,
+        current.#advertisedGeneration,
+      );
+      if (!currentExact.matches) return "unknown";
+      renameInvoked = true;
+      this.#publicationAttempted = true;
+      await this.#registryRename(temporary.path, this.#registryPath());
+      temporary = undefined;
+      await this.#registryPublicationHook?.("after_rename");
+      await this.#syncRegistryDirectory();
+      return await this.#classifyPublication(current, record);
+    } catch {
+      if (!renameInvoked) {
+        return (await this.#oldPublicationStillPresent(current))
+          ? "not_published"
+          : "unknown";
+      }
+      return await this.#classifyPublication(current, record);
+    } finally {
+      if (temporary !== undefined) {
+        await this.#cleanupOwnedFile(
+          temporary.path,
+          temporary.generation,
+        ).catch(() => undefined);
+      }
+    }
   }
 
   async updateAdvertisedStatus(status: ClaudePeerStatus): Promise<void> {
+    await this.#mutateRegistry(
+      "status",
+      async () => await this.#updateAdvertisedStatusLocked(status),
+    );
+  }
+
+  async #updateAdvertisedStatusLocked(
+    status: ClaudePeerStatus,
+  ): Promise<void> {
     if (
       this.#closed ||
       this.#advertisedRecord === undefined ||
@@ -2087,40 +2703,115 @@ export class ClaudePeerListener {
     ) {
       return;
     }
+    const currentExact = await this.#recordMatches(
+      this.#advertisedRecord,
+      this.#advertisedGeneration,
+    );
+    if (!currentExact.matches) {
+      this.#advertisedRecord = undefined;
+      this.#advertisedGeneration = undefined;
+      return;
+    }
     const now = Date.now();
-    const record = {
+    const record: AdvertisedCodexRegistryRecord = {
       ...this.#advertisedRecord,
       status,
       updatedAt: now,
       statusUpdatedAt: now,
     };
-    const registryPath = path.join(this.#sessionsDir, `${process.pid}.json`);
-    const temporaryPath = `${registryPath}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(record)}\n`, {
-      encoding: "utf8",
-      flag: "w",
-      mode: 0o600,
-    });
-    await rename(temporaryPath, registryPath);
-    this.#advertisedRecord = record;
+    const temporary = await this.#createRegistryTemporary(record);
+    try {
+      const stillCurrent = await this.#recordMatches(
+        this.#advertisedRecord,
+        this.#advertisedGeneration,
+      );
+      if (!stillCurrent.matches) return;
+      await this.#registryRename(temporary.path, this.#registryPath());
+      await this.#syncRegistryDirectory();
+      const exact = await this.#recordMatches(record, temporary.generation);
+      if (!exact.matches) {
+        throw new BridgeError(
+          "REGISTRY_RACED",
+          "The updated native Codex registry record could not be exactly confirmed.",
+        );
+      }
+      this.#advertisedRecord = record;
+      this.#advertisedGeneration = exact.generation;
+    } finally {
+      await this.#cleanupOwnedFile(
+        temporary.path,
+        temporary.generation,
+      ).catch(() => undefined);
+    }
   }
 
   async unadvertise(name?: string): Promise<void> {
+    await this.#mutateRegistry(
+      "unadvertise",
+      async () => await this.#unadvertiseLocked(name),
+    );
+  }
+
+  async #unadvertiseLocked(name?: string): Promise<void> {
     if (
       this.#advertisedRecord === undefined ||
       (name !== undefined && name !== this.#advertisedRecord.name)
     ) {
       return;
     }
-    const registryPath = path.join(this.#sessionsDir, `${process.pid}.json`);
-    await Promise.all(
-      [registryPath, `${registryPath}.tmp`].map(async (candidate) =>
-        unlink(candidate).catch((error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") throw error;
-        }),
-      ),
-    );
+    const record = this.#advertisedRecord;
+    const generation = this.#advertisedGeneration;
     this.#advertisedRecord = undefined;
+    this.#advertisedGeneration = undefined;
+    if (generation === undefined) return;
+    const exact = await this.#recordMatches(record, generation);
+    if (!exact.matches) return;
+    await unlink(this.#registryPath()).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+
+  grantSuccessionActivation(): void {
+    if (this.#closed) {
+      throw new BridgeError(
+        "CLAUDE_PEER_LISTENER_CLOSED",
+        "The Claude peer callback listener is closed.",
+      );
+    }
+    if (
+      this.#preparedGeneration === undefined ||
+      !this.#publicationAttempted ||
+      !this.#publicationConfirmed ||
+      this.#publicationSourceGeneration === undefined ||
+      this.#advertisedRecord === undefined ||
+      this.#advertisedGeneration === undefined ||
+      !sameFileGeneration(
+        this.#publicationSourceGeneration,
+        this.#advertisedGeneration,
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_PREPARED_NOT_ACTIVE",
+        "A prepared native Codex listener requires exact confirmed publication before activation can be granted.",
+      );
+    }
+    this.#activationGranted = true;
+  }
+
+  resumeInbound(): void {
+    if (this.#closed) {
+      throw new BridgeError(
+        "CLAUDE_PEER_LISTENER_CLOSED",
+        "The Claude peer callback listener is closed.",
+      );
+    }
+    if (!this.#activationGranted) {
+      throw new BridgeError(
+        "CODEX_PEER_PREPARED_NOT_ACTIVE",
+        "A prepared native Codex listener cannot resume before durable succession activation.",
+      );
+    }
+    this.#inboundQuiesced = false;
   }
 
   async acknowledge(

@@ -569,6 +569,50 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await assert.rejects(lstat(socketPath), { code: "ENOENT" });
 });
 
+test("normalizes a same-host Codex succession without exposing private identifiers", async () => {
+  const { stateDir, socketPath } = await privateState();
+  let registered: ValidatedRegisterCodexParams | undefined;
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      registerCodex: (params) => {
+        registered = { ...params };
+        return { accepted: true, code: "ok" };
+      },
+    }),
+  });
+
+  const alias = "codex-next@build-mac";
+  const succeedsAlias = "codex-reviewer@build-mac";
+  const response = await sendGatewayControlRequest({
+    socketPath,
+    request: {
+      protocolVersion: 1,
+      method: "register_codex",
+      params: {
+        alias,
+        threadId: THREAD_ID.toUpperCase(),
+        hostId: "build-mac",
+        succeedsAlias,
+      },
+    },
+  });
+
+  assert.deepEqual(registered, {
+    alias,
+    threadId: THREAD_ID,
+    hostId: "build-mac",
+    busyPolicy: "queue",
+    succeedsAlias,
+  });
+  const serialized = JSON.stringify(response);
+  assert.equal(serialized.includes(THREAD_ID), false);
+  assert.equal(serialized.includes(alias), false);
+  assert.equal(serialized.includes(succeedsAlias), false);
+  await server.close();
+});
+
 test("only exposes queue-mode lifecycle methods", () => {
   assert.deepEqual(gatewayControlMethods, [
     "health",
@@ -661,6 +705,56 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
         alias: "codex@this-mac",
         threadId: THREAD_ID,
         endpoint: "/tmp/fake.sock",
+      },
+    ],
+    [
+      "register_codex",
+      {
+        alias: "codex-next@this-mac",
+        threadId: THREAD_ID,
+        succeedsAlias: "reviewer@this-mac",
+      },
+    ],
+    [
+      "register_codex",
+      {
+        alias: "codex-next@this-mac",
+        threadId: THREAD_ID,
+        succeedsAlias: "codex-next@this-mac",
+      },
+    ],
+    [
+      "register_codex",
+      {
+        alias: "codex-next@this-mac",
+        threadId: THREAD_ID,
+        succeedsAlias: "codex-reviewer@build-mac",
+      },
+    ],
+    [
+      "register_codex",
+      {
+        alias: "codex-next@this-mac",
+        threadId: THREAD_ID,
+        succeedsAlias: null,
+      },
+    ],
+    [
+      "register_codex",
+      {
+        alias: "codex-next@this-mac",
+        threadId: THREAD_ID,
+        succeedsAlias: "codex-reviewer@this-mac",
+        oldThreadId: "00000000-0000-7000-8000-000000000702",
+      },
+    ],
+    [
+      "register_codex",
+      {
+        alias: "codex-next@this-mac",
+        threadId: THREAD_ID,
+        succeedsAlias: "codex-reviewer@this-mac",
+        succeedsThreadId: "00000000-0000-7000-8000-000000000702",
       },
     ],
     [

@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
 <meta name="description" content="Embassy — a local embassy for your AI agents. Bidirectional messaging between Claude Code sessions and Codex desktop tasks, on one machine, under your explicit control.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Embassy — a local embassy for your AI agents">
+<meta property="og:description" content="Bidirectional messaging between Claude Code sessions and Codex desktop tasks, on one machine, under your explicit control.">
+<meta property="og:image" content="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/assets/social-preview.png">
 <meta name="theme-color" content="#f8f4ec">
 <link rel="icon" href="mark-seal.svg" type="image/svg+xml">
 <title>Embassy — a local embassy for your AI agents</title>
@@ -230,7 +238,7 @@
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-square"/></svg>
-          <p><strong>No network, TCP, or HTTP listener.</strong> Embassy opens no network listener and makes no provider API call — no telemetry, no cloud component. It speaks only over local Unix sockets: its own control socket in a mode-0700 state directory, plus the provider-owned Claude peer sockets and the already-running Codex App Server socket it attaches to. The agents themselves are still cloud-backed: a routed message becomes input to an ordinary model turn, so its text reaches Anthropic or OpenAI exactly as if you had typed it into that session. "Local" describes the broker and the route, not model inference.</p>
+          <p><strong><code>embassy serve</code> opens no TCP or HTTP listener; the opt-in live companion does.</strong> <code>embassy dashboard --live</code> is a separate foreground process that binds 127.0.0.1 on an ephemeral port for a read-only authenticated metadata stream — no mutation, provider, or CORS surface. <code>embassy serve</code> itself opens no network listener and makes no provider API call — no telemetry, no cloud component. It speaks only over local Unix sockets: its own control socket in a mode-0700 state directory, plus the provider-owned Claude peer sockets and the already-running Codex App Server socket it attaches to. The agents themselves are still cloud-backed: a routed message becomes input to an ordinary model turn, so its text reaches Anthropic or OpenAI exactly as if you had typed it into that session. "Local" describes the broker and the route, not model inference.</p>
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>

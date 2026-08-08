@@ -211,6 +211,10 @@ function requireCodexAlias(options: ParsedOptions, name: string): string {
   return alias;
 }
 
+function gatewayAliasHost(alias: string): string {
+  return alias.slice(alias.lastIndexOf("@") + 1);
+}
+
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) {
@@ -370,14 +374,31 @@ async function buildRequest(
         params: emptyParams(args),
       };
     case "register-codex": {
-      const options = parseOptions(args, ["alias", "host"]);
-      assertExactOptionCount(options, 1, 2);
+      const options = parseOptions(args, ["alias", "host", "succeeds"]);
       const alias = requireCodexAlias(options, "alias");
-      const host = options.host ?? DEFAULT_HOST_ID;
+      const succeedsAlias =
+        options.succeeds === undefined
+          ? undefined
+          : requireCodexAlias(options, "succeeds");
+      if (succeedsAlias === undefined) {
+        assertExactOptionCount(options, 1, 2);
+      } else {
+        assertExactOptionCount(options, 2);
+        if (options.host !== undefined) {
+          throw new CliFault("INVALID_ARGUMENTS");
+        }
+      }
+      const host =
+        succeedsAlias === undefined
+          ? (options.host ?? DEFAULT_HOST_ID)
+          : gatewayAliasHost(alias);
       if (
         typeof host !== "string" ||
         !isGatewayHostId(host) ||
-        !alias.endsWith(`@${host}`)
+        !alias.endsWith(`@${host}`) ||
+        (succeedsAlias !== undefined &&
+          (succeedsAlias === alias ||
+            gatewayAliasHost(succeedsAlias) !== host))
       ) {
         throw new CliFault("INVALID_ARGUMENTS");
       }
@@ -389,6 +410,7 @@ async function buildRequest(
           threadId: requireExclusiveCodexThreadId(env),
           hostId: host,
           busyPolicy: "queue",
+          ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
         },
       };
     }

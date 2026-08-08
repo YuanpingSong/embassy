@@ -122,6 +122,28 @@ const claudeBinding: PrivateRouteBinding = {
   ownerLease: "claude-owner-lease-0001",
 };
 
+const successorCodexBinding: PrivateRouteBinding = {
+  ...codexBinding,
+  routeHandle: "codex-thread-private-0002",
+  ownerLease: "codex-owner-lease-0002",
+};
+
+const oldSuccessionIdentity = {
+  alias: "codex-old@this-mac",
+  threadId: codexBinding.routeHandle,
+  hostId: "this-mac",
+  generation: "opaque-listener-generation-old",
+  binding: codexBinding,
+} as const;
+
+const newSuccessionIdentity = {
+  alias: "codex-new@this-mac",
+  threadId: successorCodexBinding.routeHandle,
+  hostId: "this-mac",
+  generation: "opaque-listener-generation-new",
+  binding: successorCodexBinding,
+} as const;
+
 function endpoint(binding: PrivateRouteBinding) {
   return {
     provider: binding.provider,
@@ -180,6 +202,45 @@ async function observeAndRegisterCodexOnly(store: GatewayStore): Promise<void> {
     registrationMode: "explicit_opt_in",
   });
 }
+
+async function observeAndRegisterSuccessionRoutes(
+  store: GatewayStore,
+  includeClaude = false,
+): Promise<void> {
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  if (includeClaude) {
+    await store.observeConnector({
+      identity: endpoint(claudeBinding),
+      health: "healthy",
+      compatibility: "compatible",
+      protocol: "claude-peer",
+      protocolVersion: "1",
+    });
+  }
+  await store.registerRoute({
+    alias: oldSuccessionIdentity.alias,
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  if (includeClaude) {
+    await store.registerRoute({
+      alias: "advisor@this-mac",
+      binding: claudeBinding,
+      registrationMode: "selected_live_peer",
+    });
+  }
+}
+
+const exactSuccession = {
+  oldGeneration: oldSuccessionIdentity.generation,
+  newGeneration: newSuccessionIdentity.generation,
+} as const;
 
 const transientClaudePeer = {
   alias: "native-advisor@this-mac",
@@ -450,6 +511,468 @@ test("route registry has a configured durable capacity", async () => {
     (error: unknown) =>
       error instanceof BridgeError && error.code === "ROUTE_CAPACITY_REACHED",
   );
+  await store.close();
+});
+
+test("Codex succession journals and atomically activates one exact new route", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegisterSuccessionRoutes(store);
+
+  await store.prepareCodexSuccession({
+    old: oldSuccessionIdentity,
+    new: newSuccessionIdentity,
+  });
+  let authority = await store.inspectCodexSuccessionRecoveryAuthority();
+  assert.equal(authority.authority, "old");
+  assert.equal(
+    authority.authority === "old" ? authority.journal.stage : undefined,
+    "prepared",
+  );
+
+  await store.armCodexSuccessionPublication(exactSuccession);
+  authority = await store.inspectCodexSuccessionRecoveryAuthority();
+  assert.equal(authority.authority, "new");
+  assert.equal(
+    authority.authority === "new" ? authority.journal.stage : undefined,
+    "publication_armed",
+  );
+  await store.markCodexSuccessionPublished(exactSuccession);
+  await store.activateCodexSuccession({ ...exactSuccession, state: "idle" });
+
+  const snapshot = await store.publicSnapshot();
+  const codexRoutes = snapshot.routes.filter(
+    (route) => route.provider === "codex",
+  );
+  assert.deepEqual(
+    codexRoutes.map((route) => ({
+      alias: route.alias,
+      state: route.state,
+      counters: route.counters,
+    })),
+    [
+      {
+        alias: newSuccessionIdentity.alias,
+        state: "idle",
+        counters: {
+          accepted: 0,
+          delivered: 0,
+          unconfirmed: 0,
+          failed: 0,
+          ambiguous: 0,
+          expired: 0,
+          cancelled: 0,
+          abandoned: 0,
+          rejected: 0,
+          bytesAccepted: 0,
+        },
+      },
+    ],
+  );
+  assert.deepEqual(
+    await store.resolveRoute(newSuccessionIdentity.alias),
+    successorCodexBinding,
+  );
+  await assert.rejects(
+    store.resolveRoute(oldSuccessionIdentity.alias),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
+  );
+
+  const publicBody = JSON.stringify(snapshot);
+  for (const privateValue of [
+    oldSuccessionIdentity.threadId,
+    oldSuccessionIdentity.generation,
+    oldSuccessionIdentity.binding.ownerLease,
+    newSuccessionIdentity.threadId,
+    newSuccessionIdentity.generation,
+    newSuccessionIdentity.binding.ownerLease,
+    "codexSuccession",
+  ]) {
+    assert.equal(publicBody.includes(privateValue), false);
+  }
+
+  await store.completeCodexSuccession(exactSuccession);
+  assert.deepEqual(await store.inspectCodexSuccessionRecoveryAuthority(), {
+    authority: "none",
+  });
+  const persisted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  assert.equal(persisted.codexSuccession, null);
+  assert.equal(JSON.stringify(persisted).includes("/tmp/"), false);
+  await store.close();
+});
+
+test("Codex succession preserves global accounting and history while resetting route-local state", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegisterSuccessionRoutes(store, true);
+  const accepted = await store.enqueueMessage({
+    sourceAlias: oldSuccessionIdentity.alias,
+    targetAlias: "advisor@this-mac",
+    body: "settled before succession",
+    dedupeKey: "succession-settled-history",
+  });
+  assert.ok(accepted.messageId);
+  await store.cancelQueuedMessage(accepted.messageId);
+  const before = await store.publicSnapshot();
+  const oldCounters = before.routes.find(
+    (route) => route.alias === oldSuccessionIdentity.alias,
+  )?.counters;
+  assert.equal(oldCounters?.accepted, 1);
+  assert.equal(before.accounting.accepted, 1);
+  assert.equal(before.accounting.cancelled, 1);
+
+  await store.prepareCodexSuccession({
+    old: oldSuccessionIdentity,
+    new: newSuccessionIdentity,
+  });
+  await store.armCodexSuccessionPublication(exactSuccession);
+  await store.markCodexSuccessionPublished(exactSuccession);
+  await store.activateCodexSuccession({ ...exactSuccession, state: "idle" });
+
+  const after = await store.publicSnapshot();
+  assert.deepEqual(after.accounting, before.accounting);
+  assert.deepEqual(after.messages, before.messages);
+  const newCounters = after.routes.find(
+    (route) => route.alias === newSuccessionIdentity.alias,
+  )?.counters;
+  assert.ok(newCounters);
+  assert.ok(Object.values(newCounters).every((value) => value === 0));
+  assert.equal(
+    after.messages.some(
+      (event) => event.sourceAlias === oldSuccessionIdentity.alias,
+    ),
+    true,
+  );
+  await store.close();
+});
+
+test("Codex succession rejects a nonempty ledger and every stale owner or stage", async () => {
+  const first = await fixture();
+  await first.store.initialize();
+  await observeAndRegisterSuccessionRoutes(first.store, true);
+  await first.store.enqueueMessage({
+    sourceAlias: oldSuccessionIdentity.alias,
+    targetAlias: "advisor@this-mac",
+    body: "blocks succession",
+    dedupeKey: "succession-ledger-block",
+  });
+  await assert.rejects(
+    first.store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: newSuccessionIdentity,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_LEDGER_NOT_EMPTY",
+  );
+  assert.equal(
+    (await first.store.publicSnapshot()).routes.some(
+      (route) => route.alias === oldSuccessionIdentity.alias,
+    ),
+    true,
+  );
+  await first.store.dequeueMessage("advisor@this-mac");
+  await assert.rejects(
+    first.store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: newSuccessionIdentity,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_LEDGER_NOT_EMPTY",
+  );
+  await first.store.close();
+
+  const second = await fixture();
+  await second.store.initialize();
+  await observeAndRegisterSuccessionRoutes(second.store);
+  await assert.rejects(
+    second.store.prepareCodexSuccession({
+      old: {
+        ...oldSuccessionIdentity,
+        binding: {
+          ...oldSuccessionIdentity.binding,
+          ownerLease: "wrong-old-owner-lease",
+        },
+      },
+      new: newSuccessionIdentity,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_OWNER_MISMATCH",
+  );
+  await assert.rejects(
+    second.store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: {
+        ...newSuccessionIdentity,
+        binding: {
+          ...newSuccessionIdentity.binding,
+          endpointGeneration: "unobserved-codex-endpoint-generation",
+        },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "ROUTE_ENDPOINT_NOT_OBSERVED",
+  );
+  await assert.rejects(
+    second.store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: {
+        ...newSuccessionIdentity,
+        generation: "invalid.generation",
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_CODEX_SUCCESSION",
+  );
+  await assert.rejects(
+    second.store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: {
+        ...newSuccessionIdentity,
+        binding: {
+          ...newSuccessionIdentity.binding,
+          ownerLease: oldSuccessionIdentity.binding.ownerLease,
+        },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_CODEX_SUCCESSION",
+  );
+  await second.store.prepareCodexSuccession({
+    old: oldSuccessionIdentity,
+    new: newSuccessionIdentity,
+  });
+  await assert.rejects(
+    second.store.markCodexSuccessionPublished(exactSuccession),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_OWNER_MISMATCH",
+  );
+  await assert.rejects(
+    second.store.armCodexSuccessionPublication({
+      ...exactSuccession,
+      newGeneration: "stale-new-generation",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_OWNER_MISMATCH",
+  );
+  await assert.rejects(
+    second.store.armCodexSuccessionPublication({
+      ...exactSuccession,
+      newGeneration: "invalid.generation",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_CODEX_SUCCESSION",
+  );
+  await second.store.clearCodexSuccession(exactSuccession);
+  assert.deepEqual(
+    (await second.store.inspectPrivateCodexRoutes()).map((route) => route.alias),
+    [oldSuccessionIdentity.alias],
+  );
+  await second.store.close();
+
+  const third = await fixture();
+  await third.store.initialize();
+  await observeAndRegisterSuccessionRoutes(third.store);
+  await third.store.prepareCodexSuccession({
+    old: oldSuccessionIdentity,
+    new: newSuccessionIdentity,
+  });
+  await third.store.armCodexSuccessionPublication(exactSuccession);
+  await assert.rejects(
+    third.store.clearCodexSuccession(exactSuccession),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_PUBLICATION_PROOF_REQUIRED",
+  );
+  await third.store.clearCodexSuccession({
+    ...exactSuccession,
+    publicationAbsenceConfirmed: true,
+  });
+  assert.deepEqual(
+    await third.store.inspectCodexSuccessionRecoveryAuthority(),
+    { authority: "none" },
+  );
+  assert.deepEqual(
+    (await third.store.inspectPrivateCodexRoutes()).map((route) => route.alias),
+    [oldSuccessionIdentity.alias],
+  );
+  await third.store.close();
+
+  const fourth = await fixture();
+  await fourth.store.initialize();
+  await observeAndRegisterSuccessionRoutes(fourth.store);
+  await fourth.store.prepareCodexSuccession({
+    old: oldSuccessionIdentity,
+    new: newSuccessionIdentity,
+  });
+  await fourth.store.armCodexSuccessionPublication(exactSuccession);
+  await fourth.store.markCodexSuccessionPublished(exactSuccession);
+  await assert.rejects(
+    fourth.store.clearCodexSuccession({
+      ...exactSuccession,
+      publicationAbsenceConfirmed: true,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_SUCCESSION_OWNER_MISMATCH",
+  );
+  await fourth.store.markConnectorOffline(
+    endpoint(codexBinding),
+    "SUCCESSION_ENDPOINT_OFFLINE",
+  );
+  await assert.rejects(
+    fourth.store.activateCodexSuccession({
+      ...exactSuccession,
+      state: "idle",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "ROUTE_ENDPOINT_NOT_OBSERVED",
+  );
+  assert.deepEqual(
+    (await fourth.store.inspectPrivateCodexRoutes()).map((route) => route.alias),
+    [oldSuccessionIdentity.alias],
+  );
+  await fourth.store.close();
+});
+
+test("every durable succession stage has explicit restart authority", async () => {
+  const stages = [
+    "prepared",
+    "publication_armed",
+    "published",
+    "activated",
+    "recovery_forbidden",
+  ] as const;
+
+  for (const stage of stages) {
+    const { store, config, clock: testClock } = await fixture();
+    await store.initialize();
+    await observeAndRegisterSuccessionRoutes(store);
+    await store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: newSuccessionIdentity,
+    });
+    if (stage !== "prepared") {
+      await store.armCodexSuccessionPublication(exactSuccession);
+    }
+    if (stage === "published" || stage === "activated") {
+      await store.markCodexSuccessionPublished(exactSuccession);
+    }
+    if (stage === "activated") {
+      await store.activateCodexSuccession({
+        ...exactSuccession,
+        state: "idle",
+      });
+    }
+    if (stage === "recovery_forbidden") {
+      await store.forbidCodexSuccessionRecovery({
+        ...exactSuccession,
+        safeErrorCode: "SUCCESSION_TEST_RECOVERY_FORBIDDEN",
+      });
+    }
+    await store.close();
+
+    const recovered = new GatewayStore(config, {
+      now: testClock.now,
+      randomId: testClock.randomId,
+    });
+    await recovered.initialize();
+    const authority =
+      await recovered.inspectCodexSuccessionRecoveryAuthority();
+    const routes = await recovered.inspectPrivateCodexRoutes();
+    if (stage === "prepared") {
+      assert.equal(authority.authority, "old", stage);
+      assert.equal(
+        authority.authority === "old" ? authority.journal.stage : undefined,
+        "prepared",
+        stage,
+      );
+      assert.equal(routes[0]?.alias, oldSuccessionIdentity.alias, stage);
+      assert.deepEqual(routes[0]?.binding, codexBinding, stage);
+      await recovered.clearCodexSuccession(exactSuccession);
+    } else {
+      assert.equal(authority.authority, "new", stage);
+      assert.equal(
+        authority.authority === "new" ? authority.journal.stage : undefined,
+        "recovery_forbidden",
+        stage,
+      );
+      assert.equal(
+        authority.authority === "new"
+          ? authority.journal.safeErrorCode
+          : undefined,
+        "CODEX_SUCCESSION_RESTART_RECOVERY_REQUIRED",
+        stage,
+      );
+      assert.equal(routes[0]?.alias, newSuccessionIdentity.alias, stage);
+      assert.deepEqual(routes[0]?.binding, successorCodexBinding, stage);
+      assert.equal(routes[0]?.state, "stale", stage);
+      await recovered.completeCodexSuccession(exactSuccession);
+    }
+    assert.deepEqual(
+      await recovered.inspectCodexSuccessionRecoveryAuthority(),
+      { authority: "none" },
+      stage,
+    );
+    await recovered.close();
+  }
+});
+
+test("Codex succession barrier inspection is bounded and metadata-only", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegisterSuccessionRoutes(store, true);
+  assert.deepEqual(await store.inspectCodexSuccessionBarrier(), {
+    codexRouteCount: 1,
+    queueCount: 0,
+    inFlightCount: 0,
+    transientBodyCount: 0,
+    codexQueueDepth: 0,
+    clean: true,
+  });
+
+  const body = "SUCCESSION_BARRIER_PRIVATE_BODY";
+  const accepted = await store.enqueueMessage({
+    sourceAlias: oldSuccessionIdentity.alias,
+    targetAlias: "advisor@this-mac",
+    body,
+    dedupeKey: "succession-barrier-private-dedupe",
+  });
+  assert.ok(accepted.messageId);
+  const blocked = await store.inspectCodexSuccessionBarrier();
+  assert.deepEqual(blocked, {
+    codexRouteCount: 1,
+    queueCount: 1,
+    inFlightCount: 0,
+    transientBodyCount: 1,
+    codexQueueDepth: 0,
+    clean: false,
+  });
+  const projection = JSON.stringify(blocked);
+  assert.equal(projection.includes(body), false);
+  assert.equal(projection.includes(accepted.messageId), false);
+  assert.equal(projection.includes(oldSuccessionIdentity.threadId), false);
+  assert.ok(blocked.queueCount <= limits().maxQueueMessages);
+  assert.ok(blocked.inFlightCount <= limits().maxInFlightMessages);
+
+  await store.dequeueMessage("advisor@this-mac");
+  assert.deepEqual(await store.inspectCodexSuccessionBarrier(), {
+    codexRouteCount: 1,
+    queueCount: 0,
+    inFlightCount: 1,
+    transientBodyCount: 0,
+    codexQueueDepth: 0,
+    clean: false,
+  });
   await store.close();
 });
 
@@ -1935,9 +2458,11 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   ) as {
     accounting: Record<string, unknown>;
     routes: Array<{ counters: Record<string, unknown> }>;
+    codexSuccession?: unknown;
   };
   delete legacy.accounting.unconfirmed;
   for (const route of legacy.routes) delete route.counters.unconfirmed;
+  delete legacy.codexSuccession;
   await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
     mode: 0o600,
   });
@@ -1954,12 +2479,99 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   ) as {
     accounting: Record<string, unknown>;
     routes: Array<{ counters: Record<string, unknown> }>;
+    codexSuccession?: unknown;
   };
   assert.equal(persisted.accounting.unconfirmed, 0);
   assert.ok(
     persisted.routes.every((route) => route.counters.unconfirmed === 0),
   );
+  assert.equal(persisted.codexSuccession, null);
   await migrated.close();
+});
+
+test("strict succession journal rejects malformed oversized and unknown fields", async () => {
+  const corruptions: Array<
+    readonly [string, (journal: Record<string, unknown>) => void]
+  > = [
+    [
+      "unknown body field",
+      (journal) => {
+        journal.body = "MUST_NOT_BE_ACCEPTED";
+      },
+    ],
+    [
+      "oversized generation",
+      (journal) => {
+        const next = journal.new as Record<string, unknown>;
+        next.generation = "x".repeat(33);
+      },
+    ],
+    [
+      "generation outside the closed grammar",
+      (journal) => {
+        const next = journal.new as Record<string, unknown>;
+        next.generation = "invalid.generation";
+      },
+    ],
+    [
+      "unknown nested socket field",
+      (journal) => {
+        const next = journal.new as Record<string, unknown>;
+        const binding = next.binding as Record<string, unknown>;
+        binding.socketPath = "/tmp/must-not-be-persisted.sock";
+      },
+    ],
+    [
+      "unobserved successor connector generation",
+      (journal) => {
+        const next = journal.new as Record<string, unknown>;
+        const binding = next.binding as Record<string, unknown>;
+        binding.endpointGeneration = "unobserved-successor-generation";
+      },
+    ],
+    [
+      "reused predecessor owner lease",
+      (journal) => {
+        const prior = journal.old as Record<string, unknown>;
+        const next = journal.new as Record<string, unknown>;
+        const priorBinding = prior.binding as Record<string, unknown>;
+        const nextBinding = next.binding as Record<string, unknown>;
+        nextBinding.ownerLease = priorBinding.ownerLease;
+      },
+    ],
+    [
+      "unknown stage",
+      (journal) => {
+        journal.stage = "publishing_maybe";
+      },
+    ],
+  ];
+
+  for (const [label, corrupt] of corruptions) {
+    const { store, config } = await fixture();
+    await store.initialize();
+    await observeAndRegisterSuccessionRoutes(store);
+    await store.prepareCodexSuccession({
+      old: oldSuccessionIdentity,
+      new: newSuccessionIdentity,
+    });
+    await store.close();
+    const persisted = JSON.parse(
+      await readFile(store.stateFilePath, "utf8"),
+    ) as Record<string, unknown>;
+    const journal = persisted.codexSuccession as Record<string, unknown>;
+    corrupt(journal);
+    await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
+      mode: 0o600,
+    });
+    await chmod(store.stateFilePath, 0o600);
+    await assert.rejects(
+      new GatewayStore(config).initialize(),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+      label,
+    );
+  }
 });
 
 test("strict state schema rejects unknown content-bearing fields", async () => {

@@ -165,3 +165,6 @@ Do not steer an active turn, approve permissions, widen tools, or alter inbound-
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.
+
+
+Agents do not use the live dashboard; it is an operator-facing browser surface with no registration, selection, send, reply, or approval authority. Agent-facing paths remain `embassy status` for a sanitized snapshot and the static `gateway-dashboard.html` for offline metadata. A status snapshot observation may settle already-due lifecycle deliveries before projecting state.

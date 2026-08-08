@@ -6,9 +6,11 @@ import {
   CLAUDE_PEER_COMPATIBILITY,
   ClaudePeerAdapter,
   type ClaudePeerDescriptor,
+  type ClaudePeerInboundMessage,
   type ClaudePeerInboundProgress,
   type ClaudePeerListener,
   type ClaudePeerReceiptEvent,
+  type ClaudePeerRegistryPublicationOutcome,
   type ClaudePeerTransportEvent,
 } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
@@ -70,14 +72,73 @@ export type LocalClaudeGatewayProviderOptions = {
 
 type ClaudePending = {
   gatewayMessageId: string;
+  listener: ClaudePeerListener;
+  listenerGeneration: string;
   targetId: string;
   writeEvidence: "none" | "transport_written" | "transport_uncertain";
   timer: NodeJS.Timeout;
 };
 
+type NativeCodexPeerRegistration = Readonly<{
+  alias: string;
+  cwd: string;
+  name: string;
+}>;
+
+type NativeCodexListenerLifecycle =
+  | "active"
+  | "prepared"
+  | "retired";
+
+type NativeCodexListenerGeneration = {
+  readonly generation: string;
+  readonly listener: ClaudePeerListener;
+  lifecycle: NativeCodexListenerLifecycle;
+  registration?: NativeCodexPeerRegistration;
+  registrationProvisional: boolean;
+  provisionalIngressForwarded: boolean;
+  inboundQuiesced: boolean;
+  publicationAttempted: boolean;
+  publicationUncertain: boolean;
+  publicationOutcome?: ClaudePeerRegistryPublicationOutcome;
+  publicationOperation?: Promise<ClaudePeerRegistryPublicationOutcome>;
+};
+
+type NativeInboundRoute = Readonly<{
+  alias: string;
+  listenerGeneration: string;
+}>;
+
+export type ClaudeNativeCodexSuccessionBarrier = Readonly<{
+  generation: string;
+  activeGenerationMatched: boolean;
+  ingressQuiesced: boolean;
+  monitorFrozen: boolean;
+  discoveryInFlight: boolean;
+  pendingOutboundReceipts: number;
+  pendingInboundReceipts: number;
+  rejectedInboundSettlements: number;
+  clean: boolean;
+}>;
+
+export type CodexRouteSuccessionBarrier = Readonly<{
+  routePresent: boolean;
+  connection: CodexConnectorObservation["connection"] | "absent";
+  routeStatus: CodexConnectorObservation["routeStatus"] | "absent";
+  queueDepth: number;
+  hasActiveTurn: boolean;
+  requestInFlight: boolean;
+  routeCreationInFlight: boolean;
+  routeReleaseInFlight: boolean;
+  pendingReplyCorrelations: number;
+  pendingCallbacks: number;
+  clean: boolean;
+}>;
+
 type ClaudeRejectedInbound = {
   receiptHandle: string;
   listener: ClaudePeerListener;
+  listenerGeneration: string;
   released: boolean;
   cancelRetry?: () => void;
   operation: Promise<void>;
@@ -207,7 +268,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly discovered = new Map<string, GatewayAdapterDiscovery>();
   private readonly selected = new Map<string, string>();
   /** Exact live same-UID sessions observed through native inbound frames. */
-  private readonly nativeInbound = new Map<string, string>();
+  private readonly nativeInbound = new Map<string, NativeInboundRoute>();
+  /** Exact listener owner for every receipt capability handed to the service. */
+  private readonly nativeInboundReceiptOwners = new Map<
+    string,
+    NativeCodexListenerGeneration
+  >();
   private readonly selectedObservations = new Map<string, string>();
   /** Invalidates any discovery that overlaps a dispatch on this route. */
   private readonly selectedDispatchEpoch = new Map<string, number>();
@@ -231,8 +297,18 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   private monitorTimer: NodeJS.Timeout | undefined;
   private callbacks: GatewayAdapterCallbacks | undefined;
-  private listener: ClaudePeerListener | undefined;
-  private advertisedCodexAlias: string | undefined;
+  private activeNativeCodexListener:
+    | NativeCodexListenerGeneration
+    | undefined;
+  private preparedNativeCodexListener:
+    | NativeCodexListenerGeneration
+    | undefined;
+  private nativeCodexPreparationInFlight: string | undefined;
+  private retiredNativeCodexListener:
+    | NativeCodexListenerGeneration
+    | undefined;
+  /** Fences discovery callbacks and monitor restarts across listener rotation. */
+  private nativeCodexSuccessionFreeze: string | undefined;
   private initialized = false;
   private closed = false;
 
@@ -281,77 +357,29 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
     this.callbacks = callbacks;
     try {
+      let listenerGeneration: NativeCodexListenerGeneration | undefined;
       const listener = await this.peer.listen({
         onMessage: async (message) => {
-          if (
-            message.sourceTargetId === undefined ||
-            message.sourceAlias === undefined ||
-            !message.replySupported
-          ) {
-            if (message.receiptHandle !== undefined) {
-              await this.rejectNativeInboundReceipt(
-                message.receiptHandle,
-                "CLAUDE_SOURCE_ROUTE_INVALID",
-              );
-            }
-            return;
-          }
-          const sourceTargetId = message.sourceTargetId;
-          let sourceAlias: string | undefined;
-          try {
-            await this.refreshClaudeDiscovery();
-            const current = this.discovered.get(sourceTargetId);
-            const expectedAlias = `${message.sourceAlias}@${this.identity.hostId}`;
-            if (current?.alias === expectedAlias) sourceAlias = expectedAlias;
-          } catch {
-            sourceAlias = undefined;
-          }
-          if (sourceAlias === undefined) {
-            if (message.receiptHandle !== undefined) {
-              await this.rejectNativeInboundReceipt(
-                message.receiptHandle,
-                "CLAUDE_SOURCE_ROUTE_STALE",
-              );
-            }
-            return;
-          }
-          if (this.advertisedCodexAlias !== undefined) {
-            const targetAlias = this.advertisedCodexAlias;
-            if (
-              !this.nativeInbound.has(sourceTargetId) &&
-              this.nativeInbound.size >= this.maxPending
-            ) {
-              if (message.receiptHandle !== undefined) {
-                await this.rejectNativeInboundReceipt(
-                  message.receiptHandle,
-                  "CLAUDE_NATIVE_INGRESS_CAPACITY",
-                );
-              }
-              return;
-            }
-            this.nativeInbound.set(sourceTargetId, sourceAlias);
-            invokeCallback(() => {
-              callbacks.onClaudeMessage?.({
-                endpoint: callbackEndpoint(this.identity, sourceTargetId),
-                sourceAlias,
-                targetAlias,
-                text: message.content,
-                ...(message.receiptHandle === undefined
-                  ? {}
-                  : { receiptHandle: message.receiptHandle }),
-              });
-            });
-          } else if (this.selected.get(sourceTargetId) === sourceAlias) {
-            invokeCallback(() => {
-              callbacks.onClaudeReply({
-                endpoint: callbackEndpoint(this.identity, sourceTargetId),
-                text: message.content,
-              });
-            });
+          if (listenerGeneration !== undefined) {
+            await this.onListenerMessage(listenerGeneration, message);
           }
         },
-        onReceipt: (event) => this.onReceipt(event),
+        onReceipt: (event) => {
+          if (listenerGeneration !== undefined) {
+            this.onReceipt(listenerGeneration, event);
+          }
+        },
       });
+      listenerGeneration = {
+        generation: listener.generation,
+        listener,
+        lifecycle: "active",
+        registrationProvisional: false,
+        provisionalIngressForwarded: false,
+        inboundQuiesced: false,
+        publicationAttempted: false,
+        publicationUncertain: false,
+      };
       if (this.closed) {
         await listener.close();
         throw new BridgeError(
@@ -359,7 +387,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           "The local Claude provider closed during initialization.",
         );
       }
-      this.listener = listener;
+      this.activeNativeCodexListener = listenerGeneration;
       this.initialized = true;
       return { health: "healthy", compatibility: "compatible" };
     } catch {
@@ -434,44 +462,426 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     cwd: string;
   }): Promise<void> {
     this.assertReady();
-    const suffix = `@${this.identity.hostId}`;
-    if (!input.alias.endsWith(suffix)) {
+    const registration = this.nativeCodexRegistration(input);
+    const active = this.requireActiveNativeCodexListener();
+    if (
+      active.registration !== undefined &&
+      active.registration.alias !== registration.alias
+    ) {
       throw new BridgeError(
-        "INVALID_CODEX_PEER_ALIAS",
-        "The native Codex peer alias must target this host.",
+        "CODEX_PEER_ALREADY_ADVERTISED",
+        "This listener generation already advertises another Codex peer.",
       );
     }
-    const name = input.alias.slice(0, -suffix.length);
-    if (!name.startsWith("codex-") || !NATIVE_CLAUDE_NAME.test(name)) {
+    const installedProvisional = active.registration === undefined;
+    if (installedProvisional) {
+      active.registration = registration;
+      active.registrationProvisional = true;
+      active.provisionalIngressForwarded = false;
+    }
+    try {
+      await active.listener.advertise(registration.name, registration.cwd);
+      active.registrationProvisional = false;
+      active.provisionalIngressForwarded = false;
+    } catch (error) {
+      if (
+        error instanceof BridgeError &&
+        error.recoverable &&
+        installedProvisional &&
+        active.registration === registration &&
+        !active.provisionalIngressForwarded
+      ) {
+        delete active.registration;
+        active.registrationProvisional = false;
+      }
+      throw error;
+    }
+  }
+
+  currentNativeCodexPeerGeneration(alias: string): string {
+    this.assertReady();
+    const active = this.requireActiveNativeCodexListener();
+    if (active.registration?.alias !== alias) {
       throw new BridgeError(
-        "INVALID_CODEX_PEER_ALIAS",
-        "The native Codex peer alias must start with codex-.",
+        "CODEX_PEER_GENERATION_MISMATCH",
+        "The requested Codex alias is not the active listener generation.",
       );
     }
-    if (this.listener === undefined) {
+    return active.generation;
+  }
+
+  async prepareNativeCodexPeerGeneration(input: {
+    alias: string;
+    cwd: string;
+    generation: string;
+  }): Promise<void> {
+    this.assertReady();
+    const active = this.requireActiveNativeCodexListener();
+    if (active.registration === undefined) {
       throw new BridgeError(
-        "CLAUDE_CALLBACK_UNAVAILABLE",
-        "The private Claude callback listener is unavailable.",
+        "CODEX_PEER_NOT_ADVERTISED",
+        "A successor requires one active advertised Codex generation.",
       );
     }
-    await this.listener.advertise?.(name, input.cwd);
-    this.advertisedCodexAlias = input.alias;
+    if (
+      input.generation === active.generation ||
+      this.nativeCodexPreparationInFlight !== undefined ||
+      this.preparedNativeCodexListener !== undefined ||
+      this.retiredNativeCodexListener !== undefined
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_CAPACITY",
+        "Only one distinct prepared or retired Codex generation is allowed.",
+      );
+    }
+    const registration = this.nativeCodexRegistration(input);
+    this.nativeCodexPreparationInFlight = input.generation;
+    let prepared: NativeCodexListenerGeneration | undefined;
+    try {
+      const listener = await this.peer.listenPrepared(input.generation, {
+        onMessage: async (message) => {
+          if (prepared !== undefined) {
+            await this.onListenerMessage(prepared, message);
+          }
+        },
+        onReceipt: (event) => {
+          if (prepared !== undefined) this.onReceipt(prepared, event);
+        },
+      });
+      prepared = {
+        generation: listener.generation,
+        listener,
+        lifecycle: "prepared",
+        registration,
+        registrationProvisional: false,
+        provisionalIngressForwarded: false,
+        inboundQuiesced: true,
+        publicationAttempted: false,
+        publicationUncertain: false,
+      };
+      if (listener.generation !== input.generation || this.closed) {
+        await listener.close().catch(() => undefined);
+        throw new BridgeError(
+          "CLAUDE_CALLBACK_UNAVAILABLE",
+          "The prepared Claude callback generation could not be established.",
+        );
+      }
+      this.preparedNativeCodexListener = prepared;
+    } finally {
+      if (this.nativeCodexPreparationInFlight === input.generation) {
+        this.nativeCodexPreparationInFlight = undefined;
+      }
+    }
+  }
+
+  async quiesceNativeCodexPeerGeneration(generation: string): Promise<void> {
+    this.assertReady();
+    const active = this.requireNativeCodexListenerGeneration(
+      this.activeNativeCodexListener,
+      generation,
+      "active",
+    );
+    if (
+      this.nativeCodexSuccessionFreeze !== undefined &&
+      this.nativeCodexSuccessionFreeze !== generation
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "Another native Codex generation already owns the succession freeze.",
+      );
+    }
+    this.nativeCodexSuccessionFreeze = generation;
+    if (this.monitorTimer !== undefined) {
+      clearTimeout(this.monitorTimer);
+      this.monitorTimer = undefined;
+    }
+    try {
+      await active.listener.quiesceInbound();
+      active.inboundQuiesced = true;
+    } catch (error) {
+      if (this.nativeCodexSuccessionFreeze === generation) {
+        this.nativeCodexSuccessionFreeze = undefined;
+      }
+      this.scheduleClaudeMonitor();
+      throw error;
+    }
+  }
+
+  observeNativeCodexSuccessionBarrier(
+    generation: string,
+  ): ClaudeNativeCodexSuccessionBarrier {
+    this.assertReady();
+    const active = this.activeNativeCodexListener;
+    const activeGenerationMatched = active?.generation === generation;
+    const pendingOutboundReceipts = this.providerIdByGatewayId.size;
+    let pendingInboundReceipts = 0;
+    for (const owner of this.nativeInboundReceiptOwners.values()) {
+      if (owner.generation === generation) pendingInboundReceipts += 1;
+    }
+    let rejectedInboundSettlements = 0;
+    for (const rejection of this.rejectedNativeInbound.values()) {
+      if (rejection.listenerGeneration === generation) {
+        rejectedInboundSettlements += 1;
+      }
+    }
+    const ingressQuiesced =
+      activeGenerationMatched && active.inboundQuiesced;
+    const monitorFrozen =
+      activeGenerationMatched &&
+      this.nativeCodexSuccessionFreeze === generation;
+    const discoveryInFlight = this.discoveryInFlight !== undefined;
+    return {
+      generation,
+      activeGenerationMatched,
+      ingressQuiesced,
+      monitorFrozen,
+      discoveryInFlight,
+      pendingOutboundReceipts,
+      pendingInboundReceipts,
+      rejectedInboundSettlements,
+      clean:
+        activeGenerationMatched &&
+        ingressQuiesced &&
+        monitorFrozen &&
+        !discoveryInFlight &&
+        pendingOutboundReceipts === 0 &&
+        pendingInboundReceipts === 0 &&
+        rejectedInboundSettlements === 0,
+    };
+  }
+
+  async publishPreparedNativeCodexPeer(input: {
+    currentGeneration: string;
+    preparedGeneration: string;
+  }): Promise<ClaudePeerRegistryPublicationOutcome> {
+    this.assertReady();
+    const current = this.requireNativeCodexListenerGeneration(
+      this.activeNativeCodexListener,
+      input.currentGeneration,
+      "active",
+    );
+    const prepared = this.requireNativeCodexListenerGeneration(
+      this.preparedNativeCodexListener,
+      input.preparedGeneration,
+      "prepared",
+    );
+    if (!current.inboundQuiesced || prepared.registration === undefined) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_NOT_QUIET",
+        "The old listener must be quiesced before publication.",
+      );
+    }
+    if (!this.observeNativeCodexSuccessionBarrier(current.generation).clean) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_NOT_QUIET",
+        "Native Codex succession requires a clean provider-wide barrier.",
+        true,
+      );
+    }
+    if (
+      prepared.publicationOutcome === "published" ||
+      prepared.publicationOutcome === "not_published"
+    ) {
+      return prepared.publicationOutcome;
+    }
+    if (prepared.publicationOperation !== undefined) {
+      return await prepared.publicationOperation;
+    }
+    prepared.publicationAttempted = true;
+    const operation = prepared.listener.publishReplacing(
+      current.listener,
+      prepared.registration.name,
+      prepared.registration.cwd,
+    );
+    prepared.publicationOperation = operation;
+    try {
+      const outcome = await operation;
+      if (outcome === "published") {
+        prepared.publicationOutcome = "published";
+        return "published";
+      }
+      if (outcome === "unknown") {
+        prepared.publicationUncertain = true;
+        prepared.publicationOutcome = "unknown";
+        return "unknown";
+      }
+      if (prepared.publicationUncertain) {
+        prepared.publicationOutcome = "unknown";
+        return "unknown";
+      }
+      prepared.publicationOutcome = "not_published";
+      return "not_published";
+    } catch (error) {
+      prepared.publicationUncertain = true;
+      prepared.publicationOutcome = "unknown";
+      throw error;
+    } finally {
+      if (prepared.publicationOperation === operation) {
+        delete prepared.publicationOperation;
+      }
+    }
+  }
+
+  activatePreparedNativeCodexPeerGeneration(generation: string): void {
+    this.assertReady();
+    const prepared = this.requireNativeCodexListenerGeneration(
+      this.preparedNativeCodexListener,
+      generation,
+      "prepared",
+    );
+    if (
+      prepared.publicationOutcome !== "published" ||
+      this.retiredNativeCodexListener !== undefined
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_NOT_PUBLISHED",
+        "Only a confirmed published generation can become active.",
+      );
+    }
+    const current = this.requireActiveNativeCodexListener();
+    prepared.listener.grantSuccessionActivation();
+    prepared.listener.resumeInbound();
+    prepared.inboundQuiesced = false;
+    current.lifecycle = "retired";
+    prepared.lifecycle = "active";
+    this.retiredNativeCodexListener = current;
+    this.activeNativeCodexListener = prepared;
+    this.preparedNativeCodexListener = undefined;
+    if (this.nativeCodexSuccessionFreeze === current.generation) {
+      this.nativeCodexSuccessionFreeze = undefined;
+    }
+    this.purgeNativeCodexPeerGenerationReplyCapabilities(current.generation);
+    this.scheduleClaudeMonitor();
+  }
+
+  async cleanupPreparedNativeCodexPeerGeneration(
+    generation: string,
+  ): Promise<void> {
+    this.assertReady();
+    const prepared = this.requireNativeCodexListenerGeneration(
+      this.preparedNativeCodexListener,
+      generation,
+      "prepared",
+    );
+    if (
+      prepared.publicationAttempted &&
+      (prepared.publicationUncertain ||
+        prepared.publicationOutcome !== "not_published")
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_ROLLBACK_FORBIDDEN",
+        "A possibly published Codex generation cannot be rolled back.",
+      );
+    }
+    await prepared.listener.close();
+    if (this.preparedNativeCodexListener === prepared) {
+      this.preparedNativeCodexListener = undefined;
+    }
+  }
+
+  resumeNativeCodexPeerGeneration(generation: string): void {
+    this.assertReady();
+    const active = this.requireNativeCodexListenerGeneration(
+      this.activeNativeCodexListener,
+      generation,
+      "active",
+    );
+    if (this.preparedNativeCodexListener !== undefined) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_CLEANUP_REQUIRED",
+        "The prepared listener must be cleaned before resuming the old one.",
+      );
+    }
+    active.listener.resumeInbound();
+    active.inboundQuiesced = false;
+    if (this.nativeCodexSuccessionFreeze === generation) {
+      this.nativeCodexSuccessionFreeze = undefined;
+    }
+    this.scheduleClaudeMonitor();
+  }
+
+  async rollbackPreparedNativeCodexPeerGeneration(input: {
+    preparedGeneration: string;
+    resumeGeneration: string;
+  }): Promise<void> {
+    await this.cleanupPreparedNativeCodexPeerGeneration(
+      input.preparedGeneration,
+    );
+    this.resumeNativeCodexPeerGeneration(input.resumeGeneration);
+  }
+
+  async retireNativeCodexPeerGeneration(input: {
+    retiredGeneration: string;
+    protectedActiveGeneration: string;
+  }): Promise<void> {
+    this.assertReady();
+    const active = this.requireNativeCodexListenerGeneration(
+      this.activeNativeCodexListener,
+      input.protectedActiveGeneration,
+      "active",
+    );
+    const retired = this.requireNativeCodexListenerGeneration(
+      this.retiredNativeCodexListener,
+      input.retiredGeneration,
+      "retired",
+    );
+    if (active === retired) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "The protected and retired listener generations must be distinct.",
+      );
+    }
+    const ownsPendingReceipt = [...this.nativeInboundReceiptOwners.values()].some(
+      (owner) => owner === retired,
+    );
+    const ownsRejectedSettlement = [
+      ...this.rejectedNativeInbound.values(),
+    ].some((rejection) => rejection.listener === retired.listener);
+    const ownsOutboundReceipt = [...this.pendingByProviderId.values()].some(
+      (pending) => pending.listener === retired.listener,
+    );
+    if (ownsPendingReceipt || ownsRejectedSettlement || ownsOutboundReceipt) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_NOT_QUIET",
+        "A retired listener cannot close while it owns receipt capabilities.",
+        true,
+      );
+    }
+    await retired.listener.close();
+    if (this.retiredNativeCodexListener === retired) {
+      this.retiredNativeCodexListener = undefined;
+    }
+  }
+
+  purgeNativeCodexPeerGenerationReplyCapabilities(
+    generation: string,
+  ): number {
+    let purged = 0;
+    for (const [routeHandle, route] of this.nativeInbound) {
+      if (route.listenerGeneration !== generation) continue;
+      this.nativeInbound.delete(routeHandle);
+      purged += 1;
+    }
+    return purged;
   }
 
   async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
-    if (alias !== this.advertisedCodexAlias) return;
-    await this.listener?.unadvertise?.(
-      alias.slice(0, alias.lastIndexOf("@")),
-    );
-    this.advertisedCodexAlias = undefined;
+    const active = this.activeNativeCodexListener;
+    if (active?.registration?.alias !== alias) return;
+    await active.listener.unadvertise(active.registration.name);
+    this.purgeNativeCodexPeerGenerationReplyCapabilities(active.generation);
+    delete active.registration;
+    active.registrationProvisional = false;
+    active.provisionalIngressForwarded = false;
   }
 
   async updateNativeCodexPeerStatus(
     alias: string,
     status: "idle" | "busy" | "waiting",
   ): Promise<void> {
-    if (alias !== this.advertisedCodexAlias) return;
-    await this.listener?.updateAdvertisedStatus?.(status);
+    const active = this.activeNativeCodexListener;
+    if (active?.registration?.alias !== alias) return;
+    await active.listener.updateAdvertisedStatus(status);
   }
 
   async updateNativeInboundStatus(
@@ -479,32 +889,50 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     status: "held" | "delivered" | "denied" | "expired",
     diagnosticCode?: string,
   ): Promise<void> {
-    const listener = this.requireNativeInboundListener();
-    await listener.acknowledge(
-      receiptHandle,
-      status,
-      diagnosticCode === undefined ? undefined : { code: diagnosticCode },
-    );
+    const owner = this.requireNativeInboundReceiptOwner(receiptHandle);
+    try {
+      await owner.listener.acknowledge(
+        receiptHandle,
+        status,
+        diagnosticCode === undefined ? undefined : { code: diagnosticCode },
+      );
+      if (status !== "held") {
+        this.nativeInboundReceiptOwners.delete(receiptHandle);
+      }
+    } catch (error) {
+      if (
+        status !== "held" &&
+        (!(error instanceof BridgeError) || !error.recoverable)
+      ) {
+        this.nativeInboundReceiptOwners.delete(receiptHandle);
+      }
+      throw error;
+    }
   }
 
   async notifyNativeInboundProgress(
     receiptHandle: string,
     progress: ClaudePeerInboundProgress,
   ): Promise<void> {
-    const listener = this.requireNativeInboundListener();
-    await listener.notifyInboundProgress(receiptHandle, progress);
+    const owner = this.requireNativeInboundReceiptOwner(receiptHandle);
+    await owner.listener.notifyInboundProgress(receiptHandle, progress);
   }
 
   async releaseNativeInboundReceipt(
     receiptHandle: string,
   ): Promise<boolean> {
-    const listener = this.requireNativeInboundListener();
-    return listener.releaseInboundReceipt(receiptHandle);
+    const owner = this.nativeInboundReceiptOwners.get(receiptHandle);
+    if (owner === undefined) return false;
+    this.nativeInboundReceiptOwners.delete(receiptHandle);
+    return owner.listener.releaseInboundReceipt(receiptHandle);
   }
 
   async quiesceNativeInbound(): Promise<void> {
     if (this.closed) return;
-    await this.listener?.quiesceInbound();
+    const active = this.activeNativeCodexListener;
+    if (active === undefined) return;
+    await active.listener.quiesceInbound();
+    active.inboundQuiesced = true;
   }
 
   async dispatch(input: {
@@ -515,10 +943,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     expectsReply: boolean;
     deadlineAt: string;
   }): Promise<GatewayAdapterDispatchResult> {
+    const activeListener = this.activeNativeCodexListener;
     if (
       !this.initialized ||
       this.closed ||
-      this.listener === undefined ||
+      activeListener === undefined ||
+      activeListener.inboundQuiesced ||
+      this.nativeCodexSuccessionFreeze !== undefined ||
       !sameEndpoint(input.binding, this.identity)
     ) {
       return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
@@ -529,13 +960,24 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       } catch {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
-      const observedAlias = this.nativeInbound.get(input.binding.routeHandle);
+      const observedRoute = this.nativeInbound.get(input.binding.routeHandle);
       const current = this.discovered.get(input.binding.routeHandle);
-      if (observedAlias === undefined || current?.alias !== observedAlias) {
+      if (
+        observedRoute === undefined ||
+        observedRoute.listenerGeneration !== activeListener.generation ||
+        current?.alias !== observedRoute.alias
+      ) {
         this.nativeInbound.delete(input.binding.routeHandle);
         return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" };
       }
     } else if (this.selected.get(input.binding.routeHandle) === undefined) {
+      return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+    }
+    if (
+      this.activeNativeCodexListener !== activeListener ||
+      activeListener.inboundQuiesced ||
+      this.nativeCodexSuccessionFreeze !== undefined
+    ) {
       return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
     }
     const deadline = strictDeadline(input.deadlineAt, this.now());
@@ -575,6 +1017,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           input.messageId,
           input.binding.routeHandle,
           deadline,
+          activeListener,
         );
       }
       if (trackingFailed) return;
@@ -625,7 +1068,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         input.binding.routeHandle,
         input.text,
         {
-          listener: this.listener,
+          listener: activeListener.listener,
           receiptDeadlineAt: deadline,
           onTransportStatus,
         },
@@ -734,14 +1177,18 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.pendingTargetByGatewayId.clear();
       this.selected.clear();
       this.nativeInbound.clear();
+      this.nativeInboundReceiptOwners.clear();
       this.selectedDispatchEpoch.clear();
       this.selectedObservationDirty.clear();
       this.selectedObservations.clear();
       this.discovered.clear();
       if (this.monitorTimer !== undefined) clearTimeout(this.monitorTimer);
       this.monitorTimer = undefined;
-      this.listener = undefined;
-      this.advertisedCodexAlias = undefined;
+      this.activeNativeCodexListener = undefined;
+      this.preparedNativeCodexListener = undefined;
+      this.retiredNativeCodexListener = undefined;
+      this.nativeCodexPreparationInFlight = undefined;
+      this.nativeCodexSuccessionFreeze = undefined;
       this.callbacks = undefined;
     }
   }
@@ -756,28 +1203,239 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  private requireNativeInboundListener(): ClaudePeerListener {
+  private nativeCodexRegistration(input: {
+    alias: string;
+    cwd: string;
+  }): NativeCodexPeerRegistration {
+    const suffix = `@${this.identity.hostId}`;
+    if (!input.alias.endsWith(suffix)) {
+      throw new BridgeError(
+        "INVALID_CODEX_PEER_ALIAS",
+        "The native Codex peer alias must target this host.",
+      );
+    }
+    const name = input.alias.slice(0, -suffix.length);
+    if (!name.startsWith("codex-") || !NATIVE_CLAUDE_NAME.test(name)) {
+      throw new BridgeError(
+        "INVALID_CODEX_PEER_ALIAS",
+        "The native Codex peer alias must start with codex-.",
+      );
+    }
+    if (!path.isAbsolute(input.cwd) || input.cwd.includes("\0")) {
+      throw new BridgeError(
+        "INVALID_CODEX_PEER_CWD",
+        "A native Codex peer requires an absolute working directory.",
+      );
+    }
+    return { alias: input.alias, cwd: input.cwd, name };
+  }
+
+  private requireActiveNativeCodexListener(): NativeCodexListenerGeneration {
     this.assertReady();
-    if (this.listener === undefined) {
+    const active = this.activeNativeCodexListener;
+    if (active === undefined || active.lifecycle !== "active") {
       throw new BridgeError(
         "CLAUDE_CALLBACK_UNAVAILABLE",
         "The private Claude callback listener is unavailable.",
         true,
       );
     }
-    return this.listener;
+    return active;
+  }
+
+  private requireNativeCodexListenerGeneration(
+    listenerGeneration: NativeCodexListenerGeneration | undefined,
+    generation: string,
+    lifecycle: NativeCodexListenerLifecycle,
+  ): NativeCodexListenerGeneration {
+    if (
+      listenerGeneration === undefined ||
+      listenerGeneration.generation !== generation ||
+      listenerGeneration.listener.generation !== generation ||
+      listenerGeneration.lifecycle !== lifecycle
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "The requested native Codex listener generation is not the exact lifecycle owner.",
+      );
+    }
+    return listenerGeneration;
+  }
+
+  private requireNativeInboundReceiptOwner(
+    receiptHandle: string,
+  ): NativeCodexListenerGeneration {
+    this.assertReady();
+    const owner = this.nativeInboundReceiptOwners.get(receiptHandle);
+    if (owner === undefined || !this.ownsNativeCodexListener(owner)) {
+      throw new BridgeError(
+        "CLAUDE_PEER_RECEIPT_UNKNOWN",
+        "The native Claude peer receipt is unknown or already settled.",
+      );
+    }
+    return owner;
+  }
+
+  private ownsNativeCodexListener(
+    listenerGeneration: NativeCodexListenerGeneration,
+  ): boolean {
+    return (
+      this.activeNativeCodexListener === listenerGeneration ||
+      this.preparedNativeCodexListener === listenerGeneration ||
+      this.retiredNativeCodexListener === listenerGeneration
+    );
+  }
+
+  private async onListenerMessage(
+    listenerGeneration: NativeCodexListenerGeneration,
+    message: ClaudePeerInboundMessage,
+  ): Promise<void> {
+    const reject = async (diagnosticCode: string): Promise<void> => {
+      if (message.receiptHandle !== undefined) {
+        await this.rejectNativeInboundReceipt(
+          listenerGeneration,
+          message.receiptHandle,
+          diagnosticCode,
+        );
+      }
+    };
+    if (
+      this.closed ||
+      listenerGeneration.listener.closed ||
+      !this.ownsNativeCodexListener(listenerGeneration)
+    ) {
+      try {
+        if (message.receiptHandle !== undefined) {
+          listenerGeneration.listener.releaseInboundReceipt(
+            message.receiptHandle,
+          );
+        }
+      } catch {
+        // A detached generation has no safe callback or settlement authority.
+      }
+      return;
+    }
+    if (
+      this.activeNativeCodexListener !== listenerGeneration ||
+      listenerGeneration.lifecycle !== "active" ||
+      listenerGeneration.inboundQuiesced ||
+      this.nativeCodexSuccessionFreeze !== undefined
+    ) {
+      await reject("CLAUDE_NATIVE_GENERATION_STALE");
+      return;
+    }
+    const registrationAtIngress = listenerGeneration.registration;
+    if (
+      message.sourceTargetId === undefined ||
+      message.sourceAlias === undefined ||
+      !message.replySupported
+    ) {
+      await reject("CLAUDE_SOURCE_ROUTE_INVALID");
+      return;
+    }
+
+    const sourceTargetId = message.sourceTargetId;
+    let sourceAlias: string | undefined;
+    try {
+      await this.refreshClaudeDiscovery();
+      const current = this.discovered.get(sourceTargetId);
+      const expectedAlias = `${message.sourceAlias}@${this.identity.hostId}`;
+      if (current?.alias === expectedAlias) sourceAlias = expectedAlias;
+    } catch {
+      sourceAlias = undefined;
+    }
+    // Discovery is asynchronous. Recheck exact generation ownership before
+    // giving the body or its receipt capability to a service callback.
+    if (
+      this.activeNativeCodexListener !== listenerGeneration ||
+      listenerGeneration.lifecycle !== "active" ||
+      listenerGeneration.inboundQuiesced ||
+      this.nativeCodexSuccessionFreeze !== undefined ||
+      listenerGeneration.registration !== registrationAtIngress
+    ) {
+      await reject("CLAUDE_NATIVE_GENERATION_STALE");
+      return;
+    }
+    if (sourceAlias === undefined) {
+      await reject("CLAUDE_SOURCE_ROUTE_STALE");
+      return;
+    }
+
+    const callbacks = this.callbacks;
+    const registration = registrationAtIngress;
+    if (registration !== undefined) {
+      if (
+        callbacks?.onClaudeMessage === undefined ||
+        (!this.nativeInbound.has(sourceTargetId) &&
+          this.nativeInbound.size >= this.maxPending) ||
+        (message.receiptHandle !== undefined &&
+          !this.nativeInboundReceiptOwners.has(message.receiptHandle) &&
+          this.nativeInboundReceiptOwners.size >= this.maxPending)
+      ) {
+        await reject("CLAUDE_NATIVE_INGRESS_CAPACITY");
+        return;
+      }
+      if (
+        message.receiptHandle !== undefined &&
+        this.nativeInboundReceiptOwners.has(message.receiptHandle)
+      ) {
+        await reject("CLAUDE_NATIVE_RECEIPT_COLLISION");
+        return;
+      }
+      this.nativeInbound.set(sourceTargetId, {
+        alias: sourceAlias,
+        listenerGeneration: listenerGeneration.generation,
+      });
+      if (message.receiptHandle !== undefined) {
+        this.nativeInboundReceiptOwners.set(
+          message.receiptHandle,
+          listenerGeneration,
+        );
+      }
+      if (listenerGeneration.registrationProvisional) {
+        listenerGeneration.provisionalIngressForwarded = true;
+      }
+      invokeCallback(() =>
+        callbacks.onClaudeMessage?.({
+          endpoint: callbackEndpoint(this.identity, sourceTargetId),
+          sourceAlias,
+          targetAlias: registration.alias,
+          text: message.content,
+          ...(message.receiptHandle === undefined
+            ? {}
+            : { receiptHandle: message.receiptHandle }),
+        }),
+      );
+      return;
+    }
+    if (callbacks !== undefined && this.selected.get(sourceTargetId) === sourceAlias) {
+      invokeCallback(() =>
+        callbacks.onClaudeReply({
+          endpoint: callbackEndpoint(this.identity, sourceTargetId),
+          text: message.content,
+        }),
+      );
+      return;
+    }
+    await reject("CLAUDE_ROUTE_UNAVAILABLE");
   }
 
   private rejectNativeInboundReceipt(
+    listenerGeneration: NativeCodexListenerGeneration,
     receiptHandle: string,
     diagnosticCode: string,
   ): Promise<void> {
-    const existing = this.rejectedNativeInbound.get(receiptHandle);
+    const rejectionKey = `${listenerGeneration.generation}\0${receiptHandle}`;
+    const existing = this.rejectedNativeInbound.get(rejectionKey);
     if (existing !== undefined) return existing.operation;
-    const listener = this.listener;
-    if (listener === undefined || this.closed) {
+    const listener = listenerGeneration.listener;
+    if (
+      this.closed ||
+      listener.closed ||
+      !this.ownsNativeCodexListener(listenerGeneration)
+    ) {
       try {
-        listener?.releaseInboundReceipt(receiptHandle);
+        listener.releaseInboundReceipt(receiptHandle);
       } catch {
         // A missing/closing listener leaves no safe terminal write path.
       }
@@ -786,16 +1444,17 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     const rejection: ClaudeRejectedInbound = {
       receiptHandle,
       listener,
+      listenerGeneration: listenerGeneration.generation,
       released: false,
       operation: Promise.resolve(),
     };
-    this.rejectedNativeInbound.set(receiptHandle, rejection);
+    this.rejectedNativeInbound.set(rejectionKey, rejection);
     rejection.operation = this.settleRejectedNativeInbound(
       rejection,
       diagnosticCode,
     ).finally(() => {
-      if (this.rejectedNativeInbound.get(receiptHandle) === rejection) {
-        this.rejectedNativeInbound.delete(receiptHandle);
+      if (this.rejectedNativeInbound.get(rejectionKey) === rejection) {
+        this.rejectedNativeInbound.delete(rejectionKey);
       }
     });
     return rejection.operation;
@@ -814,7 +1473,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         this.closed ||
         rejection.released ||
         rejection.listener.closed ||
-        this.listener !== rejection.listener
+        !this.ownsNativeCodexListenerGeneration(
+          rejection.listenerGeneration,
+          rejection.listener,
+        )
       ) {
         this.releaseRejectedNativeInbound(rejection);
         return;
@@ -846,6 +1508,20 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         CLAUDE_REJECTION_RECEIPT_RETRY_DELAYS_MS[attempt]!,
       );
     }
+  }
+
+  private ownsNativeCodexListenerGeneration(
+    generation: string,
+    listener: ClaudePeerListener,
+  ): boolean {
+    return [
+      this.activeNativeCodexListener,
+      this.preparedNativeCodexListener,
+      this.retiredNativeCodexListener,
+    ].some(
+      (candidate) =>
+        candidate?.generation === generation && candidate.listener === listener,
+    );
   }
 
   private async waitForRejectedNativeInboundRetry(
@@ -888,6 +1564,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     gatewayMessageId: string,
     targetId: string,
     deadline: number,
+    listenerGeneration: NativeCodexListenerGeneration,
   ): boolean {
     if (
       this.pendingByProviderId.has(providerId) ||
@@ -899,7 +1576,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     const timer = setTimeout(() => {
       const pending = this.pendingByProviderId.get(providerId);
       if (pending === undefined) return;
-      this.listener?.untrack(providerId);
+      pending.listener.untrack(providerId);
       if (pending.writeEvidence === "transport_written") {
         this.finishClaudeMessage(
           providerId,
@@ -919,6 +1596,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     timer.unref();
     this.pendingByProviderId.set(providerId, {
       gatewayMessageId,
+      listener: listenerGeneration.listener,
+      listenerGeneration: listenerGeneration.generation,
       targetId,
       writeEvidence: "none",
       timer,
@@ -936,16 +1615,25 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       if (pending?.gatewayMessageId === gatewayMessageId) {
         clearTimeout(pending.timer);
         this.pendingByProviderId.delete(providerId);
-        this.listener?.untrack(providerId);
+        pending.listener.untrack(providerId);
       }
     }
     this.providerIdByGatewayId.delete(gatewayMessageId);
     this.pendingTargetByGatewayId.delete(gatewayMessageId);
   }
 
-  private onReceipt(event: ClaudePeerReceiptEvent): void {
+  private onReceipt(
+    listenerGeneration: NativeCodexListenerGeneration,
+    event: ClaudePeerReceiptEvent,
+  ): void {
     const pending = this.pendingByProviderId.get(event.messageId);
-    if (pending === undefined) return;
+    if (
+      pending === undefined ||
+      pending.listenerGeneration !== listenerGeneration.generation ||
+      pending.listener !== listenerGeneration.listener
+    ) {
+      return;
+    }
     if (event.status === "held") {
       pending.writeEvidence = "transport_written";
       this.emitDelivery({ messageId: pending.gatewayMessageId, state: "held" });
@@ -1059,12 +1747,15 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.discovered.set(peer.targetId, row);
       rows.push(row);
     }
-    for (const [routeHandle] of this.nativeInbound) {
+    for (const [routeHandle, route] of this.nativeInbound) {
       const current = this.discovered.get(routeHandle);
       if (current !== undefined) {
         // The stable session UUID owns native reply authority. A rename only
         // updates its current public coordinate.
-        this.nativeInbound.set(routeHandle, current.alias);
+        this.nativeInbound.set(routeHandle, {
+          alias: current.alias,
+          listenerGeneration: route.listenerGeneration,
+        });
       } else if (!discovery.truncated) {
         this.nativeInbound.delete(routeHandle);
       }
@@ -1108,6 +1799,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     safeErrorCode?: string,
     authoritative = false,
   ): void {
+    if (this.nativeCodexSuccessionFreeze !== undefined) return;
     if (
       authoritative &&
       state === "idle" &&
@@ -1146,6 +1838,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private scheduleClaudeMonitor(): void {
     if (
       this.closed ||
+      this.nativeCodexSuccessionFreeze !== undefined ||
       this.selected.size === 0 ||
       this.monitorTimer !== undefined
     ) {
@@ -1155,6 +1848,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.monitorTimer = undefined;
       void this.refreshClaudeDiscovery()
         .catch(() => {
+          if (this.nativeCodexSuccessionFreeze !== undefined) return;
           for (const routeHandle of this.selected.keys()) {
             this.emitClaudeRouteObservation(
               routeHandle,
@@ -1369,6 +2063,50 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     return {
       routeHandle: input.routeHandle,
       state: codexRouteState(observation),
+    };
+  }
+
+  observeRouteSuccessionBarrier(
+    routeHandle: string,
+  ): CodexRouteSuccessionBarrier {
+    this.assertReady();
+    const route = this.routes.get(routeHandle);
+    const observation = route?.connector.observation();
+    const routeCreationInFlight = this.routeCreations.has(routeHandle);
+    const routeReleaseInFlight = this.routeReleases.has(routeHandle);
+    const pendingReplyCorrelations = this.expectsReply.size;
+    const pendingCallbacks = Math.max(
+      this.callbackQueue.length,
+      this.callbackScheduled ? 1 : 0,
+    );
+    const routePresent = route !== undefined;
+    const connection = observation?.connection ?? "absent";
+    const routeStatus = observation?.routeStatus ?? "absent";
+    const queueDepth = observation?.queueDepth ?? 0;
+    const hasActiveTurn = observation?.hasActiveTurn ?? false;
+    const requestInFlight = observation?.requestInFlight ?? false;
+    return {
+      routePresent,
+      connection,
+      routeStatus,
+      queueDepth,
+      hasActiveTurn,
+      requestInFlight,
+      routeCreationInFlight,
+      routeReleaseInFlight,
+      pendingReplyCorrelations,
+      pendingCallbacks,
+      clean:
+        routePresent &&
+        connection === "ready" &&
+        routeStatus === "idle" &&
+        queueDepth === 0 &&
+        !hasActiveTurn &&
+        !requestInFlight &&
+        !routeCreationInFlight &&
+        !routeReleaseInFlight &&
+        pendingReplyCorrelations === 0 &&
+        pendingCallbacks === 0,
     };
   }
 

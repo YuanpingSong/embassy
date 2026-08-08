@@ -12,6 +12,7 @@ import type {
   ClaudePeerInboundProgress,
   ClaudePeerListener,
   ClaudePeerListenerOptions,
+  ClaudePeerRegistryPublicationOutcome,
   ClaudePeerSendOptions,
   ClaudePeerSendResult,
 } from "../src/gateway/claude-peer.js";
@@ -42,6 +43,7 @@ const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const PROVIDER_MESSAGE_ID = "11111111-1111-4111-8111-111111111111";
 const GATEWAY_MESSAGE_ID = "gateway-message-001";
 const SAFE_WORKSPACE = "/workspace/synthetic-project";
+const INITIAL_LISTENER_GENERATION = "listener_generation_1";
 
 function callbacks(): {
   callbacks: GatewayAdapterCallbacks;
@@ -107,7 +109,13 @@ class FakeClaudePeer {
     },
   ];
   listenerOptions: ClaudePeerListenerOptions | undefined;
+  readonly preparedListenerOptions = new Map<
+    string,
+    ClaudePeerListenerOptions
+  >();
+  readonly listeners = new Map<string, ClaudePeerListener>();
   listenerUsed = false;
+  lastListenerGeneration: string | undefined;
   lastReceiptDeadlineAt: number | undefined;
   sendCalls = 0;
   truncated = false;
@@ -134,6 +142,23 @@ class FakeClaudePeer {
     progress: ClaudePeerInboundProgress;
   }> = [];
   releasedInboundReceipts: string[] = [];
+  closedListenerGenerations: string[] = [];
+  quiescedListenerGenerations: string[] = [];
+  resumedListenerGenerations: string[] = [];
+  activationGrantedListenerGenerations: string[] = [];
+  lifecycleCalls: string[] = [];
+  advertised: Array<{ generation: string; name: string; cwd: string }> = [];
+  unadvertised: Array<{ generation: string; name?: string }> = [];
+  publications: Array<{
+    currentGeneration: string;
+    preparedGeneration: string;
+    name: string;
+    cwd: string;
+  }> = [];
+  publicationOutcome: ClaudePeerRegistryPublicationOutcome = "published";
+  afterAdvertiseVisible:
+    | ((generation: string) => void | Promise<void>)
+    | undefined;
   acknowledgeError: Error | undefined;
   acknowledgeErrors: Error[] = [];
   progressError: Error | undefined;
@@ -144,47 +169,100 @@ class FakeClaudePeer {
     | { markStarted: () => void; wait: Promise<void> }
     | undefined;
 
-  readonly listener = {
-    address: "uds:/synthetic/callback.sock",
-    closed: false,
-    close: async () => undefined,
-    untrack: (messageId: string) => this.untracked.push(messageId),
-    acknowledge: async (
-      receiptHandle: string,
-      status: "held" | "delivered" | "denied" | "expired",
-      diagnostic?: { code: string },
-    ) => {
-      const attempt = {
-        receiptHandle,
-        status,
-        ...(diagnostic === undefined
-          ? {}
-          : { diagnosticCode: diagnostic.code }),
-      };
-      this.acknowledgeAttempts.push(attempt);
-      const error = this.acknowledgeErrors.shift() ?? this.acknowledgeError;
-      if (error !== undefined) throw error;
-      this.acknowledged.push(attempt);
-      return { transportStatus: "transport_written" as const };
-    },
-    notifyInboundProgress: async (
-      receiptHandle: string,
-      progress: ClaudePeerInboundProgress,
-    ) => {
-      if (this.progressError !== undefined) throw this.progressError;
-      this.progressed.push({ receiptHandle, progress: { ...progress } });
-      return { transportStatus: "transport_written" as const };
-    },
-    releaseInboundReceipt: (receiptHandle: string) => {
-      this.releasedInboundReceipts.push(receiptHandle);
-      return this.liveInboundReceipts.delete(receiptHandle);
-    },
-    quiesceInbound: async () => undefined,
-  } as unknown as ClaudePeerListener;
+  readonly listener = this.createListener(INITIAL_LISTENER_GENERATION);
+
+  private createListener(generation: string): ClaudePeerListener {
+    let closed = false;
+    const listener = {
+      address: `uds:/synthetic/callback.${generation}.sock`,
+      generation,
+      get closed() {
+        return closed;
+      },
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        this.closedListenerGenerations.push(generation);
+      },
+      untrack: (messageId: string) => this.untracked.push(messageId),
+      acknowledge: async (
+        receiptHandle: string,
+        status: "held" | "delivered" | "denied" | "expired",
+        diagnostic?: { code: string },
+      ) => {
+        const attempt = {
+          receiptHandle,
+          status,
+          ...(diagnostic === undefined
+            ? {}
+            : { diagnosticCode: diagnostic.code }),
+        };
+        this.acknowledgeAttempts.push(attempt);
+        const error = this.acknowledgeErrors.shift() ?? this.acknowledgeError;
+        if (error !== undefined) throw error;
+        this.acknowledged.push(attempt);
+        return { transportStatus: "transport_written" as const };
+      },
+      notifyInboundProgress: async (
+        receiptHandle: string,
+        progress: ClaudePeerInboundProgress,
+      ) => {
+        if (this.progressError !== undefined) throw this.progressError;
+        this.progressed.push({ receiptHandle, progress: { ...progress } });
+        return { transportStatus: "transport_written" as const };
+      },
+      releaseInboundReceipt: (receiptHandle: string) => {
+        this.releasedInboundReceipts.push(receiptHandle);
+        return this.liveInboundReceipts.delete(receiptHandle);
+      },
+      quiesceInbound: async () => {
+        this.quiescedListenerGenerations.push(generation);
+      },
+      resumeInbound: () => {
+        this.resumedListenerGenerations.push(generation);
+        this.lifecycleCalls.push(`resume:${generation}`);
+      },
+      grantSuccessionActivation: () => {
+        this.activationGrantedListenerGenerations.push(generation);
+        this.lifecycleCalls.push(`grant:${generation}`);
+      },
+      advertise: async (name: string, cwd: string) => {
+        this.advertised.push({ generation, name, cwd });
+        await this.afterAdvertiseVisible?.(generation);
+      },
+      unadvertise: async (name?: string) => {
+        this.unadvertised.push({ generation, ...(name === undefined ? {} : { name }) });
+      },
+      updateAdvertisedStatus: async () => undefined,
+      publishReplacing: async (
+        current: ClaudePeerListener,
+        name: string,
+        cwd: string,
+      ) => {
+        this.publications.push({
+          currentGeneration: current.generation,
+          preparedGeneration: generation,
+          name,
+          cwd,
+        });
+        return this.publicationOutcome;
+      },
+    } as unknown as ClaudePeerListener;
+    this.listeners.set(generation, listener);
+    return listener;
+  }
 
   async listen(options: ClaudePeerListenerOptions): Promise<ClaudePeerListener> {
     this.listenerOptions = options;
     return this.listener;
+  }
+
+  async listenPrepared(
+    generation: string,
+    options: ClaudePeerListenerOptions,
+  ): Promise<ClaudePeerListener> {
+    this.preparedListenerOptions.set(generation, options);
+    return this.createListener(generation);
   }
 
   async discover(): Promise<{
@@ -240,6 +318,7 @@ class FakeClaudePeer {
   ): Promise<ClaudePeerSendResult> {
     this.sendCalls += 1;
     this.listenerUsed = options.listener === this.listener;
+    this.lastListenerGeneration = options.listener?.generation;
     this.lastReceiptDeadlineAt = options.receiptDeadlineAt;
     if (this.sendMode === "prewrite_failure") {
       throw new BridgeError("CLAUDE_PEER_TARGET_STALE", "synthetic");
@@ -292,8 +371,13 @@ class FakeClaudePeer {
       | "expired"
       | "unconfirmed"
       | "ambiguous",
+    generation = INITIAL_LISTENER_GENERATION,
   ): void {
-    void this.listenerOptions?.onReceipt?.({
+    const options =
+      generation === INITIAL_LISTENER_GENERATION
+        ? this.listenerOptions
+        : this.preparedListenerOptions.get(generation);
+    void options?.onReceipt?.({
       messageId: PROVIDER_MESSAGE_ID,
       status,
       trust: "untrusted_same_uid_peer",
@@ -315,11 +399,18 @@ class FakeClaudePeer {
     });
   }
 
-  async emitInboundFrame(message: ClaudePeerInboundMessage): Promise<void> {
+  async emitInboundFrame(
+    message: ClaudePeerInboundMessage,
+    generation = INITIAL_LISTENER_GENERATION,
+  ): Promise<void> {
     if (message.receiptHandle !== undefined) {
       this.liveInboundReceipts.add(message.receiptHandle);
     }
-    await this.listenerOptions?.onMessage(message);
+    const options =
+      generation === INITIAL_LISTENER_GENERATION
+        ? this.listenerOptions
+        : this.preparedListenerOptions.get(generation);
+    await options?.onMessage(message);
   }
 
   setSelectedStatus(status: "idle" | "busy" | "shell" | "waiting"): void {
@@ -650,6 +741,454 @@ test("an exact live native sender stays outbound-unselected but can receive its 
   await provider.close();
 });
 
+test("native advertisement installs generation ownership before publication becomes visible", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  fake.afterAdvertiseVisible = async (generation) => {
+    assert.equal(generation, INITIAL_LISTENER_GENERATION);
+    await fake.emitInboundFrame({
+      inboundId: "reentrant-advertise-inbound",
+      content: "visible immediately after publication",
+      sourceTargetId: "target-selected",
+      sourceAlias: "advisor",
+      receiptHandle: "reentrant-advertise-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    });
+  };
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-visible@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  assert.deepEqual(observed.messages, [
+    {
+      endpoint: { ...provider.identity, routeHandle: "target-selected" },
+      sourceAlias: "advisor@this-mac",
+      targetAlias: "codex-visible@this-mac",
+      text: "visible immediately after publication",
+      receiptHandle: "reentrant-advertise-receipt",
+    },
+  ]);
+  await provider.updateNativeInboundStatus(
+    "reentrant-advertise-receipt",
+    "delivered",
+  );
+  await provider.close();
+});
+
+test("recoverable advertisement failure retains provisional identity after re-entrant ingress", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  fake.afterAdvertiseVisible = async () => {
+    await fake.emitInboundFrame({
+      inboundId: "reentrant-failed-advertise-inbound",
+      content: "must retain its provisional generation owner",
+      sourceTargetId: "target-selected",
+      sourceAlias: "advisor",
+      receiptHandle: "reentrant-failed-advertise-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    });
+    throw new BridgeError(
+      "CLAUDE_PEER_RECEIPT_NOT_WRITTEN",
+      "synthetic clean advertisement pre-write failure",
+      true,
+    );
+  };
+  await assert.rejects(
+    provider.advertiseNativeCodexPeer({
+      alias: "codex-provisional@this-mac",
+      cwd: SAFE_WORKSPACE,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.recoverable,
+  );
+  assert.equal(observed.messages.length, 1);
+  assert.equal(
+    provider.currentNativeCodexPeerGeneration(
+      "codex-provisional@this-mac",
+    ),
+    INITIAL_LISTENER_GENERATION,
+  );
+  await provider.updateNativeInboundStatus(
+    "reentrant-failed-advertise-receipt",
+    "expired",
+    "ROUTE_UNAVAILABLE",
+  );
+  await provider.unadvertiseNativeCodexPeer("codex-provisional@this-mac");
+  await assert.rejects(
+    async () =>
+      provider.currentNativeCodexPeerGeneration(
+        "codex-provisional@this-mac",
+      ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_GENERATION_MISMATCH",
+  );
+  await provider.close();
+});
+
+test("native Codex succession fences callbacks and retires only the exact old listener", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-old@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  const initialGeneration = provider.currentNativeCodexPeerGeneration(
+    "codex-old@this-mac",
+  );
+  assert.equal(initialGeneration, INITIAL_LISTENER_GENERATION);
+
+  await provider.prepareNativeCodexPeerGeneration({
+    alias: "codex-new@this-mac",
+    cwd: SAFE_WORKSPACE,
+    generation: "next_generation",
+  });
+  await assert.rejects(
+    provider.prepareNativeCodexPeerGeneration({
+      alias: "codex-third@this-mac",
+      cwd: SAFE_WORKSPACE,
+      generation: "third_generation",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_SUCCESSION_CAPACITY",
+  );
+
+  await fake.emitInboundFrame(
+    {
+      inboundId: "prepared-before-activation",
+      content: "must never reach the new alias",
+      sourceTargetId: "target-selected",
+      sourceAlias: "advisor",
+      receiptHandle: "prepared-before-activation-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    },
+    "next_generation",
+  );
+  assert.equal(observed.messages.length, 0);
+  assert.deepEqual(fake.acknowledged.at(-1), {
+    receiptHandle: "prepared-before-activation-receipt",
+    status: "expired",
+    diagnosticCode: "CLAUDE_NATIVE_GENERATION_STALE",
+  });
+
+  await fake.emitInboundFrame({
+    inboundId: "old-owned-inbound",
+    content: "old generation body",
+    sourceTargetId: "target-selected",
+    sourceAlias: "advisor",
+    receiptHandle: "old-owned-receipt",
+    replySupported: true,
+    trust: "untrusted_same_uid_peer",
+  });
+  assert.equal(observed.messages.at(-1)?.targetAlias, "codex-old@this-mac");
+
+  await provider.quiesceNativeCodexPeerGeneration(initialGeneration);
+  assert.deepEqual(
+    provider.observeNativeCodexSuccessionBarrier(initialGeneration),
+    {
+      generation: initialGeneration,
+      activeGenerationMatched: true,
+      ingressQuiesced: true,
+      monitorFrozen: true,
+      discoveryInFlight: false,
+      pendingOutboundReceipts: 0,
+      pendingInboundReceipts: 1,
+      rejectedInboundSettlements: 0,
+      clean: false,
+    },
+  );
+  await provider.updateNativeInboundStatus("old-owned-receipt", "delivered");
+  assert.equal(
+    provider.observeNativeCodexSuccessionBarrier(initialGeneration).clean,
+    true,
+  );
+
+  assert.equal(
+    await provider.publishPreparedNativeCodexPeer({
+      currentGeneration: initialGeneration,
+      preparedGeneration: "next_generation",
+    }),
+    "published",
+  );
+  provider.activatePreparedNativeCodexPeerGeneration("next_generation");
+  assert.deepEqual(fake.lifecycleCalls.slice(-2), [
+    "grant:next_generation",
+    "resume:next_generation",
+  ]);
+  assert.equal(
+    provider.currentNativeCodexPeerGeneration("codex-new@this-mac"),
+    "next_generation",
+  );
+  assert.deepEqual(fake.publications, [
+    {
+      currentGeneration: initialGeneration,
+      preparedGeneration: "next_generation",
+      name: "codex-new",
+      cwd: SAFE_WORKSPACE,
+    },
+  ]);
+
+  await fake.emitInboundFrame(
+    {
+      inboundId: "retired-generation-frame",
+      content: "must not inherit the new alias",
+      sourceTargetId: "target-selected",
+      sourceAlias: "advisor",
+      receiptHandle: "retired-generation-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    },
+    initialGeneration,
+  );
+  assert.equal(observed.messages.length, 1);
+  assert.deepEqual(fake.acknowledged.at(-1), {
+    receiptHandle: "retired-generation-receipt",
+    status: "expired",
+    diagnosticCode: "CLAUDE_NATIVE_GENERATION_STALE",
+  });
+
+  await fake.emitInboundFrame(
+    {
+      inboundId: "new-generation-frame",
+      content: "new generation body",
+      sourceTargetId: "target-selected",
+      sourceAlias: "advisor",
+      receiptHandle: "new-generation-receipt",
+      replySupported: true,
+      trust: "untrusted_same_uid_peer",
+    },
+    "next_generation",
+  );
+  assert.equal(observed.messages.at(-1)?.targetAlias, "codex-new@this-mac");
+  await provider.updateNativeInboundStatus("new-generation-receipt", "delivered");
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "native_reply",
+      binding: binding(provider),
+      messageId: "gateway-new-generation-reply",
+      text: "reply through the exact new listener",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.lastListenerGeneration, "next_generation");
+  fake.emitReceipt("released", "next_generation");
+
+  await assert.rejects(
+    provider.prepareNativeCodexPeerGeneration({
+      alias: "codex-third@this-mac",
+      cwd: SAFE_WORKSPACE,
+      generation: "third_generation",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_SUCCESSION_CAPACITY",
+  );
+  await provider.retireNativeCodexPeerGeneration({
+    retiredGeneration: initialGeneration,
+    protectedActiveGeneration: "next_generation",
+  });
+  assert.deepEqual(fake.closedListenerGenerations, [
+    initialGeneration,
+  ]);
+  assert.equal(fake.listeners.get("next_generation")?.closed, false);
+
+  await provider.prepareNativeCodexPeerGeneration({
+    alias: "codex-third@this-mac",
+    cwd: SAFE_WORKSPACE,
+    generation: "third_generation",
+  });
+  await provider.cleanupPreparedNativeCodexPeerGeneration("third_generation");
+  assert.deepEqual(fake.closedListenerGenerations, [
+    initialGeneration,
+    "third_generation",
+  ]);
+  await provider.close();
+});
+
+test("native Codex succession rolls back only proven non-publication", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-old@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  const initialGeneration = provider.currentNativeCodexPeerGeneration(
+    "codex-old@this-mac",
+  );
+  await provider.prepareNativeCodexPeerGeneration({
+    alias: "codex-rollback@this-mac",
+    cwd: SAFE_WORKSPACE,
+    generation: "rollback_generation",
+  });
+  await provider.quiesceNativeCodexPeerGeneration(initialGeneration);
+  fake.publicationOutcome = "not_published";
+  assert.equal(
+    await provider.publishPreparedNativeCodexPeer({
+      currentGeneration: initialGeneration,
+      preparedGeneration: "rollback_generation",
+    }),
+    "not_published",
+  );
+  await provider.rollbackPreparedNativeCodexPeerGeneration({
+    preparedGeneration: "rollback_generation",
+    resumeGeneration: initialGeneration,
+  });
+  assert.deepEqual(fake.closedListenerGenerations, ["rollback_generation"]);
+  assert.deepEqual(fake.resumedListenerGenerations, [
+    initialGeneration,
+  ]);
+
+  await fake.emitInboundFrame({
+    inboundId: "old-after-rollback",
+    content: "old generation resumed",
+    sourceTargetId: "target-selected",
+    sourceAlias: "advisor",
+    receiptHandle: "old-after-rollback-receipt",
+    replySupported: true,
+    trust: "untrusted_same_uid_peer",
+  });
+  assert.equal(observed.messages.at(-1)?.targetAlias, "codex-old@this-mac");
+  await provider.updateNativeInboundStatus(
+    "old-after-rollback-receipt",
+    "delivered",
+  );
+
+  await provider.prepareNativeCodexPeerGeneration({
+    alias: "codex-uncertain@this-mac",
+    cwd: SAFE_WORKSPACE,
+    generation: "uncertain_generation",
+  });
+  await provider.quiesceNativeCodexPeerGeneration(initialGeneration);
+  fake.publicationOutcome = "unknown";
+  assert.equal(
+    await provider.publishPreparedNativeCodexPeer({
+      currentGeneration: initialGeneration,
+      preparedGeneration: "uncertain_generation",
+    }),
+    "unknown",
+  );
+  await assert.rejects(
+    provider.cleanupPreparedNativeCodexPeerGeneration("uncertain_generation"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_SUCCESSION_ROLLBACK_FORBIDDEN",
+  );
+  assert.equal(fake.listeners.get("uncertain_generation")?.closed, false);
+  fake.publicationOutcome = "not_published";
+  assert.equal(
+    await provider.publishPreparedNativeCodexPeer({
+      currentGeneration: initialGeneration,
+      preparedGeneration: "uncertain_generation",
+    }),
+    "unknown",
+  );
+  await assert.rejects(
+    provider.cleanupPreparedNativeCodexPeerGeneration("uncertain_generation"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_PEER_SUCCESSION_ROLLBACK_FORBIDDEN",
+  );
+  fake.publicationOutcome = "published";
+  assert.equal(
+    await provider.publishPreparedNativeCodexPeer({
+      currentGeneration: initialGeneration,
+      preparedGeneration: "uncertain_generation",
+    }),
+    "published",
+  );
+  provider.activatePreparedNativeCodexPeerGeneration("uncertain_generation");
+  await provider.retireNativeCodexPeerGeneration({
+    retiredGeneration: initialGeneration,
+    protectedActiveGeneration: "uncertain_generation",
+  });
+  await provider.close();
+});
+
+test("native succession freezes discovery callbacks until resume", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.discoverClaudePeers();
+  await provider.selectRoute({
+    alias: "advisor@this-mac",
+    routeHandle: "target-selected",
+  });
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-old@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  const initialGeneration = provider.currentNativeCodexPeerGeneration(
+    "codex-old@this-mac",
+  );
+
+  fake.setSelectedStatus("busy");
+  const heldDiscovery = fake.holdNextDiscovery();
+  const discovery = provider.discoverClaudePeers();
+  await heldDiscovery.started;
+  await provider.quiesceNativeCodexPeerGeneration(initialGeneration);
+  assert.equal(
+    provider.observeNativeCodexSuccessionBarrier(initialGeneration)
+      .discoveryInFlight,
+    true,
+  );
+  assert.equal(
+    provider.observeNativeCodexSuccessionBarrier(initialGeneration).clean,
+    false,
+  );
+  heldDiscovery.release();
+  await discovery;
+  assert.deepEqual(observed.routes, []);
+  assert.equal(
+    provider.observeNativeCodexSuccessionBarrier(initialGeneration).clean,
+    true,
+  );
+
+  await provider.discoverClaudePeers();
+  assert.deepEqual(observed.routes, []);
+  provider.resumeNativeCodexPeerGeneration(initialGeneration);
+  await provider.discoverClaudePeers();
+  assert.deepEqual(observed.routes.at(-1), {
+    endpoint: { ...provider.identity, routeHandle: "target-selected" },
+    state: "busy",
+  });
+  await provider.close();
+});
+
 test("provider-owned invalid, stale, and capacity rejections retry only clean prewrites", async (t) => {
   const recoverable = () =>
     new BridgeError(
@@ -849,6 +1388,11 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
   );
 
   await provider.initialize(callbacks().callbacks);
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-reviewer@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  await fake.emitInbound();
   await provider.notifyNativeInboundProgress(
     "synthetic-receipt-handle",
     {
@@ -869,6 +1413,15 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
   ]);
   assert.deepEqual(fake.acknowledged, []);
 
+  await fake.emitInboundFrame({
+    inboundId: "terminal-success-inbound",
+    content: "terminal success",
+    sourceTargetId: "target-selected",
+    sourceAlias: "advisor",
+    receiptHandle: "terminal-success",
+    replySupported: true,
+    trust: "untrusted_same_uid_peer",
+  });
   await provider.updateNativeInboundStatus(
     "terminal-success",
     "expired",
@@ -887,6 +1440,15 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
     "synthetic terminal failure",
   );
   fake.acknowledgeError = terminalFailure;
+  await fake.emitInboundFrame({
+    inboundId: "terminal-failure-inbound",
+    content: "terminal failure",
+    sourceTargetId: "target-selected",
+    sourceAlias: "advisor",
+    receiptHandle: "terminal-failure",
+    replySupported: true,
+    trust: "untrusted_same_uid_peer",
+  });
   await assert.rejects(
     provider.updateNativeInboundStatus("terminal-failure", "denied"),
     (error: unknown) => error === terminalFailure,
@@ -897,6 +1459,15 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
     "synthetic progress failure",
   );
   fake.progressError = progressFailure;
+  await fake.emitInboundFrame({
+    inboundId: "progress-failure-inbound",
+    content: "progress failure",
+    sourceTargetId: "target-selected",
+    sourceAlias: "advisor",
+    receiptHandle: "progress-failure",
+    replySupported: true,
+    trust: "untrusted_same_uid_peer",
+  });
   await assert.rejects(
     provider.notifyNativeInboundProgress("progress-failure", {
       kind: "stall",
@@ -919,7 +1490,6 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
     false,
   );
   assert.deepEqual(fake.releasedInboundReceipts, [
-    "synthetic-receipt-handle",
     "synthetic-receipt-handle",
   ]);
   await provider.close();
@@ -1457,6 +2027,83 @@ function codexBinding(
     ownerLease: "lease_codex_synthetic",
   };
 }
+
+test("Codex succession barrier exposes only an exact quiet connector", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory);
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  assert.deepEqual(provider.observeRouteSuccessionBarrier(THREAD_ID), {
+    routePresent: false,
+    connection: "absent",
+    routeStatus: "absent",
+    queueDepth: 0,
+    hasActiveTurn: false,
+    requestInFlight: false,
+    routeCreationInFlight: false,
+    routeReleaseInFlight: false,
+    pendingReplyCorrelations: 0,
+    pendingCallbacks: 0,
+    clean: false,
+  });
+
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  await delayImmediate();
+  assert.deepEqual(provider.observeRouteSuccessionBarrier(THREAD_ID), {
+    routePresent: true,
+    connection: "ready",
+    routeStatus: "idle",
+    queueDepth: 0,
+    hasActiveTurn: false,
+    requestInFlight: false,
+    routeCreationInFlight: false,
+    routeReleaseInFlight: false,
+    pendingReplyCorrelations: 0,
+    pendingCallbacks: 0,
+    clean: true,
+  });
+
+  await provider.dispatch({
+    authorization: "selected_route",
+    binding: codexBinding(provider),
+    messageId: "gateway-barrier-message",
+    text: "keep the exact route non-quiet",
+    expectsReply: true,
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const busy = provider.observeRouteSuccessionBarrier(THREAD_ID);
+  assert.equal(busy.clean, false);
+  assert.equal(busy.hasActiveTurn, true);
+  assert.equal(busy.pendingReplyCorrelations, 1);
+
+  const transport = factory.transports[0]!;
+  transport.emit({
+    method: "item/completed",
+    params: {
+      item: {
+        id: "item-barrier-final",
+        phase: "final_answer",
+        text: "barrier complete",
+        type: "agentMessage",
+      },
+      threadId: THREAD_ID,
+      turnId: "turn-provider-1",
+    },
+  });
+  transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-provider-1", status: "completed" },
+    },
+  });
+  await delayImmediate();
+  assert.equal(provider.observeRouteSuccessionBarrier(THREAD_ID).clean, true);
+  await provider.close();
+});
 
 test("local Codex provider attaches one exact route, refreshes it before write, and hands off a bounded final reply", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);

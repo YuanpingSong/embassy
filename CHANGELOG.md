@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Repo-shipped agent skill (`skills/embassy-peer/SKILL.md`) teaching the full operator/agent workflow — health, registration, sending, replying, queue-state interpretation — without exposing identifiers or message bodies.
 - One host-wide crash-reclaimable owner lease, acquired before provider setup and independent of `EMBASSY_STATE_DIR`, so only one foreground Embassy controller can advertise routes for a login account.
 
+- **Live dashboard companion** — `embassy dashboard --live [--lang en|zh-CN]` starts a separate foreground process that streams sanitized metadata to a browser tab on `127.0.0.1`; `embassy serve` remains TCP-free and HTTP-free.
+- **One-use token authentication** — live companion access bootstraps via a 256-bit URL-fragment token exchanged for a path-scoped `HttpOnly` `SameSite=Strict` session cookie with Host, Origin, and sentinel validation.
+- **Read-only browser surface** — the live companion exposes no CORS headers, no mutation or provider routes, no storage, no telemetry, and no external assets; the browser has zero authority to register, select, send, reply, approve, or interrupt.
+- **Bilingual dashboards** — static dashboards render in English and Simplified Chinese from one catalog; `--lang en|zh-CN` selects the live display language.
+
 ### Changed
 
 - Binary renamed from `claude-codex-gateway` to `embassy`; the old name ships for one release as a deprecated alias.

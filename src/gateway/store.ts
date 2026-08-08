@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
+import { isCodexRegistrationGeneration } from "./codex-registration-generation.js";
 import type { GatewayConfig } from "./config.js";
 import {
   compatibilityStates,
@@ -116,6 +117,82 @@ export type RouteInFlightSettlementInput = Readonly<{
   safeErrorCode?: string;
 }>;
 
+export const codexSuccessionJournalStages = [
+  "prepared",
+  "publication_armed",
+  "published",
+  "activated",
+  "recovery_forbidden",
+] as const;
+
+export type CodexSuccessionJournalStage =
+  (typeof codexSuccessionJournalStages)[number];
+
+export type CodexSuccessionStoreIdentity = Readonly<{
+  alias: string;
+  threadId: string;
+  hostId: string;
+  /** Opaque exact ownership/listener generation; never interpreted as a path. */
+  generation: string;
+  /** Existing private route metadata only; never publicly projected. */
+  binding: PrivateRouteBinding;
+}>;
+
+type CodexSuccessionJournal = Readonly<{
+  schemaVersion: 1;
+  stage: CodexSuccessionJournalStage;
+  old: CodexSuccessionStoreIdentity;
+  new: CodexSuccessionStoreIdentity;
+  safeErrorCode?: string;
+}>;
+
+export type PrepareCodexSuccessionInput = Readonly<{
+  old: CodexSuccessionStoreIdentity;
+  new: CodexSuccessionStoreIdentity;
+}>;
+
+export type ExactCodexSuccessionInput = Readonly<{
+  oldGeneration: string;
+  newGeneration: string;
+}>;
+
+export type ClearCodexSuccessionInput = ExactCodexSuccessionInput &
+  Readonly<{
+    /** Required once the durable arm exists; ignored only before arming. */
+    publicationAbsenceConfirmed?: true;
+  }>;
+
+export type ActivateCodexSuccessionInput = ExactCodexSuccessionInput &
+  Readonly<{
+    state: "idle" | "busy" | "awaiting_approval";
+  }>;
+
+export type ForbidCodexSuccessionRecoveryInput =
+  ExactCodexSuccessionInput &
+    Readonly<{
+      safeErrorCode: string;
+    }>;
+
+export type CodexSuccessionRecoveryAuthority =
+  | Readonly<{ authority: "none" }>
+  | Readonly<{
+      authority: "old" | "new";
+      journal: CodexSuccessionJournal;
+    }>;
+
+export type CodexSuccessionBarrierInspection = Readonly<{
+  codexRouteCount: number;
+  queueCount: number;
+  inFlightCount: number;
+  transientBodyCount: number;
+  codexQueueDepth: number;
+  clean: boolean;
+}>;
+
+const CODEX_SUCCESSION_STAGES = new Set<string>(
+  codexSuccessionJournalStages,
+);
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -157,6 +234,67 @@ function isPrivateToken(value: unknown): value is string {
   // Intentionally excludes whitespace and path separators. Socket/reply paths
   // must remain connector-memory-only and can never become route handles.
   return typeof value === "string" && PRIVATE_TOKEN_PATTERN.test(value);
+}
+
+function isCodexSuccessionIdentity(
+  value: unknown,
+): value is CodexSuccessionStoreIdentity {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, [
+      "alias",
+      "threadId",
+      "hostId",
+      "generation",
+      "binding",
+    ]) &&
+    typeof value.alias === "string" &&
+    ALIAS_PATTERN.test(value.alias) &&
+    value.alias.startsWith("codex-") &&
+    typeof value.hostId === "string" &&
+    HOST_PATTERN.test(value.hostId) &&
+    value.alias.endsWith(`@${value.hostId}`) &&
+    isPrivateToken(value.threadId) &&
+    isCodexRegistrationGeneration(value.generation) &&
+    isPrivateRouteBinding(value.binding) &&
+    value.binding.provider === "codex" &&
+    value.binding.hostId === value.hostId &&
+    value.binding.routeHandle === value.threadId
+  );
+}
+
+function isCodexSuccessionJournal(
+  value: unknown,
+): value is CodexSuccessionJournal {
+  if (
+    !isObject(value) ||
+    !hasOnlyKeys(
+      value,
+      ["schemaVersion", "stage", "old", "new"],
+      ["safeErrorCode"],
+    ) ||
+    value.schemaVersion !== 1 ||
+    typeof value.stage !== "string" ||
+    !CODEX_SUCCESSION_STAGES.has(value.stage) ||
+    !isCodexSuccessionIdentity(value.old) ||
+    !isCodexSuccessionIdentity(value.new)
+  ) {
+    return false;
+  }
+  const oldIdentity = value.old;
+  const newIdentity = value.new;
+  if (
+    oldIdentity.hostId !== newIdentity.hostId ||
+    oldIdentity.alias === newIdentity.alias ||
+    oldIdentity.threadId === newIdentity.threadId ||
+    oldIdentity.generation === newIdentity.generation ||
+    oldIdentity.binding.ownerLease === newIdentity.binding.ownerLease
+  ) {
+    return false;
+  }
+  return value.stage === "recovery_forbidden"
+    ? isSafeCode(value.safeErrorCode)
+    : value.safeErrorCode === undefined;
 }
 
 function isPrivateEndpointIdentity(
@@ -498,6 +636,33 @@ function migratePreUnconfirmedCounters(value: unknown): unknown {
   };
 }
 
+const PRE_SUCCESSION_JOURNAL_STATE_KEYS = [
+  "schemaVersion",
+  "createdAt",
+  "updatedAt",
+  "eventSequence",
+  "routes",
+  "connectors",
+  "queue",
+  "inFlight",
+  "events",
+  "dedupe",
+  "rateBuckets",
+  "accounting",
+] as const;
+
+/** Add the nullable internal journal to exact legacy v1 state only. */
+function migratePreSuccessionJournal(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !hasOnlyKeys(value, PRE_SUCCESSION_JOURNAL_STATE_KEYS)
+  ) {
+    return value;
+  }
+  return { ...value, codexSuccession: null };
+}
+
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -514,6 +679,7 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       "dedupe",
       "rateBuckets",
       "accounting",
+      "codexSuccession",
     ]) ||
     value.schemaVersion !== 1 ||
     !isIsoTimestamp(value.createdAt) ||
@@ -541,7 +707,9 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
         isIsoTimestamp(bucket.windowStartedAt) &&
         isNonNegativeInteger(bucket.count),
     ) ||
-    !isAccounting(value.accounting)
+    !isAccounting(value.accounting) ||
+    (value.codexSuccession !== null &&
+      !isCodexSuccessionJournal(value.codexSuccession))
   ) {
     return false;
   }
@@ -654,8 +822,69 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
             claudeConnectorHosts.has(route.binding.hostId) &&
             route.binding.hostId === aliasHost(bucket.sourceAlias),
         ),
-    )
+    ) &&
+    isPersistedSuccessionConsistent(candidate)
   );
+}
+
+function routeMatchesSuccessionIdentity(
+  route: GatewayRouteRecord,
+  identity: CodexSuccessionStoreIdentity,
+): boolean {
+  return (
+    route.alias === identity.alias &&
+    route.registrationMode === "explicit_opt_in" &&
+    route.binding.provider === "codex" &&
+    route.binding.hostId === identity.hostId &&
+    route.binding.routeHandle === identity.threadId &&
+    sameBinding(route.binding, identity.binding)
+  );
+}
+
+function isPersistedSuccessionConsistent(
+  state: GatewayPersistedState,
+): boolean {
+  if (state.codexSuccession === null) return true;
+  if (!isCodexSuccessionJournal(state.codexSuccession)) return false;
+  const journal = state.codexSuccession;
+  const codexRoutes = state.routes.filter(
+    (route) => route.binding.provider === "codex",
+  );
+  if (
+    codexRoutes.length !== 1 ||
+    state.queue.length !== 0 ||
+    state.inFlight.length !== 0 ||
+    codexRoutes[0]?.queueDepth !== 0
+  ) {
+    return false;
+  }
+  const route = codexRoutes[0];
+  if (route === undefined) return false;
+  const oldMatches = routeMatchesSuccessionIdentity(route, journal.old);
+  const newMatches = routeMatchesSuccessionIdentity(route, journal.new);
+  const newConnectorGenerationExists = state.connectors.some((connector) =>
+    sameEndpoint(connector, journal.new.binding),
+  );
+  if (!newConnectorGenerationExists) return false;
+  const nonCodexCollision = state.routes.some(
+    (candidate) =>
+      candidate !== route &&
+      (candidate.alias === journal.new.alias ||
+        sameRouteTarget(candidate.binding, journal.new.binding) ||
+        candidate.binding.ownerLease === journal.new.binding.ownerLease),
+  );
+  if (nonCodexCollision) return false;
+  if (journal.stage === "activated") {
+    return newMatches && isZeroRouteCounters(route.counters);
+  }
+  if (journal.stage === "recovery_forbidden") {
+    return oldMatches || (newMatches && isZeroRouteCounters(route.counters));
+  }
+  return oldMatches;
+}
+
+function isZeroRouteCounters(counters: RouteCounters): boolean {
+  return Object.values(counters).every((value) => value === 0);
 }
 
 function emptyCounters(): RouteCounters {
@@ -756,6 +985,32 @@ function endpointOf(binding: PrivateRouteBinding): PrivateEndpointIdentity {
     provider: binding.provider,
     hostId: binding.hostId,
     endpointGeneration: binding.endpointGeneration,
+  };
+}
+
+function cloneSuccessionIdentity(
+  identity: CodexSuccessionStoreIdentity,
+): CodexSuccessionStoreIdentity {
+  return {
+    alias: identity.alias,
+    threadId: identity.threadId,
+    hostId: identity.hostId,
+    generation: identity.generation,
+    binding: { ...identity.binding },
+  };
+}
+
+function cloneSuccessionJournal(
+  journal: CodexSuccessionJournal,
+): CodexSuccessionJournal {
+  return {
+    schemaVersion: 1,
+    stage: journal.stage,
+    old: cloneSuccessionIdentity(journal.old),
+    new: cloneSuccessionIdentity(journal.new),
+    ...(journal.safeErrorCode === undefined
+      ? {}
+      : { safeErrorCode: journal.safeErrorCode }),
   };
 }
 
@@ -886,6 +1141,7 @@ export class GatewayStore {
           dedupe: [],
           rateBuckets: [],
           accounting: emptyAccounting(),
+          codexSuccession: null,
         };
         this.recoverAfterRestart(now);
         this.prune(now);
@@ -1496,6 +1752,287 @@ export class GatewayStore {
           state: route.state,
           compatibility: route.compatibility,
         }));
+    });
+  }
+
+  /**
+   * Bounded, metadata-only barrier observation for the succession controller.
+   * No route, message, conversation, or listener identifier is returned.
+   */
+  async inspectCodexSuccessionBarrier(): Promise<CodexSuccessionBarrierInspection> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      const codexRoutes = state.routes.filter(
+        (route) => route.binding.provider === "codex",
+      );
+      const codexQueueDepth = codexRoutes.reduce(
+        (total, route) => total + route.queueDepth,
+        0,
+      );
+      const inspection: CodexSuccessionBarrierInspection = {
+        codexRouteCount: codexRoutes.length,
+        queueCount: state.queue.length,
+        inFlightCount: state.inFlight.length,
+        transientBodyCount: this.transientBodies.size,
+        codexQueueDepth,
+        clean:
+          codexRoutes.length === 1 &&
+          state.queue.length === 0 &&
+          state.inFlight.length === 0 &&
+          this.transientBodies.size === 0 &&
+          codexQueueDepth === 0,
+      };
+      return inspection;
+    });
+  }
+
+  /** Begin one exact, same-host Codex registration succession. */
+  async prepareCodexSuccession(
+    input: PrepareCodexSuccessionInput,
+  ): Promise<void> {
+    await this.mutate(async (state) => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(input, ["old", "new"]) ||
+        !isCodexSuccessionIdentity(input.old) ||
+        !isCodexSuccessionIdentity(input.new) ||
+        !isCodexSuccessionJournal({
+          schemaVersion: 1,
+          stage: "prepared",
+          old: input.old,
+          new: input.new,
+        })
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_SUCCESSION",
+          "The Codex succession identities are malformed, non-distinct, or cross-host.",
+        );
+      }
+      this.assertAllowedIdentity(endpointOf(input.old.binding));
+      this.assertAllowedIdentity(endpointOf(input.new.binding));
+      if (state.codexSuccession !== null) {
+        throw new BridgeError(
+          "CODEX_SUCCESSION_ALREADY_ACTIVE",
+          "A durable Codex succession journal already exists.",
+        );
+      }
+      this.assertSuccessionLedgerEmpty(state);
+      const route = this.requireSoleCodexRoute(state);
+      if (!routeMatchesSuccessionIdentity(route, input.old)) {
+        throw new BridgeError(
+          "CODEX_SUCCESSION_OWNER_MISMATCH",
+          "The old succession identity does not exactly own the sole Codex route.",
+        );
+      }
+      this.requireCompatibleObservedEndpoint(state, input.new.binding);
+      this.assertNewSuccessionIdentityAvailable(state, route, input.new);
+      state.codexSuccession = {
+        schemaVersion: 1,
+        stage: "prepared",
+        old: cloneSuccessionIdentity(input.old),
+        new: cloneSuccessionIdentity(input.new),
+      };
+    });
+  }
+
+  /** Durably closes the rollback-to-old boundary before registry publication. */
+  async armCodexSuccessionPublication(
+    input: ExactCodexSuccessionInput,
+  ): Promise<void> {
+    await this.mutate(async (state) => {
+      const journal = this.requireExactSuccession(
+        state,
+        input,
+        ["prepared"],
+      );
+      this.assertSuccessionLedgerEmpty(state);
+      this.requireJournalRoute(state, journal, "old");
+      state.codexSuccession = { ...journal, stage: "publication_armed" };
+    });
+  }
+
+  /** Record that the exact new registry generation is externally visible. */
+  async markCodexSuccessionPublished(
+    input: ExactCodexSuccessionInput,
+  ): Promise<void> {
+    await this.mutate(async (state) => {
+      const journal = this.requireExactSuccession(
+        state,
+        input,
+        ["publication_armed"],
+      );
+      this.assertSuccessionLedgerEmpty(state);
+      this.requireJournalRoute(state, journal, "old");
+      state.codexSuccession = { ...journal, stage: "published" };
+    });
+  }
+
+  /**
+   * Atomically replace the sole old Codex route with the exact journaled new
+   * private binding. No route gap is ever persisted.
+   */
+  async activateCodexSuccession(
+    input: ActivateCodexSuccessionInput,
+  ): Promise<void> {
+    await this.mutate(async (state, now) => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(input, ["oldGeneration", "newGeneration", "state"]) ||
+        !["idle", "busy", "awaiting_approval"].includes(input.state)
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_SUCCESSION",
+          "The Codex succession activation request is malformed.",
+        );
+      }
+      const journal = this.requireExactSuccession(
+        state,
+        {
+          oldGeneration: input.oldGeneration,
+          newGeneration: input.newGeneration,
+        },
+        ["published"],
+      );
+      this.assertSuccessionLedgerEmpty(state);
+      const route = this.requireJournalRoute(state, journal, "old");
+      this.requireCompatibleObservedEndpoint(state, journal.new.binding);
+      this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
+      this.replaceCodexRouteForSuccession(
+        state,
+        route,
+        journal.new,
+        now,
+        input.state,
+        "compatible",
+      );
+      state.codexSuccession = { ...journal, stage: "activated" };
+    });
+  }
+
+  /** Record an armed-or-later failure for fail-closed restart authority. */
+  async forbidCodexSuccessionRecovery(
+    input: ForbidCodexSuccessionRecoveryInput,
+  ): Promise<void> {
+    await this.mutate(async (state) => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(input, [
+          "oldGeneration",
+          "newGeneration",
+          "safeErrorCode",
+        ]) ||
+        !isSafeCode(input.safeErrorCode)
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_SUCCESSION",
+          "The Codex recovery-forbidden request is malformed.",
+        );
+      }
+      const journal = this.requireExactSuccession(
+        state,
+        {
+          oldGeneration: input.oldGeneration,
+          newGeneration: input.newGeneration,
+        },
+        [
+          "publication_armed",
+          "published",
+          "activated",
+          "recovery_forbidden",
+        ],
+      );
+      this.assertSuccessionLedgerEmpty(state);
+      const expected =
+        journal.stage === "activated" ? "new" : undefined;
+      if (expected !== undefined) this.requireJournalRoute(state, journal, expected);
+      else {
+        const route = this.requireSoleCodexRoute(state);
+        if (
+          !routeMatchesSuccessionIdentity(route, journal.old) &&
+          !routeMatchesSuccessionIdentity(route, journal.new)
+        ) {
+          throw new BridgeError(
+            "CODEX_SUCCESSION_OWNER_MISMATCH",
+            "The recovery-forbidden journal no longer owns the sole Codex route.",
+          );
+        }
+      }
+      state.codexSuccession = {
+        ...journal,
+        stage: "recovery_forbidden",
+        safeErrorCode: input.safeErrorCode,
+      };
+    });
+  }
+
+  /** Clear before arming, or after positive proof that an arm was unpublished. */
+  async clearCodexSuccession(
+    input: ClearCodexSuccessionInput,
+  ): Promise<void> {
+    await this.mutate(async (state) => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(
+          input,
+          ["oldGeneration", "newGeneration"],
+          ["publicationAbsenceConfirmed"],
+        ) ||
+        (input.publicationAbsenceConfirmed !== undefined &&
+          input.publicationAbsenceConfirmed !== true)
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_SUCCESSION",
+          "The Codex succession clear request is malformed.",
+        );
+      }
+      const journal = this.requireExactSuccession(
+        state,
+        {
+          oldGeneration: input.oldGeneration,
+          newGeneration: input.newGeneration,
+        },
+        ["prepared", "publication_armed"],
+      );
+      if (
+        journal.stage === "publication_armed" &&
+        input.publicationAbsenceConfirmed !== true
+      ) {
+        throw new BridgeError(
+          "CODEX_SUCCESSION_PUBLICATION_PROOF_REQUIRED",
+          "Clearing an armed succession requires positive proof that publication is absent.",
+        );
+      }
+      this.assertSuccessionLedgerEmpty(state);
+      this.requireJournalRoute(state, journal, "old");
+      state.codexSuccession = null;
+    });
+  }
+
+  /** Complete an activated or restart-canonicalized new generation. */
+  async completeCodexSuccession(
+    input: ExactCodexSuccessionInput,
+  ): Promise<void> {
+    await this.mutate(async (state) => {
+      const journal = this.requireExactSuccession(state, input, [
+        "activated",
+        "recovery_forbidden",
+      ]);
+      this.assertSuccessionLedgerEmpty(state);
+      this.requireJournalRoute(state, journal, "new");
+      state.codexSuccession = null;
+    });
+  }
+
+  /** Controller-private restart authority; omitted from every public view. */
+  async inspectCodexSuccessionRecoveryAuthority(): Promise<CodexSuccessionRecoveryAuthority> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      const journal = this.journal(state);
+      if (journal === null) return { authority: "none" };
+      return {
+        authority: journal.stage === "prepared" ? "old" : "new",
+        journal: cloneSuccessionJournal(journal),
+      };
     });
   }
 
@@ -2125,6 +2662,161 @@ export class GatewayStore {
     return this.state;
   }
 
+  private journal(state: GatewayPersistedState): CodexSuccessionJournal | null {
+    if (state.codexSuccession === null) return null;
+    if (!isCodexSuccessionJournal(state.codexSuccession)) {
+      throw new BridgeError(
+        "CORRUPT_GATEWAY_STATE",
+        "The in-memory Codex succession journal is invalid.",
+      );
+    }
+    return state.codexSuccession;
+  }
+
+  private requireExactSuccession(
+    state: GatewayPersistedState,
+    input: ExactCodexSuccessionInput,
+    allowedStages: readonly CodexSuccessionJournalStage[],
+  ): CodexSuccessionJournal {
+    if (
+      !isObject(input) ||
+      !hasOnlyKeys(input, ["oldGeneration", "newGeneration"]) ||
+      !isCodexRegistrationGeneration(input.oldGeneration) ||
+      !isCodexRegistrationGeneration(input.newGeneration)
+    ) {
+      throw new BridgeError(
+        "INVALID_CODEX_SUCCESSION",
+        "The exact Codex succession generations are malformed.",
+      );
+    }
+    const journal = this.journal(state);
+    if (journal === null) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_NOT_FOUND",
+        "No durable Codex succession journal exists.",
+      );
+    }
+    if (
+      journal.old.generation !== input.oldGeneration ||
+      journal.new.generation !== input.newGeneration ||
+      !allowedStages.includes(journal.stage)
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_OWNER_MISMATCH",
+        "The succession stage or exact generation ownership does not match.",
+      );
+    }
+    return journal;
+  }
+
+  private assertSuccessionLedgerEmpty(state: GatewayPersistedState): void {
+    if (
+      state.queue.length !== 0 ||
+      state.inFlight.length !== 0 ||
+      this.transientBodies.size !== 0 ||
+      state.routes.some(
+        (route) => route.binding.provider === "codex" && route.queueDepth !== 0,
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_LEDGER_NOT_EMPTY",
+        "Codex succession requires a fully drained queue and in-flight ledger.",
+        true,
+      );
+    }
+  }
+
+  private requireSoleCodexRoute(
+    state: GatewayPersistedState,
+  ): GatewayRouteRecord {
+    const routes = state.routes.filter(
+      (route) => route.binding.provider === "codex",
+    );
+    if (routes.length !== 1 || routes[0] === undefined) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_ROUTE_MISMATCH",
+        "Codex succession requires exactly one persisted Codex route.",
+      );
+    }
+    return routes[0];
+  }
+
+  private requireJournalRoute(
+    state: GatewayPersistedState,
+    journal: CodexSuccessionJournal,
+    side: "old" | "new",
+  ): GatewayRouteRecord {
+    const route = this.requireSoleCodexRoute(state);
+    if (!routeMatchesSuccessionIdentity(route, journal[side])) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_OWNER_MISMATCH",
+        `The sole Codex route does not match the exact ${side} succession owner.`,
+      );
+    }
+    return route;
+  }
+
+  private assertNewSuccessionIdentityAvailable(
+    state: GatewayPersistedState,
+    oldRoute: GatewayRouteRecord,
+    identity: CodexSuccessionStoreIdentity,
+  ): void {
+    if (
+      state.routes.some(
+        (candidate) =>
+          candidate !== oldRoute &&
+          (candidate.alias === identity.alias ||
+            sameRouteTarget(candidate.binding, identity.binding) ||
+            candidate.binding.ownerLease === identity.binding.ownerLease),
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_BINDING_COLLISION",
+        "The new Codex identity collides with another persisted route.",
+      );
+    }
+  }
+
+  private replaceCodexRouteForSuccession(
+    state: GatewayPersistedState,
+    route: GatewayRouteRecord,
+    identity: CodexSuccessionStoreIdentity,
+    now: Date,
+    routeState: "idle" | "busy" | "awaiting_approval" | "stale",
+    compatibility: "compatible" | "expired",
+  ): void {
+    const oldAlias = route.alias;
+    route.alias = identity.alias;
+    route.binding = { ...identity.binding };
+    route.registrationMode = "explicit_opt_in";
+    route.enabled = true;
+    route.state = routeState;
+    route.compatibility = compatibility;
+    route.registeredAt = now.toISOString();
+    route.updatedAt = now.toISOString();
+    route.queueDepth = 0;
+    route.counters = emptyCounters();
+    if (routeState === "stale") {
+      delete route.lastSeenAt;
+      route.safeErrorCode = "REOBSERVATION_REQUIRED";
+    } else {
+      route.lastSeenAt = now.toISOString();
+      delete route.safeErrorCode;
+    }
+    state.dedupe = state.dedupe.filter(
+      (record) =>
+        record.sourceAlias !== oldAlias &&
+        record.targetAlias !== oldAlias &&
+        record.sourceAlias !== identity.alias &&
+        record.targetAlias !== identity.alias,
+    );
+    state.rateBuckets = state.rateBuckets.filter(
+      (bucket) =>
+        bucket.sourceAlias !== oldAlias &&
+        bucket.sourceAlias !== identity.alias,
+    );
+  }
+
   private assertAllowedIdentity(identity: PrivateEndpointIdentity): void {
     if (!isPrivateEndpointIdentity(identity)) {
       throw new BridgeError(
@@ -2136,6 +2828,25 @@ export class GatewayStore {
       throw new BridgeError(
         "GATEWAY_HOST_NOT_ALLOWED",
         "The route host is not in the fixed gateway allowlist.",
+      );
+    }
+  }
+
+  private requireCompatibleObservedEndpoint(
+    state: GatewayPersistedState,
+    binding: PrivateRouteBinding,
+  ): void {
+    const connector = state.connectors.find((candidate) =>
+      sameEndpoint(candidate, binding),
+    );
+    if (
+      !connector ||
+      !["healthy", "degraded"].includes(connector.health) ||
+      connector.compatibility !== "compatible"
+    ) {
+      throw new BridgeError(
+        "ROUTE_ENDPOINT_NOT_OBSERVED",
+        "The exact compatible endpoint generation must be observed before Codex succession can publish or activate it.",
       );
     }
   }
@@ -2693,6 +3404,7 @@ export class GatewayStore {
 
   private recoverAfterRestart(now: Date): void {
     const state = this.requireState();
+    this.recoverCodexSuccessionAfterRestart(state, now);
     for (const connector of state.connectors) {
       connector.health = "offline";
       connector.compatibility = "expired";
@@ -2729,6 +3441,39 @@ export class GatewayStore {
     state.inFlight = [];
     state.accounting.queuedBytes = 0;
     this.transientBodies.clear();
+  }
+
+  private recoverCodexSuccessionAfterRestart(
+    state: GatewayPersistedState,
+    now: Date,
+  ): void {
+    const journal = this.journal(state);
+    if (journal === null || journal.stage === "prepared") return;
+    this.assertSuccessionLedgerEmpty(state);
+    const route = this.requireSoleCodexRoute(state);
+    if (
+      !routeMatchesSuccessionIdentity(route, journal.old) &&
+      !routeMatchesSuccessionIdentity(route, journal.new)
+    ) {
+      throw new BridgeError(
+        "CORRUPT_GATEWAY_STATE",
+        "The durable succession journal owns neither persisted Codex route generation.",
+      );
+    }
+    this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
+    this.replaceCodexRouteForSuccession(
+      state,
+      route,
+      journal.new,
+      now,
+      "stale",
+      "expired",
+    );
+    state.codexSuccession = {
+      ...journal,
+      stage: "recovery_forbidden",
+      safeErrorCode: "CODEX_SUCCESSION_RESTART_RECOVERY_REQUIRED",
+    };
   }
 
   private aggregateHealth(
@@ -3070,6 +3815,7 @@ export class GatewayStore {
       );
     }
     parsed = migratePreUnconfirmedCounters(parsed);
+    parsed = migratePreSuccessionJournal(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

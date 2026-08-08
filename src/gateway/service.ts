@@ -35,7 +35,22 @@ import {
   type NativeReceiptNotification,
 } from "./delivery-machine.js";
 import {
+  createCodexRegistrationSuccession,
+  transitionCodexRegistrationSuccession,
+  type CodexRegistrationIdentity,
+  type CodexRegistrationSuccessionEffect,
+  type CodexRegistrationSuccessionEvent,
+  type CodexRegistrationSuccessionState,
+  type CodexSuccessionFailurePhase,
+} from "./codex-registration-succession.js";
+import {
+  createCodexRegistrationGeneration,
+  isCodexRegistrationGeneration,
+} from "./codex-registration-generation.js";
+import {
   GatewayStore,
+  type CodexSuccessionRecoveryAuthority,
+  type CodexSuccessionStoreIdentity,
   type RouteInFlightSettlementInput,
 } from "./store.js";
 import {
@@ -202,6 +217,55 @@ export interface GatewayProviderAdapter {
   ): boolean | Promise<boolean>;
   /** Fence new native ingress while keeping receipt writes available. */
   quiesceNativeInbound?(): Promise<void>;
+  /** Claude-only exact listener-generation succession controls. */
+  currentNativeCodexPeerGeneration?(alias: string): string;
+  prepareNativeCodexPeerGeneration?(input: {
+    alias: string;
+    cwd: string;
+    generation: string;
+  }): Promise<void>;
+  quiesceNativeCodexPeerGeneration?(generation: string): Promise<void>;
+  observeNativeCodexSuccessionBarrier?(generation: string): Readonly<{
+    generation: string;
+    activeGenerationMatched: boolean;
+    ingressQuiesced: boolean;
+    monitorFrozen: boolean;
+    discoveryInFlight: boolean;
+    pendingOutboundReceipts: number;
+    pendingInboundReceipts: number;
+    rejectedInboundSettlements: number;
+    clean: boolean;
+  }>;
+  publishPreparedNativeCodexPeer?(input: {
+    currentGeneration: string;
+    preparedGeneration: string;
+  }): Promise<"published" | "not_published" | "unknown">;
+  activatePreparedNativeCodexPeerGeneration?(generation: string): void;
+  cleanupPreparedNativeCodexPeerGeneration?(generation: string): Promise<void>;
+  resumeNativeCodexPeerGeneration?(generation: string): void;
+  rollbackPreparedNativeCodexPeerGeneration?(input: {
+    preparedGeneration: string;
+    resumeGeneration: string;
+  }): Promise<void>;
+  retireNativeCodexPeerGeneration?(input: {
+    retiredGeneration: string;
+    protectedActiveGeneration: string;
+  }): Promise<void>;
+  purgeNativeCodexPeerGenerationReplyCapabilities?(generation: string): number;
+  /** Codex-only private provider-work barrier for one exact task route. */
+  observeRouteSuccessionBarrier?(routeHandle: string): Readonly<{
+    routePresent: boolean;
+    connection: string;
+    routeStatus: string;
+    queueDepth: number;
+    hasActiveTurn: boolean;
+    requestInFlight: boolean;
+    routeCreationInFlight: boolean;
+    routeReleaseInFlight: boolean;
+    pendingReplyCorrelations: number;
+    pendingCallbacks: number;
+    clean: boolean;
+  }>;
   dispatch(input: {
     binding: PrivateRouteBinding;
     authorization: "selected_route" | "native_reply";
@@ -350,6 +414,8 @@ export type GatewayServiceOptions = {
   now?: () => Date;
   nativePeerCwd?: string;
   timers?: GatewayServiceTimers;
+  /** Test seam for opaque listener generations; production remains random. */
+  successionGeneration?: () => string;
 };
 
 function bindingKey(binding: PrivateRouteBinding): string {
@@ -376,7 +442,28 @@ type CodexRegistrationLock = Readonly<{
   alias: string;
   threadId: string;
   hostId: string;
+  generation: string;
 }>;
+
+type PendingCodexSuccessionRecovery = Extract<
+  CodexSuccessionRecoveryAuthority,
+  { journal: unknown }
+> & { authority: "new" };
+
+type CodexSuccessionExecution = {
+  state: CodexRegistrationSuccessionState;
+  readonly oldRegistration: CodexRegistrationIdentity;
+  readonly newRegistration: CodexRegistrationIdentity;
+  readonly oldBinding: PrivateRouteBinding;
+  readonly newBinding: PrivateRouteBinding;
+  newRouteState?: GatewayAdapterRouteState;
+  newCodexSelected: boolean;
+  newListenerPrepared: boolean;
+  storePrepared: boolean;
+  publicationAbsenceConfirmed: boolean;
+  requestFailureCode?: string;
+  recoveryFailed: boolean;
+};
 
 function decisionFor(error: unknown): RejectedDecision {
   if (!(error instanceof BridgeError)) {
@@ -416,6 +503,7 @@ export class GatewayService {
   private readonly now: () => Date;
   private readonly timers: GatewayServiceTimers;
   private readonly nativePeerCwd: string;
+  private readonly successionGeneration: () => string;
   private readonly mutex = new KeyedMutex();
   private readonly routeBindings = new Map<string, PrivateRouteBinding>();
   private readonly routeStates = new Map<string, GatewayAdapterRouteState>();
@@ -462,10 +550,16 @@ export class GatewayService {
   private closeInFlight: Promise<void> | undefined;
   private acceptingCallbacks = true;
   private dashboardHealthy = true;
+  /** Globally fences dispatch while the single Codex identity is replaced. */
+  private codexSuccessionDispatchFrozen = false;
+  private codexSuccessionPoisoned = false;
+  private codexSuccessionState: CodexRegistrationSuccessionState | undefined;
+  private pendingCodexSuccessionRecovery:
+    | PendingCodexSuccessionRecovery
+    | undefined;
   /**
-   * Process-lifetime identity guard. Unregistering removes reachability but
-   * cannot turn the same native callback socket into a differently named
-   * Codex peer. A new GatewayService process starts with no such lock.
+   * Exact active identity. It changes only through the journaled succession
+   * machine; ordinary unregister/register cannot repurpose one listener.
    */
   private codexRegistrationLock: CodexRegistrationLock | undefined;
 
@@ -481,6 +575,9 @@ export class GatewayService {
       clearTimeout: (timer) => clearTimeout(timer),
     };
     this.nativePeerCwd = options.nativePeerCwd ?? process.cwd();
+    this.successionGeneration =
+      options.successionGeneration ??
+      createCodexRegistrationGeneration;
     this.callbackCapacity = Math.max(
       64,
       options.config.limits.maxRoutes +
@@ -539,6 +636,8 @@ export class GatewayService {
         });
         assertStartActive();
       }
+      await this.recoverCodexSuccessionAfterRestartLocked();
+      assertStartActive();
       const control = await startGatewayControlServer({
         stateDir: this.store.rootDir,
         socketPath: this.config.controlSocketPath,
@@ -1167,12 +1266,778 @@ export class GatewayService {
     );
   }
 
+  private async recoverCodexSuccessionAfterRestartLocked(): Promise<void> {
+    const authority = await this.store.inspectCodexSuccessionRecoveryAuthority();
+    if (authority.authority === "none") return;
+    const exact = {
+      oldGeneration: authority.journal.old.generation,
+      newGeneration: authority.journal.new.generation,
+    };
+    if (authority.authority === "old") {
+      // A prepared listener is process-owned and cannot survive restart. The
+      // durable store proves publication was never armed, so the stale old
+      // route remains the sole authority and may be explicitly re-observed.
+      await this.store.clearCodexSuccession(exact);
+      return;
+    }
+    // Armed or later recovery is canonicalized by the store to the new route.
+    // Only an exact re-registration of that new task may clear the journal;
+    // the old task is never restored after this boundary.
+    this.pendingCodexSuccessionRecovery = {
+      authority: "new",
+      journal: authority.journal,
+    };
+    this.codexRegistrationLock = Object.freeze({
+      alias: authority.journal.new.alias,
+      threadId: authority.journal.new.threadId,
+      hostId: authority.journal.new.hostId,
+      generation: authority.journal.new.generation,
+    });
+  }
+
+  private async completePendingCodexSuccessionRecoveryLocked(
+    params: ValidatedRegisterCodexParams,
+  ): Promise<void> {
+    const recovery = this.pendingCodexSuccessionRecovery;
+    if (recovery === undefined) return;
+    if (
+      recovery.journal.new.alias !== params.alias ||
+      recovery.journal.new.threadId !== params.threadId ||
+      recovery.journal.new.hostId !== params.hostId
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_RECOVERY_MISMATCH",
+        "Only the exact successor task may recover this Codex registration.",
+      );
+    }
+    await this.store.completeCodexSuccession({
+      oldGeneration: recovery.journal.old.generation,
+      newGeneration: recovery.journal.new.generation,
+    });
+    this.pendingCodexSuccessionRecovery = undefined;
+  }
+
+  private requireCurrentNativeCodexGeneration(
+    adapter: GatewayProviderAdapter,
+    alias: string,
+  ): string {
+    const current = adapter.currentNativeCodexPeerGeneration;
+    if (current === undefined) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_UNAVAILABLE",
+        "The Claude provider cannot identify its active Codex listener generation.",
+      );
+    }
+    const generation = current.call(adapter, alias);
+    if (!isCodexRegistrationGeneration(generation)) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_GENERATION_INVALID",
+        "The active Codex listener generation is malformed.",
+      );
+    }
+    return generation;
+  }
+
+  private nextCodexSuccessionGeneration(oldGeneration: string): string {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const generation = this.successionGeneration();
+      if (
+        isCodexRegistrationGeneration(generation) &&
+        generation !== oldGeneration
+      ) {
+        return generation;
+      }
+    }
+    throw new BridgeError(
+      "CODEX_SUCCESSION_GENERATION_UNAVAILABLE",
+      "A fresh Codex listener generation could not be allocated.",
+    );
+  }
+
+  private successionStoreIdentity(
+    registration: CodexRegistrationIdentity,
+    binding: PrivateRouteBinding,
+  ): CodexSuccessionStoreIdentity {
+    return {
+      ...registration,
+      binding: { ...binding },
+    };
+  }
+
+  private requireSuccessionMethod<K extends keyof GatewayProviderAdapter>(
+    adapter: GatewayProviderAdapter,
+    key: K,
+  ): NonNullable<GatewayProviderAdapter[K]> {
+    const method = adapter[key];
+    if (typeof method !== "function") {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_UNAVAILABLE",
+        "A provider does not support exact Codex registration succession.",
+      );
+    }
+    return method as NonNullable<GatewayProviderAdapter[K]>;
+  }
+
+  private async succeedCodexRegistration(
+    params: ValidatedRegisterCodexParams,
+  ): Promise<void> {
+    const oldAlias = params.succeedsAlias;
+    const lock = this.codexRegistrationLock;
+    if (
+      oldAlias === undefined ||
+      lock === undefined ||
+      lock.alias !== oldAlias ||
+      lock.hostId !== params.hostId ||
+      lock.alias === params.alias ||
+      lock.threadId === params.threadId ||
+      this.pendingCodexSuccessionRecovery !== undefined
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_OWNER_MISMATCH",
+        "A successor must name the exact active Codex registration on the same host.",
+      );
+    }
+    if (
+      this.codexSuccessionState !== undefined &&
+      this.codexSuccessionState.phase !== "active_old" &&
+      !(
+        this.codexSuccessionState.phase === "active_new" &&
+        this.codexSuccessionState.retired === null
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_ALREADY_ACTIVE",
+        "Another Codex registration succession is still active.",
+        true,
+      );
+    }
+    const oldInspection = await this.store.inspectPrivateRoute(oldAlias);
+    if (
+      oldInspection === undefined ||
+      oldInspection.binding.provider !== "codex" ||
+      oldInspection.binding.hostId !== lock.hostId ||
+      oldInspection.binding.routeHandle !== lock.threadId ||
+      oldInspection.binding.ownerLease !==
+        stableLease("codex", `${lock.hostId}\0${lock.threadId}`) ||
+      !oldInspection.enabled ||
+      oldInspection.compatibility !== "compatible"
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_OWNER_MISMATCH",
+        "The active Codex registration is no longer exact and compatible.",
+      );
+    }
+    const claudeAdapter = this.adapter("claude", params.hostId);
+    const observedGeneration = this.requireCurrentNativeCodexGeneration(
+      claudeAdapter,
+      oldAlias,
+    );
+    if (lock.generation !== observedGeneration) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_GENERATION_MISMATCH",
+        "The active Codex listener generation changed before succession.",
+      );
+    }
+    const newGeneration =
+      this.nextCodexSuccessionGeneration(observedGeneration);
+    const oldRegistration: CodexRegistrationIdentity = {
+      alias: oldAlias,
+      threadId: lock.threadId,
+      hostId: lock.hostId,
+      generation: observedGeneration,
+    };
+    const newRegistration: CodexRegistrationIdentity = {
+      alias: params.alias,
+      threadId: params.threadId,
+      hostId: params.hostId,
+      generation: newGeneration,
+    };
+    const codexAdapter = this.adapter("codex", params.hostId);
+    const newBinding: PrivateRouteBinding = {
+      ...codexAdapter.identity,
+      routeHandle: params.threadId,
+      ownerLease: stableLease("codex", `${params.hostId}\0${params.threadId}`),
+    };
+    const execution: CodexSuccessionExecution = {
+      state: createCodexRegistrationSuccession(oldRegistration),
+      oldRegistration,
+      newRegistration,
+      oldBinding: { ...oldInspection.binding },
+      newBinding,
+      newCodexSelected: false,
+      newListenerPrepared: false,
+      storePrepared: false,
+      publicationAbsenceConfirmed: false,
+      recoveryFailed: false,
+    };
+    this.codexSuccessionState = execution.state;
+    await this.driveCodexSuccessionLocked(execution, {
+      type: "begin",
+      registration: newRegistration,
+    });
+    await this.changed().catch(() => {
+      this.dashboardHealthy = false;
+    });
+    if (execution.requestFailureCode !== undefined) {
+      throw new BridgeError(
+        execution.requestFailureCode,
+        this.codexSuccessionPoisoned
+          ? "Codex succession requires manual recovery."
+          : "Codex succession did not pass its quiescence or publication boundary.",
+        execution.requestFailureCode.includes("BUSY"),
+      );
+    }
+    if (
+      execution.state.phase !== "active_new" ||
+      execution.state.retired !== null
+    ) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_INCOMPLETE",
+        "Codex succession did not reach a stable active generation.",
+      );
+    }
+    this.codexRegistrationLock = Object.freeze({ ...newRegistration });
+    if (execution.newRouteState === "idle") {
+      this.scheduleDispatch(newRegistration.alias);
+    }
+  }
+
+  private async driveCodexSuccessionLocked(
+    execution: CodexSuccessionExecution,
+    event: CodexRegistrationSuccessionEvent,
+    recoverFailures = true,
+  ): Promise<void> {
+    const transition = transitionCodexRegistrationSuccession(
+      execution.state,
+      event,
+    );
+    execution.state = transition.state;
+    this.codexSuccessionState = transition.state;
+    for (const effect of transition.effects) {
+      try {
+        const next = await this.executeCodexSuccessionEffectLocked(
+          execution,
+          effect,
+        );
+        if (next !== undefined) {
+          if (!recoverFailures && execution.recoveryFailed) {
+            continue;
+          }
+          await this.driveCodexSuccessionLocked(
+            execution,
+            next,
+            recoverFailures,
+          );
+          return;
+        }
+      } catch (error) {
+        const phase = this.codexSuccessionFailurePhase(effect);
+        const code = safeCode(
+          error instanceof BridgeError ? error.code : undefined,
+          `CODEX_SUCCESSION_${phase.toUpperCase()}_FAILED`,
+        );
+        execution.requestFailureCode ??= code;
+        if (!recoverFailures) {
+          execution.recoveryFailed = true;
+          this.dashboardHealthy = false;
+          continue;
+        }
+        await this.recoverCodexSuccessionLocked(execution, phase, code);
+        return;
+      }
+    }
+  }
+
+  private async recoverCodexSuccessionLocked(
+    execution: CodexSuccessionExecution,
+    phase: CodexSuccessionFailurePhase,
+    safeErrorCode: string,
+  ): Promise<void> {
+    await this.driveCodexSuccessionLocked(
+      execution,
+      {
+        type: "phase_failed",
+        generation: this.successionNewRegistration(execution).generation,
+        phase,
+        safeErrorCode,
+      },
+      false,
+    );
+    if (execution.recoveryFailed && execution.state.phase === "recovery_required") {
+      execution.recoveryFailed = false;
+      await this.driveCodexSuccessionLocked(
+        execution,
+        {
+          type: "phase_failed",
+          generation: this.successionNewRegistration(execution).generation,
+          phase: "cleanup",
+          safeErrorCode: "CODEX_SUCCESSION_CLEANUP_FAILED",
+        },
+        false,
+      );
+    }
+  }
+
+  private successionNewRegistration(
+    execution: CodexSuccessionExecution,
+  ): CodexRegistrationIdentity {
+    return execution.newRegistration;
+  }
+
+  private codexSuccessionFailurePhase(
+    effect: CodexRegistrationSuccessionEffect,
+  ): CodexSuccessionFailurePhase {
+    switch (effect.type) {
+      case "freeze_old_ingress":
+      case "freeze_old_dispatch":
+      case "quiesce_and_join_old":
+        return "freeze";
+      case "verify_full_barrier":
+        return "barrier";
+      case "create_fresh_listener_generation":
+        return "listener";
+      case "purge_old_conversations":
+      case "purge_old_reply_capabilities":
+      case "prepare_new_store":
+        return "store";
+      case "arm_publication_journal":
+        return "publication_arm";
+      case "publish_new_registry":
+        return "registry";
+      case "activate_new_registration":
+        return "activation";
+      case "retire_old_generation":
+      case "close_old_listener":
+        return "retirement";
+      case "cleanup_unpublished_generation":
+      case "resume_old_ingress":
+      case "resume_old_dispatch":
+      case "poison_new_generation":
+      case "take_registrations_offline":
+      case "cleanup_poisoned_generations":
+      case "manual_recovery_required":
+        return "cleanup";
+    }
+  }
+
+  private async executeCodexSuccessionEffectLocked(
+    execution: CodexSuccessionExecution,
+    effect: CodexRegistrationSuccessionEffect,
+  ): Promise<CodexRegistrationSuccessionEvent | undefined> {
+    const newRegistration = this.successionNewRegistration(execution);
+    const claudeAdapter = this.adapter("claude", newRegistration.hostId);
+    const codexAdapter = this.adapter("codex", newRegistration.hostId);
+    const exact = {
+      oldGeneration: execution.oldRegistration.generation,
+      newGeneration: newRegistration.generation,
+    };
+    switch (effect.type) {
+      case "freeze_old_ingress": {
+        const quiesce = this.requireSuccessionMethod(
+          claudeAdapter,
+          "quiesceNativeCodexPeerGeneration",
+        );
+        await quiesce.call(claudeAdapter, effect.registration.generation);
+        return undefined;
+      }
+      case "freeze_old_dispatch":
+        this.codexSuccessionDispatchFrozen = true;
+        this.scheduledDispatchTargets.clear();
+        return undefined;
+      case "quiesce_and_join_old":
+        await this.drainCallbackQueueLocked();
+        await this.drainDetachedReceiptWritesLocked();
+        return undefined;
+      case "verify_full_barrier": {
+        if (await this.codexSuccessionBarrierCleanLocked(effect.registration)) {
+          return { type: "barrier_clean", generation: newRegistration.generation };
+        }
+        execution.requestFailureCode ??= "CODEX_SUCCESSION_BARRIER_BUSY";
+        return {
+          type: "barrier_busy",
+          generation: newRegistration.generation,
+          safeErrorCode: "CODEX_SUCCESSION_BARRIER_BUSY",
+        };
+      }
+      case "create_fresh_listener_generation": {
+        const prepare = this.requireSuccessionMethod(
+          claudeAdapter,
+          "prepareNativeCodexPeerGeneration",
+        );
+        await prepare.call(claudeAdapter, {
+          alias: effect.registration.alias,
+          cwd: this.nativePeerCwd,
+          generation: effect.registration.generation,
+        });
+        execution.newListenerPrepared = true;
+        return {
+          type: "listener_prepared",
+          generation: effect.registration.generation,
+        };
+      }
+      case "purge_old_conversations":
+        // The barrier proves no accepted body or live continuation remains.
+        // Inert conversation identifiers are deliberately not inherited by a
+        // successor identity.
+        this.conversations.clear();
+        return undefined;
+      case "purge_old_reply_capabilities": {
+        this.pendingClaudeReplies.clear();
+        this.nativeIngressByConversation.clear();
+        const purge = this.requireSuccessionMethod(
+          claudeAdapter,
+          "purgeNativeCodexPeerGenerationReplyCapabilities",
+        );
+        purge.call(claudeAdapter, effect.registration.generation);
+        return undefined;
+      }
+      case "prepare_new_store": {
+        const selected = await codexAdapter.selectRoute({
+          alias: effect.registration.alias,
+          routeHandle: effect.registration.threadId,
+        });
+        execution.newCodexSelected = true;
+        if (selected.routeHandle !== effect.registration.threadId) {
+          throw new BridgeError(
+            "ROUTE_MISMATCH",
+            "The connector prepared a different successor task.",
+          );
+        }
+        execution.newRouteState = selected.state;
+        await this.store.prepareCodexSuccession({
+          old: this.successionStoreIdentity(
+            this.successionOldRegistration(execution),
+            execution.oldBinding,
+          ),
+          new: this.successionStoreIdentity(
+            effect.registration,
+            execution.newBinding,
+          ),
+        });
+        execution.storePrepared = true;
+        return {
+          type: "store_prepared",
+          generation: effect.registration.generation,
+        };
+      }
+      case "arm_publication_journal":
+        await this.store.armCodexSuccessionPublication(exact);
+        return {
+          type: "publication_armed",
+          generation: effect.registration.generation,
+        };
+      case "publish_new_registry": {
+        const publish = this.requireSuccessionMethod(
+          claudeAdapter,
+          "publishPreparedNativeCodexPeer",
+        );
+        const outcome = await publish.call(claudeAdapter, {
+          currentGeneration: exact.oldGeneration,
+          preparedGeneration: exact.newGeneration,
+        });
+        if (outcome === "not_published") {
+          execution.publicationAbsenceConfirmed = true;
+          execution.requestFailureCode ??=
+            "CODEX_SUCCESSION_PUBLICATION_NOT_PUBLISHED";
+          return {
+            type: "publication_absence_confirmed",
+            generation: exact.newGeneration,
+          };
+        }
+        if (outcome === "unknown") {
+          throw new BridgeError(
+            "CODEX_SUCCESSION_PUBLICATION_UNKNOWN",
+            "The successor registry publication outcome is unknown.",
+          );
+        }
+        await this.store.markCodexSuccessionPublished(exact);
+        return {
+          type: "registry_published",
+          generation: exact.newGeneration,
+        };
+      }
+      case "activate_new_registration": {
+        const state = execution.newRouteState;
+        if (state === undefined) {
+          throw new BridgeError(
+            "CODEX_SUCCESSION_STATE_MISMATCH",
+            "The successor task has no prepared route state.",
+          );
+        }
+        // Durable route authority changes before the prepared listener is
+        // granted ingress. A published listener cannot accept a body while
+        // the store still authorizes the old task.
+        await this.store.activateCodexSuccession({ ...exact, state });
+        const activate = this.requireSuccessionMethod(
+          claudeAdapter,
+          "activatePreparedNativeCodexPeerGeneration",
+        );
+        activate.call(claudeAdapter, effect.registration.generation);
+        this.forgetBinding(this.successionOldRegistration(execution).alias);
+        this.rememberBinding(
+          effect.registration.alias,
+          execution.newBinding,
+          state,
+        );
+        this.codexRegistrationLock = Object.freeze({ ...effect.registration });
+        await claudeAdapter.updateNativeCodexPeerStatus?.(
+          effect.registration.alias,
+          state === "idle"
+            ? "idle"
+            : state === "awaiting_approval"
+              ? "waiting"
+              : "busy",
+        );
+        return { type: "activate", generation: effect.registration.generation };
+      }
+      case "retire_old_generation":
+        await codexAdapter.releaseRoute?.(effect.registration.threadId);
+        return undefined;
+      case "close_old_listener": {
+        const retire = this.requireSuccessionMethod(
+          claudeAdapter,
+          "retireNativeCodexPeerGeneration",
+        );
+        await retire.call(claudeAdapter, {
+          retiredGeneration: effect.registryUnlink.onlyIfOwnedGeneration,
+          protectedActiveGeneration:
+            effect.registryUnlink.protectedActiveGeneration,
+        });
+        await this.store.completeCodexSuccession(exact);
+        this.codexSuccessionDispatchFrozen = false;
+        return {
+          type: "cleanup_confirmed",
+          generation: newRegistration.generation,
+        };
+      }
+      case "cleanup_unpublished_generation": {
+        let cleanupError: unknown;
+        if (execution.newListenerPrepared) {
+          try {
+            const cleanup = this.requireSuccessionMethod(
+              claudeAdapter,
+              "cleanupPreparedNativeCodexPeerGeneration",
+            );
+            await cleanup.call(claudeAdapter, effect.registration.generation);
+            execution.newListenerPrepared = false;
+          } catch (error) {
+            cleanupError = error;
+          }
+        }
+        if (execution.newCodexSelected) {
+          try {
+            await codexAdapter.releaseRoute?.(effect.registration.threadId);
+            execution.newCodexSelected = false;
+          } catch (error) {
+            cleanupError ??= error;
+          }
+        }
+        if (execution.storePrepared) {
+          try {
+            await this.store.clearCodexSuccession({
+              ...exact,
+              ...(execution.publicationAbsenceConfirmed
+                ? { publicationAbsenceConfirmed: true as const }
+                : {}),
+            });
+            execution.storePrepared = false;
+          } catch (error) {
+            cleanupError ??= error;
+          }
+        }
+        if (cleanupError !== undefined) throw cleanupError;
+        return {
+          type: "cleanup_confirmed",
+          generation: effect.registration.generation,
+        };
+      }
+      case "resume_old_ingress": {
+        const resume = this.requireSuccessionMethod(
+          claudeAdapter,
+          "resumeNativeCodexPeerGeneration",
+        );
+        resume.call(claudeAdapter, effect.registration.generation);
+        return undefined;
+      }
+      case "resume_old_dispatch":
+        this.codexSuccessionDispatchFrozen = false;
+        this.rescheduleIdleRoutesLocked();
+        return undefined;
+      case "poison_new_generation":
+        this.codexSuccessionPoisoned = true;
+        if (
+          execution.state.phase === "offline_poisoned" &&
+          execution.state.rollback === "old_allowed"
+        ) {
+          return undefined;
+        }
+        await this.store.forbidCodexSuccessionRecovery({
+          ...exact,
+          safeErrorCode:
+            execution.requestFailureCode ?? "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+        });
+        return undefined;
+      case "take_registrations_offline": {
+        if (
+          execution.state.phase === "offline_poisoned" &&
+          execution.state.rollback === "old_allowed"
+        ) {
+          return undefined;
+        }
+        const route =
+          (await this.store.inspectPrivateRoute(
+            effect.newRegistration.alias,
+          )) ??
+          (await this.store.inspectPrivateRoute(effect.oldRegistration.alias));
+        if (route !== undefined && route.enabled) {
+          const settlements = await this.store.disableRoute(
+            route.alias,
+            route.binding.ownerLease,
+          );
+          for (const settlement of settlements) {
+            await this.applyTerminalSettlementLocked(settlement);
+          }
+        }
+        this.forgetBinding(effect.oldRegistration.alias);
+        this.forgetBinding(effect.newRegistration.alias);
+        for (const adapter of [codexAdapter, claudeAdapter]) {
+          const settlements = await this.store.markConnectorOffline(
+            adapter.identity,
+            "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+          );
+          for (const settlement of settlements) {
+            await this.applyTerminalSettlementLocked(settlement);
+          }
+        }
+        return undefined;
+      }
+      case "cleanup_poisoned_generations": {
+        if (
+          execution.state.phase === "offline_poisoned" &&
+          execution.state.rollback === "old_allowed"
+        ) {
+          await this.executeCodexSuccessionEffectLocked(execution, {
+            type: "cleanup_unpublished_generation",
+            registration: effect.newRegistration,
+          });
+          this.codexSuccessionPoisoned = false;
+          return {
+            type: "cleanup_confirmed",
+            generation: effect.newRegistration.generation,
+          };
+        }
+        const results = await Promise.allSettled([
+          codexAdapter.close(),
+          claudeAdapter.close(),
+        ]);
+        if (results.some((result) => result.status === "rejected")) {
+          throw new BridgeError(
+            "CODEX_SUCCESSION_CLEANUP_FAILED",
+            "The poisoned Codex generations could not be fully closed.",
+          );
+        }
+        return {
+          type: "cleanup_confirmed",
+          generation: effect.newRegistration.generation,
+        };
+      }
+      case "manual_recovery_required":
+        this.dashboardHealthy = false;
+        this.addRuntimeAlert(effect.safeErrorCode, "error", {
+          provider: "codex",
+          host: effect.registration.hostId,
+        });
+        return undefined;
+    }
+  }
+
+  private successionOldRegistration(
+    execution: CodexSuccessionExecution,
+  ): CodexRegistrationIdentity {
+    return execution.oldRegistration;
+  }
+
+  private async codexSuccessionBarrierCleanLocked(
+    oldRegistration: CodexRegistrationIdentity,
+  ): Promise<boolean> {
+    await this.drainCallbackQueueLocked();
+    await this.drainDetachedReceiptWritesLocked();
+    const lifecycleChanged = await this.processLifecycleLocked();
+    if (lifecycleChanged) await this.publish();
+    const store = await this.store.inspectCodexSuccessionBarrier();
+    const claudeAdapter = this.adapter("claude", oldRegistration.hostId);
+    const codexAdapter = this.adapter("codex", oldRegistration.hostId);
+    const observeClaude = this.requireSuccessionMethod(
+      claudeAdapter,
+      "observeNativeCodexSuccessionBarrier",
+    );
+    const observeCodex = this.requireSuccessionMethod(
+      codexAdapter,
+      "observeRouteSuccessionBarrier",
+    );
+    const claude = observeClaude.call(
+      claudeAdapter,
+      oldRegistration.generation,
+    );
+    const codex = observeCodex.call(codexAdapter, oldRegistration.threadId);
+    const trackersClean = [...this.deliveryTrackers.values()].every(
+      (tracker) =>
+        isTerminalDeliveryMachine(tracker.machine) &&
+        tracker.pendingTerminalEvent === undefined &&
+        tracker.pendingTerminalReplyText === undefined &&
+        tracker.settlementRetryAt === undefined &&
+        tracker.nativeReceipt === undefined,
+    );
+    const tokensClean = [...this.deliveryTokens.values()].every((messageId) => {
+      const tracker = this.deliveryTrackers.get(messageId);
+      return tracker !== undefined && isTerminalDeliveryMachine(tracker.machine);
+    });
+    return (
+      !this.closing &&
+      this.codexSuccessionDispatchFrozen &&
+      store.clean &&
+      claude.clean &&
+      claude.generation === oldRegistration.generation &&
+      claude.activeGenerationMatched &&
+      claude.ingressQuiesced &&
+      claude.monitorFrozen &&
+      codex.clean &&
+      this.messageContexts.size === 0 &&
+      this.providerTurnContinuations.size === 0 &&
+      this.activeDispatchByTarget.size === 0 &&
+      this.scheduledDispatchTargets.size === 0 &&
+      this.dispatchRunnerTargets.size === 0 &&
+      this.pendingClaudeReplies.size === 0 &&
+      this.nativeIngressByConversation.size === 0 &&
+      this.callbackQueue.length === 0 &&
+      this.detachedReceiptWrites.size === 0 &&
+      trackersClean &&
+      tokensClean
+    );
+  }
+
+  private rescheduleIdleRoutesLocked(): void {
+    for (const [alias, state] of this.routeStates) {
+      if (state === "idle") this.scheduleDispatch(alias);
+    }
+  }
+
   private async registerCodex(params: ValidatedRegisterCodexParams): Promise<void> {
     if (!params.alias.startsWith("codex-")) {
       throw new BridgeError(
         "INVALID_CODEX_PEER_ALIAS",
         "A registered Codex alias must start with codex-.",
       );
+    }
+    if (this.codexSuccessionPoisoned) {
+      throw new BridgeError(
+        "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+        "Codex registration is offline until the incomplete succession is manually recovered.",
+      );
+    }
+    if (params.succeedsAlias !== undefined) {
+      await this.succeedCodexRegistration(params);
+      return;
     }
     const registrationLock = this.codexRegistrationLock;
     if (
@@ -1236,6 +2101,7 @@ export class GatewayService {
       throw error;
     }
     let advertiseAttempted = false;
+    let listenerGeneration: string | undefined;
     try {
       this.rememberBinding(params.alias, binding, registered.state);
       const claudeAdapter = this.adapter("claude", params.hostId);
@@ -1255,6 +2121,11 @@ export class GatewayService {
             ? "waiting"
             : "busy",
       );
+      listenerGeneration = this.requireCurrentNativeCodexGeneration(
+        claudeAdapter,
+        params.alias,
+      );
+      await this.completePendingCodexSuccessionRecoveryLocked(params);
       await this.changed();
     } catch (error) {
       if (routeBeforeRegistration !== undefined) {
@@ -1281,7 +2152,7 @@ export class GatewayService {
       }
       throw error;
     }
-    this.lockCodexRegistration(params);
+    this.lockCodexRegistration(params, listenerGeneration);
     // The provider may have reported its initial idle observation before this
     // binding was remembered. Explicit registration is itself an authoritative
     // wake-up point, so do not require a second route notification to release a
@@ -1291,12 +2162,31 @@ export class GatewayService {
 
   private lockCodexRegistration(
     params: ValidatedRegisterCodexParams,
+    generation = "unconfirmed",
   ): void {
-    this.codexRegistrationLock ??= Object.freeze({
+    const existing = this.codexRegistrationLock;
+    if (
+      existing !== undefined &&
+      (existing.alias !== params.alias ||
+        existing.threadId !== params.threadId ||
+        existing.hostId !== params.hostId)
+    ) {
+      return;
+    }
+    this.codexRegistrationLock = Object.freeze({
       alias: params.alias,
       threadId: params.threadId,
       hostId: params.hostId,
+      generation:
+        generation === "unconfirmed" && existing !== undefined
+          ? existing.generation
+          : generation,
     });
+    if (generation !== "unconfirmed") {
+      this.codexSuccessionState = createCodexRegistrationSuccession(
+        this.codexRegistrationLock,
+      );
+    }
   }
 
   private async rollbackCodexRegistration(
@@ -3260,7 +4150,14 @@ export class GatewayService {
   }
 
   private async dispatchOne(targetAlias: string): Promise<void> {
-    if (!this.running || this.closing) return;
+    if (
+      !this.running ||
+      this.closing ||
+      this.codexSuccessionDispatchFrozen ||
+      this.codexSuccessionPoisoned
+    ) {
+      return;
+    }
     if (this.activeDispatchByTarget.has(targetAlias)) return;
     if (await this.processLifecycleLocked()) {
       await this.changed();
@@ -3501,12 +4398,26 @@ export class GatewayService {
   }
 
   private scheduleDispatch(targetAlias: string): void {
+    if (
+      this.closing ||
+      this.codexSuccessionDispatchFrozen ||
+      this.codexSuccessionPoisoned
+    ) {
+      return;
+    }
     if (this.scheduledDispatchTargets.has(targetAlias)) return;
     this.scheduledDispatchTargets.add(targetAlias);
     setImmediate(() => {
       this.mutex
         .run("service", async () => {
           this.scheduledDispatchTargets.delete(targetAlias);
+          if (
+            this.closing ||
+            this.codexSuccessionDispatchFrozen ||
+            this.codexSuccessionPoisoned
+          ) {
+            return;
+          }
           this.dispatchRunnerTargets.add(targetAlias);
           try {
             await this.dispatchOne(targetAlias);
