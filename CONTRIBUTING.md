@@ -1,79 +1,110 @@
-# Contributing
+# Contributing to Embassy
+
+Embassy connects two powerful local agent runtimes across version-pinned native
+interfaces. Small changes can alter permission, privacy, or delivery behavior,
+so contributions should be narrow, testable, and explicit about boundaries.
 
 ## Development setup
 
-Use Node.js 20 or newer and the npm version declared in `package.json`.
+Use macOS, Node.js 20 or newer, and the npm version declared in `package.json`.
 
 ```bash
 npm ci
 npm run check
-npm run demo
 ```
 
-`npm run check` type-checks source and tests, builds the bridge, and runs the
-deterministic test suite. The demo uses a fake driver and does not contact
-Anthropic.
+`npm run check` type-checks and runs the deterministic test suite. Routine tests
+use fake Claude peers, fake App Server transports, and temporary directories;
+they must not contact Anthropic, OpenAI, SSH hosts, live provider sockets, or
+models.
 
-## Real local validation
+## Before opening a pull request
 
-Real Claude validation is deliberately opt-in and must never run in CI. It
-requires an absolute `CLAUDE_BRIDGE_CLAUDE_BIN` pin and the explicit
-`CLAUDE_BRIDGE_RUN_REAL_VALIDATION=1` authorization described in the README.
-Never commit credentials, Claude configuration, raw model output, bridge
-state, or generated validation artifacts.
+- Run `npm run check`.
+- Add deterministic regression coverage for routing, protocol, persistence,
+  permission, process-lifecycle, or redaction changes.
+- Keep the pull request focused and explain every security-boundary change.
+- Update README and architecture documentation when public behavior changes.
+- Verify that public files contain no credentials, native IDs, message bodies,
+  local state, or personal absolute paths.
+- Do not commit `node_modules`, `dist`, package archives, generated dashboards,
+  logs, environment files, or live-validation artifacts.
 
-## Change expectations
+## Architecture rules
 
-- Keep the MCP surface small and lifecycle-oriented.
-- Preserve stdio protocol cleanliness: diagnostics go to stderr only.
-- Keep read-only, no-network operation as the default.
-- Preserve per-thread state ownership and fail-closed path validation.
-- Add deterministic coverage for lifecycle, persistence, permission, or
-  protocol changes.
-- Keep pull requests focused and explain any security-boundary change.
+### Routing and identity
 
-## Gateway experiments
+- Codex tasks self-register through inherited `CODEX_THREAD_ID` and a
+  `codex-*` alias. Never add a thread-ID argument or global task-history scan.
+- Codex-to-Claude sends require a previously selected compatible live session.
+  Do not auto-select during send.
+- Exact live same-UID Claude sessions may reach the registered native Codex
+  peer without becoming outbound-selected.
+- Claude's session UUID is its stable logical identity. Current names are a
+  live index; do not add historical-name routing or PID/socket identity.
+- Preserve current-name collision refusal and endpoint-generation fencing.
 
-The experimental gateway is additive and does not change the released MCP
-surface. Gateway changes require version-pinned protocol schemas, fake host
-and peer adapters, and deterministic coverage for multi-host routing,
-duplicate aliases, disconnects, stale generations, bounded queues,
-cancellation, ownership, restart abandonment, and metadata redaction.
+### Provider adapters
 
-Preserve the separation between official product features and internal
-adapters: Claude Code cross-session messaging is official, while the external
-registry/UDS wire used by this project is pinned to the reviewed Claude Code
-2.1.224 / peer protocol 1 boundary. Do not create fake Claude registry records
-or advertise Codex routes as Claude sessions. Native Claude discovery returns
-real Claude sessions; the gateway CLI/skill and dashboard expose Codex aliases.
+Claude Code's cross-session feature is official. Embassy's use of its external
+registry and peer socket shape is an internal, version-pinned adapter. Codex App
+Server is likewise version-pinned. Do not widen either compatibility range
+without a documented review and deterministic fixtures for the new version.
 
-The gateway may use one private same-user control UDS inside a controller-owned
-mode-0700 directory. This does not change the stdio-only MCP invariant. Do not
-add TCP, HTTP, a network dashboard, a generic provider-RPC method, or
-`turn/steer`. Version 1 queues busy Codex routes.
+The gateway may publish one process-owned `codex-*` peer so Claude's native
+`ListAgents` and `SendMessage` tools can reach Codex. It must never overwrite a
+foreign registry record, claim to be a Claude model session, or unlink a socket
+whose exact generation it no longer owns.
 
-Keep the shipped `serve` assembly local-host-only and its Codex factory
-monitor-only. Enabling its write attestation or adding a remote provider is a
-separate reviewed live gate, not a routine refactor.
+App Server calls use a closed allowlist. Do not add a generic RPC method,
+`turn/steer`, approval responses, history retrieval, shell execution, settings
+mutation, or provider authentication. Keep `experimentalApi: true`
+non-configurable and limited to `thread/resume.excludeTurns: true`; every resume
+must require an empty `thread.turns` response.
 
-Preserve the exact 0.147.0 privacy exception: `experimentalApi: true` is a
-hard-coded, non-configurable prerequisite only for
-`thread/resume.excludeTurns: true`. Do not add experimental methods or treat
-the capability as write authority. Both resume paths must require an empty
-`thread.turns` response and fail closed without retaining returned history.
+### Permissions
 
-Do not use App Server turn-level approval or sandbox overrides as temporary
-message restrictions: the reviewed schema says those overrides persist into
-subsequent turns. Writable inbound routing may use only a resumed Codex task
-that already reports `never`, read-only, and no-network. Leave other routes
-monitor-only and require the operator to reconfigure them natively.
+Embassy does not set or override a Codex task's persistent approval or sandbox
+policy. Registration is the gateway reachability boundary. The connector may
+observe native policy for status, but must not turn it into an undocumented
+second authorization gate.
 
-Routine tests must not contact SSH hosts, provider sockets, or models. A live
-host feasibility probe must be explicitly authorized, attach only to an
-already-running App Server, use read-only protocol methods, suppress raw
-identifiers and diagnostics, and clean up only the probe's own process.
+Claude's `crossSessionInbound` behavior remains native. Do not route around a
+hold or refusal or fabricate a successful receipt.
 
-Live Claude gates are similarly incremental: passive sanitized discovery,
-gateway-owned callback lifecycle, one explicitly authorized delivery to a
-named real Claude session, and a separate Claude-to-Codex turn. Never collapse
-those gates into one test or automatically retry an ambiguous delivery.
+### Delivery and state
+
+- Bodies and reply addresses are transient and bounded.
+- Queue while a Codex task is busy; do not interrupt an unrelated turn.
+- Distinguish gateway acceptance, transport progress, destination acceptance,
+  terminal failure, ambiguity, expiry, and restart abandonment.
+- Never retry an ambiguous provider write. Requeue only a confirmed clean
+  deferral that has not crossed an ambiguous mutation boundary.
+- Restarts discard bodies and leave restored routes stale until exact
+  re-observation.
+- Persist native route identifiers only in the closed private binding schema.
+  Keep them out of events, snapshots, dashboard rows, logs, errors, and CLI
+  output. The only CLI exception is a UUID explicitly supplied by the user as a
+  Claude selector.
+
+### Local control surface
+
+Embassy may use one private same-user control UDS and a static metadata-only
+dashboard. Do not add TCP, HTTP, a network dashboard, JavaScript, telemetry,
+storage, or mutation endpoints. Keep the public v1 launcher foreground,
+macOS-only, and local-host-only.
+
+## Live validation
+
+Do not run a live probe merely because a test would be convenient. Live Claude
+registry discovery, peer connection, provider messaging, App Server turns, and
+SSH attachment are separate external actions.
+
+A live action requires an explicit user request that identifies its scope. For
+a message, confirm the exact destination and body, send only once, avoid fanout,
+and do not retry an ambiguous result. Never put real provider traffic in CI.
+
+## Reporting security issues
+
+Follow [SECURITY.md](SECURITY.md). Use a private GitHub Security Advisory rather
+than a public issue, and replace sensitive local values with synthetic ones.

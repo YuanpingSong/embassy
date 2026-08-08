@@ -1,9 +1,8 @@
-# Bidirectional Claude–Codex Gateway Architecture
+# Embassy Gateway Architecture
 
-Status: local bidirectional first version implemented and live-tested with one
-advertised Codex task; remote connectors remain deferred. The
-gateway is additive and does not change the released six-tool Claude task
-lifecycle in `0.1.0`.
+Status: local bidirectional version 1 implemented and live-tested with one
+advertised Codex task; remote connectors remain deferred. The published v1
+package supports macOS, the only platform exercised end to end so far.
 
 This document uses four evidence labels:
 
@@ -18,14 +17,15 @@ queued turn after idle, and delivered the exact final reply back to Claude.
 
 ## Purpose and boundary
 
-The gateway lets selected, already-running Claude Code sessions and selected
-native Codex tasks address one another by short aliases. It provides a single
+The gateway lets already-running Claude Code sessions and explicitly
+registered native Codex tasks address one another by short aliases. Outbound
+Codex-to-Claude sends require an explicitly selected Claude route; inbound
+native Claude messages may come from any exact live same-UID session without
+making that session outbound-selected. It provides a single
 private operational view across the two products without rebuilding either
 agent runtime.
 
-Its exact Claude Code 2.1.225 runtime/peer-protocol pin is independent of the released
-MCP lifecycle driver's 2.1.220 init/authentication compatibility pin. Adding
-the gateway does not widen or replace the lifecycle driver's runtime policy.
+Its exact Claude Code 2.1.225 runtime/peer-protocol pin is fail-closed.
 Still-running 2.1.224 sessions remain compatible during a patch upgrade
 because their registry records use the same reviewed peer protocol 1 shape.
 
@@ -34,11 +34,9 @@ It is deliberately:
 - personal, local, same-OS-user software;
 - single-user and non-hosted;
 - an alias router and bounded message broker, not an agent runtime;
-- separate from the existing stdio MCP server; and
 - unable to create Codex sidebar task cards or Claude session UI.
 
-The existing MCP server remains stdio-only. The gateway adds one private
-same-user Unix-domain control socket for its own thin clients and generates one
+Embassy uses one private same-user Unix-domain control socket for its thin clients and generates one
 private static dashboard file. It does not add a TCP listener, HTTP server, or
 public API.
 
@@ -85,8 +83,10 @@ Consequences:
 - Native Claude `ListAgents` discovers real Claude sessions plus the one
   explicitly named `codex-*` gateway peer.
 - The gateway discovers compatible real Claude sessions as transient
-  candidates, but publishes only sanitized aliases and state. A candidate is
-  not routable until the user explicitly selects it.
+  candidates, but publishes only sanitized aliases and state. A send from a
+  registered Codex task may address only an explicitly selected route by its
+  current name or UUID. Per-message consent stays native: delivery lands in the
+  Claude session's own `crossSessionInbound` policy and approval flow.
 - Codex aliases are discovered through the gateway CLI/skill and dashboard,
   not through `ListAgents`.
 - A gateway-owned anonymous callback UDS can receive a correlated reply. It
@@ -107,11 +107,11 @@ that execution host. App Server transports should not be exposed directly on
 a shared or public network.
 
 **Observed:** this Desktop build connects to a host-local App Server on each
-execution host. Remote tasks on `m5dev` do not route through the local App
+execution host. Remote tasks on `build-mac` do not route through the local App
 Server. Desktop reaches the remote listener through an SSH `app-server proxy`.
 A second attach-only client successfully initialized against the already-owned
-`m5dev` listener and called only `thread/loaded/list` without creating a turn.
-The same topology is expected for `max-ws.lab`, but that host has not been
+`build-mac` listener and called only `thread/loaded/list` without creating a turn.
+The same topology is expected for `lab-mac.example`, but that host has not been
 probed by this project.
 
 ## Topology
@@ -129,9 +129,9 @@ probed by this project.
              │
              ├─ local Codex App Server ─ selected native local tasks
              │
-             ├─ planned attach-only SSH proxy ─ m5dev App Server
+             ├─ planned attach-only SSH proxy ─ build-mac App Server
              │
-             └─ planned attach-only SSH proxy ─ max-ws.lab App Server
+             └─ planned attach-only SSH proxy ─ lab-mac.example App Server
 
   Claude-side skill/CLI ─ private control UDS ─ gateway
   Codex-side skill/CLI  ─ private control UDS ─ gateway
@@ -159,10 +159,10 @@ The status below is intentionally narrower than the target architecture.
 | Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
-| Foreground local broker launcher and provider assembly | **Implemented** as `claude-codex-gateway serve`; local-host-only with native messaging enabled |
+| Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
 | Live Codex-to-Claude delivery | **Tested** through selected real Claude 2.1.224 and 2.1.225 sessions |
 | Claude-initiated Codex turn/reply into Codex | **Tested** with a real busy Codex task: native `busy → waiting`, automatic post-idle turn, terminal delivery status, and exact reply round trip |
-| Remote production connector | **Planned**; only the `m5dev` read-only attach feasibility probe is complete |
+| Remote production connector | **Planned**; only the `build-mac` read-only attach feasibility probe is complete |
 
 Synthetic tests do not scan `~/.claude`, connect `/tmp/cc-socks`, attach to a
 Desktop App Server, invoke SSH, or make a model request.
@@ -173,11 +173,11 @@ Users address Codex routes by strict aliases and Claude routes by either the
 session's latest alias or its native session UUID, for example:
 
 ```text
-reviewer@this-mac
-builder@m5dev
-release-check@max-ws.lab
+codex-reviewer@this-mac
+codex-builder@build-mac
+codex-release-check@lab-mac.example
 claude-advisor@this-mac
-79fa18fc-1486-4e2f-a549-a8d922573477
+123e4567-e89b-42d3-a456-426614174000
 ```
 
 Claude's native `sessionId` UUID is its sole logical identity. Its current
@@ -224,7 +224,7 @@ The thin skill/CLI exposes the same safe alias list to either provider.
    and bounded text.
 2. The gateway checks thread ownership, selector state, rate and size limits,
    deadline, hop count, and dedupe state.
-3. It resolves the selector to one live UUID, selects that route when needed,
+3. It requires the selector to match an explicitly selected live UUID,
    refreshes the UUID's current process/socket coordinates, and revalidates
    the private workspace/controller-state separation before every send.
 4. It opens a short-lived connection and writes one version-pinned peer frame.
@@ -249,7 +249,10 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
 1. The gateway advertises one process-owned `codex-*` record in Claude's
    native registry.
 2. A real Claude session uses native `ListAgents` and `SendMessage`; the
-   gateway treats the text as untrusted user-role input.
+   gateway validates that exact live registry/socket generation and treats the
+   text as untrusted user-role input. This inbound observation grants only a
+   transient, in-memory capability for the correlated reply. It does not add a
+   Claude route, flip `selected`, or authorize a later unsolicited send.
 3. The Claude process's inherited messaging-socket value may be accepted as a
    transient reply address after strict validation. Claude Code exports
    `CLAUDE_CODE_MESSAGING_SOCKET` as a raw absolute socket path; the CLI
@@ -278,10 +281,8 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    message body. `denied` is reserved for an actual user or policy refusal.
    A transient clean pre-dispatch failure returns the same message to the queue
    instead of terminally failing it.
-9. App Server acceptance emits native `delivered`; permanent rejection or
-   deadline expiry emits `denied` or `expired`. Completion is summarized into
-   bounded normalized state and the correlated reply is returned to the
-   originating Claude session.
+10. Completion is summarized into bounded normalized state and the correlated
+    reply is returned only to the exact originating Claude session generation.
 
 Claude's native peer socket is itself an inbox, so Codex replies may be
 written while the Claude route is busy. The gateway still serializes its own
@@ -318,7 +319,8 @@ The small version 1 method family covers:
 - a correlated reply operation; and
 - dashboard refresh.
 
-The installed binary is `claude-codex-gateway`. Its implemented commands are
+The installed binary is `embassy` (`claude-codex-gateway` is a one-release
+deprecated alias). Its implemented commands are
 `serve`, `health`, `status`, `refresh-dashboard`, `register-codex`,
 `unregister-codex`, `select-claude`, `unselect-claude`, `send-to-claude`,
 `send-to-codex`, and `reply`. Message bodies are non-empty UTF-8 from standard
@@ -330,8 +332,8 @@ terminal. It never daemonizes itself.
 
 `select-claude --alias <current-name@host>` and
 `select-claude --session <uuid>` select the same logical session.
-`send-to-claude --to` accepts either form and resolves/selects the live UUID
-when needed. UUID input is normalized to lowercase. No command returns the
+`send-to-claude --to` accepts either form only after explicit selection. UUID
+input is normalized to lowercase. No command returns the
 UUID, and no historical name remains routable after a rename.
 
 Provider-authorized mutations require one exclusive inherited principal.
@@ -346,7 +348,7 @@ identities.
 The foreground command is:
 
 ```text
-claude-codex-gateway serve
+embassy serve
 ```
 
 It emits one normalized ready line, publishes the private dashboard, and
@@ -371,9 +373,9 @@ In the target multi-host design, each allowlisted execution host has a separate
 connector because each host has its own App Server and native state:
 
 - `this-mac`: the managed local App Server shared with Desktop;
-- `m5dev`: a host-local remote App Server reached through an attach-only SSH
+- `build-mac`: a host-local remote App Server reached through an attach-only SSH
   proxy; and
-- `max-ws.lab`: the same design, still unprobed and disabled by default.
+- `lab-mac.example`: the same design, still unprobed and disabled by default.
 
 The shipped foreground launcher accepts only `this-mac`; it rejects any remote
 host configuration. The two SSH connectors above remain planned rather than
@@ -381,8 +383,8 @@ runnable v1 routes.
 
 The local connector resolves the managed standalone Codex release by exact
 path and version; it does not use `PATH`. That installation is separate from
-the user's NVM-managed
-`/Users/yuanpingsong/.nvm/versions/node/v22.23.1/bin/codex`, does not replace
+any NVM-managed `codex` on the user's `PATH` (for example
+`~/.nvm/versions/node/*/bin/codex`), does not replace
 it, and does not edit a shell profile. The two installations therefore do not
 conflict.
 
@@ -416,24 +418,15 @@ turn with no policy overrides. Workspace and policy notifications remain
 observational; they cannot make an explicitly registered live route
 unreachable.
 
-Version 1 never changes a Codex task's approval or sandbox policy. Offline
-0.147.0 `TurnStartParams` schema evidence shows that `approvalPolicy` and
-`sandboxPolicy` overrides persist for the current and subsequent turns, so
-using them as per-message restrictions would silently mutate the native task.
-Instead, writable Claude-initiated routing is enabled only after
-`ThreadResumeResponse` already reports:
-
-```text
-approvalPolicy = never
-sandbox.type = readOnly
-sandbox.networkAccess = false or omitted
-```
-
-Any other selected task remains monitor-only/non-writable with a safe status
-code. The user must use native Codex controls to establish the narrow policy
-before opt-in and then re-register/re-observe the task. The gateway does not
-relax a permissive task, strengthen it by mutating persistent settings, or ask
-an inbound peer to approve a policy change.
+Version 1 never changes or independently classifies a Codex task's approval or
+sandbox policy. Offline 0.147.0 `TurnStartParams` schema evidence shows that
+policy overrides persist for the current and subsequent turns, so using them
+as per-message restrictions would silently mutate the native task. Embassy
+therefore starts the turn without overrides and leaves approval, sandbox, and
+tool enforcement to the registered task's native Codex configuration. Explicit
+`codex-*` registration plus exact live thread/generation validation is the
+gateway reachability boundary; workspace and policy metadata are observational
+only.
 
 A remote connector never starts, stops, replaces, signals, or unlinks a
 Desktop-owned App Server or its socket. If attach fails, the host is offline;
@@ -457,7 +450,7 @@ On 2026-08-07:
   booleans and an aggregate count, then confirmed cleanup of only its own
   proxy process.
 - An authorized remote probe attached through a second SSH proxy to the
-  already-running `m5dev` App Server (remote Codex CLI 0.145.0), initialized,
+  already-running `build-mac` App Server (remote Codex CLI 0.145.0), initialized,
   and validated a schema-correct `thread/loaded/list`. It printed no task IDs,
   payloads, remote diagnostics, history, or credentials and left Desktop's
   original proxy alive.
@@ -481,9 +474,8 @@ behavior remain untested, and any runtime mismatch still fails closed.
 
 The same offline 0.147.0 schema generation confirms that
 `TurnStartParams.approvalPolicy` and `sandboxPolicy` are persisted for the
-current and subsequent turns. That no-model evidence is why version 1 attests
-the already-resumed native policy instead of sending a seemingly temporary
-override.
+current and subsequent turns. That no-model evidence is why version 1 sends no
+seemingly temporary policy override.
 
 The one Desktop restart needed for the local shared-App-Server feasibility
 test has already been completed. Building, running synthetic tests, starting
@@ -560,7 +552,7 @@ persist, or manipulate authentication material. Routine tests replace all of
 the boundaries above with test-owned temporary directories, fake UDS peers,
 and fake App Server transports.
 
-### Exact default roots on this Mac
+### Exact default roots on macOS
 
 The runtime attestation code derives these paths from the current OS user's
 verified home; it does not scan the home directory. They have not yet been
@@ -568,14 +560,14 @@ opened by a live gateway run:
 
 | Path/capability | Minimum purpose |
 | --- | --- |
-| `/Users/yuanpingsong/.local/bin/claude` and derived expected target `/Users/yuanpingsong/.local/share/claude/versions/2.1.225` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher attestation succeeded |
-| `/Users/yuanpingsong/.claude/sessions` | Read/enumerate only live registry JSON during the separately authorized passive-discovery gate |
+| `~/.local/bin/claude` and derived expected target `~/.local/share/claude/versions/2.1.225` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher attestation succeeded |
+| `~/.claude/sessions` | Read/enumerate only live registry JSON during the separately authorized passive-discovery gate |
 | `/tmp/cc-socks` | At foreground startup, validate the private directory and create/remove only `/tmp/cc-socks/<gateway-pid>.sock` after inode/generation checks; search/stat genuine peers at passive discovery and connect one validated target only at the separately authorized send gate |
-| `/Users/yuanpingsong/.local/state/claude-agent-bridge/gateway` | Default controller-owned store, control UDS, lock, and static dashboard; an explicit absolute configuration may replace this root |
-| `/Users/yuanpingsong/.codex/packages/standalone` and `/Users/yuanpingsong/.codex/app-server-control/app-server-control.sock` | Resolve the pinned managed Codex binary and attach to the already-running private local App Server; never bootstrap or unlink it |
+| `~/.local/state/agent-embassy` | Default controller-owned store, control UDS, lock, and static dashboard; an explicit absolute configuration may replace this root |
+| `~/.codex/packages/standalone` and `~/.codex/app-server-control/app-server-control.sock` | Resolve the pinned managed Codex binary and attach to the already-running private local App Server; never bootstrap or unlink it |
 
-No grant to `/Users/yuanpingsong/.claude/projects`, the rest of
-`/Users/yuanpingsong/.claude`, Keychain APIs, the full home directory, or
+No grant to `~/.claude/projects`, the rest of
+`~/.claude`, Keychain APIs, the full home directory, or
 unrelated temporary files is required. Remote-host access is a later,
 separately reviewed fixed-SSH-alias capability.
 
@@ -598,27 +590,13 @@ the preferred least-context setup, but it is not mandatory.
 - Version-specific compatibility evidence expires on a provider or Desktop
   update.
 
-## Remaining live gates
+## Validation boundary
 
-The safe authorization ladder is intentionally incremental:
-
-1. Synthetic tests: no live provider filesystem, socket, App Server, or model
-   access.
-2. Foreground server/dashboard startup, including exact runtime attestation
-   and binding the gateway-owned anonymous callback UDS: no provider
-   discovery, provider write, or model request.
-3. Passive, sanitized Claude live-registry discovery: no provider socket write
-   and no model request.
-4. The first anonymous provider write: one separately and explicitly
-   authorized Codex-to-Claude message to one exact public alias, using the
-   exact user-approved prompt and bounds, with no retry, fanout, or
-   configuration change.
-5. A bounded Codex multi-client notification/fanout observation without a
-   gateway-started turn. Exact 0.147.0 notification shapes are already attested
-   offline; live fanout is not.
-6. A separate reviewed write-gate enablement followed by an explicitly
-   authorized Claude-to-Codex live turn.
-7. A separately reviewed remote production connector.
+Routine validation is deterministic and synthetic: it does not inspect live
+provider state, connect a provider socket, attach to App Server, invoke SSH, or
+make a model request. The separately authorized local live tests recorded
+above established discovery and both message directions. Remote production
+connectors remain a separately reviewed future capability.
 
 Only the synthetic layer is routine validation. Server/dashboard startup,
 discovery, and callback binding remain no-send operations; step 4 is the first
