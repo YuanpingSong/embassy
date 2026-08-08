@@ -1,0 +1,1246 @@
+import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import net, { type Server } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { test, type TestContext } from "node:test";
+
+import { BridgeError } from "../src/errors.js";
+import {
+  CLAUDE_PEER_COMPATIBILITY,
+  ClaudePeerAdapter,
+  encodeClaudePeerUserFrame,
+  type ClaudePeerAdapterOptions,
+  type ClaudePeerAdapterTestOverrides,
+  type ClaudePeerInboundMessage,
+  type ClaudePeerProtocolNotice,
+  type ClaudePeerReceiptEvent,
+  type ClaudeProcessIdentity,
+} from "../src/gateway/claude-peer.js";
+
+const UID = process.getuid?.() ?? 501;
+const SESSION_ONE = "00000000-0000-4000-8000-000000000001";
+const SESSION_TWO = "00000000-0000-4000-8000-000000000002";
+const SESSION_THREE = "00000000-0000-4000-8000-000000000003";
+const MESSAGE_ONE = "00000000-0000-4000-8000-000000000101";
+const MESSAGE_TWO = "00000000-0000-4000-8000-000000000102";
+
+type Fixture = {
+  root: string;
+  home: string;
+  workspace: string;
+  stateDir: string;
+  systemTemp: string;
+  sessionsDir: string;
+  socketDir: string;
+  processes: Map<number, ClaudeProcessIdentity>;
+  servers: Server[];
+  adapter: ClaudePeerAdapter;
+};
+
+type FixtureOverrides = Partial<
+  Omit<
+    ClaudePeerAdapterOptions,
+    "sessionsDir" | "socketDir" | "attestedClaudeCodeVersion"
+  >
+> &
+  Omit<
+    ClaudePeerAdapterTestOverrides,
+    "processInspector" | "userHome" | "tempRoots"
+  >;
+
+async function fixture(
+  t: TestContext,
+  overrides: FixtureOverrides = {},
+): Promise<Fixture> {
+  // This isolated tree never uses ~/.claude or the real /tmp/cc-socks root.
+  const createdRoot = await mkdtemp(
+    path.join(os.tmpdir(), "synthetic-cc-peer-"),
+  );
+  const root = await realpath(createdRoot);
+  const sessionsDir = path.join(root, "sessions");
+  const socketDir = path.join(root, "sockets");
+  const home = path.join(root, "home");
+  const workspace = path.join(home, "workspace");
+  const stateDir = path.join(root, "state");
+  const systemTemp = path.join(root, "system-temp");
+  await Promise.all([
+    mkdir(sessionsDir, { mode: 0o700 }),
+    mkdir(socketDir, { mode: 0o700 }),
+    mkdir(workspace, { recursive: true, mode: 0o700 }),
+    mkdir(stateDir, { mode: 0o700 }),
+    mkdir(systemTemp, { mode: 0o700 }),
+  ]);
+  await chmod(home, 0o700);
+  const processes = new Map<number, ClaudeProcessIdentity>();
+  const servers: Server[] = [];
+  const { connect, now, createId, ...productionOverrides } = overrides;
+  const adapter = new ClaudePeerAdapter(
+    {
+      sessionsDir,
+      socketDir,
+      attestedClaudeCodeVersion:
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      receiptDeadlineMs: 50,
+      connectTimeoutMs: 500,
+      connectionIdleMs: 500,
+      ...productionOverrides,
+    },
+    {
+      processInspector: async (pid) => processes.get(pid),
+      ...(connect === undefined ? {} : { connect }),
+      ...(now === undefined ? {} : { now }),
+      ...(createId === undefined ? {} : { createId }),
+      userHome: home,
+      tempRoots: [systemTemp],
+    },
+  );
+  t.after(async () => {
+    await adapter.close();
+    await Promise.all(
+      servers.map(
+        async (server) =>
+          await new Promise<void>((resolve) => server.close(() => resolve())),
+      ),
+    );
+    await rm(root, { recursive: true, force: true });
+  });
+  return {
+    root,
+    home,
+    workspace,
+    stateDir,
+    systemTemp,
+    sessionsDir,
+    socketDir,
+    processes,
+    servers,
+    adapter,
+  };
+}
+
+async function listen(server: Server, socketPath: string): Promise<void> {
+  server.listen(socketPath);
+  await once(server, "listening");
+  await chmod(socketPath, 0o600);
+}
+
+async function addPeer(
+  current: Fixture,
+  input: {
+    pid: number;
+    sessionId?: string;
+    name?: string;
+    kind?: string;
+    status?: string;
+    peerProtocol?: number;
+    socketPath?: string;
+    recordPid?: number;
+    cwd?: string;
+    version?: string;
+    nameSource?: string | null;
+    omitStatus?: boolean;
+    handler?: (socket: net.Socket) => void;
+  },
+): Promise<{ socketPath: string; registryPath: string; server: Server }> {
+  const socketPath =
+    input.socketPath ?? path.join(current.socketDir, `${input.pid}.sock`);
+  const server = net.createServer(input.handler);
+  await listen(server, socketPath);
+  current.servers.push(server);
+  current.processes.set(input.pid, {
+    uid: UID,
+    generation: `process-generation-${input.pid}`,
+  });
+  const registryPath = path.join(current.sessionsDir, `${input.pid}.json`);
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      pid: input.recordPid ?? input.pid,
+      sessionId: input.sessionId ?? SESSION_ONE,
+      cwd: input.cwd ?? current.workspace,
+      startedAt: 1_786_148_832_556,
+      procStart: "Sat Aug  8 00:27:11 2026",
+      version: input.version ?? CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      peerProtocol: input.peerProtocol ?? 1,
+      kind: input.kind ?? "interactive",
+      entrypoint: "cli",
+      messagingSocketPath: socketPath,
+      name: input.name ?? `peer-${input.pid}`,
+      ...(input.nameSource === undefined
+        ? {}
+        : { nameSource: input.nameSource }),
+      ...(input.omitStatus ? {} : { status: input.status ?? "idle" }),
+      updatedAt: 1_786_149_062_112,
+      ...(input.omitStatus ? {} : { statusUpdatedAt: 1_786_149_062_112 }),
+    }),
+    { mode: 0o644 },
+  );
+  return { socketPath, registryPath, server };
+}
+
+async function selectFirstPeer(current: Fixture) {
+  const target = (await current.adapter.discover()).peers[0];
+  assert.ok(target !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    target.targetId,
+    current.stateDir,
+  );
+  return target;
+}
+
+async function sendLines(
+  socketPath: string,
+  chunks: readonly (string | Buffer)[],
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const socket = net.createConnection({ path: socketPath });
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      for (const chunk of chunks) socket.write(chunk);
+      socket.end(resolve);
+    });
+  });
+}
+
+async function eventually(
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail("condition did not become true before the deadline");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test("adapter pins the reviewed Claude Code and normalized private roots", async () => {
+  assert.throws(
+    () =>
+      new ClaudePeerAdapter({
+        sessionsDir: "/synthetic/sessions",
+        socketDir: "/synthetic/sockets",
+        attestedClaudeCodeVersion: "2.1.224",
+      }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_VERSION_UNSUPPORTED",
+  );
+  assert.throws(
+    () =>
+      new ClaudePeerAdapter({
+        sessionsDir: "relative/sessions",
+        socketDir: "/synthetic/sockets",
+        attestedClaudeCodeVersion: "2.1.225",
+      }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_PEER_PATH",
+  );
+});
+
+test("discovery returns stable session UUID targets and never treats names as authority", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, {
+    pid: 41_101,
+    sessionId: SESSION_ONE,
+    name: "same-name",
+    status: "busy",
+  });
+  await addPeer(current, {
+    pid: 41_102,
+    sessionId: SESSION_TWO,
+    name: "same-name",
+    kind: "bg",
+  });
+
+  const result = await current.adapter.discover();
+  assert.equal(result.truncated, false);
+  assert.deepEqual(result.rejected, {});
+  assert.equal(result.peers.length, 2);
+  assert.equal(result.peers[0]?.alias, "same-name");
+  assert.equal(result.peers[1]?.alias, "same-name");
+  assert.notEqual(result.peers[0]?.targetId, result.peers[1]?.targetId);
+  assert.deepEqual(Object.keys(result.peers[0] ?? {}).sort(), [
+    "alias",
+    "compatibility",
+    "kind",
+    "status",
+    "targetId",
+  ]);
+  assert.ok(!JSON.stringify(result).includes(current.root));
+  assert.deepEqual(
+    result.peers.map((peer) => peer.targetId).sort(),
+    [SESSION_ONE, SESSION_TWO],
+  );
+  assert.ok(!JSON.stringify(result).includes("41101"));
+});
+
+test("discovery rejects duplicate live records for one session UUID", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, {
+    pid: 41_103,
+    sessionId: SESSION_ONE,
+    name: "first-record",
+  });
+  await addPeer(current, {
+    pid: 41_104,
+    sessionId: SESSION_ONE,
+    name: "second-record",
+  });
+
+  const result = await current.adapter.discover();
+  assert.deepEqual(result.peers, []);
+  assert.deepEqual(result.rejected, { SESSION_ID_COLLISION: 1 });
+});
+
+test("discovery accepts live same-protocol records across a Claude Code patch upgrade", async (t) => {
+  const current = await fixture(t);
+  const manual = await addPeer(current, {
+    pid: 41_111,
+    name: "claude-computer-monitor",
+    version: "2.1.224",
+    nameSource: null,
+  });
+  await addPeer(current, {
+    pid: 41_112,
+    sessionId: SESSION_TWO,
+    name: "derived-peer",
+    version: "2.1.225",
+    nameSource: "derived",
+  });
+  await addPeer(current, {
+    pid: 41_113,
+    sessionId: "00000000-0000-4000-8000-000000000003",
+    name: "print-session",
+    version: "2.1.225",
+    omitStatus: true,
+  });
+
+  assert.equal((await lstat(manual.registryPath)).mode & 0o777, 0o644);
+  const result = await current.adapter.discover();
+  assert.deepEqual(result.rejected, {});
+  assert.deepEqual(
+    result.peers.map((peer) => peer.alias).sort(),
+    ["claude-computer-monitor", "derived-peer", "print-session"],
+  );
+  assert.equal(
+    result.peers.find((peer) => peer.alias === "print-session")?.status,
+    "busy",
+  );
+});
+
+test("discovery preserves capabilities only for the same exact session generation", async (t) => {
+  const current = await fixture(t);
+  const peer = await addPeer(current, {
+    pid: 41_201,
+    sessionId: SESSION_ONE,
+    status: "idle",
+  });
+  const first = (await current.adapter.discover()).peers[0];
+  assert.ok(first !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    first.targetId,
+    current.stateDir,
+  );
+
+  const record = JSON.parse(await readFile(peer.registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  record.status = "busy";
+  await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+  const statusRefresh = (await current.adapter.discover()).peers[0];
+  assert.ok(statusRefresh !== undefined);
+  assert.equal(statusRefresh.targetId, first.targetId);
+  assert.equal(statusRefresh.status, "busy");
+
+  record.sessionId = SESSION_TWO;
+  await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+  const replaced = (await current.adapter.discover()).peers[0];
+  assert.ok(replaced !== undefined);
+  assert.notEqual(replaced.targetId, first.targetId);
+  await assert.rejects(
+    current.adapter.send(first.targetId, "must not silently rebind"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_TARGET_UNKNOWN",
+  );
+});
+
+test("selection attestation is required before any peer socket write", async (t) => {
+  let connections = 0;
+  const current = await fixture(t);
+  await addPeer(current, {
+    pid: 41_301,
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
+  const target = (await current.adapter.discover()).peers[0];
+  assert.ok(target !== undefined);
+
+  await assert.rejects(
+    current.adapter.send(target.targetId, "must remain local"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WORKSPACE_UNATTESTED",
+  );
+  assert.equal(connections, 0);
+  assert.equal(
+    await current.adapter.assertTargetWorkspaceDisjoint(
+      target.targetId,
+      current.stateDir,
+    ),
+    undefined,
+  );
+});
+
+test("selection allows home when state is disjoint but rejects root and temporary workspaces", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, { pid: 41_311, sessionId: SESSION_ONE, name: "root", cwd: "/" });
+  await addPeer(current, {
+    pid: 41_312,
+    sessionId: SESSION_TWO,
+    name: "home",
+    cwd: current.home,
+  });
+  await addPeer(current, {
+    pid: 41_313,
+    sessionId: SESSION_THREE,
+    name: "temp",
+    cwd: current.systemTemp,
+  });
+  const targets = (await current.adapter.discover()).peers;
+  assert.equal(targets.length, 3);
+
+  const home = targets.find((candidate) => candidate.alias === "home");
+  assert.ok(home !== undefined);
+  assert.equal(
+    await current.adapter.assertTargetWorkspaceDisjoint(
+      home.targetId,
+      current.stateDir,
+    ),
+    undefined,
+  );
+
+  for (const alias of ["root", "temp"] as const) {
+    const target = targets.find((candidate) => candidate.alias === alias);
+    assert.ok(target !== undefined);
+    await assert.rejects(
+      current.adapter.assertTargetWorkspaceDisjoint(
+        target.targetId,
+        current.stateDir,
+      ),
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "CLAUDE_PEER_WORKSPACE_BROAD",
+    );
+  }
+});
+
+test("selection rejects unsafe paths but permits controller state beneath an accessible workspace", async (t) => {
+  const current = await fixture(t);
+  const realWorkspace = path.join(current.home, "real-workspace");
+  const linkedWorkspace = path.join(current.home, "linked-workspace");
+  const missingWorkspace = path.join(current.home, "private-marker-missing");
+  const nestedState = path.join(current.workspace, ".gateway-state");
+  const linkedState = path.join(current.root, "linked-state");
+  await mkdir(realWorkspace, { mode: 0o700 });
+  await mkdir(nestedState, { mode: 0o700 });
+  await symlink(realWorkspace, linkedWorkspace);
+  await symlink(current.stateDir, linkedState);
+  await addPeer(current, {
+    pid: 41_321,
+    sessionId: SESSION_ONE,
+    name: "linked",
+    cwd: linkedWorkspace,
+  });
+  await addPeer(current, {
+    pid: 41_322,
+    sessionId: SESSION_TWO,
+    name: "missing",
+    cwd: missingWorkspace,
+  });
+  await addPeer(current, {
+    pid: 41_323,
+    sessionId: SESSION_THREE,
+    name: "overlap",
+    cwd: current.workspace,
+  });
+  const targets = (await current.adapter.discover()).peers;
+
+  const linked = targets.find((candidate) => candidate.alias === "linked");
+  assert.ok(linked !== undefined);
+  await assert.rejects(
+    current.adapter.assertTargetWorkspaceDisjoint(
+      linked.targetId,
+      current.stateDir,
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WORKSPACE_UNSAFE",
+  );
+
+  const missing = targets.find((candidate) => candidate.alias === "missing");
+  assert.ok(missing !== undefined);
+  await assert.rejects(
+    current.adapter.assertTargetWorkspaceDisjoint(
+      missing.targetId,
+      current.stateDir,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof BridgeError);
+      assert.equal(error.code, "CLAUDE_PEER_WORKSPACE_UNSAFE");
+      assert.ok(!error.message.includes("private-marker-missing"));
+      return true;
+    },
+  );
+
+  const overlap = targets.find((candidate) => candidate.alias === "overlap");
+  assert.ok(overlap !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    overlap.targetId,
+    nestedState,
+  );
+  await assert.rejects(
+    current.adapter.assertTargetWorkspaceDisjoint(
+      overlap.targetId,
+      linkedState,
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_STATE_ROOT_UNSAFE",
+  );
+});
+
+test("name, cwd, and kind changes preserve the logical session UUID", async (t) => {
+  const current = await fixture(t);
+  const alternateWorkspace = path.join(current.home, "alternate-workspace");
+  await mkdir(alternateWorkspace, { mode: 0o700 });
+  const peer = await addPeer(current, {
+    pid: 41_331,
+    name: "original",
+    kind: "interactive",
+  });
+  const first = (await current.adapter.discover()).peers[0];
+  assert.ok(first !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    first.targetId,
+    current.stateDir,
+  );
+  const record = JSON.parse(await readFile(peer.registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+
+  record.name = "renamed";
+  await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+  const renamed = (await current.adapter.discover()).peers[0];
+  assert.ok(renamed !== undefined);
+  assert.equal(renamed.targetId, first.targetId);
+  assert.equal(renamed.alias, "renamed");
+
+  record.cwd = alternateWorkspace;
+  await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+  const moved = (await current.adapter.discover()).peers[0];
+  assert.ok(moved !== undefined);
+  assert.equal(moved.targetId, renamed.targetId);
+
+  record.kind = "bg";
+  await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+  const changedKind = (await current.adapter.discover()).peers[0];
+  assert.ok(changedKind !== undefined);
+  assert.equal(changedKind.targetId, moved.targetId);
+  await assert.rejects(
+    current.adapter.send(first.targetId, "workspace changed"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      (error.code === "CLAUDE_PEER_TARGET_CHANGED" ||
+        error.code === "CLAUDE_PEER_WORKSPACE_CHANGED"),
+  );
+});
+
+test("send rejects replaced state and workspace generations before connecting", async (t) => {
+  let connections = 0;
+  const current = await fixture(t);
+  await addPeer(current, {
+    pid: 41_341,
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
+  const target = await selectFirstPeer(current);
+
+  await rm(current.stateDir, { recursive: true });
+  await mkdir(current.stateDir, { mode: 0o700 });
+  await assert.rejects(
+    current.adapter.send(target.targetId, "state changed"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_STATE_ROOT_CHANGED",
+  );
+  assert.equal(connections, 0);
+
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    target.targetId,
+    current.stateDir,
+  );
+  await rm(current.workspace, { recursive: true });
+  await mkdir(current.workspace, { mode: 0o700 });
+  await assert.rejects(
+    current.adapter.send(target.targetId, "workspace changed"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WORKSPACE_CHANGED",
+  );
+  assert.equal(connections, 0);
+});
+
+test("discovery ignores provider modes but rejects invalid processes and paths", async (t) => {
+  const current = await fixture(t);
+  const valid = await addPeer(current, { pid: 42_101 });
+  await chmod(valid.registryPath, 0o664);
+  await chmod(valid.socketPath, 0o666);
+
+  const mismatch = await addPeer(current, {
+    pid: 42_102,
+    recordPid: 42_999,
+  });
+  assert.ok(mismatch.registryPath.endsWith("42102.json"));
+
+  await addPeer(current, { pid: 42_103, peerProtocol: 2 });
+  const linkedTarget = path.join(current.root, "outside.json");
+  await writeFile(linkedTarget, "{}", { mode: 0o600 });
+  await symlink(linkedTarget, path.join(current.sessionsDir, "42104.json"));
+  await writeFile(path.join(current.sessionsDir, "notes.txt"), "ignored", {
+    mode: 0o600,
+  });
+
+  const result = await current.adapter.discover();
+  assert.equal(result.peers.length, 1);
+  assert.equal(result.peers[0]?.alias, "peer-42101");
+  assert.equal(result.rejected.PID_MISMATCH, 1);
+  assert.equal(result.rejected.REGISTRY_INVALID_SCHEMA, 1);
+  assert.equal(result.rejected.REGISTRY_NOT_REGULAR, 1);
+  assert.equal(result.rejected.INVALID_FILE_NAME, 1);
+});
+
+test("discovery fails closed on unreviewed registry schema fields", async (t) => {
+  const current = await fixture(t);
+  const peer = await addPeer(current, { pid: 42_111 });
+  const record = JSON.parse(await readFile(peer.registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  record.unreviewedPath = "/private/provider/history";
+  await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+
+  const result = await current.adapter.discover();
+  assert.equal(result.peers.length, 0);
+  assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
+  assert.ok(!JSON.stringify(result).includes("provider/history"));
+});
+
+test("discovery accepts accessible provider directories regardless of mode", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, { pid: 42_121 });
+  await chmod(current.sessionsDir, 0o755);
+  await chmod(current.socketDir, 0o755);
+  const result = await current.adapter.discover();
+  assert.equal(result.peers.length, 1);
+  assert.deepEqual(result.rejected, {});
+});
+
+test("registry enumeration stops at its configured entry bound", async (t) => {
+  const current = await fixture(t, { maxRegistryEntries: 1 });
+  await addPeer(current, { pid: 42_201 });
+  await addPeer(current, { pid: 42_202, sessionId: SESSION_TWO });
+  const result = await current.adapter.discover();
+  assert.equal(result.truncated, true);
+  assert.equal(result.rejected.ENTRY_LIMIT_EXCEEDED, 1);
+  assert.equal(result.peers.length, 1);
+});
+
+test("frame codec emits canonical v1 NDJSON and rejects smuggling", () => {
+  const encoded = encodeClaudePeerUserFrame({
+    messageId: MESSAGE_ONE,
+    content: "hello",
+    from: "uds:/synthetic/sockets/123.sock",
+  });
+  assert.equal(encoded.at(-1), 0x0a);
+  assert.deepEqual(JSON.parse(encoded.toString("utf8")), {
+    msgV: 1,
+    msg_id: MESSAGE_ONE,
+    type: "user",
+    message: { role: "user", content: "hello" },
+    priority: "next",
+    from: "uds:/synthetic/sockets/123.sock",
+  });
+  assert.throws(() =>
+    encodeClaudePeerUserFrame({ messageId: MESSAGE_ONE, content: "" }),
+  );
+  assert.throws(() =>
+    encodeClaudePeerUserFrame({
+      messageId: MESSAGE_ONE,
+      content: "hello",
+      from: "https://example.invalid",
+    }),
+  );
+  assert.throws(() =>
+    encodeClaudePeerUserFrame({
+      messageId: "not-a-uuid",
+      content: "hello",
+    }),
+  );
+});
+
+test("send revalidates the exact target generation and never retries a changed peer", async (t) => {
+  const current = await fixture(t);
+  const target = await addPeer(current, { pid: 43_101 });
+  const discovered = await current.adapter.discover();
+  const targetId = discovered.peers[0]?.targetId;
+  assert.ok(targetId !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    targetId,
+    current.stateDir,
+  );
+  const record = JSON.parse(await readFile(target.registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  record.sessionId = SESSION_TWO;
+  await writeFile(target.registryPath, JSON.stringify(record), { mode: 0o600 });
+
+  await assert.rejects(
+    current.adapter.send(targetId, "do not deliver"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_TARGET_UNKNOWN",
+  );
+});
+
+test("send follows a session UUID across process and socket rotation", async (t) => {
+  let replacementConnections = 0;
+  const current = await fixture(t);
+  const original = await addPeer(current, {
+    pid: 43_201,
+    sessionId: SESSION_ONE,
+    name: "before-rotation",
+  });
+  const target = (await current.adapter.discover()).peers[0];
+  assert.ok(target !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    target.targetId,
+    current.stateDir,
+  );
+
+  await unlink(original.registryPath);
+  await addPeer(current, {
+    pid: 43_202,
+    sessionId: SESSION_ONE,
+    name: "after-rotation",
+    handler: (socket) => {
+      replacementConnections += 1;
+      socket.resume();
+    },
+  });
+
+  const sent = await current.adapter.send(
+    target.targetId,
+    "follow the logical session",
+  );
+  assert.equal(target.targetId, SESSION_ONE);
+  assert.equal(sent.transportStatus, "transport_written");
+  assert.equal(replacementConnections, 1);
+  assert.equal(
+    (await current.adapter.discover()).peers[0]?.alias,
+    "after-rotation",
+  );
+});
+
+test("send writes exactly one canonical frame and reports transport, not delivery", async (t) => {
+  let wire = Buffer.alloc(0);
+  let connections = 0;
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+  });
+  await addPeer(current, {
+    pid: 44_101,
+    handler: (socket) => {
+      connections += 1;
+      socket.on("data", (chunk) => {
+        wire = Buffer.concat([wire, chunk]);
+      });
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const statuses: string[] = [];
+  const result = await current.adapter.send(target.targetId, "transport only", {
+    onTransportStatus: (event) => {
+      statuses.push(event.status);
+    },
+  });
+  await eventually(() => wire.includes(0x0a));
+  assert.equal(connections, 1);
+  assert.deepEqual(statuses, ["connecting", "transport_written"]);
+  assert.deepEqual(result, {
+    messageId: MESSAGE_ONE,
+    transportStatus: "transport_written",
+    receiptStatus: "unavailable",
+  });
+  const parsed = JSON.parse(wire.toString("utf8")) as Record<string, unknown>;
+  assert.equal(parsed.type, "user");
+  assert.equal(parsed.msgV, 1);
+  assert.equal(parsed.from, undefined);
+});
+
+test("transport observer failures cannot turn a written message into a retry signal", async (t) => {
+  let writes = 0;
+  const current = await fixture(t, { createId: () => MESSAGE_ONE });
+  await addPeer(current, {
+    pid: 44_201,
+    handler: (socket) => {
+      writes += 1;
+      socket.resume();
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const result = await current.adapter.send(target.targetId, "exactly once", {
+    onTransportStatus: () => {
+      throw new Error("observer failure");
+    },
+  });
+  await eventually(() => writes === 1);
+  assert.equal(result.transportStatus, "transport_written");
+  assert.equal(writes, 1);
+});
+
+test("a post-connect error is ambiguous, non-retryable, and retains late receipt tracking", async (t) => {
+  const fakeSocket = new EventEmitter() as net.Socket;
+  fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
+  fakeSocket.end = ((
+    _frame: Buffer,
+    _callback: () => void,
+  ) => {
+    queueMicrotask(() => fakeSocket.emit("error", new Error("reset")));
+    return fakeSocket;
+  }) as net.Socket["end"];
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  const transport: string[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    receiptDeadlineMs: 20,
+    connect: () => {
+      queueMicrotask(() => fakeSocket.emit("connect"));
+      return fakeSocket;
+    },
+  });
+  await addPeer(current, { pid: 44_301 });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  await assert.rejects(
+    current.adapter.send(target.targetId, "ambiguous edge", {
+      listener,
+      onTransportStatus: (event) => {
+        transport.push(event.status);
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
+      error.recoverable === false,
+  );
+  assert.deepEqual(transport, ["connecting", "ambiguous"]);
+  await eventually(() => receipts.length === 1);
+  assert.equal(receipts[0]?.status, "ambiguous");
+});
+
+test("a post-connect timeout is ambiguous rather than not-written", async (t) => {
+  const fakeSocket = new EventEmitter() as net.Socket;
+  fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
+  fakeSocket.end = (() => fakeSocket) as net.Socket["end"];
+  const transport: string[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    connectTimeoutMs: 10,
+    connect: () => {
+      queueMicrotask(() => fakeSocket.emit("connect"));
+      return fakeSocket;
+    },
+  });
+  await addPeer(current, { pid: 44_302 });
+  const target = await selectFirstPeer(current);
+  await assert.rejects(
+    current.adapter.send(target.targetId, "timeout edge", {
+      onTransportStatus: (event) => {
+        transport.push(event.status);
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
+      error.recoverable === false,
+  );
+  assert.deepEqual(transport, ["connecting", "ambiguous"]);
+});
+
+test("anonymous callback listener bounds NDJSON and marks registered peers untrusted", async (t) => {
+  const current = await fixture(t);
+  const peer = await addPeer(current, { pid: 45_101, name: "advisor" });
+  const messages: ClaudePeerInboundMessage[] = [];
+  const notices: ClaudePeerProtocolNotice[] = [];
+  const listener = await current.adapter.listen({
+    onMessage: (message) => {
+      messages.push(message);
+    },
+    onProtocolNotice: (notice) => {
+      notices.push(notice);
+    },
+  });
+  const canonical = encodeClaudePeerUserFrame({
+    messageId: MESSAGE_TWO,
+    content: "reply from Claude",
+    from: `uds:${peer.socketPath}`,
+  });
+  await sendLines(listener.address.slice(4), [
+    canonical.subarray(0, 7),
+    canonical.subarray(7),
+  ]);
+  await eventually(() => messages.length === 1);
+  assert.equal(messages[0]?.content, "reply from Claude");
+  assert.equal(messages[0]?.sourceAlias, "advisor");
+  assert.equal(messages[0]?.replySupported, true);
+  assert.equal(messages[0]?.trust, "untrusted_same_uid_peer");
+
+  await sendLines(listener.address.slice(4), [
+    '{"type":"rename","name":"takeover"}\n',
+  ]);
+  await eventually(() => notices.length > 0);
+  assert.ok(notices.some((notice) => notice.code === "UNSUPPORTED_FRAME"));
+  assert.equal(messages.length, 1);
+});
+
+test("callback refuses connect-back addresses without a live exact registry", async (t) => {
+  const current = await fixture(t);
+  const messages: ClaudePeerInboundMessage[] = [];
+  const notices: ClaudePeerProtocolNotice[] = [];
+  const listener = await current.adapter.listen({
+    onMessage: (message) => {
+      messages.push(message);
+    },
+    onProtocolNotice: (notice) => {
+      notices.push(notice);
+    },
+  });
+  const frame = encodeClaudePeerUserFrame({
+    messageId: MESSAGE_ONE,
+    content: "spoofed callback",
+    from: `uds:${path.join(current.socketDir, "49999.sock")}`,
+  });
+  await sendLines(listener.address.slice(4), [frame]);
+  await eventually(() => notices.length === 1);
+  assert.equal(notices[0]?.code, "UNREGISTERED_REPLY_ADDRESS");
+  assert.equal(messages.length, 0);
+});
+
+test("transient reply addresses resolve only to the exact logical session UUID", async (t) => {
+  const current = await fixture(t);
+  const peer = await addPeer(current, { pid: 45_201, name: "reviewer" });
+  const resolved = await current.adapter.resolveReplyAddress(
+    `uds:${peer.socketPath}`,
+  );
+  assert.deepEqual(Object.keys(resolved).sort(), [
+    "alias",
+    "compatibility",
+    "kind",
+    "status",
+    "targetId",
+  ]);
+  assert.equal(resolved.alias, "reviewer");
+  assert.ok(!JSON.stringify(resolved).includes(peer.socketPath));
+  assert.ok(!JSON.stringify(resolved).includes("45201"));
+  await assert.rejects(
+    current.adapter.resolveReplyAddress(
+      `uds:${path.join(current.root, "outside.sock")}`,
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "UNREGISTERED_REPLY_ADDRESS",
+  );
+});
+
+test("known held receipt flow is normalized without claiming task completion", async (t) => {
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  let outbound: Record<string, unknown> | undefined;
+  const current = await fixture(t, { createId: () => MESSAGE_ONE });
+  const peer = await addPeer(current, {
+    pid: 46_101,
+    handler: (socket) => {
+      let data = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        data += chunk;
+      });
+      socket.on("end", () => {
+        outbound = JSON.parse(data) as Record<string, unknown>;
+      });
+    },
+  });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const result = await current.adapter.send(target.targetId, "needs approval", {
+    listener,
+  });
+  assert.equal(result.receiptStatus, "pending");
+  await eventually(() => outbound !== undefined);
+  assert.equal(outbound?.from, listener.address);
+
+  const statusFrame = (status: "held" | "delivered", messageId: string) =>
+    `${JSON.stringify({
+      type: "control",
+      action: "peer_message_status",
+      status,
+      reason: "not surfaced",
+      from: `uds:${peer.socketPath}`,
+      orig_msg_id: MESSAGE_ONE,
+      msgV: 1,
+      msg_id: messageId,
+    })}\n`;
+  await sendLines(listener.address.slice(4), [
+    statusFrame("held", MESSAGE_TWO),
+  ]);
+  await eventually(() => receipts.length === 1);
+  assert.deepEqual(receipts[0], {
+    messageId: MESSAGE_ONE,
+    status: "held",
+    trust: "untrusted_same_uid_peer",
+  });
+  await sendLines(listener.address.slice(4), [
+    statusFrame("delivered", "00000000-0000-4000-8000-000000000103"),
+  ]);
+  await eventually(() => receipts.length === 2);
+  assert.deepEqual(receipts[1], {
+    messageId: MESSAGE_ONE,
+    status: "released",
+    trust: "untrusted_same_uid_peer",
+  });
+});
+
+test("anonymous callback listener does not advertise until explicitly requested", async (t) => {
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    receiptDeadlineMs: 20,
+  });
+  await addPeer(current, { pid: 47_101, handler: (socket) => socket.resume() });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const callbackPath = listener.address.slice(4);
+  const target = await selectFirstPeer(current);
+  await current.adapter.send(target.targetId, "no acknowledgement", { listener });
+  await eventually(() => receipts.length === 1);
+  assert.deepEqual(receipts[0], {
+    messageId: MESSAGE_ONE,
+    status: "ambiguous",
+    trust: "untrusted_same_uid_peer",
+  });
+  const registryNames = await readdir(current.sessionsDir);
+  assert.ok(!registryNames.includes(`${process.pid}.json`));
+  await listener.close();
+  await assert.rejects(lstat(callbackPath), { code: "ENOENT" });
+});
+
+test("listener advertises one native codex peer and removes it on close", async (t) => {
+  const current = await fixture(t, { createId: () => SESSION_ONE });
+  const listener = await current.adapter.listen({ onMessage: () => undefined });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+
+  await listener.advertise("codex-isolated-test", current.workspace);
+  const record = JSON.parse(await readFile(registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(record.pid, process.pid);
+  assert.equal(record.name, "codex-isolated-test");
+  assert.equal(record.kind, "interactive");
+  assert.equal(record.messagingSocketPath, listener.address.slice(4));
+
+  await listener.updateAdvertisedStatus("waiting");
+  const waiting = JSON.parse(
+    await readFile(registryPath, "utf8"),
+  ) as Record<string, unknown>;
+  assert.equal(waiting.status, "waiting");
+  assert.equal(typeof waiting.statusUpdatedAt, "number");
+
+  await listener.close();
+  await assert.rejects(lstat(registryPath), { code: "ENOENT" });
+});
+
+test("listener returns native held and delivered statuses to the sending peer", async (t) => {
+  let receiptHandle: string | undefined;
+  const statuses: Array<Record<string, unknown>> = [];
+  const current = await fixture(t);
+  const peer = await addPeer(current, {
+    pid: 47_151,
+    handler: (socket) => {
+      let data = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        data += chunk;
+      });
+      socket.on("end", () => {
+        statuses.push(JSON.parse(data) as Record<string, unknown>);
+      });
+    },
+  });
+  await selectFirstPeer(current);
+  const listener = await current.adapter.listen({
+    onMessage: (message) => {
+      receiptHandle = message.receiptHandle;
+    },
+  });
+  await sendLines(listener.address.slice(4), [
+    `${JSON.stringify({
+      type: "user",
+      message: { role: "user", content: "native inbound" },
+      msgV: 1,
+      msg_id: MESSAGE_ONE,
+      priority: "next",
+      from: `uds:${peer.socketPath}`,
+    })}\n`,
+  ]);
+  await eventually(() => receiptHandle !== undefined);
+  await listener.acknowledge(receiptHandle as string, "held");
+  await listener.acknowledge(receiptHandle as string, "delivered");
+  await eventually(() => statuses.length === 2);
+  assert.deepEqual(
+    statuses.map((status) => status.status),
+    ["held", "delivered"],
+  );
+  assert.equal(statuses[0]?.orig_msg_id, MESSAGE_ONE);
+});
+
+test("listener pairs an expired native receipt with a readable safe diagnostic", async (t) => {
+  let receiptHandle: string | undefined;
+  const frames: Array<Record<string, unknown>> = [];
+  const current = await fixture(t);
+  const peer = await addPeer(current, {
+    pid: 47_152,
+    handler: (socket) => {
+      let data = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        data += chunk;
+      });
+      socket.on("end", () => {
+        for (const line of data.trim().split("\n")) {
+          frames.push(JSON.parse(line) as Record<string, unknown>);
+        }
+      });
+    },
+  });
+  await selectFirstPeer(current);
+  const listener = await current.adapter.listen({
+    onMessage: (message) => {
+      receiptHandle = message.receiptHandle;
+    },
+  });
+  await sendLines(listener.address.slice(4), [
+    `${JSON.stringify({
+      type: "user",
+      message: { role: "user", content: "native inbound failure" },
+      msgV: 1,
+      msg_id: MESSAGE_ONE,
+      priority: "next",
+      from: `uds:${peer.socketPath}`,
+    })}\n`,
+  ]);
+  await eventually(() => receiptHandle !== undefined);
+  await listener.acknowledge(receiptHandle as string, "expired", {
+    code: "CODEX_ROUTE_STALE",
+  });
+  await eventually(() => frames.length === 2);
+  assert.equal(frames[0]?.status, "expired");
+  assert.equal(frames[0]?.reason, "CODEX_ROUTE_STALE");
+  assert.equal(frames[1]?.type, "user");
+  assert.match(
+    String((frames[1]?.message as Record<string, unknown>)?.content),
+    /gateway-delivery-diagnostic status="expired" code="CODEX_ROUTE_STALE"/,
+  );
+  assert.equal(frames[1]?.from, undefined);
+});
+
+test("listener shutdown settles every pending transport as ambiguous", async (t) => {
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  let asyncSettlementFinished = false;
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    receiptDeadlineMs: 1_000,
+  });
+  await addPeer(current, { pid: 47_201, handler: (socket) => socket.resume() });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: async (event) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      receipts.push(event);
+      asyncSettlementFinished = true;
+    },
+  });
+  const target = await selectFirstPeer(current);
+  await current.adapter.send(target.targetId, "pending at shutdown", {
+    listener,
+  });
+  await listener.close();
+  assert.equal(asyncSettlementFinished, true);
+  assert.deepEqual(receipts[0], {
+    messageId: MESSAGE_ONE,
+    status: "ambiguous",
+    trust: "untrusted_same_uid_peer",
+  });
+});
+
+test("callback cleanup preserves an observed foreign path replacement", async (t) => {
+  const current = await fixture(t);
+  const listener = await current.adapter.listen({ onMessage: () => undefined });
+  const callbackPath = listener.address.slice(4);
+  await unlink(callbackPath);
+  await writeFile(callbackPath, "foreign replacement", { mode: 0o600 });
+  await assert.rejects(
+    listener.close(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_CALLBACK_CHANGED",
+  );
+  assert.equal(await readFile(callbackPath, "utf8"), "foreign replacement");
+});

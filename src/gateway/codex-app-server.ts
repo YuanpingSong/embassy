@@ -1,0 +1,2096 @@
+import { Buffer } from "node:buffer";
+import path from "node:path";
+import type { Duplex } from "node:stream";
+
+import WebSocket from "ws";
+
+/**
+ * Stable App Server methods reviewed for the gateway's first writable version.
+ *
+ * `turn/steer` is intentionally absent. Although it is a stable App Server
+ * method, the gateway queues while a turn is active and does not expose live
+ * steering in v1. There is no generic/public JSON-RPC escape hatch.
+ */
+export const CODEX_APP_SERVER_V1_METHODS = [
+  "thread/loaded/list",
+  "thread/resume",
+  "thread/unsubscribe",
+  "turn/start",
+  "turn/interrupt",
+] as const;
+
+/** Exact App Server builds whose writable v2 schema was reviewed. */
+export const CODEX_APP_SERVER_WRITABLE_VERSIONS = ["0.147.0"] as const;
+
+export type CodexAppServerV1Method =
+  (typeof CODEX_APP_SERVER_V1_METHODS)[number];
+
+export type CodexRouteStatus =
+  | "unknown"
+  | "not_loaded"
+  | "idle"
+  | "starting"
+  | "active"
+  | "waiting_approval"
+  | "interrupting"
+  | "system_error"
+  | "uncertain"
+  | "stale";
+
+export type CodexConnectorConnectionState =
+  | "connecting"
+  | "ready"
+  | "closed"
+  | "faulted";
+
+export type CodexRouteIdentity = {
+  endpointGeneration: string;
+  threadId: string;
+};
+
+/**
+ * Version/generation evidence supplied by the attach-only transport owner.
+ * App Server's initialize result does not currently negotiate a protocol
+ * version, so writable construction requires an outer, version-pinned probe.
+ * The attestation expires with any endpoint generation or binary change.
+ */
+export type CodexEndpointCompatibilityAttestation = {
+  appServerVersion: string;
+  endpointGeneration: string;
+  protocol: "app-server-v2-stable";
+};
+
+/**
+ * Compare-and-swap guard for every route operation. A caller must obtain a
+ * fresh guard after any request or notification changes route state.
+ */
+export type CodexRouteGuard = CodexRouteIdentity & {
+  activeTurnId: string | null;
+  revision: number;
+  status: CodexRouteStatus;
+  writableReady: boolean;
+  workspaceAttested: boolean;
+};
+
+/** Safe dashboard/controller projection. It deliberately omits provider IDs. */
+export type CodexConnectorObservation = {
+  connection: CodexConnectorConnectionState;
+  eventSequence: number;
+  hasActiveTurn: boolean;
+  queueDepth: number;
+  requestInFlight: boolean;
+  routeStatus: CodexRouteStatus;
+  writableReady: boolean;
+  writeBlockCode: CodexWriteBlockCode | null;
+  workspaceAttested: boolean;
+};
+
+export type CodexWriteBlockCode =
+  | "UNSAFE_EFFECTIVE_POLICY"
+  | "WRITES_DISABLED"
+  | "WORKSPACE_NOT_ATTESTED";
+
+/**
+ * Transient, exact-route input to a trusted host-local workspace validator.
+ * The connector never stores, emits, or returns `canonicalCwd`.
+ */
+export type CodexWorkspaceAttestationRequest = Readonly<{
+  canonicalCwd: string;
+  endpointGeneration: string;
+  threadId: string;
+}>;
+
+/**
+ * A literal `true` means the provider proved the workspace is canonical,
+ * narrow, race-stable, and disjoint from controller-owned state at that call.
+ * The connector calls this again immediately before every `turn/start`.
+ * Local and remote hosts require separate validators in their own filesystem
+ * namespace.
+ */
+export type CodexWorkspaceAttestor = (
+  request: CodexWorkspaceAttestationRequest,
+) => Promise<boolean>;
+
+export type CodexTurnOutcome = "completed" | "failed" | "interrupted";
+export type CodexDeliveryOutcome =
+  | CodexTurnOutcome
+  | "abandoned"
+  | "ambiguous"
+  | "expired";
+
+export type CodexConnectorEventKind =
+  | "connection_ready"
+  | "connection_closed"
+  | "protocol_fault"
+  | "request_started"
+  | "thread_observed"
+  | "thread_resumed"
+  | "thread_unsubscribed"
+  | "route_status_changed"
+  | "route_write_blocked"
+  | "message_queued"
+  | "queued_messages_cancelled"
+  | "turn_starting"
+  | "turn_started"
+  | "turn_interrupt_requested"
+  | "turn_completed"
+  | "approval_waiting"
+  | "server_request_ignored"
+  | "server_warning";
+
+export type CodexConnectorEventDetails = {
+  droppedMessages?: number;
+  errorCode?: CodexConnectorErrorCode;
+  loadedThreadCount?: number;
+  messageBytes?: number;
+  operation?: CodexAppServerV1Method | "initialize";
+  selectedThreadLoaded?: boolean;
+  turnOutcome?: CodexTurnOutcome;
+};
+
+/**
+ * Normalized operational event. Raw prompts, output, tool data, paths, thread
+ * IDs, turn IDs, JSON-RPC payloads, and server error strings never enter it.
+ */
+export type CodexConnectorEvent = CodexConnectorObservation & {
+  details?: CodexConnectorEventDetails;
+  kind: CodexConnectorEventKind;
+  timestamp: string;
+};
+
+export type CodexConnectorErrorCode =
+  | "INVALID_CONFIGURATION"
+  | "INVALID_ROUTE"
+  | "STALE_ENDPOINT"
+  | "ROUTE_CAS_MISMATCH"
+  | "ROUTE_NOT_READY"
+  | "THREAD_NOT_OBSERVED"
+  | "ROUTE_BUSY"
+  | "TURN_NOT_OWNED"
+  | "WORKSPACE_NOT_ATTESTED"
+  | "UNSAFE_EFFECTIVE_POLICY"
+  | "WRITES_DISABLED"
+  | "INPUT_INVALID"
+  | "QUEUE_FULL"
+  | "MESSAGE_DUPLICATE"
+  | "MESSAGE_CAPACITY"
+  | "METHOD_NOT_ALLOWED"
+  | "CONNECTOR_CLOSED"
+  | "REQUEST_TIMEOUT"
+  | "RPC_REJECTED"
+  | "RESULT_SCHEMA_MISMATCH"
+  | "TRANSPORT_WRITE_FAILED"
+  | "TRANSPORT_CLOSED"
+  | "PROTOCOL_ERROR";
+
+export class CodexConnectorError extends Error {
+  readonly ambiguous: boolean;
+  readonly code: CodexConnectorErrorCode;
+
+  constructor(code: CodexConnectorErrorCode, ambiguous = false) {
+    super(code);
+    this.name = "CodexConnectorError";
+    this.code = code;
+    this.ambiguous = ambiguous;
+  }
+}
+
+export type CodexAppServerTransport = {
+  close: () => Promise<void>;
+  onClose: (listener: () => void) => () => void;
+  onError: (listener: () => void) => () => void;
+  onMessage: (listener: (payload: string) => void) => () => void;
+  send: (payload: string) => Promise<void>;
+};
+
+export type WebSocketDuplexTransportOptions = {
+  closeTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
+  maxFrameBytes?: number;
+};
+
+/** Minimal net.Socket surface used by Node's WebSocket HTTP upgrade client. */
+export type SocketCompatibleDuplex = Duplex & {
+  setKeepAlive: (enable?: boolean, initialDelay?: number) => SocketCompatibleDuplex;
+  setNoDelay: (noDelay?: boolean) => SocketCompatibleDuplex;
+  setTimeout: (
+    timeout: number,
+    callback?: () => void,
+  ) => SocketCompatibleDuplex;
+};
+
+const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_INPUT_BYTES = 64 * 1024;
+const DEFAULT_MAX_QUEUE_DEPTH = 32;
+const DEFAULT_MAX_MESSAGE_IDS = 4_096;
+const DEFAULT_MAX_DEADLINE_MS = 24 * 60 * 60 * 1_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function rawDataToBuffer(data: WebSocket.RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  return Buffer.concat(data);
+}
+
+/**
+ * WebSocket client over a caller-owned, socket-compatible Duplex. The caller
+ * remains responsible for spawning, bounding, and terminating its exact local
+ * or SSH proxy process; this adapter never discovers or signals App Server.
+ */
+export class WebSocketDuplexTransport implements CodexAppServerTransport {
+  static async connect(
+    stream: SocketCompatibleDuplex,
+    options: WebSocketDuplexTransportOptions = {},
+  ): Promise<WebSocketDuplexTransport> {
+    const maxFrameBytes = positiveInteger(
+      options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
+      "INVALID_CONFIGURATION",
+    );
+    const handshakeTimeoutMs = positiveInteger(
+      options.handshakeTimeoutMs ?? 5_000,
+      "INVALID_CONFIGURATION",
+    );
+    const closeTimeoutMs = positiveInteger(
+      options.closeTimeoutMs ?? 2_000,
+      "INVALID_CONFIGURATION",
+    );
+
+    const socket = new WebSocket("ws://localhost/rpc", {
+      createConnection: () => {
+        queueMicrotask(() => stream.emit("connect"));
+        return stream as never;
+      },
+      followRedirects: false,
+      handshakeTimeout: handshakeTimeoutMs,
+      maxPayload: maxFrameBytes,
+      perMessageDeflate: false,
+    });
+    // A permanent sink prevents an EventEmitter error from becoming an
+    // uncaught exception before/after connector listeners are installed.
+    socket.on("error", () => undefined);
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: CodexConnectorError) => {
+        if (settled) return;
+        settled = true;
+        socket.off("open", onOpen);
+        socket.off("error", onError);
+        socket.off("unexpected-response", onUnexpectedResponse);
+        if (error === undefined) resolve();
+        else {
+          socket.terminate();
+          reject(error);
+        }
+      };
+      const onOpen = () => finish();
+      const onError = () =>
+        finish(new CodexConnectorError("TRANSPORT_CLOSED"));
+      const onUnexpectedResponse = () =>
+        finish(new CodexConnectorError("PROTOCOL_ERROR"));
+      socket.once("open", onOpen);
+      socket.once("error", onError);
+      socket.once("unexpected-response", onUnexpectedResponse);
+    });
+
+    return new WebSocketDuplexTransport(socket, maxFrameBytes, closeTimeoutMs);
+  }
+
+  private readonly closeListeners = new Set<() => void>();
+  private readonly errorListeners = new Set<() => void>();
+  private readonly messageListeners = new Set<(payload: string) => void>();
+
+  private constructor(
+    private readonly socket: WebSocket,
+    private readonly maxFrameBytes: number,
+    private readonly closeTimeoutMs: number,
+  ) {
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        this.emitError();
+        socket.terminate();
+        return;
+      }
+      const bytes = rawDataToBuffer(data);
+      if (bytes.length > this.maxFrameBytes) {
+        this.emitError();
+        socket.terminate();
+        return;
+      }
+      const payload = bytes.toString("utf8");
+      for (const listener of this.messageListeners) listener(payload);
+    });
+    socket.on("error", () => this.emitError());
+    socket.on("close", () => {
+      for (const listener of this.closeListeners) listener();
+    });
+  }
+
+  onMessage(listener: (payload: string) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
+  }
+
+  onClose(listener: () => void): () => void {
+    this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
+
+  onError(listener: () => void): () => void {
+    this.errorListeners.add(listener);
+    return () => this.errorListeners.delete(listener);
+  }
+
+  async send(payload: string): Promise<void> {
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      throw new CodexConnectorError("TRANSPORT_CLOSED");
+    }
+    if (Buffer.byteLength(payload, "utf8") > this.maxFrameBytes) {
+      throw new CodexConnectorError("INPUT_INVALID");
+    }
+    await new Promise<void>((resolve, reject) => {
+      this.socket.send(payload, (error) => {
+        if (error == null) resolve();
+        else reject(new CodexConnectorError("TRANSPORT_WRITE_FAILED", true));
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.socket.readyState === WebSocket.CLOSED) return;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.socket.off("close", finish);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.socket.terminate();
+        finish();
+      }, this.closeTimeoutMs);
+      this.socket.once("close", finish);
+      this.socket.close(1000);
+    });
+  }
+
+  private emitError(): void {
+    for (const listener of this.errorListeners) listener();
+  }
+}
+
+type ClientInfo = {
+  name: string;
+  title: string;
+  version: string;
+};
+
+export type CodexAppServerConnectorOptions = {
+  attestWorkspace: CodexWorkspaceAttestor;
+  clientInfo?: ClientInfo;
+  compatibility: CodexEndpointCompatibilityAttestation;
+  maxDeadlineMs?: number;
+  maxFrameBytes?: number;
+  maxInputBytes?: number;
+  maxMessageIds?: number;
+  maxQueueDepth?: number;
+  maxReplyBytes?: number;
+  now?: () => Date;
+  onEvent?: (event: CodexConnectorEvent) => void;
+  onTurnResult?: (result: CodexTransientTurnResult) => void;
+  requestTimeoutMs?: number;
+  requireReadOnlyPolicy?: boolean;
+  route: CodexRouteIdentity;
+  transport: CodexAppServerTransport;
+  /** Immutable outer authorization; monitor-only connectors set this false. */
+  writesEnabled: boolean;
+};
+
+export type CodexMessageInput = {
+  deadlineAt: string;
+  messageId: string;
+  text: string;
+};
+
+export type CodexMessageDisposition = {
+  disposition: "expired" | "queued" | "started";
+  observation: CodexConnectorObservation;
+};
+
+/**
+ * Ephemeral reply handoff. `text` is never copied into connector observations
+ * or events and is discarded immediately after this synchronous callback.
+ */
+export type CodexTransientTurnResult = {
+  messageId: string;
+  outcome: CodexDeliveryOutcome;
+  replyCode: "REPLY_TOO_LARGE" | "REPLY_UNAVAILABLE" | null;
+  text: string | null;
+};
+
+export type CodexLoadedObservation = {
+  loadedThreadCount: number;
+  observation: CodexConnectorObservation;
+  selectedThreadLoaded: boolean;
+};
+
+export type CodexUnsubscribeResult = {
+  observation: CodexConnectorObservation;
+  status: "notLoaded" | "notSubscribed" | "unsubscribed";
+};
+
+type PendingRequest = {
+  method: CodexAppServerV1Method | "initialize";
+  reject: (error: CodexConnectorError) => void;
+  resolve: (result: unknown) => void;
+  timer: NodeJS.Timeout;
+};
+
+type QueuedMessage = {
+  byteLength: number;
+  deadlineAtMs: number;
+  messageId: string;
+  text: string;
+};
+
+const V1_METHOD_SET = new Set<string>(CODEX_APP_SERVER_V1_METHODS);
+
+const OUTPUT_NOTIFICATION_OPT_OUTS = [
+  "item/started",
+  "item/agentMessage/delta",
+  "item/reasoning/textDelta",
+  "item/reasoning/summaryTextDelta",
+  "item/commandExecution/outputDelta",
+  "turn/diff/updated",
+  "turn/plan/updated",
+] as const;
+
+const APPROVAL_REQUEST_METHODS = new Set([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/permissions/requestApproval",
+  "item/tool/requestUserInput",
+  "mcpServer/elicitation/request",
+]);
+
+function positiveInteger(
+  value: number,
+  code: CodexConnectorErrorCode,
+): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new CodexConnectorError(code);
+  }
+  return value;
+}
+
+function validOpaqueId(value: string, maximumLength = 256): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)
+  );
+}
+
+function validateRoute(route: CodexRouteIdentity): CodexRouteIdentity {
+  if (
+    !validOpaqueId(route.threadId) ||
+    !validOpaqueId(route.endpointGeneration, 128)
+  ) {
+    throw new CodexConnectorError("INVALID_ROUTE");
+  }
+  return { ...route };
+}
+
+function validateClientInfo(clientInfo: ClientInfo): ClientInfo {
+  const values = [clientInfo.name, clientInfo.title, clientInfo.version];
+  if (
+    values.some(
+      (value) =>
+        value.length === 0 ||
+        value.length > 128 ||
+        value.includes("\0") ||
+        /[\r\n]/u.test(value),
+    )
+  ) {
+    throw new CodexConnectorError("INVALID_CONFIGURATION");
+  }
+  return { ...clientInfo };
+}
+
+function validateCompatibility(
+  compatibility: CodexEndpointCompatibilityAttestation,
+  route: CodexRouteIdentity,
+): CodexEndpointCompatibilityAttestation {
+  if (
+    compatibility.endpointGeneration !== route.endpointGeneration ||
+    compatibility.protocol !== "app-server-v2-stable" ||
+    !CODEX_APP_SERVER_WRITABLE_VERSIONS.some(
+      (version) => version === compatibility.appServerVersion,
+    )
+  ) {
+    throw new CodexConnectorError("INVALID_CONFIGURATION");
+  }
+  return { ...compatibility };
+}
+
+function parseRouteStatus(value: unknown): CodexRouteStatus | null {
+  if (!isRecord(value) || typeof value.type !== "string") return null;
+  if (value.type === "notLoaded") return "not_loaded";
+  if (value.type === "idle") return "idle";
+  if (value.type === "systemError") return "system_error";
+  if (value.type !== "active") return null;
+  if (value.activeFlags === undefined) return "active";
+  if (
+    !Array.isArray(value.activeFlags) ||
+    value.activeFlags.length > 32 ||
+    !value.activeFlags.every(
+      (flag) => typeof flag === "string" && flag.length <= 128,
+    )
+  ) {
+    return null;
+  }
+  return value.activeFlags.includes("waitingOnApproval")
+    ? "waiting_approval"
+    : "active";
+}
+
+function parseTurn(value: unknown): {
+  id: string;
+  status: string;
+} | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    !validOpaqueId(value.id) ||
+    typeof value.status !== "string" ||
+    value.status.length > 64
+  ) {
+    return null;
+  }
+  return { id: value.id, status: value.status };
+}
+
+function parseCanonicalWorkspace(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 4_096 ||
+    value.includes("\0") ||
+    /[\r\n]/u.test(value) ||
+    !(
+      (path.posix.isAbsolute(value) && path.posix.normalize(value) === value) ||
+      (path.win32.isAbsolute(value) && path.win32.normalize(value) === value)
+    )
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function classifyEffectivePolicy(
+  approvalPolicy: unknown,
+  sandbox: unknown,
+): "invalid" | "safe" | "unsafe" {
+  if (
+    typeof approvalPolicy !== "string" ||
+    approvalPolicy.length === 0 ||
+    approvalPolicy.length > 64 ||
+    !isRecord(sandbox) ||
+    typeof sandbox.type !== "string" ||
+    sandbox.type.length === 0 ||
+    sandbox.type.length > 64 ||
+    (sandbox.networkAccess !== undefined &&
+      typeof sandbox.networkAccess !== "boolean")
+  ) {
+    return "invalid";
+  }
+  const exactReadOnlyKeys = Object.keys(sandbox).every(
+    (key) => key === "type" || key === "networkAccess",
+  );
+  return approvalPolicy === "never" &&
+    sandbox.type === "readOnly" &&
+    sandbox.networkAccess !== true &&
+    exactReadOnlyKeys
+    ? "safe"
+    : "unsafe";
+}
+
+/**
+ * One connection, one exact opted-in Codex route, one endpoint generation.
+ * Reconnection creates a new connector/generation; this object never retries
+ * an ambiguous write or silently rebinds a stale route.
+ */
+export class CodexAppServerConnector {
+  static async connect(
+    options: CodexAppServerConnectorOptions,
+  ): Promise<CodexAppServerConnector> {
+    const connector = new CodexAppServerConnector(options);
+    await connector.initialize();
+    return connector;
+  }
+
+  private readonly acceptedMessageIds = new Set<string>();
+  private activeMessageId: string | null = null;
+  private activeTurnId: string | null = null;
+  private connection: CodexConnectorConnectionState = "connecting";
+  private effectivePolicySafe = false;
+  private drainScheduled = false;
+  private eventSequence = 0;
+  private expectedClose = false;
+  private faulting = false;
+  private inFlightMethod: CodexAppServerV1Method | null = null;
+  private initializeRequested = false;
+  private initialized = false;
+  private lastCompletedTurnId: string | null = null;
+  private nextRequestId = 1;
+  private ownsActiveTurn = false;
+  private readonly pending = new Map<number, PendingRequest>();
+  private readonly queue: QueuedMessage[] = [];
+  private queueRefreshAuthorized = false;
+  private revision = 0;
+  private routeStatus: CodexRouteStatus = "unknown";
+  private selectedThreadObserved = false;
+  private statusEpoch = 0;
+  private transientReply: string | null = null;
+  private transientReplyTooLarge = false;
+  private readonly unlisten: Array<() => void> = [];
+  private workspaceAttested = false;
+  private workspaceCwd: string | null = null;
+  private workspaceEpoch = 0;
+
+  private readonly attestWorkspace: CodexWorkspaceAttestor;
+  private readonly clientInfo: ClientInfo;
+  private readonly compatibility: CodexEndpointCompatibilityAttestation;
+  private readonly maxDeadlineMs: number;
+  private readonly maxFrameBytes: number;
+  private readonly maxInputBytes: number;
+  private readonly maxMessageIds: number;
+  private readonly maxQueueDepth: number;
+  private readonly maxReplyBytes: number;
+  private readonly now: () => Date;
+  private readonly onEvent: ((event: CodexConnectorEvent) => void) | undefined;
+  private readonly onTurnResult:
+    | ((result: CodexTransientTurnResult) => void)
+    | undefined;
+  private readonly requestTimeoutMs: number;
+  private readonly requireReadOnlyPolicy: boolean;
+  private readonly route: CodexRouteIdentity;
+  private readonly transport: CodexAppServerTransport;
+  private readonly writesEnabled: boolean;
+
+  private constructor(options: CodexAppServerConnectorOptions) {
+    this.route = validateRoute(options.route);
+    this.compatibility = validateCompatibility(options.compatibility, this.route);
+    if (typeof options.attestWorkspace !== "function") {
+      throw new CodexConnectorError("INVALID_CONFIGURATION");
+    }
+    this.attestWorkspace = options.attestWorkspace;
+    if (typeof options.writesEnabled !== "boolean") {
+      throw new CodexConnectorError("INVALID_CONFIGURATION");
+    }
+    this.writesEnabled = options.writesEnabled;
+    this.transport = options.transport;
+    this.clientInfo = validateClientInfo(
+      options.clientInfo ?? {
+        name: "claude_agent_bridge_gateway",
+        title: "Claude Agent Bridge Gateway",
+        version: "0.1.0",
+      },
+    );
+    this.maxFrameBytes = positiveInteger(
+      options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
+      "INVALID_CONFIGURATION",
+    );
+    this.maxDeadlineMs = positiveInteger(
+      options.maxDeadlineMs ?? DEFAULT_MAX_DEADLINE_MS,
+      "INVALID_CONFIGURATION",
+    );
+    this.maxInputBytes = positiveInteger(
+      options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
+      "INVALID_CONFIGURATION",
+    );
+    this.maxMessageIds = positiveInteger(
+      options.maxMessageIds ?? DEFAULT_MAX_MESSAGE_IDS,
+      "INVALID_CONFIGURATION",
+    );
+    this.maxQueueDepth = positiveInteger(
+      options.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
+      "INVALID_CONFIGURATION",
+    );
+    this.maxReplyBytes = positiveInteger(
+      options.maxReplyBytes ?? DEFAULT_MAX_INPUT_BYTES,
+      "INVALID_CONFIGURATION",
+    );
+    this.requestTimeoutMs = positiveInteger(
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      "INVALID_CONFIGURATION",
+    );
+    this.requireReadOnlyPolicy = options.requireReadOnlyPolicy ?? true;
+    this.now = options.now ?? (() => new Date());
+    this.onEvent = options.onEvent;
+    this.onTurnResult = options.onTurnResult;
+
+    this.unlisten.push(
+      this.transport.onMessage((payload) => this.handlePayload(payload)),
+      this.transport.onClose(() => this.handleDisconnect()),
+      this.transport.onError(() => this.protocolFault("TRANSPORT_CLOSED")),
+    );
+  }
+
+  observation(): CodexConnectorObservation {
+    const writeBlockCode = this.currentWriteBlockCode();
+    return {
+      connection: this.connection,
+      eventSequence: this.eventSequence,
+      hasActiveTurn: this.activeTurnId !== null,
+      queueDepth: this.queue.length,
+      requestInFlight: this.inFlightMethod !== null,
+      routeStatus: this.routeStatus,
+      writableReady: writeBlockCode === null,
+      writeBlockCode,
+      workspaceAttested: this.workspaceAttested,
+    };
+  }
+
+  guard(): CodexRouteGuard {
+    const writableReady = this.currentWriteBlockCode() === null;
+    return {
+      ...this.route,
+      activeTurnId: this.activeTurnId,
+      revision: this.revision,
+      status: this.routeStatus,
+      writableReady,
+      workspaceAttested: this.workspaceAttested,
+    };
+  }
+
+  async observeLoadedThread(
+    guard: CodexRouteGuard,
+  ): Promise<CodexLoadedObservation> {
+    this.assertGuard(guard);
+    this.assertReady();
+    this.assertNoRequest();
+    this.beginRequest("thread/loaded/list");
+    try {
+      const result = await this.request("thread/loaded/list", {});
+      if (!isRecord(result) || !Array.isArray(result.data)) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH");
+      }
+      const data = result.data;
+      if (
+        data.length > 100_000 ||
+        !data.every(
+          (item) => typeof item === "string" && validOpaqueId(item),
+        )
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH");
+      }
+      const selectedThreadLoaded = data.includes(this.route.threadId);
+      if (this.selectedThreadObserved !== selectedThreadLoaded) {
+        this.selectedThreadObserved = selectedThreadLoaded;
+        this.bumpRevision();
+      }
+      if (!selectedThreadLoaded) {
+        this.invalidateWorkspaceAttestation();
+        if (
+          this.routeStatus === "active" ||
+          this.routeStatus === "waiting_approval" ||
+          this.routeStatus === "interrupting" ||
+          this.activeTurnId !== null
+        ) {
+          throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+        }
+        this.setRouteStatus("not_loaded");
+      }
+      const loadedObservation = {
+        loadedThreadCount: data.length,
+        selectedThreadLoaded,
+      };
+      this.emit("thread_observed", {
+        loadedThreadCount: data.length,
+        selectedThreadLoaded,
+      });
+      this.finishRequest("thread/loaded/list");
+      return { ...loadedObservation, observation: this.observation() };
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      if (normalized.ambiguous && this.connection === "ready") {
+        this.settleActiveDelivery("ambiguous");
+        this.setRouteStatus("uncertain");
+      }
+      this.handleActionError(normalized);
+      throw normalized;
+    } finally {
+      this.finishRequest("thread/loaded/list");
+    }
+  }
+
+  async resumeThread(guard: CodexRouteGuard): Promise<CodexConnectorObservation> {
+    this.assertGuard(guard);
+    this.assertReady();
+    this.assertNoRequest();
+    if (!this.selectedThreadObserved) {
+      throw new CodexConnectorError("THREAD_NOT_OBSERVED");
+    }
+    if (
+      this.routeStatus !== "unknown" &&
+      this.routeStatus !== "not_loaded" &&
+      !(
+        this.currentWriteBlockCode() !== null &&
+        this.routeStatus === "idle" &&
+        this.activeTurnId === null
+      )
+    ) {
+      throw new CodexConnectorError("ROUTE_BUSY");
+    }
+    this.invalidateWorkspaceAttestation();
+    const workspaceEpoch = this.workspaceEpoch;
+    const statusEpoch = this.statusEpoch;
+    this.beginRequest("thread/resume");
+    try {
+      const result = await this.request("thread/resume", {
+        excludeTurns: true,
+        threadId: this.route.threadId,
+      });
+      if (
+        !isRecord(result) ||
+        !isRecord(result.thread) ||
+        !Array.isArray(result.thread.turns) ||
+        result.thread.turns.length !== 0
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (result.thread.id !== this.route.threadId) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      await this.attestResumedWorkspace(
+        result.cwd,
+        result.approvalPolicy,
+        result.sandbox,
+        workspaceEpoch,
+      );
+      if (this.statusEpoch === statusEpoch) {
+        const status = parseRouteStatus(result.thread.status);
+        if (status === null) {
+          // A response without status proves subscription but not idleness. Do
+          // not guess; queued/model actions remain fail-closed until status is
+          // observed.
+          this.setRouteStatus("unknown");
+        } else {
+          this.setRouteStatus(status);
+        }
+      }
+      this.emit("thread_resumed");
+      const writeBlockCode = this.currentWriteBlockCode();
+      if (writeBlockCode !== null) {
+        this.emit("route_write_blocked", { errorCode: writeBlockCode });
+      }
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      if (normalized.ambiguous && this.connection === "ready") {
+        this.setRouteStatus("uncertain");
+      }
+      if (normalized.code === "WORKSPACE_NOT_ATTESTED") {
+        this.protocolFault(normalized.code);
+      } else {
+        this.handleActionError(normalized);
+      }
+      throw normalized;
+    } finally {
+      this.finishRequest("thread/resume");
+    }
+    return this.observation();
+  }
+
+  async unsubscribeThread(
+    guard: CodexRouteGuard,
+  ): Promise<CodexUnsubscribeResult> {
+    this.assertGuard(guard);
+    this.assertReady();
+    this.assertNoRequest();
+    if (
+      this.activeTurnId !== null ||
+      this.routeStatus === "active" ||
+      this.routeStatus === "waiting_approval" ||
+      this.routeStatus === "starting" ||
+      this.routeStatus === "interrupting"
+    ) {
+      throw new CodexConnectorError("ROUTE_BUSY");
+    }
+    this.dropQueuedMessages();
+    this.beginRequest("thread/unsubscribe");
+    try {
+      const result = await this.request("thread/unsubscribe", {
+        threadId: this.route.threadId,
+      });
+      if (
+        !isRecord(result) ||
+        (result.status !== "unsubscribed" &&
+          result.status !== "notSubscribed" &&
+          result.status !== "notLoaded")
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH");
+      }
+      this.setRouteStatus("not_loaded");
+      this.selectedThreadObserved = false;
+      this.invalidateWorkspaceAttestation();
+      this.emit("thread_unsubscribed");
+      const status = result.status;
+      this.finishRequest("thread/unsubscribe");
+      return { observation: this.observation(), status };
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      if (normalized.ambiguous && this.connection === "ready") {
+        this.setRouteStatus("uncertain");
+      }
+      this.handleActionError(normalized);
+      throw normalized;
+    } finally {
+      this.finishRequest("thread/unsubscribe");
+    }
+  }
+
+  /**
+   * Drop only this exact route's transient queued bodies. Route disable and
+   * unregister paths use this before releasing broker ownership.
+   */
+  cancelQueuedMessages(guard: CodexRouteGuard): CodexConnectorObservation {
+    this.assertGuard(guard);
+    this.assertReady();
+    const droppedMessages = this.dropQueuedMessages();
+    this.emit("queued_messages_cancelled", { droppedMessages });
+    return this.observation();
+  }
+
+  async submitMessage(
+    guard: CodexRouteGuard,
+    input: CodexMessageInput,
+  ): Promise<CodexMessageDisposition> {
+    this.assertGuard(guard);
+    this.assertReady();
+    if (!this.selectedThreadObserved) {
+      throw new CodexConnectorError("THREAD_NOT_OBSERVED");
+    }
+    if (
+      this.routeStatus === "starting" ||
+      this.routeStatus === "active" ||
+      this.routeStatus === "waiting_approval" ||
+      this.routeStatus === "interrupting"
+    ) {
+      this.assertQueueBoundaryRefreshable();
+      const message = this.validateMessage(input);
+      this.enqueue(message);
+      return { disposition: "queued", observation: this.observation() };
+    }
+    const refreshWorkspace =
+      !this.workspaceAttested && this.queueRefreshAuthorized;
+    if (refreshWorkspace) this.assertQueueBoundaryRefreshable();
+    else this.assertWritableReady();
+    const message = this.validateMessage(input);
+    if (this.routeStatus !== "idle") {
+      this.acceptedMessageIds.delete(message.messageId);
+      throw new CodexConnectorError("ROUTE_NOT_READY");
+    }
+
+    const disposition = await this.startMessage(message, refreshWorkspace);
+    return { disposition, observation: this.observation() };
+  }
+
+  /**
+   * Interrupt only a connector-originated turn whose exact ID is present in a
+   * fresh CAS guard. The method clears queued work and never targets a Desktop
+   * or user-originated active turn.
+   */
+  async interruptOwnedTurn(
+    guard: CodexRouteGuard,
+  ): Promise<CodexConnectorObservation> {
+    this.assertGuard(guard);
+    this.assertReady();
+    this.assertNoRequest();
+    if (!this.selectedThreadObserved) {
+      throw new CodexConnectorError("THREAD_NOT_OBSERVED");
+    }
+    if (
+      !this.ownsActiveTurn ||
+      this.activeTurnId === null ||
+      guard.activeTurnId !== this.activeTurnId ||
+      (this.routeStatus !== "active" &&
+        this.routeStatus !== "waiting_approval")
+    ) {
+      throw new CodexConnectorError("TURN_NOT_OWNED");
+    }
+
+    const turnId = this.activeTurnId;
+    const droppedMessages = this.dropQueuedMessages();
+    this.beginRequest("turn/interrupt");
+    try {
+      const result = await this.request("turn/interrupt", {
+        threadId: this.route.threadId,
+        turnId,
+      });
+      if (!isRecord(result)) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      // A completion notification can win the race with the response.
+      if (this.activeTurnId === turnId && this.ownsActiveTurn) {
+        this.setRouteStatus("interrupting");
+      }
+      this.emit("turn_interrupt_requested", { droppedMessages });
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      if (normalized.ambiguous && this.connection === "ready") {
+        this.settleActiveDelivery("ambiguous");
+        this.activeTurnId = null;
+        this.setRouteStatus("uncertain");
+      }
+      this.handleActionError(normalized);
+      throw normalized;
+    } finally {
+      this.finishRequest("turn/interrupt");
+    }
+    return this.observation();
+  }
+
+  async close(): Promise<void> {
+    if (this.connection === "closed" || this.connection === "faulted") return;
+    this.expectedClose = true;
+    try {
+      await this.transport.close();
+    } finally {
+      this.handleDisconnect();
+    }
+  }
+
+  private async initialize(): Promise<void> {
+    try {
+      const result = await this.request("initialize", {
+        capabilities: {
+          // `thread/resume.excludeTurns` is field-gated behind this capability
+          // in the exactly attested 0.147.0 schema. The client method allowlist
+          // remains closed and exposes no experimental method.
+          experimentalApi: true,
+          optOutNotificationMethods: [...OUTPUT_NOTIFICATION_OPT_OUTS],
+        },
+        clientInfo: this.clientInfo,
+      });
+      if (!isRecord(result)) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH");
+      }
+      await this.transport.send(
+        JSON.stringify({ method: "initialized", params: {} }),
+      );
+      this.initialized = true;
+      this.connection = "ready";
+      this.bumpRevision();
+      this.emit("connection_ready");
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      this.protocolFault(normalized.code);
+      throw normalized;
+    }
+  }
+
+  private validateMessage(input: CodexMessageInput): QueuedMessage {
+    if (
+      !validOpaqueId(input.messageId, 128) ||
+      typeof input.text !== "string" ||
+      input.text.trim().length === 0 ||
+      input.text.includes("\0")
+    ) {
+      throw new CodexConnectorError("INPUT_INVALID");
+    }
+    const nowMs = this.now().getTime();
+    const deadlineAtMs =
+      typeof input.deadlineAt === "string"
+        ? Date.parse(input.deadlineAt)
+        : Number.NaN;
+    if (
+      !Number.isFinite(nowMs) ||
+      !Number.isFinite(deadlineAtMs) ||
+      new Date(deadlineAtMs).toISOString() !== input.deadlineAt ||
+      deadlineAtMs <= nowMs ||
+      deadlineAtMs > nowMs + this.maxDeadlineMs
+    ) {
+      throw new CodexConnectorError("INPUT_INVALID");
+    }
+    const byteLength = Buffer.byteLength(input.text, "utf8");
+    if (byteLength === 0 || byteLength > this.maxInputBytes) {
+      throw new CodexConnectorError("INPUT_INVALID");
+    }
+    if (this.acceptedMessageIds.has(input.messageId)) {
+      throw new CodexConnectorError("MESSAGE_DUPLICATE");
+    }
+    if (this.acceptedMessageIds.size >= this.maxMessageIds) {
+      throw new CodexConnectorError("MESSAGE_CAPACITY");
+    }
+    this.acceptedMessageIds.add(input.messageId);
+    return {
+      byteLength,
+      deadlineAtMs,
+      messageId: input.messageId,
+      text: input.text,
+    };
+  }
+
+  private enqueue(message: QueuedMessage): void {
+    if (this.queue.length >= this.maxQueueDepth) {
+      this.acceptedMessageIds.delete(message.messageId);
+      throw new CodexConnectorError("QUEUE_FULL");
+    }
+    this.queue.push(message);
+    this.bumpRevision();
+    this.emit("message_queued", { messageBytes: message.byteLength });
+  }
+
+  private async startMessage(
+    message: QueuedMessage,
+    allowStaleWorkspaceRefresh = false,
+  ): Promise<"expired" | "started"> {
+    this.assertNoRequest();
+    this.assertStartBoundary(allowStaleWorkspaceRefresh);
+    if (this.messageExpired(message)) {
+      this.expireMessage(message);
+      return "expired";
+    }
+
+    // Reserve queue order while the host-local lease is being revalidated,
+    // but do not claim turn ownership until immediately before the RPC write.
+    this.activeMessageId = message.messageId;
+    this.ownsActiveTurn = false;
+    this.transientReply = null;
+    this.transientReplyTooLarge = false;
+    this.setRouteStatus("starting");
+    let requestBegan = false;
+    try {
+      await this.refreshEffectiveWriteBoundary(allowStaleWorkspaceRefresh);
+      if (this.messageExpired(message)) {
+        this.activeMessageId = null;
+        this.acceptedMessageIds.delete(message.messageId);
+        if (this.routeStatus === "starting") this.setRouteStatus("idle");
+        this.settleDelivery(message.messageId, "expired");
+        return "expired";
+      }
+      if (
+        this.connection !== "ready" ||
+        this.routeStatus !== "starting" ||
+        this.activeMessageId !== message.messageId
+      ) {
+        throw new CodexConnectorError("WORKSPACE_NOT_ATTESTED");
+      }
+
+      const statusEpoch = this.statusEpoch;
+      this.ownsActiveTurn = true;
+      this.emit("turn_starting", { messageBytes: message.byteLength });
+      this.beginRequest("turn/start");
+      requestBegan = true;
+      const result = await this.request("turn/start", {
+        input: [{ text: message.text, type: "text" }],
+        threadId: this.route.threadId,
+      });
+      if (!isRecord(result)) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      const turn = parseTurn(result.turn);
+      if (turn === null || turn.status !== "inProgress") {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (this.activeTurnId !== null && this.activeTurnId !== turn.id) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (this.lastCompletedTurnId === turn.id) {
+        // A very fast turn may complete before its start response is handled.
+        // Never resurrect it or retry; the completion notification is final.
+        return "started";
+      }
+      this.activeTurnId = turn.id;
+      this.ownsActiveTurn = true;
+      if (this.statusEpoch === statusEpoch || this.routeStatus === "starting") {
+        this.setRouteStatus("active");
+      }
+      this.emit("turn_started", { messageBytes: message.byteLength });
+      return "started";
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      const noObservedTurn = this.activeTurnId === null;
+      if (this.connection !== "ready") {
+        // The transport close/fault already settled the reserved delivery.
+      } else if (!normalized.ambiguous && noObservedTurn) {
+        this.settleDelivery(
+          message.messageId,
+          "failed",
+          null,
+          "REPLY_UNAVAILABLE",
+        );
+        this.activeMessageId = null;
+        this.ownsActiveTurn = false;
+        this.acceptedMessageIds.delete(message.messageId);
+        if (
+          normalized.code === "WORKSPACE_NOT_ATTESTED" ||
+          normalized.code === "UNSAFE_EFFECTIVE_POLICY"
+        ) {
+          if (normalized.code === "WORKSPACE_NOT_ATTESTED") {
+            this.invalidateWorkspaceAttestation();
+          }
+          const droppedMessages = this.dropQueuedMessages();
+          if (this.routeStatus === "starting") this.setRouteStatus("idle");
+          this.emit("route_write_blocked", {
+            droppedMessages,
+            errorCode: normalized.code,
+          });
+        } else if (
+          normalized.code !== "ROUTE_NOT_READY" ||
+          this.routeStatus === "starting"
+        ) {
+          // A clean JSON-RPC rejection may represent a concurrent Desktop
+          // state change. Stop the queue until authoritative state is observed.
+          this.setRouteStatus("system_error");
+        }
+      } else {
+        this.settleActiveDelivery("ambiguous");
+        this.activeTurnId = null;
+        this.setRouteStatus("uncertain");
+      }
+      this.handleActionError(normalized);
+      throw normalized;
+    } finally {
+      if (requestBegan) this.finishRequest("turn/start");
+    }
+  }
+
+  private scheduleDrain(): void {
+    this.dropExpiredQueuedMessages();
+    if (
+      this.drainScheduled ||
+      this.connection !== "ready" ||
+      this.routeStatus !== "idle" ||
+      !this.queueBoundaryRefreshable() ||
+      this.inFlightMethod !== null ||
+      this.queue.length === 0
+    ) {
+      return;
+    }
+    // Leave the body in the queue until the microtask commits the start. This
+    // keeps it visible to exact-route cancellation/close in the completion ->
+    // drain scheduling window.
+    this.drainScheduled = true;
+    queueMicrotask(() => {
+      this.drainScheduled = false;
+      this.dropExpiredQueuedMessages();
+      if (
+        this.connection !== "ready" ||
+        this.routeStatus !== "idle" ||
+        !this.queueBoundaryRefreshable() ||
+        this.inFlightMethod !== null ||
+        this.queue.length === 0
+      ) {
+        return;
+      }
+      const message = this.queue.shift();
+      if (message === undefined) return;
+      this.bumpRevision();
+      void this.startMessage(message, true).then(
+        (disposition) => {
+          if (disposition === "expired") this.scheduleDrain();
+        },
+        () => undefined,
+      );
+    });
+  }
+
+  private assertGuard(guard: CodexRouteGuard): void {
+    if (
+      guard.threadId !== this.route.threadId ||
+      guard.endpointGeneration !== this.route.endpointGeneration
+    ) {
+      throw new CodexConnectorError("STALE_ENDPOINT");
+    }
+    if (
+      guard.revision !== this.revision ||
+      guard.status !== this.routeStatus ||
+      guard.activeTurnId !== this.activeTurnId ||
+      guard.writableReady !== (this.currentWriteBlockCode() === null) ||
+      guard.workspaceAttested !== this.workspaceAttested
+    ) {
+      throw new CodexConnectorError("ROUTE_CAS_MISMATCH");
+    }
+  }
+
+  private assertReady(): void {
+    if (
+      !this.initialized ||
+      this.connection !== "ready" ||
+      this.routeStatus === "stale"
+    ) {
+      throw new CodexConnectorError("CONNECTOR_CLOSED");
+    }
+  }
+
+  private assertNoRequest(): void {
+    if (this.inFlightMethod !== null) {
+      throw new CodexConnectorError("ROUTE_BUSY");
+    }
+  }
+
+  private currentWriteBlockCode(): CodexWriteBlockCode | null {
+    if (!this.writesEnabled) return "WRITES_DISABLED";
+    // Gateway routes are explicitly registered by the owning Codex task and
+    // retain that task's native approval/sandbox policy. In that mode,
+    // workspace metadata is observational rather than an additional delivery
+    // authorization gate. A live registered route remains reachable across
+    // external turns and settings notifications.
+    if (!this.requireReadOnlyPolicy) return null;
+    if (!this.workspaceAttested || this.workspaceCwd === null) {
+      return "WORKSPACE_NOT_ATTESTED";
+    }
+    return this.effectivePolicySafe ? null : "UNSAFE_EFFECTIVE_POLICY";
+  }
+
+  private assertWritableReady(): void {
+    const code = this.currentWriteBlockCode();
+    if (code !== null) throw new CodexConnectorError(code);
+  }
+
+  private queueBoundaryRefreshable(): boolean {
+    const code = this.currentWriteBlockCode();
+    return (
+      code === null ||
+      (code === "WORKSPACE_NOT_ATTESTED" && this.queueRefreshAuthorized)
+    );
+  }
+
+  private assertQueueBoundaryRefreshable(): void {
+    if (this.queueBoundaryRefreshable()) return;
+    const code = this.currentWriteBlockCode();
+    throw new CodexConnectorError(code ?? "ROUTE_NOT_READY");
+  }
+
+  private assertStartBoundary(allowStaleWorkspaceRefresh: boolean): void {
+    if (allowStaleWorkspaceRefresh) {
+      this.assertQueueBoundaryRefreshable();
+      return;
+    }
+    this.assertWritableReady();
+  }
+
+  private async attestResumedWorkspace(
+    value: unknown,
+    approvalPolicy: unknown,
+    sandbox: unknown,
+    attemptEpoch: number,
+  ): Promise<void> {
+    if (!this.requireReadOnlyPolicy) {
+      if (
+        this.connection !== "ready" ||
+        this.inFlightMethod !== "thread/resume" ||
+        this.workspaceEpoch !== attemptEpoch
+      ) {
+        throw new CodexConnectorError("CONNECTOR_CLOSED");
+      }
+      this.workspaceCwd = parseCanonicalWorkspace(value) ?? "/";
+      this.workspaceAttested = true;
+      this.effectivePolicySafe = true;
+      this.queueRefreshAuthorized = true;
+      this.bumpRevision();
+      return;
+    }
+    const canonicalCwd = parseCanonicalWorkspace(value);
+    const policy = classifyEffectivePolicy(approvalPolicy, sandbox);
+    if (canonicalCwd === null || policy === "invalid") {
+      throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+    }
+    let accepted: unknown = false;
+    try {
+      accepted = await this.attestWorkspace(
+        Object.freeze({
+          canonicalCwd,
+          endpointGeneration: this.route.endpointGeneration,
+          threadId: this.route.threadId,
+        }),
+      );
+    } catch {
+      // The outer validator's diagnostics may contain paths or filesystem
+      // details. Collapse every denial to one normalized, path-free code.
+      accepted = false;
+    }
+    if (
+      this.connection !== "ready" ||
+      this.inFlightMethod !== "thread/resume"
+    ) {
+      throw new CodexConnectorError("CONNECTOR_CLOSED");
+    }
+    if (this.workspaceEpoch !== attemptEpoch || accepted !== true) {
+      throw new CodexConnectorError("WORKSPACE_NOT_ATTESTED");
+    }
+    this.workspaceCwd = canonicalCwd;
+    this.workspaceAttested = true;
+    const policyAccepted =
+      policy === "safe" || !this.requireReadOnlyPolicy;
+    this.effectivePolicySafe = policyAccepted;
+    this.queueRefreshAuthorized = policyAccepted;
+    this.bumpRevision();
+  }
+
+  /**
+   * Refresh the exact thread's effective cwd, approval policy, and sandbox on
+   * this same connection immediately before a `turn/start`. A filesystem-only
+   * lease renewal cannot detect an App Server settings change, and the
+   * settings-updated notification is experimental in 0.147.0, so writes never
+   * rely on notification fanout for policy freshness.
+   */
+  private async refreshEffectiveWriteBoundary(
+    allowStaleWorkspaceRefresh: boolean,
+  ): Promise<void> {
+    this.assertStartBoundary(allowStaleWorkspaceRefresh);
+    if (
+      this.routeStatus !== "starting" ||
+      this.activeMessageId === null ||
+      this.activeTurnId !== null ||
+      this.ownsActiveTurn
+    ) {
+      throw new CodexConnectorError("ROUTE_NOT_READY");
+    }
+
+    this.invalidateWorkspaceAttestation(true);
+    const workspaceEpoch = this.workspaceEpoch;
+    const statusEpoch = this.statusEpoch;
+    this.beginRequest("thread/resume");
+    try {
+      const result = await this.request("thread/resume", {
+        excludeTurns: true,
+        threadId: this.route.threadId,
+      });
+      if (
+        !isRecord(result) ||
+        !isRecord(result.thread) ||
+        result.thread.id !== this.route.threadId ||
+        !Array.isArray(result.thread.turns) ||
+        result.thread.turns.length !== 0
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      const refreshedStatus = parseRouteStatus(result.thread.status);
+      if (refreshedStatus === null) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (refreshedStatus !== "idle") {
+        this.setRouteStatus(refreshedStatus);
+        throw new CodexConnectorError("ROUTE_NOT_READY");
+      }
+      await this.attestResumedWorkspace(
+        result.cwd,
+        result.approvalPolicy,
+        result.sandbox,
+        workspaceEpoch,
+      );
+      this.assertWritableReady();
+      if (
+        this.statusEpoch !== statusEpoch ||
+        this.routeStatus !== "starting" ||
+        this.activeMessageId === null ||
+        this.activeTurnId !== null ||
+        this.ownsActiveTurn
+      ) {
+        this.invalidateWorkspaceAttestation(true);
+        throw new CodexConnectorError("ROUTE_NOT_READY");
+      }
+    } finally {
+      this.finishRequest("thread/resume");
+    }
+  }
+
+  private invalidateWorkspaceAttestation(
+    retainQueueRefreshAuthorization = false,
+  ): void {
+    this.workspaceEpoch += 1;
+    if (!Number.isSafeInteger(this.workspaceEpoch)) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    const changed =
+      this.workspaceAttested ||
+      this.workspaceCwd !== null ||
+      this.effectivePolicySafe ||
+      (!retainQueueRefreshAuthorization && this.queueRefreshAuthorized);
+    this.workspaceAttested = false;
+    this.workspaceCwd = null;
+    this.effectivePolicySafe = false;
+    if (!retainQueueRefreshAuthorization) {
+      this.queueRefreshAuthorized = false;
+    }
+    if (changed) this.bumpRevision();
+  }
+
+  private messageExpired(message: QueuedMessage): boolean {
+    const nowMs = this.now().getTime();
+    return !Number.isFinite(nowMs) || nowMs >= message.deadlineAtMs;
+  }
+
+  private expireMessage(message: QueuedMessage): void {
+    this.acceptedMessageIds.delete(message.messageId);
+    this.settleDelivery(message.messageId, "expired");
+  }
+
+  private dropExpiredQueuedMessages(): void {
+    let dropped = 0;
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      const message = this.queue[index];
+      if (message === undefined || !this.messageExpired(message)) continue;
+      this.queue.splice(index, 1);
+      this.expireMessage(message);
+      dropped += 1;
+    }
+    if (dropped > 0) this.bumpRevision();
+  }
+
+  private beginRequest(method: CodexAppServerV1Method): void {
+    if (!V1_METHOD_SET.has(method) || this.inFlightMethod !== null) {
+      throw new CodexConnectorError("ROUTE_BUSY");
+    }
+    this.inFlightMethod = method;
+    this.bumpRevision();
+    this.emit("request_started", { operation: method });
+  }
+
+  private finishRequest(method: CodexAppServerV1Method): void {
+    if (this.inFlightMethod !== method) return;
+    this.inFlightMethod = null;
+    this.bumpRevision();
+    if (this.routeStatus === "idle") this.scheduleDrain();
+  }
+
+  private request(
+    method: CodexAppServerV1Method | "initialize",
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    if (method !== "initialize" && !V1_METHOD_SET.has(method)) {
+      return Promise.reject(new CodexConnectorError("METHOD_NOT_ALLOWED"));
+    }
+    if (method === "initialize") {
+      if (this.initializeRequested || this.connection !== "connecting") {
+        return Promise.reject(new CodexConnectorError("METHOD_NOT_ALLOWED"));
+      }
+      this.initializeRequested = true;
+    } else if (!this.initialized) {
+      return Promise.reject(new CodexConnectorError("CONNECTOR_CLOSED"));
+    }
+    if (this.connection === "closed" || this.connection === "faulted") {
+      return Promise.reject(new CodexConnectorError("CONNECTOR_CLOSED"));
+    }
+    const id = this.nextRequestId;
+    this.nextRequestId += 1;
+    if (!Number.isSafeInteger(this.nextRequestId)) {
+      return Promise.reject(new CodexConnectorError("PROTOCOL_ERROR"));
+    }
+    const payload = JSON.stringify({ id, method, params });
+    if (Buffer.byteLength(payload, "utf8") > this.maxFrameBytes) {
+      return Promise.reject(new CodexConnectorError("INPUT_INVALID"));
+    }
+
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (pending === undefined) return;
+        this.pending.delete(id);
+        pending.reject(new CodexConnectorError("REQUEST_TIMEOUT", true));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { method, reject, resolve, timer });
+      let write: Promise<void>;
+      try {
+        write = this.transport.send(payload);
+      } catch {
+        write = Promise.reject(
+          new CodexConnectorError("TRANSPORT_WRITE_FAILED", true),
+        );
+      }
+      void write.catch(() => {
+        const pending = this.pending.get(id);
+        if (pending === undefined) return;
+        this.pending.delete(id);
+        clearTimeout(pending.timer);
+        pending.reject(
+          new CodexConnectorError("TRANSPORT_WRITE_FAILED", true),
+        );
+      });
+    });
+  }
+
+  private handlePayload(payload: string): void {
+    if (Buffer.byteLength(payload, "utf8") > this.maxFrameBytes) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    if (!isRecord(parsed)) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+
+    if (typeof parsed.method === "string") {
+      if (parsed.id === undefined) this.handleNotification(parsed.method, parsed.params);
+      else this.handleServerRequest(parsed.method, parsed.params);
+      return;
+    }
+    if (parsed.id === undefined) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    if (!Number.isSafeInteger(parsed.id) || typeof parsed.id !== "number") {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    const pending = this.pending.get(parsed.id);
+    if (pending === undefined) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    const hasResult = Object.hasOwn(parsed, "result");
+    const hasError = Object.hasOwn(parsed, "error");
+    if (hasResult === hasError) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    this.pending.delete(parsed.id);
+    clearTimeout(pending.timer);
+    if (hasError) {
+      if (
+        !isRecord(parsed.error) ||
+        typeof parsed.error.code !== "number" ||
+        !Number.isSafeInteger(parsed.error.code)
+      ) {
+        pending.reject(new CodexConnectorError("PROTOCOL_ERROR", true));
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      // Deliberately discard the server's free-form error message/data.
+      pending.reject(new CodexConnectorError("RPC_REJECTED"));
+      return;
+    }
+    pending.resolve(parsed.result);
+  }
+
+  private handleNotification(method: string, params: unknown): void {
+    if (method === "item/completed") {
+      this.captureCompletedAgentMessage(params);
+      return;
+    }
+
+    if (method === "thread/settings/updated") {
+      if (!isRecord(params) || typeof params.threadId !== "string") {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (params.threadId !== this.route.threadId) return;
+      // A settings update can replace the effective cwd, approval policy, or
+      // sandbox without a turn transition. Do not interpret or retain the raw
+      // settings payload. Invalidate the transient resume proof, abandon any
+      // queued bodies, and require a fresh exact-thread resume before writing.
+      this.invalidateWorkspaceAttestation();
+      const droppedMessages = this.dropQueuedMessages();
+      this.emit("route_write_blocked", {
+        droppedMessages,
+        errorCode: "WORKSPACE_NOT_ATTESTED",
+      });
+      return;
+    }
+
+    if (method === "thread/status/changed") {
+      if (!isRecord(params) || typeof params.threadId !== "string") {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (params.threadId !== this.route.threadId) return;
+      const status = parseRouteStatus(params.status);
+      if (status === null) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      this.statusEpoch += 1;
+      if (
+        (status === "active" || status === "waiting_approval") &&
+        !this.ownsActiveTurn &&
+        this.routeStatus !== "active" &&
+        this.routeStatus !== "waiting_approval"
+      ) {
+        // Another client can change the thread's default cwd when starting a
+        // turn. Require a fresh resume-time workspace proof before any later
+        // gateway write.
+        this.invalidateWorkspaceAttestation(true);
+      }
+      if (status === "idle" && this.activeTurnId !== null) {
+        // Wait for the correlated turn/completed notification before draining.
+        return;
+      }
+      if (status === "not_loaded") {
+        this.selectedThreadObserved = false;
+        this.invalidateWorkspaceAttestation();
+        this.settleActiveDelivery("ambiguous");
+        this.activeTurnId = null;
+        this.activeMessageId = null;
+        this.ownsActiveTurn = false;
+        this.clearTransientReply();
+        this.dropQueuedMessages();
+      }
+      if (
+        status === "active" &&
+        this.routeStatus === "interrupting" &&
+        this.activeTurnId !== null
+      ) {
+        return;
+      }
+      this.setRouteStatus(status);
+      this.emit(
+        status === "waiting_approval"
+          ? "approval_waiting"
+          : "route_status_changed",
+      );
+      if (status === "idle") this.scheduleDrain();
+      return;
+    }
+
+    if (method === "thread/closed") {
+      if (!isRecord(params) || typeof params.threadId !== "string") {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (params.threadId !== this.route.threadId) return;
+      this.settleActiveDelivery("ambiguous");
+      this.activeTurnId = null;
+      this.selectedThreadObserved = false;
+      this.invalidateWorkspaceAttestation();
+      this.activeMessageId = null;
+      this.ownsActiveTurn = false;
+      this.clearTransientReply();
+      this.dropQueuedMessages();
+      this.setRouteStatus("not_loaded");
+      this.emit("route_status_changed");
+      return;
+    }
+
+    if (method === "turn/started") {
+      if (
+        !isRecord(params) ||
+        typeof params.threadId !== "string"
+      ) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (params.threadId !== this.route.threadId) return;
+      const turn = parseTurn(params.turn);
+      if (
+        turn === null ||
+        turn.status !== "inProgress"
+      ) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (!this.ownsActiveTurn || this.activeMessageId === null) {
+        this.invalidateWorkspaceAttestation(true);
+        return;
+      }
+      if (this.lastCompletedTurnId === turn.id) return;
+      if (this.activeTurnId !== null && this.activeTurnId !== turn.id) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      this.activeTurnId = turn.id;
+      this.ownsActiveTurn =
+        this.ownsActiveTurn && this.activeMessageId !== null;
+      this.setRouteStatus("active");
+      this.emit("turn_started");
+      return;
+    }
+
+    if (method === "turn/completed") {
+      if (
+        !isRecord(params) ||
+        typeof params.threadId !== "string"
+      ) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (params.threadId !== this.route.threadId) return;
+      const turn = parseTurn(params.turn);
+      if (
+        turn === null ||
+        (turn.status !== "completed" &&
+          turn.status !== "failed" &&
+          turn.status !== "interrupted")
+      ) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (!this.ownsActiveTurn || this.activeMessageId === null) {
+        this.invalidateWorkspaceAttestation(true);
+        return;
+      }
+      if (this.activeTurnId === null) return;
+      if (this.activeTurnId !== turn.id) {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      const messageId = this.activeMessageId;
+      const reply = this.transientReply;
+      const replyTooLarge = this.transientReplyTooLarge;
+      this.activeTurnId = null;
+      this.lastCompletedTurnId = turn.id;
+      this.activeMessageId = null;
+      this.ownsActiveTurn = false;
+      this.clearTransientReply();
+      const outcome = turn.status as CodexTurnOutcome;
+      this.setRouteStatus(outcome === "failed" ? "system_error" : "idle");
+      this.emit("turn_completed", { turnOutcome: outcome });
+      if (messageId !== null) {
+        const text = outcome === "completed" && !replyTooLarge ? reply : null;
+        const replyCode = replyTooLarge
+          ? "REPLY_TOO_LARGE"
+          : text === null
+            ? "REPLY_UNAVAILABLE"
+            : null;
+        this.settleDelivery(messageId, outcome, text, replyCode);
+      }
+      if (outcome !== "failed") this.scheduleDrain();
+      return;
+    }
+
+    if (method === "serverRequest/resolved") {
+      if (!isRecord(params) || typeof params.threadId !== "string") {
+        this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (
+        params.threadId === this.route.threadId &&
+        this.routeStatus === "waiting_approval"
+      ) {
+        this.setRouteStatus("active");
+        this.emit("route_status_changed");
+      }
+      return;
+    }
+
+    if (method === "warning" || method === "configWarning") {
+      this.emit("server_warning");
+    }
+    // Every other notification is ignored after the global frame bound. Raw
+    // item/model/tool payloads are neither normalized nor retained.
+  }
+
+  private handleServerRequest(method: string, params: unknown): void {
+    if (!APPROVAL_REQUEST_METHODS.has(method)) {
+      this.emit("server_request_ignored");
+      return;
+    }
+    if (
+      !isRecord(params) ||
+      typeof params.threadId !== "string" ||
+      typeof params.turnId !== "string" ||
+      !validOpaqueId(params.turnId)
+    ) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    if (params.threadId !== this.route.threadId) return;
+    if (
+      !this.ownsActiveTurn &&
+      this.routeStatus !== "active" &&
+      this.routeStatus !== "waiting_approval"
+    ) {
+      this.invalidateWorkspaceAttestation(true);
+    }
+    if (this.activeTurnId !== null && this.activeTurnId !== params.turnId) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    this.activeTurnId = params.turnId;
+    // Do not acquire ownership merely by observing another client's approval.
+    this.setRouteStatus("waiting_approval");
+    this.emit("approval_waiting");
+    // Intentionally no JSON-RPC response: the gateway is not an approval UI or
+    // authority. The owning Desktop client must resolve the request.
+  }
+
+  private captureCompletedAgentMessage(params: unknown): void {
+    if (
+      !this.ownsActiveTurn ||
+      this.activeMessageId === null ||
+      this.activeTurnId === null
+    ) {
+      return;
+    }
+    if (
+      !isRecord(params) ||
+      typeof params.threadId !== "string" ||
+      typeof params.turnId !== "string" ||
+      !isRecord(params.item)
+    ) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    if (params.threadId !== this.route.threadId) return;
+    if (params.turnId !== this.activeTurnId) {
+      return;
+    }
+    const item = params.item;
+    if (item.type !== "agentMessage") return;
+    if (item.phase !== undefined && item.phase !== "final_answer") return;
+    if (typeof item.text !== "string" || item.text.includes("\0")) return;
+    const replyBytes = Buffer.byteLength(item.text, "utf8");
+    if (replyBytes === 0) return;
+    if (replyBytes > this.maxReplyBytes) {
+      this.transientReply = null;
+      this.transientReplyTooLarge = true;
+      return;
+    }
+    this.transientReply = item.text;
+    this.transientReplyTooLarge = false;
+  }
+
+  private clearTransientReply(): void {
+    this.transientReply = null;
+    this.transientReplyTooLarge = false;
+  }
+
+  private settleDelivery(
+    messageId: string,
+    outcome: CodexDeliveryOutcome,
+    text: string | null = null,
+    replyCode: CodexTransientTurnResult["replyCode"] = "REPLY_UNAVAILABLE",
+  ): void {
+    try {
+      this.onTurnResult?.({ messageId, outcome, replyCode, text });
+    } catch {
+      // Delivery consumers cannot alter transport or route state. Any reply
+      // text is dropped immediately after this synchronous handoff.
+    }
+  }
+
+  private settleActiveDelivery(outcome: "abandoned" | "ambiguous"): void {
+    if (this.activeMessageId !== null) {
+      this.settleDelivery(this.activeMessageId, outcome);
+    }
+    this.activeMessageId = null;
+    this.ownsActiveTurn = false;
+    this.clearTransientReply();
+  }
+
+  private setRouteStatus(status: CodexRouteStatus): void {
+    if (this.routeStatus === status) return;
+    this.routeStatus = status;
+    this.bumpRevision();
+  }
+
+  private bumpRevision(): void {
+    this.revision += 1;
+    if (!Number.isSafeInteger(this.revision)) {
+      this.protocolFault("PROTOCOL_ERROR");
+    }
+  }
+
+  private emit(
+    kind: CodexConnectorEventKind,
+    details?: CodexConnectorEventDetails,
+  ): void {
+    this.eventSequence += 1;
+    const event: CodexConnectorEvent = {
+      ...this.observation(),
+      kind,
+      timestamp: this.now().toISOString(),
+      ...(details === undefined ? {} : { details }),
+    };
+    try {
+      this.onEvent?.(event);
+    } catch {
+      // Monitoring consumers cannot affect routing or protocol state.
+    }
+  }
+
+  private dropQueuedMessages(): number {
+    const dropped = this.queue.length;
+    for (const message of this.queue) {
+      this.settleDelivery(message.messageId, "abandoned");
+    }
+    this.queue.length = 0;
+    if (dropped > 0) this.bumpRevision();
+    return dropped;
+  }
+
+  private normalizeError(
+    error: unknown,
+    ambiguousFallback: boolean,
+  ): CodexConnectorError {
+    return error instanceof CodexConnectorError
+      ? error
+      : new CodexConnectorError("PROTOCOL_ERROR", ambiguousFallback);
+  }
+
+  private handleActionError(error: unknown): void {
+    const normalized = this.normalizeError(error, true);
+    if (
+      normalized.code === "PROTOCOL_ERROR" ||
+      normalized.code === "RESULT_SCHEMA_MISMATCH" ||
+      normalized.code === "TRANSPORT_WRITE_FAILED" ||
+      normalized.code === "TRANSPORT_CLOSED"
+    ) {
+      this.protocolFault(normalized.code);
+    }
+  }
+
+  private rejectPending(code: CodexConnectorErrorCode): void {
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new CodexConnectorError(code, true));
+    }
+  }
+
+  private protocolFault(code: CodexConnectorErrorCode): void {
+    if (this.faulting || this.connection === "faulted") return;
+    this.faulting = true;
+    this.connection = "faulted";
+    this.initialized = false;
+    this.routeStatus = "stale";
+    this.selectedThreadObserved = false;
+    this.invalidateWorkspaceAttestation();
+    this.settleActiveDelivery("ambiguous");
+    this.activeTurnId = null;
+    const droppedMessages = this.dropQueuedMessages();
+    this.inFlightMethod = null;
+    this.bumpRevision();
+    this.rejectPending(code);
+    this.emit("protocol_fault", { droppedMessages, errorCode: code });
+    void this.transport.close().catch(() => undefined);
+    for (const remove of this.unlisten.splice(0)) remove();
+    this.faulting = false;
+  }
+
+  private handleDisconnect(): void {
+    if (this.connection === "closed" || this.connection === "faulted") return;
+    this.connection = "closed";
+    this.initialized = false;
+    this.routeStatus = "stale";
+    this.selectedThreadObserved = false;
+    this.invalidateWorkspaceAttestation();
+    this.settleActiveDelivery("ambiguous");
+    this.activeTurnId = null;
+    const droppedMessages = this.dropQueuedMessages();
+    this.inFlightMethod = null;
+    this.bumpRevision();
+    this.rejectPending("TRANSPORT_CLOSED");
+    this.emit("connection_closed", {
+      droppedMessages,
+      ...(!this.expectedClose ? { errorCode: "TRANSPORT_CLOSED" as const } : {}),
+    });
+    for (const remove of this.unlisten.splice(0)) remove();
+  }
+}

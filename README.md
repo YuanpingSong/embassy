@@ -16,6 +16,146 @@ does not provide full feature parity.
 This is an unofficial community project and is not affiliated with or
 endorsed by Anthropic or OpenAI.
 
+The experimental bidirectional Claude–Codex gateway is additive and is not
+part of the released `0.1.0` MCP surface. Its architecture, multi-host Codex
+topology, dashboard, privacy boundary, and staged live gates are documented in
+[`docs/GATEWAY-ARCHITECTURE.md`](docs/GATEWAY-ARCHITECTURE.md).
+
+## Experimental gateway status
+
+The current worktree includes a live-tested local implementation of:
+
+- a bounded metadata store with private route ownership, endpoint fencing,
+  dedupe/rate limits, and memory-only message bodies;
+- a closed JSONL control protocol on a private same-user Unix socket;
+- a self-contained, metadata-only static HTML dashboard;
+- a Claude peer adapter pinned to Claude Code 2.1.225 / peer protocol 1,
+  while accepting still-running 2.1.224 same-protocol session records during a
+  normal patch upgrade;
+- a Codex App Server connector pinned to reviewed App Server 0.147.0 schemas,
+  with queue-only busy behavior and no `turn/steer`;
+- runtime attestation for the exact installed Claude Code 2.1.225 binary and a
+  safe attach-only local Codex proxy factory;
+- local Claude and Codex provider adapters, with remote production adapters
+  disabled;
+- an integrated gateway service with cross-provider
+  selection/dispatch/reply correlation and restart-abandonment coverage;
+- a foreground, local-host-only `serve` launcher with native bidirectional
+  Claude/Codex messaging;
+- the packaged `claude-codex-gateway` client for the closed private-UDS
+  command family; and
+- the repo-scoped [`claude-codex-peer`](skills/claude-codex-peer/SKILL.md)
+  skill that defines current-name and Claude-session-UUID routing.
+
+Claude Code cross-session messaging is an official feature. This project's
+external registry/UDS adapter is an internal, version-pinned compatibility
+boundary. For one explicitly registered `codex-*` task, the gateway publishes
+a process-owned native peer record so Claude's native `ListAgents` and
+`SendMessage` tools can address it directly. App Server route events update
+that record atomically as `idle`, `busy`, or `waiting`.
+
+The foreground broker launcher and local provider assembly are implemented.
+It never daemonizes itself or enables a remote connector. A real isolated-task
+test completed Claude native discovery and send, a real busy-task hold,
+automatic dispatch after the task became idle, a second Codex turn, and
+delivery of the exact final reply back to Claude. Claude observed the native
+`busy → waiting` transition and the terminal delivery receipt. The current
+native advertisement is single-task per gateway process.
+
+Claude-originated messages receive native status control frames. Acceptance
+into the gateway queue remains an internal dashboard state and deliberately
+does not emit Claude's approval-specific native `held` status. App Server
+acceptance emits `delivered`. Delivery failures emit native `expired`, followed
+by a static machine-readable gateway diagnostic containing only a safe error
+code; `denied` is reserved for a future explicit user or policy rejection. A
+transient pre-dispatch failure returns the same message to the internal held
+queue and retries after a fresh route observation.
+Replies may be written to a busy Claude peer because Claude's native socket
+owns its own inbox; this avoids a reply-wait deadlock.
+
+The implemented commands are `serve`, `health`, `status`,
+`refresh-dashboard`, `register-codex`, `unregister-codex`, `select-claude`,
+`unselect-claude`, `send-to-claude`, `send-to-codex`, and `reply`. They require
+the foreground broker, except that `serve` starts it in the current terminal;
+all other commands communicate only through its private control UDS.
+Claude destinations may be the session's latest `name@host` or its native
+session UUID. The UUID is the logical identity; names are a live lookup index,
+and process/socket changes are refreshed transport details. A rename makes the
+old name stop resolving immediately while the UUID continues to work. Message
+bodies are non-empty UTF-8 from standard input, at most 16 KiB; they are never
+accepted as arguments or files. Output is one bounded normalized JSON line
+with no native IDs, paths, addresses, or message bodies. See the
+architecture document for the exact command contract and implementation/live
+status.
+
+Each provider-authorized mutation requires exactly one inherited principal:
+Codex identity or Claude's raw messaging-socket identity, never both. Missing
+or ambiguous identity fails closed. Serve, health, status, dashboard refresh,
+Claude selection, and unselection are operator commands and do not infer a
+provider principal.
+
+After building, start the foreground local runtime in a trusted local
+terminal:
+
+```bash
+npm run build
+npm run gateway -- serve
+```
+
+It emits one normalized ready line, publishes `gateway-dashboard.html` in the
+configured private state directory, and then waits for `SIGINT` or `SIGTERM`.
+Startup attests exact local runtime paths and binds controller-owned sockets;
+it does not discover a Claude peer, write a provider socket, start a model
+turn, or contact a remote host. Use another terminal for `health`, `status`,
+or a separately authorized discovery/send stage. The launcher reports
+`codexMode: "native_messaging"`.
+
+The version pins are separate. The released MCP lifecycle driver retains its
+Claude Code 2.1.220 compatibility boundary described below; the experimental
+peer gateway runtime requires exact Claude Code 2.1.225. Already-running
+2.1.224 peer records remain discoverable only because they use the same
+reviewed peer protocol 1 shape. Gateway work does not silently widen the
+lifecycle driver's authentication or permission attestation.
+
+The peer gateway does not authenticate to Anthropic or launch a model request
+through the CLI. Already-running genuine Claude sessions retain their own
+authentication and permissions. Gateway runtime attestation runs only bounded
+`claude --version`; the peer adapter needs the exact live-session registry and
+peer-socket roots, not Keychain, Claude project history, or the user's general
+Claude configuration. See the architecture document for the exact minimal
+paths and staged authorization ladder.
+
+A no-model check also confirmed that this Codex task's tool process inherits a
+UUID-shaped `CODEX_THREAD_ID` without printing its value. The skill/CLI can
+therefore self-register the calling task; it never needs a private thread ID in
+an argument.
+
+On the Claude side, Claude Code supplies `CLAUDE_CODE_MESSAGING_SOCKET` as a
+raw absolute socket path. The CLI converts it transiently in memory to the
+gateway's internal `uds:` reply capability. Do not set, prefix, echo, or pass
+that value manually.
+
+Controller state may sit inside a selected provider workspace; route state
+remains private and provider-native paths and message bodies are not exposed.
+The gateway still rejects the filesystem root and temporary roots as
+deliberately broad workspaces. The user's home is selectable with the default
+state location beneath it. A narrower project directory remains preferable
+when broad file context is unnecessary.
+
+The exact App Server 0.147.0 connector hard-codes initialization capability
+`experimentalApi: true` solely because that version gates the
+privacy-preserving `thread/resume` option `excludeTurns: true` behind it. Every
+resume sends only the exact task ID plus `excludeTurns: true` and rejects a
+missing, malformed, or nonempty returned `thread.turns`. For gateway routes,
+explicit registration is the reachability authorization; reported workspace
+and policy metadata are observational and do not add another delivery gate.
+The flag is not configurable, does not add an experimental RPC method, and
+does not widen the closed method allowlist.
+
+Claude-to-Codex routing retains the resumed task's existing native policy.
+The gateway does not supply persistent turn-level policy overrides or answer
+approval prompts.
+
 ## Local-only boundary
 
 This bridge is deliberately for one person using Claude Code on the same
@@ -575,6 +715,9 @@ diagnostic output, or any attempt to show account or credential data.
 
 ## References
 
+- [Anthropic cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)
+- [OpenAI Codex App Server](https://learn.chatgpt.com/docs/app-server)
+- [OpenAI remote connections and SSH hosts](https://learn.chatgpt.com/docs/remote-connections)
 - [Codex subagents documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents.md)
 - [Pinned Multi-Agent v2 tool schemas](https://github.com/openai/codex/blob/8922a784fe6aa80683fe97c2dcdfdc361478aa7f/codex-rs/core/src/tools/handlers/multi_agents_spec.rs)
 - [Pinned Multi-Agent v2 spawn and context implementation](https://github.com/openai/codex/blob/8922a784fe6aa80683fe97c2dcdfdc361478aa7f/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs)

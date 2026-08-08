@@ -21,10 +21,13 @@
   "packageManager": "npm@10.9.8",
   "type": "module",
   "bin": {
-    "claude-agent-mcp-bridge": "./dist/src/index.js"
+    "claude-agent-mcp-bridge": "./dist/src/index.js",
+    "claude-codex-gateway": "./dist/src/gateway/cli.js"
   },
   "files": [
     "dist/src",
+    "skills/claude-codex-peer",
+    "docs/GATEWAY-ARCHITECTURE.md",
     "README.md",
     "LICENSE"
   ],
@@ -32,8 +35,11 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm test",
     "demo": "tsx scripts/demo.ts",
+    "gateway": "node dist/src/gateway/cli.js",
     "prevalidate:local": "npm run build",
     "prepack": "npm run build",
+    "probe:codex-local": "tsx scripts/probe-codex-local.ts",
+    "probe:codex-remote": "tsx scripts/probe-codex-remote.ts",
     "validate:local": "tsx scripts/validate-local.ts",
     "pretest": "npm run build",
     "start": "node dist/src/index.js",
@@ -45,10 +51,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "ws": "8.21.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
+    "@types/ws": "8.18.1",
     "tsx": "4.20.6",
     "typescript": "5.9.3"
   },
