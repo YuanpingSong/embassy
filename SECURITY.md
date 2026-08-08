@@ -72,7 +72,10 @@ message content trustworthy.
   unexpectedly, Embassy shuts down rather than continuing without singleton
   ownership.
 - The control plane is a private Unix-domain socket in a controller-owned
-  mode-0700 state directory. Embassy has no TCP or HTTP listener.
+  mode-0700 state directory. `embassy serve` has no TCP or HTTP listener; its
+  only listeners are private Unix-domain sockets. The opt-in
+  `embassy dashboard --live` companion is a separate process with its own
+  loopback HTTP listener — see "Live companion boundary" below.
 - Provider protocols are version-pinned. Unknown Claude Code peer or Codex App
   Server versions, schemas, and endpoint generations fail closed.
 - Embassy publishes at most one visibly prefixed, process-owned `codex-*`
@@ -91,6 +94,9 @@ message content trustworthy.
 - Queues, frames, bodies, callbacks, deadlines, hop counts, deduplication,
   rate limits, and transient conversations are bounded. Ambiguous writes are
   never retried automatically.
+- The only network listener Embassy can create belongs to the opt-in
+  `embassy dashboard --live` companion, described under "Live companion
+  boundary". Everything enumerated above concerns `embassy serve`.
 
 ## Filesystem boundary
 
@@ -138,10 +144,12 @@ forbidden from public snapshots, normalized events, the dashboard, aliases,
 logs, errors, and CLI output. A Claude UUID may enter only as a user-supplied
 explicit CLI selector; Embassy never discovers or prints it publicly.
 
-The dashboard is an atomically rewritten static file, not a web application. It
-contains allowlisted metadata only and has no JavaScript, external assets,
-storage, telemetry, or mutation endpoint. Any process already running as the
-same OS user can read it.
+The static dashboard is two atomically rewritten mode-0600 files, not a web
+application: `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`, both
+written on every publish and cross-linked in the page. They contain allowlisted
+metadata only and have no JavaScript, external assets, storage, telemetry,
+mutation endpoint, or self-refresh. Any process already running as the same OS
+user can read them.
 
 ### Live companion boundary
 
@@ -155,6 +163,11 @@ The browser receives a read-only sanitized metadata snapshot and has no
 authority to register, select, send, reply, approve, or interrupt. Any process
 running as your OS user — including root and browser extensions with local
 filesystem access — can read what the browser can read.
+
+The bootstrap URL, including its one-use capability, is written to a mode-0600
+`bootstrap.html` inside a fresh mode-0700 run directory under the private state
+root and removed when the companion exits; treat that directory with the same
+care as the rest of the state root.
 
 Reports involving the live companion are in scope if they demonstrate a path by
 which a remote origin, a cross-site request, or a process running as a

@@ -36,9 +36,12 @@ It is deliberately:
 - an alias router and bounded message broker, not an agent runtime;
 - unable to create Codex sidebar task cards or Claude session UI.
 
-Embassy uses one private same-user Unix-domain control socket for its thin clients and generates one
-private static dashboard file. It does not add a TCP listener, HTTP server, or
-public API.
+Embassy uses one private same-user Unix-domain control socket for its thin
+clients and generates a private static dashboard page in each supported
+language. `embassy serve` does not add a TCP listener, HTTP server, or public
+API. The opt-in `embassy dashboard --live` companion is a separate foreground
+process that binds a read-only authenticated listener on `127.0.0.1`; it is
+described under [Live dashboard companion](#live-dashboard-companion).
 
 ### Why this uses the new feature, but is not skill-only
 
@@ -150,7 +153,8 @@ The status below is intentionally narrower than the target architecture.
 | --- | --- |
 | Neutral gateway types, metadata store, route fencing, bounded queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies remain memory-only |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
-| Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; no browser or HTTP server required |
+| Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
+| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, and read-only projection; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter pinned to 2.1.225 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224/2.1.225 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
 | Exact Claude 2.1.225 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
 | Allowlisted Codex App Server connector with queue-only busy behavior | **Implemented** and live-tested against App Server 0.147.0, including external busy observation, registered-route reachability across settings changes, and an automatically started queued turn |
@@ -357,11 +361,11 @@ of these closed results:
 
 - `{ found: false }`; or
 - `{ found: true, state, terminal, updatedAt, deadlineAt, ... }`, where `state`
-  is one of `queued`, `stalled`, `delivered`, `expired`, `failed`, `ambiguous`,
-  or `cancelled`. `terminal` is false exactly for `queued` and `stalled`, and
-  true for every other state. `pendingForMs` may report the nonnegative age
-  since gateway acceptance, including time spent in flight, and
-  `safeErrorCode` may report one shape-constrained broker code.
+  is one of `queued`, `stalled`, `delivered`, `unconfirmed`, `expired`,
+  `failed`, `ambiguous`, or `cancelled`. `terminal` is false exactly for
+  `queued` and `stalled`, and true for every other state. `pendingForMs` may
+  report the nonnegative age since gateway acceptance, including time spent in
+  flight, and `safeErrorCode` may report one shape-constrained broker code.
 
 `updatedAt` and `deadlineAt` are ISO timestamps. A terminal result guarantees
 only that this gateway delivery attempt will not transition again. It does not
@@ -375,10 +379,16 @@ later than the delivery deadline plus the control client's 3-second allowance.
 An unknown token fails immediately. A wait timeout is not a terminal delivery
 state and does not authorize a resend.
 
+`unconfirmed` and `ambiguous` are distinct terminal outcomes. `unconfirmed`
+means the transport write itself was confirmed but terminal provider evidence
+was never observed; `ambiguous` means the write outcome is unknown. Both are
+terminal, neither is a retry authorization, and both exit `6`.
+
 `wait-delivery` exits `0` only for `delivered`. It exits `6` for every other
-terminal state (`expired`, `failed`, `ambiguous`, or `cancelled`) while
-preserving the exact terminal result in its JSON output. An unknown token exits
-`3`; a local bounded-wait timeout exits `4` and is not a terminal state.
+terminal state (`unconfirmed`, `expired`, `failed`, `ambiguous`, or
+`cancelled`) while preserving the exact terminal result in its JSON output. An
+unknown token exits `3`; a local bounded-wait timeout exits `4` and is not a
+terminal state.
 
 The status table is bounded. Under capacity pressure Embassy evicts only the
 oldest terminal correlation handle; active `queued` or `stalled` handles are
@@ -408,7 +418,10 @@ versions, and enum values.
 The small version 1 method family covers:
 
 - health and a safe public snapshot;
-- explicit Codex registration and unregister;
+- a read-only `observe_snapshot` projection, which may settle already-due
+  lifecycle deliveries before projecting and is the only method the live
+  dashboard companion calls;
+- explicit Codex registration, succession, and unregister;
 - explicit Claude selection and unselection from the current sanitized
   available-peer inventory;
 - delivery-status lookup by an opaque, memory-only correlation handle;
@@ -419,13 +432,16 @@ The small version 1 method family covers:
 The installed binary is `embassy` (`claude-codex-gateway` is a one-release
 deprecated alias). Its implemented commands are
 `serve`, `health`, `status`, `delivery-status`, `wait-delivery`,
-`refresh-dashboard`, `register-codex`, `unregister-codex`, `select-claude`,
-`unselect-claude`, `send-to-claude`, `send-to-codex`, and `reply`. Message
-bodies are non-empty UTF-8 from standard input only, with a 16 KiB ceiling;
-they are never accepted in an argument or file. The client emits one bounded
-normalized JSON line and never returns a thread ID, provider-native ID, path,
-address, or message body. These commands require the foreground broker, except
-that `serve` starts it in the current terminal. It never daemonizes itself.
+`refresh-dashboard`, `dashboard`, `register-codex`, `unregister-codex`,
+`select-claude`, `unselect-claude`, `send-to-claude`, `send-to-codex`, and
+`reply`. `dashboard` requires `--live` and accepts an optional
+`--lang en|zh-CN`; it starts the companion process rather than issuing a single
+control request. Message bodies are non-empty UTF-8 from standard input only,
+with a 16 KiB ceiling; they are never accepted in an argument or file. The
+client emits one bounded normalized JSON line and never returns a thread ID,
+provider-native ID, path, address, or message body. These commands require the
+foreground broker, except that `serve` starts it in the current terminal. It
+never daemonizes itself.
 
 `select-claude --alias <current-name@host>` and
 `select-claude --session <uuid>` select the same logical session.
@@ -439,8 +455,8 @@ Codex registration, unregister, and Codex-to-Claude send require only a valid
 inherited. Claude-to-Codex send requires only the raw inherited Claude socket
 path and fails if a non-empty Codex thread ID is also present. `reply` likewise
 fails with both identities or neither. The operator-only health, status,
-dashboard refresh, select, unselect, and serve commands ignore provider
-identities.
+dashboard refresh, live dashboard, select, unselect, and serve commands ignore
+provider identities.
 
 The foreground command is:
 
@@ -592,11 +608,18 @@ separately announced controlled restart.
 
 ## Dashboard
 
-Version 1 generates a self-contained HTML file under the controller-owned
-state directory. It is atomically replaced, mode 0600, and uses a short meta
-refresh. It has inline CSS and a restrictive Content Security Policy, with no
-JavaScript, external assets, CDN, cookies, local storage, service worker,
-telemetry, mutation endpoint, or network listener.
+Version 1 generates self-contained HTML files under the controller-owned state
+directory: `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`, both
+rendered from one typed catalog and both atomically replaced, mode 0600, on
+every publish. Each page links to the other; that in-page link is the only
+static language switch, and `refresh-dashboard` takes no `--lang`. Each page
+has inline CSS and a restrictive Content Security Policy, with no JavaScript,
+external assets, CDN, cookies, local storage, service worker, telemetry,
+mutation endpoint, or network listener.
+
+A static page is a point-in-time snapshot and never refreshes itself: it emits
+no meta refresh and the page tells the operator to re-run
+`embassy refresh-dashboard` and reload, or to use `embassy dashboard --live`.
 
 It shows only:
 
@@ -614,6 +637,41 @@ events, stderr, credentials, or configuration contents. This is a
 controller-owned UI artifact, not a shared task file. The public snapshot has
 a 240 KiB projection budget and reports explicit omission counters if bounded
 connector, peer, route, message, or alert rows are truncated.
+
+### Live dashboard companion
+
+`embassy dashboard --live` is the opt-in browser view of the same projection.
+It is a separate foreground process, not a mode of `embassy serve`: it holds no
+provider capability, owns no registry record, and reaches the broker over the
+same private control socket every other client command uses, so it reports the
+gateway as unavailable when nothing is serving.
+
+- **Bind.** One `http.createServer` listener on `127.0.0.1` with an ephemeral
+  port, under a random per-run instance path. No other interface is bound and
+  no port is fixed or advertised.
+- **Bootstrap.** Startup mints one 256-bit (32-byte) capability, base64url
+  encoded, carried only in the URL fragment. The bootstrap URL is written to a
+  mode-0600 `bootstrap.html` inside a fresh mode-0700 `live-<random>` run
+  directory under the private state root, opened `wx` and identity-checked, and
+  both file and directory are removed when the companion exits.
+- **Exchange.** The capability is single-use. It is exchanged once for a
+  path-scoped `HttpOnly` `SameSite=Strict` session cookie; the fragment never
+  reaches the server as part of a request line.
+- **Request checks.** Host, Origin, and an `X-Embassy-Request` sentinel header
+  are validated on every request. There are no CORS headers, no cross-origin
+  reads, and no routes outside the instance path.
+- **Projection.** The only control method the companion calls is the read-only
+  `observe_snapshot`. It cannot register, unregister, succeed, select,
+  unselect, send, reply, approve, or interrupt, and it exposes no provider,
+  mutation, storage, telemetry, or external-asset surface. An observation may
+  settle already-due lifecycle deliveries before projecting, which is a broker
+  timer effect, not a browser authority.
+- **Containment.** Authentication scopes the browser, not the machine. Any
+  process running as the same OS user — including root and browser extensions
+  with local filesystem access — can read what the browser can read.
+
+`--lang en|zh-CN` selects the companion's display language. It has no effect on
+the static pair, which is always written in both languages.
 
 ## Persistence and privacy
 
@@ -710,11 +768,25 @@ the preferred least-context setup, but it is not mandatory.
   if the recovered route is idle, held undispatched work is woken. Ambiguous
   writes are not retried.
 - The first successful Codex registration locks its exact alias, task, and host
-  for that controller process. Exact re-registration and connector recovery
-  remain valid; unregister removes reachability but does not release the
-  process-lifetime identity. Choosing a different Codex identity requires
-  unregistering the current route and restarting the gateway. v1 has no
-  in-place alias succession or same-socket rename path.
+  until that registration is explicitly succeeded. Exact re-registration and
+  connector recovery remain valid; unregister removes reachability but does not
+  by itself release the identity.
+- `register-codex --alias <new> --succeeds <current>`, issued from inside the
+  successor task on the same host with its own inherited `CODEX_THREAD_ID`, is
+  the one path that changes the registered Codex identity without a restart. A
+  successor must name the exact active registration, on the same host, with a
+  different alias and a different thread; anything else is
+  `CODEX_SUCCESSION_OWNER_MISMATCH`. The journaled machine freezes the outgoing
+  generation's ingress and dispatch, drains callbacks and receipt writes, and
+  requires a clean quiescence barrier before it prepares anything durable.
+  Nothing transfers: conversations, pending reply capabilities, queued bodies,
+  and delivery tokens belong to the retired identity and are purged rather than
+  inherited, and the successor is published on a fresh listener generation.
+  Publication arming is the irreversible boundary — before it, a failure rolls
+  back to the old registration; at or after an armed, published, or unknown
+  observation, the old registration is never restored, and an incomplete
+  succession leaves registration offline and pinned until manual recovery
+  rather than leaving two live registrations.
 - A failed reactivation of a retained route, or any fresh-registration rollback
   whose cleanup cannot be fully confirmed, pins that exact identity
   fail-closed. Only exact retry is permitted until the old route is confirmed

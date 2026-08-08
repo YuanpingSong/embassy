@@ -155,6 +155,7 @@
     <nav>
       <a href="#why">Why</a>
       <a href="#how">How it works</a>
+      <a href="#dashboard">Dashboard</a>
       <a href="#truth">Protocol truth</a>
       <a href="#quickstart">Quickstart</a>
       <a href="https://github.com/YuanpingSong/agent-embassy">GitHub</a>
@@ -203,13 +204,14 @@
   <section id="how">
     <div class="wrap" style="padding:0">
       <span class="eyebrow">How it works</span>
-      <h2>Four steps, and only the ones that matter.</h2>
-      <p>No Embassy accounts, no daemons, no configuration files — four acts, each visible in your terminal.</p>
+      <h2>Five steps, and only the ones that matter.</h2>
+      <p>No Embassy accounts, no daemons, no configuration files — five acts, each visible in your terminal.</p>
       <div class="ledger">
-        <div class="row"><span class="no">1</span><span class="name">Serve</span><span class="what">Run <code>embassy serve</code> in a terminal you trust. It stays in the foreground, writes a local dashboard file, and never daemonizes. A host-wide lease ensures one broker per account.</span></div>
-        <div class="row"><span class="no">2</span><span class="name">Register</span><span class="what">The Codex task registers itself from inside its own process — ask the Codex agent to run <code>embassy register-codex --alias codex-reviewer@this-mac</code> as a shell step in its current turn. Registration is the opt-in boundary: once registered, any compatible live Claude session running as your OS user can start a turn in that task under its existing native approval and sandbox policy — and if that policy is <code>approvalPolicy: never</code>, no human approval stands between an accepted message and the model turn. Retire it with <code>unregister-codex</code>.</span></div>
+        <div class="row"><span class="no">1</span><span class="name">Serve</span><span class="what">Run <code>embassy serve</code> in a terminal you trust. It stays in the foreground, writes the static dashboard pages — <code>gateway-dashboard.html</code> and its <code>zh-CN</code> twin — into its private state directory, and never daemonizes. A host-wide lease ensures one broker per account.</span></div>
+        <div class="row"><span class="no">2</span><span class="name">Register</span><span class="what">The Codex task registers itself from inside its own process — ask the Codex agent to run <code>embassy register-codex --alias codex-reviewer@this-mac</code> as a shell step in its current turn. Registration is the opt-in boundary: once registered, any compatible live Claude session running as your OS user can start a turn in that task under its existing native approval and sandbox policy — and if that policy is <code>approvalPolicy: never</code>, no human approval stands between an accepted message and the model turn. Reaching the Codex task never selects that Claude session for the reverse direction. Retire it with <code>unregister-codex</code>.</span></div>
         <div class="row"><span class="no">3</span><span class="name">Select</span><span class="what">For the Codex→Claude direction, you explicitly select the destination — <code>embassy select-claude --alias &lt;a name from availablePeers&gt;</code>. Sending never silently selects a discovered session.</span></div>
         <div class="row"><span class="no">4</span><span class="name">Send</span><span class="what">Bodies arrive via stdin, 16&nbsp;KiB maximum, and live only in memory. Sending to a busy Codex task queues the message; an idle target gets one ordinary turn.</span></div>
+        <div class="row" id="dashboard"><span class="no">5</span><span class="name">Watch</span><span class="what">Optional. <code>embassy dashboard --live</code> opens a read-only browser view of the same metadata — a separate foreground process on <code>127.0.0.1</code>, authenticated and incapable of sending anything. <code>gateway-dashboard.html</code> in the state directory is the inert offline copy: no script, no network, and no self-refresh — re-run <code>embassy refresh-dashboard</code> and reload.</span></div>
       </div>
     </div>
   </section>
@@ -222,7 +224,7 @@
       <div class="truths">
         <div class="t">
           <svg width="18" height="18" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg>
-          <p><strong>Delivered means the receiver accepted it, never that a model completed it.</strong> Toward Codex, that is the App Server accepting the turn; toward Claude, release into the session’s native queue — not read, not completed. A confirmed write without a native terminal receipt reports as unconfirmed; an uncertain write reports as ambiguous and is never retried automatically. The CLI's initial acceptance only returns a conversation token; <code>held</code> and transport-written are progress, never success. A Claude-originated failure settles as native <code>expired</code>, followed by one static diagnostic frame carrying a safe code — never a path, identifier, or raw exception. An ambiguous write settles ambiguous and is never retried automatically.</p>
+          <p><strong>Delivered means the receiver accepted it, never that a model completed it.</strong> Toward Codex, that is the App Server accepting the turn; toward Claude, release into the session’s native queue — not read, not completed. A confirmed write without a native terminal receipt reports as unconfirmed; an uncertain write reports as ambiguous and is never retried automatically. The CLI's initial acceptance only returns a conversation token; <code>held</code> and transport-written are progress, never success. A Claude-originated failure settles as native <code>expired</code>, followed by one static diagnostic frame carrying a safe code — never a path, identifier, or raw exception.</p>
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ochre)" aria-hidden="true"><use href="#seal-half"/></svg>
@@ -238,7 +240,7 @@
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-square"/></svg>
-          <p><strong><code>embassy serve</code> opens no TCP or HTTP listener; the opt-in live companion does.</strong> <code>embassy dashboard --live</code> is a separate foreground process that binds 127.0.0.1 on an ephemeral port for a read-only authenticated metadata stream — no mutation, provider, or CORS surface. <code>embassy serve</code> itself opens no network listener and makes no provider API call — no telemetry, no cloud component. It speaks only over local Unix sockets: its own control socket in a mode-0700 state directory, plus the provider-owned Claude peer sockets and the already-running Codex App Server socket it attaches to. The agents themselves are still cloud-backed: a routed message becomes input to an ordinary model turn, so its text reaches Anthropic or OpenAI exactly as if you had typed it into that session. "Local" describes the broker and the route, not model inference.</p>
+          <p><strong><code>embassy serve</code> opens no TCP or HTTP listener; the opt-in live companion does.</strong> <code>embassy dashboard --live</code> is a separate foreground process that binds 127.0.0.1 on an ephemeral port for a read-only authenticated metadata stream — no mutation, provider, or CORS surface. Authentication scopes the browser, not the machine: any process running as your OS user — including root and browser extensions — can read what the browser can read. <code>embassy serve</code> itself opens no network listener and makes no provider API call — no telemetry, no cloud component. It speaks only over local Unix sockets: its own control socket in a mode-0700 state directory, plus the provider-owned Claude peer sockets and the already-running Codex App Server socket it attaches to. The agents themselves are still cloud-backed: a routed message becomes input to an ordinary model turn, so its text reaches Anthropic or OpenAI exactly as if you had typed it into that session. "Local" describes the broker and the route, not model inference.</p>
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>
@@ -264,6 +266,9 @@ embassy serve
 <span class="c"># in another terminal: list the candidate sessions Embassy has discovered</span>
 embassy status
 <span class="out">  availablePeers: ["advisor@this-mac", "researcher@this-mac"]</span>
+
+<span class="c"># optional, in a third terminal: a read-only browser view on 127.0.0.1</span>
+embassy dashboard --live
 
 <span class="c"># inside the Codex task — ask the Codex agent to run this as a shell step:</span>
 embassy register-codex --alias codex-reviewer@this-mac
