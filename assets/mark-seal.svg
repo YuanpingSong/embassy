@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Embassy seal — two facing arcs sheltering a sealed center, favicon variant</title>
+  <circle cx="32" cy="32" r="30" fill="#b3382c"/>
+  <path d="M24 13 A23.5 23.5 0 0 0 24 51" stroke="#f8f4ec" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <path d="M40 13 A23.5 23.5 0 0 1 40 51" stroke="#f8f4ec" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <circle cx="32" cy="32" r="4.2" fill="#f8f4ec"/>
+</svg>

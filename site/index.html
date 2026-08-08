@@ -5,285 +5,298 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
 <meta name="description" content="Embassy — a local embassy for your AI agents. Bidirectional messaging between Claude Code sessions and Codex desktop tasks, on one machine, under your explicit control.">
-<meta property="og:type" content="website">
-<meta property="og:title" content="Embassy — a local embassy for your AI agents">
-<meta property="og:description" content="Bidirectional messaging between Claude Code sessions and Codex desktop tasks, on one machine, under your explicit control.">
-<meta property="og:image" content="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/site/hero.png">
-<meta property="og:image:width" content="1280">
-<meta property="og:image:height" content="640">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Embassy — a local embassy for your AI agents">
-<meta name="twitter:description" content="Bidirectional messaging between Claude Code sessions and Codex desktop tasks, on one machine, under your explicit control.">
-<meta name="twitter:image" content="https://raw.githubusercontent.com/YuanpingSong/agent-embassy/main/site/hero.png">
-<meta name="theme-color" content="#0c111e">
+<meta name="theme-color" content="#f8f4ec">
+<link rel="icon" href="mark-seal.svg" type="image/svg+xml">
 <title>Embassy — a local embassy for your AI agents</title>
 <style>
   :root {
-    --bg: #0c111e;
-    --bg-raise: #131a2c;
-    --line: #26304a;
-    --ink: #f2eee4;
-    --ink-dim: #b9b3a4;
-    --gold: #d8b45a;
-    --purple: #a08fd8;
+    --porcelain: #f8f4ec;
+    --raise: #fffdf8;
+    --ink: #231f1a;
+    --ink-soft: #6d6558;
+    --rule: #e4dccd;
+    --seal: #b3382c;
+    --jade: #557f68;
+    --ochre: #a8842f;
+    --codeblock: #262019;
+    --serif: "Iowan Old Style", "Palatino Nova", Palatino, Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: var(--bg);
-    color: var(--ink);
-    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  }
-  a { color: var(--gold); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
-  header.top {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 20px 0; border-bottom: 1px solid var(--line);
-  }
-  .brand { font-weight: 700; letter-spacing: 0.02em; font-size: 20px; color: var(--ink); }
-  .brand .flag { color: var(--purple); }
-  nav a { color: var(--ink-dim); margin-left: 22px; font-size: 15px; }
+  body { background: var(--porcelain); color: var(--ink); font: 16.5px/1.65 var(--sans); }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 0 28px; }
+  a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--seal); }
+
+  header.top { display: flex; justify-content: space-between; align-items: center; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  .brand { display: flex; align-items: center; gap: 10px; font: 700 19px var(--serif); }
+  nav { display: flex; gap: 26px; }
+  nav a { color: var(--ink-soft); font-size: 14.5px; text-decoration: none; }
   nav a:hover { color: var(--ink); }
 
-  .hero { text-align: center; padding: 72px 0 40px; }
-  .hero h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.12; letter-spacing: -0.015em; }
-  .hero h1 em { font-style: normal; color: var(--gold); }
-  .hero p.sub {
-    margin: 20px auto 0; max-width: 640px; color: var(--ink-dim); font-size: 19px;
-  }
-  .ctas { margin-top: 34px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-  .btn {
-    display: inline-block; padding: 12px 26px; border-radius: 8px; font-weight: 600; font-size: 16px;
-  }
-  .btn.primary { background: var(--gold); color: #16120a; }
-  .btn.primary:hover { text-decoration: none; filter: brightness(1.08); }
-  .btn.ghost { border: 1px solid var(--line); color: var(--ink); background: var(--bg-raise); }
-  .btn.ghost:hover { text-decoration: none; border-color: var(--gold); }
-  .hero img.art {
-    display: block; width: min(860px, 100%); margin: 52px auto 0;
-    border-radius: 12px; border: 1px solid var(--line);
-  }
+  .hero { display: grid; grid-template-columns: minmax(340px, 7fr) minmax(300px, 5fr); gap: 56px; align-items: center; padding: 82px 0 64px; }
+  @media (max-width: 800px) { .hero { grid-template-columns: 1fr; gap: 40px; } }
+  .hero h1 { font: 400 clamp(34px, 4.6vw, 52px)/1.14 var(--serif); letter-spacing: -0.01em; text-wrap: balance; }
+  .hero h1 .seal-word { color: var(--seal); font-style: italic; }
+  .hero .sub { margin-top: 18px; color: var(--ink-soft); font-size: 18px; max-width: 54ch; }
+  .ctas { margin-top: 30px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15.5px; text-decoration: none; }
+  .btn.primary { background: var(--seal); color: var(--porcelain); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.quiet { border: 1px solid var(--rule); color: var(--ink); background: var(--raise); }
+  .btn.quiet:hover { border-color: var(--ink-soft); }
 
-  section { padding: 64px 0 8px; }
-  section h2 { font-size: 28px; margin-bottom: 10px; letter-spacing: -0.01em; }
-  section p.lead { color: var(--ink-dim); max-width: 700px; margin-bottom: 28px; }
+  .vignette { background: var(--raise); border: 1px solid var(--rule); border-radius: 12px; padding: 22px; box-shadow: 0 1px 2px rgb(35 31 26 / 4%); }
+  .vignette .party { font: 600 13px var(--mono); }
+  .vignette .party small { display: block; font: 400 11px var(--sans); color: var(--ink-soft); letter-spacing: 0.06em; text-transform: uppercase; margin-top: 2px; }
+  .vignette .msg { margin: 10px 0 14px; padding: 12px 14px; border-left: 2px solid var(--rule); color: var(--ink-soft); font-size: 14px; }
+  .vignette .transit { display: flex; align-items: center; gap: 10px; margin: 14px 0; }
+  .vignette .transit .line { flex: 1; border-top: 1px solid var(--rule); }
+  .vignette .receipt { display: flex; align-items: center; gap: 8px; font: 600 12.5px var(--mono); color: var(--jade); margin-top: 4px; }
+  .vignette .reply { margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--rule); }
 
-  .diagram { overflow-x: auto; padding: 8px 0 0; }
-  .diagram svg { display: block; margin: 0 auto; min-width: 620px; width: 100%; max-width: 880px; height: auto; }
+  section { padding: 70px 0 6px; }
+  .eyebrow { font: 600 11.5px var(--sans); letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-soft); }
+  section h2 { font: 400 30px/1.25 var(--serif); margin: 10px 0 14px; letter-spacing: -0.005em; text-wrap: balance; }
+  section > .wrap > p { color: var(--ink-soft); max-width: 66ch; margin-bottom: 12px; }
+  section > .wrap > p strong { color: var(--ink); }
 
-  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-top: 8px; }
-  .card {
-    background: var(--bg-raise); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
-  }
-  .card h3 { font-size: 17px; margin-bottom: 8px; }
-  .card h3 .n { color: var(--purple); font-family: var(--mono); margin-right: 8px; }
-  .card p { color: var(--ink-dim); font-size: 15px; }
-  .card code, p code, li code {
-    font-family: var(--mono); font-size: 0.88em; background: #0a0e18;
-    border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; color: var(--ink);
-  }
-  pre {
-    background: #0a0e18; border: 1px solid var(--line); border-radius: 10px;
-    padding: 18px 20px; overflow-x: auto; margin: 18px 0;
-  }
-  pre code { border: 0; background: none; padding: 0; font-size: 14.5px; line-height: 1.7; }
-  pre .c { color: #6b7694; }
-  pre .g { color: var(--gold); }
+  .whys { margin-top: 20px; border-top: 1px solid var(--rule); }
+  .whys p { padding: 16px 0; border-bottom: 1px solid var(--rule); color: var(--ink-soft); font-size: 16px; max-width: 70ch; margin: 0; }
 
-  .trust { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
-  .trust .card h3 { color: var(--gold); }
-  .fineprint { margin-top: 22px; color: var(--ink-dim); font-size: 15px; max-width: 720px; }
+  .ledger { margin-top: 26px; border-top: 1px solid var(--rule); }
+  .ledger .row { display: grid; grid-template-columns: 64px 180px 1fr; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  @media (max-width: 700px) { .ledger .row { grid-template-columns: 48px 1fr; } .ledger .row .what { grid-column: 2; } }
+  .ledger .no { font: 400 26px var(--serif); color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .ledger .name { font-weight: 650; font-size: 16px; }
+  .ledger .what { color: var(--ink-soft); font-size: 15px; max-width: 60ch; }
+  code { font-family: var(--mono); font-size: 0.86em; background: rgb(35 31 26 / 5%); border: 1px solid var(--rule); border-radius: 5px; padding: 1px 6px; }
 
-  .vocab dt { font-weight: 700; margin-top: 16px; color: var(--purple); }
-  .vocab dd { color: var(--ink-dim); margin-left: 0; }
+  .truths { margin-top: 22px; }
+  .truths .t { display: grid; grid-template-columns: 24px 1fr; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--rule); align-items: start; }
+  .truths .t p { color: var(--ink-soft); font-size: 15px; max-width: 68ch; margin: 0; }
+  .truths .t p strong { color: var(--ink); }
+  .truths svg { margin-top: 3px; }
 
-  ul.nots { list-style: none; margin-top: 8px; }
-  ul.nots li {
-    padding: 14px 0; border-bottom: 1px solid var(--line); color: var(--ink-dim);
-  }
-  ul.nots li strong { color: var(--ink); }
+  pre { background: var(--codeblock); border-radius: 10px; padding: 18px 20px; overflow-x: auto; margin: 20px 0 8px; }
+  pre code { border: 0; background: none; padding: 0; font-size: 13.5px; line-height: 1.75; color: #f2eee4; }
+  pre .c { color: #9a8f7d; }
+  pre .out { color: #b8ad99; }
+  ul.req { margin: 12px 0 0 20px; color: var(--ink-soft); font-size: 15px; }
+  ul.req li { margin: 6px 0; }
 
-  .req { margin: 10px 0 4px; color: var(--ink-dim); }
-  .req li { margin: 6px 0 6px 20px; }
-
-  footer {
-    margin-top: 84px; border-top: 1px solid var(--line); padding: 36px 0 56px;
-    color: var(--ink-dim); font-size: 15px;
-  }
-  footer .cols { display: flex; gap: 48px; flex-wrap: wrap; }
-  footer h4 { color: var(--ink); font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
-  footer li { list-style: none; margin: 6px 0; }
-  footer .legal { margin-top: 30px; max-width: 720px; }
+  footer { margin-top: 88px; border-top: 1px solid var(--rule); padding: 40px 0 64px; color: var(--ink-soft); font-size: 14.5px; }
+  footer .cols { display: flex; gap: 56px; flex-wrap: wrap; }
+  footer h3 { font: 600 11.5px var(--sans); letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 12px; }
+  footer li { list-style: none; margin: 7px 0; }
+  footer a { text-decoration: none; color: var(--ink); }
+  footer a:hover { text-decoration: underline; }
+  footer .legal { margin-top: 34px; max-width: 74ch; font-size: 13px; }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="mark" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="27" stroke="currentColor" stroke-width="2.5" fill="none"/>
+      <path d="M26.5 17 A19.5 19.5 0 0 0 26.5 47" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+      <path d="M37.5 17 A19.5 19.5 0 0 1 37.5 47" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+      <circle cx="32" cy="32" r="3" fill="#b3382c"/>
+    </symbol>
+    <symbol id="mark-small" viewBox="0 0 64 64">
+      <path d="M23 11 A25 25 0 0 0 23 53" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+      <path d="M41 11 A25 25 0 0 1 41 53" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+      <circle cx="32" cy="32" r="4" fill="currentColor"/>
+    </symbol>
+    <symbol id="seal-intact" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="26" stroke="currentColor" stroke-width="6" fill="none"/>
+      <circle cx="32" cy="32" r="7" fill="currentColor"/>
+    </symbol>
+    <symbol id="seal-half" viewBox="0 0 64 64">
+      <path d="M32 6 A26 26 0 1 1 12 14" stroke="currentColor" stroke-width="6" fill="none" stroke-linecap="round"/>
+      <circle cx="32" cy="32" r="7" fill="currentColor"/>
+    </symbol>
+    <symbol id="seal-broken" viewBox="0 0 64 64">
+      <path d="M50 14 A26 26 0 1 0 50 50" stroke="currentColor" stroke-width="6" fill="none" stroke-linecap="round"/>
+      <circle cx="32" cy="32" r="7" fill="currentColor"/>
+    </symbol>
+    <symbol id="glyph-ring" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="26" stroke="currentColor" stroke-width="6" fill="none"/>
+    </symbol>
+    <symbol id="glyph-stop" viewBox="0 0 64 64">
+      <path d="M22 8 H42 L56 22 V42 L42 56 H22 L8 42 V22 Z" stroke="currentColor" stroke-width="5.5" fill="none" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="glyph-square" viewBox="0 0 64 64">
+      <rect x="10" y="10" width="44" height="44" rx="8" stroke="currentColor" stroke-width="6" fill="none"/>
+    </symbol>
+  </defs>
+</svg>
 <div class="wrap">
-
   <header class="top">
-    <div class="brand"><span class="flag">⚑</span> Embassy</div>
+    <div class="brand"><svg width="26" height="26" style="color:var(--ink)"><use href="#mark"/></svg> Embassy</div>
     <nav>
+      <a href="#why">Why</a>
       <a href="#how">How it works</a>
-      <a href="#trust">Security</a>
+      <a href="#truth">Protocol truth</a>
       <a href="#quickstart">Quickstart</a>
       <a href="https://github.com/YuanpingSong/agent-embassy">GitHub</a>
     </nav>
   </header>
 
-  <section class="hero">
-    <h1>A local <em>embassy</em> for your AI agents.</h1>
-    <p class="sub">Your Claude Code sessions and Codex desktop tasks, finding each other by name and exchanging messages — in both directions, on one machine, under your explicit control.</p>
-    <div class="ctas">
-      <a class="btn primary" href="#quickstart">Quickstart</a>
-      <a class="btn ghost" href="https://github.com/YuanpingSong/agent-embassy">View on GitHub</a>
+  <div class="hero">
+    <div>
+      <h1>Your agents can't talk to each other. Give them an <span class="seal-word">embassy</span>.</h1>
+      <p class="sub">Embassy is a local, single-user gateway: your running Claude Code sessions and Codex desktop tasks exchange messages in both directions on one machine, under explicit operator steps. Settled messages return a receipt.</p>
+      <div class="ctas">
+        <a class="btn primary" href="#quickstart">Quickstart</a>
+        <a class="btn quiet" href="https://github.com/YuanpingSong/agent-embassy">View on GitHub</a>
+      </div>
     </div>
-    <img class="art" src="hero.png" alt="Two stylized embassy buildings connected by a sealed envelope on a message line">
-  </section>
+    <div class="vignette" role="img" aria-label="A real exchange: a Codex task sends a review request through Embassy to a Claude session; the reply routes back with delivered receipts">
+      <div class="party">codex-reviewer@this-mac<small>Codex task</small></div>
+      <div class="msg">Please review the current approach and note the main risk.</div>
+      <div class="transit">
+        <span class="line"></span>
+        <svg width="20" height="20" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>
+        <span class="line"></span>
+      </div>
+      <div class="party">advisor@this-mac<small>Claude Code session</small></div>
+      <div class="receipt"><svg width="14" height="14" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg> delivered · 18 ms · 342 B</div>
+      <div class="reply">
+        <div class="msg">Main risk: the migration trusts stale route bindings. Two call sites flagged in my notes.</div>
+        <div class="receipt"><svg width="14" height="14" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg> reply delivered · conv_… token returned to the sender</div>
+      </div>
+    </div>
+  </div>
 
-  <section id="scope">
-    <h2>Two agents. One broker. Nothing else.</h2>
-    <p class="lead">Embassy is an alias router and bounded message broker between two products that otherwise can't talk. It is not an orchestrator, and it does not wrap, replace, or re-implement either agent.</p>
-    <div class="diagram" role="img" aria-label="Diagram: Claude Code sessions and a Codex desktop task connected through the Embassy local broker">
-      <svg viewBox="0 0 880 190" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#d8b45a"/>
-          </marker>
-        </defs>
-        <rect x="8" y="40" width="230" height="110" rx="10" fill="#131a2c" stroke="#26304a"/>
-        <text x="123" y="82" fill="#f2eee4" font-size="17" font-weight="600" text-anchor="middle">Claude Code sessions</text>
-        <text x="123" y="108" fill="#b9b3a4" font-size="13" text-anchor="middle">native ListAgents / SendMessage</text>
-        <text x="123" y="128" fill="#b9b3a4" font-size="13" text-anchor="middle">native crossSessionInbound</text>
-        <rect x="322" y="24" width="236" height="142" rx="10" fill="#131a2c" stroke="#d8b45a"/>
-        <text x="440" y="62" fill="#d8b45a" font-size="18" font-weight="700" text-anchor="middle">embassy</text>
-        <text x="440" y="88" fill="#b9b3a4" font-size="13" text-anchor="middle">alias routing · receipts</text>
-        <text x="440" y="108" fill="#b9b3a4" font-size="13" text-anchor="middle">queue-while-busy</text>
-        <text x="440" y="128" fill="#b9b3a4" font-size="13" text-anchor="middle">metadata-only dashboard</text>
-        <text x="440" y="152" fill="#6b7694" font-size="12" text-anchor="middle">local broker · no network service</text>
-        <rect x="642" y="40" width="230" height="110" rx="10" fill="#131a2c" stroke="#26304a"/>
-        <text x="757" y="82" fill="#f2eee4" font-size="17" font-weight="600" text-anchor="middle">Codex desktop task</text>
-        <text x="757" y="108" fill="#b9b3a4" font-size="13" text-anchor="middle">native App Server</text>
-        <text x="757" y="128" fill="#b9b3a4" font-size="13" text-anchor="middle">its own native policy</text>
-        <line x1="242" y1="95" x2="318" y2="95" stroke="#d8b45a" stroke-width="2" marker-start="url(#arr)" marker-end="url(#arr)"/>
-        <line x1="562" y1="95" x2="638" y2="95" stroke="#d8b45a" stroke-width="2" marker-start="url(#arr)" marker-end="url(#arr)"/>
-      </svg>
+  <section id="why">
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">Why</span>
+      <h2>When two tools need to talk.</h2>
+      <div class="whys">
+        <p>Your Claude session asks your Codex task a question mid-flow — you never switch windows or paste a thing.</p>
+        <p>Codex fires a question to Claude while you're away; the reply routes back and a receipt confirms delivery.</p>
+        <p>Claude messages a running Codex task with its native tools — no plugin to install, no config to write.</p>
+      </div>
     </div>
   </section>
 
   <section id="how">
-    <h2>How it works</h2>
-    <p class="lead">One foreground process, one registered Codex task, and explicit Claude selection before outbound messages.</p>
-    <div class="steps">
-      <div class="card">
-        <h3><span class="n">1</span>Serve</h3>
-        <p>Run <code>embassy serve</code> in a terminal. It stays in the foreground, publishes a local dashboard file, and never daemonizes. Stop it with Ctrl-C and every queued body is gone — by design.</p>
-      </div>
-      <div class="card">
-        <h3><span class="n">2</span>Register</h3>
-        <p>A Codex task registers itself from inside its own process (<code>embassy register-codex</code>). Embassy advertises that one <code>codex-*</code> peer to every compatible live Claude session running as the same OS user.</p>
-      </div>
-      <div class="card">
-        <h3><span class="n">3</span>Select</h3>
-        <p>Before Codex can send outbound, you explicitly select one discovered Claude destination. Merely appearing in discovery never authorizes a send.</p>
-      </div>
-      <div class="card">
-        <h3><span class="n">4</span>Send</h3>
-        <p>Claude uses its native tools; Codex uses the CLI. Busy Codex targets queue and dispatch on idle. Acceptance is immediate; terminal delivery settles later as <code>delivered</code> or <code>expired</code>.</p>
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">How it works</span>
+      <h2>Four steps, and only the ones that matter.</h2>
+      <p>No accounts, no daemons, no configuration files — four acts, each visible in your terminal.</p>
+      <div class="ledger">
+        <div class="row"><span class="no">1</span><span class="name">Serve</span><span class="what">Run <code>embassy serve</code> in a terminal you trust. It stays in the foreground, publishes a local dashboard file, and never daemonizes. A host-wide lease guarantees one broker per account.</span></div>
+        <div class="row"><span class="no">2</span><span class="name">Register</span><span class="what">The Codex task registers itself from inside its own process — ask the Codex agent to run <code>embassy register-codex --alias codex-reviewer@this-mac</code> as a shell step in its current turn. Registration is the opt-in boundary: once registered, any compatible live Claude session running as your OS user can start a turn in that task under its existing native approval and sandbox policy — and if that policy is <code>approvalPolicy: never</code>, no human approval stands between an accepted message and the model turn. Retire it with <code>unregister-codex</code>.</span></div>
+        <div class="row"><span class="no">3</span><span class="name">Select</span><span class="what">For the Codex→Claude direction, you explicitly select the destination — <code>embassy select-claude --alias &lt;a name from availablePeers&gt;</code>. Sending never silently selects a discovered session.</span></div>
+        <div class="row"><span class="no">4</span><span class="name">Send</span><span class="what">Bodies arrive via stdin, 16&nbsp;KiB at most, and live only in memory. Busy targets queue; idle targets get one ordinary turn; settled messages return their receipt.</span></div>
       </div>
     </div>
   </section>
 
-  <section id="trust">
-    <h2>Not a network service</h2>
-    <p class="lead">Embassy's security posture is subtraction. The broker itself:</p>
-    <div class="trust">
-      <div class="card"><h3>No network listeners</h3><p>No TCP, no HTTP, no public API. The documented control and callback surfaces are private Unix-domain sockets.</p></div>
-      <div class="card"><h3>No outbound network calls</h3><p>The broker makes no provider API call and ships no telemetry. Delivered text still enters the receiving cloud-backed agent as an ordinary model turn.</p></div>
-      <div class="card"><h3>No stored bodies</h3><p>Message bodies are bounded (16&nbsp;KiB), stdin-only, and memory-only inside Embassy. After delivery, the receiving product retains them under its normal conversation policy.</p></div>
-      <div class="card"><h3>No credentials</h3><p>Embassy never reads credentials, Keychain items, transcripts, or either product's configuration. Version checks run one bounded <code>claude --version</code>.</p></div>
+  <section id="truth">
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">Protocol truth</span>
+      <h2>The register doesn't flatter.</h2>
+      <p>Embassy's receipts mean exactly what they say — and nothing more.</p>
+      <div class="truths">
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg>
+          <p><strong>Delivered means the receiver accepted the turn, not that a model completed it.</strong> The CLI's initial acceptance only returns a conversation token; <code>held</code> and transport-written are progress, never success. A Claude-originated failure settles as native <code>expired</code>, followed by one static diagnostic frame carrying a safe code — never a path, identifier, or raw exception. An ambiguous write settles ambiguous and is never retried automatically.</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ochre)" aria-hidden="true"><use href="#seal-half"/></svg>
+          <p><strong>Queues are honest.</strong> A busy route queues rather than interrupts — Embassy never steers another agent's turn — and queue age is visible, not silent.</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-ring"/></svg>
+          <p><strong>Restarts drop bodies, on purpose.</strong> Message text is never persisted — not in state, logs, events, or the dashboard. If the broker stops, queued text is gone and nothing replays.</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-stop"/></svg>
+          <p><strong>Unknown versions fail closed.</strong> Claude Code 2.1.225, peer protocol 1 — still-running 2.1.224 sessions stay compatible through a patch upgrade — and Codex App Server 0.147.0. Anything Embassy cannot validate is refused rather than guessed compatible: an unrecognized session is not discoverable, an unrecognized App Server shape leaves the route unwritable. Support for new versions ships as a release — see the <a href="https://github.com/YuanpingSong/agent-embassy/blob/main/CHANGELOG.md">changelog</a>.</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-square"/></svg>
+          <p><strong>No listener, anywhere.</strong> Embassy opens no TCP or HTTP listener and makes no provider API call — no telemetry, no cloud component. It speaks only over local Unix sockets: its own control socket in a mode-0700 state directory, plus the provider-owned Claude peer sockets and the already-running Codex App Server socket it attaches to. The agents themselves are still cloud-backed: a routed message becomes input to an ordinary model turn, so its text reaches Anthropic or OpenAI exactly as if you had typed it into that session. "Local" describes the broker and the route, not model inference.</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>
+          <p><strong>It is a new input path.</strong> Neither agent gains a tool it did not already have, and Embassy grants, relaxes, and answers nothing. But two products that could not exchange text now can — treat every routed message as untrusted input that may steer its receiver.</p>
+        </div>
+      </div>
     </div>
-    <p class="fineprint">“Local” describes Embassy's broker and route, not model inference. The dashboard shows route metadata — aliases, states, timestamps, queue depth — and never message content. Unknown Claude Code or Codex App Server versions fail closed: Embassy stops rather than guesses. Messages remain untrusted input to the receiving agent, governed by that agent's own permission model. Full details in the <a href="https://github.com/YuanpingSong/agent-embassy#security-model">security model</a> and <a href="https://github.com/YuanpingSong/agent-embassy/blob/main/docs/GATEWAY-ARCHITECTURE.md">architecture</a>.</p>
-  </section>
-
-  <section id="vocab">
-    <h2>The vocabulary</h2>
-    <dl class="vocab">
-      <dt>Registration and selection</dt><dd>The accreditation steps are asymmetric: one Codex task opts into inbound reach from exact compatible live Claude sessions running as the same OS user, while Claude destinations require explicit selection before outbound Codex messages. Claude-to-Codex turns run under the registered task's existing native Codex approval and sandbox policy.</dd>
-      <dt>The ledger</dt><dd>A receipt for every settled message, and a metadata-only dashboard.</dd>
-      <dt>The pouch</dt><dd>Bounded bodies, ephemeral inside Embassy, never persisted by it.</dd>
-      <dt>Consulates</dt><dd>The roadmap: the same model extended to Codex tasks on remote hosts over attach-only SSH — designed, deliberately disabled in v1.</dd>
-    </dl>
-  </section>
-
-  <section id="nots">
-    <h2>What Embassy is not</h2>
-    <ul class="nots">
-      <li><strong>Not an orchestrator.</strong> It does not spawn agents or manage their work. It starts one turn per routed message and drains its queue when the task goes idle.</li>
-      <li><strong>Not a hosted service.</strong> Personal, same-machine, same-OS-account software. Never expose it on a network.</li>
-      <li><strong>Not a permission bypass — but it is a new path.</strong> Neither agent gains a tool it did not already have. It does connect two products that previously could not exchange text at all; treat that path with the respect you would give any new input channel.</li>
-      <li><strong>Not official.</strong> An independent community project — not affiliated with or endorsed by Anthropic or OpenAI.</li>
-    </ul>
   </section>
 
   <section id="quickstart">
-    <h2>Quickstart</h2>
-    <p class="lead">Honest requirements first — Embassy pins exact versions and fails closed on anything else:</p>
-    <ul class="req">
-      <li>macOS (the only platform supported by v1) and Node.js ≥ 20</li>
-      <li>Claude Code 2.1.225, installed and signed in</li>
-      <li>Codex desktop app with its managed App Server 0.147.0</li>
-    </ul>
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">Quickstart</span>
+      <h2>Honest requirements first.</h2>
+      <ul class="req">
+        <li>macOS only (local host only) and Node.js ≥ 20</li>
+        <li>Claude Code 2.1.225, installed and signed in — with a session running, or <code>availablePeers</code> is empty</li>
+        <li>Codex desktop with its managed App Server 0.147.0 running</li>
+      </ul>
 <pre><code><span class="c"># install and start the broker (foreground, trusted terminal)</span>
 npm install -g agent-embassy
 embassy serve
 
-<span class="c"># in another terminal: see the Claude sessions Embassy can reach</span>
+<span class="c"># in another terminal: list the Claude sessions Embassy can reach</span>
 embassy status
+<span class="out">  availablePeers: ["advisor@this-mac", "researcher@this-mac"]</span>
 
-<span class="c"># inside the Codex task: register it (codex- prefix required)</span>
+<span class="c"># inside the Codex task — ask the Codex agent to run this as a shell step:</span>
 embassy register-codex --alias codex-reviewer@this-mac
 
-<span class="c"># as the operator: select the Claude destination</span>
+<span class="c"># as the operator: select one name from availablePeers above (yours will differ)</span>
 embassy select-claude --alias advisor@this-mac
 
 <span class="c"># from the Codex task: send (body via stdin, never arguments)</span>
 embassy send-to-claude --from codex-reviewer@this-mac --to advisor@this-mac --expects-reply &lt;&lt;'MSG'
 Please review the current approach and note the main risk.
 MSG
-<span class="g"># → accepted with a conversation token; delivery settles asynchronously</span></code></pre>
-    <p class="fineprint">Registering the Codex task advertises it to every compatible live Claude session running as your OS user. Inbound Claude reach does not select that session for outbound Codex messages. Embassy never changes the Codex task's approval or sandbox policy and never answers an approval request; the task's native policy remains in force.</p>
-    <p class="fineprint">The full quickstart — including the reply flow, addressing by session UUID, and delivery semantics — is in the <a href="https://github.com/YuanpingSong/agent-embassy#quickstart">README</a>.</p>
+
+<span class="c"># continue the thread with the returned token, from either side</span>
+embassy reply --conversation conv_&lt;token&gt; --alias codex-reviewer@this-mac &lt;&lt;'MSG'
+Please expand on the second call site.
+MSG
+
+<span class="c"># the other direction needs nothing at all: a live Claude session sees</span>
+<span class="c"># codex-reviewer in its native ListAgents and messages it directly.</span></code></pre>
+      <p>The full quickstart — session-UUID addressing, delivery semantics, the dashboard — is in the <a href="https://github.com/YuanpingSong/agent-embassy#quickstart">README</a>.</p>
+    </div>
   </section>
 
   <footer>
-    <div class="cols">
-      <div>
-        <h4>Documentation</h4>
-        <ul>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy#readme">README</a></li>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/docs/GATEWAY-ARCHITECTURE.md">Architecture</a></li>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/SECURITY.md">Security policy</a></li>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/CONTRIBUTING.md">Contributing</a></li>
-        </ul>
+    <div class="wrap" style="padding:0">
+      <div class="cols">
+        <div>
+          <h3>Documentation</h3>
+          <ul>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy#readme">README</a></li>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/docs/GATEWAY-ARCHITECTURE.md">Architecture</a></li>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/SECURITY.md">Security policy</a></li>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/CONTRIBUTING.md">Contributing</a></li>
+          </ul>
+        </div>
+        <div>
+          <h3>For agents</h3>
+          <ul><li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/skills/embassy-peer/SKILL.md">The embassy-peer skill</a></li></ul>
+        </div>
+        <div>
+          <h3>Project</h3>
+          <ul>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy">GitHub</a></li>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/CHANGELOG.md">Changelog</a></li>
+            <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/LICENSE">MIT License</a></li>
+          </ul>
+        </div>
       </div>
-      <div>
-        <h4>For agents</h4>
-        <ul>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/skills/embassy-peer/SKILL.md">The embassy-peer skill</a></li>
-        </ul>
-      </div>
-      <div>
-        <h4>Project</h4>
-        <ul>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy">GitHub</a></li>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/CHANGELOG.md">Changelog</a></li>
-          <li><a href="https://github.com/YuanpingSong/agent-embassy/blob/main/LICENSE">MIT License</a></li>
-        </ul>
-      </div>
+      <p class="legal">Embassy is an unofficial, independent project — not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude is a trademark of Anthropic; Codex and ChatGPT are trademarks of OpenAI. This site is a static page: it loads no external assets, sets no cookies, and collects nothing.</p>
     </div>
-    <p class="legal">Embassy is an unofficial, independent project and is not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. Claude is a trademark of Anthropic; Codex and ChatGPT are trademarks of OpenAI. This site is a static page: it loads no external assets, sets no cookies, and collects nothing.</p>
   </footer>
-
 </div>
 </body>
 </html>
