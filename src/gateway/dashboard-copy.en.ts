@@ -486,7 +486,7 @@ export const dashboardCopyEn = {
     "{queued} queued right now; {accepted} accepted since this broker started.",
   "app.diag.steering.title": "Steering",
   "app.diag.steering.absent":
-    "Steering has not landed. There is no switch here to flip.",
+    "STEER markers identify classified Claude-to-Codex delivery evidence. The operator kill-switch setting is not exposed by this metadata contract.",
   "app.diag.editable.title": "Settings",
   "app.diag.editable.note":
     "Settings are read from environment variables when embassy serve starts. This page cannot change them, so none of them is shown as an editable control.",

@@ -92,6 +92,7 @@ async function fixture(
     controlSocketPath: path.join(stateDir, "control.sock"),
     allowedHosts: ["this-mac", "build-mac"],
     stallNoticeMs: 2_500,
+    steeringEnabled: true,
     limits: limits(),
   };
   const testClock = clock();
@@ -263,6 +264,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   });
   assert.deepEqual(config.allowedHosts, ["this-mac", "build-mac"]);
   assert.equal(config.controlSocketPath, "/tmp/private-gateway-test/control.sock");
+  assert.equal(config.steeringEnabled, true);
   assert.equal(config.stallNoticeMs, 150_000);
   assert.equal(config.limits.maxMessageBytes, 16_384);
 
@@ -272,6 +274,23 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   });
   assert.equal(configuredDeadline.limits.messageDeadlineMs, 1_001);
   assert.equal(configuredDeadline.stallNoticeMs, 500);
+  assert.equal(
+    loadGatewayConfig({
+      EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+      EMBASSY_STEERING_ENABLED: "0",
+    }).steeringEnabled,
+    false,
+  );
+  assert.throws(
+    () =>
+      loadGatewayConfig({
+        EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+        EMBASSY_STEERING_ENABLED: "false",
+      }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_GATEWAY_CONFIGURATION",
+  );
 
   const xdgDefault = loadGatewayConfig({
     XDG_STATE_HOME: "/tmp/synthetic-xdg-state",
@@ -1281,6 +1300,117 @@ test("native Claude ingress queues for an explicit Codex route without registeri
     codexBinding.ownerLease,
   );
   assert.deepEqual((await store.publicSnapshot()).routes, []);
+  await store.close();
+});
+
+test("queued steers retain three newest per route and expose an exact journal marker", async () => {
+  const { store, config } = await fixture();
+  config.limits.maxQueueMessages = 6;
+  config.limits.maxQueueMessagesPerRoute = 6;
+  await store.initialize();
+  await observeAndRegisterCodexOnly(store);
+
+  await store.enqueueNativeIngress({
+    source: transientClaudePeer,
+    targetAlias: "reviewer@this-mac",
+    body: "ordinary message stays ahead in the normal queue",
+    dedupeKey: "ordinary-before-steers",
+  });
+  const steers = [];
+  for (let index = 1; index <= 4; index += 1) {
+    steers.push(
+      await store.enqueueNativeIngress({
+        source: transientClaudePeer,
+        targetAlias: "reviewer@this-mac",
+        body: `STEER: instruction ${index}`,
+        dedupeKey: `steer-${index}`,
+        steer: true,
+      }),
+    );
+  }
+
+  assert.equal(steers[0]?.supersededSettlement, undefined);
+  assert.deepEqual(steers[3]?.supersededSettlement, {
+    messageId: steers[0]?.messageId,
+    state: "cancelled",
+    safeErrorCode: "STEER_QUEUE_SUPERSEDED",
+  });
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.routes[0]?.queueDepth, 4);
+  assert.equal(snapshot.accounting.cancelled, 1);
+  const superseded = snapshot.messages.find(
+    (event) => event.safeErrorCode === "STEER_QUEUE_SUPERSEDED",
+  );
+  assert.equal(superseded?.steer, true);
+  assert.equal(superseded?.state, "cancelled");
+  assert.equal(
+    snapshot.messages.filter(
+      (event) => event.state === "queued" && event.steer === true,
+    ).length,
+    4,
+  );
+
+  const firstSteer = await store.dequeueMessage(
+    "reviewer@this-mac",
+    "steer_only",
+  );
+  assert.equal(firstSteer?.messageId, steers[1]?.messageId);
+  assert.equal(firstSteer?.body, "STEER: instruction 2");
+  assert.equal(firstSteer?.steer, true);
+  await store.settleMessage({
+    messageId: firstSteer?.messageId ?? "",
+    state: "delivered",
+  });
+  const ordinary = await store.dequeueMessage("reviewer@this-mac");
+  assert.equal(ordinary?.body, "ordinary message stays ahead in the normal queue");
+  assert.equal(ordinary?.steer, undefined);
+  await store.close();
+});
+
+test("a rejected fourth steer does not displace an already accepted body", async () => {
+  const { store, config } = await fixture();
+  config.limits.maxQueueMessages = 6;
+  config.limits.maxQueueMessagesPerRoute = 6;
+  config.limits.maxQueueBytes = 100;
+  config.limits.maxMessageBytes = 100;
+  await store.initialize();
+  await observeAndRegisterCodexOnly(store);
+
+  const accepted = [];
+  for (let index = 1; index <= 3; index += 1) {
+    accepted.push(
+      await store.enqueueNativeIngress({
+        source: transientClaudePeer,
+        targetAlias: "reviewer@this-mac",
+        body: `STEER: keep ${index}`,
+        dedupeKey: `keep-steer-${index}`,
+        steer: true,
+      }),
+    );
+  }
+  await assert.rejects(
+    store.enqueueNativeIngress({
+      source: transientClaudePeer,
+      targetAlias: "reviewer@this-mac",
+      body: `STEER: ${"x".repeat(73)}`,
+      dedupeKey: "oversized-steer-replacement",
+      steer: true,
+    }),
+    (error) => error instanceof BridgeError && error.code === "GATEWAY_QUEUE_FULL",
+  );
+
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.routes[0]?.queueDepth, 3);
+  assert.equal(snapshot.accounting.cancelled, 0);
+  assert.equal(
+    snapshot.messages.some(
+      (event) => event.safeErrorCode === "STEER_QUEUE_SUPERSEDED",
+    ),
+    false,
+  );
+  const first = await store.dequeueMessage("reviewer@this-mac", "steer_only");
+  assert.equal(first?.messageId, accepted[0]?.messageId);
+  assert.equal(first?.body, "STEER: keep 1");
   await store.close();
 });
 

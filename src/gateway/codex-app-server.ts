@@ -6,15 +6,16 @@ import WebSocket from "ws";
 /**
  * Stable App Server methods reviewed for the gateway's first writable version.
  *
- * `turn/steer` is intentionally absent. Although it is a stable App Server
- * method, the gateway queues while a turn is active and does not expose live
- * steering in v1. There is no generic/public JSON-RPC escape hatch.
+ * `turn/steer` is exposed only through the exact Claude-to-Codex `STEER:`
+ * contract. It queues input at the attested next tool-call boundary and never
+ * authorizes an interrupt or a generic/public JSON-RPC escape hatch.
  */
 export const CODEX_APP_SERVER_V1_METHODS = [
   "thread/loaded/list",
   "thread/resume",
   "thread/unsubscribe",
   "turn/start",
+  "turn/steer",
   "turn/interrupt",
 ] as const;
 
@@ -57,6 +58,11 @@ export type CodexEndpointCompatibilityAttestation = {
   appServerVersion: string;
   endpointGeneration: string;
   protocol: "app-server-v2-stable";
+  steering: {
+    method: "turn/steer";
+    requestSchema: "expected-turn-id-text-v1";
+    deliveryBoundary: "next-tool-call-boundary";
+  };
 };
 
 /**
@@ -105,6 +111,7 @@ export type CodexConnectorEventKind =
   | "queued_messages_cancelled"
   | "turn_starting"
   | "turn_started"
+  | "turn_steered"
   | "turn_interrupt_requested"
   | "turn_completed"
   | "approval_waiting"
@@ -470,11 +477,12 @@ export type CodexAppServerConnectorOptions = {
 export type CodexMessageInput = {
   deadlineAt: string;
   messageId: string;
+  steer?: true;
   text: string;
 };
 
 export type CodexMessageDisposition = {
-  disposition: "expired" | "queued" | "started";
+  disposition: "deferred" | "expired" | "queued" | "started" | "steered";
   observation: CodexConnectorObservation;
 };
 
@@ -585,13 +593,16 @@ function validateCompatibility(
   if (
     compatibility.endpointGeneration !== route.endpointGeneration ||
     compatibility.protocol !== "app-server-v2-stable" ||
+    compatibility.steering?.method !== "turn/steer" ||
+    compatibility.steering.requestSchema !== "expected-turn-id-text-v1" ||
+    compatibility.steering.deliveryBoundary !== "next-tool-call-boundary" ||
     !CODEX_APP_SERVER_WRITABLE_VERSIONS.some(
       (version) => version === compatibility.appServerVersion,
     )
   ) {
     throw new CodexConnectorError("INVALID_CONFIGURATION");
   }
-  return { ...compatibility };
+  return { ...compatibility, steering: { ...compatibility.steering } };
 }
 
 function parseRouteStatus(value: unknown): CodexRouteStatus | null {
@@ -966,6 +977,16 @@ export class CodexAppServerConnector {
     if (!this.selectedThreadObserved) {
       throw new CodexConnectorError("THREAD_NOT_OBSERVED");
     }
+    if (input.steer === true && this.routeStatus === "active") {
+      this.assertWritableReady();
+      const message = this.validateMessage(input);
+      if (this.activeTurnId === null || this.inFlightMethod !== null) {
+        this.acceptedMessageIds.delete(message.messageId);
+        return { disposition: "deferred", observation: this.observation() };
+      }
+      const disposition = await this.steerMessage(message);
+      return { disposition, observation: this.observation() };
+    }
     if (
       this.routeStatus === "starting" ||
       this.routeStatus === "active" ||
@@ -974,6 +995,10 @@ export class CodexAppServerConnector {
     ) {
       this.assertWritableReady();
       const message = this.validateMessage(input);
+      if (input.steer === true) {
+        this.acceptedMessageIds.delete(message.messageId);
+        return { disposition: "deferred", observation: this.observation() };
+      }
       this.enqueue(message);
       return { disposition: "queued", observation: this.observation() };
     }
@@ -1234,6 +1259,62 @@ export class CodexAppServerConnector {
       throw normalized;
     } finally {
       if (requestBegan) this.finishRequest("turn/start");
+    }
+  }
+
+  /**
+   * Add one exact input to the currently observed active turn. App Server owns
+   * the temporal boundary: the attested method applies it at the next tool-call
+   * boundary, never by interrupting an in-progress generation.
+   */
+  private async steerMessage(
+    message: QueuedMessage,
+  ): Promise<"deferred" | "expired" | "steered"> {
+    this.assertNoRequest();
+    this.assertWritableReady();
+    if (this.messageExpired(message)) {
+      this.expireMessage(message);
+      return "expired";
+    }
+    if (this.routeStatus !== "active" || this.activeTurnId === null) {
+      this.acceptedMessageIds.delete(message.messageId);
+      return "deferred";
+    }
+    const expectedTurnId = this.activeTurnId;
+    this.beginRequest("turn/steer");
+    try {
+      const result = await this.request("turn/steer", {
+        expectedTurnId,
+        input: [{ text: message.text, type: "text" }],
+        threadId: this.route.threadId,
+      });
+      if (
+        !isRecord(result) ||
+        Object.keys(result).length !== 1 ||
+        typeof result.turnId !== "string" ||
+        result.turnId !== expectedTurnId
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (
+        this.activeTurnId !== null &&
+        this.activeTurnId !== expectedTurnId
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      this.acceptedMessageIds.delete(message.messageId);
+      this.emit("turn_steered", { messageBytes: message.byteLength });
+      return "steered";
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      this.acceptedMessageIds.delete(message.messageId);
+      if (!normalized.ambiguous && normalized.code === "RPC_REJECTED") {
+        return "deferred";
+      }
+      this.handleActionError(normalized);
+      throw normalized;
+    } finally {
+      this.finishRequest("turn/steer");
     }
   }
 
@@ -1664,6 +1745,17 @@ export class CodexAppServerConnector {
         turn.status !== "inProgress"
       ) {
         this.protocolFault("PROTOCOL_ERROR");
+        return;
+      }
+      if (!this.ownsActiveTurn && this.activeMessageId === null) {
+        if (this.lastCompletedTurnId === turn.id) return;
+        if (this.activeTurnId !== null && this.activeTurnId !== turn.id) {
+          this.protocolFault("PROTOCOL_ERROR");
+          return;
+        }
+        this.activeTurnId = turn.id;
+        this.setRouteStatus("active");
+        this.emit("turn_started");
         return;
       }
       if (!this.ownsActiveTurn || this.activeMessageId === null) {

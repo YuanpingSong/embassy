@@ -67,7 +67,7 @@ There is an intentional asymmetry:
 - **Claude → Codex:** registration advertises one `codex-*` task to every compatible live Claude session running as the same OS user. An exact live sender may reach that task without becoming selected for messages in the other direction.
 - **Codex → Claude:** the Codex task must be registered, and you must explicitly select the destination Claude session first. Sending never silently selects a discovered session.
 
-Embassy queues messages while the Codex task is busy and starts an ordinary turn when it is available. It never exposes `turn/steer`. It may interrupt only a turn that the same connector started and positively observed, such as during controlled shutdown.
+Embassy normally queues messages while the Codex task is busy and starts an ordinary turn when it is available. In the Claude→Codex direction only, an exact leading `STEER:` body may be admitted to the active turn at App Server's next tool-call boundary. It is never injected mid-generation and never authorizes an interrupt; if that boundary is unavailable, the message silently returns to the normal queue.
 
 The gateway creates one callback socket and one `codex-*` registry record while it runs. It removes both during graceful shutdown. After a crash, stale artifacts are rejected by process-liveness and generation checks. A fixed host-wide lease permits only one Embassy controller for the current login account, even when `EMBASSY_STATE_DIR` differs between launches.
 
@@ -195,7 +195,7 @@ Provider-authorized commands inherit exactly one identity: a Codex task's `CODEX
 
 ## Delivery semantics
 
-- **Queue while busy.** Embassy queues for an active Codex task and dispatches after it becomes available. It does not steer or interrupt someone else's turn to force delivery.
+- **Queue while busy, with one explicit boundary.** Ordinary messages wait for the Codex task to become available. An exact leading `STEER:` body from Claude to Codex may be admitted to the active turn at its next tool-call boundary. Embassy never interrupts or injects text mid-generation; a cleanly unavailable boundary falls back to the normal queue. At most three steering messages remain queued per route, with the oldest settled as `cancelled/STEER_QUEUE_SUPERSEDED` when a fourth is accepted.
 - **Acceptance is not completion.** Initial CLI acceptance returns a conversation token and a delivery token. Successful destination or App Server acceptance settles as `delivered`: toward Codex that is the App Server accepting the turn, toward Claude it is release into the session's native queue — not read, not completed.
 - **Evidence has three shapes.** `delivered` means terminal provider evidence was observed. `unconfirmed` means the transport write completed but no terminal native evidence arrived. `ambiguous` means the write outcome itself is unknown. All three are terminal, and neither `unconfirmed` nor `ambiguous` is a retry authorization — inspect the recipient instead, because a resend can duplicate the message.
 - **Native failures.** A Claude-originated route or delivery failure settles as native `expired`, followed by one static `<gateway-delivery-diagnostic>` frame containing a safe error code. It contains no path, native identifier, exception, or message body. `denied` is reserved for a real user or policy refusal and is not authored by Embassy v1. `held` and transport-written are progress, never success.
@@ -257,6 +257,7 @@ Common configuration:
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute and does not relocate the fixed host-wide lease |
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`, resolved to the pinned version target | Absolute Claude Code launcher path; `PATH` is not searched |
+| `EMBASSY_STEERING_ENABLED` | `1` | Global `STEER:` kill switch; set exactly `0` to treat every body as an ordinary queued message |
 
 Advanced bounds retain conservative defaults:
 

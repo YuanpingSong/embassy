@@ -272,6 +272,11 @@ test("managed installation pins release binary and already-running private socke
       appServerVersion: VERSION,
       endpointGeneration: attested.endpointGeneration,
       protocol: "app-server-v2-stable",
+      steering: {
+        method: "turn/steer",
+        requestSchema: "expected-turn-id-text-v1",
+        deliveryBoundary: "next-tool-call-boundary",
+      },
     });
     assert.deepEqual(attested.writeCompatibility, attested.schemaCompatibility);
     await attested.close();
@@ -406,6 +411,11 @@ test("factory spawns only resolved proxy with strict options and owns cleanup", 
       appServerVersion: VERSION,
       endpointGeneration: factory.endpointGeneration,
       protocol: "app-server-v2-stable",
+      steering: {
+        method: "turn/steer",
+        requestSchema: "expected-turn-id-text-v1",
+        deliveryBoundary: "next-tool-call-boundary",
+      },
     });
     assert.equal(factory.writeCompatibility, null);
     const owned = await factory.connectTransport();

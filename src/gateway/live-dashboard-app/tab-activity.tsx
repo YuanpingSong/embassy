@@ -130,6 +130,9 @@ namespace Embassy {
           direction={group.direction}
           safeErrorCode={group.safeErrorCode}
         />
+        {group.steer === true ? (
+          <span className="mono text-muted">STEER</span>
+        ) : null}
         {group.messageIdSuffix === undefined ? null : (
           <span className="mono text-muted">{group.messageIdSuffix}</span>
         )}

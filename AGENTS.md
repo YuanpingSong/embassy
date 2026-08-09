@@ -50,9 +50,13 @@ live sends routine. Never enable a real provider message in CI.
 - Treat inherited `CLAUDE_CODE_MESSAGING_SOCKET` as a raw absolute path. It may
   become an in-memory `uds:` capability only; never accept it from an argument,
   print it, persist it, or instruct the user to prefix it.
-- Queue while Codex is busy. Do not expose `turn/steer`, a generic provider RPC
-  escape hatch, or an approval-response method. Interrupt only an exact turn
-  started and positively observed by the same connector.
+- Classify only an exact leading `STEER:` body in the Claude-to-Codex direction.
+  Deliver it through the pinned `turn/steer` schema at the next tool-call
+  boundary; never interrupt or inject mid-generation. A cleanly unavailable
+  boundary falls back to the normal bounded queue. Keep the global kill switch,
+  three-steer per-route cap, normal receipts, and journal marker. Expose no
+  generic provider RPC escape hatch or approval-response method. Interrupt only
+  an exact turn started and positively observed by the same connector.
 - Embassy never mutates a Codex task's persistent approval or sandbox policy
   and never answers approvals. Registration—not a read-only-policy classifier—
   is the gateway reachability boundary.

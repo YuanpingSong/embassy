@@ -160,6 +160,7 @@ namespace Embassy {
     state: DeliveryState;
     latencyMs?: number | undefined;
     safeErrorCode?: string | undefined;
+    steer?: true | undefined;
   }>;
 
   export type DashboardMessageGroup = Readonly<{
@@ -172,6 +173,7 @@ namespace Embassy {
     latencyMs?: number | undefined;
     bytes: number;
     safeErrorCode?: string | undefined;
+    steer?: true | undefined;
     events: readonly DashboardMessageEvent[];
   }>;
 

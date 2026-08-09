@@ -256,6 +256,23 @@ test("message lifecycles group by direction and route, not suffix alone", () => 
   assert.equal((html.match(/data-dashboard-row="message-event"/g) ?? []).length, 2);
 });
 
+test("steering delivery evidence retains a visible protocol marker", () => {
+  const snapshot = dashboardFixture();
+  const delivery = snapshot.messages.filter(
+    (event) => event.direction === "claude_to_codex",
+  );
+  assert.equal(delivery.length, 2);
+  for (const event of delivery) event.steer = true;
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(
+    model.activity.find(
+      (group) => group.direction === "claude_to_codex",
+    )?.steer,
+    true,
+  );
+  assert.match(renderDashboardHtml(snapshot), />STEER<\/span>/);
+});
+
 test("72 evidence events disclose 12 omitted rows under the global budget", () => {
   const snapshot = dashboardFixture();
   snapshot.messages = Array.from(

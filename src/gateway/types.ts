@@ -182,6 +182,8 @@ export type QueuedMessageMetadata = {
   deadlineAt: string;
   bytes: number;
   hopCount: number;
+  /** Exact Claude-to-Codex `STEER:` classification; absence means ordinary. */
+  steer?: true;
 };
 
 /** A transient dispatch value. Its body must remain in process memory. */
@@ -219,6 +221,7 @@ export type NormalizedMessageEvent = {
   state: DeliveryState;
   bytes: number;
   hopCount: number;
+  steer?: true;
   latencyMs?: number;
   safeErrorCode?: string;
 };
@@ -662,6 +665,7 @@ export type EnqueueMessageInput = {
   dedupeKey: string;
   deadlineAt?: string;
   hopCount?: number;
+  steer?: true;
 };
 
 /**
@@ -695,6 +699,8 @@ export type EnqueueMessageResult = {
   duplicate: boolean;
   messageId?: string;
   messageIdSuffix: string;
+  /** Exact older queued steer displaced by the per-route cap, if any. */
+  supersededSettlement?: TerminalMessageSettlement;
 };
 
 export type InFlightMessageProgressState = Extract<

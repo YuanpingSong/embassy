@@ -18,6 +18,11 @@ const ENDPOINT_GENERATION = "local-generation-001";
 const WORKSPACE_CWD = "/workspace/project";
 const SAFE_APPROVAL_POLICY = "never";
 const SAFE_SANDBOX = { networkAccess: false, type: "readOnly" } as const;
+const STEERING_ATTESTATION = {
+  method: "turn/steer",
+  requestSchema: "expected-turn-id-text-v1",
+  deliveryBoundary: "next-tool-call-boundary",
+} as const;
 
 function futureDeadline(milliseconds = 60_000): string {
   return new Date(Date.now() + milliseconds).toISOString();
@@ -141,6 +146,7 @@ function fixture(
           appServerVersion: "0.147.0",
           endpointGeneration: ENDPOINT_GENERATION,
           protocol: "app-server-v2-stable",
+          steering: STEERING_ATTESTATION,
         },
         onEvent: (event) => events.push(event),
         onTurnResult: (result) => replies.push(result),
@@ -318,6 +324,7 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
     "thread/resume",
     "thread/unsubscribe",
     "turn/start",
+    "turn/steer",
     "turn/interrupt",
   ]);
   for (const forbidden of [
@@ -326,7 +333,6 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
     "thread/archive",
     "thread/delete",
     "thread/shellCommand",
-    "turn/steer",
     "config/read",
     "account/read",
     "process/spawn",
@@ -351,6 +357,7 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
         appServerVersion: "0.147.0",
         endpointGeneration: "different-generation",
         protocol: "app-server-v2-stable",
+        steering: STEERING_ATTESTATION,
       },
       route: {
         endpointGeneration: ENDPOINT_GENERATION,
@@ -368,6 +375,28 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
         appServerVersion: "0.148.0",
         endpointGeneration: ENDPOINT_GENERATION,
         protocol: "app-server-v2-stable",
+        steering: STEERING_ATTESTATION,
+      },
+      route: {
+        endpointGeneration: ENDPOINT_GENERATION,
+        threadId: THREAD_ID,
+      },
+      transport: incompatibleTransport,
+      writesEnabled: true,
+    }),
+    (error) => assertConnectorError(error, "INVALID_CONFIGURATION"),
+  );
+  assert.equal(incompatibleTransport.sent.length, 0);
+  await assert.rejects(
+    CodexAppServerConnector.connect({
+      compatibility: {
+        appServerVersion: "0.147.0",
+        endpointGeneration: ENDPOINT_GENERATION,
+        protocol: "app-server-v2-stable",
+        steering: {
+          ...STEERING_ATTESTATION,
+          deliveryBoundary: "mid-generation" as never,
+        },
       },
       route: {
         endpointGeneration: ENDPOINT_GENERATION,
@@ -925,8 +954,11 @@ test("delayed external idle cannot overlap an owned start in flight", async () =
   // Embassy has claimed the first queued message and sent turn/start, but
   // before the response supplies Embassy's owned turn ID.
   current.transport.emit({
-    method: "thread/status/changed",
-    params: { status: { type: "idle" }, threadId: THREAD_ID },
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external-before-drain", status: "completed" },
+    },
   });
   await delayImmediate();
 
@@ -1191,8 +1223,11 @@ test("queued work refreshes the exact route after an external turn", async () =>
     },
   });
   current.transport.emit({
-    method: "thread/status/changed",
-    params: { status: { type: "idle" }, threadId: THREAD_ID },
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external-before-drain", status: "completed" },
+    },
   });
   await delayImmediate();
 
@@ -1205,6 +1240,204 @@ test("queued work refreshes the exact route after an external turn", async () =>
   assert.equal(connector.observation().routeStatus, "active");
   assert.equal(connector.observation().queueDepth, 0);
   await connector.close();
+});
+
+test("steers only an exact observed active turn without interrupting it", async () => {
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      fake.respond(message, {
+        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
+      });
+    } else if (message.method === "turn/steer") {
+      fake.respond(message, { turnId: "turn-external-steer" });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+
+  current.transport.emit({
+    method: "turn/started",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external-steer", status: "inProgress" },
+    },
+  });
+  const result = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-steer-external",
+    steer: true,
+    text: "STEER: inspect the newest tool result",
+  });
+
+  assert.equal(result.disposition, "steered");
+  assert.equal(connector.observation().routeStatus, "active");
+  const steer = current.transport.sent.find(
+    (message) => message.method === "turn/steer",
+  );
+  assert.deepEqual(steer?.params, {
+    expectedTurnId: "turn-external-steer",
+    input: [{ text: "STEER: inspect the newest tool result", type: "text" }],
+    threadId: THREAD_ID,
+  });
+  assert.equal(requestMethods(current.transport).includes("turn/interrupt"), false);
+  assert.equal(
+    current.events.some((event) => event.kind === "turn_steered"),
+    true,
+  );
+
+  await connector.close();
+});
+
+test("an idle steering message starts an ordinary turn without invoking turn/steer", async () => {
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      fake.respond(message, {
+        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
+      });
+    } else if (message.method === "turn/start") {
+      fake.respond(message, {
+        turn: {
+          error: null,
+          id: "turn-steer-idle-fallback",
+          items: [],
+          status: "inProgress",
+        },
+      });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+
+  const result = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-steer-idle-fallback",
+    steer: true,
+    text: "STEER: start normally because no turn is active",
+  });
+
+  assert.equal(result.disposition, "started");
+  assert.equal(
+    current.transport.sent.filter((message) => message.method === "turn/start")
+      .length,
+    1,
+  );
+  assert.equal(
+    current.transport.sent.some((message) => message.method === "turn/steer"),
+    false,
+  );
+  assert.equal(
+    current.transport.sent.some(
+      (message) => message.method === "turn/interrupt",
+    ),
+    false,
+  );
+
+  await connector.close();
+});
+
+test("falls back cleanly when an active turn cannot accept a steer", async () => {
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      fake.respond(message, {
+        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
+      });
+    } else if (message.method === "turn/steer") {
+      fake.reject(message);
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+  current.transport.emit({
+    method: "turn/started",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-steer-rejected", status: "inProgress" },
+    },
+  });
+
+  const rejected = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-steer-rejected",
+    steer: true,
+    text: "STEER: wait for the next boundary",
+  });
+  assert.equal(rejected.disposition, "deferred");
+  assert.equal(connector.observation().connection, "ready");
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(requestMethods(current.transport).includes("turn/interrupt"), false);
+
+  current.transport.emit({
+    id: "approval-steer-fallback",
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: THREAD_ID,
+      turnId: "turn-steer-rejected",
+    },
+  });
+  const approvalWait = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-steer-approval-wait",
+    steer: true,
+    text: "STEER: this stays queued normally",
+  });
+  assert.equal(approvalWait.disposition, "deferred");
+  assert.equal(
+    current.transport.sent.filter((message) => message.method === "turn/steer")
+      .length,
+    1,
+  );
+  assert.equal(
+    current.transport.sent.some(
+      (message) => message.id === "approval-steer-fallback",
+    ),
+    false,
+  );
+
+  await connector.close();
+});
+
+test("treats a malformed steer response as ambiguous and never replays it", async () => {
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      fake.respond(message, {
+        thread: { id: THREAD_ID, status: { type: "idle" }, turns: [] },
+      });
+    } else if (message.method === "turn/steer") {
+      fake.respond(message, { turnId: "turn-other" });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+  current.transport.emit({
+    method: "turn/started",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-steer-ambiguous", status: "inProgress" },
+    },
+  });
+
+  await assert.rejects(
+    connector.submitMessage(connector.guard(), {
+      deadlineAt: futureDeadline(),
+      messageId: "message-steer-ambiguous",
+      steer: true,
+      text: "STEER: ambiguous response",
+    }),
+    (error) =>
+      error instanceof CodexConnectorError &&
+      error.code === "RESULT_SCHEMA_MISMATCH" &&
+      error.ambiguous,
+  );
+  assert.equal(connector.observation().connection, "faulted");
+  assert.equal(
+    current.transport.sent.filter((message) => message.method === "turn/steer")
+      .length,
+    1,
+  );
 });
 
 test("starts one turn, queues the next, and drains only after correlated completion", async () => {
@@ -1691,8 +1924,11 @@ test("interrupts only an exact connector-owned active turn and clears queued wor
   );
   assert.equal(requestMethods(transport).includes("turn/interrupt"), false);
   transport.emit({
-    method: "thread/status/changed",
-    params: { status: { type: "idle" }, threadId: THREAD_ID },
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-external", status: "completed" },
+    },
   });
 
   await connector.submitMessage(connector.guard(), {

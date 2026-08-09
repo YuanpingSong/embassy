@@ -1085,7 +1085,7 @@ function isNormalizedMessageEvent(
         "bytes",
         "hopCount",
       ],
-      ["latencyMs", "safeErrorCode"],
+      ["latencyMs", "safeErrorCode", "steer"],
     ) &&
     isNonNegativeInteger(value.sequence) &&
     isIsoTimestamp(value.timestamp) &&
@@ -1111,7 +1111,8 @@ function isNormalizedMessageEvent(
     isNonNegativeInteger(value.bytes) &&
     isNonNegativeInteger(value.hopCount) &&
     (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
-    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
+    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
+    (value.steer === undefined || value.steer === true)
   );
 }
 

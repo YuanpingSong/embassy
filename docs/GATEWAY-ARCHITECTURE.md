@@ -100,8 +100,9 @@ Consequences:
 **Official:** Codex App Server is the JSON-RPC interface used by rich Codex
 clients. Its Unix-socket transport is WebSocket over a standard HTTP Upgrade.
 The documented protocol includes loaded-thread discovery, thread resume,
-turn start, turn interrupt, and notifications. `turn/steer` also exists, but
-the gateway intentionally excludes it from version 1.
+turn start, turn steer, turn interrupt, and notifications. Embassy exposes
+`turn/steer` only behind the exact Claude-to-Codex `STEER:` contract described
+below; there is no generic RPC surface.
 
 **Official:** for an SSH project, the ChatGPT desktop app starts the remote
 Codex App Server through SSH using the remote user's login shell. Files,
@@ -157,7 +158,7 @@ The status below is intentionally narrower than the target architecture.
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, and read-only projection; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter pinned to 2.1.226 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224–2.1.226 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
 | Exact Claude 2.1.226 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
-| Allowlisted Codex App Server connector with queue-only busy behavior | **Implemented** and live-tested against App Server 0.147.0, including external busy observation, registered-route reachability across settings changes, and an automatically started queued turn |
+| Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
 | Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
@@ -286,10 +287,17 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    not supply policy overrides.
 6. App Server status notifications atomically refresh the advertised native
    peer record to `idle`, `busy`, or `waiting`.
-7. If the task is idle, the owning connector starts one dedicated turn. If it
-   is active or awaiting approval, version 1 queues the message internally.
-   It does not emit Claude's approval-specific native `held` control frame for
-   ordinary queueing.
+7. If the task is idle, the owning connector starts one dedicated turn.
+   Ordinary messages received while it is active or awaiting approval queue
+   internally. An exact leading `STEER:` body in this direction is marked as a
+   steering message. If the connector has a positively observed active turn
+   and no RPC already in flight, it sends the closed `turn/steer` request with
+   that exact ID as `expectedTurnId`; App Server admits the input at the next
+   tool-call boundary. Embassy never calls `turn/interrupt` for this path and
+   never injects text mid-generation. A clean non-steerable or unavailable
+   boundary silently returns the same body to the normal queue. It does not
+   emit Claude's approval-specific native `held` control frame for ordinary
+   queueing.
 8. If the delivery remains pending for exactly
    `floor(messageDeadlineMs / 2)`, the gateway may send
    the originating Claude session at most one nonterminal
@@ -297,8 +305,11 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    allowlisted reason and a bounded `queued-for-ms` age; it is not a native
    `held` receipt and does not settle the delivery.
 9. When the task becomes idle, the connector refreshes the exact task state and
-   starts the held message. Explicit registration is sufficient authorization;
-   Embassy does not run an additional workspace or policy classifier.
+   starts the held message. A route retains at most three queued steering
+   messages; accepting a fourth atomically cancels the oldest with safe code
+   `STEER_QUEUE_SUPERSEDED`, a normal terminal receipt, and a `STEER`-marked
+   journal event. Explicit registration is sufficient authorization; Embassy
+   does not run an additional workspace or policy classifier.
 10. Successful App Server acceptance returns Claude's native `delivered`
    receipt. A route or delivery error returns native `expired`, followed by a
    static `<gateway-delivery-diagnostic>` user frame containing one safe error
@@ -341,10 +352,15 @@ written while the Claude route is busy. The gateway still serializes its own
 writes, but it does not wait for Claude to become idle and thereby deadlock a
 Claude turn that is waiting for the reply.
 
-The gateway does not expose `turn/steer`. Queueing is the only version 1 busy
-policy. `turn/interrupt` is permitted only for a turn that the same connector
-started and positively observed; there is no generic App Server RPC escape
-hatch.
+The gateway exposes `turn/steer` only through an exact leading `STEER:` body in
+the Claude-to-Codex direction. The global `EMBASSY_STEERING_ENABLED` switch is
+on by default and exact `0` disables classification. The pinned 0.147.0 schema
+requires `expectedTurnId`, rejects a nonmatching active turn, reports a clean
+`activeTurnNotSteerable` condition, and returns the accepted turn ID. Embassy
+validates all of those temporal correlations before settlement. `turn/interrupt`
+is permitted only for a turn that the same connector started and positively
+observed; steering never authorizes it, and there is no generic App Server RPC
+escape hatch.
 
 ### Delivery status and bounded waits
 
@@ -598,6 +614,15 @@ The same offline 0.147.0 schema generation confirms that
 `TurnStartParams.approvalPolicy` and `sandboxPolicy` are persisted for the
 current and subsequent turns. That no-model evidence is why version 1 sends no
 seemingly temporary policy override.
+
+Offline 0.147.0 schema generation also confirms that `TurnSteerParams` requires
+exact `threadId`, `input`, and `expectedTurnId`; the precondition fails
+when that ID is not the current active turn. `TurnSteerResponse` returns the
+accepted `turnId`, and the closed App Server error shape includes
+`activeTurnNotSteerable`. Embassy pins and validates this schema, delegates the
+next-tool-call timing boundary to App Server, treats a clean refusal as normal
+queue fallback, and treats malformed or write-ambiguous results as terminally
+uncertain without replay.
 
 The one Desktop restart needed for the local shared-App-Server feasibility
 test has already been completed. Building, running synthetic tests, starting

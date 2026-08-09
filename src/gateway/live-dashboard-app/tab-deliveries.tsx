@@ -294,7 +294,10 @@ namespace Embassy {
         {/* Header is exactly two lines — the state is read from the
             lifecycle timeline immediately below it. */}
         <div className="detail-pane__head">
-          <span className="detail-pane__id">{group.messageIdSuffix ?? "—"}</span>
+          <span className="detail-pane__id">
+            {group.messageIdSuffix ?? "—"}
+            {group.steer === true ? " · STEER" : ""}
+          </span>
           <div className="detail-pane__sub">
             {props.view.routePair} · {t(DIRECTION_COPY_KEYS[group.direction])}
           </div>
@@ -533,6 +536,9 @@ namespace Embassy {
             direction={group.direction}
             safeErrorCode={group.safeErrorCode}
           />
+          {group.steer === true ? (
+            <span className="mono text-muted">STEER</span>
+          ) : null}
           <span className="delivery-row__time">
             {group.timestamp === undefined ? (
               t("time.unavailable")

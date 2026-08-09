@@ -64,6 +64,13 @@ Every routed message is untrusted input capable of steering the receiving
 agent. Registration and selection control reachability; they do not make the
 message content trustworthy.
 
+The literal leading `STEER:` prefix is a protocol instruction, not proof of a
+trusted author or safe intent. Any exact same-UID Claude sender already allowed
+to reach the registered Codex task can use it. The receiver's existing Codex
+policy still governs tools and approvals, and an operator who does not want
+this timing behavior must set `EMBASSY_STEERING_ENABLED=0` before starting the
+broker.
+
 ## Process and protocol boundary
 
 - The v1 launcher is foreground, macOS-only, same-machine, and local-host-only.
@@ -85,8 +92,13 @@ message content trustworthy.
 - App Server methods are allowlisted. Embassy exposes no archive, deletion,
   shell, configuration, authentication, plugin, history, approval-response, or
   generic RPC method.
-- `turn/steer` is excluded. Queueing is the busy policy. Interrupt is limited
-  to an exact turn started and positively observed by the same connector.
+- `turn/steer` is reachable only for an exact leading `STEER:` body in the
+  Claude-to-Codex direction, with an exact observed active-turn ID. App Server
+  admits it at the next tool-call boundary; Embassy never interrupts or injects
+  mid-generation. Clean boundary refusal falls back to the normal queue, which
+  retains at most three steers per route. The environment kill switch defaults
+  on and can disable this classification globally. Interrupt remains limited to
+  an exact turn started and positively observed by the same connector.
 - Exact App Server 0.147.0 initialization enables `experimentalApi: true`
   solely for `thread/resume.excludeTurns: true`. It adds no general
   experimental method or authority. Missing, malformed, or nonempty returned

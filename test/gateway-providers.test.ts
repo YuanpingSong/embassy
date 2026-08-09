@@ -1973,6 +1973,9 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
       this.respond(message, {
         turn: { id: "turn-provider-1", status: "inProgress" },
       });
+    } else if (message.method === "turn/steer") {
+      const params = message.params as { expectedTurnId?: unknown };
+      this.respond(message, { turnId: params.expectedTurnId });
     } else if (message.method === "thread/unsubscribe") {
       this.respond(message, { status: "unsubscribed" });
     } else if (message.method === "turn/interrupt") {
@@ -2037,6 +2040,11 @@ class FakeCodexFactory {
     appServerVersion: "0.147.0",
     endpointGeneration: this.endpointGeneration,
     protocol: "app-server-v2-stable" as const,
+    steering: {
+      method: "turn/steer" as const,
+      requestSchema: "expected-turn-id-text-v1" as const,
+      deliveryBoundary: "next-tool-call-boundary" as const,
+    },
   };
   readonly writeCompatibility: typeof this.schemaCompatibility | null;
   readonly writableReady: boolean;
@@ -2693,6 +2701,57 @@ test("an explicitly registered Codex route uses its native policy and remains re
   );
   assert.equal(observed.routes.some((event) => event.safeErrorCode !== undefined), false);
 
+  await provider.close();
+});
+
+test("local Codex provider settles an exact active-turn steer at acceptance", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true, true, "active");
+  const provider = codexProvider(factory);
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  const transport = factory.transports[0]!;
+  transport.emit({
+    method: "turn/started",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-provider-external", status: "inProgress" },
+    },
+  });
+
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-steer-active",
+      text: "STEER: continue from the next tool boundary",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      steer: true,
+    }),
+    { state: "delivered" },
+  );
+  const steer = transport.sent.find(
+    (message) => message.method === "turn/steer",
+  );
+  assert.deepEqual(steer?.params, {
+    expectedTurnId: "turn-provider-external",
+    input: [
+      { text: "STEER: continue from the next tool boundary", type: "text" },
+    ],
+    threadId: THREAD_ID,
+  });
+  assert.equal(
+    transport.sent.some((message) => message.method === "turn/interrupt"),
+    false,
+  );
+  assert.equal(
+    provider.observeRouteSuccessionBarrier(THREAD_ID).pendingReplyCorrelations,
+    0,
+  );
   await provider.close();
 });
 

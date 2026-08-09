@@ -72,6 +72,7 @@ export type DashboardMessageEvent = Readonly<{
   state: DeliveryState;
   latencyMs?: number | undefined;
   safeErrorCode?: string | undefined;
+  steer?: true | undefined;
 }>;
 
 export type DashboardMessageGroup = Readonly<{
@@ -84,6 +85,7 @@ export type DashboardMessageGroup = Readonly<{
   latencyMs?: number | undefined;
   bytes: number;
   safeErrorCode?: string | undefined;
+  steer?: true | undefined;
   events: readonly DashboardMessageEvent[];
 }>;
 
@@ -376,6 +378,7 @@ function buildMessageGroups(
           ...(safeCode(event.safeErrorCode) === undefined
             ? {}
             : { safeErrorCode: safeCode(event.safeErrorCode) }),
+          ...(event.steer === true ? { steer: true as const } : {}),
         }),
       );
       return {
@@ -397,6 +400,7 @@ function buildMessageGroups(
         ...(safeCode(latest.safeErrorCode) === undefined
           ? {}
           : { safeErrorCode: safeCode(latest.safeErrorCode) }),
+        ...(latest.steer === true ? { steer: true as const } : {}),
         events: allEvents,
       };
     })

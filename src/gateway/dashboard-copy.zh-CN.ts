@@ -447,7 +447,8 @@ export const dashboardCopyZhCn = {
   "app.diag.bytes.body":
     "当前排队 {queued}；自本次 broker 启动以来共接受 {accepted}。",
   "app.diag.steering.title": "转向（steering）",
-  "app.diag.steering.absent": "转向功能尚未落地。这里没有可切换的开关。",
+  "app.diag.steering.absent":
+    "STEER 标记表示已分类的 Claude→Codex 投递证据。此元数据契约不公开操作员停用开关的当前设置。",
   "app.diag.editable.title": "设置",
   "app.diag.editable.note":
     "设置在 embassy serve 启动时从环境变量读取。此页面无法修改它们，因此不会把它们显示为可编辑控件。",

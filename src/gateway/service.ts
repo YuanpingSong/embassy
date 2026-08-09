@@ -280,6 +280,7 @@ export interface GatewayProviderAdapter {
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
+    steer?: true;
   }): Promise<GatewayAdapterDispatchResult>;
   releaseRoute?(routeHandle: string): Promise<void>;
   close(): Promise<void>;
@@ -3864,6 +3865,8 @@ export class GatewayService {
     }
     if (state !== "delivered") {
       this.nativeIngressByConversation.delete(context.conversationId);
+    } else if (!context.expectsReply) {
+      this.nativeIngressByConversation.delete(context.conversationId);
     }
     return context;
   }
@@ -3877,6 +3880,9 @@ export class GatewayService {
   private async acceptProviderDeliveryLocked(messageId: string): Promise<boolean> {
     const context = this.messageContexts.get(messageId);
     if (context === undefined) return false;
+    if (!context.expectsReply) {
+      this.nativeIngressByConversation.delete(context.conversationId);
+    }
     this.providerTurnContinuations.set(messageId, { ...context });
     await this.advanceDeliveryLocked(messageId, {
       type: "provider_released",
@@ -4145,13 +4151,16 @@ export class GatewayService {
     return await this.mutex.run("service", async () => {
       try {
         await this.verifyClaude(params.fromAlias, params.replyAddress);
+        const steer =
+          this.config.steeringEnabled && params.text.startsWith("STEER:");
         return this.acceptedControlResult(
           await this.enqueue(
             params.fromAlias,
             params.toAlias,
             params.text,
-            params.expectsReply,
+            steer ? false : params.expectsReply,
             false,
+            steer ? { steer: true } : undefined,
           ),
         );
       } catch (error) {
@@ -4186,8 +4195,10 @@ export class GatewayService {
                 params.text,
                 false,
                 true,
-                conversation.id,
-                conversation.lastHopCount + 1,
+                {
+                  existingConversationId: conversation.id,
+                  requestedHopCount: conversation.lastHopCount + 1,
+                },
               );
         return this.acceptedControlResult(result);
       } catch (error) {
@@ -4202,9 +4213,12 @@ export class GatewayService {
     text: string,
     expectsReply: boolean,
     isReply: boolean,
-    existingConversationId?: string,
-    requestedHopCount?: number,
-    exposeDeliveryToken = true,
+    options: {
+      existingConversationId?: string;
+      requestedHopCount?: number;
+      exposeDeliveryToken?: boolean;
+      steer?: true;
+    } = {},
   ): Promise<EnqueuedMessageResult> {
     if (this.codexSuccessionPoisoned) {
       throw new BridgeError(
@@ -4214,7 +4228,7 @@ export class GatewayService {
     }
     this.pruneTransient();
     if (
-      existingConversationId === undefined &&
+      options.existingConversationId === undefined &&
       this.conversations.size >= MAX_CONVERSATIONS
     ) {
       throw new BridgeError("CONVERSATION_CAPACITY", "The transient conversation table is full.", true);
@@ -4224,7 +4238,8 @@ export class GatewayService {
       const owner = this.pendingClaudeReplies.get(bindingKey(target));
       if (owner !== undefined) throw new BridgeError("REPLY_ROUTE_BUSY", "That exact peer already owns a pending reply.", true);
     }
-    const conversationId = existingConversationId ?? createGatewayConversationId();
+    const conversationId =
+      options.existingConversationId ?? createGatewayConversationId();
     const conversation = this.conversations.get(conversationId) ?? {
       id: conversationId,
       sourceAlias,
@@ -4234,10 +4249,12 @@ export class GatewayService {
       lastHopCount: 0,
       lastActivityAt: this.now().toISOString(),
     };
-    const hopCount = requestedHopCount ?? (isReply ? conversation.lastHopCount + 1 : 0);
+    const hopCount =
+      options.requestedHopCount ??
+      (isReply ? conversation.lastHopCount + 1 : 0);
     const sequence = conversation.nextSequence;
     const enqueuedAt = this.now().getTime();
-    const deliveryToken = exposeDeliveryToken
+    const deliveryToken = (options.exposeDeliveryToken ?? true)
       ? this.reserveDeliveryToken()
       : undefined;
     const deadlineAt = new Date(
@@ -4250,8 +4267,12 @@ export class GatewayService {
       dedupeKey: `${conversationId}:${sequence}`,
       hopCount,
       deadlineAt,
+      ...(options.steer === true ? { steer: true as const } : {}),
     });
     if (!queued.accepted || queued.messageId === undefined) throw new BridgeError("MESSAGE_REJECTED", "The message was not accepted.");
+    if (queued.supersededSettlement !== undefined) {
+      await this.applyTerminalSettlementLocked(queued.supersededSettlement);
+    }
     this.conversations.set(conversationId, conversation);
     conversation.nextSequence += 1;
     conversation.lastHopCount = hopCount;
@@ -4498,11 +4519,28 @@ export class GatewayService {
     ) {
       return;
     }
-    if (this.activeDispatchByTarget.has(targetAlias)) return;
     if (await this.processLifecycleLocked()) {
       await this.changed();
     }
-    const item = await this.store.dequeueMessage(targetAlias);
+    const selectedBeforeDequeue = this.routeBindings.get(targetAlias);
+    const activeDispatch = this.activeDispatchByTarget.get(targetAlias);
+    const steeringWhileBusy =
+      selectedBeforeDequeue?.provider === "codex" &&
+      this.routeStates.get(targetAlias) === "busy";
+    if (activeDispatch !== undefined && !steeringWhileBusy) return;
+    let item = await this.store.dequeueMessage(
+      targetAlias,
+      steeringWhileBusy ? "steer_only" : "any",
+    );
+    if (
+      item === undefined &&
+      steeringWhileBusy &&
+      activeDispatch === undefined
+    ) {
+      // Preserve the ordinary busy-route waiting transition when no steer can
+      // bypass it. A live provider turn still fences ordinary work.
+      item = await this.store.dequeueMessage(targetAlias, "any");
+    }
     if (item === undefined) return;
     const context = this.messageContexts.get(item.messageId);
     const selectedBinding = this.routeBindings.get(targetAlias);
@@ -4535,7 +4573,10 @@ export class GatewayService {
       const routeState = this.routeStates.get(targetAlias);
       const dispatchable =
         routeState === "idle" ||
-        (binding.provider === "claude" && routeState === "busy");
+        (binding.provider === "claude" && routeState === "busy") ||
+        (binding.provider === "codex" &&
+          item.steer === true &&
+          routeState === "busy");
       const inspection = await this.store.inspectPrivateRoute(targetAlias);
       const codexRouteStale =
         binding.provider === "codex" &&
@@ -4555,7 +4596,10 @@ export class GatewayService {
       }
       const storedDispatchable =
         inspection?.state === "idle" ||
-        (binding.provider === "claude" && inspection?.state === "busy");
+        (binding.provider === "claude" && inspection?.state === "busy") ||
+        (binding.provider === "codex" &&
+          item.steer === true &&
+          inspection?.state === "busy");
       if (
         selectedBinding === undefined ||
         !dispatchable ||
@@ -4585,7 +4629,7 @@ export class GatewayService {
         await this.changed();
         return;
       }
-      this.routeStates.set(targetAlias, "busy");
+      if (!steeringWhileBusy) this.routeStates.set(targetAlias, "busy");
     } else if (
       binding.provider !== "claude" ||
       bindingKey(binding) !== context.targetBindingKey
@@ -4598,7 +4642,9 @@ export class GatewayService {
       return;
     }
 
-    this.activeDispatchByTarget.set(targetAlias, item.messageId);
+    if (!steeringWhileBusy) {
+      this.activeDispatchByTarget.set(targetAlias, item.messageId);
+    }
     const tracker = this.deliveryTrackers.get(item.messageId);
     if (tracker === undefined) {
       const settled = await this.store.settleMessage({
@@ -4639,7 +4685,9 @@ export class GatewayService {
         item.messageId,
         item.body,
       );
-      this.activeDispatchByTarget.delete(targetAlias);
+      if (this.activeDispatchByTarget.get(targetAlias) === item.messageId) {
+        this.activeDispatchByTarget.delete(targetAlias);
+      }
       if (requeued.status === "settled") {
         await this.applyTerminalSettlementLocked(requeued.settlement);
       }
@@ -4655,6 +4703,7 @@ export class GatewayService {
         text: item.body,
         expectsReply: context?.expectsReply ?? false,
         deadlineAt: item.deadlineAt,
+        ...(item.steer === true ? { steer: true as const } : {}),
       });
     } catch {
       await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
@@ -4725,15 +4774,23 @@ export class GatewayService {
         item.messageId,
         item.body,
       );
-      this.activeDispatchByTarget.delete(currentTargetAlias);
+      if (
+        this.activeDispatchByTarget.get(currentTargetAlias) === item.messageId
+      ) {
+        this.activeDispatchByTarget.delete(currentTargetAlias);
+      }
       if (requeued.status === "requeued") {
         if (context.authorization === "selected_route") {
-          this.routeStates.set(currentTargetAlias, "idle");
-          await this.store.observeRoute({
-            binding,
-            state: "idle",
-            compatibility: "compatible",
-          });
+          if (!steeringWhileBusy) {
+            this.routeStates.set(currentTargetAlias, "idle");
+            await this.store.observeRoute({
+              binding,
+              state: "idle",
+              compatibility: "compatible",
+            });
+          } else {
+            this.scheduleHeldRedispatch(currentTargetAlias);
+          }
           await this.setNativeCodexStatus(currentTargetAlias, "waiting");
         }
       } else if (requeued.status === "settled") {
@@ -5052,9 +5109,11 @@ export class GatewayService {
               replyText,
               false,
               true,
-              conversation.id,
-              context.hopCount + 1,
-              false,
+              {
+                existingConversationId: conversation.id,
+                requestedHopCount: context.hopCount + 1,
+                exposeDeliveryToken: false,
+              },
             );
           }
         }
@@ -5128,9 +5187,11 @@ export class GatewayService {
       event.text,
       false,
       true,
-      conversation.id,
-      pending.hopCount + 1,
-      false,
+      {
+        existingConversationId: conversation.id,
+        requestedHopCount: pending.hopCount + 1,
+        exposeDeliveryToken: false,
+      },
     );
   }
 
@@ -5190,6 +5251,8 @@ export class GatewayService {
       const deadlineAt = new Date(
         enqueuedAt + this.config.limits.messageDeadlineMs,
       ).toISOString();
+      const steer =
+        this.config.steeringEnabled && event.text.startsWith("STEER:");
       const queued = await this.store.enqueueNativeIngress({
         source: { alias: event.sourceAlias, binding: sourceBinding },
         targetAlias: event.targetAlias,
@@ -5197,6 +5260,7 @@ export class GatewayService {
         dedupeKey: `${conversationId}:0`,
         hopCount: 0,
         deadlineAt,
+        ...(steer ? { steer: true as const } : {}),
       });
       if (!queued.accepted || queued.messageId === undefined) {
         throw new BridgeError(
@@ -5205,11 +5269,16 @@ export class GatewayService {
         );
       }
       acceptedMessageId = queued.messageId;
+      if (queued.supersededSettlement !== undefined) {
+        await this.applyTerminalSettlementLocked(
+          queued.supersededSettlement,
+        );
+      }
       const conversation: Conversation = {
         id: conversationId,
         sourceAlias: event.sourceAlias,
         targetAlias: event.targetAlias,
-        expectsReply: true,
+        expectsReply: !steer,
         nextSequence: 1,
         lastHopCount: 0,
         lastActivityAt: this.now().toISOString(),
@@ -5218,7 +5287,7 @@ export class GatewayService {
       this.messageContexts.set(queued.messageId, {
         conversationId,
         isReply: false,
-        expectsReply: true,
+        expectsReply: !steer,
         hopCount: 0,
         sequence: 0,
         targetBindingKey: bindingKey(target),

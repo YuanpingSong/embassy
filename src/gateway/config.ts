@@ -10,6 +10,8 @@ export type GatewayConfig = {
   stateDir: string;
   controlSocketPath: string;
   allowedHosts: readonly string[];
+  /** Global fail-closed switch for Claude-to-Codex `STEER:` delivery. */
+  steeringEnabled: boolean;
   /** One sender-visible progress notice is due this long after enqueue. */
   stallNoticeMs: number;
   limits: GatewayStoreLimits;
@@ -81,6 +83,15 @@ function parseAllowedHosts(value: string | undefined): readonly string[] {
     );
   }
   return Object.freeze([...hosts]);
+}
+
+function enabledByDefault(name: string, value: string | undefined): boolean {
+  if (value === undefined || value === "1") return true;
+  if (value === "0") return false;
+  throw new BridgeError(
+    "INVALID_GATEWAY_CONFIGURATION",
+    `${name} must be exactly 1 or 0 when set.`,
+  );
 }
 
 export function loadGatewayConfig(
@@ -233,6 +244,10 @@ export function loadGatewayConfig(
     stateDir,
     controlSocketPath,
     allowedHosts: parseAllowedHosts(env.EMBASSY_HOSTS),
+    steeringEnabled: enabledByDefault(
+      "EMBASSY_STEERING_ENABLED",
+      env.EMBASSY_STEERING_ENABLED,
+    ),
     stallNoticeMs,
     limits,
   };

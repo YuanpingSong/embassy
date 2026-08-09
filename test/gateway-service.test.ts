@@ -233,6 +233,7 @@ class FakeProvider implements GatewayProviderAdapter {
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
+    steer?: true;
   }> = [];
   attested: string[] = [];
   selectedRoutes: Array<{ alias: string; routeHandle: string }> = [];
@@ -377,6 +378,7 @@ class FakeProvider implements GatewayProviderAdapter {
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
+    steer?: true;
   }): Promise<GatewayAdapterDispatchResult> {
     this.dispatches.push({ ...input, binding: { ...input.binding } });
     if (this.synchronousDispatchDelivery !== undefined) {
@@ -768,11 +770,10 @@ function toCodex(replyAddress: string): ValidatedSendToCodexParams {
 async function selectAndRegister(
   handlers: GatewayControlHandlers,
 ): Promise<void> {
-  assert.deepEqual(await handlers.refreshDashboard(), {
-    accepted: true,
-    code: "ok",
-    revision: 1,
-  });
+  const refreshed = await handlers.refreshDashboard();
+  assert.equal(refreshed.accepted, true);
+  assert.equal(refreshed.code, "ok");
+  assert.equal(Number.isSafeInteger(refreshed.revision), true);
   assert.deepEqual(
     await handlers.selectClaude({ alias: "claude-one@this-mac" }),
     { accepted: true, code: "ok" },
@@ -3650,6 +3651,315 @@ test("idle Codex re-registration wakes an already-held native message without an
       status: "delivered",
     },
   ]);
+});
+
+test("exact STEER prefix bypasses older ordinary work only at a busy Codex boundary", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  codex.dispatchResults.push({ state: "delivered" });
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+
+  const endpoint = { ...claude.identity, routeHandle: "claude_target_1" };
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint,
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "ordinary work remains in normal queue order",
+    receiptHandle: "receipt-ordinary-before-steer",
+  });
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint,
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "STEER: inspect the next tool result",
+    receiptHandle: "receipt-steer-direct",
+  });
+
+  await waitFor(() => codex.dispatches.length === 1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.equal(codex.dispatches[0]?.text, "STEER: inspect the next tool result");
+  assert.equal(codex.dispatches[0]?.steer, true);
+  assert.equal(codex.dispatches[0]?.expectsReply, false);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-steer-direct", status: "delivered" },
+  ]);
+  const snapshot = await service.handlers().listSnapshot();
+  assert.equal(
+    snapshot.messages.some(
+      (event) => event.steer === true && event.state === "delivered",
+    ),
+    true,
+  );
+  assert.equal(
+    snapshot.routes.find(({ alias }) => alias === "codex-main@this-mac")
+      ?.queueDepth,
+    1,
+  );
+  assert.equal(
+    snapshot.messages.some(
+      (event) =>
+        event.state === "queued" &&
+        event.steer === undefined &&
+        event.direction === "claude_to_codex",
+    ),
+    true,
+  );
+
+});
+
+test("Claude control ingress classifies only the exact leading STEER prefix", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  codex.dispatchResults.push({ state: "delivered" });
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const exact = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    text: "STEER: classify this exact leading prefix",
+  });
+  assert.equal(exact.accepted, true);
+  await waitFor(() => codex.dispatches.length === 1);
+  assert.equal(codex.dispatches[0]?.steer, true);
+  assert.equal(codex.dispatches[0]?.expectsReply, false);
+
+  const inexact = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    text: " STEER: leading whitespace remains ordinary",
+  });
+  assert.equal(inexact.accepted, true);
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, queueDepth }) =>
+        alias === "codex-main@this-mac" && queueDepth === 1,
+    ),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(codex.dispatches.length, 1);
+  assert.equal(
+    (await handlers.listSnapshot()).messages.some(
+      (event) =>
+        event.state === "queued" &&
+        event.steer === undefined &&
+        event.direction === "claude_to_codex",
+    ),
+    true,
+  );
+
+  const reverse = await handlers.sendToClaude(
+    toClaude("STEER: the reverse direction remains ordinary"),
+  );
+  assert.equal(reverse.accepted, true);
+  await waitFor(() => claude.dispatches.length === 1);
+  assert.equal(claude.dispatches[0]?.steer, undefined);
+});
+
+test("a steering dispatch does not replace the active ordinary turn owner", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  codex.dispatchResults.push(
+    { state: "accepted" },
+    { state: "delivered" },
+    { state: "delivered" },
+  );
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const ordinary = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    expectsReply: false,
+    text: "ordinary turn owns the active dispatch slot",
+  });
+  assert.equal(ordinary.accepted, true);
+  await waitFor(() => codex.dispatches.length === 1);
+  const ordinaryMessageId = codex.dispatches[0]?.messageId;
+  assert.ok(ordinaryMessageId);
+
+  const steer = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    text: "STEER: coexist without replacing the owner",
+  });
+  assert.equal(steer.accepted, true);
+  await waitFor(() => codex.dispatches.length === 2);
+  assert.equal(codex.dispatches[1]?.steer, true);
+
+  const waiting = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    expectsReply: false,
+    text: "ordinary work must still wait for the original owner",
+  });
+  assert.equal(waiting.accepted, true);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(codex.dispatches.length, 2);
+
+  codex.emitDelivery({ messageId: ordinaryMessageId, state: "completed" });
+  codex.state = "idle";
+  codex.emitRouteState(THREAD_ID, "idle");
+  await waitFor(() => codex.dispatches.length === 3);
+  assert.equal(
+    codex.dispatches[2]?.text,
+    "ordinary work must still wait for the original owner",
+  );
+  assert.equal(codex.dispatches[2]?.steer, undefined);
+});
+
+test("steering kill switch leaves exact prefixes in the ordinary queue", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_STEERING_ENABLED: "0",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "STEER: globally disabled",
+    receiptHandle: "receipt-steer-disabled",
+  });
+
+  await waitForAsync(async () =>
+    (await service.handlers().listSnapshot()).routes.some(
+      ({ alias, queueDepth }) =>
+        alias === "codex-main@this-mac" && queueDepth === 1,
+    ),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(codex.dispatches.length, 0);
+  assert.equal(
+    (await service.handlers().listSnapshot()).messages.some(
+      (event) => event.steer === true,
+    ),
+    false,
+  );
+});
+
+test("a fourth queued steer supersedes the oldest with one normal terminal receipt", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  codex.state = "awaiting_approval";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+  for (let index = 1; index <= 4; index += 1) {
+    claude.callbacks?.onClaudeMessage?.({
+      endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+      sourceAlias: "claude-one@this-mac",
+      targetAlias: "codex-main@this-mac",
+      text: `STEER: queued instruction ${index}`,
+      receiptHandle: `receipt-steer-cap-${index}`,
+    });
+  }
+
+  await waitForAsync(async () => {
+    const snapshot = await service.handlers().listSnapshot();
+    return (
+      snapshot.routes.some(
+        ({ alias, queueDepth }) =>
+          alias === "codex-main@this-mac" && queueDepth === 3,
+      ) && claude.nativeInboundStatuses.length === 1
+    );
+  });
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-steer-cap-1",
+      status: "expired",
+      diagnosticCode: "STEER_QUEUE_SUPERSEDED",
+    },
+  ]);
+  assert.equal(codex.dispatches.length, 0);
+  const snapshot = await service.handlers().listSnapshot();
+  assert.equal(
+    snapshot.messages.some(
+      (event) =>
+        event.steer === true &&
+        event.state === "cancelled" &&
+        event.safeErrorCode === "STEER_QUEUE_SUPERSEDED",
+    ),
+    true,
+  );
 });
 
 test("native Claude ingress reports delivery without approval-like held notices while internal queueing remains visible", async (t) => {

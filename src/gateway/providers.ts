@@ -1950,10 +1950,17 @@ function validateCodexFactory(factory: LocalCodexTransportFactory): void {
     schema.appServerVersion !== factory.appServerVersion ||
     schema.endpointGeneration !== factory.endpointGeneration ||
     schema.protocol !== "app-server-v2-stable" ||
+    schema.steering?.method !== "turn/steer" ||
+    schema.steering.requestSchema !== "expected-turn-id-text-v1" ||
+    schema.steering.deliveryBoundary !== "next-tool-call-boundary" ||
     (write !== null &&
       (write.appServerVersion !== schema.appServerVersion ||
         write.endpointGeneration !== schema.endpointGeneration ||
-        write.protocol !== schema.protocol)) ||
+        write.protocol !== schema.protocol ||
+        write.steering?.method !== schema.steering.method ||
+        write.steering.requestSchema !== schema.steering.requestSchema ||
+        write.steering.deliveryBoundary !==
+          schema.steering.deliveryBoundary)) ||
     factory.writableReady !== (write !== null)
   ) {
     throw new BridgeError(
@@ -2193,6 +2200,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
+    steer?: true;
   }): Promise<GatewayAdapterDispatchResult> {
     if (
       !this.initialized ||
@@ -2228,11 +2236,20 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     this.expectsReply.set(input.messageId, input.expectsReply);
     try {
-      await route.connector.submitMessage(guard, {
+      const disposition = await route.connector.submitMessage(guard, {
         deadlineAt: input.deadlineAt,
         messageId: input.messageId,
+        ...(input.steer === true ? { steer: true as const } : {}),
         text: input.text,
       });
+      if (disposition.disposition === "deferred") {
+        this.expectsReply.delete(input.messageId);
+        return { state: "deferred", safeErrorCode: "CODEX_ROUTE_HELD" };
+      }
+      if (disposition.disposition === "steered") {
+        this.expectsReply.delete(input.messageId);
+        return { state: "delivered" };
+      }
       return { state: "accepted" };
     } catch (error) {
       if (!this.expectsReply.has(input.messageId)) {

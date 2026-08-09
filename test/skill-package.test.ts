@@ -50,7 +50,9 @@ test("skill exposes only the stable gateway operating surface", async () => {
   assert.match(skill, /name@host/);
   assert.match(skill, /ListAgents.*codex-\*/);
   assert.match(skill, /availablePeers/);
-  assert.match(skill, /v1 busy policy is queue-only/);
+  assert.match(skill, /exact prefix `STEER:`/);
+  assert.match(skill, /next tool-call boundary/);
+  assert.match(skill, /At most three steering messages/);
   assert.match(skill, /standard input/);
   assert.match(skill, /native bidirectional messaging/);
   assert.match(skill, /codex-\*/);

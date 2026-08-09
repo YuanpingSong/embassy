@@ -451,17 +451,21 @@ function isConnectorRecord(value: unknown): value is ConnectorRecord {
 function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
   if (
     !isObject(value) ||
-    !hasOnlyKeys(value, [
-      "messageId",
-      "messageIdSuffix",
-      "direction",
-      "sourceAlias",
-      "targetAlias",
-      "enqueuedAt",
-      "deadlineAt",
-      "bytes",
-      "hopCount",
-    ])
+    !hasOnlyKeys(
+      value,
+      [
+        "messageId",
+        "messageIdSuffix",
+        "direction",
+        "sourceAlias",
+        "targetAlias",
+        "enqueuedAt",
+        "deadlineAt",
+        "bytes",
+        "hopCount",
+      ],
+      ["steer"],
+    )
   ) {
     return false;
   }
@@ -479,7 +483,8 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
     isIsoTimestamp(value.enqueuedAt) &&
     isIsoTimestamp(value.deadlineAt) &&
     isPositiveInteger(value.bytes) &&
-    isNonNegativeInteger(value.hopCount)
+    isNonNegativeInteger(value.hopCount) &&
+    (value.steer === undefined || value.steer === true)
   );
 }
 
@@ -507,7 +512,7 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
         "bytes",
         "hopCount",
       ],
-      ["latencyMs", "safeErrorCode"],
+      ["latencyMs", "safeErrorCode", "steer"],
     )
   ) {
     return false;
@@ -528,7 +533,8 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
     isPositiveInteger(value.bytes) &&
     isNonNegativeInteger(value.hopCount) &&
     (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
-    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
+    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
+    (value.steer === undefined || value.steer === true)
   );
 }
 
@@ -2197,7 +2203,10 @@ export class GatewayStore {
     });
   }
 
-  async dequeueMessage(targetAlias?: string): Promise<TransientQueuedMessage | undefined> {
+  async dequeueMessage(
+    targetAlias?: string,
+    mode: "any" | "steer_only" = "any",
+  ): Promise<TransientQueuedMessage | undefined> {
     return this.mutate(async (state, now) => {
       if (targetAlias !== undefined && !ALIAS_PATTERN.test(targetAlias)) {
         throw new BridgeError(
@@ -2205,8 +2214,16 @@ export class GatewayStore {
           "The target alias does not use the required lowercase ASCII grammar.",
         );
       }
+      if (mode !== "any" && mode !== "steer_only") {
+        throw new BridgeError(
+          "INVALID_GATEWAY_DISPATCH_MODE",
+          "The gateway dispatch selector is not recognized.",
+        );
+      }
       const index = state.queue.findIndex(
-        (item) => targetAlias === undefined || item.targetAlias === targetAlias,
+        (item) =>
+          (targetAlias === undefined || item.targetAlias === targetAlias) &&
+          (mode === "any" || item.steer === true),
       );
       if (index < 0) return undefined;
       if (state.inFlight.length >= this.config.limits.maxInFlightMessages) {
@@ -2240,6 +2257,7 @@ export class GatewayStore {
         state: "dispatching",
         bytes: metadata.bytes,
         hopCount: metadata.hopCount,
+        ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       });
       return { ...metadata, body };
@@ -2415,6 +2433,7 @@ export class GatewayStore {
         state: "held",
         bytes: metadata.bytes,
         hopCount: metadata.hopCount,
+        ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(
           0,
           now.getTime() - Date.parse(metadata.enqueuedAt),
@@ -2459,6 +2478,7 @@ export class GatewayStore {
         state: progress,
         bytes: metadata.bytes,
         hopCount: metadata.hopCount,
+        ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(
           0,
           now.getTime() - Date.parse(metadata.enqueuedAt),
@@ -3017,7 +3037,7 @@ export class GatewayStore {
     now: Date,
     input: Pick<
       EnqueueMessageInput,
-      "body" | "dedupeKey" | "deadlineAt" | "hopCount"
+      "body" | "dedupeKey" | "deadlineAt" | "hopCount" | "steer"
     >,
     sides: ResolvedEnqueueSides,
   ): EnqueueMessageResult {
@@ -3083,6 +3103,7 @@ export class GatewayStore {
         state: "duplicate",
         bytes,
         hopCount,
+        ...(input.steer === true ? { steer: true as const } : {}),
       });
       return {
         accepted: false,
@@ -3105,20 +3126,67 @@ export class GatewayStore {
         "The message deadline must be in the future and within the configured maximum.",
       );
     }
-    const targetDepth = state.queue.filter(
+    let oldestSteerIndex = -1;
+    if (input.steer === true) {
+      let oldestSteerAt = Number.POSITIVE_INFINITY;
+      for (const [index, item] of state.queue.entries()) {
+        if (item.targetAlias !== sides.targetAlias || item.steer !== true) {
+          continue;
+        }
+        const enqueuedAt = Date.parse(item.enqueuedAt);
+        if (enqueuedAt < oldestSteerAt) {
+          oldestSteerAt = enqueuedAt;
+          oldestSteerIndex = index;
+        }
+      }
+      const steerDepth = state.queue.filter(
+        (item) => item.targetAlias === sides.targetAlias && item.steer === true,
+      ).length;
+      if (steerDepth < 3) oldestSteerIndex = -1;
+    }
+    const superseded =
+      oldestSteerIndex < 0 ? undefined : state.queue[oldestSteerIndex];
+    const targetDepthBefore = state.queue.filter(
       (item) => item.targetAlias === sides.targetAlias,
     ).length;
+    const queueLengthAfterSupersession =
+      state.queue.length - (superseded === undefined ? 0 : 1);
+    const targetDepthAfterSupersession =
+      targetDepthBefore - (superseded === undefined ? 0 : 1);
+    const queuedBytesAfterSupersession =
+      state.accounting.queuedBytes - (superseded?.bytes ?? 0);
     if (
-      state.queue.length + state.inFlight.length >=
+      queueLengthAfterSupersession + state.inFlight.length >=
         this.config.limits.maxQueueMessages ||
-      targetDepth >= this.config.limits.maxQueueMessagesPerRoute ||
-      state.accounting.queuedBytes + bytes > this.config.limits.maxQueueBytes
+      targetDepthAfterSupersession >=
+        this.config.limits.maxQueueMessagesPerRoute ||
+      queuedBytesAfterSupersession + bytes >
+        this.config.limits.maxQueueBytes
     ) {
       this.recordRejection(state, sides, bytes, now, "QUEUE_FULL");
       throw new BridgeError(
         "GATEWAY_QUEUE_FULL",
         "The bounded gateway queue cannot accept another message.",
         true,
+      );
+    }
+    let supersededSettlement: TerminalMessageSettlement | undefined;
+    if (superseded !== undefined) {
+      state.queue.splice(oldestSteerIndex, 1);
+      this.transientBodies.delete(superseded.messageId);
+      state.accounting.queuedBytes -= superseded.bytes;
+      const oldestTarget = state.routes.find(
+        (route) => route.alias === superseded.targetAlias,
+      );
+      if (oldestTarget) {
+        oldestTarget.queueDepth = Math.max(0, oldestTarget.queueDepth - 1);
+      }
+      supersededSettlement = this.finishMetadata(
+        state,
+        superseded,
+        "cancelled",
+        now,
+        "STEER_QUEUE_SUPERSEDED",
       );
     }
     const opaque = this.randomId();
@@ -3140,6 +3208,7 @@ export class GatewayStore {
       deadlineAt: deadline.toISOString(),
       bytes,
       hopCount,
+      ...(input.steer === true ? { steer: true as const } : {}),
     };
     state.queue.push(metadata);
     this.transientBodies.set(messageId, input.body);
@@ -3174,12 +3243,16 @@ export class GatewayStore {
       state: "queued",
       bytes,
       hopCount,
+      ...(input.steer === true ? { steer: true as const } : {}),
     });
     return {
       accepted: true,
       duplicate: false,
       messageId,
       messageIdSuffix,
+      ...(supersededSettlement === undefined
+        ? {}
+        : { supersededSettlement }),
     };
   }
 
@@ -3297,6 +3370,7 @@ export class GatewayStore {
       state: deliveryState,
       bytes: metadata.bytes,
       hopCount: metadata.hopCount,
+      ...(metadata.steer === true ? { steer: true as const } : {}),
       latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       ...(safeErrorCode ? { safeErrorCode } : {}),
     });

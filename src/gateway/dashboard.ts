@@ -494,7 +494,7 @@ function renderActivity(context: RenderContext): string {
         .map(
           (message) => `<tr data-dashboard-row="message-summary" data-delivery-state="${message.state}">
             <td data-label="${t(context, "activity.column.updated")}">${renderTimestampAtSnapshot(context, message.timestamp)}</td>
-            <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${t(context, message.direction === "claude_to_codex" ? "direction.claudeToCodex" : "direction.codexToClaude")}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
+            <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${t(context, message.direction === "claude_to_codex" ? "direction.claudeToCodex" : "direction.codexToClaude")}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
             <td data-label="${t(context, "activity.column.id")}"><code>…${message.messageIdSuffix ?? "—"}</code></td>
             <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction))}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
             <td data-label="${t(context, "activity.column.elapsed")}" class="numeric">${formatDuration(message.latencyMs)}</td>

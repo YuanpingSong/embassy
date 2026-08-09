@@ -665,6 +665,11 @@ class Factory implements LocalCodexTransportFactory {
       appServerVersion: this.appServerVersion,
       endpointGeneration: this.endpointGeneration,
       protocol: "app-server-v2-stable" as const,
+      steering: {
+        method: "turn/steer" as const,
+        requestSchema: "expected-turn-id-text-v1" as const,
+        deliveryBoundary: "next-tool-call-boundary" as const,
+      },
     };
     this.schemaCompatibility =
       compatibility as LocalCodexSchemaCompatibilityAttestation;
