@@ -3432,6 +3432,41 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   await migrated.close();
 });
 
+test("startup staging defers migrations and observations until one explicit commit", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await store.close();
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  delete legacy.compatibilityAttestations;
+  const legacyBytes = `${JSON.stringify(legacy)}\n`;
+  await writeFile(store.stateFilePath, legacyBytes, { mode: 0o600 });
+
+  const staged = new GatewayStore(config);
+  await staged.initialize({ deferPersistence: true });
+  const attestation = evaluateCompatibilityAttestation({
+    surface: "claude",
+    version: "2.1.227",
+    checkedAt: "2026-08-09T12:00:00.000Z",
+    policy: "observed",
+    certifiedVersions: ["2.1.226"],
+    probes: compatibilityProbeNames.claude.map((name) => ({
+      name,
+      outcome: "pass" as const,
+    })),
+  });
+  await staged.recordCompatibilityAttestation(attestation);
+  assert.equal(await readFile(store.stateFilePath, "utf8"), legacyBytes);
+
+  await staged.commitInitialization();
+  const committed = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as { compatibilityAttestations?: unknown };
+  assert.deepEqual(committed.compatibilityAttestations, [attestation]);
+  await staged.close();
+});
+
 test("compatibility attestations are strict, persistent, cached by surface and version, and bounded", async () => {
   const { store, config } = await fixture();
   await store.initialize();

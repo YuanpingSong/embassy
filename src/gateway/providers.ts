@@ -447,14 +447,18 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       compatibilityProbeNames.claude;
     try {
       const discovery = await this.peer.discover();
-      const rejected = Object.values(discovery.rejected).reduce(
-        (sum, count) => sum + (count ?? 0),
-        0,
-      );
+      // Runtime discovery is deliberately per-record fail-safe: malformed,
+      // dead, unsafe, or non-routable records are omitted rather than allowed
+      // to poison the whole registry. Startup compatibility must use the same
+      // boundary. Fail only when the bounded scan itself is incomplete, or a
+      // nonempty registry contains no record with a parseable closed schema.
+      const registryUnusable =
+        discovery.truncated ||
+        (discovery.entriesScanned > 0 && discovery.parseableRecords === 0);
       return [
         passedProbe(launcher),
         passedProbe(version),
-        discovery.truncated || rejected > 0
+        registryUnusable
           ? failedProbe(registry, "CLAUDE_REGISTRY_SCHEMA_REJECTED")
           : passedProbe(registry),
         passedProbe(socket),

@@ -120,6 +120,10 @@ export type ClaudePeerDiscovery = {
   peers: ClaudePeerDescriptor[];
   rejected: Partial<Record<ClaudePeerRejectionCode, number>>;
   truncated: boolean;
+  /** Bounded registry entries examined, including safely skipped records. */
+  entriesScanned: number;
+  /** Records whose closed wire schema parsed before later liveness checks. */
+  parseableRecords: number;
 };
 
 export type ClaudePeerTransportStatus =
@@ -1183,6 +1187,7 @@ export class ClaudePeerAdapter {
     registryPath: string,
     expectedPid: number,
     _existingTargetId?: string,
+    onParsed?: () => void,
   ): Promise<TargetBinding> {
     const { value, generation: registryGeneration } =
       await this.#readRegistryFile(registryPath);
@@ -1199,6 +1204,7 @@ export class ClaudePeerAdapter {
         "Registry schema is incompatible.",
       );
     }
+    onParsed?.();
     const processIdentity = await this.#inspectProcess(expectedPid);
     if (processIdentity === undefined) {
       throw new BridgeError("PID_NOT_LIVE", "Registry process is not live.");
@@ -1258,6 +1264,7 @@ export class ClaudePeerAdapter {
       .sort((left, right) => left.name.localeCompare(right.name))
       .slice(0, this.#limits.maxRegistryEntries);
     const peers: ClaudePeerDescriptor[] = [];
+    let parseableRecords = 0;
 
     for (const entry of bounded) {
       const match = REGISTRY_FILE_PATTERN.exec(entry.name);
@@ -1272,7 +1279,14 @@ export class ClaudePeerAdapter {
       }
       const registryPath = path.join(this.#sessionsDir, entry.name);
       try {
-        let binding = await this.#bindingFromRegistry(registryPath, pid);
+        let binding = await this.#bindingFromRegistry(
+          registryPath,
+          pid,
+          undefined,
+          () => {
+            parseableRecords += 1;
+          },
+        );
         const previous = previousTargets.find((candidate) =>
           sameTargetGeneration(candidate, binding),
         );
@@ -1325,7 +1339,13 @@ export class ClaudePeerAdapter {
     for (const targetId of this.#workspacePolicies.keys()) {
       if (!nextTargets.has(targetId)) this.#workspacePolicies.delete(targetId);
     }
-    return { peers, rejected, truncated };
+    return {
+      peers,
+      rejected,
+      truncated,
+      entriesScanned: bounded.length,
+      parseableRecords,
+    };
   }
 
   async #revalidateBinding(binding: TargetBinding): Promise<TargetBinding> {

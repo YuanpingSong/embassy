@@ -1628,6 +1628,12 @@ export class GatewayStore {
   private state: GatewayPersistedState | undefined;
   private lockHandle: FileHandle | undefined;
   private lockToken: string | undefined;
+  /**
+   * Startup admission may exercise migrated state in memory, but it must not
+   * strand an older binary by rewriting the durable schema before every
+   * provider and control-socket readiness check has passed.
+   */
+  private persistenceDeferred = false;
 
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
     this.config = config;
@@ -1641,7 +1647,7 @@ export class GatewayStore {
     return path.join(this.rootDir, STATE_FILE);
   }
 
-  async initialize(): Promise<void> {
+  async initialize(options: Readonly<{ deferPersistence?: boolean }> = {}): Promise<void> {
     await this.mutex.run("gateway", async () => {
       if (this.state) return;
       this.rootDir = await this.prepareOwnedDirectory();
@@ -1693,12 +1699,24 @@ export class GatewayStore {
         }
         this.recoverAfterRestart(now);
         this.prune(now);
-        await this.persist();
+        this.persistenceDeferred = options.deferPersistence === true;
+        if (!this.persistenceDeferred) await this.persist();
       } catch (error) {
         this.state = undefined;
+        this.persistenceDeferred = false;
         await this.releaseControllerLock();
         throw error;
       }
+    });
+  }
+
+  /** Commit a successfully admitted startup exactly once. */
+  async commitInitialization(): Promise<void> {
+    await this.mutex.run("gateway", async () => {
+      this.requireState();
+      if (!this.persistenceDeferred) return;
+      await this.persist(true);
+      this.persistenceDeferred = false;
     });
   }
 
@@ -1706,6 +1724,7 @@ export class GatewayStore {
     await this.mutex.run("gateway", async () => {
       this.transientBodies.clear();
       this.state = undefined;
+      this.persistenceDeferred = false;
       await this.releaseControllerLock();
     });
   }
@@ -5947,7 +5966,8 @@ export class GatewayStore {
     return parsed;
   }
 
-  private async persist(): Promise<void> {
+  private async persist(force = false): Promise<void> {
+    if (this.persistenceDeferred && !force) return;
     const state = this.requireState();
     if (!isPersistedState(state)) {
       throw new BridgeError(

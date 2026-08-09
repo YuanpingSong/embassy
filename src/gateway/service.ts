@@ -712,7 +712,11 @@ export class GatewayService {
       }
     };
     assertStartActive();
-    await this.store.initialize();
+    // Keep additive state migrations and startup observations in memory until
+    // every provider admission check and the private control-socket bind have
+    // succeeded. A failed upgrade must leave the prior on-disk schema usable
+    // by the previous binary.
+    await this.store.initialize({ deferPersistence: true });
     try {
       assertStartActive();
       const seen = new Set<string>();
@@ -765,6 +769,8 @@ export class GatewayService {
         handlers: this.handlers(),
       });
       try {
+        assertStartActive();
+        await this.store.commitInitialization();
         assertStartActive();
       } catch (error) {
         await control.close();

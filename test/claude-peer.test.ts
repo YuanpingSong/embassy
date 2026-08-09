@@ -290,6 +290,8 @@ test("discovery returns stable session UUID targets and never treats names as au
   const result = await current.adapter.discover();
   assert.equal(result.truncated, false);
   assert.deepEqual(result.rejected, {});
+  assert.equal(result.entriesScanned, 2);
+  assert.equal(result.parseableRecords, 2);
   assert.equal(result.peers.length, 2);
   assert.equal(result.peers[0]?.alias, "same-name");
   assert.equal(result.peers[1]?.alias, "same-name");
@@ -327,7 +329,7 @@ test("discovery rejects duplicate live records for one session UUID", async (t) 
   assert.deepEqual(result.rejected, { SESSION_ID_COLLISION: 1 });
 });
 
-test("discovery accepts live same-protocol records across a Claude Code patch upgrade", async (t) => {
+test("discovery isolates mixed real-world records across a Claude Code patch upgrade", async (t) => {
   const current = await fixture(t);
   const manual = await addPeer(current, {
     pid: 41_111,
@@ -355,13 +357,36 @@ test("discovery accepts live same-protocol records across a Claude Code patch up
     name: "current-peer",
     version: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
   });
+  await addPeer(current, {
+    pid: 41_115,
+    sessionId: "00000000-0000-4000-8000-000000000005",
+    name: "project migration",
+    version: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+  });
+  await addPeer(current, {
+    pid: 41_116,
+    sessionId: "00000000-0000-4000-8000-000000000006",
+    name: "dead-peer",
+    version: "2.1.224",
+  });
+  current.processes.delete(41_116);
 
   assert.equal((await lstat(manual.registryPath)).mode & 0o777, 0o644);
   const result = await current.adapter.discover();
-  assert.deepEqual(result.rejected, {});
+  assert.deepEqual(result.rejected, {
+    REGISTRY_INVALID_SCHEMA: 1,
+    PID_NOT_LIVE: 1,
+  });
+  assert.equal(result.entriesScanned, 6);
+  assert.equal(result.parseableRecords, 5);
   assert.deepEqual(
     result.peers.map((peer) => peer.alias).sort(),
-    ["current-peer", "derived-peer", "manual-monitor", "print-session"],
+    [
+      "current-peer",
+      "derived-peer",
+      "manual-monitor",
+      "print-session",
+    ],
   );
   assert.equal(
     result.peers.find((peer) => peer.alias === "print-session")?.status,

@@ -142,6 +142,8 @@ class FakeClaudePeer {
     | "unconfirmed"
     | undefined;
   truncated = false;
+  rejectedDiscoveryRecords: Record<string, number> = {};
+  parseableRejectedDiscoveryRecords = 0;
   asserted: Array<{ routeHandle: string; stateRoot: string }> = [];
   closed = false;
   sendMode:
@@ -296,8 +298,10 @@ class FakeClaudePeer {
 
   async discover(): Promise<{
     peers: ClaudePeerDescriptor[];
-    rejected: Record<string, never>;
+    rejected: Record<string, number>;
     truncated: boolean;
+    entriesScanned: number;
+    parseableRecords: number;
   }> {
     const peers = this.peers.map((peer) => ({ ...peer }));
     const hold = this.nextDiscoveryHold;
@@ -306,7 +310,17 @@ class FakeClaudePeer {
       hold.markStarted();
       await hold.wait;
     }
-    return { peers, rejected: {}, truncated: this.truncated };
+    const rejectedCount = Object.values(this.rejectedDiscoveryRecords).reduce(
+      (sum, count) => sum + count,
+      0,
+    );
+    return {
+      peers,
+      rejected: { ...this.rejectedDiscoveryRecords },
+      truncated: this.truncated,
+      entriesScanned: peers.length + rejectedCount,
+      parseableRecords: peers.length + this.parseableRejectedDiscoveryRecords,
+    };
   }
 
   holdNextDiscovery(): { release: () => void; started: Promise<void> } {
@@ -547,7 +561,7 @@ test("local Claude provider forwards the exact delivery notice policy", () => {
   assert.equal(receivedDeliveryNotices, "quiet");
 });
 
-test("Claude compatibility check strictly scans the registry without dispatching", async () => {
+test("Claude compatibility check skips isolated invalid registry rows without dispatching", async () => {
   const fake = new FakeClaudePeer();
   const provider = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
@@ -569,9 +583,39 @@ test("Claude compatibility check strictly scans the registry without dispatching
   );
   assert.equal(fake.sendCalls, 0);
 
+  fake.peers.push({
+    targetId: "target-space-name",
+    alias: "project migration",
+    kind: "interactive",
+    status: "idle",
+    compatibility: "compatible",
+  });
+  fake.rejectedDiscoveryRecords = {
+    REGISTRY_INVALID_SCHEMA: 2,
+    PID_NOT_LIVE: 1,
+  };
+  fake.parseableRejectedDiscoveryRecords = 1;
+  assert.equal(
+    (await provider.runCompatibilityProbes()).every(
+      (probe) => probe.outcome === "pass",
+    ),
+    true,
+  );
+
   fake.truncated = true;
   const rejected = await provider.runCompatibilityProbes();
   assert.deepEqual(rejected[2], {
+    name: "registry_schema",
+    outcome: "fail",
+    safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+  });
+
+  fake.truncated = false;
+  fake.peers.splice(0);
+  fake.rejectedDiscoveryRecords = { REGISTRY_INVALID_SCHEMA: 2 };
+  fake.parseableRejectedDiscoveryRecords = 0;
+  const unparseable = await provider.runCompatibilityProbes();
+  assert.deepEqual(unparseable[2], {
     name: "registry_schema",
     outcome: "fail",
     safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",

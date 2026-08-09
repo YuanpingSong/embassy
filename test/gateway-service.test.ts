@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -963,6 +970,53 @@ test("compatibility probes are cached once per surface and version and strict mo
   );
   await strict.close().catch(() => undefined);
   await rm(strictFixture.root, { recursive: true, force: true });
+});
+
+test("failed startup compatibility admission leaves the prior durable schema byte-exact", async () => {
+  const current = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: current.stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const seed = new GatewayStore(config);
+  await seed.initialize();
+  await seed.close();
+
+  const legacy = JSON.parse(
+    await readFile(seed.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  delete legacy.compatibilityAttestations;
+  const legacyBytes = `${JSON.stringify(legacy)}\n`;
+  await writeFile(seed.stateFilePath, legacyBytes, { mode: 0o600 });
+
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  claude.enableCompatibility("2.1.226");
+  codex.enableCompatibility("0.147.0");
+  claude.runCompatibilityProbes = async () =>
+    compatibilityProbeNames.claude.map((name) =>
+      name === "registry_schema"
+        ? {
+            name,
+            outcome: "fail" as const,
+            safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+          }
+        : { name, outcome: "pass" as const },
+    );
+  const service = new GatewayService({ config, adapters: [claude, codex] });
+  await assert.rejects(
+    service.start(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+  );
+  assert.equal(await readFile(seed.stateFilePath, "utf8"), legacyBytes);
+
+  const recovered = new GatewayStore(config);
+  await recovered.initialize();
+  assert.deepEqual(await recovered.inspectCompatibilityAttestations(), []);
+  await recovered.close();
+  await rm(current.root, { recursive: true, force: true });
 });
 
 test("live compatibility certification binds one exact Codex route and rejects version races", async () => {
