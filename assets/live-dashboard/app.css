@@ -30,6 +30,8 @@
   --card-border: #f2f2f2;
 
   /* Accents */
+  --cohere-black: #000000;
+  --dark-navy: #071829;
   --deep-green: #003c33;
   --action-blue: #1863dc;
   --coral: #ff7759;
@@ -37,29 +39,75 @@
   --error: #b30000;
   --primary: #17171c;
   --on-primary: #ffffff;
+  --on-dark: #ffffff;
   --focus-blue: #4c6ee6;
   --form-focus: #9b60aa;
 
   /* Chip tints (spec §3.1 — new) */
   --coral-tint: rgba(255, 119, 89, .12);
   --coral-deep: #9a3a20;
+  /* Prototype's claude-side accent (RoutesTab CORAL, oklch ≈ #d95737). */
+  --coral-accent: oklch(0.62 0.17 35);
+  /* Canonical coral washes: .10 topo-chip highlight, .06 warning banner. */
+  --coral-wash-hl: rgba(255, 119, 89, .10);
+  --coral-wash-soft: rgba(255, 119, 89, .06);
   --purple-tint: rgba(155, 96, 170, .10);
   --purple-deep: #7d4390;
   --error-tint: rgba(179, 0, 0, .07);
 
+  /* Semantic aliases (tokens/colors.css) — the retheming seam. */
+  --surface-page: var(--canvas);
+  --surface-card: var(--canvas);
+  --surface-warm: var(--soft-stone);
+  --surface-band-green: var(--deep-green);
+  --surface-band-navy: var(--dark-navy);
+  --surface-footer: var(--primary);
+  --text-body: var(--ink);
+  --text-muted: var(--body-muted);
+  --text-meta: var(--muted);
+  --rule: var(--hairline);
+  --link: var(--action-blue);
+  --cta-bg: var(--primary);
+  --cta-text: var(--on-primary);
+
   /* Radii */
   --radius-xs: 4px;
   --radius-sm: 8px;
+  --radius-md: 16px;
   --radius-lg: 22px;
   --radius-xl: 30px;
   --radius-pill: 32px;
   --radius-full: 9999px;
 
+  /* Spacing scale (tokens/spacing.css) */
+  --space-xxs: 2px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-xxl: 32px;
+  --space-section: 80px;
+
   /* Type */
-  --mono-ls: 0.28px;
+  --type-body-size: 16px;
+  --type-body-lh: 1.5;
+  --type-feature-size: 24px;
+  --type-feature-lh: 1.3;
+  --type-caption-size: 14px;
+  --type-caption-lh: 1.4;
+  --type-button-size: 14px;
+  --type-button-lh: 1.71;
+  --type-button-weight: 500;
+  --type-mono-size: 14px;
+  --type-mono-lh: 1.4;
+  --type-mono-ls: 0.28px;
+  --type-micro-size: 12px;
+  --type-micro-lh: 1.4;
+  --mono-ls: var(--type-mono-ls);
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --font-display: var(--font-body);
+  --font-display: "Space Grotesk", var(--font-body);
 }
 
 /* ==========================================================================
@@ -72,9 +120,11 @@
 
 body {
   margin: 0;
-  background: var(--canvas);
-  color: var(--ink);
-  font: 16px/1.5 var(--font-body);
+  background: var(--surface-page);
+  color: var(--text-body);
+  font-family: var(--font-body);
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-lh);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -84,11 +134,14 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 pre { margin: 0; }
 
 a {
-  color: var(--action-blue);
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
   text-underline-offset: 3px;
 }
+a:hover { color: var(--action-blue); }
 
-::selection { background: var(--pale-blue); color: var(--ink); }
+::selection { background: var(--pale-blue); }
 
 /* Focus is never removed — inputs included (spec §5.2). */
 :focus-visible {
@@ -97,9 +150,14 @@ a {
 }
 
 input, select, textarea, button { font: inherit; color: inherit; }
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible { border-color: var(--form-focus); }
+/* Form focus tint on any focus (mouse included), matching tokens/base.css;
+   the keyboard outline above stays untouched. */
+input:focus,
+textarea:focus,
+select:focus { border-color: var(--form-focus); }
+
+/* Uniform press feedback on every enabled button (prototype index.html). */
+button:not(:disabled):hover { opacity: .92; }
 
 .sr-only {
   position: absolute;
@@ -128,10 +186,16 @@ select:focus-visible { border-color: var(--form-focus); }
   color: var(--muted);
 }
 .section-label { margin-bottom: 14px; }
+/* Per-surface eyebrow gaps (deliveries detail rail). */
+.section-label--lifecycle { margin-bottom: 12px; }
+.section-label--frames { margin-bottom: 10px; }
+.section-label--body { margin-bottom: 8px; }
+/* Eyebrow row: info-dot/lower-bound hugs the label (prototype gap 8px). */
+.row.section-head { gap: 8px; }
 .section-title {
   font-family: var(--font-body);
-  font-size: 24px;
-  line-height: 1.3;
+  font-size: var(--type-feature-size);
+  line-height: var(--type-feature-lh);
   color: var(--ink);
 }
 .text-muted { color: var(--muted); }
@@ -139,7 +203,12 @@ select:focus-visible { border-color: var(--form-focus); }
 .text-sm { font-size: 14px; }
 .text-xs { font-size: 13px; }
 .footnote { font-size: 12px; line-height: 1.5; color: var(--muted); }
-.rule { border-top: 1px solid var(--hairline); }
+.rule {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  height: 0;
+}
 
 /* ==========================================================================
    3. LAYOUT
@@ -167,7 +236,14 @@ select:focus-visible { border-color: var(--form-focus); }
   align-items: baseline;
   gap: 14px;
   flex-wrap: wrap;
+  row-gap: 4px;
 }
+/* Posture label: 11px, no forced caps (prototype App.jsx). */
+.brand .mono-label {
+  font-size: 11px;
+  text-transform: none;
+}
+.brand-mark { align-self: center; flex-shrink: 0; }
 .brand-wordmark {
   font-family: var(--font-display);
   font-size: 26px;
@@ -180,7 +256,7 @@ select:focus-visible { border-color: var(--form-focus); }
   gap: 8px;
 }
 
-.header-spacer { flex: 1 1 24px; }
+.header-spacer { flex: 1 1 0%; }
 
 .header-meta {
   display: flex;
@@ -194,11 +270,18 @@ select:focus-visible { border-color: var(--form-focus); }
   color: var(--muted);
   white-space: nowrap;
 }
-.staleness {
+/* Second header row: staleness note left, connection controls right — the
+   primary row keeps the prototype's single-line composition. */
+.header-subrow {
   flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 2px;
+}
+.staleness {
   font-size: 13px;
   color: var(--coral-deep);
-  padding-bottom: 2px;
 }
 .staleness--quiet { color: var(--muted); }
 
@@ -211,6 +294,7 @@ select:focus-visible { border-color: var(--form-focus); }
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 
 .lang-toggle {
@@ -231,8 +315,8 @@ select:focus-visible { border-color: var(--form-focus); }
 }
 .lang-toggle__btn[aria-pressed="true"] {
   font-weight: 500;
-  background: var(--primary);
-  color: var(--on-primary);
+  background: var(--cta-bg);
+  color: var(--cta-text);
 }
 /* Keep the ring inside the clipped pill. */
 .lang-toggle__btn:focus-visible { outline-offset: -3px; }
@@ -256,7 +340,6 @@ select:focus-visible { border-color: var(--form-focus); }
   color: var(--muted);
   cursor: pointer;
 }
-.tab:hover { color: var(--ink); }
 .tab[aria-selected="true"] {
   color: var(--ink);
   border-bottom-color: var(--ink);
@@ -273,7 +356,11 @@ select:focus-visible { border-color: var(--form-focus); }
 .tab-panel { display: grid; gap: 48px; }
 .tab-panel--narrow { max-width: 860px; }
 .section { display: block; }
+/* Subordinated sub-section (routes CLI panel under the topology card). */
+.section__sub { margin-top: 20px; }
 .stack { display: grid; gap: 12px; }
+/* register-codex teaching block at the foot of the Codex routes section. */
+.routes-register { gap: 10px; margin-top: 16px; }
 .stack-sm { display: grid; gap: 8px; }
 .stack-lg { display: grid; gap: 20px; }
 .row {
@@ -287,6 +374,10 @@ select:focus-visible { border-color: var(--form-focus); }
   align-items: baseline;
   gap: 12px;
   flex-wrap: wrap;
+}
+.row-baseline--split {
+  justify-content: space-between;
+  align-items: center;
 }
 .grid-2 {
   display: grid;
@@ -328,7 +419,7 @@ select:focus-visible { border-color: var(--form-focus); }
   display: inline-block;
   font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.5;
   letter-spacing: var(--mono-ls);
   text-transform: uppercase;
   white-space: nowrap;
@@ -365,10 +456,8 @@ select:focus-visible { border-color: var(--form-focus); }
   flex-wrap: wrap;
   align-items: center;
 }
-.chip-note {
-  font-size: 12px;
-  color: var(--body-muted);
-}
+/* Activity entries breathe wider than the exchange-node chip row (6px). */
+.activity-row .chip-row { gap: 10px; }
 .lower-bound {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -389,7 +478,7 @@ select:focus-visible { border-color: var(--form-focus); }
 .btn {
   font-family: var(--font-body);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.5;
   padding: 5px 16px;
   border: 1px solid transparent;
   border-radius: var(--radius-pill);
@@ -398,19 +487,13 @@ select:focus-visible { border-color: var(--form-focus); }
   cursor: pointer;
   white-space: nowrap;
 }
-.btn:not(:disabled):hover { opacity: .92; }
 .btn--primary {
   font-weight: 500;
-  background: var(--primary);
-  color: var(--on-primary);
+  border: none;
+  background: var(--cta-bg);
+  color: var(--cta-text);
 }
 .btn--ghost { border-color: var(--hairline); }
-.btn--icon {
-  padding: 7px 9px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
 .btn:disabled {
   cursor: default;
   background: var(--hairline);
@@ -442,7 +525,16 @@ select:focus-visible { border-color: var(--form-focus); }
   color: var(--ink);
 }
 .text-input::placeholder { color: var(--muted); }
-.header-search { width: 300px; max-width: 100%; }
+/* content-box keeps the prototype's 326px outer width (300 + padding +
+   border, canonical base has no box-sizing reset); appearance reset drops
+   the UA search-cancel affordance the prototype's plain text input lacks. */
+.header-search {
+  width: 300px;
+  max-width: 100%;
+  box-sizing: content-box;
+  appearance: none;
+}
+.header-search::-webkit-search-cancel-button { display: none; }
 .filter-input {
   width: 100%;
   padding: 10px 14px;
@@ -536,6 +628,9 @@ select:focus-visible { border-color: var(--form-focus); }
   line-height: 1.5;
   color: var(--body-muted);
 }
+/* Subordinated CLI panel (routes) runs slightly denser than free-standing
+   CLI cards; scoped so other tabs keep the 18px/20px padding. */
+.section__sub .cli-card { padding: 16px 18px; }
 
 /* Honest-absent card: never a dead control. */
 .absent-feature {
@@ -546,17 +641,23 @@ select:focus-visible { border-color: var(--form-focus); }
   gap: 10px;
   align-content: start;
 }
+/* Card title (the MonoLabel eyebrow above it already carries the mono
+   "not in this build" treatment). */
 .absent-feature__title {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  letter-spacing: var(--mono-ls);
-  text-transform: uppercase;
-  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 18px;
+  line-height: 1.4;
+  color: var(--ink);
 }
 .absent-feature__body {
   font-size: 14px;
   line-height: 1.5;
   color: var(--body-muted);
+}
+.absent-feature__note {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 /* --- 5.5 CopyCmd ---------------------------------------------------------- */
@@ -576,7 +677,7 @@ select:focus-visible { border-color: var(--form-focus); }
 }
 /* The command scrolls; the button stays reachable. */
 .copy-cmd__code {
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-width: 0;
   overflow-x: auto;
   white-space: nowrap;
@@ -594,7 +695,6 @@ select:focus-visible { border-color: var(--form-focus); }
   padding: 3px 12px;
   cursor: pointer;
 }
-.copy-cmd__button:hover { opacity: .92; }
 .copy-cmd__button:focus-visible { outline-offset: 2px; }
 .copy-cmd__status {
   flex-shrink: 0;
@@ -615,6 +715,9 @@ select:focus-visible { border-color: var(--form-focus); }
   margin-bottom: 20px;
 }
 .filter-group { display: grid; gap: 8px; }
+/* Deliveries rail: state block and search get their own bottom rhythm. */
+.filters-block { margin-bottom: 20px; }
+.filters-search { margin-bottom: 24px; }
 .pill-row {
   display: flex;
   gap: 8px;
@@ -631,14 +734,19 @@ select:focus-visible { border-color: var(--form-focus); }
   background: transparent;
   color: var(--ink);
   cursor: pointer;
-  white-space: nowrap;
 }
-.pill:not([aria-pressed="true"]):hover { border-color: var(--slate); }
 .pill[aria-pressed="true"] {
   font-weight: 500;
-  border-color: var(--primary);
-  background: var(--primary);
-  color: var(--on-primary);
+  border-color: var(--cta-bg);
+  background: var(--cta-bg);
+  color: var(--cta-text);
+}
+.pill__count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: var(--mono-ls);
+  color: inherit;
+  opacity: .7;
 }
 
 /* --- 5.7 Notices ---------------------------------------------------------- */
@@ -664,7 +772,7 @@ select:focus-visible { border-color: var(--form-focus); }
 .notice[data-tone="warning"] {
   border-color: var(--coral-soft);
   border-left-color: var(--coral);
-  background: var(--coral-tint);
+  background: var(--coral-wash-soft);
 }
 .notice[data-tone="error"] {
   border-color: var(--coral-soft);
@@ -780,10 +888,13 @@ select:focus-visible { border-color: var(--form-focus); }
   text-align: center;
   margin-top: 8px;
 }
+/* Long next-action / no-pair sentences render once beneath the board. */
+.exchange-notes { margin-top: 14px; }
 
 /* --- 5.9 Attention list --------------------------------------------------- */
 
 .attention-list { display: grid; gap: 12px; }
+.attention-list + .footnote { margin-top: 12px; }
 .attention-item {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
@@ -805,7 +916,7 @@ select:focus-visible { border-color: var(--form-focus); }
   letter-spacing: var(--mono-ls);
   color: var(--slate);
 }
-.attention-item__action { max-width: 640px; }
+.attention-item__action { min-width: 340px; }
 
 /* --- 5.10 Pulse bars ------------------------------------------------------ */
 
@@ -825,9 +936,11 @@ select:focus-visible { border-color: var(--form-focus); }
   justify-items: center;
 }
 .pulse-count { font-size: 14px; color: var(--ink); }
-/* Height comes from the React style prop (dynamic numeric). */
+/* Height comes from the React style prop (dynamic numeric). content-box
+   restores the prototype's geometry (44px + border = 46px, height H + 2px). */
 .pulse-bar {
   display: block;
+  box-sizing: content-box;
   width: 44px;
   min-height: 6px;
   border: 1px solid transparent;
@@ -844,7 +957,11 @@ select:focus-visible { border-color: var(--form-focus); }
 .pulse-bar[data-kind="inert"]         { background: transparent; border-color: var(--hairline); }
 .pulse-bar[data-empty="true"] { border-color: var(--hairline); }
 .pulse-caption { font-size: 12px; color: var(--muted); margin-top: 14px; }
-.pulse-empty { font-size: 14px; color: var(--body-muted); }
+.pulse-empty {
+  font-size: 14px;
+  color: var(--body-muted);
+  margin-bottom: 14px;
+}
 
 /* --- 5.11 Topology (Routes) ---------------------------------------------- */
 
@@ -859,7 +976,7 @@ select:focus-visible { border-color: var(--form-focus); }
   justify-content: space-between;
   margin-bottom: 2px;
 }
-.topology__head--claude { color: var(--coral-deep); }
+.topology__head--claude { color: var(--coral-accent); }
 .topology__head--codex { color: var(--action-blue); }
 .topology__cols {
   display: flex;
@@ -899,12 +1016,13 @@ select:focus-visible { border-color: var(--form-focus); }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: default;
   transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
 }
-.topo-chip[data-side="claude"] { border-color: var(--coral); color: var(--ink); }
+.topo-chip[data-side="claude"] { border-color: var(--coral-accent); color: var(--ink); }
 .topo-chip[data-side="codex"] { border-color: var(--action-blue); color: var(--action-blue); }
 .topo-chip[data-candidate="true"] { border-style: dashed; color: var(--slate); }
-.topo-chip[data-highlight="on"][data-side="claude"] { background: var(--coral-tint); }
+.topo-chip[data-highlight="on"][data-side="claude"] { background: var(--coral-wash-hl); }
 .topo-chip[data-highlight="on"][data-side="codex"] { background: var(--pale-blue); }
 .topo-chip[data-highlight="off"] {
   border-color: var(--hairline);
@@ -928,7 +1046,6 @@ select:focus-visible { border-color: var(--form-focus); }
   text-align: left;
   cursor: pointer;
 }
-.accordion__row:hover { background: var(--card-border); }
 .accordion__alias {
   font-family: var(--font-mono);
   font-size: 14px;
@@ -943,6 +1060,15 @@ select:focus-visible { border-color: var(--form-focus); }
   color: var(--muted);
   flex-shrink: 0;
 }
+/* Green presence dot: selected sessions and registered codex routes. */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: #1e8e5a;
+  display: inline-block;
+  flex-shrink: 0;
+}
 .accordion__panel {
   padding: 4px 8px 20px;
   display: grid;
@@ -950,6 +1076,8 @@ select:focus-visible { border-color: var(--form-focus); }
   font-size: 14px;
   color: var(--body-muted);
 }
+.accordion__panel .details-block { margin: 4px -8px 0; }
+.accordion__panel .details-block > summary { padding-left: 8px; }
 .detail-list { display: grid; gap: 8px; }
 .detail-row { font-size: 14px; color: var(--body-muted); }
 .detail-label { color: var(--muted); }
@@ -995,8 +1123,8 @@ select:focus-visible { border-color: var(--form-focus); }
 .delivery-row {
   width: 100%;
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) auto auto;
-  gap: 10px;
+  grid-template-columns: 150px minmax(0, 1fr) auto auto;
+  gap: 16px;
   align-items: center;
   padding: 16px 8px;
   border: none;
@@ -1006,7 +1134,6 @@ select:focus-visible { border-color: var(--form-focus); }
   text-align: left;
   cursor: pointer;
 }
-.delivery-row:hover { background: var(--card-border); }
 .delivery-row[aria-selected="true"] { background: var(--pale-blue); }
 .delivery-row__id {
   font-family: var(--font-mono);
@@ -1032,7 +1159,13 @@ select:focus-visible { border-color: var(--form-focus); }
   font-size: 14px;
   letter-spacing: var(--mono-ls);
 }
+.detail-pane__head { display: grid; gap: 6px; }
 .detail-pane__sub { font-size: 13px; color: var(--muted); }
+.detail-pane__empty {
+  font-size: 14px;
+  color: var(--muted);
+  padding-top: 8px;
+}
 
 /* Lifecycle timeline: 8px dots + 1px connector */
 .lifecycle { display: grid; gap: 0; }
@@ -1113,9 +1246,9 @@ select:focus-visible { border-color: var(--form-focus); }
   display: grid;
   gap: 12px;
   padding: 24px 0;
-  max-width: 640px;
 }
 .empty-state__text { font-size: 14px; color: var(--body-muted); }
+.empty-state--activity { padding: 16px 0; max-width: none; }
 
 /* --- 5.14 Activity -------------------------------------------------------- */
 
@@ -1151,7 +1284,7 @@ select:focus-visible { border-color: var(--form-focus); }
   font-weight: 400;
   text-align: left;
   border-top: 1px solid var(--hairline);
-  vertical-align: top;
+  vertical-align: baseline;
 }
 .data-table thead th {
   border-top: none;
@@ -1165,8 +1298,8 @@ select:focus-visible { border-color: var(--form-focus); }
 .data-table td.is-mono,
 .data-table .cell-mono {
   font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: var(--mono-ls);
+  font-size: 14px;
+  letter-spacing: 0;
 }
 .data-table caption.table-caption {
   caption-side: top;
@@ -1179,34 +1312,33 @@ select:focus-visible { border-color: var(--form-focus); }
   color: var(--muted);
 }
 
-.details-block { border-top: 1px solid var(--hairline); }
+/* Disclosure reads as a text link ("counters · show"), not a block header. */
+.details-block { border-top: none; }
 .details-block > summary {
+  width: fit-content;
+  list-style: none;
   cursor: pointer;
-  padding: 12px 8px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  letter-spacing: var(--mono-ls);
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.details-block > summary:hover { color: var(--ink); }
-.details-block > summary:focus-visible { outline-offset: -2px; }
-.details-block__content { padding: 4px 0 20px; }
-
-.counter-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 8px;
-  border-top: 1px solid var(--hairline);
+  padding: 0;
+  font-family: var(--font-body);
   font-size: 14px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--action-blue);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
-.counter-row__key { color: var(--body-muted); }
-.counter-row__value {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: var(--mono-ls);
-}
+.details-block > summary::-webkit-details-marker { display: none; }
+.details-block > summary:hover { opacity: .92; color: var(--action-blue); }
+.details-block > summary:focus-visible { outline-offset: 2px; }
+.details-block__content { padding: 14px 0 20px; }
+
+/* Counters render as a real table (caption + row headers kept for AT) with
+   the prototype's list geometry. */
+.counters-list { max-width: 480px; }
+.data-table--counters th,
+.data-table--counters td { padding: 10px 8px; }
+.data-table--counters th[scope="row"] { color: var(--body-muted); }
+.data-table--counters td { text-align: right; }
 
 .env-name {
   font-family: var(--font-mono);
@@ -1219,7 +1351,7 @@ select:focus-visible { border-color: var(--form-focus); }
   display: grid;
   gap: 6px;
   padding: 12px 0;
-  border-top: 1px solid var(--card-border);
+  border-top: 1px solid var(--hairline);
   font-size: 14px;
 }
 
@@ -1227,6 +1359,7 @@ select:focus-visible { border-color: var(--form-focus); }
 
 /* The small round "i" that carries a tooltip; focusable for keyboard users. */
 .info-dot {
+  box-sizing: content-box; /* 16px + 1px border = the prototype's 18px dot */
   width: 16px;
   height: 16px;
   border-radius: var(--radius-full);
@@ -1261,13 +1394,26 @@ select:focus-visible { border-color: var(--form-focus); }
   gap: 12px;
   flex-wrap: wrap;
 }
-.succession-note { color: var(--body-muted); font-style: italic; }
+.succession-card__title { font-size: 14px; line-height: 1.4; }
+.succession-note {
+  font-size: 14px;
+  color: var(--body-muted);
+  font-style: italic;
+}
 
 /* ==========================================================================
    6. TOOLTIP (tokenized; hover AND keyboard)
    ========================================================================== */
 
 [data-tip] { position: relative; }
+
+/* Focusable tooltip wrapper hugs its dot so the anchor and focus ring trace
+   the circle, not the line box. */
+.tooltip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-full);
+}
 
 [data-tip]:hover::after,
 [data-tip]:focus-visible::after {
@@ -1305,7 +1451,7 @@ select:focus-visible { border-color: var(--form-focus); }
   .app-footer { padding: 0 20px 32px; }
 
   .header-spacer { display: none; }
-  .header-search { width: 100%; flex: 1 1 100%; }
+  .header-search { width: 100%; flex: 1 1 100%; box-sizing: border-box; }
   .header-meta { width: 100%; }
 
   .grid-2 { grid-template-columns: 1fr; }
@@ -1328,8 +1474,13 @@ select:focus-visible { border-color: var(--form-focus); }
     grid-template-columns: minmax(0, 1fr) auto;
     row-gap: 8px;
   }
-  .activity-row { grid-template-columns: 96px minmax(0, 1fr); }
-  .activity-kind { grid-column: 2; }
+  .activity-row {
+    grid-template-columns: 96px minmax(0, 1fr);
+    grid-template-areas: "time kind" "time text";
+  }
+  .activity-row > .time-ago { grid-area: time; }
+  .activity-kind { grid-area: kind; }
+  .activity-row > .activity-text { grid-area: text; }
 
   .exchange-board { padding: 20px; }
   .panel { padding: 20px; }

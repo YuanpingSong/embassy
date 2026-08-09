@@ -1195,10 +1195,12 @@ test("delivered is qualified only for codex_to_claude (H2)", () => {
   );
 });
 
-test("held is progress, duplicate is inert, rejected is failure", () => {
+test("held is progress, duplicate is inert, rejected is warning", () => {
   assert.equal(bundle.Embassy.chipKindFor("held"), "progress");
   assert.equal(bundle.Embassy.chipKindFor("duplicate"), "inert");
-  assert.equal(bundle.Embassy.chipKindFor("rejected"), "failure");
+  // PM ruling: a by-design refusal is actionable (coral warning), never
+  // failure-red.
+  assert.equal(bundle.Embassy.chipKindFor("rejected"), "warning");
   assert.equal(bundle.Embassy.chipKindFor("cancelled"), "inert");
   assert.equal(bundle.Embassy.chipKindFor("abandoned"), "inert");
   assert.equal(bundle.Embassy.chipKindFor("queued"), "progress");
@@ -1302,7 +1304,7 @@ test("delivered hover meaning localizes by direction, other states do not", () =
   );
   assert.equal(
     bundle.Embassy.deliveryMeaningKey("delivered"),
-    "activity.meaning.other",
+    "activity.meaning.delivered",
   );
   assert.equal(
     bundle.Embassy.meaningKeyFor("route", "awaiting_approval"),

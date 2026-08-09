@@ -226,7 +226,9 @@ namespace Embassy {
             <div className="pill-row">
               <FilterPill active={kindFilter === "all"} onClick={showAll}>
                 {t("app.activity.kinds.all")}{" "}
-                <span className="mono">{formatCount(counts.all, locale)}</span>
+                <span className="pill__count">
+                  {formatCount(counts.all, locale)}
+                </span>
               </FilterPill>
               {ACTIVITY_KINDS.map((kind) => (
                 <FilterPill
@@ -237,7 +239,7 @@ namespace Embassy {
                   }}
                 >
                   {t(ACTIVITY_KIND_LABEL_KEYS[kind])}{" "}
-                  <span className="mono">
+                  <span className="pill__count">
                     {formatCount(counts[kind], locale)}
                   </span>
                 </FilterPill>
@@ -257,13 +259,12 @@ namespace Embassy {
 
         <div className="stack">
           {shown.length === 0 ? (
-            <div className="empty-state">
+            <div className="empty-state empty-state--activity">
               <p className="empty-state__text">{t("app.activity.empty")}</p>
-              {/* The command only teaches when the whole stream is empty; a
-                  filtered-empty view needs no lesson in producing traffic. */}
-              {rows.length === 0 ? (
-                <CopyCmd cmd={ACTIVITY_EMPTY_COMMAND} />
-              ) : null}
+              {/* The sentence hands off to the command, so the command is
+                  always there to receive it — a filtered-empty window still
+                  needs a next step. */}
+              <CopyCmd cmd={ACTIVITY_EMPTY_COMMAND} />
             </div>
           ) : (
             <div>

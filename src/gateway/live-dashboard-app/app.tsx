@@ -151,6 +151,13 @@ namespace Embassy {
       setTab("deliveries");
     }, []);
 
+    // Consume-once contract (prototype App.jsx clearPreset): the deliveries
+    // tab clears the preset after applying it, so returning to the tab never
+    // re-fires a stale deep-link over the operator's own filters.
+    const clearPreset = React.useCallback((): void => {
+      setPreset(undefined);
+    }, []);
+
     const dismissNotice = (kind: ProtocolNoticeKind): void => {
       setNotices((previous) => ({ ...previous, [kind]: false }));
     };
@@ -220,6 +227,7 @@ namespace Embassy {
               groups={adapter.deliveriesGroups(model)}
               omissions={model.omissions}
               preset={preset}
+              clearPreset={clearPreset}
             />
           );
         case "routes":
@@ -241,6 +249,32 @@ namespace Embassy {
         <header className="app-header">
           <div className="header-bar">
             <div className="brand">
+              <svg
+                width="26"
+                height="26"
+                viewBox="0 0 64 64"
+                fill="none"
+                aria-hidden="true"
+                className="brand-mark"
+              >
+                <path d="M32 16 V5 L41 7.5 L32 10" fill="#f4a259" />
+                <path
+                  d="M21.5 55 V32 C21.5 23 42.5 23 42.5 32 V55 Z"
+                  fill="#f4a259"
+                />
+                <path
+                  d="M14 55 V30.5 C14 17 50 17 50 30.5 V55"
+                  stroke="#17171c"
+                  strokeWidth="3.4"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M10 55.5 H54"
+                  stroke="#17171c"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                />
+              </svg>
               <span className="brand-wordmark">Embassy</span>
               <span className="mono-label">{t("live.label")}</span>
               {latest === undefined ? null : (
@@ -278,31 +312,9 @@ namespace Embassy {
                 <StateChip
                   domain="connection"
                   state={connectionState}
+                  label={t(`live.connection.${connectionState}`)}
                   small={true}
                 />
-              </span>
-              <span className="conn-controls">
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => protocolRef.current?.pause()}
-                >
-                  {t("live.control.pause")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => protocolRef.current?.reconnect()}
-                >
-                  {t("live.control.reconnect")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => protocolRef.current?.readNow()}
-                >
-                  {t("live.control.refresh")}
-                </button>
               </span>
               <div className="lang-toggle">
                 <button
@@ -327,20 +339,48 @@ namespace Embassy {
                 </button>
               </div>
             </div>
-            {staleAgeMs !== undefined && staleAgeMs >= STALE_NOTICE_MS ? (
-              <p
-                className={
-                  connectionState === "connected"
-                    ? "staleness staleness--quiet"
-                    : "staleness"
-                }
-                role="status"
-              >
-                {connectionState === "connected"
-                  ? t("app.staleQuiet", { age: fmtAge(staleAgeMs) })
-                  : t("app.stale", { age: fmtAge(staleAgeMs) })}
-              </p>
-            ) : null}
+            {/* Second header row (flex-basis 100%): staleness note on the
+                left, connection controls on the right — keeps the primary
+                row at the prototype's brand/search/as-of/chip/lang line. */}
+            <div className="header-subrow">
+              {staleAgeMs !== undefined && staleAgeMs >= STALE_NOTICE_MS ? (
+                <p
+                  className={
+                    connectionState === "connected"
+                      ? "staleness staleness--quiet"
+                      : "staleness"
+                  }
+                  role="status"
+                >
+                  {connectionState === "connected"
+                    ? t("app.staleQuiet", { age: fmtAge(staleAgeMs) })
+                    : t("app.stale", { age: fmtAge(staleAgeMs) })}
+                </p>
+              ) : null}
+              <span className="conn-controls">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => protocolRef.current?.pause()}
+                >
+                  {t("live.control.pause")}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => protocolRef.current?.reconnect()}
+                >
+                  {t("live.control.reconnect")}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => protocolRef.current?.readNow()}
+                >
+                  {t("live.control.refresh")}
+                </button>
+              </span>
+            </div>
           </div>
           <nav
             className="app-nav"
@@ -370,36 +410,40 @@ namespace Embassy {
             ))}
           </nav>
         </header>
-        <main className="app-main stack-lg">
-          {hasNotices ? (
-            <div className="stack">
-              {notices.reset ? (
-                <Notice
-                  tone="info"
-                  text={t("live.stream.reset")}
-                  onDismiss={() => {
-                    dismissNotice("reset");
-                  }}
-                />
-              ) : null}
-              {notices.missedFrames ? (
-                <Notice
-                  tone="warning"
-                  text={t("app.missedFrames")}
-                  onDismiss={() => {
-                    dismissNotice("missedFrames");
-                  }}
-                />
-              ) : null}
+        <main className="app-main">
+          {/* Notices + tabpanel share the 20px stack; <main> itself stays a
+              plain block like the prototype's. */}
+          <div className="stack-lg">
+            {hasNotices ? (
+              <div className="stack">
+                {notices.reset ? (
+                  <Notice
+                    tone="info"
+                    text={t("live.stream.reset")}
+                    onDismiss={() => {
+                      dismissNotice("reset");
+                    }}
+                  />
+                ) : null}
+                {notices.missedFrames ? (
+                  <Notice
+                    tone="warning"
+                    text={t("app.missedFrames")}
+                    onDismiss={() => {
+                      dismissNotice("missedFrames");
+                    }}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+            <div
+              role="tabpanel"
+              id={`panel-${tab}`}
+              aria-labelledby={`tab-${tab}`}
+              tabIndex={0}
+            >
+              {renderActiveTab()}
             </div>
-          ) : null}
-          <div
-            role="tabpanel"
-            id={`panel-${tab}`}
-            aria-labelledby={`tab-${tab}`}
-            tabIndex={0}
-          >
-            {renderActiveTab()}
           </div>
         </main>
         <footer className="app-footer">

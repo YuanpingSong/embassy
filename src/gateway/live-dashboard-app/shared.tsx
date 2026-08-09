@@ -10,6 +10,8 @@ namespace Embassy {
     /** Selects the abandoned-state annotation (H4). */
     safeErrorCode?: string | undefined;
     label?: string | undefined;
+    /** Per-instance hover override (prototype `note` escape hatch). */
+    note?: string | undefined;
     small?: boolean | undefined;
   }>;
 
@@ -17,9 +19,16 @@ namespace Embassy {
     const t = useT();
     const domain = props.domain ?? "delivery";
     const kind = chipKindByDomain(domain, props.state, props.direction);
-    const meaning = t(
-      meaningKeyFor(domain, props.state, props.safeErrorCode, props.direction),
-    );
+    const meaning =
+      props.note ??
+      t(
+        meaningKeyFor(
+          domain,
+          props.state,
+          props.safeErrorCode,
+          props.direction,
+        ),
+      );
     return (
       <span
         className={props.small === true ? "chip chip--small" : "chip"}
@@ -83,22 +92,24 @@ namespace Embassy {
         },
       );
     };
-    const label =
+    const status =
       feedback === "copied"
         ? t("app.copied")
         : feedback === "failed"
           ? t("app.copyFailed")
-          : t("app.copy");
+          : "";
     return (
       <div className="copy-cmd">
-        <code className="copy-cmd-text">{props.cmd}</code>
-        <button
-          type="button"
-          className="copy-cmd-button"
-          onClick={copy}
+        <code className="copy-cmd__code">{props.cmd}</code>
+        <span
+          className="copy-cmd__status"
+          data-tone={feedback === "failed" ? "error" : undefined}
           aria-live="polite"
         >
-          {label}
+          {status}
+        </span>
+        <button type="button" className="copy-cmd__button" onClick={copy}>
+          {t("app.copy")}
         </button>
       </div>
     );
@@ -141,12 +152,22 @@ namespace Embassy {
    * visually-hidden copy for assistive tech.
    */
   export function TimeAgo(props: TimeAgoProps): React.ReactElement {
+    const t = useT();
     const [locale] = useLocale();
     const nowMs = useNowMs();
     const absolute = fmtAbs(props.iso, locale);
+    // Hour/day tiers keep the prototype's composite precision ("2h 5m ago",
+    // "3d 2h ago") via the localized `time.ago` template; sub-hour and future
+    // deltas stay on Intl.RelativeTimeFormat.
+    const parsedMs = Date.parse(props.iso);
+    const ageMs = Number.isFinite(parsedMs) ? nowMs - parsedMs : undefined;
+    const relative =
+      ageMs !== undefined && ageMs >= 3_600_000
+        ? t("time.ago", { duration: fmtAge(ageMs) })
+        : fmtRel(props.iso, nowMs, locale);
     return (
       <span className="time-ago" title={absolute}>
-        {fmtRel(props.iso, nowMs, locale)}
+        {relative}
         <span className="sr-only"> ({absolute})</span>
       </span>
     );
@@ -174,7 +195,7 @@ namespace Embassy {
         data-tip-wrap={props.wrap === true ? "" : undefined}
         aria-describedby={descriptionId}
       >
-        {props.children ?? "i"}
+        {props.children ?? <span className="info-dot">i</span>}
         <span className="sr-only" id={descriptionId}>
           {props.tip}
         </span>
@@ -198,9 +219,9 @@ namespace Embassy {
     return (
       <section className="absent-feature">
         <MonoLabel>{t("app.notLanded.title")}</MonoLabel>
-        <h3 className="absent-feature-title">{props.title}</h3>
-        <p className="absent-feature-body">{props.body}</p>
-        <p className="absent-feature-note">{t("app.notLanded.body")}</p>
+        <h3 className="absent-feature__title">{props.title}</h3>
+        <p className="absent-feature__body">{props.body}</p>
+        <p className="absent-feature__note">{t("app.notLanded.body")}</p>
         {props.cmd === undefined ? null : <CopyCmd cmd={props.cmd} />}
       </section>
     );

@@ -1,5 +1,6 @@
-// Diagnostics tab (§4.6) — connector protocols, honest-absent features,
-// limits & pressure, the read-only settings list, and the bounded counters.
+// Diagnostics tab (§4.6). Section order follows the designer's: the
+// operator-tunable settings open the tab, then connector protocols, the
+// honest-absent features, limits & pressure, and the bounded counters.
 //
 // Phase A truth enforced here: there is no mutation endpoint, so this tab
 // carries no number input, no Apply, no suggestion button and no confirm bar.
@@ -150,13 +151,18 @@ namespace Embassy {
     );
   }
 
-  /** Accounting counters: localized row header, mono value, visible caption. */
+  /**
+   * Accounting counters: the prototype's flush-right two-column row list,
+   * capped at 480px (`.counters-list` / `.data-table--counters`). It stays a
+   * real table so the visible caption and the row headers survive. Rows carry
+   * a top border only, so `<Rule/>` closes the list.
+   */
   function DiagnosticsCounterTable(
     props: Readonly<{ caption: string; rows: readonly DiagnosticsCounterRow[] }>,
   ): React.ReactElement {
     return (
-      <div className="table-wrap">
-        <table className="data-table">
+      <div className="table-wrap counters-list">
+        <table className="data-table data-table--counters">
           <caption className="table-caption">{props.caption}</caption>
           <tbody>
             {props.rows.map((row) => (
@@ -167,6 +173,7 @@ namespace Embassy {
             ))}
           </tbody>
         </table>
+        <Rule />
       </div>
     );
   }
@@ -196,7 +203,33 @@ namespace Embassy {
             ))}
           </tbody>
         </table>
+        <Rule />
       </div>
+    );
+  }
+
+  /**
+   * Native <details> carrying the prototype's inline text-link affordance:
+   * "<label> · show" / "<label> · hide". The element stays uncontrolled — the
+   * browser owns the disclosure; the mirrored flag only picks the verb.
+   */
+  function DiagnosticsDisclosure(
+    props: Readonly<{ label: string; children?: React.ReactNode }>,
+  ): React.ReactElement {
+    const t = useT();
+    const [open, setOpen] = React.useState(false);
+    return (
+      <details
+        className="details-block"
+        onToggle={(event) => {
+          setOpen(event.currentTarget.open);
+        }}
+      >
+        <summary>
+          {props.label} · {open ? t("app.hide") : t("app.show")}
+        </summary>
+        {props.children}
+      </details>
     );
   }
 
@@ -238,7 +271,13 @@ namespace Embassy {
     const limitsHeadingId = React.useId();
     const deadlineHeadingId = React.useId();
     const queueHeadingId = React.useId();
+    const bytesHeadingId = React.useId();
     const settingsHeadingId = React.useId();
+
+    // The only limit the live contract can actually adjudicate: deliveries
+    // that already died on the deadline. Queue depth and the byte budget
+    // report observed pressure but no ceiling, so neither carries a verdict.
+    const deadlineIsWarn = data.expiredCount > 0;
 
     const accounting = data.accounting;
     const accountingRows: readonly DiagnosticsCounterRow[] = [
@@ -410,6 +449,51 @@ namespace Embassy {
 
     return (
       <div className="tab-panel tab-panel--narrow">
+        {/* The designer opens this tab with the operator-tunable surface, not
+            with a seven-column reference table. */}
+        <section className="section" aria-labelledby={settingsHeadingId}>
+          <h2 className="mono-label section-label" id={settingsHeadingId}>
+            {t("app.diag.editable.title")}
+          </h2>
+          <div className="stack-lg">
+            {/* The prototype pairs the deadline with steering side by side. */}
+            <div className="grid-2">
+              <section
+                className={deadlineIsWarn ? "card card--warn" : "card"}
+                aria-labelledby={deadlineHeadingId}
+              >
+                <div className="card__head">
+                  <h3 className="card__title" id={deadlineHeadingId}>
+                    {t("app.diag.deadline.title")}
+                  </h3>
+                  {deadlineIsWarn ? (
+                    <StateChip domain="severity" state="warning" small />
+                  ) : null}
+                </div>
+                <p className="card__body">
+                  {t("app.diag.deadline.body", {
+                    count: formatDiagnosticsCount(data.expiredCount, locale),
+                  })}
+                </p>
+                <p className="env-name">EMBASSY_MESSAGE_DEADLINE_MS</p>
+                <CopyCmd cmd="EMBASSY_MESSAGE_DEADLINE_MS=<ms> embassy serve" />
+              </section>
+
+              <AbsentFeature
+                title={t("app.diag.steering.title")}
+                body={t("app.diag.steering.absent")}
+              />
+            </div>
+            <div className="setting-list">
+              {settings.map((setting) => (
+                <DiagnosticsSetting key={setting.id} setting={setting} />
+              ))}
+            </div>
+            {/* The note belongs to the settings it describes. */}
+            <p className="footnote">{t("app.diag.editable.note")}</p>
+          </div>
+        </section>
+
         <section className="section" aria-labelledby={versionsHeadingId}>
           <div className="row-baseline section-label">
             <h2 className="mono-label" id={versionsHeadingId}>
@@ -419,17 +503,23 @@ namespace Embassy {
               <DiagnosticsLowerBound count={data.connectors.length} />
             ) : null}
           </div>
-          <DiagnosticsConnectorTable connectors={data.connectors} />
+          <div className="stack">
+            <DiagnosticsConnectorTable connectors={data.connectors} />
+            {/* The prototype printed the pinned range beside each verdict; the
+                live contract does not carry it, so say so rather than let the
+                bare chip read as an omission. */}
+            <p className="footnote">{t("app.diag.versions.rangeAbsent")}</p>
+          </div>
         </section>
 
         <div className="grid-2">
           <AbsentFeature
-            title="Attestation"
+            title={t("app.diag.attestation.title")}
             body={t("app.diag.attestation.absent")}
             cmd="embassy health"
           />
           <AbsentFeature
-            title="Lease"
+            title={t("app.diag.lease.title")}
             body={t("app.diag.lease.absent")}
             cmd="embassy status"
           />
@@ -439,76 +529,63 @@ namespace Embassy {
           <h2 className="mono-label section-label" id={limitsHeadingId}>
             {t("app.diag.limits")}
           </h2>
-          <div className="stack-lg">
-            <div className="grid-2">
-              <section className="card" aria-labelledby={deadlineHeadingId}>
-                <div className="card__head">
-                  <h3 className="card__title" id={deadlineHeadingId}>
-                    {t("app.diag.deadline.title")}
-                  </h3>
-                </div>
-                <p className="card__body">
-                  {t("app.diag.deadline.body", {
-                    count: formatDiagnosticsCount(data.expiredCount, locale),
-                  })}
-                </p>
-                <p className="env-name">EMBASSY_MESSAGE_DEADLINE_MS</p>
-                <p className="footnote">{t("app.diag.deadline.hint")}</p>
-                <CopyCmd cmd="EMBASSY_MESSAGE_DEADLINE_MS=<ms> embassy serve" />
-              </section>
+          {/* One full-width card per limit, queue depth first (prototype). */}
+          <div className="stack">
+            <section className="card" aria-labelledby={queueHeadingId}>
+              <div className="card__head">
+                <h3 className="card__title" id={queueHeadingId}>
+                  {t("app.diag.queue.title")}
+                </h3>
+                {data.queueCountIsLowerBound ? (
+                  <DiagnosticsLowerBound count={data.queuedMessages} />
+                ) : null}
+              </div>
+              <p className="card__body">
+                {t("app.diag.queue.body", {
+                  count: formatDiagnosticsCount(data.queuedMessages, locale),
+                })}
+              </p>
+              <p className="env-name">EMBASSY_MAX_QUEUE_MESSAGES</p>
+              <CopyCmd cmd="EMBASSY_MAX_QUEUE_MESSAGES=<n> embassy serve" />
+            </section>
 
-              <section className="card" aria-labelledby={queueHeadingId}>
-                <div className="card__head">
-                  <h3 className="card__title" id={queueHeadingId}>
-                    {t("app.diag.queue.title")}
-                  </h3>
-                  {data.queueCountIsLowerBound ? (
-                    <DiagnosticsLowerBound count={data.queuedMessages} />
-                  ) : null}
-                </div>
-                <p className="card__body">
-                  {t("app.diag.queue.body", {
-                    count: formatDiagnosticsCount(data.queuedMessages, locale),
-                  })}
-                </p>
-                <p className="env-name">EMBASSY_MAX_QUEUE_MESSAGES</p>
-                <p className="footnote">{t("app.diag.deadline.hint")}</p>
-                <CopyCmd cmd="EMBASSY_MAX_QUEUE_MESSAGES=<n> embassy serve" />
-              </section>
-            </div>
-            <p className="footnote">{t("app.diag.editable.note")}</p>
-          </div>
-        </section>
+            <section className="card" aria-labelledby={bytesHeadingId}>
+              <div className="card__head">
+                <h3 className="card__title" id={bytesHeadingId}>
+                  {t("app.diag.bytes.title")}
+                </h3>
+              </div>
+              <p className="card__body">
+                {t("app.diag.bytes.body", {
+                  queued: formatDiagnosticsBytes(
+                    accounting.queuedBytes,
+                    locale,
+                  ),
+                  accepted: formatDiagnosticsBytes(
+                    accounting.bytesAccepted,
+                    locale,
+                  ),
+                })}
+              </p>
+              <p className="env-name">EMBASSY_MAX_MESSAGE_BYTES</p>
+              <CopyCmd cmd="EMBASSY_MAX_MESSAGE_BYTES=<n> embassy serve" />
+            </section>
 
-        <section className="section" aria-labelledby={settingsHeadingId}>
-          <h2 className="mono-label section-label" id={settingsHeadingId}>
-            {t("app.diag.editable.title")}
-          </h2>
-          <div className="stack-lg">
-            <AbsentFeature
-              title="Steering"
-              body={t("app.diag.steering.absent")}
-            />
-            <div className="setting-list">
-              {settings.map((setting) => (
-                <DiagnosticsSetting key={setting.id} setting={setting} />
-              ))}
-            </div>
+            {/* One hint for the section — the cards used to say it twice. */}
+            <p className="footnote">{t("app.diag.limits.hint")}</p>
           </div>
         </section>
 
         <section className="section">
-          <details className="details-block">
-            <summary>{t("app.diag.counters")}</summary>
+          <DiagnosticsDisclosure label={t("app.diag.counters")}>
             <div className="details-block__content">
               <DiagnosticsCounterTable
                 caption={t("app.diag.counters.caption")}
                 rows={accountingRows}
               />
             </div>
-          </details>
-          <details className="details-block">
-            <summary>{t("app.diag.omissions")}</summary>
+          </DiagnosticsDisclosure>
+          <DiagnosticsDisclosure label={t("app.diag.omissions")}>
             <div className="details-block__content stack">
               <DiagnosticsOmissionTable
                 caption={t("app.diag.omissions.caption")}
@@ -518,7 +595,7 @@ namespace Embassy {
                 <p className="footnote">{t("diagnostics.omissions.none")}</p>
               ) : null}
             </div>
-          </details>
+          </DiagnosticsDisclosure>
         </section>
       </div>
     );

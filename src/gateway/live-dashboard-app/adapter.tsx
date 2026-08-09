@@ -316,7 +316,15 @@ namespace Embassy {
         codexConnector: worstConnectorHealth(model, "codex"),
         compatibility: worstCompatibility(model),
       },
-      exchange: model.exchange,
+      exchange: {
+        ...model.exchange,
+        codex: {
+          ...model.exchange.codex,
+          monitorOnly: model.routes.filter(
+            (route) => route.provider === "codex" && isMonitorOnly(route),
+          ).length,
+        },
+      },
       queueClaudeToCodex: queueSplit(model, "codex", nowMs),
       queueCodexToClaude: queueSplit(model, "claude", nowMs),
       pairReady: pairReady(model),

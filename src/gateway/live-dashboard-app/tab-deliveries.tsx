@@ -62,6 +62,16 @@ namespace Embassy {
     codex_to_claude: "direction.codexToClaude",
   };
 
+  /**
+   * The two directional filter pills read Claude-first (`Claude → Codex` /
+   * `Claude ← Codex`) so they align on the same subject; the detail rail keeps
+   * the neutral `direction.*` phrasing shared with the other surfaces.
+   */
+  const DIRECTION_PILL_COPY_KEYS: Readonly<Record<MessageDirection, string>> = {
+    claude_to_codex: "direction.claudeToCodex",
+    codex_to_claude: "app.deliveries.dir.codexToClaude",
+  };
+
   /** Teaching command for both empty states (a real CLI verb; body on stdin). */
   const SEND_TO_CODEX_CMD = "embassy send-to-codex --from <alias> --to <alias>";
 
@@ -281,23 +291,64 @@ namespace Embassy {
     const earliest = group.events[0]?.timestamp;
     return (
       <div className="detail-pane">
-        <div className="stack-sm">
+        {/* Header is exactly two lines — the state is read from the
+            lifecycle timeline immediately below it. */}
+        <div className="detail-pane__head">
           <span className="detail-pane__id">{group.messageIdSuffix ?? "—"}</span>
           <div className="detail-pane__sub">
             {props.view.routePair} · {t(DIRECTION_COPY_KEYS[group.direction])}
           </div>
-          <div className="chip-row">
-            <StateChip
-              state={group.state}
-              direction={group.direction}
-              safeErrorCode={group.safeErrorCode}
-            />
-            {group.timestamp === undefined ? null : (
-              <TimeAgo iso={group.timestamp} />
-            )}
-          </div>
         </div>
 
+        <div>
+          <MonoLabel className="section-label section-label--lifecycle">
+            {t("app.deliveries.lifecycle")}
+          </MonoLabel>
+          <DeliveryLifecycle group={group} />
+          {props.view.eventsTruncated ? (
+            <p className="truncation-note">
+              {t("app.deliveries.eventsTruncated", {
+                count: fmtCount(locale, dropped),
+              })}
+            </p>
+          ) : null}
+        </div>
+
+        {/* Bodies are never retained — one branch, no window, no cap. */}
+        <div>
+          <MonoLabel className="section-label section-label--body">
+            {t("app.deliveries.bodyLabel")}
+          </MonoLabel>
+          <p className="detail-pane__sub">{t("app.deliveries.bodiesNote")}</p>
+        </div>
+
+        <div>
+          <MonoLabel className="section-label section-label--frames">
+            {t("app.deliveries.frames")}
+          </MonoLabel>
+          {frames.length === 0 ? (
+            <p className="detail-pane__sub">{t("app.deliveries.noFrames")}</p>
+          ) : (
+            <div className="frames-list">
+              {frames.map((event) => (
+                <div className="frame-item" key={event.sequence}>
+                  <span className="frame-code">{event.safeErrorCode}</span>
+                  {event.timestamp === undefined ? (
+                    <span className="lifecycle-abs">
+                      {t("time.unavailable")}
+                    </span>
+                  ) : (
+                    <TimeAgo iso={event.timestamp} />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Live-model facts the prototype had no source for; they sit after
+            the canonical lifecycle → body → frames sequence so the header
+            stays adjacent to the lifecycle. */}
         <div className="detail-list">
           {group.latencyMs === undefined ? null : (
             <DetailRow label={t("activity.column.elapsed")} mono={true}>
@@ -322,47 +373,6 @@ namespace Embassy {
             </DetailRow>
           )}
         </div>
-
-        <div>
-          <MonoLabel className="section-label">
-            {t("app.deliveries.lifecycle")}
-          </MonoLabel>
-          <DeliveryLifecycle group={group} />
-          {props.view.eventsTruncated ? (
-            <p className="truncation-note">
-              {t("app.deliveries.eventsTruncated", {
-                count: fmtCount(locale, dropped),
-              })}
-            </p>
-          ) : null}
-        </div>
-
-        <div>
-          <MonoLabel className="section-label">
-            {t("app.deliveries.frames")}
-          </MonoLabel>
-          {frames.length === 0 ? (
-            <p className="detail-pane__sub">{t("app.deliveries.noFrames")}</p>
-          ) : (
-            <div className="frames-list">
-              {frames.map((event) => (
-                <div className="frame-item" key={event.sequence}>
-                  <span className="frame-code">{event.safeErrorCode}</span>
-                  {event.timestamp === undefined ? (
-                    <span className="lifecycle-abs">
-                      {t("time.unavailable")}
-                    </span>
-                  ) : (
-                    <TimeAgo iso={event.timestamp} />
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Bodies are never retained — one branch, no window, no cap. */}
-        <p className="detail-pane__sub">{t("app.deliveries.bodiesNote")}</p>
 
         <div>
           <button
@@ -416,6 +426,7 @@ namespace Embassy {
 
     const groups = props.groups;
     const preset = props.preset;
+    const clearPreset = props.clearPreset;
 
     // Presets arrive from the header search and the pulse click-through. The
     // effect depends on the preset object only: re-running it on every stream
@@ -424,12 +435,14 @@ namespace Embassy {
       if (preset === undefined) return;
       if (preset.state !== undefined) setStateFilter(preset.state);
       const token = preset.token === undefined ? "" : preset.token.trim();
-      if (token === "") return;
-      setQuery(token);
-      setDirectionFilter("all");
-      if (preset.state === undefined) setStateFilter("all");
-      const target = findPresetTarget(groups, token);
-      if (target !== undefined) setSelectedKey(target.key);
+      if (token !== "") {
+        setQuery(token);
+        const target = findPresetTarget(groups, token);
+        if (target !== undefined) setSelectedKey(target.key);
+      }
+      // Consume-once: the preset applies exactly one time, then the shell
+      // clears it so later filter edits are never clobbered.
+      clearPreset?.();
     }, [preset]);
 
     const needle = query.trim().toLowerCase();
@@ -563,11 +576,12 @@ namespace Embassy {
     return (
       <div className="deliveries-layout">
         <div className="deliveries-main">
+          {/* The tab opens on its filters (no page title); the caption is the
+              heading and the list's programmatic label at once. */}
           <div className="row-baseline section-label">
-            <h2 className="section-title">{t("app.deliveries.title")}</h2>
-            <span className="text-xs text-muted" id={captionId}>
+            <h2 className="text-xs text-muted" id={captionId}>
               {t("app.deliveries.caption")}
-            </span>
+            </h2>
             <span className="mono text-muted">
               {t("attention.countVisible", {
                 count: fmtCount(locale, ordered.length),
@@ -584,7 +598,12 @@ namespace Embassy {
 
           <div className="filters">
             <div className="filter-group">
-              <div className="pill-row">
+              <MonoLabel>{t("app.deliveries.dir.label")}</MonoLabel>
+              <div
+                className="pill-row"
+                role="group"
+                aria-label={t("app.deliveries.dir.label")}
+              >
                 <FilterPill
                   active={directionFilter === "all"}
                   onClick={() => {
@@ -593,23 +612,28 @@ namespace Embassy {
                 >
                   {t("app.deliveries.dir.all")}
                 </FilterPill>
+                {/* Exclusive radios: re-clicking the active direction is a
+                    no-op, only the state pills toggle back to `all`. */}
                 {DIRECTION_FILTERS.map((direction) => (
                   <FilterPill
                     key={direction}
                     active={directionFilter === direction}
                     onClick={() => {
-                      setDirectionFilter(
-                        directionFilter === direction ? "all" : direction,
-                      );
+                      setDirectionFilter(direction);
                     }}
                   >
-                    {t(DIRECTION_COPY_KEYS[direction])}
+                    {t(DIRECTION_PILL_COPY_KEYS[direction])}
                   </FilterPill>
                 ))}
               </div>
             </div>
             <div className="filter-group">
-              <div className="pill-row">
+              <MonoLabel>{t("app.deliveries.view.label")}</MonoLabel>
+              <div
+                className="pill-row"
+                role="group"
+                aria-label={t("app.deliveries.view.label")}
+              >
                 <FilterPill
                   active={viewMode === "byRoute"}
                   onClick={() => {
@@ -633,7 +657,7 @@ namespace Embassy {
           {/* There is no conversation token in the contract; say so. */}
           <p className="footnote section-label">{t("app.deliveries.noConv")}</p>
 
-          <div className="filter-group section-label">
+          <div className="filter-group filters-block">
             <MonoLabel>{t("column.state")}</MonoLabel>
             <div className="pill-row" role="group" aria-label={t("column.state")}>
               <FilterPill
@@ -659,7 +683,7 @@ namespace Embassy {
             </div>
           </div>
 
-          <div className="filter-group section-label">
+          <div className="filter-group filters-search">
             <label className="sr-only" htmlFor={searchId}>
               {t("app.deliveries.search")}
             </label>
@@ -697,7 +721,7 @@ namespace Embassy {
 
         <div className="deliveries-rail">
           {selectedView === undefined ? (
-            <p className="detail-pane__sub">{t("app.deliveries.pickRow")}</p>
+            <p className="detail-pane__empty">{t("app.deliveries.pickRow")}</p>
           ) : (
             <DeliveryDetail key={selectedView.key} view={selectedView} />
           )}

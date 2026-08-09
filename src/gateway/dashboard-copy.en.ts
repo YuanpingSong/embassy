@@ -146,6 +146,8 @@ export const dashboardCopyEn = {
   "activity.column.history": "Evidence",
   "activity.history.one": "1 stage",
   "activity.history.many": "{count} stages",
+  "activity.meaning.delivered":
+    "Reached its terminal delivered state. This does not mean the model read or acted on it.",
   "activity.meaning.delivered.codexToClaude":
     "Claude returned a terminal released receipt: the message entered the recipient queue. This does not mean the model read or acted on it.",
   "activity.meaning.delivered.claudeToCodex":
@@ -305,6 +307,7 @@ export const dashboardCopyEn = {
   "time.beforeSnapshot": "{age} before snapshot",
   "time.afterSnapshot": "{age} after snapshot",
   "time.unavailable": "—",
+  "time.ago": "{duration} ago",
   "live.title": "Embassy — live dashboard",
   "live.noscript":
     "This live view requires JavaScript. The static gateway-dashboard.html in the state directory remains the offline floor.",
@@ -348,12 +351,12 @@ export const dashboardCopyEn = {
   "live.http.starting": "Dashboard is starting.",
   "app.tab.overview": "Overview",
   "app.tab.deliveries": "Deliveries",
-  "app.tab.routes": "Routes",
+  "app.tab.routes": "Routes & Sessions",
   "app.tab.activity": "Activity",
   "app.tab.diagnostics": "Diagnostics",
   "app.search.label": "Search aliases, message suffixes, and safe codes",
   "app.search.placeholder": "Search — Enter opens Deliveries",
-  "app.asOf": "As of {time}",
+  "app.asOf": "as of {time}",
   "app.stale":
     "No new frame for {age}. What you see may no longer be current.",
   "app.missedFrames":
@@ -369,37 +372,48 @@ export const dashboardCopyEn = {
     "The live contract does not carry this yet, so there is no control here to press. Use the command below instead.",
   "app.show": "Show",
   "app.hide": "Hide",
-  "app.overview.statusStrip": "System posture",
+  "app.overview.statusStrip": "System status",
+  "app.overview.broker": "Broker",
   "app.overview.claudeConn": "Claude connector",
   "app.overview.codexConn": "Codex connector",
-  "app.overview.compat": "Protocol compatibility",
+  "app.overview.compat": "Compatibility",
   "app.overview.connectorMissing": "No connector reported",
-  "app.overview.noPair.title": "No usable pair yet",
+  "app.overview.node.claude.title": "claude",
+  "app.overview.node.claude.sub": "sessions",
+  "app.overview.node.codex.title": "codex",
+  "app.overview.node.codex.sub": "tasks",
+  "app.overview.count.codex":
+    "{ready} ready · {total} registered · {monitorOnly} monitor-only",
+  "app.overview.noPair.title": "No pair",
   "app.overview.noPair.body":
     "One side is not ready, so nothing can cross. Select a Claude session and register a Codex task, and this link appears.",
-  "app.overview.queueC2x": "Claude → Codex queue",
-  "app.overview.queueX2c": "Codex → Claude queue",
-  "app.overview.depth": "Depth",
-  "app.overview.oldest": "Oldest wait",
-  "app.overview.pulse.title": "Settled in the last hour",
+  "app.overview.queueC2x": "Claude → Codex",
+  "app.overview.queueX2c": "Claude ← Codex",
+  "app.overview.depth": "depth",
+  "app.overview.oldest": "oldest",
+  "app.overview.pulse.title": "Activity pulse — terminal states, last hour",
   "app.overview.pulse.caption":
     "Counted from retained delivery groups only; older evidence has been dropped.",
   "app.overview.pulse.empty": "No delivery settled in the last hour.",
   "app.overview.viewIn": "View in Deliveries",
   "app.deliveries.title": "Deliveries",
   "app.deliveries.caption": "Retained delivery groups, most recent first",
-  "app.deliveries.dir.all": "All directions",
+  "app.deliveries.dir.label": "Direction",
+  "app.deliveries.dir.all": "All",
+  "app.deliveries.dir.codexToClaude": "Claude ← Codex",
+  "app.deliveries.view.label": "View",
   "app.deliveries.view.byRoute": "By route pair",
-  "app.deliveries.view.flat": "Flat",
-  "app.deliveries.state.all": "All states",
-  "app.deliveries.search": "Filter by suffix, alias, or safe code",
-  "app.deliveries.noMatch": "No delivery matches this filter.",
-  "app.deliveries.pickRow": "Select a delivery to read its lifecycle.",
+  "app.deliveries.view.flat": "Flat list",
+  "app.deliveries.state.all": "All",
+  "app.deliveries.search": "Search suffix, alias, or safe code",
+  "app.deliveries.noMatch": "No delivery matches this filter. Send one with",
+  "app.deliveries.pickRow": "Select a delivery to trace its lifecycle.",
   "app.deliveries.lifecycle": "Lifecycle",
-  "app.deliveries.frames": "Evidence frames",
+  "app.deliveries.frames": "Diagnostic frames",
   "app.deliveries.noFrames": "No safe code was recorded for this delivery.",
-  "app.deliveries.raw": "Show raw JSON",
-  "app.deliveries.hideRaw": "Hide raw JSON",
+  "app.deliveries.raw": "raw",
+  "app.deliveries.hideRaw": "hide raw",
+  "app.deliveries.bodyLabel": "Message body",
   "app.deliveries.bodiesNote":
     "Bodies are never retained — this is metadata only.",
   "app.deliveries.noConv":
@@ -407,10 +421,10 @@ export const dashboardCopyEn = {
   "app.deliveries.eventsTruncated":
     "{count} earlier transitions were dropped by the retention budget.",
   "app.deliveries.earliestRetained": "Earliest retained event",
-  "app.routes.topology": "Topology",
+  "app.routes.topology": "Consent topology",
   "app.routes.candidates": "Candidates",
   "app.routes.claudeSessions": "Claude sessions",
-  "app.routes.codexRoutes": "Codex routes",
+  "app.routes.codexRoutes": "Codex tasks",
   "app.routes.selectCmd.title": "Select a Claude session",
   "app.routes.selectCmd.consequence":
     "Selection is what lets Codex reach Claude. Exactly one selected session receives Codex → Claude messages.",
@@ -422,20 +436,27 @@ export const dashboardCopyEn = {
     "Monitor only — writes are disabled for this route by CODEX_WRITES_DISABLED.",
   "app.routes.noPeers": "No Claude session was discovered in this snapshot.",
   "app.routes.noCodex": "No Codex task is registered.",
-  "app.routes.successions": "Task changes",
+  "app.routes.successions": "Succession history",
   "app.routes.successions.empty": "No task change is in progress.",
   "app.routes.successions.note":
     "A task change moves the alias to a new Codex task. Nothing transfers: queued work, history, and approvals stay with the old task.",
   "app.routes.detail.absent": "Not carried by the live contract.",
   "app.routes.queueDepth": "Queue depth",
   "app.routes.counters": "Route counters",
-  "app.activity.title": "Activity",
-  "app.activity.kinds.all": "All",
+  "app.routes.registered": "registered",
+  "app.routes.monitorOnly": "monitor-only",
+  "app.routes.registerHint":
+    "Registration is not a button: it must run inside the Codex task to inherit its identity. Ask your agent to run:",
+  "app.routes.noPairInline":
+    "no pair — the task accepts no inbound messages until a session is selected",
+  "app.activity.title": "Event stream — bounded, most recent first",
+  "app.activity.kinds.all": "All kinds",
   "app.activity.kinds.delivery": "Delivery",
   "app.activity.kinds.alert": "Alert",
   "app.activity.limited":
     "Only delivery settlements and alerts are recorded here. Discovery, selection, task changes, and operator actions have no ledger in the live contract.",
-  "app.activity.empty": "No activity has been recorded yet.",
+  "app.activity.empty":
+    "Nothing in this window. Events appear as the broker produces them; try",
   "app.diag.versions": "Connector protocols",
   "app.diag.versions.caption":
     "Local connectors with protocol and compatibility state",
@@ -444,18 +465,26 @@ export const dashboardCopyEn = {
   "app.diag.col.protocol": "Protocol",
   "app.diag.col.version": "Version",
   "app.diag.col.compat": "Compatibility",
+  "app.diag.versions.rangeAbsent":
+    "The supported protocol range is not carried by the live contract, so only the compatibility verdict is shown.",
+  "app.diag.attestation.title": "Attestation",
   "app.diag.attestation.absent":
     "Attestation is not carried by the live contract. Read the local posture with the command below.",
+  "app.diag.lease.title": "Lease / instance",
   "app.diag.lease.absent":
     "Lease state is not carried by the live contract. Read the local posture with the command below.",
   "app.diag.limits": "Limits & pressure",
+  "app.diag.limits.hint":
+    "The configured value is not exposed by the live contract. Set the environment variable, then start embassy serve again.",
   "app.diag.deadline.title": "Delivery deadline",
   "app.diag.deadline.body":
     "{count} deliveries have expired since this broker started.",
-  "app.diag.deadline.hint":
-    "The configured value is not exposed by the live contract. Set the environment variable, then start embassy serve again.",
   "app.diag.queue.title": "Queue depth",
   "app.diag.queue.body": "{count} messages are queued right now.",
+  "app.diag.bytes.title": "Message byte budget",
+  "app.diag.bytes.body":
+    "{queued} queued right now; {accepted} accepted since this broker started.",
+  "app.diag.steering.title": "Steering",
   "app.diag.steering.absent":
     "Steering has not landed. There is no switch here to flip.",
   "app.diag.editable.title": "Settings",

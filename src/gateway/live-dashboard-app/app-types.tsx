@@ -122,6 +122,11 @@ namespace Embassy {
     countIsLowerBound: boolean;
     primaryAlias?: string | undefined;
     nextAction: DashboardNextAction;
+    /**
+     * Codex only: routes whose write gate is closed (CODEX_WRITES_DISABLED).
+     * Computed client-side by the adapter — the server model never carries it.
+     */
+    monitorOnly?: number | undefined;
   }>;
 
   export type DashboardAttentionGuidance =
@@ -397,6 +402,8 @@ namespace Embassy {
     groups: readonly DeliveryGroupView[];
     omissions: DashboardOmissions;
     preset: DeliveriesPreset | undefined;
+    /** Consume-once contract: called after the preset has been applied. */
+    clearPreset?: (() => void) | undefined;
   }>;
 
   export type RoutesTabProps = Readonly<{

@@ -7,7 +7,10 @@
 // designer prototype: applyQueueRaise, the confirm bars, the useReducer
 // force-update, the EMB_DATA writes, the open-mode banner (pair modes have not
 // landed), the lease status card (not in the live contract), and the phantom
-// `released` pulse bar.
+// `released` pulse bar. The board keeps the prototype's three-column
+// composition (claude · edges-or-no-pair · codex); anything that would make a
+// fourth column or a fourth node line — the no-pair explanation when queues
+// are shown, and the next-action sentences — renders under the board.
 namespace Embassy {
   /** Pulse bar geometry: 6px floor, +38px at the tallest bar (prototype parity). */
   const PULSE_BAR_BASE_PX = 6;
@@ -133,9 +136,14 @@ namespace Embassy {
     countLine: string;
   }>;
 
-  /** One party of the exchange board — both sides are wired (the prototype read only Claude). */
+  /**
+   * One party of the exchange board — both sides are wired (the prototype read
+   * only Claude). Node body stays at the prototype's short line count: the
+   * next-action sentences run to full sentences, so they render once beneath
+   * the board (`.exchange-notes`) instead of wrapping inside a 210px node and
+   * desynchronising the two nodes' heights.
+   */
   function ExchangeNode(props: ExchangeNodeProps): React.ReactElement {
-    const t = useT();
     const party = props.party;
     return (
       <div className="exchange-node">
@@ -151,9 +159,6 @@ namespace Embassy {
         {party.primaryAlias === undefined ? null : (
           <div className="exchange-node__line mono">{party.primaryAlias}</div>
         )}
-        <div className="exchange-node__line">
-          {`${t("next.label")}: ${t(NEXT_ACTION_COPY_KEYS[party.nextAction])}`}
-        </div>
       </div>
     );
   }
@@ -314,8 +319,26 @@ namespace Embassy {
     const queueIn = data.queueCodexToClaude;
     // Queued work is shown even without a ready pair — hiding a non-empty
     // queue behind the "no pair" state would conceal the stall it explains.
+    // The board still renders exactly three columns (claude · middle · codex):
+    // edges win the middle when there is anything to show, and the "no pair"
+    // explanation moves to the notes under the board so the codex node never
+    // slides off centre.
     const showEdges =
       data.pairReady || queueOut.depth > 0 || queueIn.depth > 0;
+    const nextActionLine = (
+      who: string,
+      action: DashboardNextAction,
+    ): string | null =>
+      action === "none"
+        ? null
+        : `${t("next.label")} · ${who}: ${t(NEXT_ACTION_COPY_KEYS[action])}`;
+    const boardNotes: readonly string[] = [
+      showEdges && !data.pairReady
+        ? `${t("app.overview.noPair.title")} — ${t("app.overview.noPair.body")}`
+        : null,
+      nextActionLine(t("provider.claude"), data.exchange.claude.nextAction),
+      nextActionLine(t("provider.codex"), data.exchange.codex.nextAction),
+    ].filter((line): line is string => line !== null);
     const showAttention =
       data.attention.length > 0 || data.attentionOmitted > 0;
     const maxPulse = data.pulse.bars.reduce(
@@ -344,7 +367,10 @@ namespace Embassy {
             {t("app.overview.statusStrip")}
           </h2>
           <div className="status-strip">
-            <HealthStatusCard label={t("brand.title")} health={strip.broker} />
+            <HealthStatusCard
+              label={t("app.overview.broker")}
+              health={strip.broker}
+            />
             <HealthStatusCard
               label={t("app.overview.claudeConn")}
               health={strip.claudeConnector}
@@ -358,7 +384,7 @@ namespace Embassy {
         </section>
 
         <section className="section" aria-labelledby={exchangeId}>
-          <div className="row section-label">
+          <div className="row section-label section-head">
             <h2 className="mono-label" id={exchangeId}>
               {t("exchange.eyebrow")}
             </h2>
@@ -368,8 +394,8 @@ namespace Embassy {
           </div>
           <div className="exchange-board">
             <ExchangeNode
-              title={t("exchange.claude.title")}
-              sub={t("exchange.claude.note")}
+              title={t("app.overview.node.claude.title")}
+              sub={t("app.overview.node.claude.sub")}
               party={data.exchange.claude}
               countLine={t("exchange.count.claude", {
                 ready: data.exchange.claude.ready,
@@ -377,16 +403,6 @@ namespace Embassy {
                 total: data.exchange.claude.total,
               })}
             />
-            {data.pairReady ? null : (
-              <div className="no-pair">
-                <span className="no-pair__label">
-                  {t("app.overview.noPair.title")}
-                </span>
-                <span className="no-pair__body">
-                  {t("app.overview.noPair.body")}
-                </span>
-              </div>
-            )}
             {showEdges ? (
               <div className="exchange-edges">
                 <ExchangeEdge
@@ -400,22 +416,41 @@ namespace Embassy {
                   queue={queueIn}
                 />
               </div>
-            ) : null}
+            ) : (
+              <div className="no-pair">
+                <span className="no-pair__label">
+                  {t("app.overview.noPair.title")}
+                </span>
+                <span className="no-pair__body">
+                  {t("app.overview.noPair.body")}
+                </span>
+              </div>
+            )}
             <ExchangeNode
-              title={t("exchange.codex.title")}
-              sub={t("exchange.codex.note")}
+              title={t("app.overview.node.codex.title")}
+              sub={t("app.overview.node.codex.sub")}
               party={data.exchange.codex}
-              countLine={t("exchange.count.codex", {
+              countLine={t("app.overview.count.codex", {
                 ready: data.exchange.codex.ready,
                 total: data.exchange.codex.total,
+                monitorOnly: data.exchange.codex.monitorOnly ?? 0,
               })}
             />
           </div>
+          {boardNotes.length === 0 ? null : (
+            <div className="exchange-notes stack-sm">
+              {boardNotes.map((line) => (
+                <p className="text-xs text-body-muted" key={line}>
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
         </section>
 
         {showAttention ? (
           <section className="section" aria-labelledby={attentionId}>
-            <div className="row section-label">
+            <div className="row section-label section-head">
               <h2 className="mono-label" id={attentionId}>
                 {t("attention.eyebrow")}
               </h2>

@@ -60,14 +60,17 @@ namespace Embassy {
     ambiguous: "indeterminate",
     failed: "failure",
     expired: "failure",
-    rejected: "failure",
+    // Actionable (QUEUE_FULL / INVALID_DEADLINE) but a by-design refusal, not
+    // a failure — coral warning tier, never failure-red (PM ruling).
+    rejected: "warning",
     cancelled: "inert",
     abandoned: "inert",
   };
 
-  // §3.3 — route states (fixes the prototype's idle inversion).
+  // §3.3 — route states. Idle keeps the prototype's calm-neutral treatment
+  // (soft-stone/slate progress chip), which is canonical.
   const ROUTE_CHIP_KINDS: Readonly<Record<RouteState, ChipKind>> = {
-    idle: "positive",
+    idle: "progress",
     busy: "active",
     awaiting_approval: "warning",
     stale: "failure",
@@ -78,7 +81,7 @@ namespace Embassy {
 
   // §3.3 — peer states (offline is a candidate, not an error).
   const PEER_CHIP_KINDS: Readonly<Record<PublicAvailablePeerState, ChipKind>> = {
-    idle: "positive",
+    idle: "progress",
     busy: "active",
     awaiting_approval: "warning",
     offline: "inert",
@@ -243,7 +246,7 @@ namespace Embassy {
           ? "activity.meaning.delivered.codexToClaude"
           : direction === "claude_to_codex"
             ? "activity.meaning.delivered.claudeToCodex"
-            : "activity.meaning.other";
+            : "activity.meaning.delivered";
       case "unconfirmed":
         return "activity.meaning.unconfirmed";
       case "ambiguous":
