@@ -993,7 +993,7 @@ test("native Codex succession fences callbacks and retires only the exact old li
 
   await provider.quiesceNativeCodexPeerGeneration(initialGeneration);
   assert.deepEqual(
-    provider.observeNativeCodexSuccessionBarrier(initialGeneration),
+    await provider.observeNativeCodexSuccessionBarrier(initialGeneration),
     {
       generation: initialGeneration,
       activeGenerationMatched: true,
@@ -1008,7 +1008,7 @@ test("native Codex succession fences callbacks and retires only the exact old li
   );
   await provider.updateNativeInboundStatus("old-owned-receipt", "delivered");
   assert.equal(
-    provider.observeNativeCodexSuccessionBarrier(initialGeneration).clean,
+    (await provider.observeNativeCodexSuccessionBarrier(initialGeneration)).clean,
     true,
   );
 
@@ -1019,7 +1019,7 @@ test("native Codex succession fences callbacks and retires only the exact old li
     }),
     "published",
   );
-  provider.activatePreparedNativeCodexPeerGeneration("next_generation");
+  await provider.activatePreparedNativeCodexPeerGeneration("next_generation");
   assert.deepEqual(fake.lifecycleCalls.slice(-2), [
     "grant:next_generation",
     "resume:next_generation",
@@ -1213,7 +1213,9 @@ test("native Codex succession rolls back only proven non-publication", async () 
     }),
     "published",
   );
-  provider.activatePreparedNativeCodexPeerGeneration("uncertain_generation");
+  await provider.activatePreparedNativeCodexPeerGeneration(
+    "uncertain_generation",
+  );
   await provider.retireNativeCodexPeerGeneration({
     retiredGeneration: initialGeneration,
     protectedActiveGeneration: "uncertain_generation",
@@ -1249,25 +1251,25 @@ test("native succession freezes discovery callbacks until resume", async () => {
   await heldDiscovery.started;
   await provider.quiesceNativeCodexPeerGeneration(initialGeneration);
   assert.equal(
-    provider.observeNativeCodexSuccessionBarrier(initialGeneration)
+    (await provider.observeNativeCodexSuccessionBarrier(initialGeneration))
       .discoveryInFlight,
     true,
   );
   assert.equal(
-    provider.observeNativeCodexSuccessionBarrier(initialGeneration).clean,
+    (await provider.observeNativeCodexSuccessionBarrier(initialGeneration)).clean,
     false,
   );
   heldDiscovery.release();
   await discovery;
   assert.deepEqual(observed.routes, []);
   assert.equal(
-    provider.observeNativeCodexSuccessionBarrier(initialGeneration).clean,
+    (await provider.observeNativeCodexSuccessionBarrier(initialGeneration)).clean,
     true,
   );
 
   await provider.discoverClaudePeers();
   assert.deepEqual(observed.routes, []);
-  provider.resumeNativeCodexPeerGeneration(initialGeneration);
+  await provider.resumeNativeCodexPeerGeneration(initialGeneration);
   await provider.discoverClaudePeers();
   assert.deepEqual(observed.routes.at(-1), {
     endpoint: { ...provider.identity, routeHandle: "target-selected" },

@@ -354,6 +354,7 @@ export async function runGatewayServer(
     claudeProvider = createClaudeProvider({
       runtime,
       locale: options.locale ?? "en",
+      nativeHelpers: { maxHelpers: config.limits.maxRoutes },
       ...(config.deliveryNotices === undefined
         ? {}
         : { deliveryNotices: config.deliveryNotices }),

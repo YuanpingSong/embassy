@@ -231,6 +231,7 @@ export interface GatewayProviderAdapter {
     alias: string;
     cwd: string;
     generation: string;
+    currentGeneration?: string;
   }): Promise<void>;
   quiesceNativeCodexPeerGeneration?(generation: string): Promise<void>;
   observeNativeCodexSuccessionBarrier?(generation: string): Readonly<{
@@ -243,14 +244,24 @@ export interface GatewayProviderAdapter {
     pendingInboundReceipts: number;
     rejectedInboundSettlements: number;
     clean: boolean;
-  }>;
+  }> | Promise<Readonly<{
+    generation: string;
+    activeGenerationMatched: boolean;
+    ingressQuiesced: boolean;
+    monitorFrozen: boolean;
+    discoveryInFlight: boolean;
+    pendingOutboundReceipts: number;
+    pendingInboundReceipts: number;
+    rejectedInboundSettlements: number;
+    clean: boolean;
+  }>>;
   publishPreparedNativeCodexPeer?(input: {
     currentGeneration: string;
     preparedGeneration: string;
   }): Promise<"published" | "not_published" | "unknown">;
-  activatePreparedNativeCodexPeerGeneration?(generation: string): void;
+  activatePreparedNativeCodexPeerGeneration?(generation: string): void | Promise<void>;
   cleanupPreparedNativeCodexPeerGeneration?(generation: string): Promise<void>;
-  resumeNativeCodexPeerGeneration?(generation: string): void;
+  resumeNativeCodexPeerGeneration?(generation: string): void | Promise<void>;
   rollbackPreparedNativeCodexPeerGeneration?(input: {
     preparedGeneration: string;
     resumeGeneration: string;
@@ -259,7 +270,7 @@ export interface GatewayProviderAdapter {
     retiredGeneration: string;
     protectedActiveGeneration: string;
   }): Promise<void>;
-  purgeNativeCodexPeerGenerationReplyCapabilities?(generation: string): number;
+  purgeNativeCodexPeerGenerationReplyCapabilities?(generation: string): number | Promise<number>;
   /** Codex-only private provider-work barrier for one exact task route. */
   observeRouteSuccessionBarrier?(routeHandle: string): Readonly<{
     routePresent: boolean;
@@ -275,6 +286,7 @@ export interface GatewayProviderAdapter {
     clean: boolean;
   }>;
   dispatch(input: {
+    sourceAlias: string;
     binding: PrivateRouteBinding;
     authorization: "selected_route" | "native_reply";
     messageId: string;
@@ -1786,6 +1798,7 @@ export class GatewayService {
           alias: effect.registration.alias,
           cwd: this.nativePeerCwd,
           generation: effect.registration.generation,
+          currentGeneration: execution.oldRegistration.generation,
         });
         execution.newListenerPrepared = true;
         return {
@@ -1806,7 +1819,7 @@ export class GatewayService {
           claudeAdapter,
           "purgeNativeCodexPeerGenerationReplyCapabilities",
         );
-        purge.call(claudeAdapter, effect.registration.generation);
+        await purge.call(claudeAdapter, effect.registration.generation);
         return undefined;
       }
       case "prepare_new_store": {
@@ -1904,7 +1917,7 @@ export class GatewayService {
           claudeAdapter,
           "activatePreparedNativeCodexPeerGeneration",
         );
-        activate.call(claudeAdapter, effect.registration.generation);
+        await activate.call(claudeAdapter, effect.registration.generation);
         execution.newListenerActivated = true;
         this.forgetBinding(this.successionOldRegistration(execution).alias);
         this.rememberBinding(
@@ -1989,7 +2002,7 @@ export class GatewayService {
           claudeAdapter,
           "resumeNativeCodexPeerGeneration",
         );
-        resume.call(claudeAdapter, effect.registration.generation);
+        await resume.call(claudeAdapter, effect.registration.generation);
         return undefined;
       }
       case "resume_old_dispatch":
@@ -2213,7 +2226,10 @@ export class GatewayService {
       claudeAdapter,
       "observeNativeCodexSuccessionBarrier",
     );
-    const claude = observeClaude.call(claudeAdapter, active.generation);
+    const claude = await observeClaude.call(
+      claudeAdapter,
+      active.generation,
+    );
     const observeCodex = this.requireSuccessionMethod(
       codexAdapter,
       "observeRouteSuccessionBarrier",
@@ -2289,7 +2305,7 @@ export class GatewayService {
       codexAdapter,
       "observeRouteSuccessionBarrier",
     );
-    const claude = observeClaude.call(
+    const claude = await observeClaude.call(
       claudeAdapter,
       oldRegistration.generation,
     );
@@ -5035,6 +5051,7 @@ export class GatewayService {
     let result: GatewayAdapterDispatchResult;
     try {
       result = await this.adapter(binding.provider, binding.hostId).dispatch({
+        sourceAlias: item.sourceAlias,
         binding,
         authorization: context.authorization,
         messageId: item.messageId,

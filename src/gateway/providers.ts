@@ -28,6 +28,10 @@ import type {
   LocalCodexTransportFactory,
 } from "./codex-local-transport.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
+import {
+  ClaudeNativeHelperSupervisor,
+} from "./claude-helper-supervisor.js";
+import type { ClaudeNativeHelperFactory } from "./claude-helper-client.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import type {
   GatewayAdapterCallbacks,
@@ -78,6 +82,11 @@ export type LocalClaudeGatewayProviderOptions = {
   discoveryPollMs?: number;
   maxPendingMessages?: number;
   now?: () => number;
+  /** Production-only real-PID advertisement helpers. Omit in child/test hosts. */
+  nativeHelpers?: Readonly<{
+    maxHelpers: number;
+    factory?: ClaudeNativeHelperFactory;
+  }>;
   /** Deterministic test seam. Production callers must omit this. */
   peerFactory?: ClaudePeerFactory;
 };
@@ -277,6 +286,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly maxPending: number;
   private readonly discoveryPollMs: number;
   private readonly now: () => number;
+  private readonly selectedStateRoots = new Map<string, string>();
+  private readonly nativeHelpers: ClaudeNativeHelperSupervisor | undefined;
   private readonly discovered = new Map<string, GatewayAdapterDiscovery>();
   private readonly selected = new Map<string, string>();
   /** Exact live same-UID sessions observed through native inbound frames. */
@@ -364,6 +375,25 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       options.locale ?? "en",
       options.deliveryNotices ?? "merged",
     );
+    this.nativeHelpers =
+      options.nativeHelpers === undefined
+        ? undefined
+        : new ClaudeNativeHelperSupervisor({
+            identity: this.identity,
+            runtime: options.runtime,
+            locale: options.locale ?? "en",
+            deliveryNotices: options.deliveryNotices ?? "merged",
+            maxPendingMessages: this.maxPending,
+            maxHelpers: positiveBounded(
+              options.nativeHelpers.maxHelpers,
+              256,
+              128,
+            ),
+            callbacks: () => this.callbacks,
+            ...(options.nativeHelpers.factory === undefined
+              ? {}
+              : { factory: options.nativeHelpers.factory }),
+          });
   }
 
   async initialize(
@@ -382,6 +412,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.callbacks = callbacks;
+    if (this.nativeHelpers !== undefined) {
+      this.initialized = true;
+      return { health: "healthy", compatibility: "compatible" };
+    }
     try {
       let listenerGeneration: NativeCodexListenerGeneration | undefined;
       const listener = await this.peer.listen({
@@ -439,6 +473,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   ): Promise<void> {
     this.assertReady();
     await this.peer.assertTargetWorkspaceDisjoint(routeHandle, stateRoot);
+    this.selectedStateRoots.set(routeHandle, stateRoot);
   }
 
   async selectRoute(input: {
@@ -490,6 +525,11 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     alias: string;
     cwd: string;
   }): Promise<void> {
+    if (this.nativeHelpers !== undefined) {
+      this.assertReady();
+      await this.nativeHelpers.advertise(input);
+      return;
+    }
     const registration = this.nativeCodexRegistration(input);
     await this.serializeNativeCodexRegistration(async () => {
       this.assertReady();
@@ -534,6 +574,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   currentNativeCodexPeerGeneration(alias: string): string {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      return this.nativeHelpers.currentGeneration(alias);
+    }
     const active = this.requireActiveNativeCodexListener();
     if (active.registration?.alias !== alias) {
       throw new BridgeError(
@@ -544,13 +587,57 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     return active.generation;
   }
 
+  /** Child-host initialization seam before its immutable advertisement exists. */
+  currentUnadvertisedNativeCodexPeerGeneration(): string {
+    this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      throw new BridgeError(
+        "CLAUDE_NATIVE_HELPER_NESTING_FORBIDDEN",
+        "A supervised provider cannot itself act as a native helper host.",
+      );
+    }
+    const active = this.requireActiveNativeCodexListener();
+    if (active.registration !== undefined) {
+      throw new BridgeError(
+        "CODEX_PEER_ALREADY_ADVERTISED",
+        "The native listener already owns an advertised Codex identity.",
+      );
+    }
+    return active.generation;
+  }
+
   async prepareNativeCodexPeerGeneration(input: {
     alias: string;
     cwd: string;
     generation: string;
+    currentGeneration?: string;
   }): Promise<void> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      if (input.currentGeneration === undefined) {
+        throw new BridgeError(
+          "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+          "A supervised succession must name its exact current generation.",
+        );
+      }
+      await this.nativeHelpers.prepareGeneration({
+        alias: input.alias,
+        cwd: input.cwd,
+        generation: input.generation,
+        currentGeneration: input.currentGeneration,
+      });
+      return;
+    }
     const active = this.requireActiveNativeCodexListener();
+    if (
+      input.currentGeneration !== undefined &&
+      input.currentGeneration !== active.generation
+    ) {
+      throw new BridgeError(
+        "CODEX_PEER_SUCCESSION_GENERATION_MISMATCH",
+        "The prepared successor does not name the exact current generation.",
+      );
+    }
     if (active.registration === undefined) {
       throw new BridgeError(
         "CODEX_PEER_NOT_ADVERTISED",
@@ -610,6 +697,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   async quiesceNativeCodexPeerGeneration(generation: string): Promise<void> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.quiesceGeneration(generation);
+      return;
+    }
     const active = this.requireNativeCodexListenerGeneration(
       this.activeNativeCodexListener,
       generation,
@@ -641,10 +732,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  observeNativeCodexSuccessionBarrier(
+  async observeNativeCodexSuccessionBarrier(
     generation: string,
-  ): ClaudeNativeCodexSuccessionBarrier {
+  ): Promise<ClaudeNativeCodexSuccessionBarrier> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      return await this.nativeHelpers.observeBarrier(generation);
+    }
     const active = this.activeNativeCodexListener;
     const activeGenerationMatched = active?.generation === generation;
     const pendingOutboundReceipts = this.providerIdByGatewayId.size;
@@ -689,6 +783,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     preparedGeneration: string;
   }): Promise<ClaudePeerRegistryPublicationOutcome> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      return await this.nativeHelpers.publishPrepared(input);
+    }
     const current = this.requireNativeCodexListenerGeneration(
       this.activeNativeCodexListener,
       input.currentGeneration,
@@ -705,7 +802,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         "The old listener must be quiesced before publication.",
       );
     }
-    if (!this.observeNativeCodexSuccessionBarrier(current.generation).clean) {
+    if (!(await this.observeNativeCodexSuccessionBarrier(current.generation)).clean) {
       throw new BridgeError(
         "CODEX_PEER_SUCCESSION_NOT_QUIET",
         "Native Codex succession requires a clean provider-wide barrier.",
@@ -756,8 +853,14 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  activatePreparedNativeCodexPeerGeneration(generation: string): void {
+  async activatePreparedNativeCodexPeerGeneration(
+    generation: string,
+  ): Promise<void> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.activatePrepared(generation);
+      return;
+    }
     const prepared = this.requireNativeCodexListenerGeneration(
       this.preparedNativeCodexListener,
       generation,
@@ -784,7 +887,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     if (this.nativeCodexSuccessionFreeze === current.generation) {
       this.nativeCodexSuccessionFreeze = undefined;
     }
-    this.purgeNativeCodexPeerGenerationReplyCapabilities(current.generation);
+    await this.purgeNativeCodexPeerGenerationReplyCapabilities(
+      current.generation,
+    );
     this.scheduleClaudeMonitor();
   }
 
@@ -792,6 +897,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     generation: string,
   ): Promise<void> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.cleanupPrepared(generation);
+      return;
+    }
     const prepared = this.requireNativeCodexListenerGeneration(
       this.preparedNativeCodexListener,
       generation,
@@ -813,8 +922,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  resumeNativeCodexPeerGeneration(generation: string): void {
+  async resumeNativeCodexPeerGeneration(generation: string): Promise<void> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.resumeGeneration(generation);
+      return;
+    }
     const active = this.requireNativeCodexListenerGeneration(
       this.activeNativeCodexListener,
       generation,
@@ -838,10 +951,14 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     preparedGeneration: string;
     resumeGeneration: string;
   }): Promise<void> {
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.rollbackPrepared(input);
+      return;
+    }
     await this.cleanupPreparedNativeCodexPeerGeneration(
       input.preparedGeneration,
     );
-    this.resumeNativeCodexPeerGeneration(input.resumeGeneration);
+    await this.resumeNativeCodexPeerGeneration(input.resumeGeneration);
   }
 
   async retireNativeCodexPeerGeneration(input: {
@@ -849,6 +966,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     protectedActiveGeneration: string;
   }): Promise<void> {
     this.assertReady();
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.retireGeneration(input);
+      return;
+    }
     const active = this.requireNativeCodexListenerGeneration(
       this.activeNativeCodexListener,
       input.protectedActiveGeneration,
@@ -887,9 +1008,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  purgeNativeCodexPeerGenerationReplyCapabilities(
+  async purgeNativeCodexPeerGenerationReplyCapabilities(
     generation: string,
-  ): number {
+  ): Promise<number> {
+    if (this.nativeHelpers !== undefined) {
+      return await this.nativeHelpers.purgeGenerationReplies(generation);
+    }
     let purged = 0;
     for (const [routeHandle, route] of this.nativeInbound) {
       if (route.listenerGeneration !== generation) continue;
@@ -900,11 +1024,17 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   }
 
   async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.unadvertise(alias);
+      return;
+    }
     await this.serializeNativeCodexRegistration(async () => {
       const active = this.activeNativeCodexListener;
       if (active?.registration?.alias !== alias) return;
       await active.listener.unadvertise(active.registration.name);
-      this.purgeNativeCodexPeerGenerationReplyCapabilities(active.generation);
+      await this.purgeNativeCodexPeerGenerationReplyCapabilities(
+        active.generation,
+      );
       delete active.registration;
       active.registrationProvisional = false;
       active.provisionalIngressForwarded = false;
@@ -915,6 +1045,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     alias: string,
     status: "idle" | "busy" | "waiting",
   ): Promise<void> {
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.updateStatus(alias, status);
+      return;
+    }
     const active = this.activeNativeCodexListener;
     if (active?.registration?.alias !== alias) return;
     await active.listener.updateAdvertisedStatus(status);
@@ -925,6 +1059,14 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     status: "held" | "delivered" | "denied" | "expired",
     diagnosticCode?: string,
   ): Promise<void> {
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.updateInboundStatus(
+        receiptHandle,
+        status,
+        diagnosticCode,
+      );
+      return;
+    }
     const owner = this.requireNativeInboundReceiptOwner(receiptHandle);
     try {
       await owner.listener.acknowledge(
@@ -950,6 +1092,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     receiptHandle: string,
     progress: ClaudePeerInboundProgress,
   ): Promise<void> {
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.notifyInboundProgress(receiptHandle, progress);
+      return;
+    }
     const owner = this.requireNativeInboundReceiptOwner(receiptHandle);
     await owner.listener.notifyInboundProgress(receiptHandle, progress);
   }
@@ -957,6 +1103,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   async releaseNativeInboundReceipt(
     receiptHandle: string,
   ): Promise<boolean> {
+    if (this.nativeHelpers !== undefined) {
+      return await this.nativeHelpers.releaseInboundReceipt(receiptHandle);
+    }
     const owner = this.nativeInboundReceiptOwners.get(receiptHandle);
     if (owner === undefined) return false;
     this.nativeInboundReceiptOwners.delete(receiptHandle);
@@ -965,6 +1114,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   async quiesceNativeInbound(): Promise<void> {
     if (this.closed) return;
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.quiesceAll();
+      return;
+    }
     const active = this.activeNativeCodexListener;
     if (active === undefined) return;
     await active.listener.quiesceInbound();
@@ -972,6 +1125,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   }
 
   async dispatch(input: {
+    sourceAlias?: string;
     binding: PrivateRouteBinding;
     authorization: "selected_route" | "native_reply";
     messageId: string;
@@ -979,6 +1133,65 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     expectsReply: boolean;
     deadlineAt: string;
   }): Promise<GatewayAdapterDispatchResult> {
+    if (this.nativeHelpers !== undefined) {
+      if (
+        input.sourceAlias === undefined ||
+        !this.initialized ||
+        this.closed ||
+        !sameEndpoint(input.binding, this.identity)
+      ) {
+        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+      }
+      const selectedAlias = this.selected.get(input.binding.routeHandle);
+      const stateRoot = this.selectedStateRoots.get(input.binding.routeHandle);
+      if (
+        input.authorization === "selected_route" &&
+        (selectedAlias === undefined || stateRoot === undefined)
+      ) {
+        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+      }
+      if (input.authorization === "selected_route") {
+        this.selectedDispatchEpoch.set(
+          input.binding.routeHandle,
+          (this.selectedDispatchEpoch.get(input.binding.routeHandle) ?? 0) + 1,
+        );
+        this.selectedObservationDirty.add(input.binding.routeHandle);
+        this.emitClaudeRouteObservation(input.binding.routeHandle, "busy");
+      }
+      try {
+        const sourceAlias = input.sourceAlias;
+        const result = await this.nativeHelpers.dispatch({
+          ...input,
+          sourceAlias,
+          ...(selectedAlias === undefined ? {} : { selectedAlias }),
+          ...(stateRoot === undefined ? {} : { stateRoot }),
+        });
+        if (
+          input.authorization === "selected_route" &&
+          result.state === "pending"
+        ) {
+          this.selectedObservationDirty.delete(input.binding.routeHandle);
+          this.emitClaudeRouteObservation(
+            input.binding.routeHandle,
+            "idle",
+            undefined,
+            true,
+          );
+        }
+        return result;
+      } catch (error) {
+        if (error instanceof BridgeError && error.recoverable) {
+          return {
+            state: "failed",
+            safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE",
+          };
+        }
+        return {
+          state: "ambiguous",
+          safeErrorCode: "CLAUDE_NATIVE_HELPER_OUTCOME_UNKNOWN",
+        };
+      }
+    }
     const activeListener = this.activeNativeCodexListener;
     if (
       !this.initialized ||
@@ -1189,6 +1402,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.selectedObservationDirty.delete(routeHandle);
     this.selectedObservations.delete(routeHandle);
     this.discovered.delete(routeHandle);
+    this.selectedStateRoots.delete(routeHandle);
+    if (this.nativeHelpers !== undefined) {
+      await this.nativeHelpers.releaseRoute(routeHandle);
+    }
     if (this.selected.size === 0 && this.monitorTimer !== undefined) {
       clearTimeout(this.monitorTimer);
       this.monitorTimer = undefined;
@@ -1203,6 +1420,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
     this.rejectedNativeInbound.clear();
     try {
+      await this.nativeHelpers?.close();
       await this.peer.close();
     } finally {
       for (const pending of this.pendingByProviderId.values()) {
@@ -1212,6 +1430,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.providerIdByGatewayId.clear();
       this.pendingTargetByGatewayId.clear();
       this.selected.clear();
+      this.selectedStateRoots.clear();
       this.nativeInbound.clear();
       this.nativeInboundReceiptOwners.clear();
       this.selectedDispatchEpoch.clear();
