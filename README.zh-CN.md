@@ -32,7 +32,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT
 ```
 
-第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
+第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。请在普通终端中运行守护进程命令，切勿在代理会话内运行：Codex 任务会继承守护进程的环境，因此在 Claude Code 会话内启动的守护进程会把该会话的身份泄漏到每个任务中，注册将以 `CALLER_IDENTITY_CONFLICT` 关闭失败——在干净终端执行 `daemon restart` 即可修复。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
 
 > **已知限制：** 仅当 Desktop 使用托管独立 App Server 时，Embassy 才能访问 Codex 任务。在该模式下，任务目前无法连接 Desktop 内置的应用内浏览器（`@Browser` 可加载但无法附着）。将 Desktop 切换回其默认的私有 App Server 会立即恢复内置浏览器——但会使这些任务对 Embassy 不可达。目前未发现其他能力回退，但这并非穷尽的能力对比测试。
 
