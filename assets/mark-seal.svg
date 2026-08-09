@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Embassy favicon — the big tent</title>
+  <circle cx="32" cy="32" r="30" fill="#f7e8d0"/>
+  <path d="M32 14 L13 47 Q13 51 17 51 L47 51 Q51 51 51 47 Z" fill="#f4a259" stroke="#7f4f24" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M32 14 L27.5 51 L36.5 51 Z" fill="#c96442" stroke="#7f4f24" stroke-width="3.5" stroke-linejoin="round"/>
+  <line x1="32" y1="14" x2="32" y2="7" stroke="#7f4f24" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

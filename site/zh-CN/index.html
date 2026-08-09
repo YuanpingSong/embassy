@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
+<meta name="description" content="Embassy — 您的 AI 智能体的本地大使馆。在一台机器上实现 Claude Code 会话与 Codex 桌面任务之间的双向通信，一切尽在您的明确控制之下。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Embassy — 您的 AI 智能体的本地大使馆">
+<meta property="og:description" content="在一台机器上实现 Claude Code 会话与 Codex 桌面任务之间的双向通信，一切尽在您的明确控制之下。">
+<meta property="og:image" content="https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/social-preview.png">
+<link rel="alternate" hreflang="en" href="../">
+<link rel="alternate" hreflang="zh-CN" href="./">
+<link rel="alternate" hreflang="x-default" href="../">
+<meta name="theme-color" content="#f8f4ec">
+<link rel="icon" href="../mark-seal.svg" type="image/svg+xml">
+<title>Embassy — 您的 AI 智能体的本地大使馆</title>
+<style>
+  :root {
+    --porcelain: #f8f4ec;
+    --raise: #fffdf8;
+    --ink: #231f1a;
+    --ink-soft: #6d6558;
+    --rule: #e4dccd;
+    --seal: #b3382c;
+    --jade: #557f68;
+    --jade-text: #46705b;
+    --ochre: #a8842f;
+    --codeblock: #262019;
+    --serif: "Iowan Old Style", "Palatino Nova", Palatino, Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  .skip { position: absolute; left: -9999px; top: 0; background: var(--raise); color: var(--ink); padding: 8px 14px; border: 1px solid var(--rule); border-radius: 0 0 8px 0; z-index: 10; }
+  .skip:focus { left: 0; }
+  body { background: var(--porcelain); color: var(--ink); font: 16.5px/1.65 var(--sans); }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 0 28px; }
+  a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--seal); }
+
+  header.top { display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  .brand { display: flex; align-items: center; gap: 10px; font: 700 19px var(--serif); }
+  nav { display: flex; gap: 16px 26px; flex-wrap: wrap; }
+  nav a { color: var(--ink-soft); font-size: 14.5px; text-decoration: none; }
+  nav a:hover { color: var(--ink); }
+
+  .hero > * { min-width: 0; }
+  .hero { display: grid; grid-template-columns: minmax(340px, 7fr) minmax(300px, 5fr); gap: 56px; align-items: center; padding: 82px 0 64px; }
+  @media (max-width: 800px) { .hero { grid-template-columns: 1fr; gap: 40px; } }
+  .hero > div { min-width: 0; }
+  .hero h1 { font: 400 clamp(34px, 4.6vw, 52px)/1.14 var(--serif); letter-spacing: -0.01em; text-wrap: balance; }
+  .hero h1 .seal-word { color: var(--seal); font-style: italic; }
+  .hero .sub { margin-top: 18px; color: var(--ink-soft); font-size: 18px; max-width: 54ch; }
+  .ctas { margin-top: 30px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15.5px; text-decoration: none; }
+  .btn.primary { background: var(--seal); color: var(--porcelain); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.quiet { border: 1px solid var(--rule); color: var(--ink); background: var(--raise); }
+  .btn.quiet:hover { border-color: var(--ink-soft); }
+
+  .vig-cap { font: 600 10.5px var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 12px; }
+  .vignette { background: var(--raise); border: 1px solid var(--rule); border-radius: 12px; padding: 22px; box-shadow: 0 1px 2px rgb(35 31 26 / 4%); }
+  .vignette .party { font: 600 13px var(--mono); overflow-wrap: anywhere; }
+  .vignette .party small { display: block; font: 400 11px var(--sans); color: var(--ink-soft); letter-spacing: 0.06em; text-transform: uppercase; margin-top: 2px; }
+  .vignette .msg { margin: 10px 0 14px; padding: 12px 14px; border-left: 2px solid var(--rule); color: var(--ink-soft); font-size: 14px; }
+  .vignette .transit { display: flex; align-items: center; gap: 10px; margin: 14px 0; }
+  .vignette .transit .line { flex: 1; border-top: 1px solid var(--rule); }
+  .vignette .receipt { display: flex; align-items: center; gap: 8px; font: 600 13px var(--mono); color: var(--jade-text); margin-top: 4px; overflow-wrap: anywhere; }
+  .vignette .reply { margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--rule); }
+
+  section { padding: 70px 0 6px; }
+  .eyebrow { font: 600 11.5px var(--sans); letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-soft); }
+  section h2 { font: 400 30px/1.25 var(--serif); margin: 10px 0 14px; letter-spacing: -0.005em; text-wrap: balance; }
+  section > .wrap > p { color: var(--ink-soft); max-width: 66ch; margin-bottom: 12px; }
+  section > .wrap > p strong { color: var(--ink); }
+
+  .whys { margin-top: 20px; border-top: 1px solid var(--rule); }
+  .whys p { padding: 16px 0; border-bottom: 1px solid var(--rule); color: var(--ink-soft); font-size: 16px; max-width: 70ch; margin: 0; }
+
+  .ledger { margin-top: 26px; border-top: 1px solid var(--rule); }
+  .ledger .row > * { min-width: 0; }
+  .ledger .row { display: grid; grid-template-columns: 64px 180px 1fr; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  @media (max-width: 700px) { .ledger .row { grid-template-columns: 48px 1fr; } .ledger .row .what { grid-column: 2; } }
+  .ledger .no { font: 400 26px var(--serif); color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .ledger .name { font-weight: 650; font-size: 16px; }
+  .ledger .what { color: var(--ink-soft); font-size: 15px; max-width: 60ch; }
+  code { font-family: var(--mono); font-size: 0.86em; overflow-wrap: anywhere; background: rgb(35 31 26 / 5%); border: 1px solid var(--rule); border-radius: 5px; padding: 1px 6px; }
+
+  .truths { margin-top: 22px; }
+  .truths .t > * { min-width: 0; }
+  .truths .t { display: grid; grid-template-columns: 24px 1fr; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--rule); align-items: start; }
+  .truths .t p { color: var(--ink-soft); font-size: 15px; max-width: 68ch; margin: 0; }
+  .truths .t p strong { color: var(--ink); }
+  .truths svg { margin-top: 3px; }
+
+  pre { max-width: 100%; background: var(--codeblock); border-radius: 10px; padding: 18px 20px; overflow-x: auto; margin: 20px 0 8px; }
+  pre code { border: 0; background: none; padding: 0; font-size: 13.5px; line-height: 1.75; color: #f2eee4; }
+  pre .c { color: #9a8f7d; }
+  pre .out { color: #b8ad99; }
+  ul.req { margin: 12px 0 0 20px; color: var(--ink-soft); font-size: 15px; }
+  ul.req li { margin: 6px 0; }
+
+  footer { margin-top: 88px; border-top: 1px solid var(--rule); padding: 40px 0 64px; color: var(--ink-soft); font-size: 14.5px; }
+  footer .cols { display: flex; gap: 56px; flex-wrap: wrap; }
+  footer h3 { font: 600 11.5px var(--sans); letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 12px; }
+  footer li { list-style: none; margin: 7px 0; }
+  footer a { text-decoration: none; color: var(--ink); }
+  footer a:hover { text-decoration: underline; }
+  footer .legal { margin-top: 34px; max-width: 74ch; font-size: 13px; }
+</style>
+</head>
+<body>
+<a href="#why" class="skip">跳至正文</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="mark" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="27" stroke="currentColor" stroke-width="2.5" fill="none"/>
+      <path d="M26.5 17 A19.5 19.5 0 0 0 26.5 47" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+      <path d="M37.5 17 A19.5 19.5 0 0 1 37.5 47" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+      <circle cx="32" cy="32" r="3" fill="#b3382c"/>
+    </symbol>
+    <symbol id="mark-small" viewBox="0 0 64 64">
+      <path d="M23 11 A25 25 0 0 0 23 53" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+      <path d="M41 11 A25 25 0 0 1 41 53" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+      <circle cx="32" cy="32" r="4" fill="currentColor"/>
+    </symbol>
+    <symbol id="seal-intact" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="26" stroke="currentColor" stroke-width="6" fill="none"/>
+      <circle cx="32" cy="32" r="7" fill="currentColor"/>
+    </symbol>
+    <symbol id="seal-half" viewBox="0 0 64 64">
+      <path d="M32 6 A26 26 0 1 1 12 14" stroke="currentColor" stroke-width="6" fill="none" stroke-linecap="round"/>
+      <circle cx="32" cy="32" r="7" fill="currentColor"/>
+    </symbol>
+    <symbol id="seal-broken" viewBox="0 0 64 64">
+      <path d="M50 14 A26 26 0 1 0 50 50" stroke="currentColor" stroke-width="6" fill="none" stroke-linecap="round"/>
+      <circle cx="32" cy="32" r="7" fill="currentColor"/>
+    </symbol>
+    <symbol id="glyph-ring" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="26" stroke="currentColor" stroke-width="6" fill="none"/>
+    </symbol>
+    <symbol id="glyph-stop" viewBox="0 0 64 64">
+      <path d="M22 8 H42 L56 22 V42 L42 56 H22 L8 42 V22 Z" stroke="currentColor" stroke-width="5.5" fill="none" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="glyph-square" viewBox="0 0 64 64">
+      <rect x="10" y="10" width="44" height="44" rx="8" stroke="currentColor" stroke-width="6" fill="none"/>
+    </symbol>
+  </defs>
+</svg>
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><svg width="26" height="26" style="color:var(--ink)" aria-hidden="true"><use href="#mark"/></svg> Embassy</div>
+    <nav>
+      <a href="#why">为什么</a>
+      <a href="#how">工作原理</a>
+      <a href="#dashboard">仪表盘</a>
+      <a href="#truth">协议真相</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="https://github.com/YuanpingSong/embassy">GitHub</a>
+      <a href="../" lang="en">English</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>您的智能体无法相互交流。给它们一座<span class="seal-word">大使馆</span>。</h1>
+      <p class="sub">Embassy 是一个本地单用户网关：您运行中的 Claude Code 会话和 Codex 桌面任务在同一台机器上双向交换消息，每一步都经过操作者的明确操作。每次被接受的发送都会返回一个投递令牌，并最终进入一个明确的终态。</p>
+      <div class="ctas">
+        <a class="btn primary" href="#quickstart">快速开始</a>
+        <a class="btn quiet" href="https://github.com/YuanpingSong/embassy">在 GitHub 上查看</a>
+      </div>
+    </div>
+    <figure class="vignette">
+      <figcaption class="vig-cap">示例交换</figcaption>
+      <div class="party">codex-reviewer@this-mac<small>Codex 任务</small></div>
+      <div class="msg">请审查当前方案并指出主要风险。</div>
+      <div class="transit">
+        <span class="line"></span>
+        <svg width="20" height="20" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>
+        <span class="line"></span>
+      </div>
+      <div class="party">advisor@this-mac<small>Claude Code 会话</small></div>
+      <div class="receipt"><svg width="14" height="14" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg> 已投递 · 18 ms · 342 B</div>
+      <div class="reply">
+        <div class="msg">主要风险：迁移依赖了过期的路由绑定。我的笔记中标记了两处调用位置。</div>
+        <div class="receipt"><svg width="14" height="14" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg> 回复已投递 · conv_… 令牌已返回给发送方</div>
+      </div>
+    </figure>
+  </div>
+
+  <section id="why">
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">为什么</span>
+      <h2>当两个工具需要交谈时。</h2>
+      <div class="whys">
+        <p>您的 Claude 会话在工作流中途向您的 Codex 任务提问——您无需切换窗口或粘贴任何内容。</p>
+        <p>Codex 在您离开时向 Claude 发送问题；回复被路由回来，回执确认已投递。</p>
+        <p>Claude 使用其原生工具向运行中的 Codex 任务发送消息——无需安装插件，无需编写配置。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">工作原理</span>
+      <h2>五个步骤，仅限必要的那些。</h2>
+      <p>无需 Embassy 账户、无守护进程、无配置文件——五个动作，每一个都在您的终端中可见。</p>
+      <div class="ledger">
+        <div class="row"><span class="no">1</span><span class="name">启动</span><span class="what">在您信任的终端中运行 <code>embassy serve</code>。它保持在前台运行，将静态仪表盘页面——<code>gateway-dashboard.html</code> 及其 <code>gateway-dashboard.zh-CN.html</code> 版本——写入其私有状态目录，且永不守护进程化。主机级租约确保每个账户只有一个代理。</span></div>
+        <div class="row"><span class="no">2</span><span class="name">注册</span><span class="what">Codex 任务从其自身进程内部注册——要求 Codex 智能体在当前回合中将 <code>embassy register-codex --alias codex-reviewer@this-mac</code> 作为 shell 步骤运行。注册会让该任务对以您的操作系统用户身份运行的兼容在线 Claude 会话可见；选择一个 Claude 会话后，它既是 Codex 的发送目的地，也是唯一被接受的入站发送方。其他发送方以 <code>SENDER_NOT_PAIRED</code> 终局结算；<code>serve --inbound open</code> 是显式退出配对的选项。已接受回合仍遵循 Codex 任务现有的原生审批和沙盒策略。使用 <code>unregister-codex</code> 注销。</span></div>
+        <div class="row"><span class="no">3</span><span class="name">选择</span><span class="what">对于 Codex→Claude 方向，您需要显式选择目标——<code>embassy select-claude --alias &lt;a name from availablePeers&gt;</code>。发送永远不会静默选择已发现的会话。</span></div>
+        <div class="row"><span class="no">4</span><span class="name">发送</span><span class="what">消息正文通过 stdin 传入，最大 16&nbsp;KiB，仅存在于内存中。向繁忙的 Codex 任务发送消息会排队；空闲的目标会获得一个普通回合。</span></div>
+        <div class="row" id="dashboard"><span class="no">5</span><span class="name">监控</span><span class="what">可选。<code>embassy dashboard --live</code> 打开同一元数据的认证浏览器视图——一个在 <code>127.0.0.1</code> 上的独立前台进程，仅提供三项需确认的路由同意操作：选择、取消选择和刷新发现结果。状态目录中的 <code>gateway-dashboard.html</code> 是惰性离线副本：无脚本、无网络、无自动刷新——重新运行 <code>embassy refresh-dashboard</code> 并刷新页面。</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="truth">
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">协议真相</span>
+      <h2>记录不会粉饰。</h2>
+      <p>Embassy 的回执严格表达其字面含义——不多也不少。</p>
+      <div class="truths">
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg>
+          <p><strong>已投递意味着接收方已接受消息，而非模型已完成处理。</strong>对于 Codex 方向，这指 App Server 接受了该回合；对于 Claude 方向，这指消息已释放到会话的原生队列中——并非已读取，也并非已完成。没有原生终端回执的已确认写入报告为 <code>unconfirmed</code>；不确定的写入报告为 <code>ambiguous</code>，且永不自动重试。CLI 的初始接受会返回一个会话令牌和一个投递令牌；<code>held</code> 和 <code>transport_written</code> 是过程状态，而非成功状态。源自 Claude 的失败以原生 <code>expired</code> 状态和安全 reason 代码结算。默认的 merged 通知策略避免重复的终局诊断帧，同时保留 verbose 和 quiet 模式。</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ochre)" aria-hidden="true"><use href="#seal-half"/></svg>
+          <p><strong>队列是诚实的。</strong>向繁忙的 Codex 任务发送消息会排队而非中断——Embassy 从不干预另一个智能体的回合内上下文。排队的消息在目标空闲后按顺序排出，队列存留时间在仪表盘上可见——永不静默。</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-ring"/></svg>
+          <p><strong>重启会丢弃消息正文，这是有意为之。</strong>消息文本永不持久化——不在状态中、不在日志中、不在事件中、也不在仪表盘中。如果代理停止，排队的文本即刻消失，不会重播任何内容。</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-stop"/></svg>
+          <p><strong>未知版本以关闭方式失败。</strong>Claude Code 2.1.226，对等协议 1——仍在运行的 2.1.224 与 2.1.225 会话通过补丁升级保持兼容——以及 Codex App Server 0.147.0。Embassy 无法验证的任何内容都会被拒绝，而非被猜测为兼容：无法识别的会话不可发现，无法识别的 App Server 结构会使路由不可写入。新版本的支持随发布版本一同提供——参阅<a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">更新日志</a>。</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-square"/></svg>
+          <p><strong><code>embassy serve</code> 不打开任何 TCP 或 HTTP 监听器；可选的实时伴侣组件才会。</strong><code>embassy dashboard --live</code> 是一个独立的前台进程，在临时端口上绑定 127.0.0.1，用于认证元数据流。它没有 CORS、提供商或通用控制表面；唯一的变更操作是需确认的选择、取消选择和刷新发现结果，并限制为每分钟六次。认证作用域是浏览器，而非机器：以您的操作系统用户身份运行的任何进程——包括 root 和浏览器扩展——都能读取浏览器能读取的内容。<code>embassy serve</code> 本身不打开网络监听器，也不发起任何提供商 API 调用——无遥测、无云端组件。它仅通过本地 Unix 套接字通信：其 mode-0700 状态目录中的控制套接字，以及它连接的提供商拥有的 Claude 对等套接字和已在运行的 Codex App Server 套接字。智能体本身仍由云端支持：路由的消息成为普通模型回合的输入，因此其文本会到达 Anthropic 或 OpenAI，就如同您亲自在该会话中键入一样。"本地"描述的是代理和路由，而非模型推理。</p>
+        </div>
+        <div class="t">
+          <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>
+          <p><strong>这是一条新的输入路径。</strong>没有任何智能体获得它原本没有的工具，Embassy 不授予、不放宽、也不回答任何东西。但两个原本无法交换文本的产品现在可以了——请将每条路由消息视为可能引导其接收方的不可信输入。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="quickstart">
+    <div class="wrap" style="padding:0">
+      <span class="eyebrow">快速开始</span>
+      <h2>先说真实的前提条件。</h2>
+      <ul class="req">
+        <li>仅限 macOS（仅限 localhost）· Node.js ≥ 20</li>
+        <li>Claude Code 2.1.226，已安装并登录——需有会话运行中，否则 <code>availablePeers</code> 为空</li>
+        <li>Codex 桌面版及其托管的 App Server 0.147.0 运行中</li>
+      </ul>
+<pre><code><span class="c"># 安装并启动代理（前台运行，在受信任的终端中）</span>
+npm install -g agent-embassy
+embassy serve
+
+<span class="c"># 在另一个终端中：列出 Embassy 发现的候选会话</span>
+embassy status
+<span class="out">  availablePeers: ["advisor@this-mac", "researcher@this-mac"]</span>
+
+<span class="c"># 可选，在第三个终端中：认证元数据与有限路由同意操作</span>
+embassy dashboard --live
+
+<span class="c"># 在 Codex 任务内部——要求 Codex 智能体将此作为 shell 步骤运行：</span>
+embassy register-codex --alias codex-reviewer@this-mac
+
+<span class="c"># 作为操作者：从上面的 availablePeers 中选择一个名称（您看到的会有所不同）</span>
+embassy select-claude --alias advisor@this-mac
+
+<span class="c"># 从 Codex 任务发送（正文通过 stdin 传入，不通过参数）</span>
+embassy send-to-claude --from codex-reviewer@this-mac --to advisor@this-mac --expects-reply &lt;&lt;'MSG'
+Please review the current approach and note the main risk.
+MSG
+
+<span class="c"># 使用返回的令牌继续对话，双方均可发起</span>
+embassy reply --conversation conv_&lt;token&gt; --alias codex-reviewer@this-mac &lt;&lt;'MSG'
+Please expand on the second call site.
+MSG
+
+<span class="c"># 另一个方向无需任何操作：运行中的 Claude 会话</span>
+<span class="c"># 在其原生 ListAgents 中看到 codex-reviewer 并直接发送消息。</span></code></pre>
+      <p>完整的快速开始指南——会话 UUID 寻址、投递语义、仪表盘——请参阅 <a href="https://github.com/YuanpingSong/embassy#quickstart">README</a>。</p>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap" style="padding:0">
+      <div class="cols">
+        <div>
+          <h3>文档</h3>
+          <ul>
+            <li><a href="https://github.com/YuanpingSong/embassy#readme">README</a></li>
+            <li><a href="https://github.com/YuanpingSong/embassy/blob/main/docs/GATEWAY-ARCHITECTURE.md">架构</a></li>
+            <li><a href="https://github.com/YuanpingSong/embassy/blob/main/SECURITY.md">安全政策</a></li>
+            <li><a href="https://github.com/YuanpingSong/embassy/blob/main/CONTRIBUTING.md">贡献指南</a></li>
+          </ul>
+        </div>
+        <div>
+          <h3>面向智能体</h3>
+          <ul><li><a href="https://github.com/YuanpingSong/embassy/blob/main/skills/embassy-peer/SKILL.md">embassy-peer 技能</a></li></ul>
+        </div>
+        <div>
+          <h3>项目</h3>
+          <ul>
+            <li><a href="https://github.com/YuanpingSong/embassy">GitHub</a></li>
+            <li><a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">更新日志</a></li>
+            <li><a href="https://github.com/YuanpingSong/embassy/blob/main/LICENSE">MIT 许可证</a></li>
+          </ul>
+        </div>
+      </div>
+      <p class="legal">Embassy 是一个非官方的独立项目——与 Anthropic 或 OpenAI 无关联、未获其背书或赞助。Claude 是 Anthropic 的商标；Codex 和 ChatGPT 是 OpenAI 的商标。本网站是一个静态页面：不加载外部资源、不设置 Cookie、不收集任何数据。</p>
+    </div>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [20.x, 22.x]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+
+      - name: Pin the declared npm version
+        run: |
+          npm install --global npm@10.9.8 --ignore-scripts
+          test "$(npm --version)" = "10.9.8"
+
+      - name: Install dependencies on macOS
+        if: runner.os == 'macOS'
+        run: npm ci
+
+      # The deterministic TypeScript suite is platform-independent. This
+      # Linux-only test install uses --force to bypass the root package's macOS
+      # publish guard; release/package jobs use normal installs, and no Linux
+      # artifact ships.
+      - name: Install dependencies for Linux checks
+        if: runner.os == 'Linux'
+        run: npm ci --force
+
+      - name: Run deterministic checks
+        env:
+          TMPDIR: /tmp
+        run: npm run check
+
+  package:
+    name: Build and inspect release package
+    needs: test
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+
+      - name: Pin the declared npm version
+        run: |
+          npm install --global npm@10.9.8 --ignore-scripts
+          test "$(npm --version)" = "10.9.8"
+
+      - name: Validate stable release metadata
+        id: metadata
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, existsSync, readFileSync } from "node:fs";
+
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          if (pkg.name !== "agent-embassy") {
+            throw new Error(`Unexpected package name: ${pkg.name}`);
+          }
+          if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(pkg.version)) {
+            throw new Error(`Release version must be stable semver: ${pkg.version}`);
+          }
+
+          const expectedTag = `v${pkg.version}`;
+          if (process.env.GITHUB_REF_TYPE !== "tag" || process.env.GITHUB_REF_NAME !== expectedTag) {
+            throw new Error(`Expected exact release tag ${expectedTag}`);
+          }
+
+          const notes = `.github/release-notes/${expectedTag}.md`;
+          if (!existsSync(notes)) throw new Error(`Missing release notes file: ${notes}`);
+
+          const tarball = `${pkg.name}-${pkg.version}.tgz`;
+          appendFileSync(process.env.GITHUB_OUTPUT, `notes=${notes}\ntarball=${tarball}\n`);
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and inspect the release tarball
+        shell: bash
+        env:
+          EXPECTED_TARBALL: ${{ steps.metadata.outputs.tarball }}
+        run: |
+          npm pack --json > package-report.json
+          node scripts/check-npm-package.mjs --report package-report.json --packed "$EXPECTED_TARBALL"
+
+      - name: Stage checksummed release bundle
+        shell: bash
+        env:
+          NOTES: ${{ steps.metadata.outputs.notes }}
+          TARBALL: ${{ steps.metadata.outputs.tarball }}
+        run: |
+          mkdir release-bundle
+          cp "$NOTES" "release-bundle/${GITHUB_REF_NAME}.md"
+          cp "$TARBALL" "release-bundle/$TARBALL"
+          cd release-bundle
+          shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
+          shasum -a 256 -c "$TARBALL.sha256"
+
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: embassy-release-${{ github.ref_name }}
+          path: release-bundle
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  release:
+    name: Create GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified release bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: embassy-release-${{ github.ref_name }}
+          path: release-bundle
+
+      - name: Verify and create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tarball="agent-embassy-${version}.tgz"
+          checksum="${tarball}.sha256"
+          notes="${GITHUB_REF_NAME}.md"
+
+          remote_commit="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" \
+            --jq .sha)"
+          if [ "$remote_commit" != "$GITHUB_SHA" ]; then
+            echo "Release tag no longer targets the workflow commit" >&2
+            exit 1
+          fi
+
+          shopt -s nullglob dotglob
+          files=(release-bundle/*)
+          if [ "${#files[@]}" -ne 3 ]; then
+            echo "Expected exactly three release files; found ${#files[@]}" >&2
+            exit 1
+          fi
+          for file in "$tarball" "$checksum" "$notes"; do
+            if [ ! -f "release-bundle/$file" ]; then
+              echo "Missing release file: $file" >&2
+              exit 1
+            fi
+          done
+
+          cd release-bundle
+          sha256sum -c "$checksum"
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Embassy $GITHUB_REF_NAME" \
+            --notes-file "$notes" \
+            "$tarball" \
+            "$checksum"
+
+      # npm publishing is deliberately not automated. It remains a separate,
+      # explicit maintainer action using this exact verified tag and tarball.

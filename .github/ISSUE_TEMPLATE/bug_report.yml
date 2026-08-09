@@ -1,0 +1,126 @@
+name: Bug report
+description: Something in Embassy is not behaving as documented.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Embassy is a local, single-user gateway
+        between Claude Code sessions and a Codex desktop task — please do
+        not paste message bodies, prompts, replies, credentials, OAuth
+        material, or raw provider output into this form. `embassy status`
+        excludes bodies and native identifiers, but its aliases, hosts, and
+        timestamps may still be personal; review and redact it before pasting.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact commands run, and the order they were run in.
+      placeholder: |
+        1. embassy serve
+        2. embassy register-codex --alias codex-reviewer@this-mac
+        3. embassy select-claude --alias advisor@this-mac
+        4. printf '%s\n' '[BODY REDACTED]' | embassy send-to-claude --from codex-reviewer@this-mac --to advisor@this-mac
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: input
+    id: embassy-version
+    attributes:
+      label: Embassy version
+      description: "The installed version reported by `embassy --version`."
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: >-
+        Embassy v1 is pinned to Claude Code 2.1.225 (2.1.224 sessions
+        already running stay discoverable). Note if you are on a different
+        version.
+      placeholder: "2.1.225"
+    validations:
+      required: true
+
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex App Server version
+      description: >-
+        Embassy v1 is pinned to the Codex App Server 0.147.0 schema. Note
+        if you are on a different version.
+      placeholder: "0.147.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Embassy v1 supports macOS only.
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: "`node --version` (Embassy requires Node.js ≥ 20)."
+    validations:
+      required: true
+
+  - type: textarea
+    id: status-output
+    attributes:
+      label: "`embassy status` output"
+      description: >-
+        This output excludes message bodies, credentials, and raw provider
+        identifiers. It still includes aliases, hosts, states, and timestamps;
+        review it and redact personal metadata before pasting.
+      render: text
+
+  - type: dropdown
+    id: delivery-state
+    attributes:
+      label: Delivery state observed
+      description: Which delivery/receipt state did the message end up in?
+      options:
+        - delivered
+        - expired
+        - queued
+        - abandoned
+        - other / not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else relevant — logs (stderr only, no bodies), config, environment variables set (names only).

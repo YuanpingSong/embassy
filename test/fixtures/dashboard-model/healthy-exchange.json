@@ -1,0 +1,265 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-08T12:00:00.000Z",
+  "inboundMode": "paired",
+  "health": "healthy",
+  "overall": "ready",
+  "exchange": {
+    "claude": {
+      "kind": "claude",
+      "status": "ready",
+      "total": 2,
+      "ready": 1,
+      "selectable": 1,
+      "countIsLowerBound": false,
+      "primaryAlias": "claude-advisor@this-mac",
+      "nextAction": "none"
+    },
+    "codex": {
+      "kind": "codex",
+      "status": "ready",
+      "total": 1,
+      "ready": 1,
+      "countIsLowerBound": false,
+      "primaryAlias": "codex-builder@this-mac",
+      "nextAction": "none"
+    },
+    "queuedMessages": 0,
+    "queueCountIsLowerBound": false
+  },
+  "attention": [],
+  "transit": {
+    "queuedMessages": 0,
+    "activeDeliveries": 1,
+    "queueCountIsLowerBound": false,
+    "activeCountIsLowerBound": false
+  },
+  "activity": [
+    {
+      "direction": "claude_to_codex",
+      "sourceAlias": "claude-advisor@this-mac",
+      "targetAlias": "codex-builder@this-mac",
+      "messageIdSuffix": "7de41c92",
+      "state": "transport_written",
+      "timestamp": "2026-08-08T11:59:55.000Z",
+      "bytes": 640,
+      "events": [
+        {
+          "sequence": 105,
+          "timestamp": "2026-08-08T11:59:53.000Z",
+          "state": "queued"
+        },
+        {
+          "sequence": 106,
+          "timestamp": "2026-08-08T11:59:54.000Z",
+          "state": "dispatching"
+        },
+        {
+          "sequence": 107,
+          "timestamp": "2026-08-08T11:59:55.000Z",
+          "state": "transport_written"
+        }
+      ]
+    },
+    {
+      "direction": "claude_to_codex",
+      "sourceAlias": "claude-advisor@this-mac",
+      "targetAlias": "codex-builder@this-mac",
+      "messageIdSuffix": "9f2c1ab4",
+      "state": "delivered",
+      "timestamp": "2026-08-08T11:59:12.000Z",
+      "latencyMs": 412,
+      "bytes": 1024,
+      "events": [
+        {
+          "sequence": 101,
+          "timestamp": "2026-08-08T11:59:10.000Z",
+          "state": "queued"
+        },
+        {
+          "sequence": 102,
+          "timestamp": "2026-08-08T11:59:11.000Z",
+          "state": "dispatching"
+        },
+        {
+          "sequence": 103,
+          "timestamp": "2026-08-08T11:59:11.000Z",
+          "state": "transport_written"
+        },
+        {
+          "sequence": 104,
+          "timestamp": "2026-08-08T11:59:12.000Z",
+          "state": "delivered",
+          "latencyMs": 412
+        }
+      ]
+    },
+    {
+      "direction": "codex_to_claude",
+      "sourceAlias": "codex-builder@this-mac",
+      "targetAlias": "claude-advisor@this-mac",
+      "messageIdSuffix": "3c81f0",
+      "state": "delivered",
+      "timestamp": "2026-08-08T11:58:41.000Z",
+      "latencyMs": 355,
+      "bytes": 2048,
+      "events": [
+        {
+          "sequence": 98,
+          "timestamp": "2026-08-08T11:58:39.000Z",
+          "state": "queued"
+        },
+        {
+          "sequence": 99,
+          "timestamp": "2026-08-08T11:58:40.000Z",
+          "state": "dispatching"
+        },
+        {
+          "sequence": 100,
+          "timestamp": "2026-08-08T11:58:41.000Z",
+          "state": "delivered",
+          "latencyMs": 355
+        }
+      ]
+    }
+  ],
+  "peers": [
+    {
+      "alias": "claude-advisor@this-mac",
+      "host": "this-mac",
+      "state": "idle",
+      "compatibility": "compatible",
+      "selected": true,
+      "selectable": true,
+      "lastSeenAt": "2026-08-08T11:59:58.000Z"
+    },
+    {
+      "alias": "claude-reviewer@this-mac",
+      "host": "this-mac",
+      "state": "offline",
+      "compatibility": "compatible",
+      "selected": false,
+      "selectable": false,
+      "selectionGuidance": "offline",
+      "lastSeenAt": "2026-08-08T11:31:04.000Z"
+    }
+  ],
+  "routes": [
+    {
+      "alias": "claude-advisor@this-mac",
+      "provider": "claude",
+      "host": "this-mac",
+      "enabled": true,
+      "state": "idle",
+      "compatibility": "compatible",
+      "queueDepth": 0,
+      "counters": {
+        "accepted": 18,
+        "delivered": 17,
+        "unconfirmed": 1,
+        "failed": 0,
+        "ambiguous": 0,
+        "expired": 0,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 36864
+      },
+      "lastSeenAt": "2026-08-08T11:59:58.000Z"
+    },
+    {
+      "alias": "codex-builder@this-mac",
+      "provider": "codex",
+      "host": "this-mac",
+      "enabled": true,
+      "state": "idle",
+      "compatibility": "compatible",
+      "queueDepth": 0,
+      "counters": {
+        "accepted": 21,
+        "delivered": 21,
+        "unconfirmed": 0,
+        "failed": 0,
+        "ambiguous": 0,
+        "expired": 0,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 41984
+      },
+      "lastSeenAt": "2026-08-08T11:59:59.000Z"
+    }
+  ],
+  "pairs": [
+    {
+      "claudeAlias": "claude-advisor@this-mac",
+      "codexAlias": "codex-builder@this-mac",
+      "host": "this-mac",
+      "state": "ready",
+      "counters": {
+        "accepted": 12,
+        "delivered": 12,
+        "unconfirmed": 0,
+        "failed": 0,
+        "ambiguous": 0,
+        "expired": 0,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 24576
+      }
+    }
+  ],
+  "graph": {
+    "pairCount": 1,
+    "readyPairCount": 1,
+    "pairCountIsLowerBound": false,
+    "unpairedReadyClaude": 0,
+    "unpairedReadyCodex": 0
+  },
+  "connectors": [
+    {
+      "provider": "claude",
+      "host": "this-mac",
+      "health": "healthy",
+      "compatibility": "compatible",
+      "protocol": "peer/1",
+      "protocolVersion": "1",
+      "lastSeenAt": "2026-08-08T11:59:58.000Z"
+    },
+    {
+      "provider": "codex",
+      "host": "this-mac",
+      "health": "healthy",
+      "compatibility": "compatible",
+      "protocol": "app-server/1",
+      "protocolVersion": "0.147.0",
+      "lastSeenAt": "2026-08-08T11:59:59.000Z"
+    }
+  ],
+  "accounting": {
+    "accepted": 39,
+    "duplicates": 1,
+    "delivered": 38,
+    "unconfirmed": 1,
+    "failed": 0,
+    "ambiguous": 0,
+    "expired": 0,
+    "cancelled": 0,
+    "abandoned": 0,
+    "rejected": 0,
+    "bytesAccepted": 78848,
+    "queuedBytes": 0
+  },
+  "omissions": {
+    "connectors": 0,
+    "availablePeers": 0,
+    "routes": 0,
+    "pairs": 0,
+    "upstreamMessageEvents": 0,
+    "messageGroups": 0,
+    "messageEvents": 0,
+    "upstreamAlerts": 0,
+    "attentionItems": 0
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "name": "agent-embassy",
+  "version": "1.0.0",
+  "description": "A local gateway for bidirectional messaging between Claude Code sessions and Codex tasks.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YuanpingSong/embassy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YuanpingSong/embassy/issues"
+  },
+  "homepage": "https://github.com/YuanpingSong/embassy#readme",
+  "keywords": [
+    "ai-agents",
+    "gateway",
+    "claude-code",
+    "codex",
+    "multi-agent"
+  ],
+  "packageManager": "npm@10.9.8",
+  "type": "module",
+  "os": [
+    "darwin"
+  ],
+  "bin": {
+    "embassy": "dist/src/gateway/cli.js",
+    "claude-codex-gateway": "dist/src/gateway/cli.js"
+  },
+  "files": [
+    "dist/src/gateway",
+    "dist/src/errors.js",
+    "dist/src/errors.js.map",
+    "dist/src/errors.d.ts",
+    "dist/src/mutex.js",
+    "dist/src/mutex.js.map",
+    "dist/src/mutex.d.ts",
+    "assets/mark-seal.svg",
+    "assets/mark.svg",
+    "assets/social-preview.png",
+    "skills/embassy-peer",
+    "docs/DESIGN.md",
+    "docs/GATEWAY-ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "README.zh-CN.md",
+    "SECURITY.md",
+    "LICENSE",
+    "assets/live-dashboard",
+    "assets/vendor/react"
+  ],
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json",
+    "check": "npm run typecheck && npm test",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "embassy": "node dist/src/gateway/cli.js",
+    "prepack": "npm run build",
+    "probe:codex-local": "tsx scripts/probe-codex-local.ts",
+    "probe:codex-remote": "tsx scripts/probe-codex-remote.ts",
+    "pretest": "npm run build",
+    "start": "node dist/src/gateway/cli.js serve",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/react": "18.3.12",
+    "@types/ws": "8.18.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  },
+  "author": "Yuanping Song <yuanping.song@outlook.com>"
+}

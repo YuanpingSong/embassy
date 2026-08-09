@@ -1,0 +1,90 @@
+name: Setup help
+description: The quickstart is not working for you.
+title: "[setup]: "
+labels: ["setup-help"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, re-read the
+        [Quickstart](https://github.com/YuanpingSong/embassy#quickstart).
+        Do not paste message bodies, prompts, replies, credentials, OAuth
+        material, raw provider output, or unreviewed status metadata into
+        this form. Embassy never changes a Codex task's native approval or
+        sandbox policy and never answers an approval request.
+
+  - type: dropdown
+    id: failed-step
+    attributes:
+      label: Which quickstart step failed?
+      options:
+        - "embassy serve (starting the broker)"
+        - "embassy health / embassy status"
+        - "embassy register-codex"
+        - "embassy select-claude"
+        - "embassy send-to-claude"
+        - "embassy reply"
+        - "Claude session messaging the codex-* peer"
+        - "Install (npm install -g / build from source)"
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: fail-error
+    attributes:
+      label: Exact fail-closed error line
+      description: >-
+        Embassy fails closed on version mismatches and invalid state
+        rather than guessing. Paste the exact error text (this should not
+        contain identifiers or bodies — if it does, redact them and note
+        that you redacted).
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: embassy-version
+    attributes:
+      label: Embassy version
+      description: "The installed version reported by `embassy --version`."
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: Embassy v1 is pinned to Claude Code 2.1.225.
+      placeholder: "2.1.225"
+    validations:
+      required: true
+
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex App Server version
+      description: Embassy v1 is pinned to the Codex App Server 0.147.0 schema.
+      placeholder: "0.147.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that might help — sanitized command history, environment variable names set (not values), or reviewed/redacted status output.

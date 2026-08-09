@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [20.x, 22.x]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+
+      - name: Pin the declared npm version
+        run: |
+          npm install --global npm@10.9.8 --ignore-scripts
+          test "$(npm --version)" = "10.9.8"
+
+      - name: Install dependencies on macOS
+        if: runner.os == 'macOS'
+        run: npm ci
+
+      # The deterministic TypeScript suite is platform-independent. This
+      # Linux-only test install uses --force to bypass the root package's macOS
+      # publish guard; release/package jobs use normal installs, and no Linux
+      # artifact ships.
+      - name: Install dependencies for Linux checks
+        if: runner.os == 'Linux'
+        run: npm ci --force
+
+      - name: Run deterministic checks
+        env:
+          TMPDIR: /tmp
+        run: npm run check
+
+  package:
+    name: Inspect npm package
+    needs: test
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+
+      - name: Pin the declared npm version
+        run: |
+          npm install --global npm@10.9.8 --ignore-scripts
+          test "$(npm --version)" = "10.9.8"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and inspect the dry-run package
+        shell: bash
+        run: |
+          npm pack --dry-run --json > package-report.json
+          node scripts/check-npm-package.mjs --report package-report.json
+
+      - name: Verify the installed package and ESM graph
+        shell: bash
+        run: |
+          npm pack --json > package-report.json
+          node scripts/check-npm-package.mjs --report package-report.json --packed
