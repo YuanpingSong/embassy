@@ -131,17 +131,20 @@ class CliFault extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly hint: CliCopyKey | undefined;
+  readonly kind: CliStderrKind | undefined;
 
   constructor(
     code: string,
     retryable = false,
     hint?: CliCopyKey,
+    kind?: CliStderrKind,
   ) {
     super("The gateway client rejected the request.");
     this.name = "CliFault";
     this.code = code;
     this.retryable = retryable;
     this.hint = hint;
+    this.kind = kind;
   }
 }
 
@@ -625,7 +628,7 @@ export async function validatePrivateGatewayControlSocket(
     (state.mode & 0o077) !== 0 ||
     (expectedUid !== undefined && state.uid !== expectedUid)
   ) {
-    throw new CliFault("CONTROL_STATE_UNSAFE");
+    throw new CliFault("CONTROL_STATE_UNSAFE", false, undefined, "unsafe");
   }
   if (
     socket.isSymbolicLink() ||
@@ -633,7 +636,7 @@ export async function validatePrivateGatewayControlSocket(
     (socket.mode & 0o777) !== 0o600 ||
     (expectedUid !== undefined && socket.uid !== expectedUid)
   ) {
-    throw new CliFault("CONTROL_SOCKET_UNSAFE");
+    throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe");
   }
 
   let stateReal: string;
@@ -644,13 +647,13 @@ export async function validatePrivateGatewayControlSocket(
       realpath(path.dirname(socketPath)),
     ]);
   } catch {
-    throw new CliFault("CONTROL_SOCKET_UNSAFE");
+    throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe");
   }
   if (
     path.dirname(socketPath) !== stateDir ||
     stateReal !== socketParentReal
   ) {
-    throw new CliFault("CONTROL_SOCKET_UNSAFE");
+    throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe");
   }
 }
 
@@ -935,14 +938,14 @@ export async function runGatewayCli(
       );
       if (outcome.kind === "unknown") {
         writeFailure(stdout, stderr, locale, command, "DELIVERY_TOKEN_UNKNOWN", {
-          kind: "decision",
+          kind: "tokenUnknown",
         });
         return gatewayCliExitCodes.rejected;
       }
       if (outcome.kind === "timeout") {
         writeFailure(stdout, stderr, locale, command, "DELIVERY_WAIT_TIMEOUT", {
           retryable: true,
-          kind: "unavailable",
+          kind: "deliveryTimeout",
         });
         return gatewayCliExitCodes.unavailable;
       }
@@ -1003,7 +1006,7 @@ export async function runGatewayCli(
     if (error instanceof CliFault) {
       writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.retryable,
-        kind: error.retryable ? "unavailable" : "input",
+        kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
       if (error.hint !== undefined) {
         stderr.write(`[embassy] ${getCliCopy(locale)[error.hint]}\n`);
@@ -1015,7 +1018,12 @@ export async function runGatewayCli(
     if (error instanceof BridgeError) {
       writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.recoverable,
-        kind: error.recoverable ? "unavailable" : "input",
+        kind:
+          error.code === "CLAUDE_VERSION_DRIFT"
+            ? "versionDrift"
+            : error.recoverable
+              ? "unavailable"
+              : "input",
       });
       return error.recoverable
         ? gatewayCliExitCodes.unavailable

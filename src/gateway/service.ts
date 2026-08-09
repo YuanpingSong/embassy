@@ -2057,7 +2057,7 @@ export class GatewayService {
         ) {
           throw new BridgeError(
             "CODEX_SUCCESSION_DRAIN_INCOMPLETE",
-            "Poisoned succession work did not reach a clean terminal barrier.",
+            "Interrupted succession work did not reach a clean stopping point. Restart the gateway with embassy serve.",
           );
         }
         execution.poisonCleanupReady = true;
@@ -2082,7 +2082,7 @@ export class GatewayService {
         if (!execution.poisonCleanupReady) {
           throw new BridgeError(
             "CODEX_SUCCESSION_DRAIN_INCOMPLETE",
-            "Poisoned generations cannot close before work and receipts are drained.",
+            "Interrupted generations cannot close before pending work and receipts are drained. Restart the gateway with embassy serve.",
           );
         }
         const results = await Promise.allSettled([
@@ -2166,7 +2166,7 @@ export class GatewayService {
     ) {
       throw new BridgeError(
         "CODEX_SUCCESSION_DRAIN_INCOMPLETE",
-        "Poisoned succession work did not reach a clean pre-cleanup barrier.",
+        "Interrupted succession work did not reach a clean pre-cleanup point. Restart the gateway with embassy serve.",
       );
     }
   }

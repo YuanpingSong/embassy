@@ -329,12 +329,32 @@ async function attestExecutablePath(
     if (
       !path.isAbsolute(linkTarget) ||
       path.resolve(linkTarget) !== linkTarget ||
-      linkTarget !== officialTarget ||
       path.dirname(linkTarget) !==
-        path.join(user.homedir, ".local", "share", "claude", "versions") ||
+        path.join(user.homedir, ".local", "share", "claude", "versions")
+    ) {
+      throw new BridgeError(
+        "UNSAFE_CLAUDE_EXECUTABLE",
+        "The official Claude launcher symlink target is outside its pinned version directory.",
+      );
+    }
+    if (
+      linkTarget !== officialTarget ||
       path.basename(linkTarget) !==
         CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion
     ) {
+      // A version-shaped target inside the official versions directory that
+      // is not the pinned version is drift from an auto-update, not
+      // tampering. Still fail closed, but say what happened and how to move
+      // forward. Only a strictly version-shaped basename is ever reflected.
+      const foundVersion = /^\d+\.\d+\.\d+$/.test(path.basename(linkTarget))
+        ? path.basename(linkTarget)
+        : undefined;
+      if (foundVersion !== undefined) {
+        throw new BridgeError(
+          "CLAUDE_VERSION_DRIFT",
+          `Installed Claude Code is ${foundVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
+        );
+      }
       throw new BridgeError(
         "UNSAFE_CLAUDE_EXECUTABLE",
         "The official Claude launcher symlink target is outside its pinned version directory.",
@@ -471,6 +491,19 @@ export async function attestClaudePeerRuntime(
     output.stderr.length !== 0 ||
     !VERSION_OUTPUT_PATTERN.test(output.stdout)
   ) {
+    // Well-formed output for a different version is auto-update drift and
+    // gets the actionable code; anything else stays the strict refusal.
+    const drifted =
+      output.stderr.length === 0 &&
+      Buffer.byteLength(output.stdout, "utf8") <= MAX_VERSION_OUTPUT_BYTES
+        ? /^(\d+\.\d+\.\d+) \(Claude Code\)\r?\n?$/.exec(output.stdout)
+        : null;
+    if (drifted !== null) {
+      throw new BridgeError(
+        "CLAUDE_VERSION_DRIFT",
+        `Installed Claude Code reports ${drifted[1]}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
+      );
+    }
     throw new BridgeError(
       "CLAUDE_PEER_VERSION_UNSUPPORTED",
       `Claude peer compatibility is pinned to Claude Code ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}.`,

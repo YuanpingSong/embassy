@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Actionable failure copy for the paths a new operator meets first: state-directory or socket safety violations, unknown delivery tokens, and `wait-delivery` timeouts each explain themselves and name the next command instead of a generic rejection line, in both locales.
+- Auto-update drift is fail-closed but self-explanatory: when the installed Claude Code moves past this build's pin, `serve` refuses with `CLAUDE_VERSION_DRIFT`, names the found and pinned versions, and points at `npm update -g agent-embassy` — tampering-shaped launcher states keep the strict refusal with nothing reflected.
 - **Embassy**, a local, single-user, bidirectional message gateway between running Claude Code sessions and Codex desktop tasks, packaged as `agent-embassy` with CLI binary `embassy`.
 - `embassy serve` — foreground broker that publishes one process-owned `codex-*` peer into Claude Code's live-session registry and opens its own callback socket; never daemonizes; removes both on shutdown.
 - `register-codex` / `unregister-codex` — register or retire a `codex-*` route, run from inside the Codex task itself so it inherits `CODEX_THREAD_ID`.

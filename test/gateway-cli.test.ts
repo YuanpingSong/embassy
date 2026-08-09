@@ -1058,7 +1058,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
   });
   assert.equal(
     unknownErr.chunks.join(""),
-    "[embassy] gateway rejected the request.\n",
+    "[embassy] delivery token not recognized; it may have expired or belong to a previous gateway session.\n",
   );
 
   const timeoutOut = capture();
@@ -1113,7 +1113,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
   });
   assert.equal(
     timeoutErr.chunks.join(""),
-    "[embassy] gateway unavailable.\n",
+    "[embassy] the delivery has not settled yet; the gateway is still running. Check again later with embassy delivery-status.\n",
   );
 });
 
@@ -1674,7 +1674,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
   });
   assert.equal(
     result.stderr,
-    "[embassy] request rejected.\n",
+    "[embassy] gateway state directory or socket has unexpected permissions or ownership. Verify nothing else controls that path before running embassy serve.\n",
   );
   assert.doesNotMatch(result.stdout, new RegExp(state.root.replaceAll("/", "\\/")));
 });

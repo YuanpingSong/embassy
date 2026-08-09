@@ -34,4 +34,12 @@ Options:
   "error.unavailable": "gateway unavailable.",
   "error.ambiguous": "outcome ambiguous; do not retry automatically.",
   "error.failure": "command failed.",
+  "error.unsafe":
+    "gateway state directory or socket has unexpected permissions or ownership. Verify nothing else controls that path before running embassy serve.",
+  "error.tokenUnknown":
+    "delivery token not recognized; it may have expired or belong to a previous gateway session.",
+  "error.deliveryTimeout":
+    "the delivery has not settled yet; the gateway is still running. Check again later with embassy delivery-status.",
+  "error.versionDrift":
+    "installed Claude Code is newer than this Embassy build supports. Update Embassy (npm update -g agent-embassy), then run embassy health.",
 } as const satisfies CliCopy;

@@ -149,14 +149,51 @@ test("runtime accepts only the exact official same-home pinned launcher symlink"
     ),
     (error: unknown) =>
       error instanceof BridgeError &&
-      error.code === "UNSAFE_CLAUDE_EXECUTABLE",
+      error.code === "CLAUDE_VERSION_DRIFT" &&
+      error.message.includes("2.1.224"),
+  );
+
+  // A non-version-shaped target inside the versions directory is never
+  // classified as drift and never reflected.
+  await unlink(current.executable);
+  const oddTarget = path.join(versionsDir, "evil name");
+  await writeFile(oddTarget, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(oddTarget, current.executable);
+  await assert.rejects(
+    attestClaudePeerRuntime(
+      { claudeExecutable: current.executable },
+      { userInfo: () => current.user },
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "UNSAFE_CLAUDE_EXECUTABLE" &&
+      !error.message.includes("evil"),
   );
 });
 
-test("runtime rejects version drift, stderr, and oversized output without reflecting it", async (t) => {
+test("runtime classifies clean version drift and reflects only the version", async (t) => {
+  const current = await fixture(t);
+  await assert.rejects(
+    attestClaudePeerRuntime(
+      { claudeExecutable: current.executable },
+      {
+        userInfo: () => current.user,
+        runVersion: async () => ({
+          stdout: "2.1.224 (Claude Code)\n",
+          stderr: "",
+        }),
+      },
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_VERSION_DRIFT" &&
+      error.message.includes("2.1.224"),
+  );
+});
+
+test("runtime rejects stderr and oversized version output without reflecting it", async (t) => {
   const current = await fixture(t);
   for (const output of [
-    { stdout: "2.1.224 (Claude Code)\n", stderr: "" },
     { stdout: PINNED_VERSION_OUTPUT, stderr: "warning" },
     { stdout: "x".repeat(4_097), stderr: "" },
   ]) {
@@ -171,7 +208,6 @@ test("runtime rejects version drift, stderr, and oversized output without reflec
       (error: unknown) =>
         error instanceof BridgeError &&
         error.code === "CLAUDE_PEER_VERSION_UNSUPPORTED" &&
-        !error.message.includes("2.1.224") &&
         !error.message.includes("warning") &&
         !error.message.includes("xxxx"),
     );

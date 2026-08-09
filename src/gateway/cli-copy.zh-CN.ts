@@ -34,4 +34,11 @@ export const cliCopyZhCn = {
   "error.unavailable": "网关不可用。",
   "error.ambiguous": "结果不确定；请勿自动重试。",
   "error.failure": "命令失败。",
+  "error.unsafe":
+    "网关状态目录或套接字的权限或所有者异常。请先确认该路径未被其他进程控制，再运行 embassy serve。",
+  "error.tokenUnknown": "无法识别该投递令牌；它可能已过期，或属于上一次网关会话。",
+  "error.deliveryTimeout":
+    "该投递尚未结算；网关仍在运行。请稍后使用 embassy delivery-status 再次查询。",
+  "error.versionDrift":
+    "已安装的 Claude Code 版本高于此 Embassy 构建支持的版本。请更新 Embassy（npm update -g agent-embassy），然后运行 embassy health。",
 } as const satisfies CliCopy;
