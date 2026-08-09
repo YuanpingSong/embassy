@@ -34,6 +34,7 @@ import {
   type EnqueueNativeIngressInput,
   type EnqueueNativeReplyInput,
   type GatewayAccounting,
+  type GatewayPairRecord,
   type GatewayPersistedState,
   type GatewayPrivateRouteInspection,
   type GatewayPublicSnapshot,
@@ -47,6 +48,7 @@ import {
   type PrivateEndpointIdentity,
   type PrivateRouteBinding,
   type PublicConnectorSnapshot,
+  type PublicPairSnapshot,
   type PublicRouteSnapshot,
   type QueuedMessageMetadata,
   type RebindStaleRouteInput,
@@ -132,6 +134,21 @@ export type RouteInFlightSettlementInput = Readonly<{
 export type ReplaceClaudeSelectionInput = Readonly<{
   replacement: RegisterRouteInput;
   inFlightSettlements?: readonly RouteInFlightSettlementInput[];
+}>;
+
+export type GatewayPairInput = Readonly<{
+  claudeAlias: string;
+  codexAlias: string;
+}>;
+
+export type UnpairRoutesInput = GatewayPairInput &
+  Readonly<{
+    inFlightSettlements?: readonly RouteInFlightSettlementInput[];
+  }>;
+
+export type UnpairRoutesResult = Readonly<{
+  settlements: readonly TerminalMessageSettlement[];
+  claudeRouteUnreferenced: boolean;
 }>;
 
 export const codexSuccessionJournalStages = [
@@ -413,6 +430,30 @@ function isRouteRecord(value: unknown): value is GatewayRouteRecord {
   );
 }
 
+function isPairRecord(value: unknown): value is GatewayPairRecord {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, [
+      "claudeAlias",
+      "codexAlias",
+      "claudeOwnerLease",
+      "codexOwnerLease",
+      "createdAt",
+      "updatedAt",
+      "counters",
+    ]) &&
+    typeof value.claudeAlias === "string" &&
+    ALIAS_PATTERN.test(value.claudeAlias) &&
+    typeof value.codexAlias === "string" &&
+    ALIAS_PATTERN.test(value.codexAlias) &&
+    isPrivateToken(value.claudeOwnerLease) &&
+    isPrivateToken(value.codexOwnerLease) &&
+    isIsoTimestamp(value.createdAt) &&
+    isIsoTimestamp(value.updatedAt) &&
+    isRouteCounters(value.counters)
+  );
+}
+
 function isConnectorRecord(value: unknown): value is ConnectorRecord {
   if (
     !isObject(value) ||
@@ -469,7 +510,7 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         "bytes",
         "hopCount",
       ],
-      ["steer"],
+      ["pair", "steer"],
     )
   ) {
     return false;
@@ -489,6 +530,7 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
     isIsoTimestamp(value.deadlineAt) &&
     isPositiveInteger(value.bytes) &&
     isNonNegativeInteger(value.hopCount) &&
+    (value.pair === undefined || value.pair === true) &&
     (value.steer === undefined || value.steer === true)
   );
 }
@@ -546,15 +588,19 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
 function isDedupeRecord(value: unknown): value is DedupeRecord {
   return (
     isObject(value) &&
-    hasOnlyKeys(value, [
-      "fingerprint",
-      "messageIdSuffix",
-      "sourceAlias",
-      "targetAlias",
-      "direction",
-      "firstSeenAt",
-      "expiresAt",
-    ]) &&
+    hasOnlyKeys(
+      value,
+      [
+        "fingerprint",
+        "messageIdSuffix",
+        "sourceAlias",
+        "targetAlias",
+        "direction",
+        "firstSeenAt",
+        "expiresAt",
+      ],
+      ["pair"],
+    ) &&
     typeof value.fingerprint === "string" &&
     FINGERPRINT_PATTERN.test(value.fingerprint) &&
     typeof value.messageIdSuffix === "string" &&
@@ -565,6 +611,7 @@ function isDedupeRecord(value: unknown): value is DedupeRecord {
     ALIAS_PATTERN.test(value.targetAlias) &&
     typeof value.direction === "string" &&
     DIRECTIONS.has(value.direction) &&
+    (value.pair === undefined || value.pair === true) &&
     isIsoTimestamp(value.firstSeenAt) &&
     isIsoTimestamp(value.expiresAt)
   );
@@ -686,6 +733,68 @@ function migratePreSuccessionJournal(value: unknown): unknown {
   return { ...value, codexSuccession: null };
 }
 
+const PRE_PAIR_GRAPH_STATE_KEYS = [
+  ...PRE_SUCCESSION_JOURNAL_STATE_KEYS,
+  "codexSuccession",
+] as const;
+
+/**
+ * Preserve the old explicit singleton-selection consent when adding the pair
+ * graph. This migration accepts only the exact prior v1 top-level shape; final
+ * state validation still proves every route, lease, host, and edge.
+ */
+function migratePrePairGraph(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !hasOnlyKeys(value, PRE_PAIR_GRAPH_STATE_KEYS) ||
+    !Array.isArray(value.routes) ||
+    !isIsoTimestamp(value.updatedAt)
+  ) {
+    return value;
+  }
+  const routes = value.routes.filter(isObject);
+  const claudeRoutes = routes.filter(
+    (route) =>
+      route.registrationMode === "selected_live_peer" &&
+      isObject(route.binding) &&
+      route.binding.provider === "claude",
+  );
+  const codexRoutes = routes.filter(
+    (route) =>
+      route.registrationMode === "explicit_opt_in" &&
+      isObject(route.binding) &&
+      route.binding.provider === "codex",
+  );
+  const pairs: GatewayPairRecord[] = [];
+  for (const claude of claudeRoutes) {
+    for (const codex of codexRoutes) {
+      const claudeBinding = claude.binding as Record<string, unknown>;
+      const codexBinding = codex.binding as Record<string, unknown>;
+      if (
+        claudeBinding.hostId !== codexBinding.hostId ||
+        typeof claude.alias !== "string" ||
+        typeof codex.alias !== "string" ||
+        typeof claudeBinding.ownerLease !== "string" ||
+        typeof codexBinding.ownerLease !== "string"
+      ) {
+        continue;
+      }
+      pairs.push({
+        claudeAlias: claude.alias,
+        codexAlias: codex.alias,
+        claudeOwnerLease: claudeBinding.ownerLease,
+        codexOwnerLease: codexBinding.ownerLease,
+        createdAt: value.updatedAt,
+        updatedAt: value.updatedAt,
+        counters: emptyCounters(),
+      });
+    }
+  }
+  if (pairs.length > 256) return value;
+  return { ...value, pairs };
+}
+
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -695,6 +804,7 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       "updatedAt",
       "eventSequence",
       "routes",
+      "pairs",
       "connectors",
       "queue",
       "inFlight",
@@ -710,6 +820,9 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     !isNonNegativeInteger(value.eventSequence) ||
     !Array.isArray(value.routes) ||
     !value.routes.every(isRouteRecord) ||
+    !Array.isArray(value.pairs) ||
+    value.pairs.length > 256 ||
+    !value.pairs.every(isPairRecord) ||
     !Array.isArray(value.connectors) ||
     !value.connectors.every(isConnectorRecord) ||
     !Array.isArray(value.queue) ||
@@ -764,6 +877,20 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
   const routeByAlias = new Map(
     candidate.routes.map((route) => [route.alias, route]),
   );
+  const pairKeys = candidate.pairs.map(
+    (pair) => `${pair.claudeAlias}\0${pair.codexAlias}`,
+  );
+  const pairsValid = candidate.pairs.every((pair) => {
+    const claude = routeByAlias.get(pair.claudeAlias);
+    const codex = routeByAlias.get(pair.codexAlias);
+    return (
+      claude?.binding.provider === "claude" &&
+      codex?.binding.provider === "codex" &&
+      claude.binding.hostId === codex.binding.hostId &&
+      claude.binding.ownerLease === pair.claudeOwnerLease &&
+      codex.binding.ownerLease === pair.codexOwnerLease
+    );
+  });
   const claudeConnectorHosts = new Set(
     candidate.connectors
       .filter((connector) => connector.provider === "claude")
@@ -775,26 +902,28 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     direction: "codex_to_claude" | "claude_to_codex";
     sourceAlias: string;
     targetAlias: string;
+    pair?: true;
   }): boolean => {
     const source = routeByAlias.get(message.sourceAlias);
     const target = routeByAlias.get(message.targetAlias);
-    if (message.direction === "codex_to_claude") {
-      return (
-        source?.binding.provider === "codex" &&
-        ((target?.binding.provider === "claude" &&
-          target.binding.hostId === source.binding.hostId) ||
-          (target === undefined &&
-            claudeConnectorHosts.has(source.binding.hostId) &&
-            aliasHost(message.targetAlias) === source.binding.hostId))
-      );
-    }
+    const routeShapeValid =
+      message.direction === "codex_to_claude"
+        ? source?.binding.provider === "codex" &&
+          ((target?.binding.provider === "claude" &&
+            target.binding.hostId === source.binding.hostId) ||
+            (target === undefined &&
+              claudeConnectorHosts.has(source.binding.hostId) &&
+              aliasHost(message.targetAlias) === source.binding.hostId))
+        : target?.binding.provider === "codex" &&
+          ((source?.binding.provider === "claude" &&
+            source.binding.hostId === target.binding.hostId) ||
+            (source === undefined &&
+              claudeConnectorHosts.has(target.binding.hostId) &&
+              aliasHost(message.sourceAlias) === target.binding.hostId));
     return (
-      target?.binding.provider === "codex" &&
-      ((source?.binding.provider === "claude" &&
-        source.binding.hostId === target.binding.hostId) ||
-        (source === undefined &&
-          claudeConnectorHosts.has(target.binding.hostId) &&
-          aliasHost(message.sourceAlias) === target.binding.hostId))
+      routeShapeValid &&
+      (message.pair !== true ||
+        candidate.pairs.some((pair) => pairMatchesMessage(pair, message)))
     );
   };
   const sequencesStrictlyIncrease = candidate.events.every(
@@ -804,6 +933,8 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
   );
   return (
     aliases.size === candidate.routes.length &&
+    new Set(pairKeys).size === pairKeys.length &&
+    pairsValid &&
     routeTargets.size === candidate.routes.length &&
     ownerLeases.size === candidate.routes.length &&
     connectorKeys.size === candidate.connectors.length &&
@@ -1084,6 +1215,102 @@ function renameRateBucket(
   );
 }
 
+function pairKey(claudeAlias: string, codexAlias: string): string {
+  return `${claudeAlias}\0${codexAlias}`;
+}
+
+function pairAliasesForRoutes(
+  source: GatewayRouteRecord,
+  target: GatewayRouteRecord,
+): GatewayPairInput {
+  if (
+    source.binding.provider === "claude" &&
+    target.binding.provider === "codex"
+  ) {
+    return { claudeAlias: source.alias, codexAlias: target.alias };
+  }
+  if (
+    source.binding.provider === "codex" &&
+    target.binding.provider === "claude"
+  ) {
+    return { claudeAlias: target.alias, codexAlias: source.alias };
+  }
+  throw new BridgeError(
+    "INVALID_GATEWAY_ROUTE_PAIR",
+    "Gateway pairs must connect one Claude route and one Codex route.",
+  );
+}
+
+function pairMatchesMessage(
+  pair: GatewayPairInput,
+  message: Pick<
+    QueuedMessageMetadata,
+    "sourceAlias" | "targetAlias" | "pair"
+  >,
+): boolean {
+  return (
+    message.pair === true &&
+    ((message.sourceAlias === pair.claudeAlias &&
+      message.targetAlias === pair.codexAlias) ||
+      (message.sourceAlias === pair.codexAlias &&
+        message.targetAlias === pair.claudeAlias))
+  );
+}
+
+function findPairForMessage(
+  state: GatewayPersistedState,
+  message: Pick<QueuedMessageMetadata, "sourceAlias" | "targetAlias">,
+): GatewayPairRecord | undefined {
+  return state.pairs.find((pair) => pairMatchesMessage(pair, message));
+}
+
+function renamePairAlias(
+  state: GatewayPersistedState,
+  previousAlias: string,
+  newAlias: string,
+  now: Date,
+): void {
+  if (previousAlias === newAlias) return;
+  for (const pair of state.pairs) {
+    if (pair.claudeAlias === previousAlias) pair.claudeAlias = newAlias;
+    if (pair.codexAlias === previousAlias) pair.codexAlias = newAlias;
+    if (
+      pair.claudeAlias === newAlias ||
+      pair.codexAlias === newAlias
+    ) {
+      pair.updatedAt = now.toISOString();
+    }
+  }
+}
+
+function removePairsForAliases(
+  state: GatewayPersistedState,
+  aliases: ReadonlySet<string>,
+): void {
+  state.pairs = state.pairs.filter(
+    (pair) =>
+      !aliases.has(pair.claudeAlias) && !aliases.has(pair.codexAlias),
+  );
+}
+
+function routeTerminationMatches(
+  state: GatewayPersistedState,
+  aliases: ReadonlySet<string>,
+  message: Pick<
+    QueuedMessageMetadata,
+    "sourceAlias" | "targetAlias" | "pair"
+  >,
+): boolean {
+  for (const alias of [message.sourceAlias, message.targetAlias]) {
+    if (!aliases.has(alias)) continue;
+    const route = state.routes.find((candidate) => candidate.alias === alias);
+    if (route?.binding.provider !== "claude" || message.pair === true) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function directionFor(
   source: GatewayRouteRecord,
   target: GatewayRouteRecord,
@@ -1110,6 +1337,7 @@ type ResolvedEnqueueSides = {
   sourceAlias: string;
   targetAlias: string;
   direction: "codex_to_claude" | "claude_to_codex";
+  pair?: true;
   sourceRoute?: GatewayRouteRecord;
   targetRoute?: GatewayRouteRecord;
 };
@@ -1161,6 +1389,7 @@ export class GatewayStore {
           updatedAt: now.toISOString(),
           eventSequence: 0,
           routes: [],
+          pairs: [],
           connectors: [],
           queue: [],
           inFlight: [],
@@ -1170,6 +1399,12 @@ export class GatewayStore {
           accounting: emptyAccounting(),
           codexSuccession: null,
         };
+        if (this.state.pairs.length > this.config.limits.maxPairs) {
+          throw new BridgeError(
+            "PAIR_CAPACITY_REACHED",
+            "The durable pair inventory exceeds the configured bound.",
+          );
+        }
         this.recoverAfterRestart(now);
         this.prune(now);
         await this.persist();
@@ -1309,25 +1544,6 @@ export class GatewayStore {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
           "The exact compatible endpoint generation must be observed before a route can be registered.",
-        );
-      }
-      if (
-        input.binding.provider === "claude" &&
-        input.registrationMode === "selected_live_peer" &&
-        state.routes.some(
-          (route) =>
-            route.binding.provider === "claude" &&
-            route.registrationMode === "selected_live_peer" &&
-            !(
-              route.binding.hostId === input.binding.hostId &&
-              route.binding.routeHandle === input.binding.routeHandle &&
-              route.binding.ownerLease === input.binding.ownerLease
-            ),
-        )
-      ) {
-        throw new BridgeError(
-          "CLAUDE_SELECTION_CONFLICT",
-          "A different Claude session is already selected; replace it atomically instead of adding another selection.",
         );
       }
       const byAlias = state.routes.find((route) => route.alias === input.alias);
@@ -1475,8 +1691,10 @@ export class GatewayStore {
         );
       }
 
+      // Replacing an endpoint is scoped to the replacement alias. Other
+      // selected Claude routes and their independent consent edges survive.
       const retired = selectedClaudeRoutes.filter(
-        (route) => route !== retained,
+        (route) => route !== retained && route === aliasOwner,
       );
       const retiredAliases = new Set(retired.map((route) => route.alias));
       const settlementPlan = this.validateAffectedInFlightSettlements(
@@ -1492,6 +1710,7 @@ export class GatewayStore {
         settlementPlan,
       );
       state.routes = state.routes.filter((route) => !retired.includes(route));
+      removePairsForAliases(state, retiredAliases);
       state.rateBuckets = state.rateBuckets.filter(
         (bucket) => !retiredAliases.has(bucket.sourceAlias),
       );
@@ -1543,6 +1762,7 @@ export class GatewayStore {
             }
           }
           renameRateBucket(state, previousAlias, replacement.alias);
+          renamePairAlias(state, previousAlias, replacement.alias, now);
         }
       } else {
         if (state.routes.length >= this.config.limits.maxRoutes) {
@@ -1571,13 +1791,15 @@ export class GatewayStore {
       if (
         state.routes.filter(
           (route) =>
+            route.alias === replacement.alias &&
             route.binding.provider === "claude" &&
-            route.registrationMode === "selected_live_peer",
+            route.registrationMode === "selected_live_peer" &&
+            sameBinding(route.binding, replacement.binding),
         ).length !== 1
       ) {
         throw new BridgeError(
           "CLAUDE_SELECTION_STATE_CORRUPT",
-          "A successful replacement must leave exactly one selected Claude session.",
+          "A successful endpoint replacement must leave exactly one matching Claude route.",
         );
       }
       return settlements;
@@ -1799,6 +2021,7 @@ export class GatewayStore {
           }
         }
         renameRateBucket(state, previousAlias, newAlias);
+        renamePairAlias(state, previousAlias, newAlias, now);
       }
     });
   }
@@ -1850,6 +2073,7 @@ export class GatewayStore {
         settlementPlan,
       );
       state.routes = state.routes.filter((candidate) => candidate !== route);
+      removePairsForAliases(state, aliases);
       const remainingCodexHosts = new Set(
         state.routes
           .filter((candidate) => candidate.binding.provider === "codex")
@@ -1913,6 +2137,7 @@ export class GatewayStore {
         if (record.targetAlias === alias) record.targetAlias = newAlias;
       }
       renameRateBucket(state, alias, newAlias);
+      renamePairAlias(state, alias, newAlias, now);
     });
   }
 
@@ -2317,6 +2542,125 @@ export class GatewayStore {
     });
   }
 
+  /** Create one explicit, durable Claude↔Codex consent edge. */
+  async pairRoutes(input: GatewayPairInput): Promise<{ created: boolean }> {
+    return this.mutate(async (state, now) => {
+      const { claude, codex } = this.requirePairRoutes(state, input);
+      const existing = state.pairs.find(
+        (pair) =>
+          pair.claudeAlias === claude.alias && pair.codexAlias === codex.alias,
+      );
+      if (existing !== undefined) {
+        if (
+          existing.claudeOwnerLease !== claude.binding.ownerLease ||
+          existing.codexOwnerLease !== codex.binding.ownerLease
+        ) {
+          throw new BridgeError(
+            "PAIR_AUTHORITY_MISMATCH",
+            "The pair aliases no longer match their exact route authorities.",
+          );
+        }
+        return { created: false };
+      }
+      if (state.pairs.length >= this.config.limits.maxPairs) {
+        throw new BridgeError(
+          "PAIR_CAPACITY_REACHED",
+          "The bounded permission graph cannot accept another pair.",
+          true,
+        );
+      }
+      state.pairs.push({
+        claudeAlias: claude.alias,
+        codexAlias: codex.alias,
+        claudeOwnerLease: claude.binding.ownerLease,
+        codexOwnerLease: codex.binding.ownerLease,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        counters: emptyCounters(),
+      });
+      return { created: true };
+    });
+  }
+
+  /** Bounded metadata-only graph inventory for controller inference. */
+  async inspectPairs(): Promise<GatewayPairInput[]> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      return state.pairs
+        .map(({ claudeAlias, codexAlias }) => ({ claudeAlias, codexAlias }))
+        .sort((left, right) =>
+          pairKey(left.claudeAlias, left.codexAlias).localeCompare(
+            pairKey(right.claudeAlias, right.codexAlias),
+          ),
+        );
+    });
+  }
+
+  async hasPair(input: GatewayPairInput): Promise<boolean> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      try {
+        const { claude, codex } = this.requirePairRoutes(state, input, false);
+        return state.pairs.some(
+          (pair) =>
+            pair.claudeAlias === claude.alias &&
+            pair.codexAlias === codex.alias &&
+            pair.claudeOwnerLease === claude.binding.ownerLease &&
+            pair.codexOwnerLease === codex.binding.ownerLease,
+        );
+      } catch (error) {
+        if (error instanceof BridgeError) return false;
+        throw error;
+      }
+    });
+  }
+
+  async inspectAffectedPairInFlightMessages(
+    input: GatewayPairInput,
+  ): Promise<AffectedInFlightMessageInspection[]> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      const { claude, codex } = this.requirePairRoutes(state, input, false);
+      this.requireExactPair(state, claude, codex);
+      return state.inFlight
+        .filter((item) => pairMatchesMessage(input, item))
+        .map(({ messageId, deadlineAt }) => ({ messageId, deadlineAt }));
+    });
+  }
+
+  /**
+   * Remove exactly one consent edge and settle only work owned by that edge.
+   * Adjacent pairs, terminal token metadata, and unrelated messages survive.
+   */
+  async unpairRoutes(input: UnpairRoutesInput): Promise<UnpairRoutesResult> {
+    return this.mutate(async (state, now) => {
+      const { claude, codex } = this.requirePairRoutes(state, input, false);
+      const pair = this.requireExactPair(state, claude, codex);
+      const plan = this.validateAffectedPairInFlightSettlements(
+        state,
+        pair,
+        input.inFlightSettlements ?? [],
+      );
+      const settlements = this.terminateAffectedPairMessages(
+        state,
+        pair,
+        now,
+        "PAIR_REMOVED",
+        plan,
+      );
+      state.pairs = state.pairs.filter((candidate) => candidate !== pair);
+      state.dedupe = state.dedupe.filter(
+        (record) => !pairMatchesMessage(pair, record),
+      );
+      return {
+        settlements,
+        claudeRouteUnreferenced: !state.pairs.some(
+          (candidate) => candidate.claudeAlias === pair.claudeAlias,
+        ),
+      };
+    });
+  }
+
   /**
    * Controller-internal inventory used to prepare an exact, evidence-aware
    * terminal plan before a route mutation. Message bodies and route handles
@@ -2340,10 +2684,7 @@ export class GatewayStore {
     return this.mutex.run("gateway", async () => {
       const state = this.requireState();
       return state.inFlight
-        .filter(
-          (item) =>
-            scope.has(item.sourceAlias) || scope.has(item.targetAlias),
-        )
+        .filter((item) => routeTerminationMatches(state, scope, item))
         .map(({ messageId, deadlineAt }) => ({ messageId, deadlineAt }));
     });
   }
@@ -2354,13 +2695,37 @@ export class GatewayStore {
     return this.mutate(async (state, now) => {
       const source = this.requireAvailableRoute(state, input.sourceAlias);
       const target = this.requireAvailableRoute(state, input.targetAlias);
-      return this.enqueueResolvedMessage(state, now, input, {
+      const sides: ResolvedEnqueueSides = {
         sourceAlias: source.alias,
         targetAlias: target.alias,
         direction: directionFor(source, target),
         sourceRoute: source,
         targetRoute: target,
-      });
+      };
+      try {
+        const pairAliases = pairAliasesForRoutes(source, target);
+        this.requireExactPair(
+          state,
+          pairAliases.claudeAlias === source.alias ? source : target,
+          pairAliases.codexAlias === source.alias ? source : target,
+        );
+        sides.pair = true;
+      } catch (error) {
+        if (error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED") {
+          this.recordRejection(
+            state,
+            sides,
+            typeof input.body === "string"
+              ? Math.max(1, Buffer.byteLength(input.body, "utf8"))
+              : 1,
+            now,
+            "SENDER_NOT_PAIRED",
+            input.steer,
+          );
+        }
+        throw error;
+      }
+      return this.enqueueResolvedMessage(state, now, input, sides);
     });
   }
 
@@ -2381,18 +2746,41 @@ export class GatewayStore {
         );
       }
       this.validateTransientNativeClaudePeer(state, input.source, target);
-      if (this.config.inboundMode === "paired") {
-        const paired = state.routes.find(
-          (route) =>
-            route.alias === input.source.alias &&
-            route.binding.provider === "claude" &&
-            route.registrationMode === "selected_live_peer" &&
-            route.enabled &&
-            route.compatibility === "compatible" &&
-            ["idle", "busy", "awaiting_approval"].includes(route.state) &&
-            sameBinding(route.binding, input.source.binding),
+      const selectedClaude = state.routes.find(
+        (route) =>
+          route.alias === input.source.alias &&
+          route.binding.provider === "claude" &&
+          route.registrationMode === "selected_live_peer" &&
+          route.enabled &&
+          route.compatibility === "compatible" &&
+          ["idle", "busy", "awaiting_approval"].includes(route.state) &&
+          sameBinding(route.binding, input.source.binding),
+      );
+      const pair =
+        selectedClaude === undefined
+          ? undefined
+          : state.pairs.find(
+              (candidate) =>
+                candidate.claudeAlias === selectedClaude.alias &&
+                candidate.codexAlias === target.alias &&
+                candidate.claudeOwnerLease ===
+                  selectedClaude.binding.ownerLease &&
+                candidate.codexOwnerLease === target.binding.ownerLease,
+            );
+      if (
+        input.authorizedPairTeardownReply === true &&
+        selectedClaude === undefined
+      ) {
+        throw new BridgeError(
+          "SENDER_NOT_PAIRED",
+          "The retained reply no longer matches the exact selected Claude route.",
         );
-        if (paired === undefined) {
+      }
+      if (
+        this.config.inboundMode === "paired" &&
+        pair === undefined &&
+        input.authorizedPairTeardownReply !== true
+      ) {
           const bytes =
             typeof input.body === "string"
               ? Math.max(1, Buffer.byteLength(input.body, "utf8"))
@@ -2414,13 +2802,13 @@ export class GatewayStore {
             "SENDER_NOT_PAIRED",
             "The native Claude sender is not the exact session paired with this Codex task.",
           );
-        }
       }
       return this.enqueueResolvedMessage(state, now, input, {
         sourceAlias: input.source.alias,
         targetAlias: target.alias,
         direction: "claude_to_codex",
         targetRoute: target,
+        ...(pair === undefined ? {} : { pair: true as const }),
       });
     });
   }
@@ -2442,11 +2830,27 @@ export class GatewayStore {
         );
       }
       this.validateTransientNativeClaudePeer(state, input.target, source);
+      if (input.pair === true) {
+        const target = state.routes.find(
+          (route) =>
+            route.alias === input.target.alias &&
+            route.binding.provider === "claude" &&
+            sameBinding(route.binding, input.target.binding),
+        );
+        if (target === undefined) {
+          throw new BridgeError(
+            "SENDER_NOT_PAIRED",
+            "The correlated reply no longer has its exact paired Claude route.",
+          );
+        }
+        this.requireExactPair(state, target, source);
+      }
       return this.enqueueResolvedMessage(state, now, input, {
         sourceAlias: source.alias,
         targetAlias: input.target.alias,
         direction: "codex_to_claude",
         sourceRoute: source,
+        ...(input.pair === true ? { pair: true as const } : {}),
       });
     });
   }
@@ -2859,6 +3263,18 @@ export class GatewayStore {
           };
         })
         .sort((left, right) => left.alias.localeCompare(right.alias));
+      const pairs: PublicPairSnapshot[] = state.pairs
+        .map((pair) => ({
+          claudeAlias: pair.claudeAlias,
+          codexAlias: pair.codexAlias,
+          host: pair.claudeAlias.slice(pair.claudeAlias.lastIndexOf("@") + 1),
+          counters: { ...pair.counters },
+        }))
+        .sort((left, right) =>
+          `${left.claudeAlias}\0${left.codexAlias}`.localeCompare(
+            `${right.claudeAlias}\0${right.codexAlias}`,
+          ),
+        );
       const health = this.aggregateHealth(connectors);
       const unsortedAlerts: SafeGatewayAlert[] = [
         ...connectors.flatMap((connector) =>
@@ -2905,6 +3321,7 @@ export class GatewayStore {
         connectors,
         availablePeers: [],
         routes,
+        pairs,
         messages: state.events.map((event) => ({ ...event })),
         accounting: { ...state.accounting },
         alerts,
@@ -2912,6 +3329,7 @@ export class GatewayStore {
           connectors: 0,
           availablePeers: 0,
           routes: 0,
+          pairs: 0,
           messages: 0,
           alerts: 0,
         },
@@ -3124,6 +3542,7 @@ export class GatewayStore {
         bucket.sourceAlias !== oldAlias &&
         bucket.sourceAlias !== identity.alias,
     );
+    removePairsForAliases(state, new Set([oldAlias, identity.alias]));
   }
 
   private assertAllowedIdentity(identity: PrivateEndpointIdentity): void {
@@ -3232,6 +3651,75 @@ export class GatewayStore {
       );
     }
     return route;
+  }
+
+  private requirePairRoutes(
+    state: GatewayPersistedState,
+    input: GatewayPairInput,
+    requireAvailable = true,
+  ): { claude: GatewayRouteRecord; codex: GatewayRouteRecord } {
+    if (
+      !isObject(input) ||
+      typeof input.claudeAlias !== "string" ||
+      typeof input.codexAlias !== "string" ||
+      !ALIAS_PATTERN.test(input.claudeAlias) ||
+      !ALIAS_PATTERN.test(input.codexAlias) ||
+      input.claudeAlias === input.codexAlias
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_PAIR",
+        "A pair requires distinct normalized Claude and Codex aliases.",
+      );
+    }
+    const resolve = (alias: string): GatewayRouteRecord => {
+      if (requireAvailable) return this.requireAvailableRoute(state, alias);
+      const route = state.routes.find((candidate) => candidate.alias === alias);
+      if (route === undefined) {
+        throw new BridgeError(
+          "PAIR_ROUTE_NOT_FOUND",
+          "The pair references a route that is not registered.",
+        );
+      }
+      return route;
+    };
+    const claude = resolve(input.claudeAlias);
+    const codex = resolve(input.codexAlias);
+    if (
+      claude.binding.provider !== "claude" ||
+      claude.registrationMode !== "selected_live_peer" ||
+      codex.binding.provider !== "codex" ||
+      codex.registrationMode !== "explicit_opt_in" ||
+      claude.binding.hostId !== codex.binding.hostId
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_PAIR",
+        "A pair must connect one selected Claude route and one registered Codex route on the same host.",
+      );
+    }
+    return { claude, codex };
+  }
+
+  private requireExactPair(
+    state: GatewayPersistedState,
+    claude: GatewayRouteRecord,
+    codex: GatewayRouteRecord,
+  ): GatewayPairRecord {
+    const pair = state.pairs.find(
+      (candidate) =>
+        candidate.claudeAlias === claude.alias &&
+        candidate.codexAlias === codex.alias,
+    );
+    if (
+      pair === undefined ||
+      pair.claudeOwnerLease !== claude.binding.ownerLease ||
+      pair.codexOwnerLease !== codex.binding.ownerLease
+    ) {
+      throw new BridgeError(
+        "SENDER_NOT_PAIRED",
+        "The two exact route authorities do not share a consent edge.",
+      );
+    }
+    return pair;
   }
 
   private validateTransientNativeClaudePeer(
@@ -3400,7 +3888,11 @@ export class GatewayStore {
     if (input.steer === true) {
       let oldestSteerAt = Number.POSITIVE_INFINITY;
       for (const [index, item] of state.queue.entries()) {
-        if (item.targetAlias !== sides.targetAlias || item.steer !== true) {
+        if (
+          item.sourceAlias !== sides.sourceAlias ||
+          item.targetAlias !== sides.targetAlias ||
+          item.steer !== true
+        ) {
           continue;
         }
         const enqueuedAt = Date.parse(item.enqueuedAt);
@@ -3410,7 +3902,10 @@ export class GatewayStore {
         }
       }
       const steerDepth = state.queue.filter(
-        (item) => item.targetAlias === sides.targetAlias && item.steer === true,
+        (item) =>
+          item.sourceAlias === sides.sourceAlias &&
+          item.targetAlias === sides.targetAlias &&
+          item.steer === true,
       ).length;
       if (steerDepth < 3) oldestSteerIndex = -1;
     }
@@ -3485,12 +3980,19 @@ export class GatewayStore {
       deadlineAt: deadline.toISOString(),
       bytes,
       hopCount,
+      ...(sides.pair === true ? { pair: true as const } : {}),
       ...(input.steer === true ? { steer: true as const } : {}),
     };
     state.queue.push(metadata);
     this.transientBodies.set(messageId, input.body);
     state.accounting.accepted += 1;
     state.accounting.bytesAccepted += bytes;
+    const pair = findPairForMessage(state, metadata);
+    if (pair !== undefined) {
+      pair.counters.accepted += 1;
+      pair.counters.bytesAccepted += bytes;
+      pair.updatedAt = now.toISOString();
+    }
     state.accounting.queuedBytes += bytes;
     if (sides.sourceRoute) {
       sides.sourceRoute.counters.accepted += 1;
@@ -3503,6 +4005,7 @@ export class GatewayStore {
       sourceAlias: sides.sourceAlias,
       targetAlias: sides.targetAlias,
       direction: sides.direction,
+      ...(sides.pair === true ? { pair: true as const } : {}),
       firstSeenAt: now.toISOString(),
       expiresAt: new Date(
         now.getTime() + this.config.limits.dedupeTtlMs,
@@ -3527,6 +4030,7 @@ export class GatewayStore {
       duplicate: false,
       messageId,
       messageIdSuffix,
+      ...(sides.pair === true ? { pair: true as const } : {}),
       ...(supersededSettlement === undefined
         ? {}
         : { supersededSettlement }),
@@ -3593,6 +4097,11 @@ export class GatewayStore {
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
     state.accounting.rejected += 1;
     if (sides.sourceRoute) sides.sourceRoute.counters.rejected += 1;
+    const pair = findPairForMessage(state, sides);
+    if (pair !== undefined) {
+      pair.counters.rejected += 1;
+      pair.updatedAt = now.toISOString();
+    }
     this.appendEvent(state, {
       timestamp: now.toISOString(),
       messageIdSuffix: suffix,
@@ -3636,6 +4145,11 @@ export class GatewayStore {
   ): TerminalMessageSettlement {
     const counterKey = deliveryState;
     state.accounting[counterKey] += 1;
+    const pair = findPairForMessage(state, metadata);
+    if (pair !== undefined) {
+      pair.counters[counterKey] += 1;
+      pair.updatedAt = now.toISOString();
+    }
     const target = state.routes.find(
       (route) => route.alias === metadata.targetAlias,
     );
@@ -3673,10 +4187,7 @@ export class GatewayStore {
     }
     const affectedIds = new Set(
       state.inFlight
-        .filter(
-          (item) =>
-            aliases.has(item.sourceAlias) || aliases.has(item.targetAlias),
-        )
+        .filter((item) => routeTerminationMatches(state, aliases, item))
         .map((item) => item.messageId),
     );
     const byMessageId = new Map<string, RouteInFlightSettlementInput>();
@@ -3714,6 +4225,57 @@ export class GatewayStore {
     return byMessageId;
   }
 
+  private validateAffectedPairInFlightSettlements(
+    state: GatewayPersistedState,
+    pair: GatewayPairInput,
+    requested: readonly RouteInFlightSettlementInput[],
+  ): ReadonlyMap<string, RouteInFlightSettlementInput> {
+    if (requested.length > this.config.limits.maxInFlightMessages) {
+      throw new BridgeError(
+        "INVALID_PAIR_TERMINATION_PLAN",
+        "Unpairing requires one normalized terminal settlement per affected in-flight message.",
+      );
+    }
+    const affectedIds = new Set(
+      state.inFlight
+        .filter((item) => pairMatchesMessage(pair, item))
+        .map((item) => item.messageId),
+    );
+    const byMessageId = new Map<string, RouteInFlightSettlementInput>();
+    for (const settlement of requested) {
+      if (
+        !MESSAGE_ID_PATTERN.test(settlement.messageId) ||
+        (settlement.state !== "delivered" &&
+          settlement.state !== "unconfirmed" &&
+          settlement.state !== "failed" &&
+          settlement.state !== "ambiguous" &&
+          settlement.state !== "expired" &&
+          settlement.state !== "cancelled") ||
+        (settlement.safeErrorCode !== undefined &&
+          !SAFE_CODE_PATTERN.test(settlement.safeErrorCode)) ||
+        byMessageId.has(settlement.messageId)
+      ) {
+        throw new BridgeError(
+          "INVALID_PAIR_TERMINATION_PLAN",
+          "Unpairing requires one normalized terminal settlement per affected in-flight message.",
+        );
+      }
+      byMessageId.set(settlement.messageId, settlement);
+    }
+    if (
+      byMessageId.size !== affectedIds.size ||
+      [...affectedIds].some((messageId) => !byMessageId.has(messageId)) ||
+      [...byMessageId].some(([messageId]) => !affectedIds.has(messageId))
+    ) {
+      throw new BridgeError(
+        "PAIR_TERMINATION_PLAN_MISMATCH",
+        "The exact pair termination plan no longer matches its in-flight messages.",
+        true,
+      );
+    }
+    return byMessageId;
+  }
+
   private terminateAffectedMessages(
     state: GatewayPersistedState,
     aliases: Set<string>,
@@ -3725,13 +4287,11 @@ export class GatewayStore {
     >,
   ): TerminalMessageSettlement[] {
     const settlements: TerminalMessageSettlement[] = [];
-    const queued = state.queue.filter(
-      (item) =>
-        aliases.has(item.sourceAlias) || aliases.has(item.targetAlias),
+    const queued = state.queue.filter((item) =>
+      routeTerminationMatches(state, aliases, item),
     );
     state.queue = state.queue.filter(
-      (item) =>
-        !aliases.has(item.sourceAlias) && !aliases.has(item.targetAlias),
+      (item) => !routeTerminationMatches(state, aliases, item),
     );
     for (const item of queued) {
       this.transientBodies.delete(item.messageId);
@@ -3749,13 +4309,11 @@ export class GatewayStore {
         ),
       );
     }
-    const inFlight = state.inFlight.filter(
-      (item) =>
-        aliases.has(item.sourceAlias) || aliases.has(item.targetAlias),
+    const inFlight = state.inFlight.filter((item) =>
+      routeTerminationMatches(state, aliases, item),
     );
     state.inFlight = state.inFlight.filter(
-      (item) =>
-        !aliases.has(item.sourceAlias) && !aliases.has(item.targetAlias),
+      (item) => !routeTerminationMatches(state, aliases, item),
     );
     for (const item of inFlight) {
       const requested = inFlightSettlements.get(item.messageId);
@@ -3763,6 +4321,67 @@ export class GatewayStore {
         throw new BridgeError(
           "ROUTE_TERMINATION_PLAN_MISMATCH",
           "The exact in-flight route termination plan no longer matches the affected message set.",
+          true,
+        );
+      }
+      settlements.push(
+        this.finishMetadata(
+          state,
+          item,
+          requested.state,
+          now,
+          requested.safeErrorCode,
+        ),
+      );
+    }
+    return settlements;
+  }
+
+  private terminateAffectedPairMessages(
+    state: GatewayPersistedState,
+    pair: GatewayPairInput,
+    now: Date,
+    safeErrorCode: string,
+    inFlightSettlements: ReadonlyMap<
+      string,
+      RouteInFlightSettlementInput
+    >,
+  ): TerminalMessageSettlement[] {
+    const settlements: TerminalMessageSettlement[] = [];
+    const queued = state.queue.filter((item) => pairMatchesMessage(pair, item));
+    state.queue = state.queue.filter(
+      (item) => !pairMatchesMessage(pair, item),
+    );
+    for (const item of queued) {
+      this.transientBodies.delete(item.messageId);
+      state.accounting.queuedBytes -= item.bytes;
+      const target = state.routes.find(
+        (route) => route.alias === item.targetAlias,
+      );
+      if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
+      const deadlineReached = Date.parse(item.deadlineAt) <= now.getTime();
+      settlements.push(
+        this.finishMetadata(
+          state,
+          item,
+          deadlineReached ? "expired" : "abandoned",
+          now,
+          deadlineReached ? "MESSAGE_EXPIRED" : safeErrorCode,
+        ),
+      );
+    }
+    const inFlight = state.inFlight.filter((item) =>
+      pairMatchesMessage(pair, item),
+    );
+    state.inFlight = state.inFlight.filter(
+      (item) => !pairMatchesMessage(pair, item),
+    );
+    for (const item of inFlight) {
+      const requested = inFlightSettlements.get(item.messageId);
+      if (requested === undefined) {
+        throw new BridgeError(
+          "PAIR_TERMINATION_PLAN_MISMATCH",
+          "The exact pair termination plan no longer matches its in-flight messages.",
           true,
         );
       }
@@ -4209,6 +4828,7 @@ export class GatewayStore {
     }
     parsed = migratePreUnconfirmedCounters(parsed);
     parsed = migratePreSuccessionJournal(parsed);
+    parsed = migratePrePairGraph(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

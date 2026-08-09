@@ -91,6 +91,7 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
         counters,
       },
     ],
+    pairs: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -111,6 +112,7 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
+      pairs: 0,
       messages: 0,
       alerts: 0,
     },
@@ -783,14 +785,17 @@ async function selectAndRegister(
   assert.equal(refreshed.accepted, true);
   assert.equal(refreshed.code, "ok");
   assert.equal(Number.isSafeInteger(refreshed.revision), true);
-  assert.deepEqual(
-    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
-    { accepted: true, code: "ok" },
-  );
   assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
     accepted: true,
     code: "ok",
   });
+  assert.deepEqual(
+    await handlers.selectClaude({
+      alias: "claude-one@this-mac",
+      codexThreadId: THREAD_ID,
+    }),
+    { accepted: true, code: "ok" },
+  );
 }
 
 async function discoverAndRegisterCodexOnly(
@@ -1717,8 +1722,12 @@ test("an installed prepare journal is reconciled and cleared after a post-rename
   });
   let failNextRename = false;
   const store = new GatewayStore(config, {
-    afterStateFileRename: () => {
+    afterStateFileRename: async () => {
       if (!failNextRename) return;
+      const installed = JSON.parse(
+        await readFile(path.join(stateDir, "gateway-state.json"), "utf8"),
+      ) as { codexSuccession?: { stage?: string } | null };
+      if (installed.codexSuccession?.stage !== "prepared") return;
       failNextRename = false;
       throw new Error("synthetic installed prepare commit failure");
     },
@@ -2213,6 +2222,7 @@ test("restart recovery after an irreversible succession authorizes only exact su
     EMBASSY_HOSTS: "this-mac",
   });
   const firstClaude = new FakeProvider("claude");
+  const firstCodex = new FakeProvider("codex");
   firstClaude.nativeSuccessionPublishOutcomes.push("unknown");
   const first = new GatewayService({
     config,
@@ -2648,12 +2658,13 @@ test("fresh Claude selection releases provider state when the selected handle ch
   ];
   claude.selectedRouteHandleOverride =
     "00000000-0000-4000-8000-000000000099";
+  const codex = new FakeProvider("codex");
   const service = new GatewayService({
     config: loadGatewayConfig({
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    adapters: [claude],
+    adapters: [claude, codex],
   });
   await service.start();
   t.after(async () => {
@@ -2662,6 +2673,10 @@ test("fresh Claude selection releases provider state when the selected handle ch
   });
 
   await service.handlers().refreshDashboard();
+  assert.deepEqual(
+    await service.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
   assert.deepEqual(
     await service
       .handlers()
@@ -2680,7 +2695,7 @@ test("fresh Claude selection releases provider state when the selected handle ch
   );
 });
 
-test("selecting a second Claude session atomically swaps the pair and settles old work", async (t) => {
+test("pairing a second Claude session selects it additively and preserves old work", async (t) => {
   const { root, stateDir } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -2714,14 +2729,14 @@ test("selecting a second Claude session atomically swaps the pair and settles ol
   });
   const handlers = service.handlers();
   await handlers.refreshDashboard();
-  assert.deepEqual(
-    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
-    { accepted: true, code: "ok" },
-  );
   assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
     accepted: true,
     code: "ok",
   });
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
+    { accepted: true, code: "ok" },
+  );
 
   const oldDelivery = await handlers.sendToClaude({
     ...toClaude("settle this attempt during the pair swap"),
@@ -2732,15 +2747,20 @@ test("selecting a second Claude session atomically swaps the pair and settles ol
   await waitFor(() => claude.dispatches.length === 1);
 
   assert.deepEqual(
-    await handlers.selectClaude({ alias: "claude-two@this-mac" }),
+    await handlers.pair({
+      claudeAlias: "claude-two@this-mac",
+      codexAlias: "codex-main@this-mac",
+      codexThreadId: THREAD_ID,
+    }),
     { accepted: true, code: "ok" },
   );
   const snapshot = await handlers.listSnapshot();
   assert.deepEqual(
     snapshot.routes
       .filter((route) => route.provider === "claude")
-      .map((route) => route.alias),
-    ["claude-two@this-mac"],
+      .map((route) => route.alias)
+      .sort(),
+    ["claude-one@this-mac", "claude-two@this-mac"],
   );
   assert.deepEqual(
     snapshot.availablePeers.map(({ alias, selected }) => ({
@@ -2748,27 +2768,37 @@ test("selecting a second Claude session atomically swaps the pair and settles ol
       selected,
     })),
     [
-      { alias: "claude-one@this-mac", selected: false },
+      { alias: "claude-one@this-mac", selected: true },
       { alias: "claude-two@this-mac", selected: true },
     ],
   );
-  assert.deepEqual(claude.releasedRoutes, ["claude_target_1"]);
+  assert.deepEqual(snapshot.pairs.map(({ claudeAlias, codexAlias }) => ({
+    claudeAlias,
+    codexAlias,
+  })), [
+    {
+      claudeAlias: "claude-one@this-mac",
+      codexAlias: "codex-main@this-mac",
+    },
+    {
+      claudeAlias: "claude-two@this-mac",
+      codexAlias: "codex-main@this-mac",
+    },
+  ]);
+  assert.deepEqual(claude.releasedRoutes, []);
   const oldStatus = await handlers.deliveryStatus({
     token: oldDelivery.deliveryToken,
   });
   assert.equal(oldStatus.found, true);
   if (oldStatus.found) {
-    assert.equal(oldStatus.state, "cancelled");
-    assert.equal(oldStatus.safeErrorCode, "ROUTE_UNREGISTERED");
+    assert.equal(oldStatus.terminal, false);
   }
 
-  assert.deepEqual(
-    await handlers.sendToClaude({
-      ...toClaude("the retired peer must not remain routable"),
-      expectsReply: false,
-    }),
-    { accepted: false, code: "rejected" },
-  );
+  const originalEdgeDelivery = await handlers.sendToClaude({
+    ...toClaude("the original edge remains routable"),
+    expectsReply: false,
+  });
+  assert.equal(originalEdgeDelivery.accepted, true);
   const replacementDelivery = await handlers.sendToClaude({
     ...toClaude("the replacement peer owns the only route"),
     toAlias: "claude-two@this-mac",
@@ -2779,6 +2809,122 @@ test("selecting a second Claude session atomically swaps the pair and settles ol
   assert.equal(
     claude.dispatches[1]?.binding.routeHandle,
     "claude_target_2",
+  );
+
+  assert.deepEqual(
+    await handlers.unpair({
+      claudeAlias: "claude-one@this-mac",
+      codexAlias: "codex-main@this-mac",
+      codexThreadId: THREAD_ID,
+    }),
+    { accepted: true, code: "ok" },
+  );
+  const afterUnpair = await handlers.listSnapshot();
+  assert.deepEqual(
+    afterUnpair.pairs.map(({ claudeAlias, codexAlias }) => ({
+      claudeAlias,
+      codexAlias,
+    })),
+    [
+      {
+        claudeAlias: "claude-two@this-mac",
+        codexAlias: "codex-main@this-mac",
+      },
+    ],
+  );
+  assert.deepEqual(
+    await handlers.sendToClaude({
+      ...toClaude("the removed edge cannot send"),
+      toAlias: "claude-one@this-mac",
+      expectsReply: false,
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(
+    (
+      await handlers.sendToClaude({
+        ...toClaude("the adjacent edge remains authorized"),
+        toAlias: "claude-two@this-mac",
+        expectsReply: false,
+      })
+    ).accepted,
+    true,
+  );
+});
+
+test("a pair-capacity rejection rolls a fresh Claude selection back", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+    {
+      alias: "claude-two@this-mac",
+      routeHandle: "claude_target_2",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MAX_PAIRS: "1",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.refreshDashboard();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-two@this-mac" }),
+    { accepted: false, code: "busy" },
+  );
+
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes
+      .filter((route) => route.provider === "claude")
+      .map((route) => route.alias),
+    ["claude-one@this-mac"],
+  );
+  assert.deepEqual(
+    snapshot.pairs.map(({ claudeAlias, codexAlias }) => ({
+      claudeAlias,
+      codexAlias,
+    })),
+    [
+      {
+        claudeAlias: "claude-one@this-mac",
+        codexAlias: "codex-main@this-mac",
+      },
+    ],
+  );
+  assert.deepEqual(claude.releasedRoutes, ["claude_target_2"]);
+  assert.equal(
+    snapshot.availablePeers.find(
+      (peer) => peer.alias === "claude-two@this-mac",
+    )?.selected,
+    false,
   );
 });
 
@@ -2814,8 +2960,8 @@ test("a failed send publishes discovery invalidation exactly once", async (t) =>
   });
   const handlers = service.handlers();
   await handlers.refreshDashboard();
-  await handlers.selectClaude({ alias: "advisor@this-mac" });
   await handlers.registerCodex(codexRegistration());
+  await handlers.selectClaude({ alias: "advisor@this-mac" });
 
   const publishedBefore = published.length;
   const revisionBefore = (await handlers.health()).revision;
@@ -2846,6 +2992,7 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
     EMBASSY_HOSTS: "this-mac",
   });
   const firstClaude = new FakeProvider("claude");
+  const firstCodex = new FakeProvider("codex");
   firstClaude.discoveries = [
     {
       alias: "claude-one@this-mac",
@@ -2857,9 +3004,10 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
   ];
   const first = new GatewayService({
     config,
-    adapters: [firstClaude],
+    adapters: [firstClaude, firstCodex],
   });
   await first.start();
+  await first.handlers().registerCodex(codexRegistration());
   assert.deepEqual(
     await first.handlers().selectClaude({ alias: "claude-one@this-mac" }),
     { accepted: true, code: "ok" },
@@ -2867,12 +3015,13 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
   await first.close();
 
   const secondClaude = new FakeProvider("claude");
+  const secondCodex = new FakeProvider("codex");
   secondClaude.discoveries = firstClaude.discoveries.map((peer) => ({
     ...peer,
   }));
   const second = new GatewayService({
     config,
-    adapters: [secondClaude],
+    adapters: [secondClaude, secondCodex],
   });
   await second.start();
   t.after(async () => {
@@ -2880,6 +3029,7 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
     await rm(root, { recursive: true, force: true });
   });
 
+  await second.handlers().registerCodex(codexRegistration());
   assert.deepEqual(
     await second.handlers().selectClaude({ alias: "claude-one@this-mac" }),
     { accepted: true, code: "ok" },
@@ -2893,6 +3043,7 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
     EMBASSY_HOSTS: "this-mac",
   });
   const firstClaude = new FakeProvider("claude", "claude_generation_before");
+  const firstCodex = new FakeProvider("codex");
   firstClaude.discoveries = [
     {
       alias: "old-name@this-mac",
@@ -2902,8 +3053,9 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
       compatibility: "compatible",
     },
   ];
-  const first = new GatewayService({ config, adapters: [firstClaude] });
+  const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
   await first.start();
+  await first.handlers().registerCodex(codexRegistration());
   assert.deepEqual(
     await first.handlers().selectClaude({ alias: "old-name@this-mac" }),
     { accepted: true, code: "ok" },
@@ -2911,6 +3063,7 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
   await first.close();
 
   const secondClaude = new FakeProvider("claude", "claude_generation_after");
+  const secondCodex = new FakeProvider("codex");
   secondClaude.discoveries = [
     {
       alias: "latest-name@this-mac",
@@ -2920,12 +3073,13 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
       compatibility: "compatible",
     },
   ];
-  const second = new GatewayService({ config, adapters: [secondClaude] });
+  const second = new GatewayService({ config, adapters: [secondClaude, secondCodex] });
   await second.start();
   t.after(async () => {
     await second.close();
     await rm(root, { recursive: true, force: true });
   });
+  await second.handlers().registerCodex(codexRegistration());
 
   const before = await second.snapshot();
   assert.equal(secondClaude.selectedRoutes.length, 0);
@@ -2938,12 +3092,12 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
   assert.deepEqual(await second.handlers().refreshDashboard(), {
     accepted: true,
     code: "ok",
-    revision: 1,
+    revision: 2,
   });
   assert.deepEqual(await second.handlers().refreshDashboard(), {
     accepted: true,
     code: "ok",
-    revision: 1,
+    revision: 2,
   });
   const restored = await second.snapshot();
   assert.deepEqual(secondClaude.selectedRoutes, [
@@ -2982,6 +3136,7 @@ test("incomplete, colliding, and workspace-failed discovery cannot restore a dur
     EMBASSY_HOSTS: "this-mac",
   });
   const firstClaude = new FakeProvider("claude");
+  const firstCodex = new FakeProvider("codex");
   firstClaude.discoveries = [
     {
       alias: "advisor@this-mac",
@@ -2991,20 +3146,23 @@ test("incomplete, colliding, and workspace-failed discovery cannot restore a dur
       compatibility: "compatible",
     },
   ];
-  const first = new GatewayService({ config, adapters: [firstClaude] });
+  const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
   await first.start();
+  await first.handlers().registerCodex(codexRegistration());
   await first.handlers().selectClaude({ alias: "advisor@this-mac" });
   await first.close();
 
   const secondClaude = new FakeProvider("claude", "claude_generation_after");
+  const secondCodex = new FakeProvider("codex");
   secondClaude.discoveries = firstClaude.discoveries.map((peer) => ({ ...peer }));
   secondClaude.discoveryComplete = false;
-  const second = new GatewayService({ config, adapters: [secondClaude] });
+  const second = new GatewayService({ config, adapters: [secondClaude, secondCodex] });
   await second.start();
   t.after(async () => {
     await second.close();
     await rm(root, { recursive: true, force: true });
   });
+  await second.handlers().registerCodex(codexRegistration());
 
   const completeDiscovery = secondClaude.discoverClaudePeers.bind(secondClaude);
   Object.defineProperty(secondClaude, "discoverClaudePeers", {
@@ -3085,6 +3243,7 @@ test("a same-name different UUID requires an explicit atomic selection swap", as
   });
   const otherSession = "00000000-0000-4000-8000-000000000043";
   const firstClaude = new FakeProvider("claude");
+  const firstCodex = new FakeProvider("codex");
   firstClaude.discoveries = [
     {
       alias: "second@this-mac",
@@ -3094,12 +3253,14 @@ test("a same-name different UUID requires an explicit atomic selection swap", as
       compatibility: "compatible",
     },
   ];
-  const first = new GatewayService({ config, adapters: [firstClaude] });
+  const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
   await first.start();
+  await first.handlers().registerCodex(codexRegistration());
   await first.handlers().selectClaude({ alias: "second@this-mac" });
   await first.close();
 
   const secondClaude = new FakeProvider("claude", "claude_generation_after");
+  const secondCodex = new FakeProvider("codex");
   secondClaude.discoveries = [
     {
       alias: "second@this-mac",
@@ -3109,19 +3270,26 @@ test("a same-name different UUID requires an explicit atomic selection swap", as
       compatibility: "compatible",
     },
   ];
-  const second = new GatewayService({ config, adapters: [secondClaude] });
+  const second = new GatewayService({ config, adapters: [secondClaude, secondCodex] });
   await second.start();
   t.after(async () => {
     await second.close();
     await rm(root, { recursive: true, force: true });
   });
 
+  await second.handlers().registerCodex(codexRegistration());
+
   await second.handlers().refreshDashboard();
   let snapshot = await second.snapshot();
   assert.deepEqual(secondClaude.selectedRoutes, []);
   assert.deepEqual(secondClaude.releasedRoutes, []);
   assert.equal(snapshot.availablePeers[0]?.selected, false);
-  assert.equal(snapshot.routes.every((route) => route.state === "stale"), true);
+  assert.equal(
+    snapshot.routes
+      .filter((route) => route.provider === "claude")
+      .every((route) => route.state === "stale"),
+    true,
+  );
 
   assert.deepEqual(
     await second.handlers().selectClaude({ alias: "second@this-mac" }),
@@ -3134,7 +3302,9 @@ test("a same-name different UUID requires an explicit atomic selection swap", as
   assert.deepEqual(secondClaude.releasedRoutes, [CLAUDE_SESSION_ID]);
   assert.equal(snapshot.availablePeers[0]?.selected, true);
   assert.deepEqual(
-    snapshot.routes.map((route) => route.alias),
+    snapshot.routes
+      .filter((route) => route.provider === "claude")
+      .map((route) => route.alias),
     ["second@this-mac"],
   );
 });
@@ -3148,6 +3318,7 @@ test("a stale Claude selection can be unselected by stored alias or bounded UUID
       EMBASSY_HOSTS: "this-mac",
     });
     const firstClaude = new FakeProvider("claude");
+    const firstCodex = new FakeProvider("codex");
     firstClaude.discoveries = [
       {
         alias: "offline@this-mac",
@@ -3157,8 +3328,12 @@ test("a stale Claude selection can be unselected by stored alias or bounded UUID
         compatibility: "compatible",
       },
     ];
-    const first = new GatewayService({ config, adapters: [firstClaude] });
+    const first = new GatewayService({
+      config,
+      adapters: [firstClaude, firstCodex],
+    });
     await first.start();
+    await first.handlers().registerCodex(codexRegistration());
     await first.handlers().selectClaude({ alias: "offline@this-mac" });
     await first.close();
 
@@ -3191,7 +3366,7 @@ test("unselect settles in-flight delivery from exact write evidence once", async
       label: "unwritten",
       delivery: undefined,
       state: "cancelled",
-      safeErrorCode: "ROUTE_UNREGISTERED",
+      safeErrorCode: "PAIR_REMOVED",
     },
     {
       label: "confirmed",
@@ -3410,8 +3585,8 @@ test("restoring a durable Claude UUID never replays pre-restart queue or convers
   });
   await first.start();
   await first.handlers().refreshDashboard();
-  await first.handlers().selectClaude({ alias: "busy-peer@this-mac" });
   await first.handlers().registerCodex(codexRegistration());
+  await first.handlers().selectClaude({ alias: "busy-peer@this-mac" });
   assert.equal(
     (
       await first.handlers().sendToClaude({
@@ -5330,6 +5505,14 @@ test("delivery-token pressure evicts only the oldest terminal cohort", async (t)
       accepted: true,
       code: "ok",
     });
+    assert.deepEqual(
+      await handlers.pair({
+        claudeAlias: "claude-one@this-mac",
+        codexAlias: "codex-main@this-mac",
+        codexThreadId: THREAD_ID,
+      }),
+      { accepted: true, code: "ok" },
+    );
   }
 
   const active = await handlers.sendToCodex(
@@ -6180,8 +6363,8 @@ test("a Claude rename migrates an enqueue that is already scheduled to dispatch"
   });
   const handlers = service.handlers();
   await handlers.refreshDashboard();
-  await handlers.selectClaude({ alias: "old-name@this-mac" });
   await handlers.registerCodex(codexRegistration());
+  await handlers.selectClaude({ alias: "old-name@this-mac" });
 
   const accepted = await handlers.sendToClaude({
     ...toClaude("scheduled body follows exact UUID rename"),

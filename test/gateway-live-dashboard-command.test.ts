@@ -47,6 +47,7 @@ function emptySnapshot(): GatewayPublicSnapshot {
     connectors: [],
     availablePeers: [],
     routes: [],
+    pairs: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -67,6 +68,7 @@ function emptySnapshot(): GatewayPublicSnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
+      pairs: 0,
       messages: 0,
       alerts: 0,
     },

@@ -73,6 +73,7 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         counters: routeCounters({ accepted: 4, delivered: 3 }),
       },
     ],
+    pairs: [],
     messages: [
       {
         sequence: 1,
@@ -143,6 +144,7 @@ export function dashboardFixture(): GatewayPublicSnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
+      pairs: 0,
       messages: 0,
       alerts: 0,
     },

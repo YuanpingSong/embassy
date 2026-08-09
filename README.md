@@ -95,6 +95,8 @@ MSG
 
 `embassy dashboard --live` opens a five-tab streaming view in the browser (overview, deliveries, routes, activity, diagnostics). See [Dashboard](docs/DASHBOARD.md) for details.
 
+The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`. Live dashboard mutations require the same-origin `X-Embassy-Request` sentinel.
+
 ## How it works
 
 ```text
@@ -137,9 +139,9 @@ Embassy's operators are often agents themselves: `register-codex` runs inside th
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
 | `refresh-dashboard` | operator | Regenerate both static dashboard files |
 | `dashboard --live [--lang en\|zh-CN]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
-| `delivery-status` | either provider | Read one delivery tracker by its `dlv_` token |
+| `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
-| `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; `register-codex --succeeds <current-alias>` hands the registration to a different task |
+| `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; for example, `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
 | `select-claude` / `unselect-claude` | operator | Select or unselect a discovered Claude destination |
 | `send-to-claude` | registered Codex task | Send one bounded message to an already-selected Claude session |
 | `send-to-codex` | Claude session | Send one bounded message using the inherited native reply identity |

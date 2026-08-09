@@ -1896,11 +1896,6 @@ test("an exact Claude receipt unlocks a second queued gateway send", async () =>
   try {
     await service.start();
     const handlers = service.handlers();
-    assert.equal((await handlers.refreshDashboard()).accepted, true);
-    assert.deepEqual(
-      await handlers.selectClaude({ alias: "advisor@this-mac" }),
-      { accepted: true, code: "ok" },
-    );
     assert.deepEqual(
       await handlers.registerCodex({
         alias: "codex-main@this-mac",
@@ -1908,6 +1903,11 @@ test("an exact Claude receipt unlocks a second queued gateway send", async () =>
         hostId: "this-mac",
         threadId: THREAD_ID,
       }),
+      { accepted: true, code: "ok" },
+    );
+    assert.equal((await handlers.refreshDashboard()).accepted, true);
+    assert.deepEqual(
+      await handlers.selectClaude({ alias: "advisor@this-mac" }),
       { accepted: true, code: "ok" },
     );
     const send = (text: string) =>

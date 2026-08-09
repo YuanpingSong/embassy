@@ -154,6 +154,13 @@ export function loadGatewayConfig(
       2,
       gatewayPublicSnapshotLimits.routes,
     ),
+    maxPairs: boundedInteger(
+      "EMBASSY_MAX_PAIRS",
+      env.EMBASSY_MAX_PAIRS,
+      128,
+      1,
+      gatewayPublicSnapshotLimits.pairs,
+    ),
     eventCapacity: boundedInteger(
       "EMBASSY_EVENT_CAPACITY",
       env.EMBASSY_EVENT_CAPACITY,
@@ -262,6 +269,7 @@ export function loadGatewayConfig(
     limits.eventCapacity * 512 +
     limits.dedupeCapacity * 384 +
     limits.maxRoutes * 1_024 +
+    limits.maxPairs * 512 +
     limits.maxQueueMessages * 512 +
     limits.maxRoutes * 256;
   if (conservativeStateBudget > MAX_CONFIGURED_STATE_BUDGET) {

@@ -72,6 +72,8 @@ export const gatewayCliCommands = [
   "unregister-codex",
   "select-claude",
   "unselect-claude",
+  "pair",
+  "unpair",
   "send-to-claude",
   "send-to-codex",
   "reply",
@@ -331,6 +333,15 @@ function requireExclusiveCodexThreadId(env: NodeJS.ProcessEnv): string {
   return requireCodexThreadId(env);
 }
 
+function optionalCodexThreadId(env: NodeJS.ProcessEnv): string | undefined {
+  const threadId = env.CODEX_THREAD_ID;
+  if (threadId === undefined || threadId.length === 0) return undefined;
+  if (!THREAD_ID_PATTERN.test(threadId)) {
+    throw new CliFault("CODEX_IDENTITY_REQUIRED");
+  }
+  return threadId.toLowerCase();
+}
+
 function optionalClaudeReplyAddress(
   env: NodeJS.ProcessEnv,
 ): string | undefined {
@@ -525,11 +536,29 @@ async function buildRequest(
         options.alias === undefined
           ? requireClaudeSelector(options, "session")
           : requireClaudeSelector(options, "alias");
+      const codexThreadId = optionalCodexThreadId(env);
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method:
           command === "select-claude" ? "select_claude" : "unselect_claude",
-        params: { alias: selector },
+        params: {
+          alias: selector,
+          ...(codexThreadId === undefined ? {} : { codexThreadId }),
+        },
+      };
+    }
+    case "pair":
+    case "unpair": {
+      const options = parseOptions(args, ["claude", "codex"]);
+      assertExactOptionCount(options, 2);
+      return {
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        method: command,
+        params: {
+          claudeAlias: requireClaudeSelector(options, "claude"),
+          codexAlias: requireCodexAlias(options, "codex"),
+          codexThreadId: requireExclusiveCodexThreadId(env),
+        },
       };
     }
     case "send-to-claude": {

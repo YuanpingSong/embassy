@@ -13,6 +13,7 @@ import {
   startGatewayControlServer,
   type GatewayControlHandlers,
   type GatewaySnapshot,
+  type PairParams,
   type ReplyParams,
   type ValidatedRegisterCodexParams,
   type ValidatedSendToClaudeParams,
@@ -140,6 +141,7 @@ function emptySnapshot(): GatewaySnapshot {
     connectors: [],
     availablePeers: [],
     routes: [],
+    pairs: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -160,6 +162,7 @@ function emptySnapshot(): GatewaySnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
+      pairs: 0,
       messages: 0,
       alerts: 0,
     },
@@ -229,6 +232,8 @@ test("all client commands use one private control socket and expose only normali
   const unregisters: Array<{ alias: string; threadId: string }> = [];
   const selected: string[] = [];
   const unselected: string[] = [];
+  const pairs: PairParams[] = [];
+  const unpairs: PairParams[] = [];
   const sendsToClaude: ValidatedSendToClaudeParams[] = [];
   const sendsToCodex: ValidatedSendToCodexParams[] = [];
   const replies: ReplyParams[] = [];
@@ -249,6 +254,14 @@ test("all client commands use one private control socket and expose only normali
     },
     unselectClaude: ({ alias }) => {
       unselected.push(alias);
+      return { accepted: true, code: "ok" };
+    },
+    pair: (params) => {
+      pairs.push({ ...params });
+      return { accepted: true, code: "ok" };
+    },
+    unpair: (params) => {
+      unpairs.push({ ...params });
       return { accepted: true, code: "ok" };
     },
     listSnapshot: () => emptySnapshot(),
@@ -357,6 +370,26 @@ test("all client commands use one private control socket and expose only normali
     {
       argv: ["unselect-claude", "--alias", "advisor@this-mac"],
       env: BOTH_IDENTITIES,
+    },
+    {
+      argv: [
+        "pair",
+        "--claude",
+        "advisor@this-mac",
+        "--codex",
+        "codex-reviewer@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+    },
+    {
+      argv: [
+        "unpair",
+        "--claude",
+        "advisor@this-mac",
+        "--codex",
+        "codex-reviewer@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
     },
     {
       argv: [
@@ -474,6 +507,14 @@ test("all client commands use one private control socket and expose only normali
   ]);
   assert.deepEqual(selected, ["advisor@this-mac", CLAUDE_SESSION_ID]);
   assert.deepEqual(unselected, ["advisor@this-mac"]);
+  assert.deepEqual(pairs, [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-reviewer@this-mac",
+      codexThreadId: THREAD_ID,
+    },
+  ]);
+  assert.deepEqual(unpairs, pairs);
   assert.deepEqual(deliveryStatuses, [DELIVERY_TOKEN, DELIVERY_TOKEN]);
   assert.deepEqual(sendsToClaude, [
     {
@@ -1627,6 +1668,8 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
+      pair: () => ({ accepted: true, code: "ok" }),
+      unpair: () => ({ accepted: true, code: "ok" }),
       listSnapshot: () => emptySnapshot(),
       observeSnapshot: () => ({
         snapshotRevision: 0,

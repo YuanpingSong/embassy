@@ -30,6 +30,7 @@ import type {
   NormalizedMessageEvent,
   PublicAvailablePeerSnapshot,
   PublicConnectorSnapshot,
+  PublicPairSnapshot,
   PublicRouteSnapshot,
   RouteCounters,
   SafeGatewayAlert,
@@ -68,6 +69,8 @@ export const gatewayControlMethods = [
   "unregister_codex",
   "select_claude",
   "unselect_claude",
+  "pair",
+  "unpair",
   "list_snapshot",
   "observe_snapshot",
   "delivery_status",
@@ -104,6 +107,14 @@ export type UnregisterCodexParams = {
 export type SelectClaudeParams = {
   /** Latest name@host or native Claude session UUID. */
   alias: string;
+  /** Optional inherited Codex task identity used for fail-closed inference. */
+  codexThreadId?: string;
+};
+
+export type PairParams = {
+  claudeAlias: string;
+  codexAlias: string;
+  codexThreadId: string;
 };
 
 export type SendToClaudeParams = {
@@ -191,6 +202,16 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
+      method: "pair";
+      params: PairParams;
+    }
+  | {
+      protocolVersion: 1;
+      method: "unpair";
+      params: PairParams;
+    }
+  | {
+      protocolVersion: 1;
       method: "list_snapshot";
       params: Record<string, never>;
     }
@@ -235,6 +256,8 @@ type ValidatedGatewayControlRequest =
   | Extract<GatewayControlRequest, { method: "unregister_codex" }>
   | Extract<GatewayControlRequest, { method: "select_claude" }>
   | Extract<GatewayControlRequest, { method: "unselect_claude" }>
+  | Extract<GatewayControlRequest, { method: "pair" }>
+  | Extract<GatewayControlRequest, { method: "unpair" }>
   | Extract<GatewayControlRequest, { method: "list_snapshot" }>
   | Extract<GatewayControlRequest, { method: "observe_snapshot" }>
   | Extract<GatewayControlRequest, { method: "delivery_status" }>
@@ -333,6 +356,8 @@ type ResultByMethod = {
   unregister_codex: GatewayDecision;
   select_claude: GatewayDecision;
   unselect_claude: GatewayDecision;
+  pair: GatewayDecision;
+  unpair: GatewayDecision;
   list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation;
   delivery_status: GatewayDeliveryStatusResult;
@@ -358,6 +383,8 @@ export type GatewayControlHandlers = {
   unselectClaude: (
     params: Readonly<SelectClaudeParams>,
   ) => MaybePromise<GatewayDecision>;
+  pair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
+  unpair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
   deliveryStatus: (
@@ -686,9 +713,10 @@ function normalizeParams(
     case "select_claude":
     case "unselect_claude": {
       if (
-        !hasExactKeys(value, ["alias"]) ||
+        !hasExactKeys(value, ["alias"], ["codexThreadId"]) ||
         typeof value.alias !== "string" ||
-        !isClaudeSessionSelector(value.alias)
+        !isClaudeSessionSelector(value.alias) ||
+        (value.codexThreadId !== undefined && !isUuid(value.codexThreadId))
       ) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
@@ -696,6 +724,37 @@ function normalizeParams(
         alias: UUID_PATTERN.test(value.alias)
           ? value.alias.toLowerCase()
           : value.alias,
+        ...(value.codexThreadId === undefined
+          ? {}
+          : { codexThreadId: value.codexThreadId.toLowerCase() }),
+      };
+    }
+    case "pair":
+    case "unpair": {
+      if (
+        !hasExactKeys(value, [
+          "claudeAlias",
+          "codexAlias",
+          "codexThreadId",
+        ]) ||
+        typeof value.claudeAlias !== "string" ||
+        !isClaudeSessionSelector(value.claudeAlias) ||
+        !isAlias(value.codexAlias) ||
+        !value.codexAlias.startsWith("codex-") ||
+        !isUuid(value.codexThreadId) ||
+        value.claudeAlias === value.codexAlias ||
+        (isAlias(value.claudeAlias) &&
+          value.claudeAlias.slice(value.claudeAlias.lastIndexOf("@") + 1) !==
+            value.codexAlias.slice(value.codexAlias.lastIndexOf("@") + 1))
+      ) {
+        throw new ProtocolFault("INVALID_REQUEST");
+      }
+      return {
+        claudeAlias: UUID_PATTERN.test(value.claudeAlias)
+          ? value.claudeAlias.toLowerCase()
+          : value.claudeAlias,
+        codexAlias: value.codexAlias,
+        codexThreadId: value.codexThreadId.toLowerCase(),
       };
     }
     case "send_to_claude": {
@@ -1034,6 +1093,20 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
   );
 }
 
+function isPairSnapshot(value: unknown): value is PublicPairSnapshot {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["claudeAlias", "codexAlias", "host", "counters"]) &&
+    isAlias(value.claudeAlias) &&
+    isAlias(value.codexAlias) &&
+    value.claudeAlias !== value.codexAlias &&
+    isHostId(value.host) &&
+    value.claudeAlias.endsWith(`@${value.host}`) &&
+    value.codexAlias.endsWith(`@${value.host}`) &&
+    isRouteCounters(value.counters)
+  );
+}
+
 function isAvailablePeerSnapshot(
   value: unknown,
 ): value is PublicAvailablePeerSnapshot {
@@ -1165,12 +1238,14 @@ function isSnapshotTruncation(value: unknown): boolean {
       "connectors",
       "availablePeers",
       "routes",
+      "pairs",
       "messages",
       "alerts",
     ]) &&
     isNonNegativeInteger(value.connectors) &&
     isNonNegativeInteger(value.availablePeers) &&
     isNonNegativeInteger(value.routes) &&
+    isNonNegativeInteger(value.pairs) &&
     isNonNegativeInteger(value.messages) &&
     isNonNegativeInteger(value.alerts)
   );
@@ -1187,6 +1262,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
       "connectors",
       "availablePeers",
       "routes",
+      "pairs",
       "messages",
       "accounting",
       "alerts",
@@ -1205,6 +1281,9 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
     !Array.isArray(value.routes) ||
     value.routes.length > gatewayPublicSnapshotLimits.routes ||
     !value.routes.every(isRouteSnapshot) ||
+    !Array.isArray(value.pairs) ||
+    value.pairs.length > gatewayPublicSnapshotLimits.pairs ||
+    !value.pairs.every(isPairSnapshot) ||
     !Array.isArray(value.messages) ||
     value.messages.length > gatewayPublicSnapshotLimits.messages ||
     !value.messages.every(isNormalizedMessageEvent) ||
@@ -1222,10 +1301,20 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   );
   const aliases = value.routes.map((route) => route.alias);
   const peerAliases = value.availablePeers.map((peer) => peer.alias);
+  const pairKeys = value.pairs.map(
+    (pair) => `${pair.claudeAlias}\0${pair.codexAlias}`,
+  );
+  const routeByAlias = new Map(value.routes.map((route) => [route.alias, route]));
   return (
     new Set(connectorKeys).size === connectorKeys.length &&
     new Set(aliases).size === aliases.length &&
     new Set(peerAliases).size === peerAliases.length &&
+    new Set(pairKeys).size === pairKeys.length &&
+    value.pairs.every(
+      (pair) =>
+        routeByAlias.get(pair.claudeAlias)?.provider === "claude" &&
+        routeByAlias.get(pair.codexAlias)?.provider === "codex",
+    ) &&
     Buffer.byteLength(JSON.stringify(value), "utf8") <=
       GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET
   );
@@ -1253,6 +1342,8 @@ function isResultForMethod<M extends GatewayControlMethod>(
     case "unregister_codex":
     case "select_claude":
     case "unselect_claude":
+    case "pair":
+    case "unpair":
       return isDecision(value);
     case "list_snapshot":
       return isGatewaySnapshot(value);
@@ -1300,6 +1391,12 @@ async function dispatch(
         break;
       case "unselect_claude":
         result = await handlers.unselectClaude(request.params);
+        break;
+      case "pair":
+        result = await handlers.pair(request.params);
+        break;
+      case "unpair":
+        result = await handlers.unpair(request.params);
         break;
       case "list_snapshot":
         result = await handlers.listSnapshot();
@@ -1456,6 +1553,8 @@ function isNonIdempotentControlMethod(method: GatewayControlMethod): boolean {
     method === "unregister_codex" ||
     method === "select_claude" ||
     method === "unselect_claude" ||
+    method === "pair" ||
+    method === "unpair" ||
     method === "send_to_claude" ||
     method === "send_to_codex" ||
     method === "reply"

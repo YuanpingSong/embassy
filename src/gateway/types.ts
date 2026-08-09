@@ -92,6 +92,7 @@ export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64,
   availablePeers: 256,
   routes: 256,
+  pairs: 256,
   messages: 1_024,
   alerts: 256,
 } as const);
@@ -149,6 +150,21 @@ export type GatewayRouteRecord = {
 };
 
 /**
+ * Durable bidirectional consent between two exact route owners. Aliases are
+ * display coordinates; the private leases prevent an alias from silently
+ * retargeting an existing permission edge.
+ */
+export type GatewayPairRecord = {
+  claudeAlias: string;
+  codexAlias: string;
+  claudeOwnerLease: string;
+  codexOwnerLease: string;
+  createdAt: string;
+  updatedAt: string;
+  counters: RouteCounters;
+};
+
+/**
  * Controller-internal route view used to prove ownership across a restart.
  * This type must never cross the control protocol or enter a public snapshot.
  */
@@ -186,6 +202,8 @@ export type QueuedMessageMetadata = {
   deadlineAt: string;
   bytes: number;
   hopCount: number;
+  /** This message was admitted by the exact durable consent edge. */
+  pair?: true;
   /** Exact Claude-to-Codex `STEER:` classification; absence means ordinary. */
   steer?: true;
 };
@@ -205,6 +223,7 @@ export type DedupeRecord = {
   sourceAlias: string;
   targetAlias: string;
   direction: MessageDirection;
+  pair?: true;
   firstSeenAt: string;
   expiresAt: string;
 };
@@ -251,6 +270,7 @@ export type GatewayPersistedState = {
   updatedAt: string;
   eventSequence: number;
   routes: GatewayRouteRecord[];
+  pairs: GatewayPairRecord[];
   connectors: ConnectorRecord[];
   queue: QueuedMessageMetadata[];
   inFlight: InFlightMessageMetadata[];
@@ -276,6 +296,14 @@ export type PublicRouteSnapshot = {
   oldestQueuedAt?: string;
   counters: RouteCounters;
   safeErrorCode?: string;
+};
+
+/** Metadata-only public consent edge. Private route authority is omitted. */
+export type PublicPairSnapshot = {
+  claudeAlias: string;
+  codexAlias: string;
+  host: string;
+  counters: RouteCounters;
 };
 
 export type PublicConnectorSnapshot = {
@@ -412,6 +440,7 @@ export type GatewayPublicSnapshot = {
   connectors: PublicConnectorSnapshot[];
   availablePeers: PublicAvailablePeerSnapshot[];
   routes: PublicRouteSnapshot[];
+  pairs: PublicPairSnapshot[];
   messages: NormalizedMessageEvent[];
   accounting: GatewayAccounting;
   alerts: SafeGatewayAlert[];
@@ -422,6 +451,7 @@ export type GatewaySnapshotTruncation = {
   connectors: number;
   availablePeers: number;
   routes: number;
+  pairs: number;
   messages: number;
   alerts: number;
 };
@@ -483,6 +513,7 @@ export function projectGatewayPublicSnapshot(
       gatewayPublicSnapshotLimits.availablePeers,
     ),
     routes: snapshot.routes.slice(0, gatewayPublicSnapshotLimits.routes),
+    pairs: snapshot.pairs.slice(0, gatewayPublicSnapshotLimits.pairs),
     messages: snapshot.messages.slice(-gatewayPublicSnapshotLimits.messages),
     alerts: snapshot.alerts.slice(-gatewayPublicSnapshotLimits.alerts),
     accounting: { ...snapshot.accounting },
@@ -499,6 +530,9 @@ export function projectGatewayPublicSnapshot(
       routes:
         snapshot.truncation.routes +
         Math.max(0, snapshot.routes.length - gatewayPublicSnapshotLimits.routes),
+      pairs:
+        snapshot.truncation.pairs +
+        Math.max(0, snapshot.pairs.length - gatewayPublicSnapshotLimits.pairs),
       messages:
         snapshot.truncation.messages +
         Math.max(0, snapshot.messages.length - gatewayPublicSnapshotLimits.messages),
@@ -589,6 +623,21 @@ export function projectGatewayPublicSnapshot(
     return left.alias.localeCompare(right.alias);
   });
   const routeOmissions = projected.truncation.routes;
+  const pairs = [...projected.pairs].sort((left, right) =>
+    `${left.claudeAlias}\0${left.codexAlias}`.localeCompare(
+      `${right.claudeAlias}\0${right.codexAlias}`,
+    ),
+  );
+  const pairOmissions = projected.truncation.pairs;
+  if (
+    retainUntilFit(pairs.length, (retained) => {
+      projected.pairs = pairs.slice(0, retained);
+      projected.truncation.pairs = pairOmissions + pairs.length - retained;
+    })
+  ) {
+    return projected;
+  }
+
   if (
     retainUntilFit(routes.length, (retained) => {
       projected.routes = routes.slice(0, retained);
@@ -690,6 +739,8 @@ export type EnqueueNativeIngressInput = Omit<
 > & {
   source: TransientNativeClaudePeer;
   targetAlias: string;
+  /** Pre-deadline reply evidence retained across exact pair teardown. */
+  authorizedPairTeardownReply?: true;
 };
 
 export type EnqueueNativeReplyInput = Omit<
@@ -698,6 +749,8 @@ export type EnqueueNativeReplyInput = Omit<
 > & {
   sourceAlias: string;
   target: TransientNativeClaudePeer;
+  /** Retain the original paired admission authority, when one existed. */
+  pair?: true;
 };
 
 export type EnqueueMessageResult = {
@@ -705,6 +758,8 @@ export type EnqueueMessageResult = {
   duplicate: boolean;
   messageId?: string;
   messageIdSuffix: string;
+  /** The accepted message is owned by one exact consent edge. */
+  pair?: true;
   /** Exact older queued steer displaced by the per-route cap, if any. */
   supersededSettlement?: TerminalMessageSettlement;
 };
@@ -771,6 +826,7 @@ export type RequeueInFlightMessageResult =
 
 export type GatewayStoreLimits = {
   maxRoutes: number;
+  maxPairs: number;
   eventCapacity: number;
   eventTtlMs: number;
   dedupeCapacity: number;

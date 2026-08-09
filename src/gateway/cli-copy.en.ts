@@ -16,6 +16,8 @@ Commands:
   unregister-codex       Unregister the current Codex task
   select-claude          Select a discovered Claude session
   unselect-claude        Clear the Claude selection
+  pair                   Add one Claude↔Codex consent edge
+  unpair                 Remove one Claude↔Codex consent edge
   send-to-claude         Send stdin to the selected Claude route
   send-to-codex          Send stdin to a registered Codex route
   reply                  Reply with a conversation token

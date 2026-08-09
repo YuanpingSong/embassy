@@ -56,6 +56,7 @@ function clock(): Clock {
 function limits(): GatewayConfig["limits"] {
   return {
     maxRoutes: 4,
+    maxPairs: 128,
     eventCapacity: 10,
     eventTtlMs: 1_000,
     dedupeCapacity: 10,
@@ -185,6 +186,10 @@ async function observeAndRegister(store: GatewayStore): Promise<void> {
   };
   await store.registerRoute(codex);
   await store.registerRoute(claude);
+  await store.pairRoutes({
+    claudeAlias: claude.alias,
+    codexAlias: codex.alias,
+  });
 }
 
 async function observeAndRegisterCodexOnly(store: GatewayStore): Promise<void> {
@@ -239,6 +244,10 @@ async function observeAndRegisterSuccessionRoutes(
       alias: "advisor@this-mac",
       binding: claudeBinding,
       registrationMode: "selected_live_peer",
+    });
+    await store.pairRoutes({
+      claudeAlias: "advisor@this-mac",
+      codexAlias: oldSuccessionIdentity.alias,
     });
   }
 }
@@ -555,6 +564,179 @@ test("route registry has a configured durable capacity", async () => {
     }),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "ROUTE_CAPACITY_REACHED",
+  );
+  await store.close();
+});
+
+test("permission graph admission and unpair teardown are exact to one edge", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  const secondCodexBinding: PrivateRouteBinding = {
+    ...codexBinding,
+    routeHandle: "codex-thread-private-0002",
+    ownerLease: "codex-owner-lease-0002",
+  };
+  const secondClaudeBinding: PrivateRouteBinding = {
+    ...claudeBinding,
+    routeHandle: "claude-session-private-0002",
+    ownerLease: "claude-owner-lease-0002",
+  };
+  await store.registerRoute({
+    alias: "writer@this-mac",
+    binding: secondCodexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.registerRoute({
+    alias: "critic@this-mac",
+    binding: secondClaudeBinding,
+    registrationMode: "selected_live_peer",
+  });
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "writer@this-mac",
+  });
+  await store.pairRoutes({
+    claudeAlias: "critic@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+  assert.deepEqual(await store.inspectPairs(), [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "reviewer@this-mac",
+    },
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "writer@this-mac",
+    },
+    {
+      claudeAlias: "critic@this-mac",
+      codexAlias: "reviewer@this-mac",
+    },
+  ]);
+  await assert.rejects(
+    store.enqueueMessage({
+      sourceAlias: "critic@this-mac",
+      targetAlias: "writer@this-mac",
+      body: "must not cross an absent edge",
+      dedupeKey: "absent-edge",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED",
+  );
+  const first = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "first edge in flight",
+    dedupeKey: "first-edge",
+  });
+  const adjacent = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "writer@this-mac",
+    body: "adjacent edge remains queued",
+    dedupeKey: "adjacent-edge",
+  });
+  assert.equal(first.accepted, true);
+  assert.equal(adjacent.accepted, true);
+  const dispatched = await store.dequeueMessage("reviewer@this-mac");
+  assert.equal(dispatched?.messageId, first.messageId);
+  const result = await store.unpairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "reviewer@this-mac",
+    inFlightSettlements: [
+      {
+        messageId: first.messageId ?? "",
+        state: "cancelled",
+        safeErrorCode: "PAIR_REMOVED",
+      },
+    ],
+  });
+  assert.deepEqual(result.settlements, [
+    {
+      messageId: first.messageId,
+      state: "cancelled",
+      safeErrorCode: "PAIR_REMOVED",
+    },
+  ]);
+  assert.equal(result.claudeRouteUnreferenced, false);
+  assert.equal(
+    await store.hasPair({
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "reviewer@this-mac",
+    }),
+    false,
+  );
+  const remaining = await store.dequeueMessage("writer@this-mac");
+  assert.equal(remaining?.messageId, adjacent.messageId);
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.pairs.length, 2);
+  assert.equal(snapshot.accounting.rejected, 1);
+  assert.equal(snapshot.accounting.cancelled, 1);
+  assert.equal(JSON.stringify(snapshot).includes("owner-lease"), false);
+  await store.close();
+});
+
+test("permission graph capacity is configured and fail-closed", async () => {
+  const { store, config } = await fixture();
+  config.limits.maxPairs = 1;
+  await store.initialize();
+  await observeAndRegister(store);
+  assert.equal((await store.inspectPairs()).length, 1);
+  const secondCodexBinding: PrivateRouteBinding = {
+    ...codexBinding,
+    routeHandle: "codex-thread-private-capacity",
+    ownerLease: "codex-owner-lease-capacity",
+  };
+  await store.registerRoute({
+    alias: "writer@this-mac",
+    binding: secondCodexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await assert.rejects(
+    store.pairRoutes({
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "writer@this-mac",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "PAIR_CAPACITY_REACHED",
+  );
+  await store.close();
+});
+
+test("unpair removes only edge-owned work and preserves open-mode ingress", async () => {
+  const { store, config } = await fixture();
+  config.inboundMode = "open";
+  await store.initialize();
+  await observeAndRegister(store);
+  await store.unpairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+
+  const openIngress = await store.enqueueNativeIngress({
+    source: {
+      alias: "advisor@this-mac",
+      binding: claudeBinding,
+    },
+    targetAlias: "reviewer@this-mac",
+    body: "open authority survives an unrelated edge lifecycle",
+    dedupeKey: "open-before-edge",
+  });
+  assert.equal(openIngress.accepted, true);
+  assert.equal(openIngress.pair, undefined);
+
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+  const removed = await store.unpairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+  assert.deepEqual(removed.settlements, []);
+  assert.equal(
+    (await store.dequeueMessage("reviewer@this-mac"))?.messageId,
+    openIngress.messageId,
   );
   await store.close();
 });
@@ -1348,6 +1530,10 @@ test("paired native ingress accepts only the exact selected Claude binding", asy
     binding: transientClaudePeer.binding,
     registrationMode: "selected_live_peer",
   });
+  await store.pairRoutes({
+    claudeAlias: transientClaudePeer.alias,
+    codexAlias: "reviewer@this-mac",
+  });
   const otherPeer = {
     alias: "other-advisor@this-mac",
     binding: {
@@ -1752,7 +1938,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
     })),
     routes: Array.from({ length: 256 }, (_, index) => ({
       alias: alias("r", index),
-      provider: index % 2 === 0 ? "codex" : "claude",
+      provider: index < 128 ? "codex" : "claude",
       host: hosts[index % hosts.length]!,
       enabled: true,
       state: "awaiting_approval",
@@ -1763,6 +1949,17 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       counters: { ...counters },
       safeErrorCode: `R${"X".repeat(59)}${index.toString().padStart(4, "0")}`,
     })),
+    pairs: Array.from({ length: 256 }, (_, index) => {
+      const claudeIndex = 128 + (index % 128);
+      const codexIndex =
+        (index % 128 + (index < 128 ? 0 : 32)) % 128;
+      return {
+        claudeAlias: alias("r", claudeIndex),
+        codexAlias: alias("r", codexIndex),
+        host: hosts[claudeIndex % hosts.length]!,
+        counters: { ...counters },
+      };
+    }),
     messages: Array.from({ length: 1_024 }, (_, index) => ({
       sequence: index + 1,
       timestamp,
@@ -1804,6 +2001,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       connectors: 0,
       availablePeers: 0,
       routes: 0,
+      pairs: 0,
       messages: 0,
       alerts: 0,
     },
@@ -1813,6 +2011,10 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
   assert.deepEqual(projected, projectGatewayPublicSnapshot(snapshot));
   assert.equal(projected.connectors.length, snapshot.connectors.length);
   assert.equal(projected.routes.length, snapshot.routes.length);
+  assert.equal(
+    projected.truncation.pairs,
+    snapshot.pairs.length - projected.pairs.length,
+  );
   assert.equal(
     projected.truncation.messages,
     snapshot.messages.length - projected.messages.length,
@@ -2869,10 +3071,12 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
     accounting: Record<string, unknown>;
     routes: Array<{ counters: Record<string, unknown> }>;
     codexSuccession?: unknown;
+    pairs?: unknown;
   };
   delete legacy.accounting.unconfirmed;
   for (const route of legacy.routes) delete route.counters.unconfirmed;
   delete legacy.codexSuccession;
+  delete legacy.pairs;
   await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
     mode: 0o600,
   });
@@ -2884,6 +3088,25 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   assert.ok(
     snapshot.routes.every((route) => route.counters.unconfirmed === 0),
   );
+  assert.deepEqual(snapshot.pairs, [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "reviewer@this-mac",
+      host: "this-mac",
+      counters: {
+        accepted: 0,
+        delivered: 0,
+        unconfirmed: 0,
+        failed: 0,
+        ambiguous: 0,
+        expired: 0,
+        cancelled: 0,
+        abandoned: 0,
+        rejected: 0,
+        bytesAccepted: 0,
+      },
+    },
+  ]);
   const persisted = JSON.parse(
     await readFile(migrated.stateFilePath, "utf8"),
   ) as {

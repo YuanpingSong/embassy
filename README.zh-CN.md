@@ -95,6 +95,8 @@ MSG
 
 `embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断）。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
 
+代理还会以 mode 0600 发布静态快照 `gateway-dashboard.html` 与 `gateway-dashboard.zh-CN.html`。实时仪表盘的变更操作必须携带同源 `X-Embassy-Request` 哨兵头。
+
 ## 工作原理
 
 ```text
@@ -137,9 +139,9 @@ Embassy 的操作者本身往往就是代理：`register-codex` 在 Codex 任务
 | `health` / `status` | 操作员 | 检查存活状态并查看脱敏快照 |
 | `refresh-dashboard` | 操作员 | 重新生成两个静态仪表盘文件 |
 | `dashboard --live [--lang en\|zh-CN]` | 操作员 | 启动带有限路由同意操作的实时仪表盘组件；需要 `embassy serve` 正在运行 |
-| `delivery-status` | 任一提供方 | 通过 `dlv_` 令牌读取单条投递跟踪器 |
+| `delivery-status` | 任一提供方 | 使用 `embassy delivery-status --token dlv_<token>` 读取单条投递跟踪器 |
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
-| `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；`register-codex --succeeds <current-alias>` 将注册转交给另一个任务 |
+| `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；例如，`embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
 | `select-claude` / `unselect-claude` | 操作员 | 选择或取消选择已发现的 Claude 目的地 |
 | `send-to-claude` | 已注册的 Codex 任务 | 向已选择的 Claude 会话发送一条有界消息 |
 | `send-to-codex` | Claude 会话 | 使用继承的原生回复标识发送一条有界消息 |

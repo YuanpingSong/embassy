@@ -148,6 +148,7 @@ function snapshot(): GatewaySnapshot {
         counters: { ...counters },
       },
     ],
+    pairs: [],
     messages: [
       {
         sequence: 1,
@@ -204,6 +205,7 @@ function snapshot(): GatewaySnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
+      pairs: 0,
       messages: 0,
       alerts: 0,
     },
@@ -219,6 +221,8 @@ function handlers(
     unregisterCodex: () => ({ accepted: true, code: "ok" }),
     selectClaude: () => ({ accepted: true, code: "ok" }),
     unselectClaude: () => ({ accepted: true, code: "ok" }),
+    pair: () => ({ accepted: true, code: "ok" }),
+    unpair: () => ({ accepted: true, code: "ok" }),
     listSnapshot: () => snapshot(),
     observeSnapshot: () => ({ snapshotRevision: 3, snapshot: snapshot() }),
     deliveryStatus: () => ({
@@ -329,6 +333,8 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   let registered: ValidatedRegisterCodexParams | undefined;
   let toClaude: ValidatedSendToClaudeParams | undefined;
   let toCodex: ValidatedSendToCodexParams | undefined;
+  let paired: unknown;
+  let unpaired: unknown;
   let reply: unknown;
   const server = await startGatewayControlServer({
     stateDir,
@@ -336,6 +342,14 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     handlers: handlers({
       registerCodex: (params) => {
         registered = { ...params };
+        return { accepted: true, code: "ok" };
+      },
+      pair: (params) => {
+        paired = { ...params };
+        return { accepted: true, code: "ok" };
+      },
+      unpair: (params) => {
+        unpaired = { ...params };
         return { accepted: true, code: "ok" };
       },
       sendToClaude: (params) => {
@@ -414,6 +428,27 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     hostId: "this-mac",
     busyPolicy: "queue",
   });
+  for (const method of ["pair", "unpair"] as const) {
+    await sendGatewayControlRequest({
+      socketPath,
+      request: {
+        protocolVersion: 1,
+        method,
+        params: {
+          claudeAlias: "claude-one@this-mac",
+          codexAlias: "codex-main@this-mac",
+          codexThreadId: THREAD_ID.toUpperCase(),
+        },
+      },
+    });
+  }
+  const expectedPair = {
+    claudeAlias: "claude-one@this-mac",
+    codexAlias: "codex-main@this-mac",
+    codexThreadId: THREAD_ID,
+  };
+  assert.deepEqual(paired, expectedPair);
+  assert.deepEqual(unpaired, expectedPair);
 
   const secretText = "transient body that must not appear in the response";
   const outbound = await sendGatewayControlRequest({
@@ -530,6 +565,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     connectors: 0,
     availablePeers: 0,
     routes: 0,
+    pairs: 0,
     messages: 0,
     alerts: 0,
   });
@@ -621,6 +657,8 @@ test("only exposes queue-mode lifecycle methods", () => {
     "unregister_codex",
     "select_claude",
     "unselect_claude",
+    "pair",
+    "unpair",
     "list_snapshot",
     "observe_snapshot",
     "delivery_status",

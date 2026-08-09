@@ -14,6 +14,7 @@ import {
   type GatewayReplyCaller,
   type GatewaySendResult,
   type GatewaySnapshotObservation,
+  type PairParams,
   type ReplyParams,
   type SelectClaudeParams,
   type UnregisterCodexParams,
@@ -294,6 +295,8 @@ type Conversation = {
   nextSequence: number;
   lastHopCount: number;
   lastActivityAt: string;
+  /** Conversation authority originated from one exact durable pair. */
+  pair?: true;
 };
 
 type MessageContext = {
@@ -835,6 +838,10 @@ export class GatewayService {
         await this.exclusiveDecision(async () => this.selectClaude(params)),
       unselectClaude: async (params) =>
         await this.exclusiveDecision(async () => this.unselectClaude(params)),
+      pair: async (params) =>
+        await this.exclusiveDecision(async () => this.pairRoutes(params)),
+      unpair: async (params) =>
+        await this.exclusiveDecision(async () => this.unpairRoutes(params)),
       listSnapshot: async () => (await this.observeSnapshot()).snapshot,
       observeSnapshot: async () => await this.observeSnapshot(),
       deliveryStatus: async (params) => await this.deliveryStatus(params.token),
@@ -3109,9 +3116,110 @@ export class GatewayService {
     }
   }
 
+  private async inferCodexAlias(codexThreadId?: string): Promise<string> {
+    const candidates = (await this.store.inspectPrivateCodexRoutes()).filter(
+      ({ binding }) =>
+        codexThreadId === undefined || binding.routeHandle === codexThreadId,
+    );
+    const candidate = candidates[0];
+    if (candidates.length !== 1 || candidate === undefined) {
+      throw new BridgeError(
+        codexThreadId === undefined
+          ? "CODEX_PAIR_INFERENCE_AMBIGUOUS"
+          : "CODEX_CALLER_MISMATCH",
+        codexThreadId === undefined
+          ? "Selecting Claude requires an inherited Codex task or exactly one registered Codex route."
+          : "The inherited Codex task does not uniquely own a registered route.",
+      );
+    }
+    return candidate.alias;
+  }
+
+  private assertCodexPairCaller(params: PairParams): void {
+    const binding = this.routeBindings.get(params.codexAlias);
+    if (
+      binding?.provider !== "codex" ||
+      binding.routeHandle !== params.codexThreadId
+    ) {
+      throw new BridgeError(
+        "CODEX_CALLER_MISMATCH",
+        "The inherited Codex task does not own the requested pair endpoint.",
+      );
+    }
+  }
+
+  private async pairRoutes(params: PairParams): Promise<void> {
+    this.assertCodexPairCaller(params);
+    await this.selectAndPairClaude(params.claudeAlias, params.codexAlias);
+  }
+
+  private async unpairRoutes(params: PairParams): Promise<void> {
+    this.assertCodexPairCaller(params);
+    const selected = await this.selectedClaudeRoute(params.claudeAlias);
+    await this.unpairClaudeRoute(selected, params.codexAlias);
+  }
+
+  private async unpairClaudeRoute(
+    selected: GatewayPrivateRouteInspection,
+    codexAlias: string,
+  ): Promise<void> {
+    await this.drainPreDeadlineDeliveryCallbacksLocked();
+    const pair = {
+      claudeAlias: selected.alias,
+      codexAlias,
+    } as const;
+    const inFlightSettlements =
+      await this.planPairInFlightSettlementsLocked(pair, {
+        unwrittenOutcome: "cancelled",
+        safeErrorCode: "PAIR_REMOVED",
+      });
+    const result = await this.store.unpairRoutes({
+      ...pair,
+      inFlightSettlements,
+    });
+    for (const settlement of result.settlements) {
+      await this.applyTerminalSettlementLocked(settlement);
+    }
+    this.purgePairCapabilitiesLocked(pair);
+    if (result.claudeRouteUnreferenced) {
+      const settlements = await this.store.unregisterRoute(
+        selected.alias,
+        selected.binding.ownerLease,
+      );
+      for (const settlement of settlements) {
+        await this.applyTerminalSettlementLocked(settlement);
+      }
+      this.forgetBinding(selected.alias);
+      await this.adapters
+        .find(
+          (adapter) =>
+            adapter.identity.provider === "claude" &&
+            adapter.identity.hostId === selected.binding.hostId,
+        )
+        ?.releaseRoute?.(selected.binding.routeHandle)
+        .catch(() => {
+          this.dashboardHealthy = false;
+        });
+      this.availablePeers = this.availablePeers.map((peer) =>
+        peer.alias === selected.alias ? { ...peer, selected: false } : peer,
+      );
+    }
+    await this.changed();
+  }
+
   private async selectClaude(params: SelectClaudeParams): Promise<void> {
+    await this.selectAndPairClaude(
+      params.alias,
+      await this.inferCodexAlias(params.codexThreadId),
+    );
+  }
+
+  private async selectAndPairClaude(
+    selector: string,
+    codexAlias: string,
+  ): Promise<void> {
     const discoveryChanged = await this.refreshClaudeDiscovery();
-    const candidate = this.claudeCandidate(params.alias);
+    const candidate = this.claudeCandidate(selector);
     if (candidate === undefined) throw new BridgeError("PEER_NOT_FOUND", "No unique compatible interactive peer matches that current name or session UUID.");
     const persisted = await this.store.inspectPrivateClaudeRoutes();
     const byIdentity = persisted.find(
@@ -3119,70 +3227,89 @@ export class GatewayService {
         route.binding.hostId === candidate.adapter.identity.hostId &&
         route.binding.routeHandle === candidate.routeHandle,
     );
-    const retired = persisted.filter((route) => route !== byIdentity);
+    const byAlias = persisted.find((route) => route.alias === candidate.alias);
     const live = this.routeBindings.get(candidate.alias);
     const alreadyLive =
       live?.provider === "claude" &&
       live.hostId === candidate.adapter.identity.hostId &&
       live.routeHandle === candidate.routeHandle;
-    if (alreadyLive && retired.length === 0) {
-      if (discoveryChanged) await this.publish();
-      return;
+    if (!alreadyLive) {
+      if (byIdentity !== undefined) {
+        await this.selectClaudeCandidate(candidate, byIdentity);
+      } else if (byAlias !== undefined) {
+        await this.replaceClaudeSelectionCandidate(
+          candidate,
+          undefined,
+          [byAlias],
+          false,
+        );
+      } else {
+        await this.selectClaudeCandidate(candidate);
+      }
     }
-    if (retired.length === 0) {
-      await this.selectClaudeCandidate(candidate, byIdentity);
-    } else {
-      await this.replaceClaudeSelectionCandidate(
-        candidate,
-        byIdentity,
-        retired,
-        alreadyLive,
-      );
+    let paired: { created: boolean };
+    try {
+      paired = await this.store.pairRoutes({
+        claudeAlias: candidate.alias,
+        codexAlias,
+      });
+    } catch (error) {
+      if (
+        !alreadyLive &&
+        byIdentity === undefined &&
+        byAlias === undefined
+      ) {
+        await this.rollbackFreshClaudeSelection(candidate);
+      }
+      await this.refreshClaudeDiscovery().catch(() => {
+        this.dashboardHealthy = false;
+      });
+      await this.publish().catch(() => {
+        this.dashboardHealthy = false;
+      });
+      throw error;
     }
     await this.refreshClaudeDiscovery();
-    await this.publish();
+    if (discoveryChanged || !alreadyLive || paired.created) await this.changed();
+    else await this.publish();
+  }
+
+  private async rollbackFreshClaudeSelection(candidate: Candidate): Promise<void> {
+    let cleanupFailed = false;
+    try {
+      await this.store.unregisterRoute(
+        candidate.alias,
+        stableLease("claude", candidate.routeHandle),
+      );
+    } catch {
+      cleanupFailed = true;
+    }
+    this.forgetBinding(candidate.alias);
+    await candidate.adapter.releaseRoute?.(candidate.routeHandle).catch(() => {
+      cleanupFailed = true;
+    });
+    if (cleanupFailed) this.dashboardHealthy = false;
   }
 
   private async unselectClaude(params: SelectClaudeParams): Promise<void> {
+    const codexAlias = await this.inferCodexAlias(params.codexThreadId);
+    const selected = await this.selectedClaudeRoute(params.alias);
+    await this.unpairClaudeRoute(selected, codexAlias);
+  }
+
+  private async selectedClaudeRoute(
+    selector: string,
+  ): Promise<GatewayPrivateRouteInspection> {
     const persisted = await this.store.inspectPrivateClaudeRoutes();
-    const selected = CLAUDE_SESSION_ID.test(params.alias)
+    const selected = CLAUDE_SESSION_ID.test(selector)
       ? persisted.find(
           (route) =>
             route.binding.routeHandle.toLowerCase() ===
-            params.alias.toLowerCase(),
+            selector.toLowerCase(),
         )
-      : persisted.find((route) => route.alias === params.alias);
+      : persisted.find((route) => route.alias === selector);
     if (selected === undefined) throw new BridgeError("PEER_NOT_FOUND", "No selected Claude session matches that selector.");
-    const { alias, binding } = selected;
-    await this.drainPreDeadlineDeliveryCallbacksLocked();
-    const inFlightSettlements =
-      await this.planRouteInFlightSettlementsLocked(alias, {
-        unwrittenOutcome: "cancelled",
-        safeErrorCode: "ROUTE_UNREGISTERED",
-      });
-    const settlements = await this.store.unregisterRoute(
-      alias,
-      binding.ownerLease,
-      inFlightSettlements,
-    );
-    for (const settlement of settlements) {
-      await this.applyTerminalSettlementLocked(settlement);
-    }
-    this.forgetBinding(alias);
-    await this.adapters
-      .find(
-        (adapter) =>
-          adapter.identity.provider === "claude" &&
-          adapter.identity.hostId === binding.hostId,
-      )
-      ?.releaseRoute?.(binding.routeHandle)
-      .catch(() => {
-        this.dashboardHealthy = false;
-      });
-    this.availablePeers = this.availablePeers.map((peer) =>
-      peer.alias === alias ? { ...peer, selected: false } : peer,
-    );
-    await this.changed();
+    return selected;
   }
 
   private async registerOrRebind(
@@ -3645,6 +3772,104 @@ export class GatewayService {
         ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
       };
     });
+  }
+
+  private async planPairInFlightSettlementsLocked(
+    pair: { claudeAlias: string; codexAlias: string },
+    input: {
+      unwrittenOutcome: "cancelled" | "failed";
+      safeErrorCode: string;
+    },
+  ): Promise<RouteInFlightSettlementInput[]> {
+    const affected =
+      await this.store.inspectAffectedPairInFlightMessages(pair);
+    const observedAt = this.now().getTime();
+    return affected.map(({ messageId }) => {
+      const tracker = this.deliveryTrackers.get(messageId);
+      if (tracker === undefined) {
+        return {
+          messageId,
+          state: "ambiguous",
+          safeErrorCode: "DELIVERY_TRACKER_MISSING",
+        };
+      }
+      const event =
+        tracker.pendingTerminalEvent ??
+        ({
+          type: "route_terminated",
+          at: observedAt,
+          unwrittenOutcome: input.unwrittenOutcome,
+          safeErrorCode: input.safeErrorCode,
+        } satisfies DeliveryEvent);
+      const transition = transitionDelivery(tracker.machine, event);
+      const settlement = transition.effects.find(
+        (
+          effect,
+        ): effect is Extract<DeliveryEffect, { type: "settle_delivery" }> =>
+          effect.type === "settle_delivery",
+      );
+      if (settlement === undefined) {
+        throw new BridgeError(
+          "PAIR_TERMINATION_STATE_MISMATCH",
+          "An affected in-flight delivery could not produce an exact terminal pair settlement.",
+          true,
+        );
+      }
+      const safeErrorCode = this.normalizeDeliverySafeCode(
+        tracker,
+        settlement.outcome,
+        settlement.safeErrorCode,
+      );
+      return {
+        messageId,
+        state: settlement.outcome,
+        ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
+      };
+    });
+  }
+
+  private purgePairCapabilitiesLocked(pair: {
+    claudeAlias: string;
+    codexAlias: string;
+  }): void {
+    const matches = (sourceAlias: string, targetAlias: string): boolean =>
+      (sourceAlias === pair.claudeAlias && targetAlias === pair.codexAlias) ||
+      (sourceAlias === pair.codexAlias && targetAlias === pair.claudeAlias);
+    const conversationIds = new Set<string>();
+    for (const [conversationId, conversation] of this.conversations) {
+      if (
+        conversation.pair !== true ||
+        !matches(conversation.sourceAlias, conversation.targetAlias)
+      ) {
+        continue;
+      }
+      conversationIds.add(conversationId);
+      this.conversations.delete(conversationId);
+    }
+    for (const [messageId, context] of this.messageContexts) {
+      if (!conversationIds.has(context.conversationId)) continue;
+      this.messageContexts.delete(messageId);
+      if (this.activeDispatchByTarget.get(context.targetAlias) === messageId) {
+        this.activeDispatchByTarget.delete(context.targetAlias);
+      }
+    }
+    for (const [messageId, continuation] of this.providerTurnContinuations) {
+      if (!conversationIds.has(continuation.conversationId)) continue;
+      this.providerTurnContinuations.delete(messageId);
+      if (
+        this.activeDispatchByTarget.get(continuation.targetAlias) === messageId
+      ) {
+        this.activeDispatchByTarget.delete(continuation.targetAlias);
+      }
+    }
+    for (const [key, pending] of this.pendingClaudeReplies) {
+      if (conversationIds.has(pending.conversationId)) {
+        this.pendingClaudeReplies.delete(key);
+      }
+    }
+    for (const conversationId of conversationIds) {
+      this.nativeIngressByConversation.delete(conversationId);
+    }
   }
 
   private async settleDeliveryStoreLocked(
@@ -4381,6 +4606,7 @@ export class GatewayService {
       await this.applyTerminalSettlementLocked(queued.supersededSettlement);
     }
     this.conversations.set(conversationId, conversation);
+    if (queued.pair === true) conversation.pair = true;
     conversation.nextSequence += 1;
     conversation.lastHopCount = hopCount;
     conversation.lastActivityAt = this.now().toISOString();
@@ -4463,6 +4689,7 @@ export class GatewayService {
       dedupeKey: `${conversation.id}:${sequence}`,
       hopCount: requestedHopCount,
       deadlineAt,
+      ...(conversation.pair === true ? { pair: true as const } : {}),
     });
     if (!queued.accepted || queued.messageId === undefined) {
       throw new BridgeError(
@@ -4542,6 +4769,7 @@ export class GatewayService {
       dedupeKey: `${conversation.id}:${sequence}`,
       hopCount: requestedHopCount,
       deadlineAt,
+      authorizedPairTeardownReply: true,
     });
     if (!queued.accepted || queued.messageId === undefined) {
       throw new BridgeError(
@@ -4552,6 +4780,9 @@ export class GatewayService {
     conversation.nextSequence += 1;
     conversation.lastHopCount = requestedHopCount;
     conversation.lastActivityAt = this.now().toISOString();
+    // The old edge has already been removed. Retain only this already-observed
+    // reply attempt; the conversation no longer grants pair reply authority.
+    delete conversation.pair;
     this.messageContexts.set(queued.messageId, {
       conversationId: conversation.id,
       isReply: true,
@@ -5199,8 +5430,14 @@ export class GatewayService {
             .resolveRoute(conversation.targetAlias)
             .then(() => true)
             .catch(() => false);
+          const pairStillActive =
+            conversation.pair !== true ||
+            (await this.store.hasPair({
+              claudeAlias: conversation.targetAlias,
+              codexAlias: conversation.sourceAlias,
+            }));
           if (
-            !sourceStillRoutable &&
+            (!sourceStillRoutable || !pairStillActive) &&
             sourceBinding?.provider === "claude"
           ) {
             await this.enqueueObservedClaudeReplyAfterRouteTeardownLocked(
@@ -5389,6 +5626,7 @@ export class GatewayService {
         nextSequence: 1,
         lastHopCount: 0,
         lastActivityAt: this.now().toISOString(),
+        ...(queued.pair === true ? { pair: true as const } : {}),
       };
       this.conversations.set(conversationId, conversation);
       this.messageContexts.set(queued.messageId, {
