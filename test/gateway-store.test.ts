@@ -1641,7 +1641,7 @@ test("paired native ingress accepts only the exact selected Claude binding", asy
   await store.close();
 });
 
-test("queued steers retain three newest per route and expose an exact journal marker", async () => {
+test("queued steers retain three newest per edge and expose an exact journal marker", async () => {
   const { store, config } = await fixture();
   config.inboundMode = "open";
   config.limits.maxQueueMessages = 6;
@@ -1703,6 +1703,83 @@ test("queued steers retain three newest per route and expose an exact journal ma
   const ordinary = await store.dequeueMessage("reviewer@this-mac");
   assert.equal(ordinary?.body, "ordinary message stays ahead in the normal queue");
   assert.equal(ordinary?.steer, undefined);
+  await store.close();
+});
+
+test("adjacent edges have independent steer caps and attributable counters", async () => {
+  const { store, config } = await fixture();
+  config.limits.maxQueueMessages = 8;
+  config.limits.maxQueueMessagesPerRoute = 8;
+  config.limits.maxQueueBytes = 2_048;
+  await store.initialize();
+  await observeAndRegister(store);
+  const secondClaudeBinding: PrivateRouteBinding = {
+    ...claudeBinding,
+    routeHandle: "claude-session-private-steer-0002",
+    ownerLease: "claude-owner-lease-steer-0002",
+  };
+  await store.registerRoute({
+    alias: "critic@this-mac",
+    binding: secondClaudeBinding,
+    registrationMode: "selected_live_peer",
+  });
+  await store.pairRoutes({
+    claudeAlias: "critic@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+
+  const firstEdge = [];
+  const secondEdge = [];
+  for (let index = 1; index <= 3; index += 1) {
+    firstEdge.push(
+      await store.enqueueMessage({
+        sourceAlias: "advisor@this-mac",
+        targetAlias: "reviewer@this-mac",
+        body: `STEER: first edge ${index}`,
+        dedupeKey: `first-edge-steer-${index}`,
+        steer: true,
+      }),
+    );
+    secondEdge.push(
+      await store.enqueueMessage({
+        sourceAlias: "critic@this-mac",
+        targetAlias: "reviewer@this-mac",
+        body: `STEER: second edge ${index}`,
+        dedupeKey: `second-edge-steer-${index}`,
+        steer: true,
+      }),
+    );
+  }
+  const fourthFirstEdge = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "STEER: first edge 4",
+    dedupeKey: "first-edge-steer-4",
+    steer: true,
+  });
+
+  assert.deepEqual(fourthFirstEdge.supersededSettlement, {
+    messageId: firstEdge[0]?.messageId,
+    state: "cancelled",
+    safeErrorCode: "STEER_QUEUE_SUPERSEDED",
+  });
+  assert.equal(secondEdge.every((result) => result.accepted), true);
+  const snapshot = await store.publicSnapshot();
+  const firstCounters = snapshot.pairs.find(
+    (pair) => pair.claudeAlias === "advisor@this-mac",
+  )?.counters;
+  const secondCounters = snapshot.pairs.find(
+    (pair) => pair.claudeAlias === "critic@this-mac",
+  )?.counters;
+  assert.equal(firstCounters?.accepted, 4);
+  assert.equal(firstCounters?.cancelled, 1);
+  assert.equal(secondCounters?.accepted, 3);
+  assert.equal(secondCounters?.cancelled, 0);
+  assert.equal(
+    snapshot.routes.find((route) => route.alias === "reviewer@this-mac")
+      ?.queueDepth,
+    6,
+  );
   await store.close();
 });
 

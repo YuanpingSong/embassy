@@ -3046,6 +3046,47 @@ test("pairing a second Claude session selects it additively and preserves old wo
     }),
     { accepted: false, code: "rejected" },
   );
+  const removedStatus = await handlers.deliveryStatus({
+    token: oldDelivery.deliveryToken,
+  });
+  assert.deepEqual(
+    removedStatus.found
+      ? {
+          terminal: removedStatus.terminal,
+          state: removedStatus.state,
+          safeErrorCode: removedStatus.safeErrorCode,
+        }
+      : removedStatus,
+    {
+      terminal: true,
+      state: "cancelled",
+      safeErrorCode: "PAIR_REMOVED",
+    },
+  );
+  claude.emitDelivery({
+    messageId: claude.dispatches[0]!.messageId,
+    state: "released",
+  });
+  assert.deepEqual(
+    await handlers.deliveryStatus({ token: oldDelivery.deliveryToken }),
+    removedStatus,
+  );
+
+  const adjacentPending = await handlers.deliveryStatus({
+    token: replacementDelivery.deliveryToken,
+  });
+  assert.equal(adjacentPending.found, true);
+  if (adjacentPending.found) assert.equal(adjacentPending.terminal, false);
+  claude.emitDelivery({
+    messageId: claude.dispatches[1]!.messageId,
+    state: "released",
+  });
+  await waitForAsync(async () => {
+    const status = await handlers.deliveryStatus({
+      token: replacementDelivery.deliveryToken,
+    });
+    return status.found && status.terminal && status.state === "delivered";
+  });
   assert.equal(
     (
       await handlers.sendToClaude({
@@ -3056,6 +3097,114 @@ test("pairing a second Claude session selects it additively and preserves old wo
     ).accepted,
     true,
   );
+});
+
+test("unpair settles only that edge's native receipt while an adjacent receipt remains live", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+    {
+      alias: "claude-two@this-mac",
+      routeHandle: "claude_target_2",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.refreshDashboard();
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await handlers.pair({
+      claudeAlias: "claude-two@this-mac",
+      codexAlias: "codex-main@this-mac",
+      codexThreadId: THREAD_ID,
+    }),
+    { accepted: true, code: "ok" },
+  );
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "first edge waits for its exact unpair",
+    receiptHandle: "receipt-first-edge-unpair",
+  });
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_2" },
+    sourceAlias: "claude-two@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "adjacent edge remains queued",
+    receiptHandle: "receipt-adjacent-edge-unpair",
+  });
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      (route) => route.alias === "codex-main@this-mac" && route.queueDepth === 2,
+    ),
+  );
+
+  assert.deepEqual(
+    await handlers.unpair({
+      claudeAlias: "claude-one@this-mac",
+      codexAlias: "codex-main@this-mac",
+      codexThreadId: THREAD_ID,
+    }),
+    { accepted: true, code: "ok" },
+  );
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-first-edge-unpair",
+      status: "expired",
+      diagnosticCode: "PAIR_REMOVED",
+    },
+  ]);
+  assert.equal(codex.dispatches.length, 0);
+  assert.equal(
+    (await handlers.listSnapshot()).routes.find(
+      (route) => route.alias === "codex-main@this-mac",
+    )?.queueDepth,
+    1,
+  );
+
+  codex.dispatchResults.push({ state: "delivered" });
+  codex.state = "idle";
+  codex.emitRouteState(THREAD_ID, "idle");
+  await waitFor(() => codex.dispatches.length === 1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 2);
+  assert.equal(codex.dispatches[0]?.text, "adjacent edge remains queued");
+  assert.deepEqual(claude.nativeInboundStatuses[1], {
+    receiptHandle: "receipt-adjacent-edge-unpair",
+    status: "delivered",
+  });
 });
 
 test("a pair-capacity rejection rolls a fresh Claude selection back", async (t) => {

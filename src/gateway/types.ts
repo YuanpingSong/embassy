@@ -760,7 +760,7 @@ export type EnqueueMessageResult = {
   messageIdSuffix: string;
   /** The accepted message is owned by one exact consent edge. */
   pair?: true;
-  /** Exact older queued steer displaced by the per-route cap, if any. */
+  /** Exact older queued steer displaced by the per-edge cap, if any. */
   supersededSettlement?: TerminalMessageSettlement;
 };
 
