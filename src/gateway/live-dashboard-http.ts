@@ -25,6 +25,9 @@ export type LiveDashboardHttpAssets = Readonly<{
   shellHtml: string;
   clientJavaScript: string;
   styleSheet: string;
+  appJavaScript: string;
+  vendorReactJavaScript: string;
+  vendorReactDomJavaScript: string;
 }>;
 
 export type LiveDashboardRequestHandler = (
@@ -46,7 +49,16 @@ export type LiveDashboardRequestHandlerOptions = Readonly<{
 
 type Route = Readonly<{
   kind: LiveDashboardRequestKind;
-  name: "bootstrap" | "client" | "session" | "snapshot" | "stream" | "style";
+  name:
+    | "bootstrap"
+    | "client"
+    | "session"
+    | "snapshot"
+    | "stream"
+    | "style"
+    | "vendorReact"
+    | "vendorReactDom"
+    | "app";
 }>;
 
 type BodyReadResult =
@@ -95,6 +107,12 @@ function routeFor(target: string | undefined, instancePath: string): Route | und
       return { kind: "navigation", name: "client" };
     case `${instancePath}/app.css`:
       return { kind: "navigation", name: "style" };
+    case `${instancePath}/react.js`:
+      return { kind: "navigation", name: "vendorReact" };
+    case `${instancePath}/react-dom.js`:
+      return { kind: "navigation", name: "vendorReactDom" };
+    case `${instancePath}/app.js`:
+      return { kind: "navigation", name: "app" };
     case `${instancePath}/session`:
       return { kind: "session", name: "session" };
     case `${instancePath}/snapshot`:
@@ -351,6 +369,33 @@ export function createLiveDashboardRequestHandler(
             200,
             assets.styleSheet,
             "text/css; charset=utf-8",
+          );
+          return;
+        case "vendorReact":
+          respond(
+            response,
+            copy,
+            200,
+            assets.vendorReactJavaScript,
+            "text/javascript; charset=utf-8",
+          );
+          return;
+        case "vendorReactDom":
+          respond(
+            response,
+            copy,
+            200,
+            assets.vendorReactDomJavaScript,
+            "text/javascript; charset=utf-8",
+          );
+          return;
+        case "app":
+          respond(
+            response,
+            copy,
+            200,
+            assets.appJavaScript,
+            "text/javascript; charset=utf-8",
           );
           return;
         case "session": {

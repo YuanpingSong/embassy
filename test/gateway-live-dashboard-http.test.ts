@@ -26,6 +26,9 @@ const ASSETS = Object.freeze({
   shellHtml: "<!doctype html><title>Embassy live</title>",
   clientJavaScript: "globalThis.embassyLive = true;",
   styleSheet: ":root { color-scheme: light; }",
+  appJavaScript: "var Embassy;",
+  vendorReactJavaScript: "globalThis.React = {};",
+  vendorReactDomJavaScript: "globalThis.ReactDOM = {};",
 });
 
 const LATEST: LiveDashboardStreamEvent = Object.freeze({

@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "none",
+    "outFile": "../../../dist/src/gateway/live-dashboard-app/app.js",
+    "jsx": "react",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["react"],
+    "removeComments": true
+  },
+  "files": [
+    "globals.d.ts",
+    "app-types.tsx",
+    "format.tsx",
+    "chips.tsx",
+    "i18n.tsx",
+    "adapter.tsx",
+    "protocol.tsx",
+    "shared.tsx",
+    "tab-overview.tsx",
+    "tab-deliveries.tsx",
+    "tab-routes.tsx",
+    "tab-activity.tsx",
+    "tab-diagnostics.tsx",
+    "app.tsx"
+  ]
+}

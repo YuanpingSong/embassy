@@ -18,7 +18,6 @@ import {
   defaultLiveDashboardFileSystem,
   type LiveDashboardFileSystem,
 } from "../src/gateway/live-dashboard-bootstrap.js";
-import { buildDashboardViewModel } from "../src/gateway/dashboard-model.js";
 import {
   LIVE_DASHBOARD_LIMITS,
   liveDashboardSecurityHeaders,
@@ -506,7 +505,7 @@ test("blocked streams are disconnected after five seconds", async () => {
   assert.equal(hub.streamCount(), 0);
 });
 
-test("browser assets use the shared bilingual catalog and DOM text nodes", () => {
+test("browser assets use the shared bilingual catalog and inert React bootstrap", () => {
   for (const locale of ["en", "zh-CN"] as const) {
     const assets = renderLiveDashboardAssets(locale);
     const copy = getDashboardCopy(locale);
@@ -522,7 +521,7 @@ test("browser assets use the shared bilingual catalog and DOM text nodes", () =>
       true,
     );
     assert.doesNotMatch(assets.shellHtml, /hreflang/u);
-    assert.match(assets.clientJavaScript, /textContent/u);
+    assert.match(assets.clientJavaScript, /window\.EMBASSY_BOOT/u);
     assert.match(assets.clientJavaScript, /zh-CN/u);
     assert.doesNotMatch(assets.clientJavaScript, /const LIVE=/u);
     assert.doesNotThrow(() => new Script(assets.clientJavaScript));
@@ -530,199 +529,15 @@ test("browser assets use the shared bilingual catalog and DOM text nodes", () =>
       assets.clientJavaScript,
       /innerHTML|eval\(|localStorage|sessionStorage|document\.cookie|serviceWorker/u,
     );
-    assert.equal(assets.shellHtml.includes("<script type=\"module\" src=\"client.js\">"), true);
+    assert.doesNotThrow(() => new Script(assets.appJavaScript));
+    assert.match(assets.appJavaScript, /ReactDOM\.createRoot/u);
+    assert.match(assets.shellHtml, /<div id="root"/u);
+    assert.equal(assets.shellHtml.includes('<script defer src="client.js"></script>'), true);
+    assert.equal(assets.shellHtml.includes('<script defer src="app.js"></script>'), true);
   }
   assert.throws(
     () => renderLiveDashboardAssets("zh-cn" as "zh-CN"),
     /DASHBOARD_LOCALE_UNSUPPORTED/u,
-  );
-});
-
-class FakeBrowserNode {
-  readonly children: FakeBrowserNode[] = [];
-  readonly dataset: Record<string, string> = {};
-  readonly listeners = new Map<string, () => void>();
-  className = "";
-  id = "";
-  lang = "";
-  placeholder = "";
-  selected = false;
-  textContent = "";
-  type = "";
-  value = "";
-
-  constructor(readonly tagName: string) {}
-
-  append(...children: FakeBrowserNode[]): void {
-    this.children.push(...children);
-  }
-
-  replaceChildren(...children: FakeBrowserNode[]): void {
-    this.children.splice(0, this.children.length, ...children);
-  }
-
-  addEventListener(name: string, callback: () => void): void {
-    this.listeners.set(name, callback);
-  }
-
-  setAttribute(_name: string, _value: string): void {}
-  focus(): void {}
-  setSelectionRange(_start: number, _end: number): void {}
-
-  trigger(name: string): void {
-    this.listeners.get(name)?.();
-  }
-
-  find(predicate: (node: FakeBrowserNode) => boolean): FakeBrowserNode | undefined {
-    if (predicate(this)) return this;
-    for (const child of this.children) {
-      const found = child.find(predicate);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  }
-}
-
-test("browser runtime preserves truthful state and reads fresh data while paused", async () => {
-  const documentElement = new FakeBrowserNode("html");
-  const root = new FakeBrowserNode("main");
-  root.id = "embassy-live";
-  documentElement.append(root);
-  const document = {
-    title: "",
-    documentElement,
-    createElement: (name: string) => new FakeBrowserNode(name),
-    getElementById: (id: string) =>
-      documentElement.find((node) => node.id === id),
-    querySelector: (selector: string) => {
-      if (!selector.startsWith(".")) return undefined;
-      const className = selector.slice(1);
-      return documentElement.find((node) =>
-        node.className.split(/\s+/u).includes(className),
-      );
-    },
-  };
-  const liveFixture = dashboardFixture();
-  liveFixture.alerts = [
-    {
-      code: "CODEX_SUCCESSION_RECOVERY_REQUIRED",
-      severity: "error",
-      timestamp: liveFixture.generatedAt,
-      provider: "codex",
-      host: "this-mac",
-    },
-  ];
-  const event = {
-    streamRevision: 1,
-    snapshotRevision: 1,
-    reset: false,
-    model: buildDashboardViewModel(liveFixture),
-  };
-  const refreshedEvent = {
-    ...event,
-    streamRevision: 42,
-    snapshotRevision: 2,
-  };
-  const frame = new TextEncoder().encode(
-    `id: 1\nevent: snapshot\ndata: ${JSON.stringify(event)}\n\n`,
-  );
-  let readCount = 0;
-  let snapshotReads = 0;
-  const assets = renderLiveDashboardAssets("en");
-  new Script(assets.clientJavaScript).runInNewContext({
-    AbortController,
-    TextDecoder,
-    document,
-    fetch: async (target: string) => {
-      if (target.endsWith("/snapshot")) {
-        snapshotReads += 1;
-        return {
-          ok: true,
-          json: async () => refreshedEvent,
-        };
-      }
-      return {
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: async () =>
-              readCount++ === 0
-                ? { done: false, value: frame }
-                : { done: true, value: undefined },
-          }),
-        },
-      };
-    },
-    history: { replaceState: () => undefined },
-    location: {
-      pathname: "/abcdefghijklmnopqrstuv/bootstrap",
-      hash: "",
-    },
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  assert.equal(
-    document.getElementById("live-status")?.textContent,
-    "Connection ended — use Reconnect",
-  );
-  assert.equal(document.title, "Embassy — live dashboard");
-  assert.ok(
-    documentElement.find(
-      (node) =>
-        node.tagName === "strong" &&
-        node.textContent === "Codex task change requires manual recovery",
-    ),
-  );
-  assert.ok(
-    documentElement.find(
-      (node) =>
-        node.tagName === "code" &&
-        node.textContent === "CODEX_SUCCESSION_RECOVERY_REQUIRED",
-    ),
-  );
-  const filter = document.querySelector(".filter");
-  assert.ok(filter);
-  filter.value = "codex";
-  filter.trigger("input");
-  assert.equal(
-    document.getElementById("live-status")?.textContent,
-    "Connection ended — use Reconnect",
-  );
-
-  const pause = documentElement.find(
-    (node) => node.tagName === "button" && node.textContent === "Pause",
-  );
-  assert.ok(pause);
-  pause.trigger("click");
-  assert.equal(document.getElementById("live-status")?.textContent, "Updates paused");
-
-  const readNow = documentElement.find(
-    (node) => node.tagName === "button" && node.textContent === "Read now",
-  );
-  assert.ok(readNow);
-  readNow.trigger("click");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(snapshotReads, 1);
-  assert.ok(
-    documentElement.find(
-      (node) => node.tagName === "strong" && node.textContent === "42",
-    ),
-  );
-  assert.equal(document.getElementById("live-status")?.textContent, "Updates paused");
-
-  const language = documentElement.find((node) => node.tagName === "select");
-  assert.ok(language);
-  language.value = "zh-CN";
-  language.trigger("change");
-  assert.equal(document.getElementById("live-status")?.textContent, "更新已暂停");
-  assert.equal(document.documentElement.lang, "zh-CN");
-  assert.equal(document.title, "Embassy — 实时面板");
-  assert.ok(
-    documentElement.find(
-      (node) =>
-        node.tagName === "strong" &&
-        node.textContent === "更换 Codex 任务需要手动恢复",
-    ),
   );
 });
 
@@ -975,7 +790,7 @@ test("real loopback composition exchanges a fragment session, streams, and exact
 
     const shell = await requestHttpSmoke(bootstrapUrl);
     assert.equal(shell.statusCode, 200);
-    assert.match(shell.body, /id="embassy-live"/u);
+    assert.match(shell.body, /id="root"/u);
     assert.equal(shell.body.includes(capability), false);
     assert.equal(shell.headers["cache-control"], "no-store");
 

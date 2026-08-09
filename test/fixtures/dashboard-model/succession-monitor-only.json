@@ -1,0 +1,253 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-08T12:00:00.000Z",
+  "health": "degraded",
+  "overall": "attention",
+  "exchange": {
+    "claude": {
+      "kind": "claude",
+      "status": "ready",
+      "total": 1,
+      "ready": 1,
+      "selectable": 1,
+      "countIsLowerBound": false,
+      "primaryAlias": "claude-advisor@this-mac",
+      "nextAction": "none"
+    },
+    "codex": {
+      "kind": "codex",
+      "status": "busy",
+      "total": 2,
+      "ready": 1,
+      "countIsLowerBound": false,
+      "primaryAlias": "codex-builder@this-mac",
+      "nextAction": "restore_codex"
+    },
+    "queuedMessages": 1,
+    "queueCountIsLowerBound": false,
+    "oldestQueueAgeMs": 10000,
+    "oldestQueuedAt": "2026-08-08T11:59:50.000Z"
+  },
+  "attention": [
+    {
+      "kind": "route",
+      "code": "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+      "severity": "error",
+      "timestamp": "2026-08-08T11:59:12.000Z",
+      "provider": "codex",
+      "alias": "codex-legacy@this-mac",
+      "host": "this-mac",
+      "guidance": "codex_succession_recovery"
+    },
+    {
+      "kind": "route",
+      "code": "CODEX_SUCCESSION_BARRIER_BUSY",
+      "severity": "warning",
+      "timestamp": "2026-08-08T11:59:31.000Z",
+      "provider": "codex",
+      "alias": "codex-builder@this-mac",
+      "host": "this-mac",
+      "guidance": "codex_succession_busy"
+    },
+    {
+      "kind": "broker",
+      "code": "REOBSERVATION_REQUIRED",
+      "severity": "info",
+      "timestamp": "2026-08-08T11:58:00.000Z",
+      "provider": "claude",
+      "alias": "claude-advisor@this-mac",
+      "host": "this-mac",
+      "guidance": "reobserve_claude"
+    },
+    {
+      "kind": "alert",
+      "code": "UNKNOWN_CONDITION",
+      "severity": "info",
+      "guidance": "generic"
+    }
+  ],
+  "transit": {
+    "queuedMessages": 1,
+    "activeDeliveries": 0,
+    "queueCountIsLowerBound": false,
+    "activeCountIsLowerBound": false,
+    "oldestQueueAgeMs": 10000,
+    "oldestQueuedAt": "2026-08-08T11:59:50.000Z"
+  },
+  "activity": [
+    {
+      "direction": "codex_to_claude",
+      "sourceAlias": "codex-builder@this-mac",
+      "targetAlias": "claude-advisor@this-mac",
+      "messageIdSuffix": "abc123",
+      "state": "delivered",
+      "timestamp": "2026-08-08T11:59:00.000Z",
+      "latencyMs": 268,
+      "bytes": 960,
+      "events": [
+        {
+          "sequence": 51,
+          "timestamp": "2026-08-08T11:58:59.000Z",
+          "state": "transport_written"
+        },
+        {
+          "sequence": 52,
+          "timestamp": "2026-08-08T11:59:00.000Z",
+          "state": "delivered",
+          "latencyMs": 268
+        }
+      ]
+    },
+    {
+      "direction": "claude_to_codex",
+      "sourceAlias": "claude-advisor@this-mac",
+      "targetAlias": "codex-legacy@this-mac",
+      "messageIdSuffix": "44ff0912",
+      "state": "failed",
+      "timestamp": "2026-08-08T11:58:30.000Z",
+      "bytes": 128,
+      "safeErrorCode": "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+      "events": [
+        {
+          "sequence": 49,
+          "timestamp": "2026-08-08T11:58:29.000Z",
+          "state": "dispatching"
+        },
+        {
+          "sequence": 50,
+          "timestamp": "2026-08-08T11:58:30.000Z",
+          "state": "failed",
+          "safeErrorCode": "CODEX_SUCCESSION_RECOVERY_REQUIRED"
+        }
+      ]
+    }
+  ],
+  "peers": [
+    {
+      "alias": "claude-advisor@this-mac",
+      "host": "this-mac",
+      "state": "idle",
+      "compatibility": "compatible",
+      "selected": true,
+      "selectable": true,
+      "lastSeenAt": "2026-08-08T11:59:58.000Z"
+    }
+  ],
+  "routes": [
+    {
+      "alias": "codex-legacy@this-mac",
+      "provider": "codex",
+      "host": "this-mac",
+      "enabled": true,
+      "state": "stale",
+      "compatibility": "compatible",
+      "queueDepth": 0,
+      "counters": {
+        "accepted": 12,
+        "delivered": 10,
+        "unconfirmed": 0,
+        "failed": 1,
+        "ambiguous": 0,
+        "expired": 1,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 20480
+      },
+      "lastSeenAt": "2026-08-08T11:52:03.000Z",
+      "safeErrorCode": "CODEX_SUCCESSION_RECOVERY_REQUIRED"
+    },
+    {
+      "alias": "codex-builder@this-mac",
+      "provider": "codex",
+      "host": "this-mac",
+      "enabled": true,
+      "state": "busy",
+      "compatibility": "compatible",
+      "queueDepth": 1,
+      "oldestQueuedAt": "2026-08-08T11:59:50.000Z",
+      "queueAgeMs": 10000,
+      "counters": {
+        "accepted": 9,
+        "delivered": 8,
+        "unconfirmed": 0,
+        "failed": 0,
+        "ambiguous": 0,
+        "expired": 0,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 16384
+      },
+      "lastSeenAt": "2026-08-08T11:59:59.000Z",
+      "safeErrorCode": "CODEX_WRITES_DISABLED"
+    },
+    {
+      "alias": "claude-advisor@this-mac",
+      "provider": "claude",
+      "host": "this-mac",
+      "enabled": true,
+      "state": "idle",
+      "compatibility": "compatible",
+      "queueDepth": 0,
+      "counters": {
+        "accepted": 14,
+        "delivered": 14,
+        "unconfirmed": 0,
+        "failed": 0,
+        "ambiguous": 0,
+        "expired": 0,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 24576
+      },
+      "lastSeenAt": "2026-08-08T11:59:58.000Z"
+    }
+  ],
+  "connectors": [
+    {
+      "provider": "claude",
+      "host": "this-mac",
+      "health": "healthy",
+      "compatibility": "compatible",
+      "protocol": "peer/1",
+      "protocolVersion": "1",
+      "lastSeenAt": "2026-08-08T11:59:58.000Z"
+    },
+    {
+      "provider": "codex",
+      "host": "this-mac",
+      "health": "degraded",
+      "compatibility": "unknown",
+      "protocol": "app-server/1",
+      "protocolVersion": "0.147.0",
+      "lastSeenAt": "2026-08-08T11:59:59.000Z",
+      "safeErrorCode": "CODEX_SUCCESSION_BARRIER_BUSY"
+    }
+  ],
+  "accounting": {
+    "accepted": 35,
+    "duplicates": 0,
+    "delivered": 32,
+    "unconfirmed": 0,
+    "failed": 1,
+    "ambiguous": 0,
+    "expired": 1,
+    "cancelled": 0,
+    "abandoned": 0,
+    "rejected": 0,
+    "bytesAccepted": 61440,
+    "queuedBytes": 128
+  },
+  "omissions": {
+    "connectors": 0,
+    "availablePeers": 0,
+    "routes": 0,
+    "upstreamMessageEvents": 0,
+    "messageGroups": 0,
+    "messageEvents": 0,
+    "upstreamAlerts": 0,
+    "attentionItems": 0
+  }
+}

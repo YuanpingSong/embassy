@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-08T09:30:00.000Z",
+  "health": "connecting",
+  "overall": "setup",
+  "exchange": {
+    "claude": {
+      "kind": "claude",
+      "status": "missing",
+      "total": 0,
+      "ready": 0,
+      "selectable": 0,
+      "countIsLowerBound": false,
+      "nextAction": "discover_claude"
+    },
+    "codex": {
+      "kind": "codex",
+      "status": "missing",
+      "total": 0,
+      "ready": 0,
+      "countIsLowerBound": false,
+      "nextAction": "register_codex"
+    },
+    "queuedMessages": 0,
+    "queueCountIsLowerBound": false
+  },
+  "attention": [],
+  "transit": {
+    "queuedMessages": 0,
+    "activeDeliveries": 0,
+    "queueCountIsLowerBound": false,
+    "activeCountIsLowerBound": false
+  },
+  "activity": [],
+  "peers": [],
+  "routes": [],
+  "connectors": [],
+  "accounting": {
+    "accepted": 0,
+    "duplicates": 0,
+    "delivered": 0,
+    "unconfirmed": 0,
+    "failed": 0,
+    "ambiguous": 0,
+    "expired": 0,
+    "cancelled": 0,
+    "abandoned": 0,
+    "rejected": 0,
+    "bytesAccepted": 0,
+    "queuedBytes": 0
+  },
+  "omissions": {
+    "connectors": 0,
+    "availablePeers": 0,
+    "routes": 0,
+    "upstreamMessageEvents": 0,
+    "messageGroups": 0,
+    "messageEvents": 0,
+    "upstreamAlerts": 0,
+    "attentionItems": 0
+  }
+}

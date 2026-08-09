@@ -46,10 +46,11 @@
     "README.md",
     "README.zh-CN.md",
     "SECURITY.md",
-    "LICENSE"
+    "LICENSE",
+    "assets/vendor/react"
   ],
   "scripts": {
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json",
     "check": "npm run typecheck && npm test",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "embassy": "node dist/src/gateway/cli.js",
@@ -59,7 +60,7 @@
     "pretest": "npm run build",
     "start": "node dist/src/gateway/cli.js serve",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=20"
@@ -69,6 +70,7 @@
   },
   "devDependencies": {
     "@types/node": "24.10.1",
+    "@types/react": "18.3.12",
     "@types/ws": "8.18.1",
     "tsx": "4.20.6",
     "typescript": "5.9.3"
