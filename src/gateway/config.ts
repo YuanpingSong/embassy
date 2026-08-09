@@ -6,6 +6,10 @@ import {
   type GatewayInboundMode,
   type GatewayStoreLimits,
 } from "./types.js";
+import {
+  PROGRESS_WATCH_DEFAULT_CAPACITY,
+  PROGRESS_WATCH_HARD_CAPACITY,
+} from "./progress-watch-machine.js";
 
 export const gatewayDeliveryNoticeModes = [
   "merged",
@@ -22,6 +26,8 @@ export type GatewayConfig = {
   allowedHosts: readonly string[];
   /** Global fail-closed switch for Claude-to-Codex `STEER:` delivery. */
   steeringEnabled: boolean;
+  /** Global fail-closed switch for opt-in, owner-ended progress watches. */
+  trackingEnabled?: boolean;
   /** Claude-to-Codex sender consent. Only an explicit CLI opt-out is open. */
   inboundMode: GatewayInboundMode;
   /** One sender-visible progress notice is due this long after enqueue. */
@@ -161,6 +167,13 @@ export function loadGatewayConfig(
       1,
       gatewayPublicSnapshotLimits.pairs,
     ),
+    maxWatches: boundedInteger(
+      "EMBASSY_MAX_WATCHES",
+      env.EMBASSY_MAX_WATCHES,
+      PROGRESS_WATCH_DEFAULT_CAPACITY,
+      1,
+      PROGRESS_WATCH_HARD_CAPACITY,
+    ),
     eventCapacity: boundedInteger(
       "EMBASSY_EVENT_CAPACITY",
       env.EMBASSY_EVENT_CAPACITY,
@@ -270,6 +283,7 @@ export function loadGatewayConfig(
     limits.dedupeCapacity * 384 +
     limits.maxRoutes * 1_024 +
     limits.maxPairs * 512 +
+    (limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY) * 768 +
     limits.maxQueueMessages * 512 +
     limits.maxRoutes * 256;
   if (conservativeStateBudget > MAX_CONFIGURED_STATE_BUDGET) {
@@ -286,6 +300,10 @@ export function loadGatewayConfig(
     steeringEnabled: enabledByDefault(
       "EMBASSY_STEERING_ENABLED",
       env.EMBASSY_STEERING_ENABLED,
+    ),
+    trackingEnabled: enabledByDefault(
+      "EMBASSY_TRACKING_ENABLED",
+      env.EMBASSY_TRACKING_ENABLED,
     ),
     inboundMode: "paired",
     stallNoticeMs,

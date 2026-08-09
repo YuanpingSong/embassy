@@ -747,6 +747,116 @@ test("unpair removes only edge-owned work and preserves open-mode ingress", asyn
   await store.close();
 });
 
+test("progress watches persist exact edge authority and advance owner-ended episodes", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  const opened = await store.openProgressWatch({
+    conversationId: "conv_abcdefghijklmnop",
+    ownerAlias: "reviewer@this-mac",
+    workerAlias: "advisor@this-mac",
+    idleMs: 60_000,
+  });
+  assert.equal(opened.created, true);
+  assert.equal(opened.watch.phase, "quiet");
+  assert.deepEqual(
+    (
+      JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+        progressWatchEvents: Array<{ kind: string }>;
+      }
+    ).progressWatchEvents.map((event) => event.kind),
+    ["opened"],
+  );
+
+  testClock.advance(60_000);
+  assert.deepEqual(await store.advanceDueProgressWatches(), [
+    {
+      type: "send_nudge",
+      conversationId: "conv_abcdefghijklmnop",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      nudgeNumber: 1,
+    },
+  ]);
+  assert.equal(
+    await store.touchProgressWatch({
+      conversationId: "conv_abcdefghijklmnop",
+      actorAlias: "advisor@this-mac",
+      workerReportedComplete: true,
+    }),
+    true,
+  );
+  assert.equal((await store.inspectProgressWatches())[0]?.phase, "quiet");
+  await assert.rejects(
+    store.settleProgressWatch({
+      conversationId: "conv_abcdefghijklmnop",
+      outcome: "done",
+      ownerAlias: "advisor@this-mac",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "PROGRESS_WATCH_OWNER_REQUIRED",
+  );
+  assert.equal(
+    await store.settleProgressWatch({
+      conversationId: "conv_abcdefghijklmnop",
+      outcome: "done",
+      ownerAlias: "reviewer@this-mac",
+    }),
+    true,
+  );
+  assert.deepEqual(await store.inspectProgressWatches(), []);
+
+  const persisted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    progressWatchEvents: Array<{ kind: string; conversationId: string }>;
+  };
+  assert.deepEqual(
+    persisted.progressWatchEvents.map((event) => event.kind),
+    ["nudge", "worker_reported_complete", "done"],
+  );
+  assert.equal(
+    JSON.stringify(await store.publicSnapshot()).includes(
+      "conv_abcdefghijklmnop",
+    ),
+    false,
+  );
+  await store.close();
+});
+
+test("progress watches degrade honestly on restart and retire with one edge", async () => {
+  const { store, config, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  await store.openProgressWatch({
+    conversationId: "conv_qrstuvwxyzABCDEF",
+    ownerAlias: "advisor@this-mac",
+    workerAlias: "reviewer@this-mac",
+    idleMs: 60_000,
+  });
+  await store.close();
+
+  const recovered = new GatewayStore(config, { now: testClock.now });
+  await recovered.initialize();
+  const [watch] = await recovered.inspectProgressWatches();
+  assert.equal(watch?.capability, "route");
+  assert.equal(watch?.degradedNoticeSent, true);
+  await recovered.unpairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+  assert.deepEqual(await recovered.inspectProgressWatches(), []);
+  const persisted = JSON.parse(
+    await readFile(recovered.stateFilePath, "utf8"),
+  ) as { progressWatchEvents: Array<{ kind: string }> };
+  assert.deepEqual(
+    persisted.progressWatchEvents.map((event) => event.kind),
+    ["opened", "capability_degraded", "endpoint_retired"],
+  );
+  await recovered.close();
+});
+
 test("Codex succession journals and atomically activates one exact new route", async () => {
   const { store } = await fixture();
   await store.initialize();
@@ -3201,11 +3311,17 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
     routes: Array<{ counters: Record<string, unknown> }>;
     codexSuccession?: unknown;
     pairs?: unknown;
+    watchSequence?: unknown;
+    progressWatches?: unknown;
+    progressWatchEvents?: unknown;
   };
   delete legacy.accounting.unconfirmed;
   for (const route of legacy.routes) delete route.counters.unconfirmed;
   delete legacy.codexSuccession;
   delete legacy.pairs;
+  delete legacy.watchSequence;
+  delete legacy.progressWatches;
+  delete legacy.progressWatchEvents;
   await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
     mode: 0o600,
   });

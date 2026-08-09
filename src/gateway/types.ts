@@ -1,3 +1,8 @@
+import type {
+  ProgressWatchJournalEvent,
+  ProgressWatchMachine,
+} from "./progress-watch-machine.js";
+
 export const gatewayProviders = ["codex", "claude"] as const;
 
 export type GatewayProvider = (typeof gatewayProviders)[number];
@@ -278,6 +283,9 @@ export type GatewayPersistedState = {
   dedupe: DedupeRecord[];
   rateBuckets: RateBucket[];
   accounting: GatewayAccounting;
+  watchSequence: number;
+  progressWatches: ProgressWatchMachine[];
+  progressWatchEvents: ProgressWatchJournalEvent[];
   /** Strictly validated internal restart journal; never publicly projected. */
   codexSuccession?: unknown;
 };
@@ -827,6 +835,8 @@ export type RequeueInFlightMessageResult =
 export type GatewayStoreLimits = {
   maxRoutes: number;
   maxPairs: number;
+  /** Omitted injected-test configs use the production default of 32. */
+  maxWatches?: number;
   eventCapacity: number;
   eventTtlMs: number;
   dedupeCapacity: number;
