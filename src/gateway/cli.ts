@@ -18,6 +18,8 @@ import {
   type CliCopyKey,
   type CliStderrKind,
 } from "./cli-copy.js";
+import { callerIdentityConflictHintEn } from "./cli-copy.en.js";
+import { callerIdentityConflictHintZhCn } from "./cli-copy.zh-CN.js";
 import {
   GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS,
   GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
@@ -62,7 +64,7 @@ const DEFAULT_HOST_ID = "this-mac";
 const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
 const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
-export const EMBASSY_VERSION = "1.0.0";
+export const EMBASSY_VERSION = "1.1.0";
 const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
@@ -145,13 +147,13 @@ type CommonCliOptions = Readonly<{
 class CliFault extends Error {
   readonly code: string;
   readonly retryable: boolean;
-  readonly hint: CliCopyKey | undefined;
+  readonly hint: CliFaultHint | undefined;
   readonly kind: CliStderrKind | undefined;
 
   constructor(
     code: string,
     retryable = false,
-    hint?: CliCopyKey,
+    hint?: CliFaultHint,
     kind?: CliStderrKind,
   ) {
     super("The gateway client rejected the request.");
@@ -162,6 +164,8 @@ class CliFault extends Error {
     this.kind = kind;
   }
 }
+
+type CliFaultHint = CliCopyKey | "callerIdentityConflict";
 
 function isCommand(value: string | undefined): value is GatewayCliCommand {
   return (
@@ -360,9 +364,20 @@ function hasInheritedIdentity(value: string | undefined): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
+function callerIdentityConflictFault(env: NodeJS.ProcessEnv): CliFault {
+  const hasBothIdentities =
+    hasInheritedIdentity(env.CODEX_THREAD_ID) &&
+    hasInheritedIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET);
+  return new CliFault(
+    "CALLER_IDENTITY_CONFLICT",
+    false,
+    hasBothIdentities ? "callerIdentityConflict" : undefined,
+  );
+}
+
 function requireExclusiveCodexThreadId(env: NodeJS.ProcessEnv): string {
   if (hasInheritedIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) {
-    throw new CliFault("CALLER_IDENTITY_CONFLICT");
+    throw callerIdentityConflictFault(env);
   }
   return requireCodexThreadId(env);
 }
@@ -409,7 +424,7 @@ function requireClaudeReplyAddress(env: NodeJS.ProcessEnv): string {
 
 function requireExclusiveClaudeReplyAddress(env: NodeJS.ProcessEnv): string {
   if (hasInheritedIdentity(env.CODEX_THREAD_ID)) {
-    throw new CliFault("CALLER_IDENTITY_CONFLICT");
+    throw callerIdentityConflictFault(env);
   }
   return requireClaudeReplyAddress(env);
 }
@@ -692,12 +707,15 @@ async function buildRequest(
       const alias = requireAlias(options, "alias");
       const idleMinutes = trackIdleMinutes(options);
       const threadId = env.CODEX_THREAD_ID;
+      if (
+        hasInheritedIdentity(threadId) &&
+        hasInheritedIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)
+      ) {
+        throw callerIdentityConflictFault(env);
+      }
       const replyAddress = optionalClaudeReplyAddress(env);
       const hasCodexIdentity = hasInheritedIdentity(threadId);
       const hasClaudeIdentity = replyAddress !== undefined;
-      if (hasCodexIdentity && hasClaudeIdentity) {
-        throw new CliFault("CALLER_IDENTITY_CONFLICT");
-      }
       if (!hasCodexIdentity && !hasClaudeIdentity) {
         throw new CliFault("CALLER_IDENTITY_REQUIRED");
       }
@@ -1174,7 +1192,13 @@ export async function runGatewayCli(
         kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
       if (error.hint !== undefined) {
-        stderr.write(`[embassy] ${getCliCopy(locale)[error.hint]}\n`);
+        const hint =
+          error.hint === "callerIdentityConflict"
+            ? locale === "zh-CN"
+              ? callerIdentityConflictHintZhCn
+              : callerIdentityConflictHintEn
+            : getCliCopy(locale)[error.hint];
+        stderr.write(`[embassy] ${hint}\n`);
       }
       return error.retryable
         ? gatewayCliExitCodes.unavailable

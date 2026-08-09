@@ -79,6 +79,7 @@ export const gatewayControlMethods = [
   "health",
   "register_codex",
   "unregister_codex",
+  "remove_stale_codex_registration",
   "select_claude",
   "unselect_claude",
   "pair",
@@ -117,6 +118,11 @@ export type ValidatedRegisterCodexParams = {
 export type UnregisterCodexParams = {
   alias: string;
   threadId: string;
+};
+
+/** Bounded operator recovery input; native task and endpoint IDs stay private. */
+export type RemoveStaleCodexRegistrationParams = {
+  alias: string;
 };
 
 export type SelectClaudeParams = {
@@ -217,6 +223,11 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
+      method: "remove_stale_codex_registration";
+      params: RemoveStaleCodexRegistrationParams;
+    }
+  | {
+      protocolVersion: 1;
       method: "select_claude";
       params: SelectClaudeParams;
     }
@@ -294,6 +305,10 @@ type ValidatedGatewayControlRequest =
       params: ValidatedRegisterCodexParams;
     }
   | Extract<GatewayControlRequest, { method: "unregister_codex" }>
+  | Extract<
+      GatewayControlRequest,
+      { method: "remove_stale_codex_registration" }
+    >
   | Extract<GatewayControlRequest, { method: "select_claude" }>
   | Extract<GatewayControlRequest, { method: "unselect_claude" }>
   | Extract<GatewayControlRequest, { method: "pair" }>
@@ -397,6 +412,7 @@ type ResultByMethod = {
   health: GatewayHealthResult;
   register_codex: GatewayDecision;
   unregister_codex: GatewayDecision;
+  remove_stale_codex_registration: GatewayDecision;
   select_claude: GatewayDecision;
   unselect_claude: GatewayDecision;
   pair: GatewayDecision;
@@ -422,6 +438,9 @@ export type GatewayControlHandlers = {
   ) => MaybePromise<GatewayDecision>;
   unregisterCodex: (
     params: Readonly<UnregisterCodexParams>,
+  ) => MaybePromise<GatewayDecision>;
+  removeStaleCodexRegistration: (
+    params: Readonly<RemoveStaleCodexRegistrationParams>,
   ) => MaybePromise<GatewayDecision>;
   selectClaude: (
     params: Readonly<SelectClaudeParams>,
@@ -797,6 +816,16 @@ function normalizeParams(
         alias: value.alias,
         threadId: value.threadId.toLowerCase(),
       };
+    }
+    case "remove_stale_codex_registration": {
+      if (
+        !hasExactKeys(value, ["alias"]) ||
+        !isAlias(value.alias) ||
+        !value.alias.startsWith("codex-")
+      ) {
+        throw new ProtocolFault("INVALID_REQUEST");
+      }
+      return { alias: value.alias };
     }
     case "select_claude":
     case "unselect_claude": {
@@ -1435,28 +1464,55 @@ function isGatewayActivityEvent(
     isNonNegativeInteger(value.sequence) &&
     value.sequence > 0 &&
     isIsoTimestamp(value.timestamp) &&
-    ["discovery", "selection", "registration", "pairing", "watch"].includes(
-      String(value.kind),
+    isGatewayActivityIdentity(
+      value.kind,
+      value.action,
+      value.operatorAction,
     ) &&
-    [
-      "discovery_refreshed",
-      "claude_selected",
-      "claude_unselected",
-      "codex_registered",
-      "codex_succeeded",
-      "codex_unregistered",
-      "routes_paired",
-      "routes_unpaired",
-      "watch_ended",
-    ].includes(String(value.action)) &&
     (value.outcome === "accepted" || value.outcome === "rejected") &&
     Array.isArray(value.aliases) &&
     value.aliases.length <= 2 &&
     value.aliases.every(isAlias) &&
     new Set(value.aliases).size === value.aliases.length &&
-    value.operatorAction === true &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
   );
+}
+
+function isGatewayActivityIdentity(
+  kind: unknown,
+  action: unknown,
+  operatorAction: unknown,
+): boolean {
+  if (typeof operatorAction !== "boolean") return false;
+  switch (kind) {
+    case "discovery":
+      return action === "discovery_refreshed" && operatorAction;
+    case "selection":
+      return (
+        (action === "claude_selected" || action === "claude_unselected") &&
+        operatorAction
+      );
+    case "registration":
+      return (
+        (action === "codex_registered" ||
+          action === "codex_succeeded" ||
+          action === "codex_unregistered") &&
+        operatorAction
+      );
+    case "pairing":
+      return (
+        (action === "routes_paired" || action === "routes_unpaired") &&
+        operatorAction
+      );
+    case "watch":
+      return action === "watch_ended" && operatorAction;
+    case "endpoint":
+      return action === "endpoint_refreshed" && !operatorAction;
+    case "recovery":
+      return action === "codex_orphan_removed" && operatorAction;
+    default:
+      return false;
+  }
 }
 
 function isDeadlinePressure(
@@ -1658,6 +1714,7 @@ function isResultForMethod<M extends GatewayControlMethod>(
       return isHealthResult(value);
     case "register_codex":
     case "unregister_codex":
+    case "remove_stale_codex_registration":
     case "select_claude":
     case "unselect_claude":
     case "pair":
@@ -1709,6 +1766,9 @@ async function dispatch(
         break;
       case "unregister_codex":
         result = await handlers.unregisterCodex(request.params);
+        break;
+      case "remove_stale_codex_registration":
+        result = await handlers.removeStaleCodexRegistration(request.params);
         break;
       case "select_claude":
         result = await handlers.selectClaude(request.params);
@@ -1884,6 +1944,7 @@ function isNonIdempotentControlMethod(method: GatewayControlMethod): boolean {
   return (
     method === "register_codex" ||
     method === "unregister_codex" ||
+    method === "remove_stale_codex_registration" ||
     method === "select_claude" ||
     method === "unselect_claude" ||
     method === "pair" ||

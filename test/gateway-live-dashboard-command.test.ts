@@ -403,7 +403,7 @@ test("live command validates private state, opens one scrubbed bootstrap path, a
   assert.equal(listeners.size, 0);
 });
 
-test("live dashboard actions forward only the three closed control methods", async () => {
+test("live dashboard actions forward only the four closed control methods", async () => {
   const requests: unknown[] = [];
   const actions = createGatewayLiveDashboardActions(
     CONTROL_SOCKET_PATH,
@@ -448,6 +448,13 @@ test("live dashboard actions forward only the three closed control methods", asy
     { ok: false, code: "busy" },
   );
   assert.deepEqual(
+    await actions.execute({
+      action: "remove_stale_codex_registration",
+      alias: "codex-orphan@this-mac",
+    }),
+    { ok: true, code: "ok" },
+  );
+  assert.deepEqual(
     await actions.execute({ action: "refresh_dashboard" }),
     { ok: true, code: "ok" },
   );
@@ -472,6 +479,14 @@ test("live dashboard actions forward only the three closed control methods", asy
           claudeAlias: "claude-reviewer@this-mac",
           codexAlias: "codex-builder@this-mac",
         },
+      },
+    },
+    {
+      socketPath: CONTROL_SOCKET_PATH,
+      request: {
+        protocolVersion: 1,
+        method: "remove_stale_codex_registration",
+        params: { alias: "codex-orphan@this-mac" },
       },
     },
     {

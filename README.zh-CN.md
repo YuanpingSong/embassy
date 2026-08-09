@@ -32,7 +32,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT
 ```
 
-第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。请在普通终端中运行守护进程命令，切勿在代理会话内运行：Codex 任务会继承守护进程的环境，因此在 Claude Code 会话内启动的守护进程会把该会话的身份泄漏到每个任务中，注册将以 `CALLER_IDENTITY_CONFLICT` 关闭失败——在干净终端执行 `daemon restart` 即可修复。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
+第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。请在普通终端中运行守护进程命令，切勿在代理会话内运行：Codex 任务会继承守护进程的环境，因此在 Claude Code 会话内启动的守护进程会把该会话的身份泄漏到每个任务中，注册将以 `CALLER_IDENTITY_CONFLICT` 关闭失败——请在普通终端执行 `codex app-server daemon restart` 修复。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
 
 > **已知限制：** 仅当 Desktop 使用托管独立 App Server 时，Embassy 才能访问 Codex 任务。在该模式下，任务目前无法连接 Desktop 内置的应用内浏览器（`@Browser` 可加载但无法附着）。将 Desktop 切换回其默认的私有 App Server 会立即恢复内置浏览器——但会使这些任务对 Embassy 不可达。目前未发现其他能力回退，但这并非穷尽的能力对比测试。
 
@@ -62,6 +62,8 @@ embassy register-codex --alias codex-reviewer@this-mac
 ```
 
 你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，运行 `unregister-codex`。
+
+如果托管 App Server 之后重启，Embassy 会自动探测新端点；只有替代端点兼容，且 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才会重新附着这个别名。端点不兼容，或精确任务缺失、重复，都会使路由保持陈旧以供诊断；Embassy 绝不会按别名改投其他任务，也不会跨端点代际边界重建或重放消息正文。
 
 ### 3. 选择 Claude 目的地
 
@@ -103,6 +105,8 @@ MSG
 ### 实时查看
 
 `embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断）。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
+
+实时仪表盘也可以在明确确认后移除孤立的 Codex 注册，但仅限代理已经证明该注册陈旧且其所属端点代际已失效的情况。当前、仅离线或代际状态不明确的注册绝不能通过此恢复操作移除。
 
 代理还会以 mode 0600 发布静态快照 `gateway-dashboard.html` 与 `gateway-dashboard.zh-CN.html`。实时仪表盘的变更操作必须携带同源 `X-Embassy-Request` 哨兵头。
 

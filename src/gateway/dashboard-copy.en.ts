@@ -381,17 +381,18 @@ export const dashboardCopyEn = {
   "live.mastheadSubtitle":
     "Live metadata stream with bounded route-consent controls. serve remains socket-only.",
   "live.readonlyFooter":
-    "This view can pair, unpair, and refresh Claude discovery — nothing else.",
+    "This view can pair, unpair, refresh Claude discovery, and request removal of a stale Codex registration — nothing else.",
   "live.action.authorityLabel": "Bounded operator authority",
   "live.action.authorityBody":
-    "This view can pair or unpair named endpoints and refresh Claude discovery. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
-  "live.action.sectionTitle": "Route consent actions",
+    "This view can pair or unpair named endpoints, refresh Claude discovery, and request removal of a named Codex registration only when the broker proves it stale on a dead endpoint generation. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
+  "live.action.sectionTitle": "Bounded route actions",
   "live.action.scope":
-    "Pair or unpair named Claude and Codex endpoints. Refresh discovery is available here. Every action requires confirmation.",
+    "Pair or unpair named Claude and Codex endpoints, refresh discovery, or recover an orphaned Codex alias. Every action requires confirmation and broker-side revalidation.",
   "live.action.select": "Select session",
   "live.action.unselect": "Unselect session",
   "live.action.pair": "Pair endpoints",
   "live.action.unpair": "Unpair endpoints",
+  "live.action.removeStaleCodexRegistration": "Remove stale registration",
   "live.action.refresh": "Refresh discovery",
   "live.action.confirm": "Confirm",
   "live.action.cancel": "Cancel",
@@ -528,6 +529,8 @@ export const dashboardCopyEn = {
     "Remove only this outbound edge. Open inbound remains enabled for every live Claude session under this OS user.",
   "app.routes.refreshCmd":
     "Re-read local discovery and rewrite the static dashboard file.",
+  "app.routes.removeStaleCodex.consequence":
+    "Remove only {alias} if the broker confirms that the registration is stale and its endpoint generation is dead. Its consent edges are removed; a live registration is never touched.",
   "app.routes.monitorOnlyReason":
     "Monitor only — writes are disabled for this route by CODEX_WRITES_DISABLED.",
   "app.routes.noPeers": "No Claude session was discovered in this snapshot.",
@@ -562,6 +565,10 @@ export const dashboardCopyEn = {
   "app.activity.operation.routesPaired": "Consent edge paired",
   "app.activity.operation.routesUnpaired": "Consent edge unpaired",
   "app.activity.operation.watchEnded": "Progress watch ended",
+  "app.activity.operation.endpointRefreshed": "Codex endpoint refreshed",
+  "app.activity.operation.codexOrphanRemoved": "Stale Codex registration removed",
+  "app.activity.operation.operator": "operator",
+  "app.activity.operation.automatic": "automatic",
   "app.activity.operation.accepted": "accepted",
   "app.activity.operation.rejected": "rejected",
   "app.activity.limited":

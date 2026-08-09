@@ -139,7 +139,14 @@ export type DashboardMessageGroup = Readonly<{
 export type DashboardActivityEventRow = Readonly<{
   sequence: number;
   timestamp: string;
-  kind: "discovery" | "selection" | "registration" | "pairing" | "watch";
+  kind:
+    | "discovery"
+    | "selection"
+    | "registration"
+    | "pairing"
+    | "watch"
+    | "endpoint"
+    | "recovery";
   action:
     | "discovery_refreshed"
     | "claude_selected"
@@ -149,9 +156,12 @@ export type DashboardActivityEventRow = Readonly<{
     | "codex_unregistered"
     | "routes_paired"
     | "routes_unpaired"
-    | "watch_ended";
+    | "watch_ended"
+    | "endpoint_refreshed"
+    | "codex_orphan_removed";
   outcome: "accepted" | "rejected";
   aliases: readonly string[];
+  operatorAction: boolean;
   safeErrorCode?: string | undefined;
 }>;
 
@@ -620,6 +630,7 @@ export function buildDashboardViewModel(
         action: event.action,
         outcome: event.outcome,
         aliases: event.aliases.map((alias) => boundedText(alias)).slice(0, 2),
+        operatorAction: event.operatorAction,
         ...(safeCode(event.safeErrorCode) === undefined
           ? {}
           : { safeErrorCode: safeCode(event.safeErrorCode) }),

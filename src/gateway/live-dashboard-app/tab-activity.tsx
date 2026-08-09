@@ -1,7 +1,8 @@
 // Activity tab (§4.5) — the merged, honestly bounded event stream.
 //
-// The live contract carries a bounded process-local operator-action ledger in
-// addition to delivery settlements and alerts. It never includes bodies,
+// The live contract carries a bounded process-local activity ledger in
+// addition to delivery settlements and alerts. Automatic endpoint refreshes
+// stay visibly distinct from operator actions. It never includes bodies,
 // private route handles, task IDs, or complete conversation capabilities.
 //
 // Row order is the adapter's explicit timestamp-desc sort (adapter.activityRows);
@@ -38,6 +39,8 @@ namespace Embassy {
     routes_paired: "app.activity.operation.routesPaired",
     routes_unpaired: "app.activity.operation.routesUnpaired",
     watch_ended: "app.activity.operation.watchEnded",
+    endpoint_refreshed: "app.activity.operation.endpointRefreshed",
+    codex_orphan_removed: "app.activity.operation.codexOrphanRemoved",
   };
 
   /** Teaching command for the empty stream (verified real CLI verb). */
@@ -45,6 +48,12 @@ namespace Embassy {
     "embassy send-to-codex --from <alias> --to <alias>";
 
   const activityCountFormatters = new Map<Locale, Intl.NumberFormat>();
+
+  export function activityAuthority(
+    event: DashboardActivityEventRow,
+  ): "operator" | "automatic" {
+    return event.operatorAction ? "operator" : "automatic";
+  }
 
   /** Locale-aware integer formatting; format.tsx covers dates only. */
   function formatCount(count: number, locale: Locale): string {
@@ -192,9 +201,20 @@ namespace Embassy {
   ): React.ReactElement {
     const t = useT();
     const event = props.event;
+    const authority = activityAuthority(event);
     return (
-      <div className="activity-text stack-sm">
+      <div
+        className="activity-text stack-sm"
+        data-activity-authority={authority}
+      >
         <div className="chip-row">
+          <span className="chip chip--small" data-kind="inert">
+            {t(
+              authority === "operator"
+                ? "app.activity.operation.operator"
+                : "app.activity.operation.automatic",
+            )}
+          </span>
           <span>{t(OPERATION_COPY_KEYS[event.action])}</span>
           <span className="mono text-muted">
             {t(

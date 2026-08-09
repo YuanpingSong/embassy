@@ -29,6 +29,7 @@ import {
   type GatewayAdapterDiscovery,
   type GatewayAdapterDiscoverySnapshot,
   type GatewayAdapterDispatchResult,
+  type GatewayAdapterEndpointRefresh,
   type GatewayAdapterRouteObservationState,
   type GatewayAdapterRouteState,
   type GatewayProviderAdapter,
@@ -45,6 +46,7 @@ import type {
 import { BridgeError } from "../src/errors.js";
 import {
   compatibilityProbeNames,
+  type CompatibilityAttestation,
   type CompatibilityCertification,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
@@ -166,6 +168,64 @@ class UnprovablePreparedAuthorityStore extends GatewayStore {
   }
 }
 
+class EndpointRefreshFaultStore extends GatewayStore {
+  failReanchorBefore = 0;
+  failReanchorAfter = 0;
+  reanchorGate: Promise<void> | undefined;
+  onReanchorEntered: (() => void) | undefined;
+
+  override async reanchorCodexRoutes(
+    input: Parameters<GatewayStore["reanchorCodexRoutes"]>[0],
+  ): ReturnType<GatewayStore["reanchorCodexRoutes"]> {
+    if (this.failReanchorBefore > 0) {
+      this.failReanchorBefore -= 1;
+      throw new BridgeError(
+        "SYNTHETIC_REANCHOR_PRECOMMIT",
+        "Synthetic pre-commit endpoint refresh failure.",
+        true,
+      );
+    }
+    this.onReanchorEntered?.();
+    await this.reanchorGate;
+    const result = await super.reanchorCodexRoutes(input);
+    if (this.failReanchorAfter > 0) {
+      this.failReanchorAfter -= 1;
+      throw new BridgeError(
+        "SYNTHETIC_REANCHOR_OUTCOME_UNKNOWN",
+        "Synthetic endpoint refresh outcome uncertainty.",
+      );
+    }
+    return result;
+  }
+}
+
+class OrphanRemovalFaultStore extends GatewayStore {
+  failRemovalBefore = 0;
+  failRemovalAfter = 0;
+
+  override async removeStaleCodexOrphan(
+    input: Parameters<GatewayStore["removeStaleCodexOrphan"]>[0],
+  ): ReturnType<GatewayStore["removeStaleCodexOrphan"]> {
+    if (this.failRemovalBefore > 0) {
+      this.failRemovalBefore -= 1;
+      throw new BridgeError(
+        "SYNTHETIC_ORPHAN_REMOVAL_PRECOMMIT",
+        "Synthetic orphan-removal persistence failure.",
+        true,
+      );
+    }
+    const result = await super.removeStaleCodexOrphan(input);
+    if (this.failRemovalAfter > 0) {
+      this.failRemovalAfter -= 1;
+      throw new BridgeError(
+        "SYNTHETIC_ORPHAN_REMOVAL_OUTCOME_UNKNOWN",
+        "Synthetic post-commit orphan-removal failure.",
+      );
+    }
+    return result;
+  }
+}
+
 async function fixture(): Promise<{
   root: string;
   stateDir: string;
@@ -247,10 +307,13 @@ class ManualGatewayClock {
 class FakeProvider implements GatewayProviderAdapter {
   readonly identity: PrivateEndpointIdentity;
   readonly protocol: string;
-  readonly protocolVersion = "synthetic-1";
+  readonly protocolVersion: string;
   discoveries: GatewayAdapterDiscovery[] = [];
   discoveryComplete = true;
   callbacks: GatewayAdapterCallbacks | undefined;
+  selectedEndpointRefresh: GatewayAdapterEndpointRefresh | undefined;
+  acceptedCompatibilityAttestations: CompatibilityAttestation[] = [];
+  acceptCompatibilityAttestationBefore: (() => void) | undefined;
   dispatches: Array<{
     binding: PrivateRouteBinding;
     authorization: "selected_route" | "native_reply";
@@ -262,6 +325,7 @@ class FakeProvider implements GatewayProviderAdapter {
   }> = [];
   attested: string[] = [];
   selectedRoutes: Array<{ alias: string; routeHandle: string }> = [];
+  selectRouteBeforeReturn: (() => void) | undefined;
   releasedRoutes: string[] = [];
   selectedRouteHandleOverride: string | undefined;
   closed = false;
@@ -290,7 +354,9 @@ class FakeProvider implements GatewayProviderAdapter {
   }> = [];
   nativeCodexUnadvertisements: string[] = [];
   nativeCodexUnadvertisementFailures: Error[] = [];
+  nativeCodexUnadvertisementFailuresAfterRemove: Error[] = [];
   nativeCodexStatusFailures: Error[] = [];
+  nativeCodexStatusAfterUpdate: (() => void) | undefined;
   nativeCodexActiveAlias: string | undefined;
   nativeCodexGenerations = new Map<string, string>();
   nativeCodexPreparedAlias: string | undefined;
@@ -300,7 +366,11 @@ class FakeProvider implements GatewayProviderAdapter {
   nativeCodexIngressQuiesced = false;
   nativeCodexMonitorFrozen = false;
   nativeSuccessionBarrierClean = true;
+  nativeSuccessionBarrierBeforeReturn: (() => void) | undefined;
   codexSuccessionBarrierClean = true;
+  codexRouteCreationInFlight = false;
+  codexEndpointActivationRetryPending = false;
+  currentNativeCodexGenerationFailures: Error[] = [];
   nativeSuccessionPublishOutcomes: Array<
     "published" | "not_published" | "unknown"
   > = [];
@@ -351,6 +421,7 @@ class FakeProvider implements GatewayProviderAdapter {
   constructor(
     provider: "codex" | "claude",
     endpointGeneration = `generation_${provider}`,
+    protocolVersion = "synthetic-1",
   ) {
     this.identity = {
       provider,
@@ -358,6 +429,7 @@ class FakeProvider implements GatewayProviderAdapter {
       endpointGeneration,
     };
     this.protocol = provider === "codex" ? "codex-app-server" : "claude-peer";
+    this.protocolVersion = protocolVersion;
     if (provider === "claude") {
       this.assertWorkspaceDisjoint = async (routeHandle) => {
         this.attested.push(routeHandle);
@@ -416,15 +488,38 @@ class FakeProvider implements GatewayProviderAdapter {
   async selectRoute(input: {
     alias: string;
     routeHandle: string;
-  }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }> {
+  }): Promise<{
+    routeHandle: string;
+    state: GatewayAdapterRouteState;
+    endpointRefresh?: GatewayAdapterEndpointRefresh;
+  }> {
     this.selectedRoutes.push({ ...input });
+    this.selectRouteBeforeReturn?.();
     return {
       routeHandle: this.selectedRouteHandleOverride ?? input.routeHandle,
       state: this.state,
+      ...(this.selectedEndpointRefresh === undefined
+        ? {}
+        : { endpointRefresh: this.selectedEndpointRefresh }),
     };
   }
 
+  acceptCompatibilityAttestation(
+    attestation: CompatibilityAttestation,
+  ): void {
+    this.acceptCompatibilityAttestationBefore?.();
+    this.acceptedCompatibilityAttestations.push(
+      structuredClone(attestation),
+    );
+  }
+
   async releaseRoute(routeHandle: string): Promise<void> {
+    if (this.codexEndpointActivationRetryPending) {
+      throw new BridgeError(
+        "CODEX_ENDPOINT_ACTIVATION_PENDING",
+        "Synthetic endpoint activation retry still owns this task.",
+      );
+    }
     this.releasedRoutes.push(routeHandle);
   }
 
@@ -471,6 +566,7 @@ class FakeProvider implements GatewayProviderAdapter {
     const failure = this.nativeCodexStatusFailures.shift();
     if (failure !== undefined) throw failure;
     this.nativeCodexStatuses.push({ alias, status });
+    this.nativeCodexStatusAfterUpdate?.();
   }
 
   async advertiseNativeCodexPeer(input: {
@@ -505,6 +601,7 @@ class FakeProvider implements GatewayProviderAdapter {
   }
 
   async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
+    this.lifecycleEvents.push(`native:unadvertise:${alias}`);
     const failure = this.nativeCodexUnadvertisementFailures.shift();
     if (failure !== undefined) throw failure;
     this.nativeCodexUnadvertisements.push(alias);
@@ -512,6 +609,9 @@ class FakeProvider implements GatewayProviderAdapter {
     if (this.nativeCodexActiveAlias === alias) {
       this.nativeCodexActiveAlias = undefined;
     }
+    const failureAfterRemove =
+      this.nativeCodexUnadvertisementFailuresAfterRemove.shift();
+    if (failureAfterRemove !== undefined) throw failureAfterRemove;
   }
 
   async updateNativeInboundStatus(
@@ -579,6 +679,8 @@ class FakeProvider implements GatewayProviderAdapter {
   }
 
   currentNativeCodexPeerGeneration(alias: string): string {
+    const failure = this.currentNativeCodexGenerationFailures.shift();
+    if (failure !== undefined) throw failure;
     this.maybeFailSuccession("current");
     const generation = this.nativeCodexGenerations.get(alias);
     if (generation === undefined) {
@@ -614,6 +716,10 @@ class FakeProvider implements GatewayProviderAdapter {
     }
     this.nativeCodexIngressQuiesced = true;
     this.nativeCodexMonitorFrozen = true;
+    if (this.nativeMessageOnQuiesce !== undefined) {
+      this.callbacks?.onClaudeMessage?.(this.nativeMessageOnQuiesce);
+      this.nativeMessageOnQuiesce = undefined;
+    }
   }
 
   observeNativeCodexSuccessionBarrier(generation: string): {
@@ -631,6 +737,7 @@ class FakeProvider implements GatewayProviderAdapter {
     this.maybeFailSuccession("claude_barrier");
     const activeGenerationMatched =
       generation === this.nativeCodexActiveGeneration;
+    this.nativeSuccessionBarrierBeforeReturn?.();
     return {
       generation,
       activeGenerationMatched,
@@ -776,12 +883,16 @@ class FakeProvider implements GatewayProviderAdapter {
       queueDepth: 0,
       hasActiveTurn: false,
       requestInFlight: false,
-      routeCreationInFlight: false,
+      routeCreationInFlight:
+        this.codexRouteCreationInFlight ||
+        this.codexEndpointActivationRetryPending,
       routeReleaseInFlight: false,
       pendingReplyCorrelations: 0,
       pendingCallbacks: 0,
       clean:
         this.codexSuccessionBarrierClean &&
+        !this.codexRouteCreationInFlight &&
+        !this.codexEndpointActivationRetryPending &&
         routePresent &&
         this.state === "idle",
     };
@@ -851,6 +962,40 @@ function independentCodexRegistration(): ValidatedRegisterCodexParams {
     threadId: THIRD_THREAD_ID,
     hostId: "this-mac",
     busyPolicy: "queue",
+  };
+}
+
+function compatibleCodexAttestation(
+  version = "0.147.0",
+): CompatibilityAttestation {
+  return {
+    schemaVersion: 1,
+    surface: "codex",
+    version,
+    tier: "certified",
+    checkedAt: "2026-08-09T12:00:00.000Z",
+    probes: compatibilityProbeNames.codex.map((name) => ({
+      name,
+      outcome: "pass",
+    })),
+  };
+}
+
+function incompatibleCodexAttestation(
+  version = "1.0.0",
+  checkedAt = "2026-08-09T12:00:00.000Z",
+): CompatibilityAttestation {
+  return {
+    schemaVersion: 1,
+    surface: "codex",
+    version,
+    tier: "incompatible",
+    checkedAt,
+    probes: compatibilityProbeNames.codex.map((name) => ({
+      name,
+      outcome: "pass",
+    })),
+    safeErrorCode: "CODEX_VERSION_DRIFT",
   };
 }
 
@@ -986,6 +1131,10 @@ test("failed startup compatibility admission leaves the prior durable schema byt
     await readFile(seed.stateFilePath, "utf8"),
   ) as Record<string, unknown>;
   delete legacy.compatibilityAttestations;
+  delete legacy.codexEndpointRefreshSequence;
+  delete legacy.codexEndpointRefreshEvents;
+  delete legacy.codexOrphanRemovalSequence;
+  delete legacy.codexOrphanRemovalEvents;
   const legacyBytes = `${JSON.stringify(legacy)}\n`;
   await writeFile(seed.stateFilePath, legacyBytes, { mode: 0o600 });
 
@@ -1633,6 +1782,1680 @@ test("multiple distinct Codex registrations coexist and unregister independently
     ["codex-side@this-mac"],
   );
   assert.equal(claude.nativeCodexGenerations.has("codex-side@this-mac"), true);
+});
+
+test("a compatible Codex endpoint refresh reanchors exact tasks and preserves pair authority", async (t) => {
+  const { root, stateDir } = await fixture();
+  const beforeGeneration = "codex_generation_before_refresh";
+  const afterGeneration = "codex_generation_after_refresh";
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider(
+    "codex",
+    beforeGeneration,
+    "0.147.0",
+  );
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+  assert.deepEqual(
+    (await handlers.listSnapshot()).pairs.map(
+      ({ claudeAlias, codexAlias }) => ({ claudeAlias, codexAlias }),
+    ),
+    [
+      {
+        claudeAlias: "claude-one@this-mac",
+        codexAlias: "codex-main@this-mac",
+      },
+    ],
+  );
+
+  const previous = { ...codex.identity };
+  codex.identity.endpointGeneration = afterGeneration;
+  codex.callbacks?.onEndpointRefresh?.({
+    outcome: "compatible",
+    previous,
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+  });
+
+  await waitForAsync(async () =>
+    (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration === afterGeneration,
+  );
+  let snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes
+      .filter(({ provider }) => provider === "codex")
+      .map(({ alias, state, compatibility }) => ({
+        alias,
+        state,
+        compatibility,
+      })),
+    [
+      {
+        alias: "codex-main@this-mac",
+        state: "idle",
+        compatibility: "compatible",
+      },
+    ],
+  );
+  assert.deepEqual(
+    snapshot.pairs.map(({ claudeAlias, codexAlias }) => ({
+      claudeAlias,
+      codexAlias,
+    })),
+    [
+      {
+        claudeAlias: "claude-one@this-mac",
+        codexAlias: "codex-main@this-mac",
+      },
+    ],
+  );
+  assert.deepEqual(
+    snapshot.activityEvents
+      ?.filter(({ action }) => action === "endpoint_refreshed")
+      .map(({ kind, outcome, aliases, operatorAction }) => ({
+        kind,
+        outcome,
+        aliases,
+        operatorAction,
+      })),
+    [
+      {
+        kind: "endpoint",
+        outcome: "accepted",
+        aliases: ["codex-main@this-mac"],
+        operatorAction: false,
+      },
+    ],
+  );
+  const privateRoute = await service.store.inspectPrivateRoute(
+    "codex-main@this-mac",
+  );
+  assert.equal(privateRoute?.binding.routeHandle, THREAD_ID);
+  assert.equal(privateRoute?.binding.endpointGeneration, afterGeneration);
+  const persisted = JSON.parse(
+    await readFile(service.store.stateFilePath, "utf8"),
+  ) as {
+    codexEndpointRefreshEvents: Array<{
+      sequence: number;
+      timestamp: string;
+      alias: string;
+      hostId: string;
+      threadId: string;
+      oldEndpointGeneration: string;
+      newEndpointGeneration: string;
+    }>;
+  };
+  assert.deepEqual(persisted.codexEndpointRefreshEvents, [
+    {
+      sequence: 1,
+      timestamp: persisted.codexEndpointRefreshEvents[0]?.timestamp,
+      alias: "codex-main@this-mac",
+      hostId: "this-mac",
+      threadId: THREAD_ID,
+      oldEndpointGeneration: beforeGeneration,
+      newEndpointGeneration: afterGeneration,
+    },
+  ]);
+
+  // A callback carrying the retired exact endpoint cannot stale the rebound
+  // route even though its native task handle is unchanged.
+  codex.callbacks?.onRouteState({
+    endpoint: { ...previous, routeHandle: THREAD_ID },
+    state: "stale",
+    safeErrorCode: "CODEX_ROUTE_STALE",
+  });
+  await immediate();
+  await immediate();
+  assert.equal(
+    (await handlers.listSnapshot()).routes.find(
+      ({ alias }) => alias === "codex-main@this-mac",
+    )?.state,
+    "idle",
+  );
+
+  assert.deepEqual(
+    await handlers.registerCodex(independentCodexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes
+      .filter(({ provider }) => provider === "codex")
+      .map(({ alias }) => alias),
+    ["codex-main@this-mac", "codex-side@this-mac"],
+  );
+  const publicText = JSON.stringify(snapshot);
+  for (const privateValue of [
+    THREAD_ID,
+    THIRD_THREAD_ID,
+    beforeGeneration,
+    afterGeneration,
+  ]) {
+    assert.equal(publicText.includes(privateValue), false);
+  }
+});
+
+test("an incompatible Codex endpoint refresh remains stale and surfaces the candidate compatibility tier", async (t) => {
+  const { root, stateDir } = await fixture();
+  const beforeGeneration = "codex_generation_before_incompatible_refresh";
+  const candidateGeneration = "codex_generation_incompatible_candidate";
+  const claude = new FakeProvider("claude");
+  claude.enableCompatibility("2.1.226");
+  const codex = new FakeProvider(
+    "codex",
+    beforeGeneration,
+    "0.147.0",
+  );
+  codex.enableCompatibility("0.147.0");
+  const clock = new ManualGatewayClock();
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await discoverAndRegisterCodexOnly(handlers);
+  await clock.advanceBy(1);
+
+  await service.store.recordCompatibilityAttestation(
+    incompatibleCodexAttestation("9.0.0", clock.now().toISOString()),
+  );
+  const historicalSnapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    historicalSnapshot.compatibilityChecks
+      ?.filter(({ surface }) => surface === "codex")
+      .map(({ version, tier }) => ({ version, tier })),
+    [{ version: "0.147.0", tier: "certified" }],
+  );
+  await clock.advanceBy(1);
+
+  codex.callbacks?.onEndpointRefresh?.({
+    outcome: "incompatible",
+    previous: { ...codex.identity },
+    candidate: {
+      ...codex.identity,
+      endpointGeneration: candidateGeneration,
+    },
+    attestation: incompatibleCodexAttestation(
+      "1.0.0",
+      clock.now().toISOString(),
+    ),
+  });
+
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, state }) =>
+        alias === "codex-main@this-mac" && state === "stale",
+    ),
+  );
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.compatibilityChecks?.map(
+      ({ surface, version, tier, probes, safeErrorCode }) => ({
+        surface,
+        version,
+        tier,
+        probes,
+        safeErrorCode,
+      }),
+    ),
+    [
+      {
+        surface: "claude",
+        version: "2.1.226",
+        tier: "certified",
+        probes: compatibilityProbeNames.claude.map((name) => ({
+          name,
+          outcome: "pass",
+        })),
+        safeErrorCode: undefined,
+      },
+      {
+        surface: "codex",
+        version: "1.0.0",
+        tier: "incompatible",
+        probes: compatibilityProbeNames.codex.map((name) => ({
+          name,
+          outcome: "pass",
+        })),
+        safeErrorCode: "CODEX_VERSION_DRIFT",
+      },
+    ],
+  );
+  const publicText = JSON.stringify(snapshot);
+  for (const privateValue of [
+    THREAD_ID,
+    beforeGeneration,
+    candidateGeneration,
+  ]) {
+    assert.equal(publicText.includes(privateValue), false);
+  }
+
+  const previous = { ...codex.identity };
+  const recoveredGeneration = "codex_generation_recovered";
+  codex.identity.endpointGeneration = recoveredGeneration;
+  codex.callbacks?.onEndpointRefresh?.({
+    outcome: "compatible",
+    previous,
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+  });
+  await waitForAsync(async () =>
+    (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration === recoveredGeneration,
+  );
+  const recoveredSnapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    recoveredSnapshot.compatibilityChecks
+      ?.filter(({ surface }) => surface === "codex")
+      .map(({ version, tier }) => ({ version, tier })),
+    [{ version: "0.147.0", tier: "certified" }],
+  );
+  assert.equal(
+    recoveredSnapshot.routes.find(
+      ({ alias }) => alias === "codex-main@this-mac",
+    )?.state,
+    "idle",
+  );
+  assert.equal(
+    JSON.stringify(recoveredSnapshot).includes(recoveredGeneration),
+    false,
+  );
+});
+
+test("endpoint refresh retries complete once across precommit, uncertain-commit, and native-update failures", async () => {
+  for (const failurePoint of [
+    "before_reanchor",
+    "after_reanchor",
+    "native_status",
+  ] as const) {
+    const { root, stateDir } = await fixture();
+    const config = loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    });
+    const store = new EndpointRefreshFaultStore(config);
+    if (failurePoint === "before_reanchor") store.failReanchorBefore = 1;
+    if (failurePoint === "after_reanchor") store.failReanchorAfter = 1;
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider(
+      "codex",
+      `codex_${failurePoint}_g1`,
+      "0.147.0",
+    );
+    const service = new GatewayService({
+      config,
+      store,
+      adapters: [claude, codex],
+    });
+    try {
+      await service.start();
+      await service.handlers().registerCodex(codexRegistration());
+      if (failurePoint === "native_status") {
+        claude.nativeCodexStatusFailures.push(
+          new Error("synthetic refreshed status failure"),
+        );
+      }
+      const previous = { ...codex.identity };
+      codex.identity.endpointGeneration = `codex_${failurePoint}_g2`;
+      const refresh: GatewayAdapterEndpointRefresh = {
+        outcome: "compatible",
+        previous,
+        current: { ...codex.identity },
+        attestation: compatibleCodexAttestation(codex.protocolVersion),
+        routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+      };
+      codex.callbacks?.onEndpointRefresh?.(refresh);
+      await waitForAsync(async () => {
+        const internal = service as unknown as {
+          callbackWorker?: Promise<void>;
+        };
+        return (
+          internal.callbackWorker === undefined &&
+          store.failReanchorBefore === 0 &&
+          store.failReanchorAfter === 0 &&
+          claude.nativeCodexStatusFailures.length === 0
+        );
+      });
+      assert.equal(
+        codex.acceptedCompatibilityAttestations.length,
+        0,
+        failurePoint,
+      );
+
+      codex.callbacks?.onEndpointRefresh?.(refresh);
+      await waitForAsync(
+        async () =>
+          codex.acceptedCompatibilityAttestations.length === 1 &&
+          (await store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+            .endpointGeneration === codex.identity.endpointGeneration,
+      );
+      const persisted = JSON.parse(
+        await readFile(store.stateFilePath, "utf8"),
+      ) as { codexEndpointRefreshEvents: unknown[] };
+      assert.equal(persisted.codexEndpointRefreshEvents.length, 1);
+      assert.equal(
+        (await service.handlers().listSnapshot()).activityEvents?.filter(
+          ({ action }) => action === "endpoint_refreshed",
+        ).length,
+        1,
+      );
+      codex.callbacks?.onEndpointRefresh?.(refresh);
+      await immediate();
+      await immediate();
+      assert.equal(codex.acceptedCompatibilityAttestations.length, 1);
+      assert.equal(
+        (
+          JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+            codexEndpointRefreshEvents: unknown[];
+          }
+        ).codexEndpointRefreshEvents.length,
+        1,
+      );
+    } finally {
+      await service.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("endpoint refresh activation requires one exact live native listener and status method", async (t) => {
+  for (const failurePoint of [
+    "listener_missing",
+    "status_method_missing",
+    "listener_exits_after_status",
+    "listener_exits_during_publish",
+  ] as const) {
+    const { root, stateDir } = await fixture();
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider(
+      "codex",
+      `codex_native_continuity_${failurePoint}_g1`,
+      "0.147.0",
+    );
+    let removeListenerDuringPublish = false;
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: stateDir,
+        EMBASSY_HOSTS: "this-mac",
+      }),
+      adapters: [claude, codex],
+      publishDashboard: async () => {
+        if (removeListenerDuringPublish) {
+          claude.nativeCodexGenerations.delete("codex-main@this-mac");
+          removeListenerDuringPublish = false;
+        }
+        return "<html></html>";
+      },
+    });
+    await service.start();
+    t.after(async () => {
+      await service.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    });
+    await service.handlers().registerCodex(codexRegistration());
+    const listenerGeneration = claude.nativeCodexGenerations.get(
+      "codex-main@this-mac",
+    )!;
+    const originalUpdate =
+      claude.updateNativeCodexPeerStatus.bind(claude);
+    if (failurePoint === "listener_missing") {
+      claude.nativeCodexGenerations.delete("codex-main@this-mac");
+    } else if (failurePoint === "status_method_missing") {
+      (claude as unknown as Record<string, unknown>)[
+        "updateNativeCodexPeerStatus"
+      ] = undefined;
+    } else if (failurePoint === "listener_exits_after_status") {
+      claude.nativeCodexStatusAfterUpdate = () => {
+        claude.nativeCodexGenerations.delete("codex-main@this-mac");
+        claude.nativeCodexStatusAfterUpdate = undefined;
+      };
+    } else {
+      removeListenerDuringPublish = true;
+    }
+
+    const previous = { ...codex.identity };
+    codex.identity.endpointGeneration =
+      `codex_native_continuity_${failurePoint}_g2`;
+    const refresh: GatewayAdapterEndpointRefresh = {
+      outcome: "compatible",
+      previous,
+      current: { ...codex.identity },
+      attestation: compatibleCodexAttestation(codex.protocolVersion),
+      routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+    };
+    codex.callbacks?.onEndpointRefresh?.(refresh);
+    await waitForAsync(async () => {
+      const internal = service as unknown as {
+        callbackWorker?: Promise<void>;
+      };
+      const route = await service.store.inspectPrivateRoute(
+        "codex-main@this-mac",
+      );
+      return (
+        internal.callbackWorker === undefined &&
+        route?.binding.endpointGeneration ===
+          codex.identity.endpointGeneration &&
+        route.state === "stale"
+      );
+    });
+    assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+    assert.equal(
+      (await service.handlers().listSnapshot()).routes.find(
+        ({ alias }) => alias === "codex-main@this-mac",
+      )?.state,
+      "stale",
+    );
+
+    claude.nativeCodexGenerations.set(
+      "codex-main@this-mac",
+      listenerGeneration,
+    );
+    claude.nativeCodexActiveAlias = "codex-main@this-mac";
+    claude.nativeCodexActiveGeneration = listenerGeneration;
+    (
+      claude as unknown as {
+        updateNativeCodexPeerStatus: FakeProvider["updateNativeCodexPeerStatus"];
+      }
+    ).updateNativeCodexPeerStatus = originalUpdate;
+    codex.callbacks?.onEndpointRefresh?.(refresh);
+    await waitForAsync(
+      async () => codex.acceptedCompatibilityAttestations.length === 1,
+    );
+    assert.equal(
+      (await service.handlers().listSnapshot()).routes.find(
+        ({ alias }) => alias === "codex-main@this-mac",
+      )?.state,
+      "idle",
+    );
+  }
+});
+
+test("an uncertain durable reanchor can fail closed natively and then retry exactly", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const store = new EndpointRefreshFaultStore(config);
+  store.failReanchorAfter = 1;
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_uncertain_native_g1", "0.147.0");
+  const service = new GatewayService({ config, store, adapters: [claude, codex] });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await service.handlers().registerCodex(codexRegistration());
+  const listenerGeneration = claude.nativeCodexGenerations.get(
+    "codex-main@this-mac",
+  )!;
+  const previous = { ...codex.identity };
+  codex.identity.endpointGeneration = "codex_uncertain_native_g2";
+  const refresh: GatewayAdapterEndpointRefresh = {
+    outcome: "compatible",
+    previous,
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+  };
+
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  await waitForAsync(async () => {
+    const internal = service as unknown as { callbackWorker?: Promise<void> };
+    return internal.callbackWorker === undefined && store.failReanchorAfter === 0;
+  });
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-main@this-mac"))?.state,
+    "stale",
+  );
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-main@this-mac"))?.compatibility,
+    "expired",
+  );
+  claude.nativeCodexGenerations.delete("codex-main@this-mac");
+
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  await waitForAsync(
+    async () =>
+      (await store.inspectPrivateRoute("codex-main@this-mac"))?.state ===
+      "stale",
+  );
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+  claude.nativeCodexGenerations.set(
+    "codex-main@this-mac",
+    listenerGeneration,
+  );
+  claude.nativeCodexActiveAlias = "codex-main@this-mac";
+  claude.nativeCodexActiveGeneration = listenerGeneration;
+
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  await waitForAsync(
+    async () =>
+      codex.acceptedCompatibilityAttestations.length === 1 &&
+      (await store.inspectPrivateRoute("codex-main@this-mac"))?.state ===
+        "idle",
+  );
+  const persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+    codexEndpointRefreshEvents: unknown[];
+  };
+  assert.equal(persisted.codexEndpointRefreshEvents.length, 1);
+  assert.equal(
+    (await service.handlers().listSnapshot()).activityEvents?.filter(
+      ({ action }) => action === "endpoint_refreshed",
+    ).length,
+    1,
+  );
+});
+
+test("a selector refresh drains pre-return native ingress at the old generation boundary", async (t) => {
+  const { root, stateDir } = await fixture();
+  const beforeGeneration = "codex_selector_drain_g1";
+  const afterGeneration = "codex_selector_drain_g2";
+  const receiptHandle = "receipt-selector-drain";
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", beforeGeneration, "0.147.0");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await service.handlers().registerCodex(codexRegistration());
+  codex.callbacks?.onRouteState?.({
+    endpoint: { ...codex.identity, routeHandle: THREAD_ID },
+    state: "busy",
+  });
+  await waitForAsync(
+    async () =>
+      (await service.store.inspectPrivateRoute("codex-main@this-mac"))
+        ?.state === "busy",
+  );
+
+  const previous = { ...codex.identity };
+  codex.identity.endpointGeneration = afterGeneration;
+  codex.selectedEndpointRefresh = {
+    outcome: "compatible",
+    previous,
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+  };
+  codex.selectRouteBeforeReturn = () => {
+    codex.selectRouteBeforeReturn = undefined;
+    claude.callbacks?.onClaudeMessage?.({
+      endpoint: {
+        ...claude.identity,
+        routeHandle: "claude_selector_drain_source",
+      },
+      sourceAlias: "claude-selector@this-mac",
+      targetAlias: "codex-main@this-mac",
+      text: "must settle before selector generation activation",
+      receiptHandle,
+    });
+  };
+  let terminalReceiptObservedAtActivation = false;
+  codex.acceptCompatibilityAttestationBefore = () => {
+    assert.equal(
+      claude.nativeInboundStatuses.some(
+        (status) =>
+          status.receiptHandle === receiptHandle &&
+          status.status === "expired" &&
+          status.diagnosticCode === "ENDPOINT_GENERATION_CHANGED",
+      ),
+      true,
+    );
+    terminalReceiptObservedAtActivation = true;
+  };
+
+  assert.deepEqual(
+    await service.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.equal(terminalReceiptObservedAtActivation, true);
+  assert.deepEqual(codex.dispatches, []);
+  assert.equal(
+    (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration,
+    afterGeneration,
+  );
+});
+
+test("a selector refresh activates retained tasks before installing its fresh task", async (t) => {
+  const { root, stateDir } = await fixture();
+  const beforeGeneration = "codex_selector_refresh_g1";
+  const afterGeneration = "codex_selector_refresh_g2";
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", beforeGeneration, "0.147.0");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await service.handlers().registerCodex(codexRegistration());
+  const previous = { ...codex.identity };
+  codex.identity.endpointGeneration = afterGeneration;
+  codex.selectedEndpointRefresh = {
+    outcome: "compatible",
+    previous,
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [
+      { routeHandle: THREAD_ID, state: "idle" },
+      { routeHandle: OTHER_THREAD_ID, state: "idle" },
+    ],
+  };
+
+  assert.deepEqual(
+    await service.handlers().registerCodex({
+      alias: "codex-fresh@this-mac",
+      threadId: OTHER_THREAD_ID,
+      hostId: "this-mac",
+      busyPolicy: "queue",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(
+    (await service.store.inspectPrivateCodexRoutes())
+      .map(({ alias, binding }) => ({
+        alias,
+        endpointGeneration: binding.endpointGeneration,
+      }))
+      .sort((left, right) => left.alias.localeCompare(right.alias)),
+    [
+      {
+        alias: "codex-fresh@this-mac",
+        endpointGeneration: afterGeneration,
+      },
+      {
+        alias: "codex-main@this-mac",
+        endpointGeneration: afterGeneration,
+      },
+    ],
+  );
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 1);
+  const persisted = JSON.parse(
+    await readFile(service.store.stateFilePath, "utf8"),
+  ) as { codexEndpointRefreshEvents: Array<{ alias: string }> };
+  assert.deepEqual(
+    persisted.codexEndpointRefreshEvents.map(({ alias }) => alias),
+    ["codex-main@this-mac"],
+  );
+});
+
+test("exact re-registration finalizes a selector refresh only after rebuilding its native listener", async () => {
+  for (const providerAlreadyTracksRoute of [false, true]) {
+    const { root, stateDir } = await fixture();
+    const config = loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    });
+    const firstCodex = new FakeProvider(
+      "codex",
+      `codex_restart_${providerAlreadyTracksRoute ? "tracked" : "clean"}_g1`,
+      "0.147.0",
+    );
+    const first = new GatewayService({
+      config,
+      adapters: [new FakeProvider("claude"), firstCodex],
+    });
+    let second: GatewayService | undefined;
+    try {
+      await first.start();
+      await first.handlers().registerCodex(codexRegistration());
+      await first.close();
+
+      const claude = new FakeProvider("claude");
+      const codex = new FakeProvider(
+        "codex",
+        `codex_restart_${providerAlreadyTracksRoute ? "tracked" : "clean"}_g2`,
+        "0.147.0",
+      );
+      codex.selectedEndpointRefresh = {
+        outcome: "compatible",
+        previous: { ...firstCodex.identity },
+        current: { ...codex.identity },
+        attestation: compatibleCodexAttestation(codex.protocolVersion),
+        routes: providerAlreadyTracksRoute
+          ? [{ routeHandle: THREAD_ID, state: "idle" }]
+          : [],
+      };
+      second = new GatewayService({ config, adapters: [claude, codex] });
+      await second.start();
+      assert.deepEqual(
+        await second.handlers().registerCodex(codexRegistration()),
+        { accepted: true, code: "ok" },
+      );
+      const route = await second.store.inspectPrivateRoute(
+        "codex-main@this-mac",
+      );
+      assert.equal(
+        route?.binding.endpointGeneration,
+        codex.identity.endpointGeneration,
+      );
+      assert.equal(route?.state, "idle");
+      assert.equal(route?.compatibility, "compatible");
+      assert.equal(
+        claude.currentNativeCodexPeerGeneration("codex-main@this-mac"),
+        "initial",
+      );
+      assert.equal(codex.acceptedCompatibilityAttestations.length, 1);
+      const publicText = JSON.stringify(
+        await second.handlers().listSnapshot(),
+      );
+      assert.equal(publicText.includes(THREAD_ID), false);
+      assert.equal(publicText.includes(codex.identity.endpointGeneration), false);
+    } finally {
+      await second?.close().catch(() => undefined);
+      await first.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("selector refresh registration failures remain stale and retry to one final activation", async () => {
+  for (const failurePoint of ["advertise_after_write", "status"] as const) {
+    const { root, stateDir } = await fixture();
+    const config = loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    });
+    const firstCodex = new FakeProvider(
+      "codex",
+      `codex_registration_retry_${failurePoint}_g1`,
+      "0.147.0",
+    );
+    const first = new GatewayService({
+      config,
+      adapters: [new FakeProvider("claude"), firstCodex],
+    });
+    let second: GatewayService | undefined;
+    try {
+      await first.start();
+      await first.handlers().registerCodex(codexRegistration());
+      await first.close();
+      const claude = new FakeProvider("claude");
+      const codex = new FakeProvider(
+        "codex",
+        `codex_registration_retry_${failurePoint}_g2`,
+        "0.147.0",
+      );
+      codex.selectedEndpointRefresh = {
+        outcome: "compatible",
+        previous: { ...firstCodex.identity },
+        current: { ...codex.identity },
+        attestation: compatibleCodexAttestation(codex.protocolVersion),
+        routes: [],
+      };
+      if (failurePoint === "advertise_after_write") {
+        claude.nativeCodexAdvertisementFailures.push({
+          error: new Error("synthetic advertise outcome unknown"),
+          afterWrite: true,
+        });
+      } else {
+        claude.nativeCodexStatusFailures.push(
+          new Error("synthetic registration status failure"),
+        );
+      }
+      second = new GatewayService({ config, adapters: [claude, codex] });
+      await second.start();
+      assert.deepEqual(
+        await second.handlers().registerCodex(codexRegistration()),
+        { accepted: false, code: "rejected" },
+      );
+      assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+      assert.equal(
+        (await second.store.inspectPrivateRoute("codex-main@this-mac"))
+          ?.state,
+        "stale",
+      );
+
+      assert.deepEqual(
+        await second.handlers().registerCodex(codexRegistration()),
+        { accepted: true, code: "ok" },
+      );
+      const route = await second.store.inspectPrivateRoute(
+        "codex-main@this-mac",
+      );
+      assert.equal(route?.binding.endpointGeneration, codex.identity.endpointGeneration);
+      assert.equal(route?.state, "idle");
+      assert.equal(route?.compatibility, "compatible");
+      assert.equal(codex.acceptedCompatibilityAttestations.length, 1);
+      assert.equal(
+        claude.currentNativeCodexPeerGeneration("codex-main@this-mac"),
+        "initial",
+      );
+    } finally {
+      await second?.close().catch(() => undefined);
+      await first.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("selector refresh retains a coalesced retry across deferred activation failure", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstCodex = new FakeProvider(
+    "codex",
+    "codex_deferred_retry_g1",
+    "0.147.0",
+  );
+  const first = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), firstCodex],
+  });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.close();
+
+  let releaseReanchor!: () => void;
+  const reanchorGate = new Promise<void>((resolve) => {
+    releaseReanchor = resolve;
+  });
+  let reanchorEntered = false;
+  const store = new EndpointRefreshFaultStore(config);
+  store.reanchorGate = reanchorGate;
+  store.onReanchorEntered = () => {
+    reanchorEntered = true;
+  };
+  const claude = new FakeProvider("claude");
+  claude.nativeCodexStatusFailures.push(
+    new Error("synthetic deferred activation status failure"),
+  );
+  const codex = new FakeProvider(
+    "codex",
+    "codex_deferred_retry_g2",
+    "0.147.0",
+  );
+  const refresh: GatewayAdapterEndpointRefresh = {
+    outcome: "compatible",
+    previous: { ...firstCodex.identity },
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+  };
+  codex.selectedEndpointRefresh = refresh;
+  const second = new GatewayService({ config, store, adapters: [claude, codex] });
+  await second.start();
+  t.after(async () => {
+    releaseReanchor();
+    await second.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const registration = second.handlers().registerCodex(codexRegistration());
+  await waitFor(() => reanchorEntered);
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  releaseReanchor();
+  assert.deepEqual(await registration, { accepted: false, code: "rejected" });
+  const internal = second as unknown as {
+    endpointRefreshCallback?: unknown;
+  };
+  assert.notEqual(internal.endpointRefreshCallback, undefined);
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-main@this-mac"))?.state,
+    "stale",
+  );
+
+  assert.deepEqual(
+    await second.handlers().registerCodex(codexRegistration()),
+    { accepted: true, code: "ok" },
+  );
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 1);
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-main@this-mac"))?.state,
+    "idle",
+  );
+});
+
+test("a malformed selector endpoint refresh has no durable or native activation side effects", async (t) => {
+  const { root, stateDir } = await fixture();
+  const generation = "codex_malformed_selector_g1";
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", generation, "0.147.0");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await service.handlers().registerCodex(codexRegistration());
+  const previous = { ...codex.identity };
+  codex.selectedEndpointRefresh = {
+    outcome: "compatible",
+    previous,
+    current: { ...previous },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: OTHER_THREAD_ID, state: "idle" }],
+  };
+  const advertisedBefore = [...claude.nativeCodexAdvertisements];
+
+  assert.deepEqual(
+    await service.handlers().registerCodex({
+      alias: "codex-malformed@this-mac",
+      threadId: OTHER_THREAD_ID,
+      hostId: "this-mac",
+      busyPolicy: "queue",
+    }),
+    { accepted: false, code: "route_mismatch" },
+  );
+  const retained = await service.store.inspectPrivateRoute(
+    "codex-main@this-mac",
+  );
+  assert.equal(retained?.binding.endpointGeneration, generation);
+  assert.equal(retained?.state, "idle");
+  assert.equal(retained?.compatibility, "compatible");
+  assert.equal(
+    await service.store.inspectPrivateRoute("codex-malformed@this-mac"),
+    undefined,
+  );
+  assert.deepEqual(claude.nativeCodexAdvertisements, advertisedBefore);
+  assert.deepEqual(claude.nativeCodexUnadvertisements, []);
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+  assert.equal(
+    (
+      JSON.parse(await readFile(service.store.stateFilePath, "utf8")) as {
+        codexEndpointRefreshEvents: unknown[];
+      }
+    ).codexEndpointRefreshEvents.length,
+    0,
+  );
+});
+
+test("endpoint refresh retains one coalesced slot when the ordinary callback queue is saturated", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider(
+    "codex",
+    "codex_callback_capacity_g1",
+    "0.147.0",
+  );
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await service.handlers().registerCodex(codexRegistration());
+  const internal = service as unknown as {
+    callbackCapacity: number;
+    callbackQueue: Array<Record<string, unknown>>;
+    endpointRefreshCallback?: unknown;
+  };
+  const sentinel = {
+    type: "delivery",
+    source: { ...claude.identity },
+    value: { messageId: "msg_callback-capacity-sentinel", state: "failed" },
+    receivedAt: Date.now(),
+  };
+  internal.callbackQueue.push(sentinel);
+  while (internal.callbackQueue.length < internal.callbackCapacity) {
+    internal.callbackQueue.push({
+      type: "delivery",
+      source: { ...claude.identity },
+      value: {
+        messageId: `msg_callback-capacity-${internal.callbackQueue.length}`,
+        state: "failed",
+      },
+      receivedAt: Date.now(),
+    });
+  }
+  const previous = { ...codex.identity };
+  codex.identity.endpointGeneration = "codex_callback_capacity_g2";
+  const refresh: GatewayAdapterEndpointRefresh = {
+    outcome: "compatible",
+    previous,
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+  };
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  codex.callbacks?.onEndpointRefresh?.(refresh);
+  assert.equal(internal.callbackQueue.includes(sentinel), true);
+  assert.notEqual(internal.endpointRefreshCallback, undefined);
+  assert.equal(internal.callbackQueue.length, internal.callbackCapacity);
+
+  await waitForAsync(
+    async () =>
+      codex.acceptedCompatibilityAttestations.length === 1 &&
+      (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+        .endpointGeneration === codex.identity.endpointGeneration,
+  );
+  assert.equal(
+    (
+      JSON.parse(await readFile(service.store.stateFilePath, "utf8")) as {
+        codexEndpointRefreshEvents: unknown[];
+      }
+    ).codexEndpointRefreshEvents.length,
+    1,
+  );
+  assert.equal(
+    (await service.handlers().listSnapshot()).activityEvents?.filter(
+      ({ action }) => action === "endpoint_refreshed",
+    ).length,
+    1,
+  );
+});
+
+test("owned orphan removal quiesces and drains native ingress before unadvertising", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_owned_orphan_g1");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.registerCodex(codexRegistration());
+  await service.store.markConnectorOffline(
+    { ...codex.identity },
+    "ENDPOINT_GENERATION_CHANGED",
+    [],
+  );
+  codex.releasedRoutes.push(THREAD_ID);
+  claude.nativeMessageOnQuiesce = {
+    endpoint: { ...claude.identity, routeHandle: "claude_target_late" },
+    sourceAlias: "claude-late@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "late native ingress at orphan boundary",
+    receiptHandle: "receipt-orphan-quiesce",
+  };
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  const quiesceIndex = claude.lifecycleEvents.indexOf(
+    "succession:quiesce:initial",
+  );
+  const barrierIndex = claude.lifecycleEvents.indexOf(
+    "succession:barrier-claude:initial",
+  );
+  const receiptIndex = claude.lifecycleEvents.findIndex((event) =>
+    event.startsWith("status:"),
+  );
+  const unadvertiseIndex = claude.lifecycleEvents.indexOf(
+    "native:unadvertise:codex-main@this-mac",
+  );
+  assert.ok(quiesceIndex >= 0);
+  assert.ok(barrierIndex > quiesceIndex);
+  assert.ok(receiptIndex > quiesceIndex && receiptIndex < unadvertiseIndex);
+  assert.ok(unadvertiseIndex > barrierIndex);
+  assert.equal(
+    claude.nativeInboundStatuses.some(
+      ({ receiptHandle }) => receiptHandle === "receipt-orphan-quiesce",
+    ),
+    true,
+  );
+  assert.equal(
+    await service.store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+
+  await service.store.observeConnector({
+    identity: codex.identity,
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: codex.protocol,
+    protocolVersion: codex.protocolVersion,
+  });
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+});
+
+test("owned orphan removal resumes its exact listener after a barrier failure", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_orphan_barrier_g1");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.registerCodex(codexRegistration());
+  await service.store.markConnectorOffline(
+    { ...codex.identity },
+    "ENDPOINT_GENERATION_CHANGED",
+    [],
+  );
+  codex.releasedRoutes.push(THREAD_ID);
+  claude.nativeSuccessionBarrierClean = false;
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "busy" },
+  );
+  assert.equal(
+    claude.lifecycleEvents.includes("succession:resume:initial"),
+    true,
+  );
+  assert.deepEqual(claude.nativeCodexUnadvertisements, []);
+  assert.notEqual(
+    await service.store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+
+  claude.nativeSuccessionBarrierClean = true;
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+});
+
+test("orphan removal rechecks provider recovery claims after the native barrier", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_orphan_race_g1");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.registerCodex(codexRegistration());
+  await service.store.markConnectorOffline(
+    { ...codex.identity },
+    "ENDPOINT_GENERATION_CHANGED",
+    [],
+  );
+  codex.releasedRoutes.push(THREAD_ID);
+  const releasesBefore = codex.releasedRoutes.length;
+  claude.nativeSuccessionBarrierBeforeReturn = () => {
+    claude.nativeSuccessionBarrierBeforeReturn = undefined;
+    codex.codexRouteCreationInFlight = true;
+  };
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "busy" },
+  );
+  assert.equal(codex.releasedRoutes.length, releasesBefore);
+  assert.deepEqual(claude.nativeCodexUnadvertisements, []);
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+  assert.equal(
+    (await service.store.inspectPrivateRoute("codex-main@this-mac"))
+      ?.binding.endpointGeneration,
+    "codex_orphan_race_g1",
+  );
+  const persisted = JSON.parse(
+    await readFile(service.store.stateFilePath, "utf8"),
+  ) as { codexEndpointRefreshEvents: unknown[] };
+  assert.equal(persisted.codexEndpointRefreshEvents.length, 0);
+});
+
+test("orphan removal blocks a target-bearing provider activation retry", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_orphan_retry_barrier_g1");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await service.handlers().registerCodex(codexRegistration());
+  await service.store.markConnectorOffline(
+    { ...codex.identity },
+    "ENDPOINT_GENERATION_CHANGED",
+    [],
+  );
+  codex.releasedRoutes.push(THREAD_ID);
+  const releasesBefore = codex.releasedRoutes.length;
+  codex.codexEndpointActivationRetryPending = true;
+
+  assert.deepEqual(
+    await service.handlers().removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "busy" },
+  );
+  assert.equal(codex.releasedRoutes.length, releasesBefore);
+  assert.deepEqual(claude.nativeCodexUnadvertisements, []);
+  assert.equal(
+    (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.state,
+    "stale",
+  );
+});
+
+test("orphan removal retries after native removal reports an ambiguous failure", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_orphan_ambiguous_g1");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.registerCodex(codexRegistration());
+  await service.store.markConnectorOffline(
+    { ...codex.identity },
+    "ENDPOINT_GENERATION_CHANGED",
+    [],
+  );
+  codex.releasedRoutes.push(THREAD_ID);
+  claude.nativeCodexUnadvertisementFailuresAfterRemove.push(
+    new Error("synthetic close outcome unknown"),
+  );
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(
+    claude.nativeCodexGenerations.has("codex-main@this-mac"),
+    false,
+  );
+  assert.notEqual(
+    await service.store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: false,
+    code: "rejected",
+  });
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  assert.equal(
+    claude.lifecycleEvents.filter(
+      (event) => event === "native:unadvertise:codex-main@this-mac",
+    ).length,
+    1,
+  );
+  assert.equal(
+    await service.store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+});
+
+test("restored orphan removal retries an exact native-absent store failure", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const first = new GatewayService({
+    config,
+    adapters: [
+      new FakeProvider("claude"),
+      new FakeProvider("codex", "codex_orphan_store_g1"),
+    ],
+  });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.close();
+
+  const store = new OrphanRemovalFaultStore(config);
+  store.failRemovalBefore = 1;
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_orphan_store_g2");
+  const second = new GatewayService({ config, store, adapters: [claude, codex] });
+  await second.start();
+  t.after(async () => {
+    await second.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = second.handlers();
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.notEqual(
+    await store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(claude.nativeCodexUnadvertisements, []);
+  assert.equal(
+    await store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+});
+
+test("orphan removal finalizes an exact post-commit store outcome on retry", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const first = new GatewayService({
+    config,
+    adapters: [
+      new FakeProvider("claude"),
+      new FakeProvider("codex", "codex_orphan_postcommit_g1"),
+    ],
+  });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.close();
+
+  const store = new OrphanRemovalFaultStore(config);
+  store.failRemovalAfter = 1;
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_orphan_postcommit_g2");
+  const second = new GatewayService({ config, store, adapters: [claude, codex] });
+  await second.start();
+  t.after(async () => {
+    await second.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = second.handlers();
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.equal(
+    await store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration,
+    "codex_orphan_postcommit_g2",
+  );
+});
+
+test("dashboard recovery removes only a stale Codex registration on a superseded generation", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstClaude = new FakeProvider("claude");
+  firstClaude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const firstCodex = new FakeProvider("codex", "codex_orphan_generation");
+  const first = new GatewayService({
+    config,
+    adapters: [firstClaude, firstCodex],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  await selectAndRegister(first.handlers());
+  assert.equal((await first.handlers().listSnapshot()).pairs.length, 1);
+  await first.close();
+
+  const secondClaude = new FakeProvider("claude");
+  const secondCodex = new FakeProvider(
+    "codex",
+    "codex_replacement_generation",
+  );
+  second = new GatewayService({
+    config,
+    adapters: [secondClaude, secondCodex],
+  });
+  await second.start();
+  const handlers = second.handlers();
+  let snapshot = await handlers.listSnapshot();
+  assert.equal(
+    snapshot.routes.find(({ alias }) => alias === "codex-main@this-mac")
+      ?.state,
+    "stale",
+  );
+  assert.equal(snapshot.pairs.length, 1);
+
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: true, code: "ok" },
+  );
+  snapshot = await handlers.listSnapshot();
+  assert.equal(
+    snapshot.routes.some(({ alias }) => alias === "codex-main@this-mac"),
+    false,
+  );
+  assert.deepEqual(snapshot.pairs, []);
+  assert.equal(
+    await second.store.inspectPrivateRoute("codex-main@this-mac"),
+    undefined,
+  );
+  assert.deepEqual(secondCodex.releasedRoutes, [THREAD_ID]);
+  assert.deepEqual(secondClaude.nativeCodexUnadvertisements, []);
+  assert.deepEqual(
+    snapshot.activityEvents
+      ?.filter(({ action }) => action === "codex_orphan_removed")
+      .map(({ kind, outcome, aliases, operatorAction }) => ({
+        kind,
+        outcome,
+        aliases,
+        operatorAction,
+      })),
+    [
+      {
+        kind: "recovery",
+        outcome: "accepted",
+        aliases: ["codex-main@this-mac"],
+        operatorAction: true,
+      },
+    ],
+  );
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.equal(
+    (await second.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration,
+    "codex_replacement_generation",
+  );
+});
+
+test("dashboard recovery refuses a stale Codex registration when its exact generation is live", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const endpointGeneration = "codex_still_live_generation";
+  const first = new GatewayService({
+    config,
+    adapters: [
+      new FakeProvider("claude"),
+      new FakeProvider("codex", endpointGeneration),
+    ],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.close();
+
+  const secondCodex = new FakeProvider("codex", endpointGeneration);
+  second = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), secondCodex],
+  });
+  await second.start();
+  const handlers = second.handlers();
+  assert.equal(
+    (await handlers.listSnapshot()).routes.find(
+      ({ alias }) => alias === "codex-main@this-mac",
+    )?.state,
+    "stale",
+  );
+  assert.deepEqual(
+    await handlers.removeStaleCodexRegistration({
+      alias: "codex-main@this-mac",
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  assert.deepEqual(secondCodex.releasedRoutes, []);
+  assert.equal(
+    (await second.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration,
+    endpointGeneration,
+  );
+  assert.deepEqual(
+    (await handlers.listSnapshot()).activityEvents
+      ?.filter(({ action }) => action === "codex_orphan_removed")
+      .map(({ outcome, safeErrorCode }) => ({ outcome, safeErrorCode })),
+    [
+      {
+        outcome: "rejected",
+        safeErrorCode: "CODEX_ORPHAN_GENERATION_LIVE",
+      },
+    ],
+  );
 });
 
 test("Codex registration identity is immutable for one service lifetime", async (t) => {

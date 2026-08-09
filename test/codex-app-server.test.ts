@@ -509,6 +509,25 @@ test("observes and resumes only the exact opted-in thread", async () => {
   await connector.close();
 });
 
+test("rejects duplicate exact loaded-thread claims before resume", async () => {
+  const { connect, transport } = fixture((message, fake) => {
+    if (message.method === "thread/loaded/list") {
+      fake.respond(message, { data: [THREAD_ID, "thread-other", THREAD_ID] });
+    }
+  });
+  const connector = await connect();
+
+  await assert.rejects(
+    connector.observeLoadedThread(connector.guard()),
+    (error) => assertConnectorError(error, "RESULT_SCHEMA_MISMATCH"),
+  );
+  assert.equal(
+    transport.sent.some((message) => message.method === "thread/resume"),
+    false,
+  );
+  await connector.close();
+});
+
 test("refreshes the exact task but leaves changed native policy and workspace to Codex", async () => {
   let resumeCall = 0;
   const current = fixture((message, fake) => {

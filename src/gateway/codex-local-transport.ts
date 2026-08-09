@@ -848,9 +848,10 @@ class Factory implements LocalCodexTransportFactory {
   }
 }
 
-export async function createLocalCodexTransportFactory(
+async function createLocalCodexTransportFactoryForResolution(
   options: LocalCodexTransportFactoryOptions,
-  dependencies: LocalCodexTransportDependencies = {},
+  dependencies: LocalCodexTransportDependencies,
+  resolution: "startup" | "refresh_candidate",
 ): Promise<LocalCodexTransportFactory> {
   if (
     !VERSION_PATTERN.test(options.appServerVersion) ||
@@ -874,7 +875,8 @@ export async function createLocalCodexTransportFactory(
     );
   } catch (error) {
     if (
-      options.compatibilityPolicy !== "observed" ||
+      (resolution !== "refresh_candidate" &&
+        options.compatibilityPolicy !== "observed") ||
       !(error instanceof LocalCodexTransportError) ||
       error.code !== "APP_SERVER_VERSION_MISMATCH"
     ) {
@@ -923,5 +925,39 @@ export async function createLocalCodexTransportFactory(
     installation,
     normalizedOptions,
     normalizedDependencies,
+  );
+}
+
+/**
+ * Resolve the startup factory under the configured admission policy. Strict
+ * startup remains pinned to the exact reviewed build; observed startup may
+ * inspect a same-major schema candidate before the provider admits it.
+ */
+export async function createLocalCodexTransportFactory(
+  options: LocalCodexTransportFactoryOptions,
+  dependencies: LocalCodexTransportDependencies = {},
+): Promise<LocalCodexTransportFactory> {
+  return await createLocalCodexTransportFactoryForResolution(
+    options,
+    dependencies,
+    "startup",
+  );
+}
+
+/**
+ * Resolve only a replacement endpoint candidate after an already-admitted
+ * factory reports a generation change. This narrow path may inspect the
+ * currently installed same-major numeric build even under strict policy so
+ * the provider can run its four read-only probes and record an incompatible
+ * attestation. It does not relax normal startup admission or provider writes.
+ */
+export async function createLocalCodexRefreshCandidateTransportFactory(
+  options: LocalCodexTransportFactoryOptions,
+  dependencies: LocalCodexTransportDependencies = {},
+): Promise<LocalCodexTransportFactory> {
+  return await createLocalCodexTransportFactoryForResolution(
+    options,
+    dependencies,
+    "refresh_candidate",
   );
 }

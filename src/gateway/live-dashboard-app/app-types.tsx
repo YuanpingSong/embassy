@@ -21,6 +21,10 @@ namespace Embassy {
         claudeAlias: string;
         codexAlias: string;
       }>
+    | Readonly<{
+        action: "remove_stale_codex_registration";
+        alias: string;
+      }>
     | Readonly<{ action: "refresh_dashboard" }>;
 
   export type LiveDashboardActionResult = Readonly<{
@@ -216,7 +220,14 @@ namespace Embassy {
   export type DashboardActivityEventRow = Readonly<{
     sequence: number;
     timestamp: string;
-    kind: "discovery" | "selection" | "registration" | "pairing" | "watch";
+    kind:
+      | "discovery"
+      | "selection"
+      | "registration"
+      | "pairing"
+      | "watch"
+      | "endpoint"
+      | "recovery";
     action:
       | "discovery_refreshed"
       | "claude_selected"
@@ -226,9 +237,12 @@ namespace Embassy {
       | "codex_unregistered"
       | "routes_paired"
       | "routes_unpaired"
-      | "watch_ended";
+      | "watch_ended"
+      | "endpoint_refreshed"
+      | "codex_orphan_removed";
     outcome: "accepted" | "rejected";
     aliases: readonly string[];
+    operatorAction: boolean;
     safeErrorCode?: string | undefined;
   }>;
 

@@ -27,6 +27,7 @@ test("snapshot evidence exposes suffix-only correlation, peer validation, operat
       action: "routes_paired",
       outcome: "accepted",
       aliases: ["claude-advisor@this-mac", "codex-reviewer@this-mac"],
+      operatorAction: true,
     },
   ]);
   assert.equal(model.deadlinePressure?.configuredDeadlineMs, 300_000);
@@ -42,6 +43,57 @@ test("snapshot evidence exposes suffix-only correlation, peer validation, operat
   assert.match(zh, /已验证/);
   assert.match(zh, /保留证据：3 次终局尝试/);
   assert.equal(en.includes("conv_IjKl_789"), false);
+});
+
+test("activity projection distinguishes automatic endpoint refresh from operator recovery", () => {
+  const snapshot = dashboardFixture();
+  snapshot.activityEvents = [
+    {
+      sequence: 1,
+      timestamp: "2026-08-08T11:59:53.000Z",
+      kind: "endpoint",
+      action: "endpoint_refreshed",
+      outcome: "accepted",
+      aliases: ["codex-reviewer@this-mac"],
+      operatorAction: false,
+    },
+    {
+      sequence: 2,
+      timestamp: "2026-08-08T11:59:54.000Z",
+      kind: "recovery",
+      action: "codex_orphan_removed",
+      outcome: "accepted",
+      aliases: ["codex-orphan@this-mac"],
+      operatorAction: true,
+    },
+  ];
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(
+    model.brokerActivity.map(({ action, operatorAction }) => ({
+      action,
+      operatorAction,
+    })),
+    [
+      { action: "endpoint_refreshed", operatorAction: false },
+      { action: "codex_orphan_removed", operatorAction: true },
+    ],
+  );
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.equal(
+    (en.match(/data-dashboard-row="automatic-event"/gu) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (en.match(/data-dashboard-row="operator-action"/gu) ?? []).length,
+    1,
+  );
+  assert.match(en, /automatic[\s\S]*Codex endpoint refreshed/u);
+  assert.match(en, /operator[\s\S]*Stale Codex registration removed/u);
+  assert.match(zh, /自动[\s\S]*已刷新 Codex 端点/u);
+  assert.match(zh, /操作者[\s\S]*已移除陈旧的 Codex 注册/u);
 });
 
 test("diagnostics project live certification depth, time, and failure truth", () => {

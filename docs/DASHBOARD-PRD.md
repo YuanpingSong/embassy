@@ -1,9 +1,9 @@
 # Embassy Dashboard — Product Requirements (Web App)
 
-Owner: PM. Status: the five-tab web app shipped read-only (commit cb69bae);
-the mutation set (§3.3 actions), editable settings, registration handshake,
-and §6b ambitious scope remain requirements gated on broker work plus the
-standing threat-model review. Pair this with the companion design MD for
+Owner: PM. Status: the five-tab web app and its four bounded route actions
+have shipped; editable settings, registration handshake, and §6b ambitious
+scope remain requirements gated on broker work plus the standing threat-model
+review. Pair this with the companion design MD for
 visual tokens; this document is the product truth. The static mode-0600 file
 remains the inert offline floor and is out of scope here.
 
@@ -27,9 +27,9 @@ in one click.
 
 Security posture is inherited from the shipped live contract and is
 non-negotiable: loopback-only, one-use token bootstrap; metadata only —
-**message bodies never appear anywhere, ever**. The app is read-MOSTLY: the
-sole mutations are the operator's consent operations — select, unselect,
-and snapshot refresh — shipped behind their standing threat-model review,
+**message bodies never appear anywhere, ever**. The app is read-MOSTLY: its
+sole mutations are exact pair, unpair, discovery refresh, and broker-guarded
+stale-Codex-registration removal actions, shipped behind their standing threat-model review,
 carried over the authenticated session (exact-Origin + sentinel-header
 POSTs per the live contract). Never register/send/reply/approve/interrupt
 from a browser, ever.
@@ -82,13 +82,17 @@ Five tabs, one question each:
   successor, drain outcome, what settled terminally; nothing transfers, and
   the card says so.
 - **Actions (the tab's mutations — the only ones in the app):**
-  *Select* on any discovered, compatible Claude session and *Unselect* on
-  the current selection, right in the topology; plus *Refresh discovery*.
+  *Pair* or *Unpair* exact Claude/Codex endpoints, *Refresh discovery*, and
+  request removal of a named stale Codex registration. The recovery action is
+  shown only on stale Codex rows and the broker accepts it only when the owning
+  endpoint generation is dead; it never accepts a task ID or generation from
+  the browser.
   Requirements: each action shows a one-line consequence before confirming
-  ("Selecting makes this session the destination Codex can send to");
+  (including the stale-and-dead-generation guard for recovery);
   actions ride the authenticated session with exact-Origin + sentinel
-  checks, are rate-limited, and every invocation lands in the Activity
-  ledger with an operator-action marker. Failures surface the same safe
+checks, are rate-limited, and every invocation lands in the Activity
+ledger with an operator-action marker. Automatic endpoint refresh also lands
+in that ledger, distinctly marked automatic rather than operator. Failures surface the same safe
   codes the CLI would print. **Registration is a flow, not a button**: identity must be inherited
   inside the Codex task, so the tab initiates a registration offer
   (short-lived, alias pre-authorized) and displays the one-line claim

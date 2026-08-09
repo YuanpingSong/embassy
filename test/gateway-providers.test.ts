@@ -22,6 +22,7 @@ import type {
   LocalCodexOwnedTransport,
   LocalCodexTransportFactory,
 } from "../src/gateway/codex-local-transport.js";
+import { LocalCodexTransportError } from "../src/gateway/codex-local-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
 import { compatibilityProbeNames } from "../src/gateway/compatibility.js";
 import {
@@ -55,6 +56,9 @@ function callbacks(): {
   >[];
   notices: Array<{ code: string }>;
   routes: Parameters<GatewayAdapterCallbacks["onRouteState"]>[0][];
+  endpointRefreshes: Parameters<
+    NonNullable<GatewayAdapterCallbacks["onEndpointRefresh"]>
+  >[0][];
 } {
   const deliveries: GatewayAdapterDelivery[] = [];
   const replies: Parameters<GatewayAdapterCallbacks["onClaudeReply"]>[0][] = [];
@@ -63,6 +67,9 @@ function callbacks(): {
   >[] = [];
   const notices: Array<{ code: string }> = [];
   const routes: Parameters<GatewayAdapterCallbacks["onRouteState"]>[0][] = [];
+  const endpointRefreshes: Parameters<
+    NonNullable<GatewayAdapterCallbacks["onEndpointRefresh"]>
+  >[0][] = [];
   return {
     callbacks: {
       onDelivery: (event) => deliveries.push({ ...event }),
@@ -71,6 +78,7 @@ function callbacks(): {
       onClaudeMessage: (event) =>
         messages.push({ ...event, endpoint: { ...event.endpoint } }),
       onProtocolNotice: (event) => notices.push({ ...event }),
+      onEndpointRefresh: (event) => endpointRefreshes.push(event),
       onRouteState: (event) =>
         routes.push({
           endpoint: { ...event.endpoint },
@@ -85,6 +93,7 @@ function callbacks(): {
     messages,
     notices,
     routes,
+    endpointRefreshes,
   };
 }
 
@@ -2033,7 +2042,7 @@ test("local Claude provider retains successful socket writes until exact receipt
 
 test("an exact Claude receipt unlocks a second queued gateway send", async () => {
   const created = await mkdtemp(
-    path.join(os.tmpdir(), "gateway-provider-repeat-"),
+    path.join(os.tmpdir(), "egp-"),
   );
   const root = await realpath(created);
   const workspace = path.join(root, "workspace");
@@ -2098,14 +2107,17 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
   private readonly closeListeners = new Set<() => void>();
   private readonly errorListeners = new Set<() => void>();
   private readonly messageListeners = new Set<(payload: string) => void>();
+  private resumedThreadId: string;
 
   constructor(
-    private readonly threadId: string,
+    private readonly threadIds: readonly string[],
     private readonly safePolicy: boolean,
     private readonly resumeStatus: "idle" | "active",
     private readonly completeInterrupt: boolean,
     private readonly faultAfterResume = false,
-  ) {}
+  ) {
+    this.resumedThreadId = threadIds[0] ?? THREAD_ID;
+  }
 
   onMessage(listener: (payload: string) => void): () => void {
     this.messageListeners.add(listener);
@@ -2128,8 +2140,12 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     if (message.method === "initialize") {
       this.respond(message, { platformFamily: "unix", platformOs: "darwin" });
     } else if (message.method === "thread/loaded/list") {
-      this.respond(message, { data: [this.threadId] });
+      this.respond(message, { data: [...this.threadIds] });
     } else if (message.method === "thread/resume") {
+      const params = message.params as { threadId?: unknown };
+      if (typeof params.threadId === "string") {
+        this.resumedThreadId = params.threadId;
+      }
       this.respond(message, {
         approvalPolicy: this.safePolicy ? "never" : "on-request",
         cwd: SAFE_WORKSPACE,
@@ -2137,7 +2153,7 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
           ? { networkAccess: false, type: "readOnly" }
           : { type: "workspaceWrite" },
         thread: {
-          id: this.threadId,
+          id: this.resumedThreadId,
           status: { type: this.resumeStatus },
           turns: [],
         },
@@ -2161,7 +2177,7 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
           this.emit({
             method: "turn/completed",
             params: {
-              threadId: this.threadId,
+              threadId: this.resumedThreadId,
               turn: { id: "turn-provider-1", status: "interrupted" },
             },
           }),
@@ -2212,6 +2228,7 @@ class FakeCodexFactory {
   readonly hostId = "this-mac";
   readonly protocol = "codex-app-server" as const;
   readonly protocolVersion = "0.147.0";
+  readonly compatibilityPolicy = "observed" as const;
   readonly schemaCompatibility = {
     appServerVersion: "0.147.0",
     endpointGeneration: this.endpointGeneration,
@@ -2227,17 +2244,22 @@ class FakeCodexFactory {
   readonly transports: FakeCodexTransport[] = [];
   connectAttempts = 0;
   connectGate: Promise<void> | undefined;
+  connectGateOnAttempt: number | undefined;
   closed = false;
   failNextConnect = false;
   faultNextRouteAfterResume = false;
+  endpointGenerationChanged = false;
+  allowNextConnectAcrossGenerationChange = false;
+  private readonly threadIds: readonly string[];
 
   constructor(
-    private readonly threadId: string,
+    threadId: string | readonly string[],
     writesEnabled: boolean,
     private readonly safePolicy = true,
     private readonly resumeStatus: "idle" | "active" = "idle",
     private readonly completeInterrupt = true,
   ) {
+    this.threadIds = typeof threadId === "string" ? [threadId] : [...threadId];
     this.writableReady = writesEnabled;
     this.writeCompatibility = writesEnabled
       ? { ...this.schemaCompatibility }
@@ -2246,9 +2268,22 @@ class FakeCodexFactory {
 
   async connectTransport(): Promise<LocalCodexOwnedTransport> {
     this.connectAttempts += 1;
-    const gate = this.connectGate;
-    this.connectGate = undefined;
+    const admittedAcrossGenerationChange =
+      this.allowNextConnectAcrossGenerationChange;
+    this.allowNextConnectAcrossGenerationChange = false;
+    const gate =
+      this.connectGateOnAttempt === undefined ||
+      this.connectGateOnAttempt === this.connectAttempts
+        ? this.connectGate
+        : undefined;
+    if (gate !== undefined) {
+      this.connectGate = undefined;
+      this.connectGateOnAttempt = undefined;
+    }
     if (gate !== undefined) await gate;
+    if (this.endpointGenerationChanged && !admittedAcrossGenerationChange) {
+      throw new LocalCodexTransportError("ENDPOINT_GENERATION_CHANGED");
+    }
     if (this.failNextConnect) {
       this.failNextConnect = false;
       throw new Error("synthetic connection failure");
@@ -2256,7 +2291,7 @@ class FakeCodexFactory {
     const faultAfterResume = this.faultNextRouteAfterResume;
     this.faultNextRouteAfterResume = false;
     const transport = new FakeCodexTransport(
-      this.threadId,
+      this.threadIds,
       this.safePolicy,
       this.resumeStatus,
       this.completeInterrupt,
@@ -2275,6 +2310,8 @@ class FakeCodexFactory {
 function codexProvider(
   factory: FakeCodexFactory,
   options: {
+    refreshFactory?: () => Promise<LocalCodexTransportFactory>;
+    compatibilityPolicy?: "observed" | "strict";
     cleanupPollMs?: number;
     cleanupTimeoutMs?: number;
     recoveryInitialMs?: number;
@@ -2285,6 +2322,39 @@ function codexProvider(
     factory: factory as unknown as LocalCodexTransportFactory,
     ...options,
   });
+}
+
+function retargetCodexFactory(
+  factory: FakeCodexFactory,
+  endpointGeneration: string,
+  appServerVersion = "0.147.0",
+  compatibilityPolicy: "observed" | "strict" = "observed",
+): FakeCodexFactory {
+  const compatibility = {
+    appServerVersion,
+    endpointGeneration,
+    protocol: "app-server-v2-stable" as const,
+    ...(appServerVersion === "0.147.0"
+      ? {}
+      : { observedSchemaCandidate: true as const }),
+    steering: {
+      method: "turn/steer" as const,
+      requestSchema: "expected-turn-id-text-v1" as const,
+      deliveryBoundary: "next-tool-call-boundary" as const,
+    },
+  };
+  Object.defineProperties(factory, {
+    appServerVersion: { configurable: true, value: appServerVersion },
+    compatibilityPolicy: { configurable: true, value: compatibilityPolicy },
+    endpointGeneration: { configurable: true, value: endpointGeneration },
+    protocolVersion: { configurable: true, value: appServerVersion },
+    schemaCompatibility: { configurable: true, value: compatibility },
+    writeCompatibility: {
+      configurable: true,
+      value: factory.writableReady ? compatibility : null,
+    },
+  });
+  return factory;
 }
 
 function codexBinding(
@@ -2427,12 +2497,24 @@ test("an observed Codex candidate cannot select or write until its bounded probe
     (error: unknown) =>
       error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
   );
-  assert.equal(
-    (await provider.runCompatibilityProbes()).every(
-      (probe) => probe.outcome === "pass",
-    ),
-    true,
+  const probes = await provider.runCompatibilityProbes();
+  assert.equal(probes.every((probe) => probe.outcome === "pass"), true);
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
   );
+  provider.acceptCompatibilityAttestation({
+    schemaVersion: 1,
+    surface: "codex",
+    version: "0.148.0",
+    tier: "schema_attested",
+    checkedAt: new Date().toISOString(),
+    probes,
+  });
   assert.deepEqual(
     await provider.selectRoute({
       alias: "codex-main@this-mac",
@@ -2761,6 +2843,1063 @@ test("a dead Codex connector becomes stale and auto-recovers without replay", as
     1,
   );
   await provider.close();
+});
+
+test("Codex endpoint refresh probes once, coalesces route recovery, and reanchors only loaded threads", async () => {
+  const secondThread = "00000000-0000-7000-8000-000000000702";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, secondThread], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-2",
+  );
+  let refreshCalls = 0;
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+    refreshFactory: async () => {
+      refreshCalls += 1;
+      return secondFactory as unknown as LocalCodexTransportFactory;
+    },
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  await provider.selectRoute({
+    alias: "codex-secondary@this-mac",
+    routeHandle: secondThread,
+  });
+  await delayImmediate();
+  const lateFirstListeners = firstFactory.transports[0]!.snapshotMessageListeners();
+
+  firstFactory.endpointGenerationChanged = true;
+  for (const transport of firstFactory.transports) {
+    transport.disconnectUnexpectedly();
+  }
+
+  await waitFor(() => observed.endpointRefreshes.length === 1);
+  const refreshed = observed.endpointRefreshes[0]!;
+  assert.equal(refreshed.outcome, "compatible");
+  if (refreshed.outcome !== "compatible") assert.fail("expected compatible");
+  assert.equal(refreshCalls, 1);
+  assert.equal(refreshed.previous.endpointGeneration, "local-synthetic-generation-1");
+  assert.equal(refreshed.current.endpointGeneration, "local-synthetic-generation-2");
+  assert.deepEqual(refreshed.routes, [
+    { routeHandle: THREAD_ID, state: "idle" },
+  ]);
+  assert.equal(provider.identity.endpointGeneration, "local-synthetic-generation-2");
+
+  const probe = secondFactory.transports[0]!;
+  assert.deepEqual(
+    probe.sent.map((message) => message.method),
+    ["initialize", "initialized", "thread/loaded/list"],
+  );
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+  assert.equal(
+    secondFactory.transports.filter((transport) =>
+      transport.sent.some((message) => message.method === "thread/resume"),
+    ).length,
+    1,
+  );
+
+  const routeCountBeforeLateEvent = observed.routes.length;
+  firstFactory.transports[0]!.emitTo(lateFirstListeners, {
+    method: "thread/status/changed",
+    params: { status: { type: "active" }, threadId: THREAD_ID },
+  });
+  await delayImmediate();
+  assert.equal(observed.routes.length, routeCountBeforeLateEvent);
+
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-before-generation-attestation",
+      text: "must remain frozen until the service accepts evidence",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  await assert.rejects(
+    provider.runCompatibilityCertification({
+      controllerStateRoot: "/synthetic/controller-state",
+      routeHandle: THREAD_ID,
+      withTurn: true,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
+  );
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-not-admitted@this-mac",
+      routeHandle: "00000000-0000-7000-8000-000000000709",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
+  );
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+  provider.acceptCompatibilityAttestation(refreshed.attestation);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-after-generation-refresh",
+      text: "write only on the compatibility-attested generation",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  assert.equal(
+    secondFactory.transports.filter((transport) =>
+      transport.sent.some((message) => message.method === "turn/start"),
+    ).length,
+    1,
+  );
+  await provider.close();
+});
+
+test("Codex endpoint refresh skips a candidate that churns during its compatibility handshake", async () => {
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const churningFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-2",
+  );
+  churningFactory.endpointGenerationChanged = true;
+  const stableFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-3",
+  );
+  const candidates = [churningFactory, stableFactory];
+  let refreshCalls = 0;
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+    refreshFactory: async () => {
+      refreshCalls += 1;
+      const candidate = candidates.shift();
+      if (candidate === undefined) throw new Error("unexpected refresh");
+      return candidate as unknown as LocalCodexTransportFactory;
+    },
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+
+  await waitFor(() => observed.endpointRefreshes.length === 1);
+  assert.equal(refreshCalls, 2);
+  assert.equal(churningFactory.closed, true);
+  assert.equal(churningFactory.transports.length, 0);
+  const refreshed = observed.endpointRefreshes[0]!;
+  assert.equal(refreshed.outcome, "compatible");
+  if (refreshed.outcome !== "compatible") assert.fail("expected compatible");
+  assert.equal(
+    refreshed.previous.endpointGeneration,
+    "local-synthetic-generation-1",
+  );
+  assert.equal(
+    refreshed.current.endpointGeneration,
+    "local-synthetic-generation-3",
+  );
+  assert.equal(
+    observed.endpointRefreshes.some((event) => event.outcome === "incompatible"),
+    false,
+  );
+  assert.equal(
+    stableFactory.transports[0]!.sent.some(
+      (message) =>
+        message.method === "thread/resume" || message.method === "turn/start",
+    ),
+    false,
+  );
+  provider.acceptCompatibilityAttestation(refreshed.attestation);
+  await provider.close();
+});
+
+test("Codex endpoint churn stops after three candidate probes without publishing incompatibility", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000711";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const candidates = [2, 3, 4].map((generation) => {
+    const factory = retargetCodexFactory(
+      new FakeCodexFactory([THREAD_ID, freshThread], true),
+      `local-synthetic-generation-${generation}`,
+    );
+    factory.endpointGenerationChanged = true;
+    return factory;
+  });
+  const retainedCandidates = [...candidates];
+  let refreshCalls = 0;
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+    refreshFactory: async () => {
+      refreshCalls += 1;
+      const candidate = candidates.shift();
+      if (candidate === undefined) throw new Error("unexpected refresh");
+      return candidate as unknown as LocalCodexTransportFactory;
+    },
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-fresh@this-mac",
+      routeHandle: freshThread,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ENDPOINT_GENERATION_CHURN",
+  );
+  assert.equal(refreshCalls, 3);
+  assert.equal(observed.endpointRefreshes.length, 0);
+  assert.equal(
+    retainedCandidates.every(
+      (factory) => factory.closed && factory.transports.length === 0,
+    ),
+    true,
+  );
+  await provider.close();
+});
+
+test("fresh Codex selection returns one endpoint transition while preserving a stale registered identity", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000703";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-synthetic-generation-2",
+  );
+  let releaseRefresh!: () => void;
+  let refreshRequested = false;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+    refreshFactory: async () => {
+      refreshRequested = true;
+      await refreshGate;
+      return secondFactory as unknown as LocalCodexTransportFactory;
+    },
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+
+  const selecting = provider.selectRoute({
+    alias: "codex-fresh@this-mac",
+    routeHandle: freshThread,
+  });
+  await waitFor(() => refreshRequested);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-during-generation-refresh",
+      text: "must remain frozen",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  releaseRefresh();
+  const selected = await selecting;
+  assert.equal(selected.routeHandle, freshThread);
+  assert.equal(selected.state, "idle");
+  assert.equal(selected.endpointRefresh?.outcome, "compatible");
+  if (selected.endpointRefresh?.outcome !== "compatible") {
+    assert.fail("expected a compatible endpoint transition");
+  }
+  assert.deepEqual(selected.endpointRefresh.routes, [
+    { routeHandle: THREAD_ID, state: "idle" },
+  ]);
+  assert.equal(observed.endpointRefreshes.length, 0);
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-blocked@this-mac",
+      routeHandle: "00000000-0000-7000-8000-000000000706",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
+  );
+  provider.acceptCompatibilityAttestation(selected.endpointRefresh.attestation);
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+  await provider.close();
+});
+
+test("a fresh Codex selector takes over an in-flight automatic endpoint transition without duplicate callback", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000707";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-synthetic-generation-2",
+  );
+  let releaseRefresh!: () => void;
+  let refreshRequested = false;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+    refreshFactory: async () => {
+      refreshRequested = true;
+      await refreshGate;
+      return secondFactory as unknown as LocalCodexTransportFactory;
+    },
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => refreshRequested);
+
+  const selecting = provider.selectRoute({
+    alias: "codex-fresh@this-mac",
+    routeHandle: freshThread,
+  });
+  releaseRefresh();
+  const selected = await selecting;
+  assert.equal(selected.endpointRefresh?.outcome, "compatible");
+  assert.equal(observed.endpointRefreshes.length, 0);
+  if (selected.endpointRefresh?.outcome !== "compatible") {
+    assert.fail("expected selector-owned transition");
+  }
+  provider.acceptCompatibilityAttestation(selected.endpointRefresh.attestation);
+  await provider.close();
+});
+
+test("a retained selector route that closes after refresh staging is omitted from fallback activation evidence", async () => {
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-2",
+  );
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 25,
+    recoveryMaxMs: 50,
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  type StagedRoute = Readonly<{
+    endpointGeneration: string;
+    transport: FakeCodexTransport;
+  }>;
+  const internals = provider as unknown as {
+    ensureRoute: (
+      threadId: string,
+      queueInitialObservation?: boolean,
+      allowPendingEndpointAttestation?: boolean,
+    ) => Promise<StagedRoute>;
+  };
+  const ensureRoute = internals.ensureRoute.bind(provider);
+  let closedAtSelectorBoundary = false;
+  internals.ensureRoute = async (
+    threadId,
+    queueInitialObservation,
+    allowPendingEndpointAttestation,
+  ) => {
+    const route = await ensureRoute(
+      threadId,
+      queueInitialObservation,
+      allowPendingEndpointAttestation,
+    );
+    if (
+      allowPendingEndpointAttestation === true &&
+      route.endpointGeneration === secondFactory.endpointGeneration &&
+      !closedAtSelectorBoundary
+    ) {
+      closedAtSelectorBoundary = true;
+      route.transport.disconnectUnexpectedly();
+    }
+    return route;
+  };
+
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ROUTE_SETUP_REJECTED",
+  );
+
+  await waitFor(() => observed.endpointRefreshes.length === 1);
+  const firstEvent = observed.endpointRefreshes[0]!;
+  assert.equal(firstEvent.outcome, "compatible");
+  if (firstEvent.outcome !== "compatible") {
+    assert.fail("expected compatible fallback activation evidence");
+  }
+  assert.deepEqual(firstEvent.routes, []);
+  assert.equal(closedAtSelectorBoundary, true);
+  assert.equal(secondFactory.transports[1]!.cleanupConfirmed, true);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-stale-selector-before-activation",
+      text: "must remain frozen before exact activation",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+
+  await waitFor(() => observed.endpointRefreshes.length === 2, 1_000);
+  assert.strictEqual(observed.endpointRefreshes[1], firstEvent);
+  provider.acceptCompatibilityAttestation(firstEvent.attestation);
+  await waitFor(
+    () => provider.observeRouteSuccessionBarrier(THREAD_ID).clean,
+    1_000,
+  );
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(observed.endpointRefreshes.length, 2);
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+  await provider.releaseRoute(THREAD_ID);
+  assert.equal(provider.observeRouteSuccessionBarrier(THREAD_ID).clean, false);
+  await provider.close();
+});
+
+test("a retained selector route is omitted when its staged replacement creation fails", async () => {
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-2",
+  );
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  type StagedRoute = Readonly<{
+    endpointGeneration: string;
+    transport: FakeCodexTransport;
+  }>;
+  const internals = provider as unknown as {
+    ensureRoute: (
+      threadId: string,
+      queueInitialObservation?: boolean,
+      allowPendingEndpointAttestation?: boolean,
+    ) => Promise<StagedRoute>;
+    routes: Map<string, StagedRoute>;
+  };
+  const ensureRoute = internals.ensureRoute.bind(provider);
+  let failedReplacementAtSelectorBoundary = false;
+  internals.ensureRoute = async (
+    threadId,
+    queueInitialObservation,
+    allowPendingEndpointAttestation,
+  ) => {
+    if (
+      allowPendingEndpointAttestation === true &&
+      !failedReplacementAtSelectorBoundary
+    ) {
+      const staged = internals.routes.get(threadId);
+      assert.equal(
+        staged?.endpointGeneration,
+        secondFactory.endpointGeneration,
+      );
+      failedReplacementAtSelectorBoundary = true;
+      staged!.transport.disconnectUnexpectedly();
+      secondFactory.failNextConnect = true;
+    }
+    return await ensureRoute(
+      threadId,
+      queueInitialObservation,
+      allowPendingEndpointAttestation,
+    );
+  };
+
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ROUTE_SETUP_REJECTED",
+  );
+
+  assert.equal(failedReplacementAtSelectorBoundary, true);
+  assert.equal(observed.endpointRefreshes.length, 1);
+  const event = observed.endpointRefreshes[0]!;
+  assert.equal(event.outcome, "compatible");
+  if (event.outcome !== "compatible") {
+    assert.fail("expected compatible fallback activation evidence");
+  }
+  assert.deepEqual(event.routes, []);
+  assert.equal(secondFactory.transports[1]!.cleanupConfirmed, true);
+  const absentBarrier = provider.observeRouteSuccessionBarrier(THREAD_ID);
+  assert.equal(absentBarrier.routePresent, false);
+  assert.equal(absentBarrier.clean, false);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-failed-selector-replacement-before-activation",
+      text: "must remain frozen before filtered activation",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+
+  provider.acceptCompatibilityAttestation(event.attestation);
+  assert.deepEqual(
+    await provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    { routeHandle: THREAD_ID, state: "idle" },
+  );
+  assert.equal(observed.endpointRefreshes.length, 1);
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
+  await provider.releaseRoute(THREAD_ID);
+  await provider.close();
+});
+
+test("a delayed old-generation route creation is joined, closed, and never admitted across refresh", async () => {
+  const delayedThread = "00000000-0000-7000-8000-000000000708";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, delayedThread], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, delayedThread], true),
+    "local-synthetic-generation-2",
+  );
+  const provider = codexProvider(firstFactory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  let releaseOldCreation!: () => void;
+  firstFactory.connectGate = new Promise<void>((resolve) => {
+    releaseOldCreation = resolve;
+  });
+  firstFactory.allowNextConnectAcrossGenerationChange = true;
+  const delayedSelection = provider.selectRoute({
+    alias: "codex-delayed@this-mac",
+    routeHandle: delayedThread,
+  });
+  await waitFor(() => firstFactory.connectAttempts === 2);
+
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => secondFactory.connectAttempts === 1);
+  releaseOldCreation();
+  const selected = await delayedSelection;
+  assert.equal(selected.endpointRefresh?.outcome, "compatible");
+  if (selected.endpointRefresh?.outcome !== "compatible") {
+    assert.fail("expected selector-owned transition");
+  }
+  const lateOldTransport = firstFactory.transports[1]!;
+  assert.equal(lateOldTransport.cleanupConfirmed, true);
+  assert.equal(
+    lateOldTransport.sent.some((message) => message.method === "turn/start"),
+    false,
+  );
+
+  provider.acceptCompatibilityAttestation(selected.endpointRefresh.attestation);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: {
+        ...provider.identity,
+        routeHandle: delayedThread,
+        ownerLease: "lease_delayed_generation",
+      },
+      messageId: "gateway-delayed-generation-write",
+      text: "must use only the replacement generation",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  assert.equal(
+    secondFactory.transports.some((transport) =>
+      transport.sent.some((message) => message.method === "turn/start"),
+    ),
+    true,
+  );
+  await provider.close();
+});
+
+test("an unaccepted automatic Codex endpoint callback is retried with identical bounded evidence", async () => {
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-2",
+  );
+  const provider = codexProvider(firstFactory, {
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  const observed = callbacks();
+  let callbacksObserved = 0;
+  let firstEvidence: unknown;
+  observed.callbacks.onEndpointRefresh = (event) => {
+    callbacksObserved += 1;
+    if (callbacksObserved === 1) {
+      firstEvidence = event;
+      return;
+    }
+    assert.strictEqual(event, firstEvidence);
+    if (event.outcome === "compatible") {
+      provider.acceptCompatibilityAttestation(event.attestation);
+    }
+  };
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => callbacksObserved === 1);
+  const pendingBarrier = provider.observeRouteSuccessionBarrier(THREAD_ID);
+  assert.equal(pendingBarrier.routeCreationInFlight, true);
+  assert.equal(pendingBarrier.clean, false);
+  await assert.rejects(
+    provider.releaseRoute(THREAD_ID),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ENDPOINT_ACTIVATION_PENDING",
+  );
+  await waitFor(() => callbacksObserved === 2, 1_000);
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(callbacksObserved, 2);
+  const acceptedBarrier = provider.observeRouteSuccessionBarrier(THREAD_ID);
+  assert.equal(acceptedBarrier.routeCreationInFlight, false);
+  assert.equal(acceptedBarrier.clean, true);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-after-refresh-callback-retry",
+      text: "activated only after retry acceptance",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  await provider.close();
+});
+
+test("incompatible Codex endpoint drift stays stale and never resumes or writes", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000704";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+    "0.147.0",
+    "strict",
+  );
+  const driftedFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-synthetic-generation-2",
+    "0.148.0",
+    "strict",
+  );
+  const provider = codexProvider(firstFactory, {
+    compatibilityPolicy: "strict",
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+    refreshFactory: async () =>
+      driftedFactory as unknown as LocalCodexTransportFactory,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-fresh@this-mac",
+      routeHandle: freshThread,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_ROUTE_SETUP_REJECTED",
+  );
+  assert.equal(provider.identity.endpointGeneration, "local-synthetic-generation-1");
+  assert.equal(observed.endpointRefreshes.length, 1);
+  const rejected = observed.endpointRefreshes[0]!;
+  assert.equal(rejected.outcome, "incompatible");
+  if (rejected.outcome !== "incompatible") assert.fail("expected incompatible");
+  assert.equal(rejected.attestation.tier, "incompatible");
+  assert.equal(rejected.attestation.safeErrorCode, "CODEX_VERSION_DRIFT");
+  assert.deepEqual(
+    driftedFactory.transports[0]!.sent.map((message) => message.method),
+    ["initialize", "initialized", "thread/loaded/list"],
+  );
+  assert.equal(
+    driftedFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) =>
+        message.method === "thread/resume" || message.method === "turn/start",
+    ),
+    false,
+  );
+  assert.equal(driftedFactory.closed, true);
+  await new Promise<void>((resolve) => setTimeout(resolve, 300));
+  assert.equal(observed.endpointRefreshes.length, 1);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-after-incompatible-refresh",
+      text: "must remain blocked",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  await provider.close();
+});
+
+test("incompatible Codex refresh retires every old route and fences late state and completion callbacks", async () => {
+  const secondThread = "00000000-0000-7000-8000-000000000709";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, secondThread], true),
+    "local-synthetic-generation-1",
+    "0.147.0",
+    "strict",
+  );
+  const driftedFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, secondThread], true),
+    "local-synthetic-generation-2",
+    "0.148.0",
+    "strict",
+  );
+  const provider = codexProvider(firstFactory, {
+    compatibilityPolicy: "strict",
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+    refreshFactory: async () =>
+      driftedFactory as unknown as LocalCodexTransportFactory,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  await provider.selectRoute({
+    alias: "codex-secondary@this-mac",
+    routeHandle: secondThread,
+  });
+  const secondTransport = firstFactory.transports[1]!;
+  const lateSecondListeners = secondTransport.snapshotMessageListeners();
+  const messageId = "gateway-incompatible-generation-active";
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: {
+        ...provider.identity,
+        routeHandle: secondThread,
+        ownerLease: "lease_incompatible_generation",
+      },
+      messageId,
+      text: "settle once at the generation boundary",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => observed.endpointRefreshes.length === 1, 2_000);
+  assert.equal(observed.endpointRefreshes[0]!.outcome, "incompatible");
+  assert.equal(
+    firstFactory.transports.every((transport) => transport.cleanupConfirmed),
+    true,
+  );
+  assert.equal(
+    observed.deliveries.filter((delivery) => delivery.messageId === messageId)
+      .length,
+    1,
+  );
+  const routeEventsBeforeLateFrames = observed.routes.length;
+
+  secondTransport.emitTo(lateSecondListeners, {
+    method: "thread/status/changed",
+    params: { status: { type: "idle" }, threadId: secondThread },
+  });
+  secondTransport.emitTo(lateSecondListeners, {
+    method: "item/completed",
+    params: {
+      item: {
+        id: "late-incompatible-item",
+        phase: "final_answer",
+        text: "must be fenced",
+        type: "agentMessage",
+      },
+      threadId: secondThread,
+      turnId: "turn-provider-1",
+    },
+  });
+  secondTransport.emitTo(lateSecondListeners, {
+    method: "turn/completed",
+    params: {
+      threadId: secondThread,
+      turn: { id: "turn-provider-1", status: "completed" },
+    },
+  });
+  await delayImmediate();
+  assert.equal(observed.routes.length, routeEventsBeforeLateFrames);
+  assert.equal(
+    observed.deliveries.filter((delivery) => delivery.messageId === messageId)
+      .length,
+    1,
+  );
+  assert.equal(
+    driftedFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) =>
+        message.method === "thread/resume" || message.method === "turn/start",
+    ),
+    false,
+  );
+  await provider.close();
+});
+
+test("Codex selection can re-probe and activate a later compatible generation after drift", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000710";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+    "0.147.0",
+    "strict",
+  );
+  const driftedFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-synthetic-generation-2",
+    "0.148.0",
+    "strict",
+  );
+  const recoveredFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-synthetic-generation-3",
+    "0.147.0",
+    "strict",
+  );
+  const candidates = [driftedFactory, recoveredFactory];
+  const provider = codexProvider(firstFactory, {
+    compatibilityPolicy: "strict",
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+    refreshFactory: async () => {
+      const candidate = candidates.shift();
+      if (candidate === undefined) throw new Error("unexpected refresh");
+      return candidate as unknown as LocalCodexTransportFactory;
+    },
+  });
+  await provider.initialize(callbacks().callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-fresh@this-mac",
+      routeHandle: freshThread,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_ROUTE_SETUP_REJECTED",
+  );
+  const internalFence = provider as unknown as {
+    retiredEndpointGeneration?: string;
+    retiredEndpointGenerations?: unknown;
+  };
+  assert.equal(
+    internalFence.retiredEndpointGeneration,
+    "local-synthetic-generation-1",
+  );
+  assert.equal("retiredEndpointGenerations" in internalFence, false);
+
+  const selected = await provider.selectRoute({
+    alias: "codex-fresh@this-mac",
+    routeHandle: freshThread,
+  });
+  assert.equal(selected.endpointRefresh?.outcome, "compatible");
+  if (selected.endpointRefresh?.outcome !== "compatible") {
+    assert.fail("expected recovered compatible transition");
+  }
+  assert.equal(
+    selected.endpointRefresh.current.endpointGeneration,
+    "local-synthetic-generation-3",
+  );
+  assert.equal(internalFence.retiredEndpointGeneration, undefined);
+  provider.acceptCompatibilityAttestation(selected.endpointRefresh.attestation);
+  assert.equal(candidates.length, 0);
+  await provider.close();
+});
+
+test("Codex provider shutdown joins an in-flight endpoint refresh and closes the unused candidate", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000705";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-synthetic-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-synthetic-generation-2",
+  );
+  let releaseCandidateRoute!: () => void;
+  secondFactory.connectGate = new Promise<void>((resolve) => {
+    releaseCandidateRoute = resolve;
+  });
+  secondFactory.connectGateOnAttempt = 2;
+  const provider = codexProvider(firstFactory, {
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+  });
+  await provider.initialize(callbacks().callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  const selection = provider.selectRoute({
+    alias: "codex-fresh@this-mac",
+    routeHandle: freshThread,
+  });
+  await waitFor(() => secondFactory.connectAttempts === 2);
+  const closing = provider.close();
+  releaseCandidateRoute();
+  await assert.rejects(selection);
+  await closing;
+  assert.equal(firstFactory.closed, true);
+  assert.equal(secondFactory.closed, true);
+  assert.equal(
+    secondFactory.transports.every((transport) => transport.cleanupConfirmed),
+    true,
+  );
+  assert.equal(
+    secondFactory.transports.flatMap((transport) => transport.sent).some(
+      (message) => message.method === "turn/start",
+    ),
+    false,
+  );
 });
 
 test("unusable Codex thread states are stale rather than busy and auto-recover", async () => {

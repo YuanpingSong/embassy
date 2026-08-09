@@ -32,7 +32,7 @@ Embassy is built for one person, one macOS account, and agents you already trust
 /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT
 ```
 
-The first command starts the managed daemon if it is not already running (`restart` and `stop` also exist); the second launches the ChatGPT desktop app pointed at it. `CODEX_APP_SERVER_USE_LOCAL_DAEMON` is not documented by OpenAI; it is observed to work with this Desktop build and may change. Run the daemon command from a normal terminal, never from inside an agent session: Codex tasks inherit the daemon's environment, so a daemon started inside a Claude Code session leaks that session's identity into every task and registration fails closed with `CALLER_IDENTITY_CONFLICT` — fix it with a clean-terminal `daemon restart`. The Claude session you select as a destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled — that is Claude Code's own setting, configured in Claude Code, not in Embassy.
+The first command starts the managed daemon if it is not already running (`restart` and `stop` also exist); the second launches the ChatGPT desktop app pointed at it. `CODEX_APP_SERVER_USE_LOCAL_DAEMON` is not documented by OpenAI; it is observed to work with this Desktop build and may change. Run the daemon command from a normal terminal, never from inside an agent session: Codex tasks inherit the daemon's environment, so a daemon started inside a Claude Code session leaks that session's identity into every task and registration fails closed with `CALLER_IDENTITY_CONFLICT` — fix it from a normal terminal with `codex app-server daemon restart`. The Claude session you select as a destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled — that is Claude Code's own setting, configured in Claude Code, not in Embassy.
 
 > **Known limitation:** Embassy can reach Codex tasks only while Desktop uses the managed standalone App Server. In that mode, tasks currently cannot connect to Desktop's built-in in-app browser (`@Browser` loads but does not attach). Switching Desktop back to its default private App Server restores the built-in browser immediately — but makes those tasks unreachable by Embassy. No other capability regressions have been identified, though this was not an exhaustive parity test.
 
@@ -62,6 +62,8 @@ embassy register-codex --alias codex-reviewer@this-mac
 ```
 
 You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `unregister-codex`.
+
+If the managed App Server later restarts, Embassy automatically probes the new endpoint and reattaches this alias only when the replacement is compatible and `thread/loaded/list` finds the byte-identical task exactly once. An incompatible endpoint or a missing or duplicate exact task leaves the route stale for diagnosis; Embassy never retargets by alias and never reconstructs or replays a message body across the endpoint-generation boundary.
 
 ### 3. Select a Claude destination
 
@@ -103,6 +105,8 @@ MSG
 ### See it live
 
 `embassy dashboard --live` opens a five-tab streaming view in the browser (overview, deliveries, routes, activity, diagnostics). See [Dashboard](docs/DASHBOARD.md) for details.
+
+The live dashboard can also remove an orphaned Codex registration after an explicit confirmation, but only when the broker proves that the registration is stale and its owning endpoint generation is dead. A current, merely offline, or ambiguous generation is never removable through this recovery action.
 
 The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`. Live dashboard mutations require the same-origin `X-Embassy-Request` sentinel.
 

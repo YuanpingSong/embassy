@@ -50,6 +50,10 @@ const BOTH_IDENTITIES = {
   CODEX_THREAD_ID: THREAD_ID,
   CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
 } as const;
+const CALLER_IDENTITY_CONFLICT_HINT_EN =
+  "[embassy] both agent identities were inherited; the Codex App Server daemon may have been started inside an agent session. From a normal terminal, run: codex app-server daemon restart\n";
+const CALLER_IDENTITY_CONFLICT_HINT_ZH_CN =
+  "[embassy] 同时继承了两种代理身份；Codex App Server 守护进程可能是在代理会话内启动的。请在普通终端中运行：codex app-server daemon restart\n";
 const roots = new Set<string>();
 
 function compatibilityReport(failing = false): CompatibilityCheckReport {
@@ -172,6 +176,7 @@ test("compat-certify preserves closed JSON, exact route grammar, and terminal ex
       health: () => ({ status: "ok", revision: 1 }),
       registerCodex: () => ({ accepted: true, code: "ok" }),
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
+      removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
       pair: () => ({ accepted: true, code: "ok" }),
@@ -438,6 +443,7 @@ test("all client commands use one private control socket and expose only normali
       unregisters.push({ ...params });
       return { accepted: true, code: "ok" };
     },
+    removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
     selectClaude: ({ alias }) => {
       selected.push(alias);
       return { accepted: true, code: "ok" };
@@ -1630,6 +1636,22 @@ test("identity, stdin, and argument failures happen before any control request",
       code: "CALLER_IDENTITY_CONFLICT",
     },
     {
+      argv: [
+        "register-codex",
+        "--alias",
+        "codex-reviewer@this-mac",
+        "--lang",
+        "zh-CN",
+      ],
+      env: { ...BOTH_IDENTITIES },
+      code: "CALLER_IDENTITY_CONFLICT",
+    },
+    {
+      argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
+      env: { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH },
+      code: "CALLER_IDENTITY_CONFLICT",
+    },
+    {
       argv: ["unregister-codex", "--alias", "codex-reviewer@this-mac"],
       env: { ...BOTH_IDENTITIES },
       code: "CALLER_IDENTITY_CONFLICT",
@@ -1655,6 +1677,18 @@ test("identity, stdin, and argument failures happen before any control request",
         "codex-reviewer@this-mac",
       ],
       env: { ...BOTH_IDENTITIES },
+      body: SECRET_BODY,
+      code: "CALLER_IDENTITY_CONFLICT",
+    },
+    {
+      argv: [
+        "send-to-codex",
+        "--from",
+        "advisor@this-mac",
+        "--to",
+        "codex-reviewer@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
       body: SECRET_BODY,
       code: "CALLER_IDENTITY_CONFLICT",
     },
@@ -1704,11 +1738,26 @@ test("identity, stdin, and argument failures happen before any control request",
       error: { code: string };
     };
     assert.equal(parsed.error.code, current.code);
+    const hasBothIdentities =
+      typeof current.env.CODEX_THREAD_ID === "string" &&
+      current.env.CODEX_THREAD_ID.length > 0 &&
+      typeof current.env.CLAUDE_CODE_MESSAGING_SOCKET === "string" &&
+      current.env.CLAUDE_CODE_MESSAGING_SOCKET.length > 0;
+    const isZhCn = current.argv.includes("zh-CN");
     assert.equal(
       stderr.chunks.join(""),
-      "[embassy] request rejected.\n",
+      isZhCn
+        ? `[embassy] 请求被拒绝。\n${
+            hasBothIdentities ? CALLER_IDENTITY_CONFLICT_HINT_ZH_CN : ""
+          }`
+        : `[embassy] request rejected.\n${
+            hasBothIdentities ? CALLER_IDENTITY_CONFLICT_HINT_EN : ""
+          }`,
     );
-    assert.doesNotMatch(stdout.chunks.join(""), /BODY_SENTINEL|cc-socks|45201/);
+    const rendered = `${stdout.chunks.join("")}${stderr.chunks.join("")}`;
+    assert.equal(rendered.includes(SECRET_BODY), false);
+    assert.equal(rendered.includes(THREAD_ID), false);
+    assert.equal(rendered.includes(CLAUDE_SOCKET_PATH), false);
   }
 });
 
@@ -1882,6 +1931,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       health: () => ({ status: "ok", revision: 1 }),
       registerCodex: () => ({ accepted: true, code: "ok" }),
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
+      removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
       pair: () => ({ accepted: true, code: "ok" }),
@@ -1999,7 +2049,7 @@ test("package metadata publishes the client and its runtime dependency", async (
     devDependencies: Record<string, string>;
   };
   assert.equal(packageJson.name, "agent-embassy");
-  assert.equal(packageJson.version, "1.0.0");
+  assert.equal(packageJson.version, "1.1.0");
   assert.equal(packageJson.version, EMBASSY_VERSION);
   assert.deepEqual(packageJson.os, ["darwin"]);
   assert.equal(packageJson.bin.embassy, "dist/src/gateway/cli.js");

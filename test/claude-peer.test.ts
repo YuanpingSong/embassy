@@ -15,7 +15,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import net, { type Server } from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -68,9 +67,12 @@ async function fixture(
   t: TestContext,
   overrides: FixtureOverrides = {},
 ): Promise<Fixture> {
-  // This isolated tree never uses ~/.claude or the real /tmp/cc-socks root.
+  // Keep the test-owned root short enough for Darwin's Unix socket pathname
+  // limit. os.tmpdir() can be a long per-user path there, and prepared socket
+  // names include both the PID and generation. This still never uses the real
+  // /tmp/cc-socks root or ~/.claude.
   const createdRoot = await mkdtemp(
-    path.join(os.tmpdir(), "synthetic-cc-peer-"),
+    path.join("/tmp", "synthetic-cc-peer-"),
   );
   const root = await realpath(createdRoot);
   const sessionsDir = path.join(root, "sessions");
