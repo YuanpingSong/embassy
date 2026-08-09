@@ -140,6 +140,15 @@ Four embassy terms name real features:
 
 Embassy's operators are often agents themselves: `register-codex` runs inside the Codex task, and the Claude side is driven entirely through native tools. The repo ships [`skills/embassy-peer/SKILL.md`](skills/embassy-peer/SKILL.md) — point your agent at it rather than paraphrasing this README.
 
+The skill ships in the npm package; install it where each agent discovers skills:
+
+```bash
+cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.codex/skills/
+cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
+```
+
+Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it as a user skill.
+
 ## Commands
 
 | Command | Run by | Purpose |
