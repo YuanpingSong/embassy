@@ -8,6 +8,55 @@ import {
 } from "../src/gateway/dashboard-model.js";
 import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
 
+test("progress watches project bounded countdowns, attention, and bilingual metadata only", () => {
+  const snapshot = dashboardFixture();
+  snapshot.progressWatches = [
+    {
+      conversationIdSuffix: "AbCd_123",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      phase: "episode",
+      capability: "conversation",
+      lastActivityAt: "2026-08-08T11:55:00.000Z",
+      nextActionAt: "2026-08-08T12:05:00.000Z",
+      idleMs: 300_000,
+      nudgeCount: 1,
+      workerReportedComplete: true,
+    },
+  ];
+  snapshot.progressWatchEvents = [
+    {
+      sequence: 7,
+      timestamp: "2026-08-08T11:55:00.000Z",
+      conversationIdSuffix: "AbCd_123",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      kind: "nudge",
+      nudgeNumber: 1,
+    },
+  ];
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(model.watches[0], {
+    ...snapshot.progressWatches[0],
+    idleForMs: 300_000,
+    dueInMs: 300_000,
+  });
+  assert.equal(model.watchEvents[0]?.kind, "nudge");
+  assert.equal(model.attention.some((item) => item.guidance === "progress_watch"), true);
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Active progress watches/);
+  assert.match(en, /Worker reported completion/);
+  assert.match(en, /…AbCd_123/);
+  assert.match(zh, /活跃进度监视/);
+  assert.match(zh, /工作方已报告完成/);
+  for (const secret of ["conv_", "ownerLease", "receiptHandle"]) {
+    assert.equal(en.includes(secret), false);
+    assert.equal(zh.includes(secret), false);
+  }
+});
+
 test("view model derives deterministic route and global queue ages from generatedAt", () => {
   const snapshot = dashboardFixture();
   snapshot.routes.push({

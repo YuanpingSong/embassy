@@ -236,6 +236,8 @@ namespace Embassy {
           return (
             <DeliveriesTab
               groups={adapter.deliveriesGroups(model)}
+              watches={model.watches ?? []}
+              watchEvents={model.watchEvents ?? []}
               omissions={model.omissions}
               preset={preset}
               clearPreset={clearPreset}

@@ -98,6 +98,8 @@ export const gatewayPublicSnapshotLimits = Object.freeze({
   availablePeers: 256,
   routes: 256,
   pairs: 256,
+  progressWatches: 64,
+  progressWatchEvents: 256,
   messages: 1_024,
   alerts: 256,
 } as const);
@@ -439,6 +441,37 @@ export type SafeGatewayAlert = {
   alias?: string;
 };
 
+export type PublicProgressWatchSnapshot = {
+  conversationIdSuffix: string;
+  ownerAlias: string;
+  workerAlias: string;
+  phase: "quiet" | "episode";
+  capability: "conversation" | "route";
+  lastActivityAt: string;
+  nextActionAt: string;
+  idleMs: number;
+  nudgeCount: 0 | 1 | 2;
+  workerReportedComplete: boolean;
+};
+
+export type PublicProgressWatchEventSnapshot = {
+  sequence: number;
+  timestamp: string;
+  conversationIdSuffix: string;
+  ownerAlias: string;
+  workerAlias: string;
+  kind:
+    | "opened"
+    | "nudge"
+    | "worker_reported_complete"
+    | "capability_degraded"
+    | "done"
+    | "unresponsive"
+    | "endpoint_retired"
+    | "disabled";
+  nudgeNumber?: 1 | 2;
+};
+
 export type GatewayPublicSnapshot = {
   schemaVersion: 1;
   generatedAt: string;
@@ -449,6 +482,8 @@ export type GatewayPublicSnapshot = {
   availablePeers: PublicAvailablePeerSnapshot[];
   routes: PublicRouteSnapshot[];
   pairs: PublicPairSnapshot[];
+  progressWatches?: PublicProgressWatchSnapshot[];
+  progressWatchEvents?: PublicProgressWatchEventSnapshot[];
   messages: NormalizedMessageEvent[];
   accounting: GatewayAccounting;
   alerts: SafeGatewayAlert[];
@@ -460,6 +495,8 @@ export type GatewaySnapshotTruncation = {
   availablePeers: number;
   routes: number;
   pairs: number;
+  progressWatches?: number;
+  progressWatchEvents?: number;
   messages: number;
   alerts: number;
 };
@@ -522,6 +559,21 @@ export function projectGatewayPublicSnapshot(
     ),
     routes: snapshot.routes.slice(0, gatewayPublicSnapshotLimits.routes),
     pairs: snapshot.pairs.slice(0, gatewayPublicSnapshotLimits.pairs),
+    ...(snapshot.progressWatches === undefined
+      ? {}
+      : {
+          progressWatches: snapshot.progressWatches.slice(
+            0,
+            gatewayPublicSnapshotLimits.progressWatches,
+          ),
+        }),
+    ...(snapshot.progressWatchEvents === undefined
+      ? {}
+      : {
+          progressWatchEvents: snapshot.progressWatchEvents.slice(
+            -gatewayPublicSnapshotLimits.progressWatchEvents,
+          ),
+        }),
     messages: snapshot.messages.slice(-gatewayPublicSnapshotLimits.messages),
     alerts: snapshot.alerts.slice(-gatewayPublicSnapshotLimits.alerts),
     accounting: { ...snapshot.accounting },
@@ -541,6 +593,28 @@ export function projectGatewayPublicSnapshot(
       pairs:
         snapshot.truncation.pairs +
         Math.max(0, snapshot.pairs.length - gatewayPublicSnapshotLimits.pairs),
+      ...(snapshot.progressWatches === undefined
+        ? {}
+        : {
+            progressWatches:
+              (snapshot.truncation.progressWatches ?? 0) +
+              Math.max(
+                0,
+                snapshot.progressWatches.length -
+                  gatewayPublicSnapshotLimits.progressWatches,
+              ),
+          }),
+      ...(snapshot.progressWatchEvents === undefined
+        ? {}
+        : {
+            progressWatchEvents:
+              (snapshot.truncation.progressWatchEvents ?? 0) +
+              Math.max(
+                0,
+                snapshot.progressWatchEvents.length -
+                  gatewayPublicSnapshotLimits.progressWatchEvents,
+              ),
+          }),
       messages:
         snapshot.truncation.messages +
         Math.max(0, snapshot.messages.length - gatewayPublicSnapshotLimits.messages),
@@ -575,6 +649,20 @@ export function projectGatewayPublicSnapshot(
     applyRetainedCount(0);
     return false;
   };
+
+  const watchEvents = projected.progressWatchEvents ?? [];
+  const watchEventOmissions = projected.truncation.progressWatchEvents ?? 0;
+  if (
+    watchEvents.length > 0 &&
+    retainUntilFit(watchEvents.length, (retained) => {
+      projected.progressWatchEvents =
+        retained === 0 ? [] : watchEvents.slice(-retained);
+      projected.truncation.progressWatchEvents =
+        watchEventOmissions + watchEvents.length - retained;
+    })
+  ) {
+    return projected;
+  }
 
   const messages = projected.messages;
   const messageOmissions = projected.truncation.messages;

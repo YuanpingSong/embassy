@@ -149,6 +149,30 @@ function snapshot(): GatewaySnapshot {
       },
     ],
     pairs: [],
+    progressWatches: [
+      {
+        conversationIdSuffix: "AbCd_123",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        phase: "quiet",
+        capability: "conversation",
+        lastActivityAt: NOW,
+        nextActionAt: NOW,
+        idleMs: 300_000,
+        nudgeCount: 0,
+        workerReportedComplete: false,
+      },
+    ],
+    progressWatchEvents: [
+      {
+        sequence: 1,
+        timestamp: NOW,
+        conversationIdSuffix: "AbCd_123",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "opened",
+      },
+    ],
     messages: [
       {
         sequence: 1,
@@ -206,6 +230,8 @@ function snapshot(): GatewaySnapshot {
       availablePeers: 0,
       routes: 0,
       pairs: 0,
+      progressWatches: 0,
+      progressWatchEvents: 0,
       messages: 0,
       alerts: 0,
     },
@@ -582,6 +608,8 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     availablePeers: 0,
     routes: 0,
     pairs: 0,
+    progressWatches: 0,
+    progressWatchEvents: 0,
     messages: 0,
     alerts: 0,
   });
@@ -1181,6 +1209,10 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   );
   assert.ok(queuedRoute);
   queuedRoute.queueDepth = 0;
+  const invalidWatch = snapshot();
+  const watch = invalidWatch.progressWatches?.[0];
+  assert.ok(watch);
+  watch.conversationIdSuffix = "conv_SECRET";
   const unprojected = snapshot();
   const baseEvent = unprojected.messages[0];
   assert.ok(baseEvent);
@@ -1197,6 +1229,7 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidInboundMode,
     invalidCount,
     inconsistentQueueAge,
+    invalidWatch,
     unprojected,
   ];
   const attempts = candidates.length;

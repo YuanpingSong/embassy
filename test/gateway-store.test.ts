@@ -759,6 +759,22 @@ test("progress watches persist exact edge authority and advance owner-ended epis
   });
   assert.equal(opened.created, true);
   assert.equal(opened.watch.phase, "quiet");
+  const publicOpened = await store.publicSnapshot();
+  assert.deepEqual(publicOpened.progressWatches, [
+    {
+      conversationIdSuffix: "ijklmnop",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      phase: "quiet",
+      capability: "conversation",
+      lastActivityAt: testClock.now().toISOString(),
+      nextActionAt: new Date(testClock.now().getTime() + 60_000).toISOString(),
+      idleMs: 60_000,
+      nudgeCount: 0,
+      workerReportedComplete: false,
+    },
+  ]);
+  assert.equal(JSON.stringify(publicOpened).includes("conv_abcdefghijklmnop"), false);
   assert.deepEqual(
     (
       JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
@@ -839,6 +855,10 @@ test("progress watches persist exact edge authority and advance owner-ended epis
       "conv_abcdefghijklmnop",
     ),
     false,
+  );
+  assert.deepEqual(
+    (await store.publicSnapshot()).progressWatchEvents?.map((event) => event.kind),
+    ["nudge", "worker_reported_complete", "done"],
   );
   await store.close();
 });

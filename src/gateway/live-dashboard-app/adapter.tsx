@@ -234,6 +234,7 @@ namespace Embassy {
     degraded: "degraded",
     codex_succession_busy: "codexSuccessionBusy",
     codex_succession_recovery: "codexSuccessionRecovery",
+    progress_watch: "progressWatch",
     generic: "generic",
   } as const satisfies Record<DashboardAttentionGuidance, string>;
 

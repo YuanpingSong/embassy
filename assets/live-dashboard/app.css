@@ -1147,6 +1147,38 @@ button:not(:disabled):hover { opacity: .92; }
   min-width: 0;
 }
 
+.watch-register {
+  margin: 24px 0 32px;
+  padding: 20px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-warm);
+}
+.watch-register h2 { margin: 4px 0 0; font-size: 20px; }
+.watch-register__empty { margin: 16px 0 0; color: var(--body-muted); }
+.watch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.watch-card {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-card);
+}
+.watch-card[data-phase="episode"] { border-left: 3px solid var(--coral); }
+.watch-card__head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.watch-card > strong { display: block; margin-top: 10px; overflow-wrap: anywhere; }
+.watch-card__facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 0; }
+.watch-card__facts div { min-width: 0; }
+.watch-card__facts dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.watch-card__facts dd { margin: 3px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.watch-history { margin-top: 16px; color: var(--body-muted); }
+.watch-history summary { cursor: pointer; }
+.watch-history ol { margin: 10px 0 0; padding-left: 22px; }
+.watch-history li { margin: 5px 0; }
+
 .delivery-group { margin-bottom: 28px; }
 .delivery-group__head {
   display: flex;
@@ -1505,6 +1537,7 @@ button:not(:disabled):hover { opacity: .92; }
     grid-template-columns: minmax(0, 1fr);
     gap: 28px;
   }
+  .watch-grid { grid-template-columns: minmax(0, 1fr); }
   .deliveries-rail {
     border-left: none;
     border-top: 1px solid var(--hairline);

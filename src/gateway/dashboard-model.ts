@@ -19,6 +19,8 @@ export const DASHBOARD_MODEL_LIMITS = Object.freeze({
   pairs: 64,
   messages: 50,
   messageEvents: 60,
+  progressWatches: 64,
+  progressWatchEvents: 64,
   alerts: 32,
 } as const);
 
@@ -46,7 +48,7 @@ export type DashboardExchangeParty = Readonly<{
 }>;
 
 export type DashboardAttentionItem = Readonly<{
-  kind: "alert" | "route" | "connector" | "broker";
+  kind: "alert" | "route" | "connector" | "broker" | "watch";
   code?: string | undefined;
   severity: AlertSeverity;
   timestamp?: string | undefined;
@@ -65,7 +67,41 @@ export type DashboardAttentionItem = Readonly<{
     | "degraded"
     | "codex_succession_busy"
     | "codex_succession_recovery"
+    | "progress_watch"
     | "generic";
+}>;
+
+export type DashboardProgressWatchRow = Readonly<{
+  conversationIdSuffix: string;
+  ownerAlias: string;
+  workerAlias: string;
+  phase: "quiet" | "episode";
+  capability: "conversation" | "route";
+  lastActivityAt: string;
+  nextActionAt: string;
+  idleMs: number;
+  idleForMs: number;
+  dueInMs: number;
+  nudgeCount: 0 | 1 | 2;
+  workerReportedComplete: boolean;
+}>;
+
+export type DashboardProgressWatchEventRow = Readonly<{
+  sequence: number;
+  timestamp: string;
+  conversationIdSuffix: string;
+  ownerAlias: string;
+  workerAlias: string;
+  kind:
+    | "opened"
+    | "nudge"
+    | "worker_reported_complete"
+    | "capability_degraded"
+    | "done"
+    | "unresponsive"
+    | "endpoint_retired"
+    | "disabled";
+  nudgeNumber?: 1 | 2 | undefined;
 }>;
 
 export type DashboardMessageEvent = Readonly<{
@@ -156,6 +192,9 @@ export type DashboardOmissions = Readonly<{
   availablePeers: number;
   routes: number;
   pairs: number;
+  progressWatches: number;
+  upstreamProgressWatchEvents: number;
+  progressWatchEvents: number;
   upstreamMessageEvents: number;
   messageGroups: number;
   messageEvents: number;
@@ -190,6 +229,8 @@ export type DashboardViewModel = Readonly<{
   peers: readonly DashboardPeerRow[];
   routes: readonly DashboardRouteRow[];
   pairs: readonly DashboardPairRow[];
+  watches: readonly DashboardProgressWatchRow[];
+  watchEvents: readonly DashboardProgressWatchEventRow[];
   graph: DashboardGraphFacts;
   connectors: readonly DashboardConnectorRow[];
   accounting: GatewayPublicSnapshot["accounting"];
@@ -199,6 +240,7 @@ export type DashboardViewModel = Readonly<{
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SAFE_PROTOCOL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+:/-]{0,47}$/;
 const OPAQUE_SUFFIX_PATTERN = /^[a-f0-9]{6,12}$/i;
+const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 
 function boundedText(value: unknown, maximumCharacters = 96): string {
   if (typeof value !== "string") return "";
@@ -565,6 +607,84 @@ export function buildDashboardViewModel(
     );
   const pairs = allPairs.slice(0, DASHBOARD_MODEL_LIMITS.pairs);
 
+  const allWatches: DashboardProgressWatchRow[] = (
+    snapshot.progressWatches ?? []
+  )
+    .flatMap((watch): DashboardProgressWatchRow[] => {
+      const lastActivityAt = normalizedTimestamp(watch.lastActivityAt);
+      const nextActionAt = normalizedTimestamp(watch.nextActionAt);
+      const generatedAtMs = generatedAt === undefined ? undefined : Date.parse(generatedAt);
+      if (
+        !CONVERSATION_SUFFIX_PATTERN.test(watch.conversationIdSuffix) ||
+        lastActivityAt === undefined ||
+        nextActionAt === undefined ||
+        generatedAtMs === undefined
+      ) {
+        return [];
+      }
+      const idleMs = normalizedInteger(watch.idleMs);
+      if (
+        idleMs === undefined ||
+        (watch.nudgeCount !== 0 && watch.nudgeCount !== 1 && watch.nudgeCount !== 2)
+      ) {
+        return [];
+      }
+      return [
+        {
+          conversationIdSuffix: watch.conversationIdSuffix,
+          ownerAlias: boundedText(watch.ownerAlias),
+          workerAlias: boundedText(watch.workerAlias),
+          phase: watch.phase,
+          capability: watch.capability,
+          lastActivityAt,
+          nextActionAt,
+          idleMs,
+          idleForMs: Math.max(0, generatedAtMs - Date.parse(lastActivityAt)),
+          dueInMs: Math.max(0, Date.parse(nextActionAt) - generatedAtMs),
+          nudgeCount: watch.nudgeCount,
+          workerReportedComplete: Boolean(watch.workerReportedComplete),
+        },
+      ];
+    })
+    .sort(
+      (left, right) =>
+        compareText(left.nextActionAt, right.nextActionAt) ||
+        compareText(left.ownerAlias, right.ownerAlias) ||
+        compareText(left.workerAlias, right.workerAlias),
+    );
+  const watches = allWatches.slice(0, DASHBOARD_MODEL_LIMITS.progressWatches);
+  const allWatchEvents: DashboardProgressWatchEventRow[] = (
+    snapshot.progressWatchEvents ?? []
+  )
+    .flatMap((event): DashboardProgressWatchEventRow[] => {
+      const timestamp = normalizedTimestamp(event.timestamp);
+      if (
+        timestamp === undefined ||
+        !CONVERSATION_SUFFIX_PATTERN.test(event.conversationIdSuffix) ||
+        normalizedInteger(event.sequence) === undefined
+      ) {
+        return [];
+      }
+      return [
+        {
+          sequence: event.sequence,
+          timestamp,
+          conversationIdSuffix: event.conversationIdSuffix,
+          ownerAlias: boundedText(event.ownerAlias),
+          workerAlias: boundedText(event.workerAlias),
+          kind: event.kind,
+          ...(event.nudgeNumber === undefined
+            ? {}
+            : { nudgeNumber: event.nudgeNumber }),
+        },
+      ];
+    })
+    .sort((left, right) => right.sequence - left.sequence);
+  const watchEvents = allWatchEvents.slice(
+    0,
+    DASHBOARD_MODEL_LIMITS.progressWatchEvents,
+  );
+
   const connectors = snapshot.connectors
     .map(
       (connector): DashboardConnectorRow => ({
@@ -684,6 +804,20 @@ export function buildDashboardViewModel(
       compareText(right.timestamp ?? "", left.timestamp ?? ""),
     );
   const attentionCandidates: DashboardAttentionItem[] = [...explicitAlerts];
+  for (const watch of allWatches) {
+    if (watch.phase !== "episode" && watch.capability !== "route") continue;
+    attentionCandidates.push({
+      kind: "watch",
+      code:
+        watch.capability === "route"
+          ? "PROGRESS_WATCH_CAPABILITY_DEGRADED"
+          : "PROGRESS_WATCH_QUIET",
+      severity: "warning",
+      timestamp: watch.lastActivityAt,
+      alias: watch.workerAlias,
+      guidance: "progress_watch",
+    });
+  }
   const representedScopes = new Set(
     attentionCandidates.map(
       (item) =>
@@ -781,6 +915,16 @@ export function buildDashboardViewModel(
       normalizedInteger(snapshot.truncation.pairs) ?? 0,
       Math.max(0, allPairs.length - DASHBOARD_MODEL_LIMITS.pairs),
     ),
+    progressWatches: boundedAdd(
+      normalizedInteger(snapshot.truncation.progressWatches) ?? 0,
+      Math.max(0, allWatches.length - DASHBOARD_MODEL_LIMITS.progressWatches),
+    ),
+    upstreamProgressWatchEvents:
+      normalizedInteger(snapshot.truncation.progressWatchEvents) ?? 0,
+    progressWatchEvents: Math.max(
+      0,
+      allWatchEvents.length - DASHBOARD_MODEL_LIMITS.progressWatchEvents,
+    ),
     upstreamMessageEvents:
       normalizedInteger(snapshot.truncation.messages) ?? 0,
     messageGroups: messages.omittedGroups,
@@ -859,6 +1003,8 @@ export function buildDashboardViewModel(
     peers,
     routes,
     pairs,
+    watches,
+    watchEvents,
     graph,
     connectors,
     accounting: {

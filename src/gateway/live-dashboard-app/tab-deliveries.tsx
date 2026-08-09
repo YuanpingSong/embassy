@@ -414,6 +414,97 @@ namespace Embassy {
     );
   }
 
+  const WATCH_EVENT_COPY_KEYS: Readonly<
+    Record<DashboardProgressWatchEventRow["kind"], string>
+  > = {
+    opened: "watches.event.opened",
+    nudge: "watches.event.nudge",
+    worker_reported_complete: "watches.event.workerReportedComplete",
+    capability_degraded: "watches.event.capabilityDegraded",
+    done: "watches.event.done",
+    unresponsive: "watches.event.unresponsive",
+    endpoint_retired: "watches.event.endpointRetired",
+    disabled: "watches.event.disabled",
+  };
+
+  function ProgressWatchRegister(
+    props: Readonly<{
+      watches: readonly DashboardProgressWatchRow[];
+      events: readonly DashboardProgressWatchEventRow[];
+    }>,
+  ): React.ReactElement {
+    const t = useT();
+    const [locale] = useLocale();
+    return (
+      <section className="watch-register" aria-labelledby="watch-register-title">
+        <div className="row-baseline section-label">
+          <div>
+            <MonoLabel>{t("watches.eyebrow")}</MonoLabel>
+            <h2 id="watch-register-title">{t("watches.title")}</h2>
+          </div>
+          <span className="mono text-muted">
+            {fmtCount(locale, props.watches.length)}
+          </span>
+        </div>
+        <p className="footnote">{t("watches.note")}</p>
+        {props.watches.length === 0 ? (
+          <p className="watch-register__empty">{t("watches.empty")}</p>
+        ) : (
+          <div className="watch-grid">
+            {props.watches.map((watch) => (
+              <article
+                className="watch-card"
+                data-phase={watch.phase}
+                key={`${watch.ownerAlias}|${watch.workerAlias}|${watch.conversationIdSuffix}`}
+              >
+                <div className="watch-card__head">
+                  <code>…{watch.conversationIdSuffix}</code>
+                  <StateChip
+                    domain="severity"
+                    state={watch.phase === "episode" ? "warning" : "info"}
+                    label={t(
+                      watch.phase === "episode"
+                        ? "watches.phase.episode"
+                        : "watches.phase.quiet",
+                    )}
+                    note={t(
+                      watch.phase === "episode"
+                        ? "watches.phase.episode"
+                        : "watches.phase.quiet",
+                    )}
+                  />
+                </div>
+                <strong>{watch.ownerAlias} → {watch.workerAlias}</strong>
+                <dl className="watch-card__facts">
+                  <div><dt>{t("watches.column.quietFor")}</dt><dd><TimeAgo iso={watch.lastActivityAt} /></dd></div>
+                  <div><dt>{t("watches.column.nextAction")}</dt><dd><TimeAgo iso={watch.nextActionAt} /></dd></div>
+                  <div><dt>{t("watches.column.nudges")}</dt><dd>{fmtCount(locale, watch.nudgeCount)}</dd></div>
+                  <div><dt>{t("watches.column.capability")}</dt><dd>{t(watch.capability === "route" ? "watches.capability.route" : "watches.capability.conversation")}</dd></div>
+                </dl>
+                {watch.workerReportedComplete ? (
+                  <p className="footnote">{t("watches.workerComplete")}</p>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        )}
+        {props.events.length === 0 ? null : (
+          <details className="watch-history">
+            <summary>{t("watches.history.title")}</summary>
+            <ol>
+              {props.events.map((event) => (
+                <li key={event.sequence}>
+                  <TimeAgo iso={event.timestamp} /> · <code>…{event.conversationIdSuffix}</code> · {t(WATCH_EVENT_COPY_KEYS[event.kind])}
+                  {event.nudgeNumber === undefined ? "" : ` #${event.nudgeNumber}`}
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
+      </section>
+    );
+  }
+
   export function DeliveriesTab(
     props: DeliveriesTabProps,
   ): React.ReactElement {
@@ -666,6 +757,11 @@ namespace Embassy {
 
           {/* There is no conversation token in the contract; say so. */}
           <p className="footnote section-label">{t("app.deliveries.noConv")}</p>
+
+          <ProgressWatchRegister
+            watches={props.watches}
+            events={props.watchEvents}
+          />
 
           <div className="filter-group filters-block">
             <MonoLabel>{t("column.state")}</MonoLabel>

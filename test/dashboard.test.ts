@@ -88,6 +88,8 @@ test("English and Chinese render one semantic model with reciprocal local links"
   assert.match(zh, /lang="en" hreflang="en"/);
   assert.equal((en.match(/data-dashboard-row="message-summary"/g) ?? []).length, model.activity.length);
   assert.equal((zh.match(/data-dashboard-row="message-summary"/g) ?? []).length, model.activity.length);
+  assert.equal((en.match(/data-dashboard-row="progress-watch"/g) ?? []).length, model.watches.length);
+  assert.equal((zh.match(/data-dashboard-row="progress-watch"/g) ?? []).length, model.watches.length);
   for (const state of model.activity.map((message) => message.state)) {
     assert.equal((en.match(new RegExp(`data-delivery-state="${state}"`, "g")) ?? []).length, 1);
     assert.equal((zh.match(new RegExp(`data-delivery-state="${state}"`, "g")) ?? []).length, 1);

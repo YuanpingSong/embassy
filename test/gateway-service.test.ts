@@ -5790,6 +5790,7 @@ test("opt-in progress watches nudge through the ordinary queue and settle bounde
   );
 
   await clock.advanceBy(120_000);
+  await handlers.listSnapshot();
   assert.deepEqual(await store.inspectProgressWatches(), []);
   assert.equal(
     (await handlers.listSnapshot()).alerts.some(
@@ -5834,7 +5835,7 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
 
   const opened = await handlers.sendToClaude({
     ...toClaude("TRACK: keep this long-running exchange visible"),
-    expectsReply: false,
+    expectsReply: true,
   });
   assert.equal(opened.accepted, true);
   if (!opened.accepted) return;
@@ -5844,9 +5845,13 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
   const workerHint = await handlers.reply({
     conversationId: opened.conversationId,
     text: "DONE: worker reports the result is ready",
-    caller: { kind: "claude", alias: "claude-one@this-mac" },
+    caller: {
+      kind: "claude",
+      alias: "claude-one@this-mac",
+      replyAddress: "uds:/synthetic/claude.sock",
+    },
   });
-  assert.equal(workerHint.accepted, true);
+  assert.equal(workerHint.accepted, true, JSON.stringify(workerHint));
   await waitFor(() => codex.dispatches.length === 1);
   assert.notEqual(
     (await store.inspectProgressWatches())[0]?.workerReportedCompleteAt,

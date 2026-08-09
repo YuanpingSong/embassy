@@ -31,6 +31,8 @@ import type {
   PublicAvailablePeerSnapshot,
   PublicConnectorSnapshot,
   PublicPairSnapshot,
+  PublicProgressWatchEventSnapshot,
+  PublicProgressWatchSnapshot,
   PublicRouteSnapshot,
   RouteCounters,
   SafeGatewayAlert,
@@ -60,6 +62,7 @@ const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROTOCOL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PROTOCOL_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$/;
 const MESSAGE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
+const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 const ISO_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
@@ -1285,43 +1288,128 @@ function isSafeAlert(value: unknown): value is SafeGatewayAlert {
   );
 }
 
-function isSnapshotTruncation(value: unknown): boolean {
+function isProgressWatchSnapshot(
+  value: unknown,
+): value is PublicProgressWatchSnapshot {
   return (
     isRecord(value) &&
     hasExactKeys(value, [
-      "connectors",
-      "availablePeers",
-      "routes",
-      "pairs",
-      "messages",
-      "alerts",
+      "conversationIdSuffix",
+      "ownerAlias",
+      "workerAlias",
+      "phase",
+      "capability",
+      "lastActivityAt",
+      "nextActionAt",
+      "idleMs",
+      "nudgeCount",
+      "workerReportedComplete",
     ]) &&
+    typeof value.conversationIdSuffix === "string" &&
+    CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix) &&
+    isAlias(value.ownerAlias) &&
+    isAlias(value.workerAlias) &&
+    value.ownerAlias !== value.workerAlias &&
+    (value.phase === "quiet" || value.phase === "episode") &&
+    (value.capability === "conversation" || value.capability === "route") &&
+    isIsoTimestamp(value.lastActivityAt) &&
+    isIsoTimestamp(value.nextActionAt) &&
+    typeof value.idleMs === "number" &&
+    isTrackIdleMinutes(value.idleMs / 60_000) &&
+    (value.nudgeCount === 0 || value.nudgeCount === 1 || value.nudgeCount === 2) &&
+    typeof value.workerReportedComplete === "boolean"
+  );
+}
+
+function isProgressWatchEventSnapshot(
+  value: unknown,
+): value is PublicProgressWatchEventSnapshot {
+  return (
+    isRecord(value) &&
+    hasExactKeys(
+      value,
+      [
+        "sequence",
+        "timestamp",
+        "conversationIdSuffix",
+        "ownerAlias",
+        "workerAlias",
+        "kind",
+      ],
+      ["nudgeNumber"],
+    ) &&
+    isNonNegativeInteger(value.sequence) &&
+    isIsoTimestamp(value.timestamp) &&
+    typeof value.conversationIdSuffix === "string" &&
+    CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix) &&
+    isAlias(value.ownerAlias) &&
+    isAlias(value.workerAlias) &&
+    [
+      "opened",
+      "nudge",
+      "worker_reported_complete",
+      "capability_degraded",
+      "done",
+      "unresponsive",
+      "endpoint_retired",
+      "disabled",
+    ].includes(String(value.kind)) &&
+    (value.nudgeNumber === undefined ||
+      value.nudgeNumber === 1 ||
+      value.nudgeNumber === 2) &&
+    ((value.kind === "nudge") === (value.nudgeNumber !== undefined))
+  );
+}
+
+function isSnapshotTruncation(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasExactKeys(
+      value,
+      [
+        "connectors",
+        "availablePeers",
+        "routes",
+        "pairs",
+        "messages",
+        "alerts",
+      ],
+      ["progressWatches", "progressWatchEvents"],
+    ) &&
     isNonNegativeInteger(value.connectors) &&
     isNonNegativeInteger(value.availablePeers) &&
     isNonNegativeInteger(value.routes) &&
     isNonNegativeInteger(value.pairs) &&
     isNonNegativeInteger(value.messages) &&
-    isNonNegativeInteger(value.alerts)
+    isNonNegativeInteger(value.alerts) &&
+    (value.progressWatches === undefined ||
+      isNonNegativeInteger(value.progressWatches)) &&
+    (value.progressWatchEvents === undefined ||
+      isNonNegativeInteger(value.progressWatchEvents))
   );
 }
 
 export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, [
-      "schemaVersion",
-      "generatedAt",
-      "inboundMode",
-      "health",
-      "connectors",
-      "availablePeers",
-      "routes",
-      "pairs",
-      "messages",
-      "accounting",
-      "alerts",
-      "truncation",
-    ]) ||
+    !hasExactKeys(
+      value,
+      [
+        "schemaVersion",
+        "generatedAt",
+        "inboundMode",
+        "health",
+        "connectors",
+        "availablePeers",
+        "routes",
+        "pairs",
+        "messages",
+        "accounting",
+        "alerts",
+        "truncation",
+      ],
+      ["progressWatches", "progressWatchEvents"],
+    ) ||
     value.schemaVersion !== 1 ||
     !isIsoTimestamp(value.generatedAt) ||
     (value.inboundMode !== "paired" && value.inboundMode !== "open") ||
@@ -1338,6 +1426,16 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
     !Array.isArray(value.pairs) ||
     value.pairs.length > gatewayPublicSnapshotLimits.pairs ||
     !value.pairs.every(isPairSnapshot) ||
+    (value.progressWatches !== undefined &&
+      (!Array.isArray(value.progressWatches) ||
+        value.progressWatches.length >
+          gatewayPublicSnapshotLimits.progressWatches ||
+        !value.progressWatches.every(isProgressWatchSnapshot))) ||
+    (value.progressWatchEvents !== undefined &&
+      (!Array.isArray(value.progressWatchEvents) ||
+        value.progressWatchEvents.length >
+          gatewayPublicSnapshotLimits.progressWatchEvents ||
+        !value.progressWatchEvents.every(isProgressWatchEventSnapshot))) ||
     !Array.isArray(value.messages) ||
     value.messages.length > gatewayPublicSnapshotLimits.messages ||
     !value.messages.every(isNormalizedMessageEvent) ||

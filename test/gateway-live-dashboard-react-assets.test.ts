@@ -443,6 +443,14 @@ test("serves the rendered shell and bundles byte-for-byte in both locales", asyn
       assets.appJavaScript.includes("EMBASSY_DELIVERY_NOTICES"),
       `${locale} app bundle must expose the delivery-notice setting`,
     );
+    assert.ok(
+      assets.appJavaScript.includes("watch-register"),
+      `${locale} app bundle must render progress watches`,
+    );
+    assert.ok(
+      assets.styleSheet.includes(".watch-register"),
+      `${locale} stylesheet must include the bounded watch register`,
+    );
     const handler = createHandler(assets, locale);
     const fixtures: ReadonlyArray<readonly [string, string, string]> = [
       ["bootstrap", assets.shellHtml, "text/html; charset=utf-8"],

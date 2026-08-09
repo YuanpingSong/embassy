@@ -62,6 +62,8 @@ import {
   type PrivateRouteBinding,
   type PublicConnectorSnapshot,
   type PublicPairSnapshot,
+  type PublicProgressWatchEventSnapshot,
+  type PublicProgressWatchSnapshot,
   type PublicRouteSnapshot,
   type QueuedMessageMetadata,
   type RebindStaleRouteInput,
@@ -3838,6 +3840,46 @@ export class GatewayStore {
             `${right.claudeAlias}\0${right.codexAlias}`,
           ),
         );
+      const progressWatches: PublicProgressWatchSnapshot[] =
+        state.progressWatches
+          .map((watch) => ({
+            conversationIdSuffix: watch.conversationId.slice(-8),
+            ownerAlias: watch.ownerAlias,
+            workerAlias: watch.workerAlias,
+            phase: watch.phase,
+            capability: watch.capability,
+            lastActivityAt: watch.lastActivityAt,
+            nextActionAt: watch.nextActionAt,
+            idleMs: watch.idleMs,
+            nudgeCount: watch.nudgeCount,
+            workerReportedComplete:
+              watch.workerReportedCompleteAt !== undefined,
+          }))
+          .sort((left, right) =>
+            `${left.nextActionAt}\0${left.ownerAlias}\0${left.workerAlias}`.localeCompare(
+              `${right.nextActionAt}\0${right.ownerAlias}\0${right.workerAlias}`,
+            ),
+          );
+      const progressWatchEvents: PublicProgressWatchEventSnapshot[] =
+        state.progressWatchEvents
+          .filter(
+            (
+              event,
+            ): event is typeof event & {
+              kind: Exclude<typeof event.kind, "activity">;
+            } => event.kind !== "activity",
+          )
+          .map((event) => ({
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            conversationIdSuffix: event.conversationId.slice(-8),
+            ownerAlias: event.ownerAlias,
+            workerAlias: event.workerAlias,
+            kind: event.kind,
+            ...(event.nudgeNumber === undefined
+              ? {}
+              : { nudgeNumber: event.nudgeNumber }),
+          }));
       const health = this.aggregateHealth(connectors);
       const unsortedAlerts: SafeGatewayAlert[] = [
         ...connectors.flatMap((connector) =>
@@ -3885,6 +3927,8 @@ export class GatewayStore {
         availablePeers: [],
         routes,
         pairs,
+        progressWatches,
+        progressWatchEvents,
         messages: state.events.map((event) => ({ ...event })),
         accounting: { ...state.accounting },
         alerts,
@@ -3893,6 +3937,8 @@ export class GatewayStore {
           availablePeers: 0,
           routes: 0,
           pairs: 0,
+          progressWatches: 0,
+          progressWatchEvents: 0,
           messages: 0,
           alerts: 0,
         },

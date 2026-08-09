@@ -155,10 +155,11 @@ namespace Embassy {
     | "degraded"
     | "codex_succession_busy"
     | "codex_succession_recovery"
+    | "progress_watch"
     | "generic";
 
   export type DashboardAttentionItem = Readonly<{
-    kind: "alert" | "route" | "connector" | "broker";
+    kind: "alert" | "route" | "connector" | "broker" | "watch";
     code?: string | undefined;
     severity: AlertSeverity;
     timestamp?: string | undefined;
@@ -232,6 +233,39 @@ namespace Embassy {
     counters: RouteCounters;
   }>;
 
+  export type DashboardProgressWatchRow = Readonly<{
+    conversationIdSuffix: string;
+    ownerAlias: string;
+    workerAlias: string;
+    phase: "quiet" | "episode";
+    capability: "conversation" | "route";
+    lastActivityAt: string;
+    nextActionAt: string;
+    idleMs: number;
+    idleForMs: number;
+    dueInMs: number;
+    nudgeCount: 0 | 1 | 2;
+    workerReportedComplete: boolean;
+  }>;
+
+  export type DashboardProgressWatchEventRow = Readonly<{
+    sequence: number;
+    timestamp: string;
+    conversationIdSuffix: string;
+    ownerAlias: string;
+    workerAlias: string;
+    kind:
+      | "opened"
+      | "nudge"
+      | "worker_reported_complete"
+      | "capability_degraded"
+      | "done"
+      | "unresponsive"
+      | "endpoint_retired"
+      | "disabled";
+    nudgeNumber?: 1 | 2 | undefined;
+  }>;
+
   export type DashboardGraphFacts = Readonly<{
     pairCount: number;
     readyPairCount: number;
@@ -256,6 +290,9 @@ namespace Embassy {
     availablePeers: number;
     routes: number;
     pairs: number;
+    progressWatches: number;
+    upstreamProgressWatchEvents: number;
+    progressWatchEvents: number;
     upstreamMessageEvents: number;
     messageGroups: number;
     messageEvents: number;
@@ -290,6 +327,8 @@ namespace Embassy {
     peers: readonly DashboardPeerRow[];
     routes: readonly DashboardRouteRow[];
     pairs: readonly DashboardPairRow[];
+    watches: readonly DashboardProgressWatchRow[];
+    watchEvents: readonly DashboardProgressWatchEventRow[];
     graph: DashboardGraphFacts;
     connectors: readonly DashboardConnectorRow[];
     accounting: DashboardAccounting;
@@ -440,6 +479,8 @@ namespace Embassy {
 
   export type DeliveriesTabProps = Readonly<{
     groups: readonly DeliveryGroupView[];
+    watches: readonly DashboardProgressWatchRow[];
+    watchEvents: readonly DashboardProgressWatchEventRow[];
     omissions: DashboardOmissions;
     preset: DeliveriesPreset | undefined;
     /** Consume-once contract: called after the preset has been applied. */
