@@ -42,7 +42,7 @@ The agents are still cloud-backed products. A routed message becomes input to an
 
 Four embassy terms name real features. Everything technical about them lives in the sections below.
 
-- **Registration and selection** are asymmetric accreditation: Codex targets are explicitly registered, while outbound Claude destinations are explicitly selected. Any exact compatible live Claude session running as the same OS user may initiate native delivery to a registered Codex target under that task's existing native Codex approval and sandbox policy.
+- **Registration and selection** are the two halves of one consent: Codex targets are explicitly registered, and selecting a Claude session both makes it the destination Codex sends to and makes it the only inbound sender the registered task accepts. Messages from any other session settle terminally with `SENDER_NOT_PAIRED`. Starting the gateway with `embassy serve --inbound open` deliberately restores any-session inbound for operators who want it.
 - **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only dashboard.
 - **The pouch** is transit: bounded bodies, ephemeral inside Embassy, never persisted by it.
 - **Consulates** are the roadmap: the same model extended to Codex tasks on remote hosts over attach-only SSH — designed, and deliberately disabled in v1.
@@ -62,10 +62,10 @@ Four embassy terms name real features. Everything technical about them lives in 
 
 Embassy publishes one explicitly registered Codex task into Claude Code's live-session registry as a clearly named `codex-*` peer. Compatible Claude sessions see it through their native `ListAgents` and can contact it with `SendMessage`—no Claude plugin, MCP server, or settings change is required.
 
-There is an intentional asymmetry:
+Selection is bidirectional consent — the selected Claude session and the registered Codex task form a pair:
 
-- **Claude → Codex:** registration advertises one `codex-*` task to every compatible live Claude session running as the same OS user. An exact live sender may reach that task without becoming selected for messages in the other direction.
-- **Codex → Claude:** the Codex task must be registered, and you must explicitly select the destination Claude session first. Sending never silently selects a discovered session.
+- **Claude → Codex:** registration makes the `codex-*` task *visible* to every compatible live Claude session running as the same OS user (that registry is machine-wide by nature), but the task *accepts* messages only from the paired session. Any other sender settles terminally with `SENDER_NOT_PAIRED` in its native receipt. `embassy serve --inbound open` is the explicit opt-out that restores any-session inbound.
+- **Codex → Claude:** the Codex task must be registered, and you must explicitly select the destination Claude session first. Sending never silently selects a discovered session. With nothing selected, a registered task accepts no inbound messages at all.
 
 Embassy normally queues messages while the Codex task is busy and starts an ordinary turn when it is available. In the Claude→Codex direction only, an exact leading `STEER:` body may be admitted to the active turn at App Server's next tool-call boundary. It is never injected mid-generation and never authorizes an interrupt; if that boundary is unavailable, the message silently returns to the normal queue.
 
@@ -182,7 +182,7 @@ Codex routes use an explicit `codex-*` alias and the task's inherited thread ide
 | `serve` | operator | Start the foreground broker and dashboard |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
 | `refresh-dashboard` | operator | Regenerate both static dashboard files |
-| `dashboard --live [--lang en\|zh-CN]` | operator | Start the read-only live dashboard companion; requires a running `embassy serve` |
+| `dashboard --live [--lang en\|zh-CN]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
 | `delivery-status` | either provider | Read one delivery tracker by its `dlv_` token |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; `register-codex --succeeds <current-alias>` hands the registration to a different task |
@@ -220,7 +220,7 @@ embassy wait-delivery --token dlv_<token>
 
 Embassy creates a new input path between two powerful local agents. Treat every routed message as untrusted input that may steer its receiver.
 
-- **Local broker, cloud-backed agents.** `embassy serve` listens only on private Unix-domain sockets and makes no provider API call; the opt-in `embassy dashboard --live` companion adds a separate read-only loopback listener (see [Live dashboard](#live-dashboard)). Delivered content still enters Claude or Codex model context and is retained according to that product's normal conversation behavior.
+- **Local broker, cloud-backed agents.** `embassy serve` listens only on private Unix-domain sockets and makes no provider API call; the opt-in `embassy dashboard --live` companion adds a separate authenticated loopback listener with three bounded route-consent actions (see [Live dashboard](#live-dashboard)). Delivered content still enters Claude or Codex model context and is retained according to that product's normal conversation behavior.
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Another process already running as your OS user can present that identity. Route ownership, exact endpoint generation, bounds, and conversation state reduce mistakes; they are not a defense against code you already allowed to run as you.
 - **Explicit outbound consent.** A Codex task cannot send to a merely discovered Claude candidate. The operator must select it first. Inbound native Claude senders are validated as exact compatible live sessions but do not become outbound-selected automatically.
 - **Native permissions remain native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. For Codex-to-Claude delivery, `crossSessionInbound` remains Claude's native control for accepting, holding, or refusing messages entering the selected Claude session; Embassy cannot override it.
@@ -306,12 +306,16 @@ Access bootstraps through a one-use 256-bit URL-fragment token exchanged for a
 path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header is checked on every request; navigation GETs permit a
 missing Origin and carry no sentinel, while non-navigation POSTs require the
 exact Origin plus the X-Embassy-Request sentinel. There are no CORS headers, no
-mutation or provider routes, no server-side storage, no telemetry, and no
-external assets. The browser client keeps only a display-preference key
+generic control or provider routes, no server-side storage, no telemetry, and
+no external assets. The only mutation route accepts exact select-Claude,
+unselect-Claude, and refresh-discovery actions, requires an explicit in-page
+confirmation, rejects bodies over 1 KiB, and is limited to six actions per
+minute. The browser client keeps only a display-preference key
 (active tab and language) in `localStorage`.
-The browser has zero authority to register, select, send, reply, approve, or
-interrupt — it receives a read-only sanitized metadata snapshot only, streamed
-via authenticated `fetch`. A snapshot observation may settle already-due
+The browser cannot register tasks, send, reply, approve, interrupt, change
+settings, or invoke arbitrary broker/provider methods. It receives a sanitized
+metadata snapshot via authenticated `fetch`; after each bounded action it reads
+a fresh snapshot. A snapshot observation may settle already-due
 lifecycle deliveries before projecting state.
 
 An optional `--lang en|zh-CN` flag selects the display language. It belongs to
