@@ -25,7 +25,7 @@ session without making that session outbound-selected. It provides a single
 private operational view across the two products without rebuilding either
 agent runtime.
 
-Its exact Claude Code 2.1.225 runtime/peer-protocol pin is fail-closed.
+Its exact Claude Code 2.1.226 runtime/peer-protocol pin is fail-closed.
 Still-running 2.1.224 sessions remain compatible during a patch upgrade
 because their registry records use the same reviewed peer protocol 1 shape.
 
@@ -61,13 +61,13 @@ not wrap, replace, or recreate either provider.
 
 ### Claude Code
 
-**Official:** Claude Code 2.1.225 documents cross-session messaging on macOS
+**Official:** Claude Code 2.1.226 documents cross-session messaging on macOS
 and Linux. Real Claude sessions can use `ListAgents` to find other real Claude
 sessions and `SendMessage` to contact them. A target can accept, hold, or
 refuse inbound cross-session messages through `crossSessionInbound`. Messages
 do not bypass the receiver's tool permissions or approval boundary.
 
-**Version-pinned internal boundary:** the installed Claude Code 2.1.225 build
+**Version-pinned internal boundary:** the installed Claude Code 2.1.226 build
 advertises live sessions through registry records and transports peer frames
 over per-session Unix-domain sockets using peer protocol 1. Those registry and
 wire shapes are not documented as a stable third-party integration API. The
@@ -155,8 +155,8 @@ The status below is intentionally narrower than the target architecture.
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, and read-only projection; it is a separate foreground process, never part of `embassy serve` |
-| Claude registry/peer adapter pinned to 2.1.225 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224/2.1.225 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
-| Exact Claude 2.1.225 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
+| Claude registry/peer adapter pinned to 2.1.226 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224–2.1.226 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
+| Exact Claude 2.1.226 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
 | Allowlisted Codex App Server connector with queue-only busy behavior | **Implemented** and live-tested against App Server 0.147.0, including external busy observation, registered-route reachability across settings changes, and an automatically started queued turn |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
@@ -165,7 +165,7 @@ The status below is intentionally narrower than the target architecture.
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
-| Live Codex-to-Claude delivery | **Tested** through selected real Claude 2.1.224 and 2.1.225 sessions |
+| Live Codex-to-Claude delivery | **Tested** through selected real Claude 2.1.224–2.1.226 sessions |
 | Claude-initiated Codex turn/reply into Codex | **Tested** with a real busy Codex task: native `busy → waiting`, automatic post-idle turn, terminal delivery status, and exact reply round trip |
 | Remote production connector | **Planned**; only the `build-mac` read-only attach feasibility probe is complete |
 
@@ -736,7 +736,7 @@ paths, peers, and transports:
 
 | Path/capability | Minimum purpose |
 | --- | --- |
-| `~/.local/bin/claude` and derived expected target `~/.local/share/claude/versions/2.1.225` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher attestation succeeded |
+| `~/.local/bin/claude` and derived expected target `~/.local/share/claude/versions/2.1.226` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher attestation succeeded |
 | `~/.claude/sessions` | Read/enumerate only live registry JSON during the separately authorized passive-discovery gate |
 | `/tmp/cc-socks` | At foreground startup, validate the private directory and create/remove only `/tmp/cc-socks/<gateway-pid>.sock` after inode/generation checks; search/stat genuine peers at passive discovery and connect one validated target only at the separately authorized send gate |
 | `~/.local/state/agent-embassy/.agent-embassy-state` | Validate or establish the exact ownership marker before creating the fixed host lease; an existing non-empty unmarked root is rejected without mutation |

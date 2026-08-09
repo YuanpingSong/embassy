@@ -1,8 +1,9 @@
 # Change Order — Paired Routes (Dashboard Design)
 
 Product model change, PM-approved, supersedes the "asymmetry" language in
-earlier PRD revisions. Engineering is implementing in parallel; design
-against this as truth.
+earlier PRD revisions. Status: designed, not yet implemented — the broker
+still ships the asymmetric model, and shipped surfaces must keep describing
+that reality until this lands. Design against this document as the target.
 
 ## What changed
 

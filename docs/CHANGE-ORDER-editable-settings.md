@@ -1,7 +1,9 @@
 # Change Order — User-Editable Settings (Dashboard Design)
 
-PM-approved. Scope: ONLY the settings an operator actually adjusts to run
-Embassy smoothly. Everything else remains launch-time environment
+PM-approved. Status: designed, not yet implemented — the shipped dashboard
+renders these settings read-only with their env var names, and every edit
+path gates on the mutation threat-model review. Scope: ONLY the settings an
+operator actually adjusts to run Embassy smoothly. Everything else remains launch-time environment
 configuration, shown read-only in Diagnostics.
 
 ## Design principle

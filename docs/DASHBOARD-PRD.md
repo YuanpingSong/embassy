@@ -1,7 +1,9 @@
 # Embassy Dashboard — Product Requirements (Web App)
 
-Owner: PM. Status: requirements for the full web-app dashboard that succeeds
-the single-page HTML dashboards. Pair this with the companion design MD for
+Owner: PM. Status: the five-tab web app shipped read-only (commit cb69bae);
+the mutation set (§3.3 actions), editable settings, registration handshake,
+and §6b ambitious scope remain requirements gated on broker work plus the
+standing threat-model review. Pair this with the companion design MD for
 visual tokens; this document is the product truth. The static mode-0600 file
 remains the inert offline floor and is out of scope here.
 

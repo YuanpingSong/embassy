@@ -293,7 +293,9 @@ embassy dashboard --live
 ```
 
 `embassy dashboard --live` starts a separate foreground companion process that
-streams the same metadata shown by the static dashboard into a browser tab. It
+presents gateway metadata in a five-tab browser view (overview, deliveries,
+routes, activity, diagnostics), streaming the same data the static dashboard
+snapshots. It
 reaches the broker over the same private control socket every other command
 uses, so it reports the gateway as unavailable when nothing is serving. It
 binds `127.0.0.1` on an ephemeral port; the companion is not part of
@@ -303,7 +305,9 @@ Access bootstraps through a one-use 256-bit URL-fragment token exchanged for a
 path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header is checked on every request; navigation GETs permit a
 missing Origin and carry no sentinel, while non-navigation POSTs require the
 exact Origin plus the X-Embassy-Request sentinel. There are no CORS headers, no
-mutation or provider routes, no storage, no telemetry, and no external assets.
+mutation or provider routes, no server-side storage, no telemetry, and no
+external assets. The browser client keeps only a display-preference key
+(active tab and language) in `localStorage`.
 The browser has zero authority to register, select, send, reply, approve, or
 interrupt — it receives a read-only sanitized metadata snapshot only, streamed
 via authenticated `fetch`. A snapshot observation may settle already-due

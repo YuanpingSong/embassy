@@ -4,6 +4,24 @@ Canon for every user surface: marketing site, dashboard, README visuals, mark,
 and social imagery. One token system; no surface invents its own values.
 Agreed jointly (PM + engineering) 2026-08-08.
 
+> **PM amendment — 2026-08-09 (the warm/arch era).** The visual identity
+> moved on from this document's imagery on the operator's direction; the
+> honesty rules below remain canon, the imagery sections are historical.
+> What ships today: the **gate/archway mark** with an amber glow and pennant
+> (`assets/embassy-logo/mark.svg`, badge and lockup alongside; the tent
+> variants at `assets/mark.svg` / `assets/mark-seal.svg` remain as favicon
+> until superseded); the **warm anime banner** — three chibi agent mascots
+> exchanging envelopes before the glowing arch (`assets/social-preview.png`,
+> brief in `docs/BANNER-BRIEF.md`); and the **live dashboard's Cohere-token
+> chip system** (`assets/live-dashboard/app.css`) in place of the porcelain
+> palette and seal/receipt iconography described below — state is carried by
+> tinted chips (progress stone, positive green, qualified outline,
+> indeterminate purple, warning coral, failure red, inert outline), with the
+> same rules: progress is never green, `released` ≠ read, refusals are not
+> failures, and the brand accent is never a state color. A successor canon
+> document for the warm era is owed; until then, treat BANNER-BRIEF.md plus
+> the shipped dashboard tokens as the working truth for imagery and color.
+
 ## Idea
 
 Embassy's brand is the **receipt** — the seal that records a message
