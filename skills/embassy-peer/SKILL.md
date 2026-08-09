@@ -7,7 +7,7 @@ description: Operate Embassy through current name@host or Claude session-UUID se
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, pair, unpair, select, and unselect commands do not infer a provider principal.
+Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. `pair` and `unpair` carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the authenticated live dashboard creates or removes an edge without attestation.
 
 ## Select a peer
 
@@ -51,7 +51,7 @@ Create one explicit Claude↔Codex edge by naming both ends. The Claude end must
 embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac
 ```
 
-Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. Remove exactly the named edge:
+Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. Run `pair` and `unpair` from inside a registered Codex task so the CLI reads the inherited `CODEX_THREAD_ID`; a plain operator shell fails closed with `CODEX_IDENTITY_REQUIRED` — use the live dashboard or the one-task shorthand instead. Remove exactly the named edge:
 
 ```sh
 embassy unpair --claude advisor@this-mac --codex codex-reviewer@this-mac
