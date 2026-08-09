@@ -7,6 +7,15 @@ import {
   type GatewayStoreLimits,
 } from "./types.js";
 
+export const gatewayDeliveryNoticeModes = [
+  "merged",
+  "verbose",
+  "quiet",
+] as const;
+
+export type GatewayDeliveryNoticeMode =
+  (typeof gatewayDeliveryNoticeModes)[number];
+
 export type GatewayConfig = {
   stateDir: string;
   controlSocketPath: string;
@@ -17,6 +26,8 @@ export type GatewayConfig = {
   inboundMode: GatewayInboundMode;
   /** One sender-visible progress notice is due this long after enqueue. */
   stallNoticeMs: number;
+  /** Native Claude sender notice policy; omitted injected configs mean merged. */
+  deliveryNotices?: GatewayDeliveryNoticeMode;
   limits: GatewayStoreLimits;
 };
 
@@ -94,6 +105,23 @@ function enabledByDefault(name: string, value: string | undefined): boolean {
   throw new BridgeError(
     "INVALID_GATEWAY_CONFIGURATION",
     `${name} must be exactly 1 or 0 when set.`,
+  );
+}
+
+function deliveryNoticeMode(
+  value: string | undefined,
+): GatewayDeliveryNoticeMode {
+  const candidate = value ?? "merged";
+  if (
+    gatewayDeliveryNoticeModes.includes(
+      candidate as GatewayDeliveryNoticeMode,
+    )
+  ) {
+    return candidate as GatewayDeliveryNoticeMode;
+  }
+  throw new BridgeError(
+    "INVALID_GATEWAY_CONFIGURATION",
+    "EMBASSY_DELIVERY_NOTICES must be exactly merged, verbose, or quiet.",
   );
 }
 
@@ -253,6 +281,7 @@ export function loadGatewayConfig(
     ),
     inboundMode: "paired",
     stallNoticeMs,
+    deliveryNotices: deliveryNoticeMode(env.EMBASSY_DELIVERY_NOTICES),
     limits,
   };
 }

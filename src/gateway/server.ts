@@ -354,6 +354,9 @@ export async function runGatewayServer(
     claudeProvider = createClaudeProvider({
       runtime,
       locale: options.locale ?? "en",
+      ...(config.deliveryNotices === undefined
+        ? {}
+        : { deliveryNotices: config.deliveryNotices }),
     });
     store = createStore(config);
     const createdCodexFactory = await awaitWhileLeaseHeld(

@@ -228,7 +228,7 @@
       <div class="truths">
         <div class="t">
           <svg width="18" height="18" style="color:var(--jade)" aria-hidden="true"><use href="#seal-intact"/></svg>
-          <p><strong>已投递意味着接收方已接受消息，而非模型已完成处理。</strong>对于 Codex 方向，这指 App Server 接受了该回合；对于 Claude 方向，这指消息已释放到会话的原生队列中——并非已读取，也并非已完成。没有原生终端回执的已确认写入报告为 <code>unconfirmed</code>；不确定的写入报告为 <code>ambiguous</code>，且永不自动重试。CLI 的初始接受会返回一个会话令牌和一个投递令牌；<code>held</code> 和 <code>transport_written</code> 是过程状态，而非成功状态。源自 Claude 的失败以原生 <code>expired</code> 状态结算，随后附带一个包含安全代码的静态诊断帧——永不包含路径、标识符或原始异常。</p>
+          <p><strong>已投递意味着接收方已接受消息，而非模型已完成处理。</strong>对于 Codex 方向，这指 App Server 接受了该回合；对于 Claude 方向，这指消息已释放到会话的原生队列中——并非已读取，也并非已完成。没有原生终端回执的已确认写入报告为 <code>unconfirmed</code>；不确定的写入报告为 <code>ambiguous</code>，且永不自动重试。CLI 的初始接受会返回一个会话令牌和一个投递令牌；<code>held</code> 和 <code>transport_written</code> 是过程状态，而非成功状态。源自 Claude 的失败以原生 <code>expired</code> 状态和安全 reason 代码结算。默认的 merged 通知策略避免重复的终局诊断帧，同时保留 verbose 和 quiet 模式。</p>
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ochre)" aria-hidden="true"><use href="#seal-half"/></svg>

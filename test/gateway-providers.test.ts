@@ -495,6 +495,24 @@ function binding(
   };
 }
 
+test("local Claude provider forwards the exact delivery notice policy", () => {
+  const fake = new FakeClaudePeer();
+  let receivedLocale: unknown;
+  let receivedDeliveryNotices: unknown;
+  createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    locale: "zh-CN",
+    deliveryNotices: "quiet",
+    peerFactory: (_runtime, locale, deliveryNotices) => {
+      receivedLocale = locale;
+      receivedDeliveryNotices = deliveryNotices;
+      return fake as never;
+    },
+  });
+  assert.equal(receivedLocale, "zh-CN");
+  assert.equal(receivedDeliveryNotices, "quiet");
+});
+
 test("closing during Claude listen fences and closes the late listener", async () => {
   const fake = new FakeClaudePeer();
   let markListenEntered: (() => void) | undefined;

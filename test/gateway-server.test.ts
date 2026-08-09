@@ -130,6 +130,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     LOGNAME: "synthetic-user",
     EMBASSY_STATE_DIR: stateDir,
     EMBASSY_CLAUDE_BIN: SYNTHETIC_LAUNCHER,
+    EMBASSY_DELIVERY_NOTICES: "quiet",
     ANTHROPIC_API_KEY: SYNTHETIC_SECRET,
     CLAUDE_CODE_MESSAGING_SOCKET: "/synthetic/private/provider.sock",
     CODEX_THREAD_ID: "00000000-0000-7000-8000-000000000701",
@@ -181,6 +182,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
         events.push("create-claude");
         assert.deepEqual(options.runtime, runtime());
         assert.equal(options.locale, "zh-CN");
+        assert.equal(options.deliveryNotices, "quiet");
         return provider(() => events.push("close-claude"));
       },
       createStore: (received) => {

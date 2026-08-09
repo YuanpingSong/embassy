@@ -2149,7 +2149,7 @@ test("native ingress quiescence joins admitted hooks, rejects new messages, and 
   await listener.acknowledge(receiptHandle as string, "expired", {
     code: "GATEWAY_SHUTDOWN",
   });
-  await eventually(() => statuses.length === 2);
+  await eventually(() => statuses.length === 1);
   assert.equal(statuses[0]?.status, "expired");
 
   await sendLines(listener.address.slice(4), [
@@ -2518,22 +2518,18 @@ test("receipt capacity explicitly expires rather than forwarding an untracked me
   await sendLines(listener.address.slice(4), [
     frame(MESSAGE_TWO, "must be refused explicitly"),
   ]);
-  await eventually(() => peerFrames.length === 2);
+  await eventually(() => peerFrames.length === 1);
   assert.equal(messages.length, 1);
   assert.ok(notices.some((notice) => notice.code === "RECEIPT_LIMIT"));
   assert.equal(peerFrames[0]?.status, "expired");
   assert.equal(peerFrames[0]?.orig_msg_id, MESSAGE_TWO);
   assert.equal(peerFrames[0]?.reason, "GATEWAY_RECEIPT_CAPACITY");
-  assert.match(
-    String((peerFrames[1]?.message as Record<string, unknown>)?.content),
-    /code="GATEWAY_RECEIPT_CAPACITY"/,
-  );
 
   await listener.acknowledge(
     messages[0]?.receiptHandle as string,
     "delivered",
   );
-  await eventually(() => peerFrames.length === 3);
+  await eventually(() => peerFrames.length === 2);
   await sendLines(listener.address.slice(4), [
     frame(
       "00000000-0000-4000-8000-000000000103",
@@ -2604,7 +2600,7 @@ test("capacity expiry retains one bounded retry after a clean pre-write failure"
     frame(MESSAGE_TWO, "retry capacity expiry"),
   ]);
 
-  await eventually(() => peerFrames.length === 2);
+  await eventually(() => peerFrames.length === 1);
   assert.equal(connectAttempts, 2);
   assert.equal(messages.length, 1);
   assert.ok(notices.some((notice) => notice.code === "RECEIPT_LIMIT"));
@@ -2786,10 +2782,13 @@ test("capacity clean-write retries release on exhaustion and stop on listener cl
   assert.equal(messages.length, 1);
 });
 
-test("listener pairs an expired native receipt with a localized readable safe diagnostic", async (t) => {
+test("verbose notices preserve the localized expired diagnostic frame", async (t) => {
   let receiptHandle: string | undefined;
   const frames: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, { locale: "zh-CN" });
+  const current = await fixture(t, {
+    locale: "zh-CN",
+    deliveryNotices: "verbose",
+  });
   const peer = await addPeer(current, {
     pid: 47_152,
     handler: (socket) => {
@@ -2839,6 +2838,129 @@ test("listener pairs an expired native receipt with a localized readable safe di
   assert.match(diagnosticContent, /本地网关无法投递前一条消息/);
   assert.match(diagnosticContent, /embassy status/);
   assert.equal(frames[1]?.from, undefined);
+});
+
+test("merged notices keep stalls but fold expiry diagnostics into native status", async (t) => {
+  let receiptHandle: string | undefined;
+  const frames: Array<Record<string, unknown>> = [];
+  const current = await fixture(t, { deliveryNotices: "merged" });
+  const peer = await addPeer(current, {
+    pid: 47_153,
+    handler: (socket) => {
+      let data = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        data += chunk;
+      });
+      socket.on("end", () => {
+        for (const line of data.trim().split("\n").filter(Boolean)) {
+          frames.push(JSON.parse(line) as Record<string, unknown>);
+        }
+      });
+    },
+  });
+  await selectFirstPeer(current);
+  const listener = await current.adapter.listen({
+    onMessage: (message) => {
+      receiptHandle = message.receiptHandle;
+    },
+  });
+  await sendLines(listener.address.slice(4), [
+    `${JSON.stringify({
+      type: "user",
+      message: { role: "user", content: "merged native inbound failure" },
+      msgV: 1,
+      msg_id: MESSAGE_ONE,
+      priority: "next",
+      from: `uds:${peer.socketPath}`,
+    })}\n`,
+  ]);
+  await eventually(() => receiptHandle !== undefined);
+  assert.deepEqual(
+    await listener.notifyInboundProgress(receiptHandle as string, {
+      kind: "stall",
+      reason: "ROUTE_BUSY",
+      queuedForMs: 150_000,
+    }),
+    { transportStatus: "transport_written" },
+  );
+  await eventually(() => frames.length === 1);
+  assert.equal(frames[0]?.type, "user");
+  assert.match(
+    String((frames[0]?.message as Record<string, unknown>)?.content),
+    /gateway-delivery-stall/,
+  );
+
+  await listener.acknowledge(receiptHandle as string, "expired", {
+    code: "CODEX_ROUTE_STALE",
+  });
+  await eventually(() => frames.length === 2);
+  assert.equal(frames[1]?.action, "peer_message_status");
+  assert.equal(frames[1]?.status, "expired");
+  assert.equal(frames[1]?.reason, "CODEX_ROUTE_STALE");
+  assert.equal(
+    frames.some((frame) =>
+      String((frame.message as Record<string, unknown> | undefined)?.content)
+        .includes("gateway-delivery-diagnostic"),
+    ),
+    false,
+  );
+});
+
+test("quiet notices suppress gateway user frames while preserving native expiry truth", async (t) => {
+  let receiptHandle: string | undefined;
+  const frames: Array<Record<string, unknown>> = [];
+  const current = await fixture(t, { deliveryNotices: "quiet" });
+  const peer = await addPeer(current, {
+    pid: 47_154,
+    handler: (socket) => {
+      let data = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        data += chunk;
+      });
+      socket.on("end", () => {
+        for (const line of data.trim().split("\n").filter(Boolean)) {
+          frames.push(JSON.parse(line) as Record<string, unknown>);
+        }
+      });
+    },
+  });
+  await selectFirstPeer(current);
+  const listener = await current.adapter.listen({
+    onMessage: (message) => {
+      receiptHandle = message.receiptHandle;
+    },
+  });
+  await sendLines(listener.address.slice(4), [
+    `${JSON.stringify({
+      type: "user",
+      message: { role: "user", content: "quiet native inbound failure" },
+      msgV: 1,
+      msg_id: MESSAGE_ONE,
+      priority: "next",
+      from: `uds:${peer.socketPath}`,
+    })}\n`,
+  ]);
+  await eventually(() => receiptHandle !== undefined);
+  assert.deepEqual(
+    await listener.notifyInboundProgress(receiptHandle as string, {
+      kind: "stall",
+      reason: "ROUTE_BUSY",
+      queuedForMs: 150_000,
+    }),
+    { transportStatus: "suppressed" },
+  );
+  assert.equal(frames.length, 0);
+
+  await listener.acknowledge(receiptHandle as string, "expired", {
+    code: "CODEX_ROUTE_STALE",
+  });
+  await eventually(() => frames.length === 1);
+  assert.equal(frames[0]?.action, "peer_message_status");
+  assert.equal(frames[0]?.status, "expired");
+  assert.equal(frames[0]?.reason, "CODEX_ROUTE_STALE");
+  assert.equal(frames[0]?.type, "control");
 });
 
 test("listener shutdown preserves confirmed-write evidence as unconfirmed", async (t) => {

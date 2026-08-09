@@ -474,6 +474,9 @@ export const dashboardCopyZhCn = {
   "app.diag.steering.title": "转向（steering）",
   "app.diag.steering.absent":
     "STEER 标记表示已分类的 Claude→Codex 投递证据。此元数据契约不公开操作员停用开关的当前设置。",
+  "app.diag.deliveryNotices.title": "投递通知",
+  "app.diag.deliveryNotices.note":
+    "可设为 merged（默认）、verbose 或 quiet；更改后请重新启动 embassy serve。",
   "app.diag.editable.title": "设置",
   "app.diag.editable.note":
     "设置在 embassy serve 启动时从环境变量读取。此页面无法修改它们，因此不会把它们显示为可编辑控件。",

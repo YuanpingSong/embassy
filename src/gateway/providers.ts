@@ -27,6 +27,7 @@ import type {
   LocalCodexOwnedTransport,
   LocalCodexTransportFactory,
 } from "./codex-local-transport.js";
+import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import type {
   GatewayAdapterCallbacks,
@@ -63,6 +64,7 @@ const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
 type ClaudePeerFactory = (
   runtime: AttestedClaudePeerRuntime,
   locale: DashboardLocale,
+  deliveryNotices: GatewayDeliveryNoticeMode,
 ) => ClaudePeerAdapter;
 
 export type LocalClaudeGatewayProviderOptions = {
@@ -71,6 +73,8 @@ export type LocalClaudeGatewayProviderOptions = {
   hostId?: "this-mac";
   /** Locale for bounded notices written into native Claude sessions. */
   locale?: DashboardLocale;
+  /** Gateway-authored user-frame policy; native receipt status is unchanged. */
+  deliveryNotices?: GatewayDeliveryNoticeMode;
   discoveryPollMs?: number;
   maxPendingMessages?: number;
   now?: () => number;
@@ -348,13 +352,18 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     );
     this.now = options.now ?? Date.now;
     this.peer = (options.peerFactory ??
-      ((runtime, locale) =>
+      ((runtime, locale, deliveryNotices) =>
         new ClaudePeerAdapter({
           sessionsDir: runtime.sessionsDir,
           socketDir: runtime.socketDir,
           attestedClaudeCodeVersion: runtime.claudeCodeVersion,
           locale,
-        })))(options.runtime, options.locale ?? "en");
+          deliveryNotices,
+        })))(
+      options.runtime,
+      options.locale ?? "en",
+      options.deliveryNotices ?? "merged",
+    );
   }
 
   async initialize(

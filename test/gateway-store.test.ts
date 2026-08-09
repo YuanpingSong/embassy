@@ -267,6 +267,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.equal(config.controlSocketPath, "/tmp/private-gateway-test/control.sock");
   assert.equal(config.inboundMode, "paired");
   assert.equal(config.steeringEnabled, true);
+  assert.equal(config.deliveryNotices, "merged");
   assert.equal(config.stallNoticeMs, 150_000);
   assert.equal(config.limits.maxMessageBytes, 16_384);
 
@@ -283,11 +284,30 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
     }).steeringEnabled,
     false,
   );
+  for (const mode of ["merged", "verbose", "quiet"] as const) {
+    assert.equal(
+      loadGatewayConfig({
+        EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+        EMBASSY_DELIVERY_NOTICES: mode,
+      }).deliveryNotices,
+      mode,
+    );
+  }
   assert.throws(
     () =>
       loadGatewayConfig({
         EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
         EMBASSY_STEERING_ENABLED: "false",
+      }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_GATEWAY_CONFIGURATION",
+  );
+  assert.throws(
+    () =>
+      loadGatewayConfig({
+        EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+        EMBASSY_DELIVERY_NOTICES: "silent",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&

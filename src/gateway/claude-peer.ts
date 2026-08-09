@@ -22,6 +22,7 @@ import {
   createCodexRegistrationGeneration,
   isCodexRegistrationGeneration,
 } from "./codex-registration-generation.js";
+import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 
 /**
@@ -157,7 +158,7 @@ export type ClaudePeerInboundProgress = {
 };
 
 export type ClaudePeerAcknowledgmentResult = {
-  transportStatus: "transport_written";
+  transportStatus: "transport_written" | "suppressed";
 };
 
 export type ClaudePeerTransportEvent = {
@@ -218,6 +219,8 @@ export type ClaudePeerAdapterOptions = {
   attestedClaudeCodeVersion: string;
   /** Locale for bounded user-visible gateway notices written to Claude. */
   locale?: DashboardLocale;
+  /** Gateway-authored user-frame policy; native status frames are unaffected. */
+  deliveryNotices?: GatewayDeliveryNoticeMode;
   maxRegistryEntries?: number;
   maxRegistryBytes?: number;
   maxFrameBytes?: number;
@@ -908,6 +911,7 @@ export class ClaudePeerAdapter {
   readonly #createId: () => string;
   readonly #createGeneration: () => string;
   readonly #locale: DashboardLocale;
+  readonly #deliveryNotices: GatewayDeliveryNoticeMode;
   readonly #registryRename: (
     source: string,
     destination: string,
@@ -952,6 +956,16 @@ export class ClaudePeerAdapter {
       );
     }
     this.#locale = options.locale ?? "en";
+    if (
+      options.deliveryNotices !== undefined &&
+      !["merged", "verbose", "quiet"].includes(options.deliveryNotices)
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_CONFIGURATION",
+        "The Claude peer delivery notice mode is unsupported.",
+      );
+    }
+    this.#deliveryNotices = options.deliveryNotices ?? "merged";
     this.#sessionsDir = assertAbsoluteConfiguredPath(
       options.sessionsDir,
       "sessionsDir",
@@ -1642,6 +1656,7 @@ export class ClaudePeerAdapter {
       connect: this.#connect,
       now: this.#now,
       locale: this.#locale,
+      deliveryNotices: this.#deliveryNotices,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
       resolveSessionBinding: async (sessionId) => {
@@ -1974,6 +1989,7 @@ type ListenerCreateOptions = {
   connect: ClaudePeerConnect;
   now: () => number;
   locale: DashboardLocale;
+  deliveryNotices: GatewayDeliveryNoticeMode;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
@@ -2021,6 +2037,7 @@ export class ClaudePeerListener {
   readonly #connect: ClaudePeerConnect;
   readonly #now: () => number;
   readonly #locale: DashboardLocale;
+  readonly #deliveryNotices: GatewayDeliveryNoticeMode;
   readonly #resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   readonly #resolveSessionBinding: (
     sessionId: string,
@@ -2085,6 +2102,7 @@ export class ClaudePeerListener {
     this.#connect = options.connect;
     this.#now = options.now;
     this.#locale = options.locale;
+    this.#deliveryNotices = options.deliveryNotices;
     this.#resolveReplyAddress = options.resolveReplyAddress;
     this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
@@ -2959,6 +2977,10 @@ export class ClaudePeerListener {
         "The native Claude peer receipt already has a stall notification.",
       );
     }
+    if (this.#deliveryNotices === "quiet") {
+      receipt.stallNotification = "settled";
+      return { transportStatus: "suppressed" };
+    }
 
     const queuedForMs = boundedStallQueuedForMs(progress.queuedForMs);
     const openingTag =
@@ -3050,7 +3072,7 @@ export class ClaudePeerListener {
       "utf8",
     );
     const diagnosticFrame =
-      diagnostic === undefined
+      diagnostic === undefined || this.#deliveryNotices !== "verbose"
         ? undefined
         : encodeClaudePeerUserFrame({
             messageId: this.#createId(),

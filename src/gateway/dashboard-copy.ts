@@ -426,6 +426,8 @@ export const dashboardCopyKeys = [
   "app.diag.bytes.body",
   "app.diag.steering.title",
   "app.diag.steering.absent",
+  "app.diag.deliveryNotices.title",
+  "app.diag.deliveryNotices.note",
   "app.diag.editable.title",
   "app.diag.editable.note",
   "app.diag.counters",

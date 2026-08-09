@@ -408,8 +408,8 @@ namespace Embassy {
       omissions.upstreamAlerts === 0 &&
       omissions.attentionItems === 0;
 
-    // The change order's editable four, read-only in Phase A: env var name
-    // where one exists, and the tab whose evidence motivates the change.
+    // Operator-visible settings remain read-only here: show an env var name
+    // where one exists and the tab whose evidence motivates the change.
     const settings: readonly DiagnosticsSettingRow[] = [
       {
         id: "deadline",
@@ -426,6 +426,14 @@ namespace Embassy {
         envName: "EMBASSY_MAX_QUEUE_MESSAGES",
         where: t("app.tab.overview"),
         note: undefined,
+      },
+      {
+        id: "deliveryNotices",
+        name: t("app.diag.deliveryNotices.title"),
+        nameIsToken: false,
+        envName: "EMBASSY_DELIVERY_NOTICES",
+        where: t("app.tab.diagnostics"),
+        note: t("app.diag.deliveryNotices.note"),
       },
       {
         id: "steering",

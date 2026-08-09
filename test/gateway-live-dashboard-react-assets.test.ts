@@ -439,6 +439,10 @@ test("rejects cross-origin, unknown, and malformed asset targets", async () => {
 test("serves the rendered shell and bundles byte-for-byte in both locales", async () => {
   for (const locale of ["en", "zh-CN"] as const) {
     const assets = renderLiveDashboardAssets(locale);
+    assert.ok(
+      assets.appJavaScript.includes("EMBASSY_DELIVERY_NOTICES"),
+      `${locale} app bundle must expose the delivery-notice setting`,
+    );
     const handler = createHandler(assets, locale);
     const fixtures: ReadonlyArray<readonly [string, string, string]> = [
       ["bootstrap", assets.shellHtml, "text/html; charset=utf-8"],

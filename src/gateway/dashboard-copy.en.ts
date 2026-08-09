@@ -516,6 +516,9 @@ export const dashboardCopyEn = {
   "app.diag.steering.title": "Steering",
   "app.diag.steering.absent":
     "STEER markers identify classified Claude-to-Codex delivery evidence. The operator kill-switch setting is not exposed by this metadata contract.",
+  "app.diag.deliveryNotices.title": "Delivery notices",
+  "app.diag.deliveryNotices.note":
+    "Use merged (default), verbose, or quiet; restart embassy serve after changing it.",
   "app.diag.editable.title": "Settings",
   "app.diag.editable.note":
     "Settings are read from environment variables when embassy serve starts. This page cannot change them, so none of them is shown as an editable control.",

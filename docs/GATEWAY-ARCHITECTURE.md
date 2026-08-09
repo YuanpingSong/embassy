@@ -163,7 +163,7 @@ The status below is intentionally narrower than the target architecture.
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
 | Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
-| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, one bounded stall notice with pending age, opaque memory-only correlation handles, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
+| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque memory-only correlation handles, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
@@ -299,12 +299,13 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    boundary silently returns the same body to the normal queue. It does not
    emit Claude's approval-specific native `held` control frame for ordinary
    queueing.
-8. If the delivery remains pending for exactly
-   `floor(messageDeadlineMs / 2)`, the gateway may send
-   the originating Claude session at most one nonterminal
+8. In `merged` and `verbose` notice modes, if the delivery remains pending for
+   exactly `floor(messageDeadlineMs / 2)`, the gateway may send the
+   originating Claude session at most one nonterminal
    `<gateway-delivery-stall>` user frame for that receipt. It contains only an
    allowlisted reason and a bounded `queued-for-ms` age; it is not a native
-   `held` receipt and does not settle the delivery.
+   `held` receipt and does not settle the delivery. `quiet` suppresses this
+   gateway-authored frame without changing native status or dashboard state.
 9. When the task becomes idle, the connector refreshes the exact task state and
    starts the held message. A route retains at most three queued steering
    messages; accepting a fourth atomically cancels the oldest with safe code
@@ -312,13 +313,14 @@ native `SendMessage`, starts an App Server turn, and returns the final reply.
    journal event. Explicit registration is sufficient authorization; Embassy
    does not run an additional workspace or policy classifier.
 10. Successful App Server acceptance returns Claude's native `delivered`
-   receipt. A route or delivery error returns native `expired`, followed by a
-   static `<gateway-delivery-diagnostic>` user frame containing one safe error
-   code. This is the only way to make the reason visible to Claude Code 2.1.224,
-   whose native receipt parser accepts only `held`, `delivered`, `denied`, and
-   `expired` and does not render the control frame's `reason` value. The
-   diagnostic never contains a socket path, session UUID, raw exception, or
-   message body. `denied` is reserved for an actual user or policy refusal.
+   receipt. A route or delivery error returns native `expired` with one safe
+   error code retained in its `reason` field. The default `merged` mode omits
+   the duplicate terminal user frame; `verbose` additionally sends a static
+   `<gateway-delivery-diagnostic>` user frame so the reason is readable in
+   Claude Code versions that do not render the native control reason. `quiet`
+   also omits gateway-authored stall frames. The diagnostic never contains a
+   socket path, session UUID, raw exception, or message body. `denied` is
+   reserved for an actual user or policy refusal.
    A transient clean pre-dispatch failure returns the same message to the queue
    instead of terminally failing it.
 11. Completion is summarized into bounded normalized state and the correlated
@@ -387,7 +389,8 @@ of these closed results:
 `updatedAt` and `deadlineAt` are ISO timestamps. A terminal result guarantees
 only that this gateway delivery attempt will not transition again. It does not
 guarantee a model reply or make an ambiguous outcome safe to retry. A stalled
-result is progress only, even after the one sender-visible stall notice.
+result is progress only, even after the one sender-visible stall notice when
+the configured notice policy permits it.
 
 The CLI exposes `delivery-status --token <token>` for one read and
 `wait-delivery --token <token>` for a bounded wait. The waiter uses the same
