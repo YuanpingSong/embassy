@@ -25,7 +25,9 @@ Embassy is built for one person, one macOS account, and agents you already trust
 
 ## Quickstart
 
-**Requirements:** macOS, Node.js 20+, Claude Code 2.1.226 (still-running 2.1.224–2.1.225 sessions remain discoverable), Codex desktop with App Server 0.147.0 running. The Claude session you select as a destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled — that is Claude Code's own setting, configured in Claude Code, not in Embassy.
+**Requirements:** macOS, Node.js 20+, Claude Code 2.1.226 (still-running 2.1.224–2.1.225 sessions remain discoverable), and Codex desktop configured to use the managed standalone App Server 0.147.0. The Claude session you select as a destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled — that is Claude Code's own setting, configured in Claude Code, not in Embassy.
+
+> **Known limitation:** Embassy can reach Codex tasks only while Desktop uses the managed standalone App Server. In that mode, tasks currently cannot connect to Desktop's built-in in-app browser (`@Browser` loads but does not attach). Switching Desktop back to its default private App Server restores the built-in browser immediately — but makes those tasks unreachable by Embassy. No other capability regressions have been identified, though this was not an exhaustive parity test.
 
 ### 1. Start Embassy
 
