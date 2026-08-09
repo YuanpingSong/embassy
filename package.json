@@ -47,6 +47,7 @@
     "README.zh-CN.md",
     "SECURITY.md",
     "LICENSE",
+    "assets/live-dashboard",
     "assets/vendor/react"
   ],
   "scripts": {

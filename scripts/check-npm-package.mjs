@@ -20,9 +20,13 @@ const PUBLIC_PACKAGE_PATHS = [
   "README.md",
   "README.zh-CN.md",
   "SECURITY.md",
+  "assets/live-dashboard/app.css",
   "assets/mark-seal.svg",
   "assets/mark.svg",
   "assets/social-preview.png",
+  "assets/vendor/react/LICENSE",
+  "assets/vendor/react/react-dom.production.min.js",
+  "assets/vendor/react/react.production.min.js",
   "docs/DESIGN.md",
   "docs/GATEWAY-ARCHITECTURE.md",
   "package.json",
@@ -80,6 +84,7 @@ export const EXPECTED_NPM_PACKAGE_PATHS = Object.freeze(
     ...PUBLIC_PACKAGE_PATHS,
     ...runtimePaths("dist/src/gateway", GATEWAY_RUNTIME_MODULES),
     ...runtimePaths("dist/src", ROOT_RUNTIME_MODULES),
+    "dist/src/gateway/live-dashboard-app/app.js",
   ].sort(),
 );
 
