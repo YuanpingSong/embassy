@@ -135,6 +135,12 @@ const successorCodexBinding: PrivateRouteBinding = {
   ownerLease: "codex-owner-lease-0002",
 };
 
+const independentCodexBinding: PrivateRouteBinding = {
+  ...codexBinding,
+  routeHandle: "codex-thread-private-0003",
+  ownerLease: "codex-owner-lease-0003",
+};
+
 const oldSuccessionIdentity = {
   alias: "codex-old@this-mac",
   threadId: codexBinding.routeHandle,
@@ -1329,7 +1335,7 @@ test("Codex succession barrier inspection is bounded and metadata-only", async (
   const { store } = await fixture();
   await store.initialize();
   await observeAndRegisterSuccessionRoutes(store, true);
-  assert.deepEqual(await store.inspectCodexSuccessionBarrier(), {
+  assert.deepEqual(await store.inspectCodexSuccessionBarrier(oldSuccessionIdentity.alias), {
     codexRouteCount: 1,
     queueCount: 0,
     inFlightCount: 0,
@@ -1346,7 +1352,7 @@ test("Codex succession barrier inspection is bounded and metadata-only", async (
     dedupeKey: "succession-barrier-private-dedupe",
   });
   assert.ok(accepted.messageId);
-  const blocked = await store.inspectCodexSuccessionBarrier();
+  const blocked = await store.inspectCodexSuccessionBarrier(oldSuccessionIdentity.alias);
   assert.deepEqual(blocked, {
     codexRouteCount: 1,
     queueCount: 1,
@@ -1363,7 +1369,7 @@ test("Codex succession barrier inspection is bounded and metadata-only", async (
   assert.ok(blocked.inFlightCount <= limits().maxInFlightMessages);
 
   await store.dequeueMessage("advisor@this-mac");
-  assert.deepEqual(await store.inspectCodexSuccessionBarrier(), {
+  assert.deepEqual(await store.inspectCodexSuccessionBarrier(oldSuccessionIdentity.alias), {
     codexRouteCount: 1,
     queueCount: 0,
     inFlightCount: 1,
@@ -1371,6 +1377,52 @@ test("Codex succession barrier inspection is bounded and metadata-only", async (
     codexQueueDepth: 0,
     clean: false,
   });
+  await store.close();
+});
+
+test("Codex succession is route-scoped and preserves unrelated queued work", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegisterSuccessionRoutes(store, true);
+  await store.registerRoute({
+    alias: "codex-independent@this-mac",
+    binding: independentCodexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "codex-independent@this-mac",
+  });
+  const unrelated = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "codex-independent@this-mac",
+    body: "unrelated queued body",
+    dedupeKey: "unrelated-during-succession",
+  });
+
+  assert.equal(
+    (await store.inspectCodexSuccessionBarrier(oldSuccessionIdentity.alias))
+      .clean,
+    true,
+  );
+  await store.prepareCodexSuccession({
+    old: oldSuccessionIdentity,
+    new: newSuccessionIdentity,
+  });
+  await store.armCodexSuccessionPublication(exactSuccession);
+  await store.markCodexSuccessionPublished(exactSuccession);
+  await store.activateCodexSuccession({ ...exactSuccession, state: "idle" });
+  await store.completeCodexSuccession(exactSuccession);
+
+  assert.equal(
+    (await store.dequeueMessage("codex-independent@this-mac"))?.messageId,
+    unrelated.messageId,
+  );
+  const aliases = (await store.publicSnapshot()).routes.map(
+    (route) => route.alias,
+  );
+  assert.equal(aliases.includes(newSuccessionIdentity.alias), true);
+  assert.equal(aliases.includes("codex-independent@this-mac"), true);
   await store.close();
 });
 

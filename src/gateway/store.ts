@@ -1001,19 +1001,31 @@ function isPersistedSuccessionConsistent(
   if (state.codexSuccession === null) return true;
   if (!isCodexSuccessionJournal(state.codexSuccession)) return false;
   const journal = state.codexSuccession;
-  const codexRoutes = state.routes.filter(
-    (route) => route.binding.provider === "codex",
+  const matchingRoutes = state.routes.filter(
+    (candidate) =>
+      routeMatchesSuccessionIdentity(candidate, journal.old) ||
+      routeMatchesSuccessionIdentity(candidate, journal.new),
   );
+  if (matchingRoutes.length !== 1 || matchingRoutes[0] === undefined) {
+    return false;
+  }
+  const route = matchingRoutes[0];
+  const successionAliases = new Set([journal.old.alias, journal.new.alias]);
   if (
-    codexRoutes.length !== 1 ||
-    state.queue.length !== 0 ||
-    state.inFlight.length !== 0 ||
-    codexRoutes[0]?.queueDepth !== 0
+    state.queue.some(
+      (item) =>
+        successionAliases.has(item.sourceAlias) ||
+        successionAliases.has(item.targetAlias),
+    ) ||
+    state.inFlight.some(
+      (item) =>
+        successionAliases.has(item.sourceAlias) ||
+        successionAliases.has(item.targetAlias),
+    ) ||
+    route.queueDepth !== 0
   ) {
     return false;
   }
-  const route = codexRoutes[0];
-  if (route === undefined) return false;
   const oldMatches = routeMatchesSuccessionIdentity(route, journal.old);
   const newMatches = routeMatchesSuccessionIdentity(route, journal.new);
   const newConnectorGenerationExists = state.connectors.some((connector) =>
@@ -2206,9 +2218,9 @@ export class GatewayStore {
   }
 
   /**
-   * Controller-internal inventory used only to enforce the single Codex
-   * process identity across restart. Native task handles never cross the
-   * control protocol or enter a public projection.
+   * Controller-internal inventory used to preserve exact Codex registration
+   * identities across restart. Native task handles never cross the control
+   * protocol or enter a public projection.
    */
   async inspectPrivateCodexRoutes(): Promise<
     GatewayPrivateRouteInspection[]
@@ -2237,27 +2249,43 @@ export class GatewayStore {
    * Bounded, metadata-only barrier observation for the succession controller.
    * No route, message, conversation, or listener identifier is returned.
    */
-  async inspectCodexSuccessionBarrier(): Promise<CodexSuccessionBarrierInspection> {
+  async inspectCodexSuccessionBarrier(
+    alias: string,
+  ): Promise<CodexSuccessionBarrierInspection> {
     return this.mutex.run("gateway", async () => {
       const state = this.requireState();
       const codexRoutes = state.routes.filter(
-        (route) => route.binding.provider === "codex",
+        (route) =>
+          route.binding.provider === "codex" && route.alias === alias,
       );
       const codexQueueDepth = codexRoutes.reduce(
         (total, route) => total + route.queueDepth,
         0,
       );
+      const queued = state.queue.filter(
+        (item) => item.sourceAlias === alias || item.targetAlias === alias,
+      );
+      const inFlight = state.inFlight.filter(
+        (item) => item.sourceAlias === alias || item.targetAlias === alias,
+      );
+      const ownedMessageIds = new Set([
+        ...queued.map((item) => item.messageId),
+        ...inFlight.map((item) => item.messageId),
+      ]);
+      const transientBodyCount = [...this.transientBodies.keys()].filter(
+        (messageId) => ownedMessageIds.has(messageId),
+      ).length;
       const inspection: CodexSuccessionBarrierInspection = {
         codexRouteCount: codexRoutes.length,
-        queueCount: state.queue.length,
-        inFlightCount: state.inFlight.length,
-        transientBodyCount: this.transientBodies.size,
+        queueCount: queued.length,
+        inFlightCount: inFlight.length,
+        transientBodyCount,
         codexQueueDepth,
         clean:
           codexRoutes.length === 1 &&
-          state.queue.length === 0 &&
-          state.inFlight.length === 0 &&
-          this.transientBodies.size === 0 &&
+          queued.length === 0 &&
+          inFlight.length === 0 &&
+          transientBodyCount === 0 &&
           codexQueueDepth === 0,
       };
       return inspection;
@@ -2294,12 +2322,12 @@ export class GatewayStore {
           "A durable Codex succession journal already exists.",
         );
       }
-      this.assertSuccessionLedgerEmpty(state);
-      const route = this.requireSoleCodexRoute(state);
+      this.assertSuccessionLedgerEmpty(state, input.old.alias);
+      const route = this.requireCodexRouteForIdentity(state, input.old);
       if (!routeMatchesSuccessionIdentity(route, input.old)) {
         throw new BridgeError(
           "CODEX_SUCCESSION_OWNER_MISMATCH",
-          "The old succession identity does not exactly own the sole Codex route.",
+          "The old succession identity does not exactly own its Codex route.",
         );
       }
       this.requireCompatibleObservedEndpoint(state, input.new.binding);
@@ -2323,7 +2351,7 @@ export class GatewayStore {
         input,
         ["prepared"],
       );
-      this.assertSuccessionLedgerEmpty(state);
+      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
       this.requireJournalRoute(state, journal, "old");
       state.codexSuccession = { ...journal, stage: "publication_armed" };
     });
@@ -2339,7 +2367,7 @@ export class GatewayStore {
         input,
         ["publication_armed"],
       );
-      this.assertSuccessionLedgerEmpty(state);
+      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
       this.requireJournalRoute(state, journal, "old");
       state.codexSuccession = { ...journal, stage: "published" };
     });
@@ -2371,7 +2399,7 @@ export class GatewayStore {
         },
         ["published"],
       );
-      this.assertSuccessionLedgerEmpty(state);
+      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
       const route = this.requireJournalRoute(state, journal, "old");
       this.requireCompatibleObservedEndpoint(state, journal.new.binding);
       this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
@@ -2419,21 +2447,12 @@ export class GatewayStore {
           "recovery_forbidden",
         ],
       );
-      this.assertSuccessionLedgerEmpty(state);
+      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
       const expected =
         journal.stage === "activated" ? "new" : undefined;
       if (expected !== undefined) this.requireJournalRoute(state, journal, expected);
       else {
-        const route = this.requireSoleCodexRoute(state);
-        if (
-          !routeMatchesSuccessionIdentity(route, journal.old) &&
-          !routeMatchesSuccessionIdentity(route, journal.new)
-        ) {
-          throw new BridgeError(
-            "CODEX_SUCCESSION_OWNER_MISMATCH",
-            "The recovery-forbidden journal no longer owns the sole Codex route.",
-          );
-        }
+        this.requireAnyJournalRoute(state, journal);
       }
       state.codexSuccession = {
         ...journal,
@@ -2480,7 +2499,7 @@ export class GatewayStore {
           "Clearing an armed succession requires positive proof that publication is absent.",
         );
       }
-      this.assertSuccessionLedgerEmpty(state);
+      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
       this.requireJournalRoute(state, journal, "old");
       state.codexSuccession = null;
     });
@@ -2495,7 +2514,7 @@ export class GatewayStore {
         "activated",
         "recovery_forbidden",
       ]);
-      this.assertSuccessionLedgerEmpty(state);
+      this.assertSuccessionLedgerEmpty(state, journal.new.alias);
       this.requireJournalRoute(state, journal, "new");
       state.codexSuccession = null;
     });
@@ -3436,36 +3455,55 @@ export class GatewayStore {
     return journal;
   }
 
-  private assertSuccessionLedgerEmpty(state: GatewayPersistedState): void {
+  private assertSuccessionLedgerEmpty(
+    state: GatewayPersistedState,
+    alias: string,
+  ): void {
+    const queued = state.queue.filter(
+      (item) => item.sourceAlias === alias || item.targetAlias === alias,
+    );
+    const inFlight = state.inFlight.filter(
+      (item) => item.sourceAlias === alias || item.targetAlias === alias,
+    );
+    const ownedMessageIds = new Set([
+      ...queued.map((item) => item.messageId),
+      ...inFlight.map((item) => item.messageId),
+    ]);
     if (
-      state.queue.length !== 0 ||
-      state.inFlight.length !== 0 ||
-      this.transientBodies.size !== 0 ||
+      queued.length !== 0 ||
+      inFlight.length !== 0 ||
+      [...this.transientBodies.keys()].some((messageId) =>
+        ownedMessageIds.has(messageId),
+      ) ||
       state.routes.some(
-        (route) => route.binding.provider === "codex" && route.queueDepth !== 0,
+        (route) =>
+          route.binding.provider === "codex" &&
+          route.alias === alias &&
+          route.queueDepth !== 0,
       )
     ) {
       throw new BridgeError(
         "CODEX_SUCCESSION_LEDGER_NOT_EMPTY",
-        "Codex succession requires a fully drained queue and in-flight ledger.",
+        "Codex succession requires the replaced route's queue and in-flight ledger to be drained.",
         true,
       );
     }
   }
 
-  private requireSoleCodexRoute(
+  private requireCodexRouteForIdentity(
     state: GatewayPersistedState,
+    identity: CodexSuccessionStoreIdentity,
   ): GatewayRouteRecord {
-    const routes = state.routes.filter(
-      (route) => route.binding.provider === "codex",
+    const route = state.routes.find(
+      (candidate) => routeMatchesSuccessionIdentity(candidate, identity),
     );
-    if (routes.length !== 1 || routes[0] === undefined) {
+    if (route === undefined) {
       throw new BridgeError(
-        "CODEX_SUCCESSION_ROUTE_MISMATCH",
-        "Codex succession requires exactly one persisted Codex route.",
+        "CODEX_SUCCESSION_OWNER_MISMATCH",
+        "Codex succession requires the exact persisted Codex route.",
       );
     }
-    return routes[0];
+    return route;
   }
 
   private requireJournalRoute(
@@ -3473,14 +3511,25 @@ export class GatewayStore {
     journal: CodexSuccessionJournal,
     side: "old" | "new",
   ): GatewayRouteRecord {
-    const route = this.requireSoleCodexRoute(state);
-    if (!routeMatchesSuccessionIdentity(route, journal[side])) {
+    return this.requireCodexRouteForIdentity(state, journal[side]);
+  }
+
+  private requireAnyJournalRoute(
+    state: GatewayPersistedState,
+    journal: CodexSuccessionJournal,
+  ): GatewayRouteRecord {
+    const routes = state.routes.filter(
+      (candidate) =>
+        routeMatchesSuccessionIdentity(candidate, journal.old) ||
+        routeMatchesSuccessionIdentity(candidate, journal.new),
+    );
+    if (routes.length !== 1 || routes[0] === undefined) {
       throw new BridgeError(
         "CODEX_SUCCESSION_OWNER_MISMATCH",
-        `The sole Codex route does not match the exact ${side} succession owner.`,
+        "The succession journal must own exactly one persisted Codex route.",
       );
     }
-    return route;
+    return routes[0];
   }
 
   private assertNewSuccessionIdentityAvailable(
@@ -4461,17 +4510,8 @@ export class GatewayStore {
   ): void {
     const journal = this.journal(state);
     if (journal === null || journal.stage === "prepared") return;
-    this.assertSuccessionLedgerEmpty(state);
-    const route = this.requireSoleCodexRoute(state);
-    if (
-      !routeMatchesSuccessionIdentity(route, journal.old) &&
-      !routeMatchesSuccessionIdentity(route, journal.new)
-    ) {
-      throw new BridgeError(
-        "CORRUPT_GATEWAY_STATE",
-        "The durable succession journal owns neither persisted Codex route generation.",
-      );
-    }
+    const route = this.requireAnyJournalRoute(state, journal);
+    this.assertSuccessionLedgerEmpty(state, route.alias);
     this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
     this.replaceCodexRouteForSuccession(
       state,

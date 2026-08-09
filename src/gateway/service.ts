@@ -588,9 +588,9 @@ export class GatewayService {
   private closeInFlight: Promise<void> | undefined;
   private acceptingCallbacks = true;
   private dashboardHealthy = true;
-  /** Globally fences dispatch while the single Codex identity is replaced. */
-  private codexSuccessionDispatchFrozen = false;
-  private codexSuccessionPoisoned = false;
+  /** Route-scoped fences; unrelated Codex registrations remain dispatchable. */
+  private readonly codexSuccessionDispatchFrozen = new Set<string>();
+  private readonly codexSuccessionPoisoned = new Set<string>();
   private codexSuccessionState: CodexRegistrationSuccessionState | undefined;
   private pendingCodexSuccessionRecovery:
     | PendingCodexSuccessionRecovery
@@ -599,7 +599,10 @@ export class GatewayService {
    * Exact active identity. It changes only through the journaled succession
    * machine; ordinary unregister/register cannot repurpose one listener.
    */
-  private codexRegistrationLock: CodexRegistrationLock | undefined;
+  private readonly codexRegistrationLocks = new Map<
+    string,
+    CodexRegistrationLock
+  >();
 
   constructor(options: GatewayServiceOptions) {
     this.config = options.config;
@@ -1347,18 +1350,31 @@ export class GatewayService {
       authority: "new",
       journal: authority.journal,
     };
-    this.codexRegistrationLock = Object.freeze({
+    this.codexRegistrationLocks.set(authority.journal.new.alias, Object.freeze({
       alias: authority.journal.new.alias,
       threadId: authority.journal.new.threadId,
       hostId: authority.journal.new.hostId,
       generation: authority.journal.new.generation,
-    });
+    }));
   }
 
   private async completePendingCodexSuccessionRecoveryLocked(
     params: ValidatedRegisterCodexParams,
   ): Promise<void> {
     const recovery = this.pendingCodexSuccessionRecovery;
+    if (recovery === undefined) return;
+    this.assertPendingCodexSuccessionRecoveryMatch(params, recovery);
+    await this.store.completeCodexSuccession({
+      oldGeneration: recovery.journal.old.generation,
+      newGeneration: recovery.journal.new.generation,
+    });
+    this.pendingCodexSuccessionRecovery = undefined;
+  }
+
+  private assertPendingCodexSuccessionRecoveryMatch(
+    params: ValidatedRegisterCodexParams,
+    recovery = this.pendingCodexSuccessionRecovery,
+  ): void {
     if (recovery === undefined) return;
     if (
       recovery.journal.new.alias !== params.alias ||
@@ -1370,11 +1386,6 @@ export class GatewayService {
         "Only the exact successor task may recover this Codex registration.",
       );
     }
-    await this.store.completeCodexSuccession({
-      oldGeneration: recovery.journal.old.generation,
-      newGeneration: recovery.journal.new.generation,
-    });
-    this.pendingCodexSuccessionRecovery = undefined;
   }
 
   private requireCurrentNativeCodexGeneration(
@@ -1486,7 +1497,10 @@ export class GatewayService {
     params: ValidatedRegisterCodexParams,
   ): Promise<void> {
     const oldAlias = params.succeedsAlias;
-    const lock = this.codexRegistrationLock;
+    const lock =
+      oldAlias === undefined
+        ? undefined
+        : this.codexRegistrationLocks.get(oldAlias);
     if (
       oldAlias === undefined ||
       lock === undefined ||
@@ -1588,7 +1602,8 @@ export class GatewayService {
     if (execution.requestFailureCode !== undefined) {
       throw new BridgeError(
         execution.requestFailureCode,
-        this.codexSuccessionPoisoned
+        this.codexSuccessionPoisoned.has(oldRegistration.alias) ||
+          this.codexSuccessionPoisoned.has(newRegistration.alias)
           ? "Codex succession requires manual recovery."
           : "Codex succession did not pass its quiescence or publication boundary.",
         execution.requestFailureCode.includes("BUSY"),
@@ -1603,7 +1618,11 @@ export class GatewayService {
         "Codex succession did not reach a stable active generation.",
       );
     }
-    this.codexRegistrationLock = Object.freeze({ ...newRegistration });
+    this.codexRegistrationLocks.delete(oldRegistration.alias);
+    this.codexRegistrationLocks.set(
+      newRegistration.alias,
+      Object.freeze({ ...newRegistration }),
+    );
     if (execution.newRouteState === "idle") {
       this.scheduleDispatch(newRegistration.alias);
     }
@@ -1771,8 +1790,10 @@ export class GatewayService {
         return undefined;
       }
       case "freeze_old_dispatch":
-        this.codexSuccessionDispatchFrozen = true;
-        this.scheduledDispatchTargets.clear();
+        this.codexSuccessionDispatchFrozen.add(execution.oldRegistration.alias);
+        this.codexSuccessionDispatchFrozen.add(execution.newRegistration.alias);
+        this.scheduledDispatchTargets.delete(execution.oldRegistration.alias);
+        this.scheduledDispatchTargets.delete(execution.newRegistration.alias);
         return undefined;
       case "quiesce_and_join_old":
         await this.drainCallbackQueueLocked();
@@ -1810,11 +1831,20 @@ export class GatewayService {
         // The barrier proves no accepted body or live continuation remains.
         // Inert conversation identifiers are deliberately not inherited by a
         // successor identity.
-        this.conversations.clear();
+        this.purgeSuccessionTransientState(
+          new Set([
+            execution.oldRegistration.alias,
+            execution.newRegistration.alias,
+          ]),
+        );
         return undefined;
       case "purge_old_reply_capabilities": {
-        this.pendingClaudeReplies.clear();
-        this.nativeIngressByConversation.clear();
+        this.purgeSuccessionTransientState(
+          new Set([
+            execution.oldRegistration.alias,
+            execution.newRegistration.alias,
+          ]),
+        );
         const purge = this.requireSuccessionMethod(
           claudeAdapter,
           "purgeNativeCodexPeerGenerationReplyCapabilities",
@@ -1925,7 +1955,13 @@ export class GatewayService {
           execution.newBinding,
           state,
         );
-        this.codexRegistrationLock = Object.freeze({ ...effect.registration });
+        this.codexRegistrationLocks.delete(
+          this.successionOldRegistration(execution).alias,
+        );
+        this.codexRegistrationLocks.set(
+          effect.registration.alias,
+          Object.freeze({ ...effect.registration }),
+        );
         await claudeAdapter.updateNativeCodexPeerStatus?.(
           effect.registration.alias,
           state === "idle"
@@ -1950,7 +1986,8 @@ export class GatewayService {
             effect.registryUnlink.protectedActiveGeneration,
         });
         await this.store.completeCodexSuccession(exact);
-        this.codexSuccessionDispatchFrozen = false;
+        this.codexSuccessionDispatchFrozen.delete(execution.oldRegistration.alias);
+        this.codexSuccessionDispatchFrozen.delete(execution.newRegistration.alias);
         return {
           type: "cleanup_confirmed",
           generation: newRegistration.generation,
@@ -2006,14 +2043,18 @@ export class GatewayService {
         return undefined;
       }
       case "resume_old_dispatch":
-        this.codexSuccessionDispatchFrozen = false;
-        this.rescheduleIdleRoutesLocked();
+        this.codexSuccessionDispatchFrozen.delete(execution.oldRegistration.alias);
+        this.codexSuccessionDispatchFrozen.delete(execution.newRegistration.alias);
+        if (this.routeStates.get(execution.oldRegistration.alias) === "idle") {
+          this.scheduleDispatch(execution.oldRegistration.alias);
+        }
         return {
           type: "resume_confirmed",
           generation: newRegistration.generation,
         };
       case "poison_new_generation":
-        this.codexSuccessionPoisoned = true;
+        this.codexSuccessionPoisoned.add(execution.oldRegistration.alias);
+        this.codexSuccessionPoisoned.add(execution.newRegistration.alias);
         if (
           execution.state.phase === "offline_poisoned" &&
           execution.state.rollback === "old_allowed"
@@ -2044,6 +2085,13 @@ export class GatewayService {
           )) ??
           (await this.store.inspectPrivateRoute(effect.oldRegistration.alias));
         if (route !== undefined && route.enabled) {
+          const invalidated = await this.store.invalidateRoute(
+            route.binding,
+            "CODEX_SUCCESSION_RECOVERY_REQUIRED",
+          );
+          for (const settlement of invalidated) {
+            await this.applyTerminalSettlementLocked(settlement);
+          }
           const settlements = await this.store.disableRoute(
             route.alias,
             route.binding.ownerLease,
@@ -2054,20 +2102,14 @@ export class GatewayService {
         }
         this.forgetBinding(effect.oldRegistration.alias);
         this.forgetBinding(effect.newRegistration.alias);
-        for (const adapter of [codexAdapter, claudeAdapter]) {
-          const settlements = await this.store.markConnectorOffline(
-            adapter.identity,
-            "CODEX_SUCCESSION_RECOVERY_REQUIRED",
-          );
-          for (const settlement of settlements) {
-            await this.applyTerminalSettlementLocked(settlement);
-          }
-        }
         await this.drainCallbackQueueLocked();
         await this.drainDetachedReceiptWritesLocked();
-        this.conversations.clear();
-        this.pendingClaudeReplies.clear();
-        this.nativeIngressByConversation.clear();
+        this.purgeSuccessionTransientState(
+          new Set([
+            execution.oldRegistration.alias,
+            execution.newRegistration.alias,
+          ]),
+        );
         if (
           !(await this.codexSuccessionPoisonBarrierCleanLocked(
             execution,
@@ -2093,7 +2135,8 @@ export class GatewayService {
             type: "cleanup_unpublished_generation",
             registration: effect.newRegistration,
           });
-          this.codexSuccessionPoisoned = false;
+          this.codexSuccessionPoisoned.delete(execution.oldRegistration.alias);
+          this.codexSuccessionPoisoned.delete(execution.newRegistration.alias);
           return {
             type: "cleanup_confirmed",
             generation: effect.newRegistration.generation,
@@ -2106,8 +2149,14 @@ export class GatewayService {
           );
         }
         const results = await Promise.allSettled([
-          codexAdapter.close(),
-          claudeAdapter.close(),
+          claudeAdapter.unadvertiseNativeCodexPeer?.(
+            execution.oldRegistration.alias,
+          ),
+          claudeAdapter.unadvertiseNativeCodexPeer?.(
+            execution.newRegistration.alias,
+          ),
+          codexAdapter.releaseRoute?.(execution.oldRegistration.threadId),
+          codexAdapter.releaseRoute?.(execution.newRegistration.threadId),
         ]);
         if (results.some((result) => result.status === "rejected")) {
           throw new BridgeError(
@@ -2115,6 +2164,8 @@ export class GatewayService {
             "The poisoned Codex generations could not be fully closed.",
           );
         }
+        this.codexRegistrationLocks.delete(execution.oldRegistration.alias);
+        this.codexRegistrationLocks.delete(execution.newRegistration.alias);
         return {
           type: "cleanup_confirmed",
           generation: effect.newRegistration.generation,
@@ -2211,6 +2262,82 @@ export class GatewayService {
     );
   }
 
+  private conversationTouchesAliases(
+    conversationId: string,
+    aliases: ReadonlySet<string>,
+  ): boolean {
+    const conversation = this.conversations.get(conversationId);
+    return (
+      conversation !== undefined &&
+      (aliases.has(conversation.sourceAlias) ||
+        aliases.has(conversation.targetAlias))
+    );
+  }
+
+  private successionServiceStateClean(
+    aliases: ReadonlySet<string>,
+  ): boolean {
+    const contextTouches = (context: MessageContext): boolean =>
+      aliases.has(context.targetAlias) ||
+      this.conversationTouchesAliases(context.conversationId, aliases);
+    return (
+      [...this.messageContexts.values()].every(
+        (context) => !contextTouches(context),
+      ) &&
+      [...this.providerTurnContinuations.values()].every(
+        (context) => !contextTouches(context),
+      ) &&
+      [...this.activeDispatchByTarget.keys()].every(
+        (alias) => !aliases.has(alias),
+      ) &&
+      [...this.scheduledDispatchTargets].every((alias) => !aliases.has(alias)) &&
+      [...this.dispatchRunnerTargets].every((alias) => !aliases.has(alias)) &&
+      [...this.pendingClaudeReplies.values()].every(
+        (pending) =>
+          !this.conversationTouchesAliases(pending.conversationId, aliases),
+      ) &&
+      [...this.nativeIngressByConversation.entries()].every(
+        ([conversationId, capability]) =>
+          !aliases.has(capability.sourceAlias) &&
+          !this.conversationTouchesAliases(conversationId, aliases),
+      ) &&
+      [...this.deliveryTrackers.values()].every(
+        (tracker) =>
+          (!aliases.has(tracker.targetAlias) &&
+            !this.conversationTouchesAliases(
+              tracker.conversationId,
+              aliases,
+            )) ||
+          (isTerminalDeliveryMachine(tracker.machine) &&
+            tracker.pendingTerminalEvent === undefined &&
+            tracker.pendingTerminalReplyText === undefined &&
+            tracker.settlementRetryAt === undefined &&
+            tracker.nativeReceipt === undefined),
+      )
+    );
+  }
+
+  private purgeSuccessionTransientState(aliases: ReadonlySet<string>): void {
+    const conversationIds = new Set(
+      [...this.conversations.values()]
+        .filter(
+          (conversation) =>
+            aliases.has(conversation.sourceAlias) ||
+            aliases.has(conversation.targetAlias),
+        )
+        .map((conversation) => conversation.id),
+    );
+    for (const conversationId of conversationIds) {
+      this.conversations.delete(conversationId);
+      this.nativeIngressByConversation.delete(conversationId);
+    }
+    for (const [key, pending] of this.pendingClaudeReplies) {
+      if (conversationIds.has(pending.conversationId)) {
+        this.pendingClaudeReplies.delete(key);
+      }
+    }
+  }
+
   private async codexSuccessionPoisonBarrierCleanLocked(
     execution: CodexSuccessionExecution,
     claudeAdapter: GatewayProviderAdapter,
@@ -2241,22 +2368,22 @@ export class GatewayService {
         observeCodex.call(codexAdapter, registration.threadId),
       ),
     );
-    const store = await this.store.inspectCodexSuccessionBarrier();
-    const trackersClean = [...this.deliveryTrackers.values()].every(
-      (tracker) =>
-        isTerminalDeliveryMachine(tracker.machine) &&
-        tracker.pendingTerminalEvent === undefined &&
-        tracker.pendingTerminalReplyText === undefined &&
-        tracker.settlementRetryAt === undefined &&
-        tracker.nativeReceipt === undefined,
+    const persistedRoute =
+      (await this.store.inspectPrivateRoute(execution.newRegistration.alias)) ??
+      (await this.store.inspectPrivateRoute(execution.oldRegistration.alias));
+    if (persistedRoute === undefined) return false;
+    const store = await this.store.inspectCodexSuccessionBarrier(
+      persistedRoute.alias,
     );
-    const tokensClean = [...this.deliveryTokens.values()].every((messageId) => {
-      const tracker = this.deliveryTrackers.get(messageId);
-      return tracker !== undefined && isTerminalDeliveryMachine(tracker.machine);
-    });
+    const aliases = new Set([
+      execution.oldRegistration.alias,
+      execution.newRegistration.alias,
+    ]);
     return (
-      this.codexSuccessionPoisoned &&
-      this.codexSuccessionDispatchFrozen &&
+      [...aliases].every((alias) => this.codexSuccessionPoisoned.has(alias)) &&
+      [...aliases].every((alias) =>
+        this.codexSuccessionDispatchFrozen.has(alias),
+      ) &&
       store.clean &&
       store.codexRouteCount === 1 &&
       store.queueCount === 0 &&
@@ -2273,17 +2400,9 @@ export class GatewayService {
       claude.pendingInboundReceipts === 0 &&
       claude.rejectedInboundSettlements === 0 &&
       codexQuiet &&
-      this.messageContexts.size === 0 &&
-      this.providerTurnContinuations.size === 0 &&
-      this.activeDispatchByTarget.size === 0 &&
-      this.scheduledDispatchTargets.size === 0 &&
-      this.dispatchRunnerTargets.size === 0 &&
-      this.pendingClaudeReplies.size === 0 &&
-      this.nativeIngressByConversation.size === 0 &&
+      this.successionServiceStateClean(aliases) &&
       this.callbackQueue.length === 0 &&
-      this.detachedReceiptWrites.size === 0 &&
-      trackersClean &&
-      tokensClean
+      this.detachedReceiptWrites.size === 0
     );
   }
 
@@ -2294,7 +2413,9 @@ export class GatewayService {
     await this.drainDetachedReceiptWritesLocked();
     const lifecycleChanged = await this.processLifecycleLocked();
     if (lifecycleChanged) await this.publish();
-    const store = await this.store.inspectCodexSuccessionBarrier();
+    const store = await this.store.inspectCodexSuccessionBarrier(
+      oldRegistration.alias,
+    );
     const claudeAdapter = this.adapter("claude", oldRegistration.hostId);
     const codexAdapter = this.adapter("codex", oldRegistration.hostId);
     const observeClaude = this.requireSuccessionMethod(
@@ -2310,21 +2431,10 @@ export class GatewayService {
       oldRegistration.generation,
     );
     const codex = observeCodex.call(codexAdapter, oldRegistration.threadId);
-    const trackersClean = [...this.deliveryTrackers.values()].every(
-      (tracker) =>
-        isTerminalDeliveryMachine(tracker.machine) &&
-        tracker.pendingTerminalEvent === undefined &&
-        tracker.pendingTerminalReplyText === undefined &&
-        tracker.settlementRetryAt === undefined &&
-        tracker.nativeReceipt === undefined,
-    );
-    const tokensClean = [...this.deliveryTokens.values()].every((messageId) => {
-      const tracker = this.deliveryTrackers.get(messageId);
-      return tracker !== undefined && isTerminalDeliveryMachine(tracker.machine);
-    });
+    const aliases = new Set([oldRegistration.alias]);
     return (
       !this.closing &&
-      this.codexSuccessionDispatchFrozen &&
+      this.codexSuccessionDispatchFrozen.has(oldRegistration.alias) &&
       store.clean &&
       claude.clean &&
       claude.generation === oldRegistration.generation &&
@@ -2332,17 +2442,9 @@ export class GatewayService {
       claude.ingressQuiesced &&
       claude.monitorFrozen &&
       codex.clean &&
-      this.messageContexts.size === 0 &&
-      this.providerTurnContinuations.size === 0 &&
-      this.activeDispatchByTarget.size === 0 &&
-      this.scheduledDispatchTargets.size === 0 &&
-      this.dispatchRunnerTargets.size === 0 &&
-      this.pendingClaudeReplies.size === 0 &&
-      this.nativeIngressByConversation.size === 0 &&
+      this.successionServiceStateClean(aliases) &&
       this.callbackQueue.length === 0 &&
-      this.detachedReceiptWrites.size === 0 &&
-      trackersClean &&
-      tokensClean
+      this.detachedReceiptWrites.size === 0
     );
   }
 
@@ -2359,7 +2461,11 @@ export class GatewayService {
         "A registered Codex alias must start with codex-.",
       );
     }
-    if (this.codexSuccessionPoisoned) {
+    if (
+      this.codexSuccessionPoisoned.has(params.alias) ||
+      (params.succeedsAlias !== undefined &&
+        this.codexSuccessionPoisoned.has(params.succeedsAlias))
+    ) {
       throw new BridgeError(
         "CODEX_SUCCESSION_RECOVERY_REQUIRED",
         "Codex registration is offline until the incomplete succession is manually recovered.",
@@ -2369,11 +2475,10 @@ export class GatewayService {
       await this.succeedCodexRegistration(params);
       return;
     }
-    const registrationLock = this.codexRegistrationLock;
+    const registrationLock = this.codexRegistrationLocks.get(params.alias);
     if (
       registrationLock !== undefined &&
-      (registrationLock.alias !== params.alias ||
-        registrationLock.threadId !== params.threadId ||
+      (registrationLock.threadId !== params.threadId ||
         registrationLock.hostId !== params.hostId)
     ) {
       throw new BridgeError(
@@ -2381,16 +2486,29 @@ export class GatewayService {
         "A Codex registration cannot change alias, task, or host during one Embassy process lifetime.",
       );
     }
-    const persistedCodexRoutes = await this.store.inspectPrivateCodexRoutes();
-    const persistedCodexRoute =
-      persistedCodexRoutes.length === 1
-        ? persistedCodexRoutes[0]
-        : undefined;
     if (
-      persistedCodexRoutes.length > 0 &&
-      (persistedCodexRoute === undefined ||
-        persistedCodexRoute.alias !== params.alias ||
-        persistedCodexRoute.binding.hostId !== params.hostId ||
+      [...this.codexRegistrationLocks.values()].some(
+        (lock) =>
+          lock.alias !== params.alias &&
+          lock.hostId === params.hostId &&
+          lock.threadId === params.threadId,
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_REGISTRATION_REBIND_FORBIDDEN",
+        "One Codex task cannot be registered under two aliases.",
+      );
+    }
+    // An irreversible succession restart leaves one exact durable successor
+    // authority. Reject every other identity before it can acquire provisional
+    // connector or native-advertisement state.
+    this.assertPendingCodexSuccessionRecoveryMatch(params);
+    const persistedCodexRoute = (
+      await this.store.inspectPrivateCodexRoutes()
+    ).find((route) => route.alias === params.alias);
+    if (
+      persistedCodexRoute !== undefined &&
+      (persistedCodexRoute.binding.hostId !== params.hostId ||
         persistedCodexRoute.binding.routeHandle !== params.threadId ||
         persistedCodexRoute.binding.ownerLease !==
           stableLease("codex", `${params.hostId}\0${params.threadId}`))
@@ -2494,16 +2612,15 @@ export class GatewayService {
     params: ValidatedRegisterCodexParams,
     generation = "unconfirmed",
   ): void {
-    const existing = this.codexRegistrationLock;
+    const existing = this.codexRegistrationLocks.get(params.alias);
     if (
       existing !== undefined &&
-      (existing.alias !== params.alias ||
-        existing.threadId !== params.threadId ||
+      (existing.threadId !== params.threadId ||
         existing.hostId !== params.hostId)
     ) {
       return;
     }
-    this.codexRegistrationLock = Object.freeze({
+    const lock = Object.freeze({
       alias: params.alias,
       threadId: params.threadId,
       hostId: params.hostId,
@@ -2512,9 +2629,10 @@ export class GatewayService {
           ? existing.generation
           : generation,
     });
+    this.codexRegistrationLocks.set(params.alias, lock);
     if (generation !== "unconfirmed") {
       this.codexSuccessionState = createCodexRegistrationSuccession(
-        this.codexRegistrationLock,
+        lock,
       );
     }
   }
@@ -4568,7 +4686,10 @@ export class GatewayService {
       steer?: true;
     } = {},
   ): Promise<EnqueuedMessageResult> {
-    if (this.codexSuccessionPoisoned) {
+    if (
+      this.codexSuccessionPoisoned.has(sourceAlias) ||
+      this.codexSuccessionPoisoned.has(targetAlias)
+    ) {
       throw new BridgeError(
         "CODEX_SUCCESSION_RECOVERY_REQUIRED",
         "No message can be accepted while Codex succession requires manual recovery.",
@@ -4868,8 +4989,8 @@ export class GatewayService {
     if (
       !this.running ||
       this.closing ||
-      this.codexSuccessionDispatchFrozen ||
-      this.codexSuccessionPoisoned
+      this.codexSuccessionDispatchFrozen.has(targetAlias) ||
+      this.codexSuccessionPoisoned.has(targetAlias)
     ) {
       return;
     }
@@ -5177,8 +5298,8 @@ export class GatewayService {
   private scheduleDispatch(targetAlias: string): void {
     if (
       this.closing ||
-      this.codexSuccessionDispatchFrozen ||
-      this.codexSuccessionPoisoned
+      this.codexSuccessionDispatchFrozen.has(targetAlias) ||
+      this.codexSuccessionPoisoned.has(targetAlias)
     ) {
       return;
     }
@@ -5190,8 +5311,8 @@ export class GatewayService {
           this.scheduledDispatchTargets.delete(targetAlias);
           if (
             this.closing ||
-            this.codexSuccessionDispatchFrozen ||
-            this.codexSuccessionPoisoned
+            this.codexSuccessionDispatchFrozen.has(targetAlias) ||
+            this.codexSuccessionPoisoned.has(targetAlias)
           ) {
             return;
           }
@@ -5576,7 +5697,7 @@ export class GatewayService {
     let acceptedMessageId: string | undefined;
     try {
       this.pruneTransient();
-      if (this.codexSuccessionPoisoned) {
+      if (this.codexSuccessionPoisoned.has(event.targetAlias)) {
         throw new BridgeError(
           "CODEX_SUCCESSION_RECOVERY_REQUIRED",
           "Native ingress is unavailable while Codex succession requires manual recovery.",
