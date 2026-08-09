@@ -37,6 +37,8 @@ test("skill exposes only the stable gateway operating surface", async () => {
     "refresh-dashboard",
     "select-claude",
     "unselect-claude",
+    "pair",
+    "unpair",
     "register-codex",
     "unregister-codex",
     "send-to-claude",
@@ -71,7 +73,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /user-supplied native session UUID/);
   assert.match(skill, /select-claude --session/);
   assert.match(skill, /old name stops resolving immediately/);
-  assert.match(skill, /send never selects a Claude session automatically/i);
+  assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
   assert.match(skill, /default paired mode/);
   assert.match(skill, /SENDER_NOT_PAIRED/);

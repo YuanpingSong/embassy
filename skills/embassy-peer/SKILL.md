@@ -69,6 +69,12 @@ Or address the same logical session directly by UUID:
 embassy select-claude --session 123e4567-e89b-42d3-a456-426614174000
 ```
 
+Remove the same one-task edge by naming the Claude endpoint:
+
+```sh
+embassy unselect-claude --alias advisor@this-mac
+```
+
 With zero or several possible Codex ends, the shorthands fail closed and name the explicit verb; never guess an end on the caller's behalf.
 
 Let the gateway resolve either selector against the current genuine Claude discovery snapshot. It refreshes process and socket coordinates by UUID; those transport details are never caller inputs. If discovery is ambiguous, incompatible, or unavailable, stop on the result.
@@ -134,7 +140,7 @@ The foreground launcher supports native bidirectional messaging for each explici
 
 An accepted send returns a public conversation token and a fresh delivery token. The delivery token is an opaque, memory-only correlation handle, exactly `dlv_` plus 24 base64url characters. Copy the exact returned value; do not construct, shorten, log, or persist it.
 
-Use exactly one send for one user-authorized message. Do not automatically retry, fan out, hand-roll a poll loop, or fall back to Claude Code's native `SendMessage`.
+Use exactly one send for one user-authorized message. A send never selects a Claude session automatically. Do not automatically retry, fan out, hand-roll a poll loop, or fall back to Claude Code's native `SendMessage`.
 
 ## Reply to a conversation
 
@@ -183,7 +189,7 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Keep the gateway local, single-user, and non-hosted.
 - Keep the shipped launcher local-host-only.
 - Never read provider credentials, authentication state, history, settings, registries, raw sockets, or Keychain entries.
-- Publish only the gateway's registered `codex-*` peer records and remove them on shutdown.
+- Publish only each registered `codex-*` peer record owned by the gateway and remove it on shutdown.
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.
