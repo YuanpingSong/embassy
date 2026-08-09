@@ -112,3 +112,10 @@ and do not retry an ambiguous result. Never put real provider traffic in CI.
 
 Follow [SECURITY.md](SECURITY.md). Use a private GitHub Security Advisory rather
 than a public issue, and replace sensitive local values with synthetic ones.
+
+Two platform notes: the suite binds Unix-domain sockets under `TMPDIR`, and
+macOS caps socket paths at ~104 bytes — keep `TMPDIR` short (CI pins
+`TMPDIR=/tmp`; do the same locally if the transport tests hang). On Linux,
+the darwin-only lease and peer-generation tests skip explicitly (the host
+lease spawns macOS's `/usr/bin/lockf`); macOS runs the full suite.
+
