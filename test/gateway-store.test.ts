@@ -2140,6 +2140,7 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       host: "this-mac",
       state: "idle",
       compatibility: "compatible",
+      validated: true,
       selected: false,
       lastSeenAt: "2026-08-07T12:00:00.000Z",
     }),
@@ -2152,6 +2153,7 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       host: "this-mac",
       state: "idle",
       compatibility: "compatible",
+      validated: true,
       selected: false,
       targetId: "PRIVATE_TARGET_MUST_NOT_ESCAPE",
     }),
@@ -2164,6 +2166,7 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       host: "this-mac",
       state: "idle",
       compatibility: "compatible",
+      validated: true,
       selected: false,
     }),
     false,
@@ -2175,6 +2178,7 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       host: "this-mac",
       state: "idle",
       compatibility: "compatible",
+      validated: true,
       selected: true,
     }),
     false,
@@ -2185,6 +2189,7 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
     host: "this-mac",
     state: "idle",
     compatibility: "compatible",
+    validated: true,
     selected: false,
   } as const;
   assert.equal(arePublicAvailablePeerSnapshots([peer], 1), true);
@@ -2232,6 +2237,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       host: hosts[index % hosts.length]!,
       state: index % 2 === 0 ? "busy" : "offline",
       compatibility: index % 2 === 0 ? "compatible" : "expired",
+      validated: index % 2 === 0,
       selected: index % 3 === 0,
       lastSeenAt: timestamp,
       safeErrorCode: `P${"X".repeat(59)}${index.toString().padStart(4, "0")}`,
@@ -2701,6 +2707,70 @@ test("public route queue age is exact, optional, and metadata-only", async () =>
   );
   assert.equal(advisorRoute?.queueDepth, 0);
   assert.equal(Object.hasOwn(advisorRoute ?? {}, "oldestQueuedAt"), false);
+  await store.close();
+});
+
+test("conversation correlation stays suffix-only and deadline pressure is retained-evidence bounded", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const queued = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "reviewer@this-mac",
+    body: "SUFFIX_ONLY_BODY_MUST_NOT_ESCAPE",
+    dedupeKey: "suffix-only-evidence",
+    conversationIdSuffix: "aB_9-zY0",
+  });
+  assert.ok(queued.messageId);
+  assert.equal(
+    (await store.dequeueMessage("reviewer@this-mac"))?.conversationIdSuffix,
+    "aB_9-zY0",
+  );
+  testClock.advance(750);
+  assert.deepEqual(
+    await store.settleMessage({
+      messageId: queued.messageId,
+      state: "delivered",
+    }),
+    {
+      status: "settled",
+      settlement: { messageId: queued.messageId, state: "delivered" },
+    },
+  );
+
+  const snapshot = await store.publicSnapshot();
+  assert.deepEqual(
+    snapshot.messages.map((event) => event.conversationIdSuffix),
+    ["aB_9-zY0", "aB_9-zY0", "aB_9-zY0"],
+  );
+  assert.deepEqual(snapshot.deadlinePressure, {
+    configuredDeadlineMs: 5_000,
+    retainedSince: snapshot.messages[0]?.timestamp,
+    terminalEvents: 1,
+    expiredEvents: 0,
+    buckets: [
+      { bucket: "under_1m", settled: 1, expired: 0 },
+      { bucket: "1m_to_5m", settled: 0, expired: 0 },
+      { bucket: "5m_to_15m", settled: 0, expired: 0 },
+      { bucket: "15m_to_60m", settled: 0, expired: 0 },
+      { bucket: "over_60m", settled: 0, expired: 0 },
+    ],
+  });
+  const serialized = JSON.stringify(snapshot);
+  assert.equal(serialized.includes("SUFFIX_ONLY_BODY_MUST_NOT_ESCAPE"), false);
+  await assert.rejects(
+    store.enqueueMessage({
+      sourceAlias: "advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      body: "invalid suffix",
+      dedupeKey: "invalid-suffix",
+      conversationIdSuffix: "too-long-token",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_CONVERSATION_SUFFIX",
+  );
   await store.close();
 });
 

@@ -33,9 +33,11 @@ import {
 } from "./types.js";
 import type {
   GatewayAccounting,
+  DeadlinePressureSnapshot,
   GatewayPublicSnapshot,
   NormalizedMessageEvent,
   PublicAvailablePeerSnapshot,
+  PublicGatewayActivityEvent,
   PublicConnectorSnapshot,
   PublicPairSnapshot,
   PublicProgressWatchEventSnapshot,
@@ -1223,6 +1225,7 @@ function isAvailablePeerSnapshot(
         "host",
         "state",
         "compatibility",
+        "validated",
         "selected",
       ],
       ["lastSeenAt", "safeErrorCode"],
@@ -1237,6 +1240,7 @@ function isAvailablePeerSnapshot(
       value.state === "offline" ||
       value.state === "incompatible") &&
     isCompatibility(value.compatibility) &&
+    typeof value.validated === "boolean" &&
     typeof value.selected === "boolean" &&
     (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
@@ -1261,12 +1265,15 @@ function isNormalizedMessageEvent(
         "bytes",
         "hopCount",
       ],
-      ["latencyMs", "safeErrorCode", "steer"],
+      ["conversationIdSuffix", "latencyMs", "safeErrorCode", "steer"],
     ) &&
     isNonNegativeInteger(value.sequence) &&
     isIsoTimestamp(value.timestamp) &&
     typeof value.messageIdSuffix === "string" &&
     MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
+    (value.conversationIdSuffix === undefined ||
+      (typeof value.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
     (value.direction === "codex_to_claude" ||
       value.direction === "claude_to_codex") &&
     isAlias(value.sourceAlias) &&
@@ -1407,6 +1414,92 @@ function isProgressWatchEventSnapshot(
   );
 }
 
+function isGatewayActivityEvent(
+  value: unknown,
+): value is PublicGatewayActivityEvent {
+  return (
+    isRecord(value) &&
+    hasExactKeys(
+      value,
+      [
+        "sequence",
+        "timestamp",
+        "kind",
+        "action",
+        "outcome",
+        "aliases",
+        "operatorAction",
+      ],
+      ["safeErrorCode"],
+    ) &&
+    isNonNegativeInteger(value.sequence) &&
+    value.sequence > 0 &&
+    isIsoTimestamp(value.timestamp) &&
+    ["discovery", "selection", "registration", "pairing", "watch"].includes(
+      String(value.kind),
+    ) &&
+    [
+      "discovery_refreshed",
+      "claude_selected",
+      "claude_unselected",
+      "codex_registered",
+      "codex_succeeded",
+      "codex_unregistered",
+      "routes_paired",
+      "routes_unpaired",
+      "watch_ended",
+    ].includes(String(value.action)) &&
+    (value.outcome === "accepted" || value.outcome === "rejected") &&
+    Array.isArray(value.aliases) &&
+    value.aliases.length <= 2 &&
+    value.aliases.every(isAlias) &&
+    new Set(value.aliases).size === value.aliases.length &&
+    value.operatorAction === true &&
+    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
+  );
+}
+
+function isDeadlinePressure(
+  value: unknown,
+): value is DeadlinePressureSnapshot {
+  const names = [
+    "under_1m",
+    "1m_to_5m",
+    "5m_to_15m",
+    "15m_to_60m",
+    "over_60m",
+  ];
+  return (
+    isRecord(value) &&
+    hasExactKeys(
+      value,
+      ["configuredDeadlineMs", "terminalEvents", "expiredEvents", "buckets"],
+      ["retainedSince"],
+    ) &&
+    isNonNegativeInteger(value.configuredDeadlineMs) &&
+    value.configuredDeadlineMs > 0 &&
+    (value.retainedSince === undefined || isIsoTimestamp(value.retainedSince)) &&
+    isNonNegativeInteger(value.terminalEvents) &&
+    isNonNegativeInteger(value.expiredEvents) &&
+    value.expiredEvents <= value.terminalEvents &&
+    Array.isArray(value.buckets) &&
+    value.buckets.length === names.length &&
+    value.buckets.every(
+      (bucket, index) =>
+        isRecord(bucket) &&
+        hasExactKeys(bucket, ["bucket", "settled", "expired"]) &&
+        bucket.bucket === names[index] &&
+        isNonNegativeInteger(bucket.settled) &&
+        isNonNegativeInteger(bucket.expired) &&
+        bucket.expired <= bucket.settled,
+    ) &&
+    value.buckets.reduce((sum, bucket) => sum + Number(bucket.settled), 0) ===
+      value.terminalEvents &&
+    value.buckets.reduce((sum, bucket) => sum + Number(bucket.expired), 0) ===
+      value.expiredEvents
+  );
+}
+
 function isSnapshotTruncation(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -1420,7 +1513,12 @@ function isSnapshotTruncation(value: unknown): boolean {
         "messages",
         "alerts",
       ],
-      ["compatibilityChecks", "progressWatches", "progressWatchEvents"],
+      [
+        "compatibilityChecks",
+        "progressWatches",
+        "progressWatchEvents",
+        "activityEvents",
+      ],
     ) &&
     isNonNegativeInteger(value.connectors) &&
     isNonNegativeInteger(value.availablePeers) &&
@@ -1433,7 +1531,9 @@ function isSnapshotTruncation(value: unknown): boolean {
     (value.progressWatches === undefined ||
       isNonNegativeInteger(value.progressWatches)) &&
     (value.progressWatchEvents === undefined ||
-      isNonNegativeInteger(value.progressWatchEvents))
+      isNonNegativeInteger(value.progressWatchEvents)) &&
+    (value.activityEvents === undefined ||
+      isNonNegativeInteger(value.activityEvents))
   );
 }
 
@@ -1456,7 +1556,13 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
         "alerts",
         "truncation",
       ],
-      ["compatibilityChecks", "progressWatches", "progressWatchEvents"],
+      [
+        "compatibilityChecks",
+        "progressWatches",
+        "progressWatchEvents",
+        "activityEvents",
+        "deadlinePressure",
+      ],
     ) ||
     value.schemaVersion !== 1 ||
     !isIsoTimestamp(value.generatedAt) ||
@@ -1489,6 +1595,13 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
         value.progressWatchEvents.length >
           gatewayPublicSnapshotLimits.progressWatchEvents ||
         !value.progressWatchEvents.every(isProgressWatchEventSnapshot))) ||
+    (value.activityEvents !== undefined &&
+      (!Array.isArray(value.activityEvents) ||
+        value.activityEvents.length >
+          gatewayPublicSnapshotLimits.activityEvents ||
+        !value.activityEvents.every(isGatewayActivityEvent))) ||
+    (value.deadlinePressure !== undefined &&
+      !isDeadlinePressure(value.deadlinePressure)) ||
     !Array.isArray(value.messages) ||
     value.messages.length > gatewayPublicSnapshotLimits.messages ||
     !value.messages.every(isNormalizedMessageEvent) ||

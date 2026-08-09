@@ -318,6 +318,7 @@ test("dense dashboard projections remain independently bounded in both locales",
     host: "host.local",
     state: "idle" as const,
     compatibility: "compatible" as const,
+    validated: true,
     selected: index === 0,
   }));
   snapshot.routes = Array.from({ length: DASHBOARD_ROUTE_LIMIT + 4 }, (_, index) => ({

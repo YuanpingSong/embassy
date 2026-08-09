@@ -106,6 +106,7 @@ namespace Embassy {
     const group = view.group;
     return (
       includesFold(group.messageIdSuffix, needleLower) ||
+      includesFold(group.conversationIdSuffix, needleLower) ||
       includesFold(group.sourceAlias, needleLower) ||
       includesFold(group.targetAlias, needleLower) ||
       includesFold(group.safeErrorCode, needleLower) ||
@@ -127,7 +128,8 @@ namespace Embassy {
     const wanted = token.trim().toLowerCase();
     if (wanted === "") return undefined;
     const bySuffix = groups.find((view) =>
-      equalsFold(view.group.messageIdSuffix, wanted),
+      equalsFold(view.group.messageIdSuffix, wanted) ||
+      equalsFold(view.group.conversationIdSuffix, wanted),
     );
     if (bySuffix !== undefined) return bySuffix;
     return groups.find(
@@ -300,6 +302,9 @@ namespace Embassy {
         <div className="detail-pane__head">
           <span className="detail-pane__id">
             {group.messageIdSuffix ?? "—"}
+            {group.conversationIdSuffix === undefined
+              ? ""
+              : ` · conv …${group.conversationIdSuffix}`}
             {group.steer === true ? " · STEER" : ""}
           </span>
           <div className="detail-pane__sub">

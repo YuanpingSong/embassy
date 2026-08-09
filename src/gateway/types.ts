@@ -102,6 +102,7 @@ export const gatewayPublicSnapshotLimits = Object.freeze({
   pairs: 256,
   progressWatches: 64,
   progressWatchEvents: 256,
+  activityEvents: 256,
   messages: 1_024,
   alerts: 256,
 } as const);
@@ -204,6 +205,8 @@ export type ConnectorRecord = {
 export type QueuedMessageMetadata = {
   messageId: string;
   messageIdSuffix: string;
+  /** Bounded public correlation only; the full conversation capability stays private. */
+  conversationIdSuffix?: string;
   direction: MessageDirection;
   sourceAlias: string;
   targetAlias: string;
@@ -229,6 +232,7 @@ export type InFlightMessageMetadata = QueuedMessageMetadata & {
 export type DedupeRecord = {
   fingerprint: string;
   messageIdSuffix: string;
+  conversationIdSuffix?: string;
   sourceAlias: string;
   targetAlias: string;
   direction: MessageDirection;
@@ -247,6 +251,7 @@ export type NormalizedMessageEvent = {
   sequence: number;
   timestamp: string;
   messageIdSuffix: string;
+  conversationIdSuffix?: string;
   direction: MessageDirection;
   sourceAlias: string;
   targetAlias: string;
@@ -354,9 +359,69 @@ export type PublicAvailablePeerSnapshot = {
   host: string;
   state: PublicAvailablePeerState;
   compatibility: CompatibilityState;
+  /** True only when this row passed the provider's strict selectable-peer checks. */
+  validated: boolean;
   selected: boolean;
   lastSeenAt?: string;
   safeErrorCode?: string;
+};
+
+export const gatewayActivityKinds = [
+  "discovery",
+  "selection",
+  "registration",
+  "pairing",
+  "watch",
+] as const;
+export type GatewayActivityKind = (typeof gatewayActivityKinds)[number];
+
+export const gatewayActivityActions = [
+  "discovery_refreshed",
+  "claude_selected",
+  "claude_unselected",
+  "codex_registered",
+  "codex_succeeded",
+  "codex_unregistered",
+  "routes_paired",
+  "routes_unpaired",
+  "watch_ended",
+] as const;
+export type GatewayActivityAction = (typeof gatewayActivityActions)[number];
+
+/** Bounded, body-free operator activity retained for this broker process. */
+export type PublicGatewayActivityEvent = {
+  sequence: number;
+  timestamp: string;
+  kind: GatewayActivityKind;
+  action: GatewayActivityAction;
+  outcome: "accepted" | "rejected";
+  aliases: string[];
+  operatorAction: true;
+  safeErrorCode?: string;
+};
+
+export const deadlinePressureBucketNames = [
+  "under_1m",
+  "1m_to_5m",
+  "5m_to_15m",
+  "15m_to_60m",
+  "over_60m",
+] as const;
+export type DeadlinePressureBucketName =
+  (typeof deadlinePressureBucketNames)[number];
+export type DeadlinePressureBucket = {
+  bucket: DeadlinePressureBucketName;
+  settled: number;
+  expired: number;
+};
+
+/** Counts are computed only from the bounded retained delivery ledger. */
+export type DeadlinePressureSnapshot = {
+  configuredDeadlineMs: number;
+  retainedSince?: string;
+  terminalEvents: number;
+  expiredEvents: number;
+  buckets: DeadlinePressureBucket[];
 };
 
 const PUBLIC_ALIAS_PATTERN =
@@ -376,6 +441,7 @@ export function isPublicAvailablePeerSnapshot(
     "host",
     "state",
     "compatibility",
+    "validated",
     "selected",
   ];
   const optional = ["lastSeenAt", "safeErrorCode"];
@@ -399,6 +465,7 @@ export function isPublicAvailablePeerSnapshot(
     !(compatibilityStates as readonly string[]).includes(
       candidate.compatibility,
     ) ||
+    typeof candidate.validated !== "boolean" ||
     typeof candidate.selected !== "boolean"
   ) {
     return false;
@@ -489,6 +556,8 @@ export type GatewayPublicSnapshot = {
   pairs: PublicPairSnapshot[];
   progressWatches?: PublicProgressWatchSnapshot[];
   progressWatchEvents?: PublicProgressWatchEventSnapshot[];
+  activityEvents?: PublicGatewayActivityEvent[];
+  deadlinePressure?: DeadlinePressureSnapshot;
   messages: NormalizedMessageEvent[];
   accounting: GatewayAccounting;
   alerts: SafeGatewayAlert[];
@@ -503,6 +572,7 @@ export type GatewaySnapshotTruncation = {
   pairs: number;
   progressWatches?: number;
   progressWatchEvents?: number;
+  activityEvents?: number;
   messages: number;
   alerts: number;
 };
@@ -588,6 +658,13 @@ export function projectGatewayPublicSnapshot(
             -gatewayPublicSnapshotLimits.progressWatchEvents,
           ),
         }),
+    ...(snapshot.activityEvents === undefined
+      ? {}
+      : {
+          activityEvents: snapshot.activityEvents.slice(
+            -gatewayPublicSnapshotLimits.activityEvents,
+          ),
+        }),
     messages: snapshot.messages.slice(-gatewayPublicSnapshotLimits.messages),
     alerts: snapshot.alerts.slice(-gatewayPublicSnapshotLimits.alerts),
     accounting: { ...snapshot.accounting },
@@ -640,6 +717,17 @@ export function projectGatewayPublicSnapshot(
                   gatewayPublicSnapshotLimits.progressWatchEvents,
               ),
           }),
+      ...(snapshot.activityEvents === undefined
+        ? {}
+        : {
+            activityEvents:
+              (snapshot.truncation.activityEvents ?? 0) +
+              Math.max(
+                0,
+                snapshot.activityEvents.length -
+                  gatewayPublicSnapshotLimits.activityEvents,
+              ),
+          }),
       messages:
         snapshot.truncation.messages +
         Math.max(0, snapshot.messages.length - gatewayPublicSnapshotLimits.messages),
@@ -684,6 +772,20 @@ export function projectGatewayPublicSnapshot(
         retained === 0 ? [] : watchEvents.slice(-retained);
       projected.truncation.progressWatchEvents =
         watchEventOmissions + watchEvents.length - retained;
+    })
+  ) {
+    return projected;
+  }
+
+  const activityEvents = projected.activityEvents ?? [];
+  const activityEventOmissions = projected.truncation.activityEvents ?? 0;
+  if (
+    activityEvents.length > 0 &&
+    retainUntilFit(activityEvents.length, (retained) => {
+      projected.activityEvents =
+        retained === 0 ? [] : activityEvents.slice(-retained);
+      projected.truncation.activityEvents =
+        activityEventOmissions + activityEvents.length - retained;
     })
   ) {
     return projected;
@@ -839,6 +941,8 @@ export type EnqueueMessageInput = {
   targetAlias: string;
   body: string;
   dedupeKey: string;
+  /** Last eight opaque characters of the controller-owned conversation ID. */
+  conversationIdSuffix?: string;
   deadlineAt?: string;
   hopCount?: number;
   steer?: true;

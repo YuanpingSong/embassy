@@ -14,6 +14,36 @@ import {
   evaluateCompatibilityAttestation,
 } from "../src/gateway/compatibility.js";
 
+test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {
+  const snapshot = dashboardFixture();
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.peers.every((peer) => peer.validated), true);
+  assert.equal(model.activity[0]?.conversationIdSuffix, "IjKl_789");
+  assert.deepEqual(model.brokerActivity, [
+    {
+      sequence: 1,
+      timestamp: "2026-08-08T11:59:54.000Z",
+      kind: "pairing",
+      action: "routes_paired",
+      outcome: "accepted",
+      aliases: ["claude-advisor@this-mac", "codex-reviewer@this-mac"],
+    },
+  ]);
+  assert.equal(model.deadlinePressure?.configuredDeadlineMs, 300_000);
+  assert.equal(model.deadlinePressure?.buckets[0]?.settled, 3);
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /conv …IjKl_789/);
+  assert.match(en, /Consent edge paired/);
+  assert.match(en, /Validated/);
+  assert.match(en, /Retained evidence: 3 terminal attempts/);
+  assert.match(zh, /已建立同意边/);
+  assert.match(zh, /已验证/);
+  assert.match(zh, /保留证据：3 次终局尝试/);
+  assert.equal(en.includes("conv_IjKl_789"), false);
+});
+
 test("diagnostics project live certification depth, time, and failure truth", () => {
   const snapshot = dashboardFixture();
   snapshot.compatibilityChecks = (["claude", "codex"] as const).map(
@@ -390,6 +420,7 @@ test("only compatible live collision-free peers drive the select call to action"
       host: "this-mac",
       state: "incompatible",
       compatibility: "incompatible",
+      validated: false,
       selected: false,
       safeErrorCode: "PEER_ALIAS_COLLISION",
     },
@@ -399,6 +430,7 @@ test("only compatible live collision-free peers drive the select call to action"
       host: "this-mac",
       state: "incompatible",
       compatibility: "incompatible",
+      validated: false,
       selected: false,
       safeErrorCode: "PEER_SESSION_COLLISION",
     },
@@ -408,6 +440,7 @@ test("only compatible live collision-free peers drive the select call to action"
       host: "this-mac",
       state: "incompatible",
       compatibility: "incompatible",
+      validated: false,
       selected: false,
       safeErrorCode: "PEER_DISCOVERY_INCOMPLETE",
     },
@@ -417,6 +450,7 @@ test("only compatible live collision-free peers drive the select call to action"
       host: "this-mac",
       state: "offline",
       compatibility: "compatible",
+      validated: false,
       selected: false,
     },
   ];
@@ -563,6 +597,7 @@ test("invalid available-peer inventory is rejected as a whole", () => {
     host: "this-mac",
     state: "idle",
     compatibility: "compatible",
+    validated: true,
     selected: false,
   }];
   const model = buildDashboardViewModel(snapshot);

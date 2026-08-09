@@ -349,6 +349,15 @@ namespace Embassy {
     // that already died on the deadline. Queue depth and the byte budget
     // report observed pressure but no ceiling, so neither carries a verdict.
     const deadlineIsWarn = data.expiredCount > 0;
+    const deadlineBucketKeys: Readonly<
+      Record<DeadlinePressureSnapshot["buckets"][number]["bucket"], string>
+    > = {
+      under_1m: "app.diag.deadline.bucket.under1m",
+      "1m_to_5m": "app.diag.deadline.bucket.1to5m",
+      "5m_to_15m": "app.diag.deadline.bucket.5to15m",
+      "15m_to_60m": "app.diag.deadline.bucket.15to60m",
+      over_60m: "app.diag.deadline.bucket.over60m",
+    };
 
     const accounting = data.accounting;
     const accountingRows: readonly DiagnosticsCounterRow[] = [
@@ -554,6 +563,35 @@ namespace Embassy {
                     count: formatDiagnosticsCount(data.expiredCount, locale),
                   })}
                 </p>
+                {data.deadlinePressure === undefined ? null : (
+                  <div className="stack-sm">
+                    <p className="footnote">
+                      {t("app.diag.deadline.retained", {
+                        terminal: formatDiagnosticsCount(
+                          data.deadlinePressure.terminalEvents,
+                          locale,
+                        ),
+                        expired: formatDiagnosticsCount(
+                          data.deadlinePressure.expiredEvents,
+                          locale,
+                        ),
+                        deadline: fmtAge(
+                          data.deadlinePressure.configuredDeadlineMs,
+                        ),
+                      })}
+                    </p>
+                    <dl className="detail-list">
+                      {data.deadlinePressure.buckets.map((bucket) => (
+                        <React.Fragment key={bucket.bucket}>
+                          <dt>{t(deadlineBucketKeys[bucket.bucket])}</dt>
+                          <dd>
+                            {formatDiagnosticsCount(bucket.settled, locale)} · {formatDiagnosticsCount(bucket.expired, locale)} {t("delivery.expired")}
+                          </dd>
+                        </React.Fragment>
+                      ))}
+                    </dl>
+                  </div>
+                )}
                 <p className="env-name">EMBASSY_MESSAGE_DEADLINE_MS</p>
                 <CopyCmd cmd="EMBASSY_MESSAGE_DEADLINE_MS=<ms> embassy serve" />
               </section>

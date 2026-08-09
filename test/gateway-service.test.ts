@@ -7538,6 +7538,69 @@ test("a Claude rename migrates an enqueue that is already scheduled to dispatch"
   );
 });
 
+test("operator decisions expose a bounded body-free activity ledger", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({ config, adapters: [claude, codex] });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(
+    await handlers.registerCodex({
+      ...codexRegistration(),
+      alias: "codex-other@this-mac",
+    }),
+    { accepted: false, code: "conflict" },
+  );
+
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.activityEvents?.map(
+      ({ kind, action, outcome, aliases, operatorAction, safeErrorCode }) => ({
+        kind,
+        action,
+        outcome,
+        aliases,
+        operatorAction,
+        safeErrorCode,
+      }),
+    ),
+    [
+      {
+        kind: "registration",
+        action: "codex_registered",
+        outcome: "accepted",
+        aliases: ["codex-main@this-mac"],
+        operatorAction: true,
+        safeErrorCode: undefined,
+      },
+      {
+        kind: "registration",
+        action: "codex_registered",
+        outcome: "rejected",
+        aliases: ["codex-other@this-mac"],
+        operatorAction: true,
+        safeErrorCode: "CODEX_REGISTRATION_REBIND_FORBIDDEN",
+      },
+    ],
+  );
+  assert.equal(snapshot.truncation.activityEvents, 0);
+  assert.equal(JSON.stringify(snapshot.activityEvents).includes(THREAD_ID), false);
+});
+
 test("snapshot observations ignore generatedAt but revision every public semantic surface", async () => {
   const { root, stateDir } = await fixture();
   const clock = new ManualGatewayClock();
@@ -7565,6 +7628,7 @@ test("snapshot observations ignore generatedAt but revision every public semanti
       host: "this-mac",
       state: "idle",
       compatibility: "compatible",
+      validated: true,
       selected: false,
       lastSeenAt: clock.now().toISOString(),
     },

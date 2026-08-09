@@ -375,9 +375,9 @@ namespace Embassy {
   }
 
   function activityRowSource(row: ActivityRow): string {
-    return row.kind === "delivery"
-      ? row.group.sourceAlias
-      : row.item.alias ?? row.item.host ?? "";
+    if (row.kind === "delivery") return row.group.sourceAlias;
+    if (row.kind === "operation") return row.event.aliases[0] ?? "";
+    return row.item.alias ?? row.item.host ?? "";
   }
 
   /**
@@ -402,6 +402,9 @@ namespace Embassy {
         guidanceKey: guidanceCopyKey(item.guidance),
       });
     }
+    for (const event of model.brokerActivity ?? []) {
+      rows.push({ kind: "operation", timestamp: event.timestamp, event });
+    }
     return rows.sort(
       (left, right) =>
         compareText(right.timestamp ?? "", left.timestamp ?? "") ||
@@ -417,6 +420,9 @@ namespace Embassy {
       connectorsOmitted: model.omissions.connectors,
       compatibilityChecks: model.compatibilityChecks ?? [],
       expiredCount: model.accounting.expired,
+      ...(model.deadlinePressure === undefined
+        ? {}
+        : { deadlinePressure: model.deadlinePressure }),
       queuedMessages: model.exchange.queuedMessages,
       queueCountIsLowerBound: model.exchange.queueCountIsLowerBound,
       accounting: model.accounting,

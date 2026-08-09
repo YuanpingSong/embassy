@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { Script, createContext } from "node:vm";
 
 import type {
+  DashboardActivityEventRow,
   DashboardAttentionItem,
   DashboardMessageGroup,
   DashboardOmissions,
@@ -123,6 +124,11 @@ type ActivityRow =
       timestamp: string;
       item: DashboardAttentionItem;
       guidanceKey: string;
+    }>
+  | Readonly<{
+      kind: "operation";
+      timestamp: string;
+      event: DashboardActivityEventRow;
     }>;
 
 type DiagnosticsData = Readonly<{
@@ -134,6 +140,7 @@ type DiagnosticsData = Readonly<{
   queueCountIsLowerBound: boolean;
   accounting: DashboardViewModel["accounting"];
   omissions: DashboardOmissions;
+  deadlinePressure: DashboardViewModel["deadlinePressure"];
 }>;
 
 type EmbassyAdapter = Readonly<{
@@ -1219,6 +1226,27 @@ test("activityRows merges settlements and timestamped alerts, timestamp desc", (
       ["delivery", "2026-08-08T10:15:00.000Z"],
     ],
   );
+});
+
+test("activityRows includes body-free broker operations in timeline order", () => {
+  const model = mutableClone(EMPTY);
+  model.brokerActivity = [
+    {
+      sequence: 1,
+      timestamp: "2026-08-08T12:00:00.000Z",
+      kind: "pairing",
+      action: "routes_paired",
+      outcome: "accepted",
+      aliases: ["claude-alpha@this-mac", "codex-main@this-mac"],
+    },
+  ];
+  assert.deepEqual(plain(adapter.activityRows(model)), [
+    {
+      kind: "operation",
+      timestamp: "2026-08-08T12:00:00.000Z",
+      event: model.brokerActivity[0],
+    },
+  ]);
 });
 
 test("activityRows drops in-flight groups and alerts without a timestamp", () => {

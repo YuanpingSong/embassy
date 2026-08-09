@@ -78,9 +78,12 @@ import {
   type EnqueueMessageInput,
   type GatewayPrivateRouteInspection,
   type GatewayPublicSnapshot,
+  type GatewayActivityAction,
+  type GatewayActivityKind,
   type PrivateEndpointIdentity,
   type PrivateRouteBinding,
   type PublicAvailablePeerSnapshot,
+  type PublicGatewayActivityEvent,
   type RouteState,
   type SafeGatewayAlert,
   type TerminalMessageSettlement,
@@ -97,6 +100,7 @@ const PRIVATE_HANDLE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_CONVERSATIONS = 1_024;
 const DELIVERY_ACK_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 const NATIVE_HELD_THRESHOLD_MS = 1_000;
+const RUNTIME_ACTIVITY_CAPACITY = 256;
 const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
 
@@ -621,6 +625,8 @@ export class GatewayService {
   private readonly deliveryTrackers = new Map<string, MessageDeliveryTracker>();
   private readonly deliveryTokens = new Map<string, string>();
   private readonly runtimeAlerts: SafeGatewayAlert[] = [];
+  private readonly activityEvents: PublicGatewayActivityEvent[] = [];
+  private activitySequence = 0;
   private readonly detachedReceiptWrites = new Set<Promise<void>>();
   private readonly nativeIngressByConversation = new Map<
     string,
@@ -933,17 +939,67 @@ export class GatewayService {
         revision: this.revision,
       }),
       registerCodex: async (params) =>
-        await this.exclusiveDecision(async () => this.registerCodex(params)),
+        await this.exclusiveDecision(
+          async () => this.registerCodex(params),
+          {
+            kind: "registration",
+            action:
+              params.succeedsAlias === undefined
+                ? "codex_registered"
+                : "codex_succeeded",
+            aliases: [
+              ...(params.succeedsAlias === undefined
+                ? []
+                : [params.succeedsAlias]),
+              params.alias,
+            ],
+          },
+        ),
       unregisterCodex: async (params) =>
-        await this.exclusiveDecision(async () => this.unregisterCodex(params)),
+        await this.exclusiveDecision(
+          async () => this.unregisterCodex(params),
+          {
+            kind: "registration",
+            action: "codex_unregistered",
+            aliases: [params.alias],
+          },
+        ),
       selectClaude: async (params) =>
-        await this.exclusiveDecision(async () => this.selectClaude(params)),
+        await this.exclusiveDecision(
+          async () => this.selectClaude(params),
+          {
+            kind: "selection",
+            action: "claude_selected",
+            aliases: PUBLIC_ALIAS.test(params.alias) ? [params.alias] : [],
+          },
+        ),
       unselectClaude: async (params) =>
-        await this.exclusiveDecision(async () => this.unselectClaude(params)),
+        await this.exclusiveDecision(
+          async () => this.unselectClaude(params),
+          {
+            kind: "selection",
+            action: "claude_unselected",
+            aliases: PUBLIC_ALIAS.test(params.alias) ? [params.alias] : [],
+          },
+        ),
       pair: async (params) =>
-        await this.exclusiveDecision(async () => this.pairRoutes(params)),
+        await this.exclusiveDecision(
+          async () => this.pairRoutes(params),
+          {
+            kind: "pairing",
+            action: "routes_paired",
+            aliases: [params.claudeAlias, params.codexAlias],
+          },
+        ),
       unpair: async (params) =>
-        await this.exclusiveDecision(async () => this.unpairRoutes(params)),
+        await this.exclusiveDecision(
+          async () => this.unpairRoutes(params),
+          {
+            kind: "pairing",
+            action: "routes_unpaired",
+            aliases: [params.claudeAlias, params.codexAlias],
+          },
+        ),
       listSnapshot: async () => (await this.observeSnapshot()).snapshot,
       observeSnapshot: async () => await this.observeSnapshot(),
       compatibilityCheck: async () => await this.compatibilityCheck(),
@@ -951,27 +1007,37 @@ export class GatewayService {
         await this.compatibilityCertify(params),
       deliveryStatus: async (params) => await this.deliveryStatus(params.token),
       untrack: async (params) =>
-        await this.exclusiveDecision(async () => {
-          const settled = await this.store.settleProgressWatch({
-            conversationId: params.conversationId,
-            outcome: "done",
-          });
-          if (!settled) {
-            throw new BridgeError(
-              "PROGRESS_WATCH_NOT_FOUND",
-              "No active progress watch matches that conversation token.",
-            );
-          }
-          await this.changed();
-        }),
+        await this.exclusiveDecision(
+          async () => {
+            const settled = await this.store.settleProgressWatch({
+              conversationId: params.conversationId,
+              outcome: "done",
+            });
+            if (!settled) {
+              throw new BridgeError(
+                "PROGRESS_WATCH_NOT_FOUND",
+                "No active progress watch matches that conversation token.",
+              );
+            }
+            await this.changed();
+          },
+          { kind: "watch", action: "watch_ended", aliases: [] },
+        ),
       sendToClaude: async (params) => await this.acceptToClaude(params),
       sendToCodex: async (params) => await this.acceptToCodex(params),
       reply: async (params) => await this.acceptReply(params),
       refreshDashboard: async () => {
-        const result = await this.exclusiveDecision(async () => {
-          await this.refreshClaudeDiscovery();
-          await this.publish();
-        });
+        const result = await this.exclusiveDecision(
+          async () => {
+            await this.refreshClaudeDiscovery();
+            await this.publish();
+          },
+          {
+            kind: "discovery",
+            action: "discovery_refreshed",
+            aliases: [],
+          },
+        );
         return { ...result, revision: this.revision };
       },
     };
@@ -3242,6 +3308,7 @@ export class GatewayService {
           host: row.adapter.identity.hostId,
           state: "incompatible",
           compatibility: "incompatible",
+          validated: false,
           selected: false,
           safeErrorCode: row.safeErrorCode,
         });
@@ -3260,6 +3327,7 @@ export class GatewayService {
         host: row.adapter.identity.hostId,
         state: row.peer.state,
         compatibility: row.peer.compatibility,
+        validated: true,
         selected,
       });
       if (selected && selectedBinding !== undefined) {
@@ -5268,6 +5336,7 @@ export class GatewayService {
       targetAlias,
       body: text,
       dedupeKey: `${conversationId}:${sequence}`,
+      conversationIdSuffix: conversationId.slice(-8),
       hopCount,
       deadlineAt,
       ...(options.steer === true ? { steer: true as const } : {}),
@@ -5374,6 +5443,7 @@ export class GatewayService {
       },
       body: text,
       dedupeKey: `${conversation.id}:${sequence}`,
+      conversationIdSuffix: conversation.id.slice(-8),
       hopCount: requestedHopCount,
       deadlineAt,
       ...(conversation.pair === true ? { pair: true as const } : {}),
@@ -5460,14 +5530,15 @@ export class GatewayService {
       targetAlias: conversation.sourceAlias,
       body: text,
       dedupeKey: `${conversation.id}:${sequence}`,
+      conversationIdSuffix: conversation.id.slice(-8),
       hopCount: requestedHopCount,
-        deadlineAt,
-        authorizedPairTeardownReply: true,
-        progressWatch: progressWatchActivity(
-          text,
-          conversation.id,
-          conversation.targetAlias,
-        ),
+      deadlineAt,
+      authorizedPairTeardownReply: true,
+      progressWatch: progressWatchActivity(
+        text,
+        conversation.id,
+        conversation.targetAlias,
+      ),
     });
     if (!queued.accepted || queued.messageId === undefined) {
       throw new BridgeError(
@@ -6359,6 +6430,7 @@ export class GatewayService {
         targetAlias: event.targetAlias,
         body: event.text,
         dedupeKey: `${conversationId}:0`,
+        conversationIdSuffix: conversationId.slice(-8),
         hopCount: 0,
         deadlineAt,
         ...(steer ? { steer: true as const } : {}),
@@ -6629,14 +6701,48 @@ export class GatewayService {
     }
   }
 
-  private async exclusiveDecision(operation: () => Promise<void>): Promise<GatewayDecision> {
+  private async exclusiveDecision(
+    operation: () => Promise<void>,
+    activity?: Readonly<{
+      kind: GatewayActivityKind;
+      action: GatewayActivityAction;
+      aliases: readonly string[];
+    }>,
+  ): Promise<GatewayDecision> {
     return await this.mutex.run("service", async () => {
+      let result: GatewayDecision;
+      let rejectedSafeCode: string | undefined;
       try {
         await operation();
-        return { accepted: true, code: "ok" };
+        result = { accepted: true, code: "ok" };
       } catch (error) {
-        return decisionFor(error);
+        result = decisionFor(error);
+        rejectedSafeCode =
+          error instanceof BridgeError
+            ? safeCode(error.code, "OPERATOR_ACTION_REJECTED")
+            : "OPERATOR_ACTION_REJECTED";
       }
+      if (activity !== undefined) {
+        this.activitySequence += 1;
+        this.activityEvents.push({
+          sequence: this.activitySequence,
+          timestamp: this.now().toISOString(),
+          kind: activity.kind,
+          action: activity.action,
+          outcome: result.accepted ? "accepted" : "rejected",
+          aliases: activity.aliases
+            .filter((alias) => PUBLIC_ALIAS.test(alias))
+            .slice(0, 2),
+          operatorAction: true,
+          ...(rejectedSafeCode === undefined
+            ? {}
+            : { safeErrorCode: rejectedSafeCode }),
+        });
+        while (this.activityEvents.length > RUNTIME_ACTIVITY_CAPACITY) {
+          this.activityEvents.shift();
+        }
+      }
+      return result;
     });
   }
 
@@ -6715,6 +6821,14 @@ export class GatewayService {
       ...base,
       ...(compatibilityChecks.length === 0 ? {} : { compatibilityChecks }),
       availablePeers: peers,
+      activityEvents: this.activityEvents.map((event) => ({
+        ...event,
+        aliases: [...event.aliases],
+      })),
+      truncation: {
+        ...base.truncation,
+        activityEvents: 0,
+      },
       alerts: [
         ...base.alerts,
         ...this.runtimeAlerts.map((alert) => ({ ...alert })),

@@ -27,6 +27,7 @@ export const DASHBOARD_MODEL_LIMITS = Object.freeze({
   messageEvents: 60,
   progressWatches: 64,
   progressWatchEvents: 64,
+  activityEvents: 64,
   alerts: 32,
 } as const);
 
@@ -116,6 +117,7 @@ export type DashboardMessageEvent = Readonly<{
   state: DeliveryState;
   latencyMs?: number | undefined;
   safeErrorCode?: string | undefined;
+  conversationIdSuffix?: string | undefined;
   steer?: true | undefined;
 }>;
 
@@ -124,6 +126,7 @@ export type DashboardMessageGroup = Readonly<{
   sourceAlias: string;
   targetAlias: string;
   messageIdSuffix?: string | undefined;
+  conversationIdSuffix?: string | undefined;
   state: DeliveryState;
   timestamp?: string | undefined;
   latencyMs?: number | undefined;
@@ -133,11 +136,31 @@ export type DashboardMessageGroup = Readonly<{
   events: readonly DashboardMessageEvent[];
 }>;
 
+export type DashboardActivityEventRow = Readonly<{
+  sequence: number;
+  timestamp: string;
+  kind: "discovery" | "selection" | "registration" | "pairing" | "watch";
+  action:
+    | "discovery_refreshed"
+    | "claude_selected"
+    | "claude_unselected"
+    | "codex_registered"
+    | "codex_succeeded"
+    | "codex_unregistered"
+    | "routes_paired"
+    | "routes_unpaired"
+    | "watch_ended";
+  outcome: "accepted" | "rejected";
+  aliases: readonly string[];
+  safeErrorCode?: string | undefined;
+}>;
+
 export type DashboardPeerRow = Readonly<{
   alias: string;
   host: string;
   state: PublicAvailablePeerState;
   compatibility: CompatibilityState;
+  validated: boolean;
   selected: boolean;
   selectable: boolean;
   selectionGuidance?:
@@ -219,6 +242,8 @@ export type DashboardOmissions = Readonly<{
   messageEvents: number;
   upstreamAlerts: number;
   attentionItems: number;
+  upstreamActivityEvents: number;
+  activityEvents: number;
 }>;
 
 export type DashboardViewModel = Readonly<{
@@ -245,6 +270,7 @@ export type DashboardViewModel = Readonly<{
     oldestQueuedAt?: string | undefined;
   }>;
   activity: readonly DashboardMessageGroup[];
+  brokerActivity: readonly DashboardActivityEventRow[];
   peers: readonly DashboardPeerRow[];
   routes: readonly DashboardRouteRow[];
   pairs: readonly DashboardPairRow[];
@@ -254,6 +280,7 @@ export type DashboardViewModel = Readonly<{
   connectors: readonly DashboardConnectorRow[];
   compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
   accounting: GatewayPublicSnapshot["accounting"];
+  deadlinePressure?: GatewayPublicSnapshot["deadlinePressure"];
   omissions: DashboardOmissions;
 }>;
 
@@ -351,7 +378,7 @@ function peerSelectionGuidance(
 function peerIsSelectable(
   peer: GatewayPublicSnapshot["availablePeers"][number],
 ): boolean {
-  return peerSelectionGuidance(peer) === undefined;
+  return peer.validated && peerSelectionGuidance(peer) === undefined;
 }
 
 function partyStatus(
@@ -477,6 +504,10 @@ function buildMessageGroups(
           ...(safeCode(event.safeErrorCode) === undefined
             ? {}
             : { safeErrorCode: safeCode(event.safeErrorCode) }),
+          ...(typeof event.conversationIdSuffix === "string" &&
+          CONVERSATION_SUFFIX_PATTERN.test(event.conversationIdSuffix)
+            ? { conversationIdSuffix: event.conversationIdSuffix }
+            : {}),
           ...(event.steer === true ? { steer: true as const } : {}),
         }),
       );
@@ -487,6 +518,10 @@ function buildMessageGroups(
         ...(typeof latest.messageIdSuffix === "string" &&
         OPAQUE_SUFFIX_PATTERN.test(latest.messageIdSuffix)
           ? { messageIdSuffix: latest.messageIdSuffix.toLowerCase() }
+          : {}),
+        ...(typeof latest.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(latest.conversationIdSuffix)
+          ? { conversationIdSuffix: latest.conversationIdSuffix }
           : {}),
         state: latest.state,
         ...(normalizedTimestamp(latest.timestamp) === undefined
@@ -550,6 +585,7 @@ export function buildDashboardViewModel(
         host: boundedText(peer.host),
         state: peer.state,
         compatibility: peer.compatibility,
+        validated: peer.validated,
         selected: peer.selected,
         selectable: peerIsSelectable(peer),
         ...(peerSelectionGuidance(peer) === undefined
@@ -568,6 +604,31 @@ export function buildDashboardViewModel(
       return compareText(left.alias, right.alias);
     })
     .slice(0, DASHBOARD_MODEL_LIMITS.availablePeers);
+  const allBrokerActivity: DashboardActivityEventRow[] = (
+    snapshot.activityEvents ?? []
+  ).flatMap((event) => {
+    const timestamp = normalizedTimestamp(event.timestamp);
+    const sequence = normalizedInteger(event.sequence);
+    if (timestamp === undefined || sequence === undefined || sequence < 1) {
+      return [];
+    }
+    return [
+      {
+        sequence,
+        timestamp,
+        kind: event.kind,
+        action: event.action,
+        outcome: event.outcome,
+        aliases: event.aliases.map((alias) => boundedText(alias)).slice(0, 2),
+        ...(safeCode(event.safeErrorCode) === undefined
+          ? {}
+          : { safeErrorCode: safeCode(event.safeErrorCode) }),
+      },
+    ];
+  });
+  const brokerActivity = allBrokerActivity.slice(
+    -DASHBOARD_MODEL_LIMITS.activityEvents,
+  );
 
   const allRoutes = snapshot.routes.map((route): DashboardRouteRow => {
     const depth = normalizedInteger(route.queueDepth) ?? 0;
@@ -990,6 +1051,12 @@ export function buildDashboardViewModel(
       0,
       attentionCandidates.length - DASHBOARD_MODEL_LIMITS.alerts,
     ),
+    upstreamActivityEvents:
+      normalizedInteger(snapshot.truncation.activityEvents) ?? 0,
+    activityEvents: Math.max(
+      0,
+      allBrokerActivity.length - DASHBOARD_MODEL_LIMITS.activityEvents,
+    ),
   };
 
   return {
@@ -1056,6 +1123,7 @@ export function buildDashboardViewModel(
           }),
     },
     activity: messages.groups,
+    brokerActivity,
     peers,
     routes,
     pairs,
@@ -1078,6 +1146,9 @@ export function buildDashboardViewModel(
       bytesAccepted: normalizedInteger(snapshot.accounting.bytesAccepted) ?? 0,
       queuedBytes: normalizedInteger(snapshot.accounting.queuedBytes) ?? 0,
     },
+    ...(snapshot.deadlinePressure === undefined
+      ? {}
+      : { deadlinePressure: snapshot.deadlinePressure }),
     omissions,
   };
 }

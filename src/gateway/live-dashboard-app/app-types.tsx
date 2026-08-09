@@ -175,6 +175,7 @@ namespace Embassy {
     state: DeliveryState;
     latencyMs?: number | undefined;
     safeErrorCode?: string | undefined;
+    conversationIdSuffix?: string | undefined;
     steer?: true | undefined;
   }>;
 
@@ -183,6 +184,7 @@ namespace Embassy {
     sourceAlias: string;
     targetAlias: string;
     messageIdSuffix?: string | undefined;
+    conversationIdSuffix?: string | undefined;
     state: DeliveryState;
     timestamp?: string | undefined;
     latencyMs?: number | undefined;
@@ -197,6 +199,7 @@ namespace Embassy {
     host: string;
     state: PublicAvailablePeerState;
     compatibility: CompatibilityState;
+    validated: boolean;
     selected: boolean;
     selectable: boolean;
     selectionGuidance?:
@@ -208,6 +211,42 @@ namespace Embassy {
       | undefined;
     lastSeenAt?: string | undefined;
     safeErrorCode?: string | undefined;
+  }>;
+
+  export type DashboardActivityEventRow = Readonly<{
+    sequence: number;
+    timestamp: string;
+    kind: "discovery" | "selection" | "registration" | "pairing" | "watch";
+    action:
+      | "discovery_refreshed"
+      | "claude_selected"
+      | "claude_unselected"
+      | "codex_registered"
+      | "codex_succeeded"
+      | "codex_unregistered"
+      | "routes_paired"
+      | "routes_unpaired"
+      | "watch_ended";
+    outcome: "accepted" | "rejected";
+    aliases: readonly string[];
+    safeErrorCode?: string | undefined;
+  }>;
+
+  export type DeadlinePressureSnapshot = Readonly<{
+    configuredDeadlineMs: number;
+    retainedSince?: string | undefined;
+    terminalEvents: number;
+    expiredEvents: number;
+    buckets: readonly Readonly<{
+      bucket:
+        | "under_1m"
+        | "1m_to_5m"
+        | "5m_to_15m"
+        | "15m_to_60m"
+        | "over_60m";
+      settled: number;
+      expired: number;
+    }>[];
   }>;
 
   export type DashboardRouteRow = Readonly<{
@@ -319,6 +358,8 @@ namespace Embassy {
     messageEvents: number;
     upstreamAlerts: number;
     attentionItems: number;
+    upstreamActivityEvents: number;
+    activityEvents: number;
   }>;
 
   export type DashboardViewModel = Readonly<{
@@ -345,6 +386,7 @@ namespace Embassy {
       oldestQueuedAt?: string | undefined;
     }>;
     activity: readonly DashboardMessageGroup[];
+    brokerActivity: readonly DashboardActivityEventRow[];
     peers: readonly DashboardPeerRow[];
     routes: readonly DashboardRouteRow[];
     pairs: readonly DashboardPairRow[];
@@ -354,6 +396,7 @@ namespace Embassy {
     connectors: readonly DashboardConnectorRow[];
     compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
     accounting: DashboardAccounting;
+    deadlinePressure?: DeadlinePressureSnapshot | undefined;
     omissions: DashboardOmissions;
   }>;
 
@@ -477,6 +520,11 @@ namespace Embassy {
         timestamp: string;
         item: DashboardAttentionItem;
         guidanceKey: string;
+      }>
+    | Readonly<{
+        kind: "operation";
+        timestamp: string;
+        event: DashboardActivityEventRow;
       }>;
 
   export type DiagnosticsData = Readonly<{
@@ -485,6 +533,7 @@ namespace Embassy {
     compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
     /** Lifetime expired count from accounting; feeds the deadline pressure card. */
     expiredCount: number;
+    deadlinePressure?: DeadlinePressureSnapshot | undefined;
     queuedMessages: number;
     queueCountIsLowerBound: boolean;
     accounting: DashboardAccounting;

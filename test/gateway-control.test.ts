@@ -125,6 +125,7 @@ function snapshot(): GatewaySnapshot {
         host: "this-mac",
         state: "idle",
         compatibility: "compatible",
+        validated: true,
         selected: false,
         lastSeenAt: NOW,
       },
@@ -181,11 +182,36 @@ function snapshot(): GatewaySnapshot {
         kind: "opened",
       },
     ],
+    activityEvents: [
+      {
+        sequence: 1,
+        timestamp: NOW,
+        kind: "pairing",
+        action: "routes_paired",
+        outcome: "accepted",
+        aliases: ["claude-one@build-mac", "codex-main@this-mac"],
+        operatorAction: true,
+      },
+    ],
+    deadlinePressure: {
+      configuredDeadlineMs: 300_000,
+      retainedSince: NOW,
+      terminalEvents: 1,
+      expiredEvents: 1,
+      buckets: [
+        { bucket: "under_1m", settled: 1, expired: 1 },
+        { bucket: "1m_to_5m", settled: 0, expired: 0 },
+        { bucket: "5m_to_15m", settled: 0, expired: 0 },
+        { bucket: "15m_to_60m", settled: 0, expired: 0 },
+        { bucket: "over_60m", settled: 0, expired: 0 },
+      ],
+    },
     messages: [
       {
         sequence: 1,
         timestamp: NOW,
         messageIdSuffix: "89abcdef",
+        conversationIdSuffix: "AbCd_123",
         direction: "codex_to_claude",
         sourceAlias: "codex-main@this-mac",
         targetAlias: "claude-one@build-mac",
@@ -240,6 +266,7 @@ function snapshot(): GatewaySnapshot {
       pairs: 0,
       progressWatches: 0,
       progressWatchEvents: 0,
+      activityEvents: 0,
       messages: 0,
       alerts: 0,
     },
@@ -653,6 +680,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     pairs: 0,
     progressWatches: 0,
     progressWatchEvents: 0,
+    activityEvents: 0,
     messages: 0,
     alerts: 0,
   });
@@ -1259,6 +1287,13 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   const watch = invalidWatch.progressWatches?.[0];
   assert.ok(watch);
   watch.conversationIdSuffix = "conv_SECRET";
+  const invalidActivity = snapshot();
+  const activity = invalidActivity.activityEvents?.[0];
+  assert.ok(activity);
+  activity.aliases = ["PRIVATE_TASK_ID"];
+  const invalidDeadline = snapshot();
+  assert.ok(invalidDeadline.deadlinePressure);
+  invalidDeadline.deadlinePressure.expiredEvents = 2;
   const unprojected = snapshot();
   const baseEvent = unprojected.messages[0];
   assert.ok(baseEvent);
@@ -1276,6 +1311,8 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidCount,
     inconsistentQueueAge,
     invalidWatch,
+    invalidActivity,
+    invalidDeadline,
     unprojected,
   ];
   const attempts = candidates.length;

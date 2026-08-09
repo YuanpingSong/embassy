@@ -418,6 +418,18 @@ namespace Embassy {
         <DetailRow label={t("column.compatibility")}>
           <StateChip domain="compatibility" state={peer.compatibility} small />
         </DetailRow>
+        <DetailRow label={t("column.validation")}>
+          <span
+            className="chip chip--small"
+            data-kind={peer.validated ? "positive" : "warning"}
+          >
+            {t(
+              peer.validated
+                ? "status.validated"
+                : "status.validationRejected",
+            )}
+          </span>
+        </DetailRow>
         <DetailRow label={t("column.selection")}>
           <span
             className="chip chip--small"

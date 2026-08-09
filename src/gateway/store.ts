@@ -46,6 +46,7 @@ import {
   routeRegistrationModes,
   routeStates,
   type ConnectorRecord,
+  type DeadlinePressureBucket,
   type DedupeRecord,
   type DeliveryState,
   type EnqueueMessageInput,
@@ -103,6 +104,7 @@ const MESSAGE_ID_PATTERN =
   /^msg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MESSAGE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
 const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
+const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 const FINGERPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 class PostRenamePersistenceError extends BridgeError {
@@ -666,7 +668,7 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         "bytes",
         "hopCount",
       ],
-      ["pair", "steer"],
+      ["conversationIdSuffix", "pair", "steer"],
     )
   ) {
     return false;
@@ -676,6 +678,9 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
     MESSAGE_ID_PATTERN.test(value.messageId) &&
     typeof value.messageIdSuffix === "string" &&
     MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
+    (value.conversationIdSuffix === undefined ||
+      (typeof value.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
     typeof value.direction === "string" &&
     DIRECTIONS.has(value.direction) &&
     typeof value.sourceAlias === "string" &&
@@ -715,7 +720,7 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
         "bytes",
         "hopCount",
       ],
-      ["latencyMs", "safeErrorCode", "steer"],
+      ["conversationIdSuffix", "latencyMs", "safeErrorCode", "steer"],
     )
   ) {
     return false;
@@ -725,6 +730,9 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
     isIsoTimestamp(value.timestamp) &&
     typeof value.messageIdSuffix === "string" &&
     MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
+    (value.conversationIdSuffix === undefined ||
+      (typeof value.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
     typeof value.direction === "string" &&
     DIRECTIONS.has(value.direction) &&
     typeof value.sourceAlias === "string" &&
@@ -755,12 +763,15 @@ function isDedupeRecord(value: unknown): value is DedupeRecord {
         "firstSeenAt",
         "expiresAt",
       ],
-      ["pair"],
+      ["conversationIdSuffix", "pair"],
     ) &&
     typeof value.fingerprint === "string" &&
     FINGERPRINT_PATTERN.test(value.fingerprint) &&
     typeof value.messageIdSuffix === "string" &&
     MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
+    (value.conversationIdSuffix === undefined ||
+      (typeof value.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
     typeof value.sourceAlias === "string" &&
     ALIAS_PATTERN.test(value.sourceAlias) &&
     typeof value.targetAlias === "string" &&
@@ -3403,6 +3414,7 @@ export class GatewayStore {
             now,
             "SENDER_NOT_PAIRED",
             input.steer,
+            input.conversationIdSuffix,
           );
         }
         throw error;
@@ -3479,6 +3491,7 @@ export class GatewayStore {
             now,
             "SENDER_NOT_PAIRED",
             input.steer,
+            input.conversationIdSuffix,
           );
           throw new BridgeError(
             "SENDER_NOT_PAIRED",
@@ -3585,6 +3598,9 @@ export class GatewayStore {
       this.appendEvent(state, {
         timestamp: now.toISOString(),
         messageIdSuffix: metadata.messageIdSuffix,
+        ...(metadata.conversationIdSuffix === undefined
+          ? {}
+          : { conversationIdSuffix: metadata.conversationIdSuffix }),
         direction: metadata.direction,
         sourceAlias: metadata.sourceAlias,
         targetAlias: metadata.targetAlias,
@@ -3761,6 +3777,9 @@ export class GatewayStore {
       this.appendEvent(state, {
         timestamp: now.toISOString(),
         messageIdSuffix: metadata.messageIdSuffix,
+        ...(metadata.conversationIdSuffix === undefined
+          ? {}
+          : { conversationIdSuffix: metadata.conversationIdSuffix }),
         direction: metadata.direction,
         sourceAlias: metadata.sourceAlias,
         targetAlias: metadata.targetAlias,
@@ -3806,6 +3825,9 @@ export class GatewayStore {
       this.appendEvent(state, {
         timestamp: now.toISOString(),
         messageIdSuffix: metadata.messageIdSuffix,
+        ...(metadata.conversationIdSuffix === undefined
+          ? {}
+          : { conversationIdSuffix: metadata.conversationIdSuffix }),
         direction: metadata.direction,
         sourceAlias: metadata.sourceAlias,
         targetAlias: metadata.targetAlias,
@@ -3997,6 +4019,41 @@ export class GatewayStore {
               ? {}
               : { nudgeNumber: event.nudgeNumber }),
           }));
+      const pressureBuckets: DeadlinePressureBucket[] = [
+        { bucket: "under_1m", settled: 0, expired: 0 },
+        { bucket: "1m_to_5m", settled: 0, expired: 0 },
+        { bucket: "5m_to_15m", settled: 0, expired: 0 },
+        { bucket: "15m_to_60m", settled: 0, expired: 0 },
+        { bucket: "over_60m", settled: 0, expired: 0 },
+      ];
+      const terminalEvidence = state.events.filter(
+        (event) =>
+          event.latencyMs !== undefined &&
+          (event.state === "delivered" ||
+            event.state === "unconfirmed" ||
+            event.state === "failed" ||
+            event.state === "ambiguous" ||
+            event.state === "expired" ||
+            event.state === "cancelled" ||
+            event.state === "abandoned"),
+      );
+      for (const event of terminalEvidence) {
+        const latency = event.latencyMs ?? 0;
+        const index =
+          latency < 60_000
+            ? 0
+            : latency < 300_000
+              ? 1
+              : latency < 900_000
+                ? 2
+                : latency < 3_600_000
+                  ? 3
+                  : 4;
+        const bucket = pressureBuckets[index];
+        if (bucket === undefined) continue;
+        bucket.settled += 1;
+        if (event.state === "expired") bucket.expired += 1;
+      }
       const health = this.aggregateHealth(connectors);
       const unsortedAlerts: SafeGatewayAlert[] = [
         ...connectors.flatMap((connector) =>
@@ -4046,6 +4103,17 @@ export class GatewayStore {
         pairs,
         progressWatches,
         progressWatchEvents,
+        deadlinePressure: {
+          configuredDeadlineMs: this.config.limits.messageDeadlineMs,
+          ...(state.events[0]?.timestamp === undefined
+            ? {}
+            : { retainedSince: state.events[0].timestamp }),
+          terminalEvents: terminalEvidence.length,
+          expiredEvents: terminalEvidence.filter(
+            (event) => event.state === "expired",
+          ).length,
+          buckets: pressureBuckets,
+        },
         messages: state.events.map((event) => ({ ...event })),
         accounting: { ...state.accounting },
         alerts,
@@ -4537,6 +4605,7 @@ export class GatewayStore {
       EnqueueMessageInput,
       | "body"
       | "dedupeKey"
+      | "conversationIdSuffix"
       | "deadlineAt"
       | "hopCount"
       | "steer"
@@ -4545,6 +4614,15 @@ export class GatewayStore {
     >,
     sides: ResolvedEnqueueSides,
   ): EnqueueMessageResult {
+    if (
+      input.conversationIdSuffix !== undefined &&
+      !CONVERSATION_SUFFIX_PATTERN.test(input.conversationIdSuffix)
+    ) {
+      throw new BridgeError(
+        "INVALID_CONVERSATION_SUFFIX",
+        "Conversation correlation requires an eight-character opaque suffix.",
+      );
+    }
     if (
       typeof input.body !== "string" ||
       input.body.length === 0 ||
@@ -4564,6 +4642,7 @@ export class GatewayStore {
         now,
         "MESSAGE_TOO_LARGE",
         input.steer,
+        input.conversationIdSuffix,
       );
       throw new BridgeError(
         "MESSAGE_TOO_LARGE",
@@ -4582,6 +4661,7 @@ export class GatewayStore {
         now,
         "HOP_LIMIT_EXCEEDED",
         input.steer,
+        input.conversationIdSuffix,
       );
       throw new BridgeError(
         "HOP_LIMIT_EXCEEDED",
@@ -4619,6 +4699,9 @@ export class GatewayStore {
         sourceAlias: sides.sourceAlias,
         targetAlias: sides.targetAlias,
         state: "duplicate",
+        ...(duplicate.conversationIdSuffix === undefined
+          ? {}
+          : { conversationIdSuffix: duplicate.conversationIdSuffix }),
         bytes,
         hopCount,
         ...(input.steer === true ? { steer: true as const } : {}),
@@ -4645,6 +4728,7 @@ export class GatewayStore {
         now,
         "INVALID_DEADLINE",
         input.steer,
+        input.conversationIdSuffix,
       );
       throw new BridgeError(
         "INVALID_DEADLINE",
@@ -4702,6 +4786,7 @@ export class GatewayStore {
         now,
         "QUEUE_FULL",
         input.steer,
+        input.conversationIdSuffix,
       );
       throw new BridgeError(
         "GATEWAY_QUEUE_FULL",
@@ -4761,6 +4846,9 @@ export class GatewayStore {
     const metadata: QueuedMessageMetadata = {
       messageId,
       messageIdSuffix,
+      ...(input.conversationIdSuffix === undefined
+        ? {}
+        : { conversationIdSuffix: input.conversationIdSuffix }),
       direction: sides.direction,
       sourceAlias: sides.sourceAlias,
       targetAlias: sides.targetAlias,
@@ -4790,6 +4878,9 @@ export class GatewayStore {
     state.dedupe.push({
       fingerprint,
       messageIdSuffix,
+      ...(input.conversationIdSuffix === undefined
+        ? {}
+        : { conversationIdSuffix: input.conversationIdSuffix }),
       sourceAlias: sides.sourceAlias,
       targetAlias: sides.targetAlias,
       direction: sides.direction,
@@ -4805,6 +4896,9 @@ export class GatewayStore {
     this.appendEvent(state, {
       timestamp: now.toISOString(),
       messageIdSuffix,
+      ...(input.conversationIdSuffix === undefined
+        ? {}
+        : { conversationIdSuffix: input.conversationIdSuffix }),
       direction: sides.direction,
       sourceAlias: sides.sourceAlias,
       targetAlias: sides.targetAlias,
@@ -4880,6 +4974,7 @@ export class GatewayStore {
     now: Date,
     safeErrorCode: string,
     steer?: true,
+    conversationIdSuffix?: string,
   ): void {
     const suffix = this.randomId().replaceAll("-", "").slice(-8).toLowerCase();
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
@@ -4893,6 +4988,9 @@ export class GatewayStore {
     this.appendEvent(state, {
       timestamp: now.toISOString(),
       messageIdSuffix: suffix,
+      ...(conversationIdSuffix === undefined
+        ? {}
+        : { conversationIdSuffix }),
       direction: sides.direction,
       sourceAlias: sides.sourceAlias,
       targetAlias: sides.targetAlias,
@@ -5235,6 +5333,9 @@ export class GatewayStore {
     this.appendEvent(state, {
       timestamp: now.toISOString(),
       messageIdSuffix: metadata.messageIdSuffix,
+      ...(metadata.conversationIdSuffix === undefined
+        ? {}
+        : { conversationIdSuffix: metadata.conversationIdSuffix }),
       direction: metadata.direction,
       sourceAlias: metadata.sourceAlias,
       targetAlias: metadata.targetAlias,

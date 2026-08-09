@@ -1,9 +1,8 @@
 // Activity tab (§4.5) — the merged, honestly bounded event stream.
 //
-// R14: the live contract carries no ledger for discovery, selection, task
-// changes, leases, or operator actions, so this tab shows exactly two kinds —
-// delivery settlements and alerts — and says so in a permanent footnote
-// instead of offering pills that could never fill.
+// The live contract carries a bounded process-local operator-action ledger in
+// addition to delivery settlements and alerts. It never includes bodies,
+// private route handles, task IDs, or complete conversation capabilities.
 //
 // Row order is the adapter's explicit timestamp-desc sort (adapter.activityRows);
 // this file never re-sorts and never relies on the model's array order. Row text
@@ -15,12 +14,30 @@ namespace Embassy {
 
   type ActivityKindFilter = ActivityKind | "all";
 
-  /** The only two kinds the live contract can evidence (R14). */
-  const ACTIVITY_KINDS: readonly ActivityKind[] = ["delivery", "alert"];
+  const ACTIVITY_KINDS: readonly ActivityKind[] = [
+    "delivery",
+    "operation",
+    "alert",
+  ];
 
   const ACTIVITY_KIND_LABEL_KEYS: Readonly<Record<ActivityKind, string>> = {
     delivery: "app.activity.kinds.delivery",
+    operation: "app.activity.kinds.operation",
     alert: "app.activity.kinds.alert",
+  };
+
+  const OPERATION_COPY_KEYS: Readonly<
+    Record<DashboardActivityEventRow["action"], string>
+  > = {
+    discovery_refreshed: "app.activity.operation.discoveryRefreshed",
+    claude_selected: "app.activity.operation.claudeSelected",
+    claude_unselected: "app.activity.operation.claudeUnselected",
+    codex_registered: "app.activity.operation.codexRegistered",
+    codex_succeeded: "app.activity.operation.codexSucceeded",
+    codex_unregistered: "app.activity.operation.codexUnregistered",
+    routes_paired: "app.activity.operation.routesPaired",
+    routes_unpaired: "app.activity.operation.routesUnpaired",
+    watch_ended: "app.activity.operation.watchEnded",
   };
 
   /** Teaching command for the empty stream (verified real CLI verb). */
@@ -42,12 +59,14 @@ namespace Embassy {
 
   function countByKind(rows: readonly ActivityRow[]): ActivityCounts {
     let delivery = 0;
+    let operation = 0;
     let alert = 0;
     for (const row of rows) {
       if (row.kind === "delivery") delivery += 1;
+      else if (row.kind === "operation") operation += 1;
       else alert += 1;
     }
-    return { all: rows.length, delivery, alert };
+    return { all: rows.length, delivery, operation, alert };
   }
 
   /**
@@ -59,9 +78,13 @@ namespace Embassy {
     kind: ActivityKind,
     omissions: DashboardOmissions,
   ): boolean {
-    return kind === "delivery"
-      ? omissions.messageGroups > 0 || omissions.upstreamMessageEvents > 0
-      : omissions.attentionItems > 0 || omissions.upstreamAlerts > 0;
+    if (kind === "delivery") {
+      return omissions.messageGroups > 0 || omissions.upstreamMessageEvents > 0;
+    }
+    if (kind === "operation") {
+      return omissions.activityEvents > 0 || omissions.upstreamActivityEvents > 0;
+    }
+    return omissions.attentionItems > 0 || omissions.upstreamAlerts > 0;
   }
 
   function filterIsLowerBound(
@@ -76,6 +99,9 @@ namespace Embassy {
   function activityRowIdentity(row: ActivityRow): string {
     if (row.kind === "delivery") {
       return `delivery|${deliveryGroupKey(row.group)}`;
+    }
+    if (row.kind === "operation") {
+      return `operation|${row.event.sequence}|${row.event.action}`;
     }
     const item = row.item;
     return `alert|${row.timestamp}|${item.guidance}|${item.alias ?? ""}|${
@@ -161,6 +187,34 @@ namespace Embassy {
     );
   }
 
+  function OperationEntryText(
+    props: Readonly<{ event: DashboardActivityEventRow }>,
+  ): React.ReactElement {
+    const t = useT();
+    const event = props.event;
+    return (
+      <div className="activity-text stack-sm">
+        <div className="chip-row">
+          <span>{t(OPERATION_COPY_KEYS[event.action])}</span>
+          <span className="mono text-muted">
+            {t(
+              event.outcome === "accepted"
+                ? "app.activity.operation.accepted"
+                : "app.activity.operation.rejected",
+            )}
+          </span>
+        </div>
+        {event.aliases.length === 0 && event.safeErrorCode === undefined ? null : (
+          <span className="attention-item__scope">
+            {[...event.aliases, event.safeErrorCode]
+              .filter((part): part is string => part !== undefined)
+              .join(" · ")}
+          </span>
+        )}
+      </div>
+    );
+  }
+
   function ActivityEntry(
     props: Readonly<{ row: ActivityRow }>,
   ): React.ReactElement {
@@ -180,6 +234,8 @@ namespace Embassy {
         </span>
         {row.kind === "delivery" ? (
           <DeliveryEntryText group={row.group} />
+        ) : row.kind === "operation" ? (
+          <OperationEntryText event={row.event} />
         ) : (
           <AlertEntryText item={row.item} guidanceKey={row.guidanceKey} />
         )}
