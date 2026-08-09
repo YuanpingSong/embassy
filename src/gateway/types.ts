@@ -2,6 +2,7 @@ import type {
   ProgressWatchJournalEvent,
   ProgressWatchMachine,
 } from "./progress-watch-machine.js";
+import type { CompatibilityAttestation } from "./compatibility.js";
 
 export const gatewayProviders = ["codex", "claude"] as const;
 
@@ -288,6 +289,8 @@ export type GatewayPersistedState = {
   watchSequence: number;
   progressWatches: ProgressWatchMachine[];
   progressWatchEvents: ProgressWatchJournalEvent[];
+  /** Bounded, body-free probe evidence keyed by provider surface and version. */
+  compatibilityAttestations: CompatibilityAttestation[];
   /** Strictly validated internal restart journal; never publicly projected. */
   codexSuccession?: unknown;
 };

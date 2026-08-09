@@ -10,6 +10,10 @@ import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
   PROGRESS_WATCH_HARD_CAPACITY,
 } from "./progress-watch-machine.js";
+import {
+  compatibilityPolicies,
+  type CompatibilityPolicy,
+} from "./compatibility.js";
 
 export const gatewayDeliveryNoticeModes = [
   "merged",
@@ -34,6 +38,8 @@ export type GatewayConfig = {
   stallNoticeMs: number;
   /** Native Claude sender notice policy; omitted injected configs mean merged. */
   deliveryNotices?: GatewayDeliveryNoticeMode;
+  /** Unknown patch/minor compatibility policy; defaults to bounded observation. */
+  compatibilityPolicy?: CompatibilityPolicy;
   limits: GatewayStoreLimits;
 };
 
@@ -128,6 +134,17 @@ function deliveryNoticeMode(
   throw new BridgeError(
     "INVALID_GATEWAY_CONFIGURATION",
     "EMBASSY_DELIVERY_NOTICES must be exactly merged, verbose, or quiet.",
+  );
+}
+
+function compatibilityPolicy(value: string | undefined): CompatibilityPolicy {
+  const candidate = value ?? "observed";
+  if (compatibilityPolicies.includes(candidate as CompatibilityPolicy)) {
+    return candidate as CompatibilityPolicy;
+  }
+  throw new BridgeError(
+    "INVALID_GATEWAY_CONFIGURATION",
+    "EMBASSY_COMPAT_POLICY must be exactly observed or strict.",
   );
 }
 
@@ -308,6 +325,7 @@ export function loadGatewayConfig(
     inboundMode: "paired",
     stallNoticeMs,
     deliveryNotices: deliveryNoticeMode(env.EMBASSY_DELIVERY_NOTICES),
+    compatibilityPolicy: compatibilityPolicy(env.EMBASSY_COMPAT_POLICY),
     limits,
   };
 }

@@ -16,6 +16,12 @@ import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import { isCodexRegistrationGeneration } from "./codex-registration-generation.js";
+import {
+  compatibilityCacheKey,
+  isCompatibilityAttestation,
+  type CompatibilityAttestation,
+  type CompatibilitySurface,
+} from "./compatibility.js";
 import type { GatewayConfig } from "./config.js";
 import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
@@ -85,6 +91,7 @@ const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
 export const GATEWAY_MAX_STATE_FILE_BYTES = 8 * 1024 * 1024;
+const COMPATIBILITY_ATTESTATION_CAPACITY = 16;
 const ALIAS_PATTERN =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -966,6 +973,25 @@ function migratePreProgressWatches(value: unknown): unknown {
   };
 }
 
+const PRE_COMPATIBILITY_ATTESTATION_STATE_KEYS = [
+  ...PRE_PROGRESS_WATCH_STATE_KEYS,
+  "watchSequence",
+  "progressWatches",
+  "progressWatchEvents",
+] as const;
+
+/** Add an empty compatibility cache to the exact preceding v1 schema only. */
+function migratePreCompatibilityAttestations(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !hasOnlyKeys(value, PRE_COMPATIBILITY_ATTESTATION_STATE_KEYS)
+  ) {
+    return value;
+  }
+  return { ...value, compatibilityAttestations: [] };
+}
+
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -986,6 +1012,7 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       "watchSequence",
       "progressWatches",
       "progressWatchEvents",
+      "compatibilityAttestations",
       "codexSuccession",
     ]) ||
     value.schemaVersion !== 1 ||
@@ -1003,6 +1030,10 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     !value.progressWatches.every(isProgressWatchMachine) ||
     !Array.isArray(value.progressWatchEvents) ||
     !value.progressWatchEvents.every(isProgressWatchJournalEvent) ||
+    !Array.isArray(value.compatibilityAttestations) ||
+    value.compatibilityAttestations.length >
+      COMPATIBILITY_ATTESTATION_CAPACITY ||
+    !value.compatibilityAttestations.every(isCompatibilityAttestation) ||
     !Array.isArray(value.connectors) ||
     !value.connectors.every(isConnectorRecord) ||
     !Array.isArray(value.queue) ||
@@ -1045,6 +1076,12 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     candidate.progressWatches.map((watch) => watch.conversationId),
   );
   if (watchConversationIds.size !== candidate.progressWatches.length) {
+    return false;
+  }
+  const compatibilityKeys = candidate.compatibilityAttestations.map(
+    compatibilityCacheKey,
+  );
+  if (new Set(compatibilityKeys).size !== compatibilityKeys.length) {
     return false;
   }
   for (const watch of candidate.progressWatches) {
@@ -1636,6 +1673,7 @@ export class GatewayStore {
           watchSequence: 0,
           progressWatches: [],
           progressWatchEvents: [],
+          compatibilityAttestations: [],
           codexSuccession: null,
         };
         if (this.state.pairs.length > this.config.limits.maxPairs) {
@@ -2963,6 +3001,66 @@ export class GatewayStore {
     return this.mutex.run("gateway", async () =>
       this.requireState().progressWatches.map((watch) => ({ ...watch })),
     );
+  }
+
+  async inspectCompatibilityAttestation(
+    surface: CompatibilitySurface,
+    version: string,
+  ): Promise<CompatibilityAttestation | undefined> {
+    return this.mutex.run("gateway", async () => {
+      const attestation = this.requireState().compatibilityAttestations.find(
+        (candidate) =>
+          candidate.surface === surface && candidate.version === version,
+      );
+      return attestation === undefined
+        ? undefined
+        : structuredClone(attestation);
+    });
+  }
+
+  async inspectCompatibilityAttestations(): Promise<
+    CompatibilityAttestation[]
+  > {
+    return this.mutex.run("gateway", async () =>
+      this.requireState().compatibilityAttestations
+        .map((attestation) => structuredClone(attestation))
+        .sort((left, right) =>
+          compatibilityCacheKey(left).localeCompare(
+            compatibilityCacheKey(right),
+          ),
+        ),
+    );
+  }
+
+  async recordCompatibilityAttestation(
+    attestation: CompatibilityAttestation,
+  ): Promise<void> {
+    if (!isCompatibilityAttestation(attestation)) {
+      throw new BridgeError(
+        "COMPAT_ATTESTATION_INVALID",
+        "Compatibility evidence failed strict schema validation.",
+      );
+    }
+    await this.mutate(async (state) => {
+      const key = compatibilityCacheKey(attestation);
+      const index = state.compatibilityAttestations.findIndex(
+        (candidate) => compatibilityCacheKey(candidate) === key,
+      );
+      if (index >= 0) {
+        state.compatibilityAttestations[index] = structuredClone(attestation);
+        return;
+      }
+      if (
+        state.compatibilityAttestations.length >=
+        COMPATIBILITY_ATTESTATION_CAPACITY
+      ) {
+        state.compatibilityAttestations.sort((left, right) =>
+          left.checkedAt.localeCompare(right.checkedAt),
+        );
+        state.compatibilityAttestations.shift();
+      }
+      state.compatibilityAttestations.push(structuredClone(attestation));
+    });
   }
 
   async touchProgressWatch(input: Readonly<{
@@ -5816,6 +5914,7 @@ export class GatewayStore {
     parsed = migratePreSuccessionJournal(parsed);
     parsed = migratePrePairGraph(parsed);
     parsed = migratePreProgressWatches(parsed);
+    parsed = migratePreCompatibilityAttestations(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

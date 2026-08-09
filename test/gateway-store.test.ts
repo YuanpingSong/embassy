@@ -21,6 +21,10 @@ import {
   GATEWAY_MAX_STATE_FILE_BYTES,
   GatewayStore,
 } from "../src/gateway/store.js";
+import {
+  compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
+} from "../src/gateway/compatibility.js";
 import type {
   GatewayStoreDependencies,
   PrivateRouteBinding,
@@ -95,6 +99,7 @@ async function fixture(
     stallNoticeMs: 2_500,
     steeringEnabled: true,
     inboundMode: "paired",
+    compatibilityPolicy: "observed",
     limits: limits(),
   };
   const testClock = clock();
@@ -283,6 +288,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.equal(config.inboundMode, "paired");
   assert.equal(config.steeringEnabled, true);
   assert.equal(config.deliveryNotices, "merged");
+  assert.equal(config.compatibilityPolicy, "observed");
   assert.equal(config.stallNoticeMs, 150_000);
   assert.equal(config.limits.maxMessageBytes, 16_384);
 
@@ -308,11 +314,28 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
       mode,
     );
   }
+  assert.equal(
+    loadGatewayConfig({
+      EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+      EMBASSY_COMPAT_POLICY: "strict",
+    }).compatibilityPolicy,
+    "strict",
+  );
   assert.throws(
     () =>
       loadGatewayConfig({
         EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
         EMBASSY_STEERING_ENABLED: "false",
+      }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "INVALID_GATEWAY_CONFIGURATION",
+  );
+  assert.throws(
+    () =>
+      loadGatewayConfig({
+        EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+        EMBASSY_COMPAT_POLICY: "warn",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -3352,6 +3375,7 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
     watchSequence?: unknown;
     progressWatches?: unknown;
     progressWatchEvents?: unknown;
+    compatibilityAttestations?: unknown;
   };
   delete legacy.accounting.unconfirmed;
   for (const route of legacy.routes) delete route.counters.unconfirmed;
@@ -3360,6 +3384,7 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   delete legacy.watchSequence;
   delete legacy.progressWatches;
   delete legacy.progressWatchEvents;
+  delete legacy.compatibilityAttestations;
   await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
     mode: 0o600,
   });
@@ -3396,13 +3421,65 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
     accounting: Record<string, unknown>;
     routes: Array<{ counters: Record<string, unknown> }>;
     codexSuccession?: unknown;
+    compatibilityAttestations?: unknown;
   };
   assert.equal(persisted.accounting.unconfirmed, 0);
   assert.ok(
     persisted.routes.every((route) => route.counters.unconfirmed === 0),
   );
   assert.equal(persisted.codexSuccession, null);
+  assert.deepEqual(persisted.compatibilityAttestations, []);
   await migrated.close();
+});
+
+test("compatibility attestations are strict, persistent, cached by surface and version, and bounded", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  const attestation = evaluateCompatibilityAttestation({
+    surface: "claude",
+    version: "2.1.227",
+    checkedAt: "2026-08-09T12:00:00.000Z",
+    policy: "observed",
+    certifiedVersions: ["2.1.226"],
+    probes: compatibilityProbeNames.claude.map((name) => ({
+      name,
+      outcome: "pass" as const,
+    })),
+  });
+  await store.recordCompatibilityAttestation(attestation);
+  assert.deepEqual(
+    await store.inspectCompatibilityAttestation("claude", "2.1.227"),
+    attestation,
+  );
+  await store.recordCompatibilityAttestation({
+    ...attestation,
+    checkedAt: "2026-08-09T12:01:00.000Z",
+  });
+  assert.equal((await store.inspectCompatibilityAttestations()).length, 1);
+  await assert.rejects(
+    store.recordCompatibilityAttestation({
+      ...attestation,
+      probes: [],
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "COMPAT_ATTESTATION_INVALID",
+  );
+  await store.close();
+
+  const recovered = new GatewayStore(config);
+  await recovered.initialize();
+  assert.equal(
+    (
+      await recovered.inspectCompatibilityAttestation("claude", "2.1.227")
+    )?.checkedAt,
+    "2026-08-09T12:01:00.000Z",
+  );
+  assert.equal(
+    JSON.stringify(await recovered.publicSnapshot()).includes("2.1.227"),
+    false,
+  );
+  await recovered.close();
 });
 
 test("strict succession journal rejects malformed oversized and unknown fields", async () => {
