@@ -13,7 +13,7 @@
       "selectable": 1,
       "countIsLowerBound": true,
       "primaryAlias": "claude-advisor@this-mac",
-      "nextAction": "select_claude"
+      "nextAction": "pair_routes"
     },
     "codex": {
       "kind": "codex",
@@ -335,6 +335,33 @@
       "lastSeenAt": "2026-08-08T11:59:41.000Z"
     }
   ],
+  "pairs": [
+    {
+      "claudeAlias": "claude-advisor@this-mac",
+      "codexAlias": "codex-builder@this-mac",
+      "host": "this-mac",
+      "state": "degraded",
+      "counters": {
+        "accepted": 20,
+        "delivered": 15,
+        "unconfirmed": 2,
+        "failed": 1,
+        "ambiguous": 1,
+        "expired": 1,
+        "cancelled": 0,
+        "abandoned": 0,
+        "rejected": 0,
+        "bytesAccepted": 40960
+      }
+    }
+  ],
+  "graph": {
+    "pairCount": 1,
+    "readyPairCount": 0,
+    "pairCountIsLowerBound": true,
+    "unpairedReadyClaude": 2,
+    "unpairedReadyCodex": 0
+  },
   "connectors": [
     {
       "provider": "claude",
@@ -384,6 +411,7 @@
     "connectors": 0,
     "availablePeers": 3,
     "routes": 1,
+    "pairs": 2,
     "upstreamMessageEvents": 12,
     "messageGroups": 4,
     "messageEvents": 9,

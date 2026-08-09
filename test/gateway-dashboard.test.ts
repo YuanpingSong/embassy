@@ -164,20 +164,24 @@ test("Codex succession alerts distinguish a busy boundary from manual recovery",
 test("first-run exchange board gives truthful paired setup actions", () => {
   const snapshot = dashboardFixture();
   snapshot.routes = [];
+  snapshot.pairs = [];
   snapshot.availablePeers = snapshot.availablePeers.map((peer) => ({
     ...peer,
     selected: false,
   }));
   const visiblePeers = renderDashboardHtml(snapshot);
-  assert.match(visiblePeers, /embassy select-claude --alias &lt;alias&gt;/);
+  assert.match(
+    visiblePeers,
+    /embassy pair --claude &lt;alias&gt; --codex &lt;alias&gt;/,
+  );
   assert.match(visiblePeers, /embassy register-codex --alias codex-&lt;name&gt;@&lt;host&gt;/);
 
   snapshot.availablePeers = [];
   const noPeers = renderDashboardHtml(snapshot);
   assert.match(noPeers, /Start or keep a Claude Code session running/);
   assert.match(noPeers, /embassy refresh-dashboard/);
-  assert.match(noPeers, /No Claude session is paired/);
-  assert.match(noPeers, /accepts no inbound messages/);
+  assert.match(noPeers, /No ready consent edge exists/);
+  assert.match(noPeers, /refuse unpaired senders/);
   assert.match(noPeers, /data-inbound-mode="paired"/);
 
   snapshot.inboundMode = "open";
@@ -185,9 +189,66 @@ test("first-run exchange board gives truthful paired setup actions", () => {
   assert.match(openInbound, /Open inbound/);
   assert.match(
     openInbound,
-    /Any live Claude session under this OS user may message this task/,
+    /Any live Claude session under this OS user may initiate inbound work/,
   );
   assert.match(openInbound, /data-inbound-mode="open"/);
+});
+
+test("dashboard projects explicit consent edges and graph readiness", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes.push({
+    ...snapshot.routes[0]!,
+    alias: "claude-reviewer@this-mac",
+    state: "idle",
+  });
+  const staleCodexRoute = {
+    ...snapshot.routes[1]!,
+    alias: "codex-builder@this-mac",
+    queueDepth: 0,
+    state: "stale" as const,
+  };
+  delete staleCodexRoute.oldestQueuedAt;
+  snapshot.routes.push(staleCodexRoute);
+  snapshot.pairs.push({
+    claudeAlias: "claude-reviewer@this-mac",
+    codexAlias: "codex-builder@this-mac",
+    host: "this-mac",
+    counters: routeCounters({ accepted: 1, failed: 1 }),
+  });
+  snapshot.truncation.pairs = 2;
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(
+    model.pairs.map(({ claudeAlias, codexAlias, state }) => ({
+      claudeAlias,
+      codexAlias,
+      state,
+    })),
+    [
+      {
+        claudeAlias: "claude-advisor@this-mac",
+        codexAlias: "codex-reviewer@this-mac",
+        state: "ready",
+      },
+      {
+        claudeAlias: "claude-reviewer@this-mac",
+        codexAlias: "codex-builder@this-mac",
+        state: "degraded",
+      },
+    ],
+  );
+  assert.deepEqual(model.graph, {
+    pairCount: 2,
+    readyPairCount: 1,
+    pairCountIsLowerBound: true,
+    unpairedReadyClaude: 1,
+    unpairedReadyCodex: 0,
+  });
+  assert.equal(model.omissions.pairs, 2);
+  const html = renderDashboardHtml(snapshot);
+  assert.match(html, /claude-advisor@this-mac paired with codex-reviewer@this-mac/);
+  assert.match(html, /claude-reviewer@this-mac paired with codex-builder@this-mac/);
+  assert.match(html, /2 additional consent edges are omitted/);
 });
 
 test("unpaired sender refusal is neutral and explains the pairing boundary", () => {

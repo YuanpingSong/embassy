@@ -297,6 +297,8 @@ function nextActionLabel(
       ? "next.discoverClaude"
       : action === "select_claude"
         ? "next.selectClaude"
+      : action === "pair_routes"
+        ? "next.pairRoutes"
       : action === "restore_claude"
         ? "next.restoreClaude"
         : action === "repair_claude_inventory"
@@ -329,6 +331,48 @@ function renderParty(context: RenderContext, party: DashboardExchangeParty): str
   </article>`;
 }
 
+function renderPairGraph(context: RenderContext): string {
+  const graph = context.model.graph;
+  const summary = t(context, "app.routes.pairSummary", {
+    ready: renderCount(context, graph.readyPairCount, graph.pairCountIsLowerBound),
+    total: renderCount(context, graph.pairCount, graph.pairCountIsLowerBound),
+  });
+  const unpaired = t(context, "app.routes.unpairedSummary", {
+    claude: String(graph.unpairedReadyClaude),
+    codex: String(graph.unpairedReadyCodex),
+  });
+  const rows = context.model.pairs.length === 0
+    ? `<p class="quiet">${t(context, "app.routes.noPairInline")}</p>`
+    : `<ul class="pair-list">${context.model.pairs.map((pair) => {
+        const label = t(context, "app.routes.pairDescription", {
+          claude: escapeDashboardHtml(pair.claudeAlias),
+          codex: escapeDashboardHtml(pair.codexAlias),
+        });
+        const stateLabel = pair.state === "ready"
+          ? t(context, "status.ready")
+          : pair.state === "degraded"
+            ? t(context, "status.attention")
+            : t(context, "status.missing");
+        const tone: DashboardTone = pair.state === "ready"
+          ? "good"
+          : pair.state === "degraded"
+            ? "warning"
+            : "danger";
+        return `<li><span>${label}</span>${statusPill(stateLabel, tone)}</li>`;
+      }).join("")}</ul>`;
+  const omitted = context.model.omissions.pairs === 0
+    ? ""
+    : `<p class="quiet">${t(context, "app.omitted.pairs", {
+        count: String(context.model.omissions.pairs),
+      })}</p>`;
+  return `<section class="pair-graph" aria-labelledby="pair-graph-title">
+    <div class="pair-graph__heading"><h3 id="pair-graph-title">${t(context, "app.routes.pairs")}</h3><strong>${summary}</strong></div>
+    <p>${unpaired}</p>
+    ${rows}
+    ${omitted}
+  </section>`;
+}
+
 function renderExchange(context: RenderContext): string {
   const age = formatQueueAge(
     context.model.exchange.oldestQueueAgeMs,
@@ -344,9 +388,7 @@ function renderExchange(context: RenderContext): string {
         ),
       });
   const paired = context.model.inboundMode === "paired";
-  const hasPair =
-    context.model.exchange.claude.ready > 0 &&
-    context.model.exchange.codex.ready > 0;
+  const hasPair = context.model.graph.readyPairCount > 0;
   const policyBody = paired
     ? t(context, hasPair ? "inbound.paired.body" : "inbound.noPair.body")
     : t(context, "inbound.open.body");
@@ -377,6 +419,7 @@ function renderExchange(context: RenderContext): string {
       ${renderParty(context, context.model.exchange.codex)}
     </div>
     <div class="direction-key" aria-label="${t(context, "exchange.title")}"><span>Codex → Claude</span><span>Claude → Codex</span></div>
+    ${renderPairGraph(context)}
   </section>`;
 }
 
@@ -600,6 +643,7 @@ function renderDiagnostics(context: RenderContext): string {
     [omissions.connectors, "diagnostics.omissions.connectors"],
     [omissions.availablePeers, "diagnostics.omissions.peers"],
     [omissions.routes, "diagnostics.omissions.routes"],
+    [omissions.pairs, "diagnostics.omissions.pairs"],
     [
       omissions.upstreamMessageEvents,
       "diagnostics.omissions.upstreamMessageEvents",
@@ -718,6 +762,12 @@ const DASHBOARD_STYLES = `
     .pouch small { padding: 0 .35rem; color: var(--muted); }
     .direction-key { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; padding-top: .55rem; color: var(--muted); font-size: .74rem; }
     .direction-key span:last-child { text-align: right; }
+    .pair-graph { margin-top: 1.2rem; padding: 1rem; border: 1px solid var(--hairline); background: var(--sheet); }
+    .pair-graph__heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .7rem 1rem; align-items: baseline; }
+    .pair-graph__heading h3, .pair-graph p { margin-bottom: .55rem; }
+    .pair-graph__heading strong, .pair-graph p { color: var(--muted); font: .78rem/1.45 ui-sans-serif, system-ui, sans-serif; }
+    .pair-list { display: grid; gap: .45rem; margin: .8rem 0 0; padding: 0; list-style: none; }
+    .pair-list li { display: flex; justify-content: space-between; gap: .8rem; align-items: center; padding-top: .45rem; border-top: 1px solid var(--hairline); overflow-wrap: anywhere; }
     .attention { border-bottom-color: var(--danger); }
     .attention-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--hairline); }
     .attention-projection-note { margin: 0; padding: 1rem; border-left: 3px solid var(--warning); background: var(--warning-soft); }

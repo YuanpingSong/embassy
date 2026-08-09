@@ -25,6 +25,7 @@ namespace Embassy {
   const NEXT_ACTION_COPY_KEYS: Readonly<Record<DashboardNextAction, string>> = {
     discover_claude: "next.discoverClaude",
     select_claude: "next.selectClaude",
+    pair_routes: "next.pairRoutes",
     restore_claude: "next.restoreClaude",
     repair_claude_inventory: "next.repairClaude",
     register_codex: "next.registerCodex",
@@ -325,7 +326,7 @@ namespace Embassy {
     // explanation moves to the notes under the board so the codex node never
     // slides off centre.
     const showEdges =
-      data.pairReady || queueOut.depth > 0 || queueIn.depth > 0;
+      data.graph.readyPairCount > 0 || queueOut.depth > 0 || queueIn.depth > 0;
     const nextActionLine = (
       who: string,
       action: DashboardNextAction,
@@ -334,7 +335,7 @@ namespace Embassy {
         ? null
         : `${t("next.label")} · ${who}: ${t(NEXT_ACTION_COPY_KEYS[action])}`;
     const boardNotes: readonly string[] = [
-      !openInbound && showEdges && !data.pairReady
+      !openInbound && showEdges && data.graph.readyPairCount === 0
         ? `${t("app.overview.noPair.title")} — ${t("app.overview.noPair.body")}`
         : null,
       nextActionLine(t("provider.claude"), data.exchange.claude.nextAction),
@@ -408,7 +409,7 @@ namespace Embassy {
               {t(
                 openInbound
                   ? "inbound.open.body"
-                  : data.pairReady
+                  : data.graph.readyPairCount > 0
                     ? "inbound.paired.body"
                     : "inbound.noPair.body",
               )}

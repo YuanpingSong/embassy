@@ -1021,6 +1021,24 @@ button:not(:disabled):hover { opacity: .92; }
   color: var(--body-muted);
   padding-top: 8px;
 }
+.topology__edge-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--hairline);
+  list-style: none;
+}
+.topology__edge-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--body-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .topo-row {
   height: 64px;
   display: flex;

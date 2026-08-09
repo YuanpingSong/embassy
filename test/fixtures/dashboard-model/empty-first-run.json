@@ -35,6 +35,14 @@
   "activity": [],
   "peers": [],
   "routes": [],
+  "pairs": [],
+  "graph": {
+    "pairCount": 0,
+    "readyPairCount": 0,
+    "pairCountIsLowerBound": false,
+    "unpairedReadyClaude": 0,
+    "unpairedReadyCodex": 0
+  },
   "connectors": [],
   "accounting": {
     "accepted": 0,
@@ -54,6 +62,7 @@
     "connectors": 0,
     "availablePeers": 0,
     "routes": 0,
+    "pairs": 0,
     "upstreamMessageEvents": 0,
     "messageGroups": 0,
     "messageEvents": 0,

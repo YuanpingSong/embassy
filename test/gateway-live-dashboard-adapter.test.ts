@@ -75,7 +75,7 @@ type OverviewData = Readonly<{
   exchange: DashboardViewModel["exchange"];
   queueClaudeToCodex: QueueSummary;
   queueCodexToClaude: QueueSummary;
-  pairReady: boolean;
+  graph: DashboardViewModel["graph"];
   attention: readonly AttentionView[];
   attentionOmitted: number;
   pulse: PulseData;
@@ -106,7 +106,9 @@ type RoutesData = Readonly<{
   peersOmitted: number;
   codexRoutes: readonly CodexRouteView[];
   routesOmitted: number;
-  pairReady: boolean;
+  pairs: DashboardViewModel["pairs"];
+  pairsOmitted: number;
+  graph: DashboardViewModel["graph"];
   successions: readonly SuccessionView[];
 }>;
 
@@ -151,7 +153,6 @@ type EmbassyAdapter = Readonly<{
     provider: GatewayProvider,
   ): ConnectorHealth | undefined;
   worstCompatibility(model: DashboardViewModel): CompatibilityState | undefined;
-  pairReady(model: DashboardViewModel): boolean;
   extractSuccessions(model: DashboardViewModel): readonly SuccessionView[];
   isMonitorOnly(route: DashboardRouteRow): boolean;
   hasLifecycleTruncation(group: DashboardMessageGroup): boolean;
@@ -183,8 +184,11 @@ type EmbassyNamespace = Readonly<{
     onNotice?: (kind: string) => void;
   }>): Readonly<{
     executeAction(action:
-      | Readonly<{ action: "select_claude"; alias: string }>
-      | Readonly<{ action: "unselect_claude"; alias: string }>
+      | Readonly<{
+          action: "pair" | "unpair";
+          claudeAlias: string;
+          codexAlias: string;
+        }>
       | Readonly<{ action: "refresh_dashboard" }>,
     ): Promise<Readonly<{ ok: boolean; code: string }>>;
   }>;
@@ -522,7 +526,6 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
     "pulse",
     "worstConnectorHealth",
     "worstCompatibility",
-    "pairReady",
     "extractSuccessions",
     "isMonitorOnly",
     "hasLifecycleTruncation",
@@ -581,8 +584,9 @@ test("browser action protocol posts one closed action then reads a fresh snapsho
     assert.deepEqual(
       plain(
         await protocol.executeAction({
-          action: "select_claude",
-          alias: "claude-reviewer@this-mac",
+          action: "pair",
+          claudeAlias: "claude-reviewer@this-mac",
+          codexAlias: "codex-builder@this-mac",
         }),
       ),
       { ok: true, code: "ok" },
@@ -602,8 +606,9 @@ test("browser action protocol posts one closed action then reads a fresh snapsho
   assert.equal(
     calls[0]?.init.body,
     JSON.stringify({
-      action: "select_claude",
-      alias: "claude-reviewer@this-mac",
+      action: "pair",
+      claudeAlias: "claude-reviewer@this-mac",
+      codexAlias: "codex-builder@this-mac",
     }),
   );
   assert.equal(calls[1]?.input, "/instance_0123456789abcdef/snapshot");
@@ -633,6 +638,8 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     "activity",
     "peers",
     "routes",
+    "pairs",
+    "graph",
     "connectors",
     "accounting",
     "omissions",
@@ -641,6 +648,7 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     "connectors",
     "availablePeers",
     "routes",
+    "pairs",
     "upstreamMessageEvents",
     "messageGroups",
     "messageEvents",
@@ -955,13 +963,6 @@ test("worstCompatibility spans every connector regardless of provider", () => {
   assert.equal(adapter.worstCompatibility(incompatible), "incompatible");
 });
 
-test("pairReady requires a ready count on both sides", () => {
-  assert.equal(adapter.pairReady(HEALTHY), true);
-  assert.equal(adapter.pairReady(SUCCESSION), true);
-  assert.equal(adapter.pairReady(DEGRADED), false); // codex.ready === 0
-  assert.equal(adapter.pairReady(EMPTY), false);
-});
-
 // ---------------------------------------------------------------------------
 // §7.3 — monitor-only, successions, routes props
 // ---------------------------------------------------------------------------
@@ -1000,7 +1001,9 @@ test("routesProps keeps the server's route order and drops claude routes", () =>
   assert.equal(data.routesOmitted, 1);
   assert.equal(data.peersOmitted, 3);
   assert.equal(data.peers.length, 2);
-  assert.equal(data.pairReady, false);
+  assert.equal(data.graph.readyPairCount, 0);
+  assert.equal(data.pairs.length, 1);
+  assert.equal(data.pairsOmitted, 2);
   assert.equal(at(data.codexRoutes, 0).oldestAgeMs, 450_000);
   assert.equal(at(data.codexRoutes, 1).oldestAgeMs, undefined);
 });
@@ -1440,7 +1443,7 @@ test("overviewProps composes the status strip, queues and attention", () => {
   assert.equal(data.queueClaudeToCodex.oldestAgeMs, 480_000);
   assert.equal(data.queueCodexToClaude.depth, 2);
   assert.equal(data.queueCodexToClaude.oldestAgeMs, 210_000);
-  assert.equal(data.pairReady, false);
+  assert.equal(data.graph.readyPairCount, 0);
   assert.equal(data.attention.length, 4);
   assert.equal(data.attentionOmitted, 5);
   assert.equal(data.pulse.total, 3);
@@ -1457,7 +1460,7 @@ test("overviewProps on a healthy exchange reports no attention and a live pair",
     codexConnector: "healthy",
     compatibility: "compatible",
   });
-  assert.equal(data.pairReady, true);
+  assert.equal(data.graph.readyPairCount, 1);
   assert.equal(data.attention.length, 0);
   assert.equal(data.attentionOmitted, 0);
   assert.equal(data.pulse.total, 2);
@@ -1491,7 +1494,7 @@ test("empty peers, routes, connectors and activity produce empty props, never a 
   assert.equal(overview.statusStrip.compatibility, undefined);
   assert.equal(overview.attention.length, 0);
   assert.equal(overview.attentionOmitted, 0);
-  assert.equal(overview.pairReady, false);
+  assert.equal(overview.graph.readyPairCount, 0);
   assert.equal(overview.pulse.total, 0);
   assert.equal(overview.pulse.bars.length, 8);
   assert.equal(overview.pulse.isLowerBound, false);

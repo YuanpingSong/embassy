@@ -412,7 +412,7 @@ test("live dashboard actions forward only the three closed control methods", asy
       const method = (
         options as { request: { method: string } }
       ).request.method;
-      if (method === "unselect_claude") {
+      if (method === "unpair") {
         return {
           protocolVersion: 1,
           ok: true,
@@ -433,15 +433,17 @@ test("live dashboard actions forward only the three closed control methods", asy
 
   assert.deepEqual(
     await actions.execute({
-      action: "select_claude",
-      alias: "claude-reviewer@this-mac",
+      action: "pair",
+      claudeAlias: "claude-reviewer@this-mac",
+      codexAlias: "codex-builder@this-mac",
     }),
     { ok: true, code: "ok" },
   );
   assert.deepEqual(
     await actions.execute({
-      action: "unselect_claude",
-      alias: "claude-reviewer@this-mac",
+      action: "unpair",
+      claudeAlias: "claude-reviewer@this-mac",
+      codexAlias: "codex-builder@this-mac",
     }),
     { ok: false, code: "busy" },
   );
@@ -454,16 +456,22 @@ test("live dashboard actions forward only the three closed control methods", asy
       socketPath: CONTROL_SOCKET_PATH,
       request: {
         protocolVersion: 1,
-        method: "select_claude",
-        params: { alias: "claude-reviewer@this-mac" },
+        method: "pair",
+        params: {
+          claudeAlias: "claude-reviewer@this-mac",
+          codexAlias: "codex-builder@this-mac",
+        },
       },
     },
     {
       socketPath: CONTROL_SOCKET_PATH,
       request: {
         protocolVersion: 1,
-        method: "unselect_claude",
-        params: { alias: "claude-reviewer@this-mac" },
+        method: "unpair",
+        params: {
+          claudeAlias: "claude-reviewer@this-mac",
+          codexAlias: "codex-builder@this-mac",
+        },
       },
     },
     {

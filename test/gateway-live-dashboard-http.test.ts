@@ -506,8 +506,16 @@ test("action route forwards only the three exact authenticated verbs", async () 
   const actions = new SyntheticActions();
   const handler = createHandler(undefined, "en", actions);
   const fixtures: LiveDashboardAction[] = [
-    { action: "select_claude", alias: "claude-advisor@this-mac" },
-    { action: "unselect_claude", alias: "claude-advisor@this-mac" },
+    {
+      action: "pair",
+      claudeAlias: "claude-advisor@this-mac",
+      codexAlias: "codex-builder@this-mac",
+    },
+    {
+      action: "unpair",
+      claudeAlias: "claude-advisor@this-mac",
+      codexAlias: "codex-builder@this-mac",
+    },
     { action: "refresh_dashboard" },
   ];
 
@@ -664,9 +672,9 @@ test("action route rejects malformed or unauthenticated requests before broker c
     {
       method: "POST",
       headers: actionHeaders(
-        '{"action":"select_claude","alias":"NOT AN ALIAS"}',
+        '{"action":"pair","claudeAlias":"NOT AN ALIAS","codexAlias":"codex-builder@this-mac"}',
       ),
-      body: '{"action":"select_claude","alias":"NOT AN ALIAS"}',
+      body: '{"action":"pair","claudeAlias":"NOT AN ALIAS","codexAlias":"codex-builder@this-mac"}',
       status: 400,
     },
   ];

@@ -2956,7 +2956,6 @@ test("pairing a second Claude session selects it additively and preserves old wo
     await handlers.pair({
       claudeAlias: "claude-two@this-mac",
       codexAlias: "codex-main@this-mac",
-      codexThreadId: THREAD_ID,
     }),
     { accepted: true, code: "ok" },
   );

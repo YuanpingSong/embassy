@@ -37,8 +37,11 @@ export type LiveDashboardRequestHandler = (
 ) => Promise<void>;
 
 export type LiveDashboardAction =
-  | Readonly<{ action: "select_claude"; alias: string }>
-  | Readonly<{ action: "unselect_claude"; alias: string }>
+  | Readonly<{
+      action: "pair" | "unpair";
+      claudeAlias: string;
+      codexAlias: string;
+    }>
   | Readonly<{ action: "refresh_dashboard" }>;
 
 export type LiveDashboardActionResult = Readonly<{
@@ -317,16 +320,27 @@ function parseAction(body: string): LiveDashboardAction | undefined {
     return { action: "refresh_dashboard" };
   }
   if (
-    (record.action === "select_claude" ||
-      record.action === "unselect_claude") &&
-    keys.length === 2 &&
+    (record.action === "pair" || record.action === "unpair") &&
+    keys.length === 3 &&
     keys.includes("action") &&
-    keys.includes("alias") &&
-    typeof record.alias === "string" &&
-    record.alias.length <= 128 &&
-    isGatewayAlias(record.alias)
+    keys.includes("claudeAlias") &&
+    keys.includes("codexAlias") &&
+    typeof record.claudeAlias === "string" &&
+    typeof record.codexAlias === "string" &&
+    record.claudeAlias.length <= 128 &&
+    record.codexAlias.length <= 128 &&
+    isGatewayAlias(record.claudeAlias) &&
+    isGatewayAlias(record.codexAlias) &&
+    record.claudeAlias.startsWith("claude-") &&
+    record.codexAlias.startsWith("codex-") &&
+    record.claudeAlias.slice(record.claudeAlias.lastIndexOf("@") + 1) ===
+      record.codexAlias.slice(record.codexAlias.lastIndexOf("@") + 1)
   ) {
-    return { action: record.action, alias: record.alias };
+    return {
+      action: record.action,
+      claudeAlias: record.claudeAlias,
+      codexAlias: record.codexAlias,
+    };
   }
   return undefined;
 }

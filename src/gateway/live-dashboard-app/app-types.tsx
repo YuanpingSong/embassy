@@ -16,8 +16,11 @@ namespace Embassy {
     | "stopped";
 
   export type LiveDashboardAction =
-    | Readonly<{ action: "select_claude"; alias: string }>
-    | Readonly<{ action: "unselect_claude"; alias: string }>
+    | Readonly<{
+        action: "pair" | "unpair";
+        claudeAlias: string;
+        codexAlias: string;
+      }>
     | Readonly<{ action: "refresh_dashboard" }>;
 
   export type LiveDashboardActionResult = Readonly<{
@@ -117,6 +120,7 @@ namespace Embassy {
   export type DashboardNextAction =
     | "discover_claude"
     | "select_claude"
+    | "pair_routes"
     | "restore_claude"
     | "repair_claude_inventory"
     | "register_codex"
@@ -220,6 +224,22 @@ namespace Embassy {
     safeErrorCode?: string | undefined;
   }>;
 
+  export type DashboardPairRow = Readonly<{
+    claudeAlias: string;
+    codexAlias: string;
+    host: string;
+    state: "ready" | "degraded" | "unavailable";
+    counters: RouteCounters;
+  }>;
+
+  export type DashboardGraphFacts = Readonly<{
+    pairCount: number;
+    readyPairCount: number;
+    pairCountIsLowerBound: boolean;
+    unpairedReadyClaude: number;
+    unpairedReadyCodex: number;
+  }>;
+
   export type DashboardConnectorRow = Readonly<{
     provider: GatewayProvider;
     host: string;
@@ -235,6 +255,7 @@ namespace Embassy {
     connectors: number;
     availablePeers: number;
     routes: number;
+    pairs: number;
     upstreamMessageEvents: number;
     messageGroups: number;
     messageEvents: number;
@@ -268,6 +289,8 @@ namespace Embassy {
     activity: readonly DashboardMessageGroup[];
     peers: readonly DashboardPeerRow[];
     routes: readonly DashboardRouteRow[];
+    pairs: readonly DashboardPairRow[];
+    graph: DashboardGraphFacts;
     connectors: readonly DashboardConnectorRow[];
     accounting: DashboardAccounting;
     omissions: DashboardOmissions;
@@ -337,7 +360,7 @@ namespace Embassy {
     exchange: DashboardViewModel["exchange"];
     queueClaudeToCodex: QueueSummary;
     queueCodexToClaude: QueueSummary;
-    pairReady: boolean;
+    graph: DashboardGraphFacts;
     attention: readonly AttentionView[];
     attentionOmitted: number;
     pulse: PulseData;
@@ -376,7 +399,9 @@ namespace Embassy {
     peersOmitted: number;
     codexRoutes: readonly CodexRouteView[];
     routesOmitted: number;
-    pairReady: boolean;
+    pairs: readonly DashboardPairRow[];
+    pairsOmitted: number;
+    graph: DashboardGraphFacts;
     successions: readonly SuccessionView[];
   }>;
 

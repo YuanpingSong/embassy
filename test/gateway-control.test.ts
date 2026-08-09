@@ -449,6 +449,21 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   };
   assert.deepEqual(paired, expectedPair);
   assert.deepEqual(unpaired, expectedPair);
+  await sendGatewayControlRequest({
+    socketPath,
+    request: {
+      protocolVersion: 1,
+      method: "pair",
+      params: {
+        claudeAlias: "claude-two@this-mac",
+        codexAlias: "codex-main@this-mac",
+      },
+    },
+  });
+  assert.deepEqual(paired, {
+    claudeAlias: "claude-two@this-mac",
+    codexAlias: "codex-main@this-mac",
+  });
 
   const secretText = "transient body that must not appear in the response";
   const outbound = await sendGatewayControlRequest({

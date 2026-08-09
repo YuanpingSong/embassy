@@ -73,7 +73,14 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         counters: routeCounters({ accepted: 4, delivered: 3 }),
       },
     ],
-    pairs: [],
+    pairs: [
+      {
+        claudeAlias: "claude-advisor@this-mac",
+        codexAlias: "codex-reviewer@this-mac",
+        host: "this-mac",
+        counters: routeCounters({ accepted: 4, delivered: 3 }),
+      },
+    ],
     messages: [
       {
         sequence: 1,

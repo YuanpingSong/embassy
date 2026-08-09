@@ -255,27 +255,33 @@ export function createGatewayLiveDashboardActions(
     ): Promise<LiveDashboardActionResult> => {
       try {
         let response:
-          | GatewayControlResponse<"select_claude">
-          | GatewayControlResponse<"unselect_claude">
+          | GatewayControlResponse<"pair">
+          | GatewayControlResponse<"unpair">
           | GatewayControlResponse<"refresh_dashboard">;
         switch (action.action) {
-          case "select_claude":
+          case "pair":
             response = await sendRequest({
               socketPath,
               request: {
                 protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-                method: "select_claude",
-                params: { alias: action.alias },
+                method: "pair",
+                params: {
+                  claudeAlias: action.claudeAlias,
+                  codexAlias: action.codexAlias,
+                },
               },
             });
             break;
-          case "unselect_claude":
+          case "unpair":
             response = await sendRequest({
               socketPath,
               request: {
                 protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-                method: "unselect_claude",
-                params: { alias: action.alias },
+                method: "unpair",
+                params: {
+                  claudeAlias: action.claudeAlias,
+                  codexAlias: action.codexAlias,
+                },
               },
             });
             break;

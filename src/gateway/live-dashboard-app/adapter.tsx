@@ -152,11 +152,6 @@ namespace Embassy {
     return worst;
   }
 
-  /** Topology edge exists only when both sides have a ready count (§2.2). */
-  export function pairReady(model: DashboardViewModel): boolean {
-    return model.exchange.claude.ready > 0 && model.exchange.codex.ready > 0;
-  }
-
   /**
    * Pulse (§2.2): terminal-state settlements over the 3600 s window before
    * `generatedAt`, one bar per terminal state (all eight, zeros included).
@@ -328,7 +323,7 @@ namespace Embassy {
       },
       queueClaudeToCodex: queueSplit(model, "codex", nowMs),
       queueCodexToClaude: queueSplit(model, "claude", nowMs),
-      pairReady: pairReady(model),
+      graph: model.graph,
       attention: attentionViews(model),
       attentionOmitted: model.omissions.attentionItems,
       pulse: pulse(model),
@@ -371,7 +366,9 @@ namespace Embassy {
       peersOmitted: model.omissions.availablePeers,
       codexRoutes,
       routesOmitted: model.omissions.routes,
-      pairReady: pairReady(model),
+      pairs: model.pairs,
+      pairsOmitted: model.omissions.pairs,
+      graph: model.graph,
       successions: extractSuccessions(model),
     };
   }
@@ -437,7 +434,6 @@ namespace Embassy {
     pulse,
     worstConnectorHealth,
     worstCompatibility,
-    pairReady,
     extractSuccessions,
     isMonitorOnly,
     hasLifecycleTruncation,

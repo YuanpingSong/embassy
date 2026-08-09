@@ -16,6 +16,7 @@ export const DASHBOARD_MODEL_LIMITS = Object.freeze({
   connectors: 16,
   availablePeers: 64,
   routes: 128,
+  pairs: 64,
   messages: 50,
   messageEvents: 60,
   alerts: 32,
@@ -26,6 +27,7 @@ export type DashboardTone = "good" | "info" | "warning" | "danger" | "quiet";
 export type DashboardNextAction =
   | "discover_claude"
   | "select_claude"
+  | "pair_routes"
   | "restore_claude"
   | "repair_claude_inventory"
   | "register_codex"
@@ -122,6 +124,22 @@ export type DashboardRouteRow = Readonly<{
   safeErrorCode?: string | undefined;
 }>;
 
+export type DashboardPairRow = Readonly<{
+  claudeAlias: string;
+  codexAlias: string;
+  host: string;
+  state: "ready" | "degraded" | "unavailable";
+  counters: RouteCounters;
+}>;
+
+export type DashboardGraphFacts = Readonly<{
+  pairCount: number;
+  readyPairCount: number;
+  pairCountIsLowerBound: boolean;
+  unpairedReadyClaude: number;
+  unpairedReadyCodex: number;
+}>;
+
 export type DashboardConnectorRow = Readonly<{
   provider: GatewayProvider;
   host: string;
@@ -137,6 +155,7 @@ export type DashboardOmissions = Readonly<{
   connectors: number;
   availablePeers: number;
   routes: number;
+  pairs: number;
   upstreamMessageEvents: number;
   messageGroups: number;
   messageEvents: number;
@@ -170,6 +189,8 @@ export type DashboardViewModel = Readonly<{
   activity: readonly DashboardMessageGroup[];
   peers: readonly DashboardPeerRow[];
   routes: readonly DashboardRouteRow[];
+  pairs: readonly DashboardPairRow[];
+  graph: DashboardGraphFacts;
   connectors: readonly DashboardConnectorRow[];
   accounting: GatewayPublicSnapshot["accounting"];
   omissions: DashboardOmissions;
@@ -221,6 +242,21 @@ function compareText(left: string, right: string): number {
 
 function boundedAdd(left: number, right: number): number {
   return Math.min(Number.MAX_SAFE_INTEGER, left + right);
+}
+
+function normalizedCounters(counters: Partial<RouteCounters> | undefined): RouteCounters {
+  return {
+    accepted: normalizedInteger(counters?.accepted) ?? 0,
+    delivered: normalizedInteger(counters?.delivered) ?? 0,
+    unconfirmed: normalizedInteger(counters?.unconfirmed) ?? 0,
+    failed: normalizedInteger(counters?.failed) ?? 0,
+    ambiguous: normalizedInteger(counters?.ambiguous) ?? 0,
+    expired: normalizedInteger(counters?.expired) ?? 0,
+    cancelled: normalizedInteger(counters?.cancelled) ?? 0,
+    abandoned: normalizedInteger(counters?.abandoned) ?? 0,
+    rejected: normalizedInteger(counters?.rejected) ?? 0,
+    bytesAccepted: normalizedInteger(counters?.bytesAccepted) ?? 0,
+  };
 }
 
 function routeIsReady(route: DashboardRouteRow): boolean {
@@ -485,18 +521,7 @@ export function buildDashboardViewModel(
       queueDepth: depth,
       ...(oldestQueuedAt === undefined ? {} : { oldestQueuedAt }),
       ...(age === undefined ? {} : { queueAgeMs: age }),
-      counters: {
-        accepted: normalizedInteger(route.counters?.accepted) ?? 0,
-        delivered: normalizedInteger(route.counters?.delivered) ?? 0,
-        unconfirmed: normalizedInteger(route.counters?.unconfirmed) ?? 0,
-        failed: normalizedInteger(route.counters?.failed) ?? 0,
-        ambiguous: normalizedInteger(route.counters?.ambiguous) ?? 0,
-        expired: normalizedInteger(route.counters?.expired) ?? 0,
-        cancelled: normalizedInteger(route.counters?.cancelled) ?? 0,
-        abandoned: normalizedInteger(route.counters?.abandoned) ?? 0,
-        rejected: normalizedInteger(route.counters?.rejected) ?? 0,
-        bytesAccepted: normalizedInteger(route.counters?.bytesAccepted) ?? 0,
-      },
+      counters: normalizedCounters(route.counters),
       ...(normalizedTimestamp(route.lastSeenAt) === undefined
         ? {}
         : { lastSeenAt: normalizedTimestamp(route.lastSeenAt) }),
@@ -511,6 +536,34 @@ export function buildDashboardViewModel(
       compareText(left.alias, right.alias),
     )
     .slice(0, DASHBOARD_MODEL_LIMITS.routes);
+
+  const routeByAlias = new Map(allRoutes.map((route) => [route.alias, route]));
+  const allPairs = snapshot.pairs
+    .map((pair): DashboardPairRow => {
+      const claudeAlias = boundedText(pair.claudeAlias);
+      const codexAlias = boundedText(pair.codexAlias);
+      const claudeRoute = routeByAlias.get(claudeAlias);
+      const codexRoute = routeByAlias.get(codexAlias);
+      const bothPresent = claudeRoute !== undefined && codexRoute !== undefined;
+      return {
+        claudeAlias,
+        codexAlias,
+        host: boundedText(pair.host),
+        state:
+          bothPresent && routeIsReady(claudeRoute) && routeIsReady(codexRoute)
+            ? "ready"
+            : bothPresent
+              ? "degraded"
+              : "unavailable",
+        counters: normalizedCounters(pair.counters),
+      };
+    })
+    .sort(
+      (left, right) =>
+        compareText(left.claudeAlias, right.claudeAlias) ||
+        compareText(left.codexAlias, right.codexAlias),
+    );
+  const pairs = allPairs.slice(0, DASHBOARD_MODEL_LIMITS.pairs);
 
   const connectors = snapshot.connectors
     .map(
@@ -558,6 +611,23 @@ export function buildDashboardViewModel(
   const codexRoutes = allRoutes.filter((route) => route.provider === "codex");
   const readyClaude = claudeRoutes.filter(routeIsReady).length;
   const readyCodex = codexRoutes.filter(routeIsReady).length;
+  const readyPairs = allPairs.filter((pair) => pair.state === "ready");
+  const pairedReadyClaude = new Set(
+    readyPairs.map((pair) => pair.claudeAlias),
+  );
+  const pairedReadyCodex = new Set(readyPairs.map((pair) => pair.codexAlias));
+  const graph: DashboardGraphFacts = {
+    pairCount: allPairs.length,
+    readyPairCount: readyPairs.length,
+    pairCountIsLowerBound:
+      (normalizedInteger(snapshot.truncation.pairs) ?? 0) > 0,
+    unpairedReadyClaude: claudeRoutes.filter(
+      (route) => routeIsReady(route) && !pairedReadyClaude.has(route.alias),
+    ).length,
+    unpairedReadyCodex: codexRoutes.filter(
+      (route) => routeIsReady(route) && !pairedReadyCodex.has(route.alias),
+    ).length,
+  };
   const selectedPeers = validPeers.filter(
     (peer) => peer.selected && peerIsSelectable(peer),
   );
@@ -566,12 +636,12 @@ export function buildDashboardViewModel(
   const claudeStatus = partyStatus(claudeRoutes, readyClaude);
   const codexStatus = partyStatus(codexRoutes, readyCodex);
   const claudeNextAction: DashboardNextAction =
-    selectedClaudeCount > 0 && readyClaude > 0
+    graph.readyPairCount > 0 && selectedClaudeCount > 0 && readyClaude > 0
       ? "none"
       : validPeers.length === 0
         ? "discover_claude"
-        : selectablePeers.length > 0 && selectedPeers.length === 0
-          ? "select_claude"
+        : selectablePeers.length > 0
+          ? "pair_routes"
           : selectedPeers.length > 0
             ? "restore_claude"
             : "repair_claude_inventory";
@@ -580,7 +650,9 @@ export function buildDashboardViewModel(
       ? "register_codex"
       : readyCodex === 0
         ? "restore_codex"
-        : "none";
+        : graph.readyPairCount === 0
+          ? "pair_routes"
+          : "none";
 
   const explicitAlerts: DashboardAttentionItem[] = snapshot.alerts
     .map((alert): DashboardAttentionItem => {
@@ -684,7 +756,7 @@ export function buildDashboardViewModel(
   }
   const attention = attentionCandidates.slice(0, DASHBOARD_MODEL_LIMITS.alerts);
 
-  const setupComplete = readyClaude > 0 && readyCodex > 0;
+  const setupComplete = graph.readyPairCount > 0;
   const overall =
     attentionCandidates.length > 0 ||
     (normalizedInteger(snapshot.truncation.alerts) ?? 0) > 0
@@ -704,6 +776,10 @@ export function buildDashboardViewModel(
     routes: boundedAdd(
       normalizedInteger(snapshot.truncation.routes) ?? 0,
       Math.max(0, allRoutes.length - DASHBOARD_MODEL_LIMITS.routes),
+    ),
+    pairs: boundedAdd(
+      normalizedInteger(snapshot.truncation.pairs) ?? 0,
+      Math.max(0, allPairs.length - DASHBOARD_MODEL_LIMITS.pairs),
     ),
     upstreamMessageEvents:
       normalizedInteger(snapshot.truncation.messages) ?? 0,
@@ -782,6 +858,8 @@ export function buildDashboardViewModel(
     activity: messages.groups,
     peers,
     routes,
+    pairs,
+    graph,
     connectors,
     accounting: {
       accepted: normalizedInteger(snapshot.accounting.accepted) ?? 0,

@@ -114,7 +114,8 @@ export type SelectClaudeParams = {
 export type PairParams = {
   claudeAlias: string;
   codexAlias: string;
-  codexThreadId: string;
+  /** Task attestation for agent calls; omitted only by the authenticated operator UI. */
+  codexThreadId?: string;
 };
 
 export type SendToClaudeParams = {
@@ -732,16 +733,12 @@ function normalizeParams(
     case "pair":
     case "unpair": {
       if (
-        !hasExactKeys(value, [
-          "claudeAlias",
-          "codexAlias",
-          "codexThreadId",
-        ]) ||
+        !hasExactKeys(value, ["claudeAlias", "codexAlias"], ["codexThreadId"]) ||
         typeof value.claudeAlias !== "string" ||
         !isClaudeSessionSelector(value.claudeAlias) ||
         !isAlias(value.codexAlias) ||
         !value.codexAlias.startsWith("codex-") ||
-        !isUuid(value.codexThreadId) ||
+        (value.codexThreadId !== undefined && !isUuid(value.codexThreadId)) ||
         value.claudeAlias === value.codexAlias ||
         (isAlias(value.claudeAlias) &&
           value.claudeAlias.slice(value.claudeAlias.lastIndexOf("@") + 1) !==
@@ -754,7 +751,9 @@ function normalizeParams(
           ? value.claudeAlias.toLowerCase()
           : value.claudeAlias,
         codexAlias: value.codexAlias,
-        codexThreadId: value.codexThreadId.toLowerCase(),
+        ...(value.codexThreadId === undefined
+          ? {}
+          : { codexThreadId: value.codexThreadId.toLowerCase() }),
       };
     }
     case "send_to_claude": {

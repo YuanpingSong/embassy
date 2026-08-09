@@ -18,16 +18,16 @@ export const dashboardCopyZhCn = {
   "exchange.eyebrow": "交换台",
   "exchange.title": "两个方向，两道明确边界",
   "exchange.note":
-    "选择决定 Codex 的目标；在配对入站模式下，它也决定该任务唯一接受的 Claude 发送方。原生可见性仍覆盖整台机器。",
+    "每条同意边都指定一个 Claude 会话和一个 Codex 任务。原生发现仍覆盖整台机器，权限则不会。",
   "inbound.paired.badge": "配对入站",
-  "inbound.paired.body": "已注册的 Codex 任务只接受来自已选择 Claude 会话的消息。",
+  "inbound.paired.body": "每个已注册的 Codex 任务只接受沿显式 Claude 同意边发送的消息。",
   "inbound.open.badge": "开放入站",
-  "inbound.open.body": "同一操作系统用户下，任何在线的 Claude 会话都可向此任务发送消息。",
-  "inbound.noPair.body": "当前没有配对的 Claude 会话；已注册的 Codex 任务不接受入站消息。",
-  "exchange.claude.title": "Claude 选择",
-  "exchange.claude.note": "Codex → Claude 的目标",
-  "exchange.codex.title": "Codex 注册",
-  "exchange.codex.note": "Claude → Codex 的目标",
+  "inbound.open.body": "同一操作系统用户下的任何在线 Claude 会话都可发起入站工作；显式 Codex 发送仍需同意边。",
+  "inbound.noPair.body": "当前没有就绪的同意边；配对模式会拒绝未配对发送方。",
+  "exchange.claude.title": "Claude 会话",
+  "exchange.claude.note": "同意边端点",
+  "exchange.codex.title": "Codex 任务",
+  "exchange.codex.note": "同意边端点",
   "exchange.pouch.title": "本地信袋",
   "exchange.pouch.empty": "队列为空",
   "exchange.pouch.queued": "{count} 条排队中",
@@ -51,6 +51,8 @@ export const dashboardCopyZhCn = {
     "启动或保持一个 Claude Code 会话运行，然后运行 embassy refresh-dashboard。",
   "next.selectClaude":
     "运行 embassy select-claude --alias <alias>，明确选择一个可见会话。",
+  "next.pairRoutes":
+    "运行 embassy pair --claude <alias> --codex <alias>，建立显式同意边。",
   "next.restoreClaude": "刷新发现；若未自动恢复，请明确选择 Claude 当前别名。",
   "next.repairClaude":
     "当前没有兼容、在线且无冲突的可选会话。请先解决“会话与路由”中显示的问题，再刷新发现。",
@@ -224,6 +226,7 @@ export const dashboardCopyZhCn = {
   "diagnostics.omissions.connectors": "{count} 个连接器",
   "diagnostics.omissions.peers": "{count} 个会话",
   "diagnostics.omissions.routes": "{count} 条路由",
+  "diagnostics.omissions.pairs": "{count} 条同意边",
   "diagnostics.omissions.upstreamMessageEvents":
     "面板投影前的 {count} 条投递事件",
   "diagnostics.omissions.messageGroups": "{count} 组投递",
@@ -292,15 +295,17 @@ export const dashboardCopyZhCn = {
   "live.label": "实时伴侣",
   "live.mastheadSubtitle": "实时元数据流，并提供有限的路由同意控制。serve 仍限套接字通道。",
   "live.readonlyFooter":
-    "此视图仅可选择、取消选择并刷新 Claude 发现结果。",
+    "此视图仅可配对、取消配对并刷新 Claude 发现结果。",
   "live.action.authorityLabel": "有限的操作权限",
   "live.action.authorityBody":
-    "此视图可选择、取消选择并刷新 Claude 发现结果；不能注册任务、发送、回复、批准、中断或更改设置。",
+    "此视图可配对或取消配对具名端点，并刷新 Claude 发现结果；不能注册任务、发送、回复、批准、中断或更改设置。",
   "live.action.sectionTitle": "路由同意操作",
   "live.action.scope":
-    "请在 Claude 会话行中选择或取消选择；可在此刷新发现结果。每项操作都必须确认。",
+    "请为具名 Claude 与 Codex 端点配对或取消配对；可在此刷新发现结果。每项操作都必须确认。",
   "live.action.select": "选择会话",
   "live.action.unselect": "取消选择会话",
+  "live.action.pair": "配对端点",
+  "live.action.unpair": "取消端点配对",
   "live.action.refresh": "刷新发现结果",
   "live.action.confirm": "确认",
   "live.action.cancel": "取消",
@@ -373,9 +378,9 @@ export const dashboardCopyZhCn = {
   "app.overview.node.codex.sub": "任务",
   "app.overview.count.codex":
     "已就绪 {ready} · 已注册 {total} · 仅监控 {monitorOnly}",
-  "app.overview.noPair.title": "无配对",
+  "app.overview.noPair.title": "没有就绪同意边",
   "app.overview.noPair.body":
-    "在选择 Claude 会话之前，已注册的 Codex 任务不接受入站消息；Codex 也没有 Claude 发送目标。",
+    "配对入站仅接受由显式同意边连接到已注册 Codex 任务的发送方；Codex 也只沿显式边路由。",
   "app.overview.queueC2x": "Claude → Codex",
   "app.overview.queueX2c": "Claude ← Codex",
   "app.overview.depth": "深度",
@@ -411,15 +416,24 @@ export const dashboardCopyZhCn = {
   "app.routes.candidates": "候选项",
   "app.routes.claudeSessions": "Claude 会话",
   "app.routes.codexRoutes": "Codex 任务",
-  "app.routes.selectCmd.title": "选择 Claude 会话",
+  "app.routes.pairs": "同意边",
+  "app.routes.pairDescription": "{claude} 已与 {codex} 配对",
+  "app.routes.pairSummary": "{total} 条同意边中有 {ready} 条就绪",
+  "app.routes.unpairedSummary":
+    "{claude} 个就绪 Claude 端点与 {codex} 个就绪 Codex 端点没有就绪边。",
+  "app.routes.pairCmd.consequence":
+    "仅在 {claude} 与 {codex} 之间建立同意；现有边保持不变。",
+  "app.routes.unpairCmd.consequence":
+    "仅移除 {claude} 与 {codex} 之间的同意；相邻边上的工作保持活动。",
+  "app.routes.selectCmd.title": "建立同意边",
   "app.routes.selectCmd.consequence":
-    "将此会话与已注册的 Codex 任务配对。它既是 Codex 的发送目标，也是该任务唯一接受的 Claude 发送方。",
+    "在此 Claude 会话与一个 Codex 任务之间建立一条同意边；其他边保持不变。",
   "app.routes.selectCmd.consequenceOpen":
-    "将此会话选为 Codex 的发送目标。开放入站仍会接受同一操作系统用户下的任何在线 Claude 会话。",
+    "建立一条出站目标边。开放入站仍会接受同一操作系统用户下的任何在线 Claude 会话。",
   "app.routes.unselectCmd.consequence":
-    "取消此配对。Codex 将无法发往 Claude；在重新配对之前，该任务也不接受入站消息。",
+    "仅移除此同意边；相邻边上的工作保持活动。",
   "app.routes.unselectCmd.consequenceOpen":
-    "清除 Codex → Claude 的目标。开放入站仍对同一操作系统用户下的所有在线 Claude 会话启用。",
+    "仅移除此出站边。开放入站仍对同一操作系统用户下的所有在线 Claude 会话启用。",
   "app.routes.refreshCmd": "重新读取本地发现结果，并重写静态面板文件。",
   "app.routes.monitorOnlyReason":
     "仅监控——此路由因 CODEX_WRITES_DISABLED 而停用写入。",
@@ -437,7 +451,8 @@ export const dashboardCopyZhCn = {
   "app.routes.registerHint":
     "注册不是按钮：它必须在 Codex 任务内运行以继承其身份。请让你的代理运行：",
   "app.routes.noPairInline":
-    "无配对 — 在选择会话之前，任务不接受任何入站消息",
+    "无同意边 — 请将 Claude 会话与 Codex 任务配对",
+  "app.omitted.pairs": "另有 {count} 条同意边未显示。",
   "app.activity.title": "事件流 — 有界，最新在前",
   "app.activity.kinds.all": "所有类型",
   "app.activity.kinds.delivery": "投递",

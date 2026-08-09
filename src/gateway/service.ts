@@ -3273,7 +3273,8 @@ export class GatewayService {
     const binding = this.routeBindings.get(params.codexAlias);
     if (
       binding?.provider !== "codex" ||
-      binding.routeHandle !== params.codexThreadId
+      (params.codexThreadId !== undefined &&
+        binding.routeHandle !== params.codexThreadId)
     ) {
       throw new BridgeError(
         "CODEX_CALLER_MISMATCH",

@@ -157,9 +157,9 @@ test("information architecture is ordered and calm when no alert exists", () => 
   assert.ok(exchange > 0 && transit > exchange && activity > transit && sessions > activity && diagnostics > sessions);
   assert.equal(html.includes('id="attention-title"'), false);
   assert.match(html, /Two directions, two explicit boundaries/);
-  assert.match(html, /Claude selection/);
+  assert.match(html, /Claude sessions/);
   assert.match(html, /Local pouch/);
-  assert.match(html, /Codex registration/);
+  assert.match(html, /Codex tasks/);
   assert.match(html, /Compatibility &amp; system details/);
   assert.match(html, /<details class="section diagnostics"/);
 });

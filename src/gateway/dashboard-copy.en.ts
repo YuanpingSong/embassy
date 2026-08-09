@@ -19,19 +19,19 @@ export const dashboardCopyEn = {
   "exchange.eyebrow": "Exchange board",
   "exchange.title": "Two directions, two explicit boundaries",
   "exchange.note":
-    "Selection controls the Codex destination and, in paired mode, the only Claude sender that task accepts. Native visibility remains machine-wide.",
+    "Each consent edge names one Claude session and one Codex task. Native discovery remains machine-wide; permission does not.",
   "inbound.paired.badge": "Paired inbound",
   "inbound.paired.body":
-    "The registered Codex task accepts messages only from the selected Claude session.",
+    "Each registered Codex task accepts messages only across its explicit Claude consent edges.",
   "inbound.open.badge": "Open inbound",
   "inbound.open.body":
-    "Any live Claude session under this OS user may message this task.",
+    "Any live Claude session under this OS user may initiate inbound work; explicit Codex sends still require an edge.",
   "inbound.noPair.body":
-    "No Claude session is paired; a registered Codex task accepts no inbound messages.",
-  "exchange.claude.title": "Claude selection",
-  "exchange.claude.note": "Destination for Codex → Claude",
-  "exchange.codex.title": "Codex registration",
-  "exchange.codex.note": "Target for Claude → Codex",
+    "No ready consent edge exists; paired-mode endpoints refuse unpaired senders.",
+  "exchange.claude.title": "Claude sessions",
+  "exchange.claude.note": "Consent-edge endpoints",
+  "exchange.codex.title": "Codex tasks",
+  "exchange.codex.note": "Consent-edge endpoints",
   "exchange.pouch.title": "Local pouch",
   "exchange.pouch.empty": "Queue clear",
   "exchange.pouch.queued": "{count} queued",
@@ -55,6 +55,8 @@ export const dashboardCopyEn = {
     "Start or keep a Claude Code session running, then run embassy refresh-dashboard.",
   "next.selectClaude":
     "Run embassy select-claude --alias <alias> to choose a visible session explicitly.",
+  "next.pairRoutes":
+    "Create an explicit edge with embassy pair --claude <alias> --codex <alias>.",
   "next.restoreClaude":
     "Refresh discovery, then explicitly select the current Claude alias if it is not restored.",
   "next.repairClaude":
@@ -251,6 +253,7 @@ export const dashboardCopyEn = {
   "diagnostics.omissions.connectors": "{count} connectors",
   "diagnostics.omissions.peers": "{count} sessions",
   "diagnostics.omissions.routes": "{count} routes",
+  "diagnostics.omissions.pairs": "{count} consent edges",
   "diagnostics.omissions.upstreamMessageEvents":
     "{count} delivery events before dashboard projection",
   "diagnostics.omissions.messageGroups": "{count} delivery groups",
@@ -325,15 +328,17 @@ export const dashboardCopyEn = {
   "live.mastheadSubtitle":
     "Live metadata stream with bounded route-consent controls. serve remains socket-only.",
   "live.readonlyFooter":
-    "This view can select, unselect, and refresh Claude discovery — nothing else.",
+    "This view can pair, unpair, and refresh Claude discovery — nothing else.",
   "live.action.authorityLabel": "Bounded operator authority",
   "live.action.authorityBody":
-    "This view can select, unselect, and refresh Claude discovery. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
+    "This view can pair or unpair named endpoints and refresh Claude discovery. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
   "live.action.sectionTitle": "Route consent actions",
   "live.action.scope":
-    "Select or unselect inside a Claude session row. Refresh discovery is available here. Every action requires confirmation.",
+    "Pair or unpair named Claude and Codex endpoints. Refresh discovery is available here. Every action requires confirmation.",
   "live.action.select": "Select session",
   "live.action.unselect": "Unselect session",
+  "live.action.pair": "Pair endpoints",
+  "live.action.unpair": "Unpair endpoints",
   "live.action.refresh": "Refresh discovery",
   "live.action.confirm": "Confirm",
   "live.action.cancel": "Cancel",
@@ -409,9 +414,9 @@ export const dashboardCopyEn = {
   "app.overview.node.codex.sub": "tasks",
   "app.overview.count.codex":
     "{ready} ready · {total} registered · {monitorOnly} monitor-only",
-  "app.overview.noPair.title": "No pair",
+  "app.overview.noPair.title": "No ready consent edge",
   "app.overview.noPair.body":
-    "A registered Codex task accepts no inbound messages until a Claude session is selected; Codex also has no Claude destination.",
+    "Paired inbound accepts only senders connected to a registered Codex task by an explicit edge; Codex routes only along explicit edges.",
   "app.overview.queueC2x": "Claude → Codex",
   "app.overview.queueX2c": "Claude ← Codex",
   "app.overview.depth": "depth",
@@ -450,15 +455,24 @@ export const dashboardCopyEn = {
   "app.routes.candidates": "Candidates",
   "app.routes.claudeSessions": "Claude sessions",
   "app.routes.codexRoutes": "Codex tasks",
-  "app.routes.selectCmd.title": "Select a Claude session",
+  "app.routes.pairs": "Consent edges",
+  "app.routes.pairDescription": "{claude} paired with {codex}",
+  "app.routes.pairSummary": "{ready} ready of {total} consent edges",
+  "app.routes.unpairedSummary":
+    "{claude} ready Claude endpoints and {codex} ready Codex endpoints have no ready edge.",
+  "app.routes.pairCmd.consequence":
+    "Create consent only between {claude} and {codex}. Existing edges stay unchanged.",
+  "app.routes.unpairCmd.consequence":
+    "Remove consent only between {claude} and {codex}. Work on adjacent edges stays active.",
+  "app.routes.selectCmd.title": "Create a consent edge",
   "app.routes.selectCmd.consequence":
-    "Pair this session with the registered Codex task. It becomes the destination Codex sends to and the only Claude sender the task accepts.",
+    "Create one consent edge between this Claude session and a Codex task. Other edges stay unchanged.",
   "app.routes.selectCmd.consequenceOpen":
-    "Select this session as the destination Codex sends to. Open inbound still accepts any live Claude session under this OS user.",
+    "Create one outbound destination edge. Open inbound still accepts any live Claude session under this OS user.",
   "app.routes.unselectCmd.consequence":
-    "Unpair this session. Codex cannot send to Claude, and the task accepts no inbound messages until another session is paired.",
+    "Remove only this consent edge. Work on adjacent edges stays active.",
   "app.routes.unselectCmd.consequenceOpen":
-    "Clear the Codex → Claude destination. Open inbound remains enabled for every live Claude session under this OS user.",
+    "Remove only this outbound edge. Open inbound remains enabled for every live Claude session under this OS user.",
   "app.routes.refreshCmd":
     "Re-read local discovery and rewrite the static dashboard file.",
   "app.routes.monitorOnlyReason":
@@ -477,7 +491,8 @@ export const dashboardCopyEn = {
   "app.routes.registerHint":
     "Registration is not a button: it must run inside the Codex task to inherit its identity. Ask your agent to run:",
   "app.routes.noPairInline":
-    "no pair — the task accepts no inbound messages until a session is selected",
+    "no consent edge — pair a Claude session with a Codex task",
+  "app.omitted.pairs": "{count} additional consent edges are omitted.",
   "app.activity.title": "Event stream — bounded, most recent first",
   "app.activity.kinds.all": "All kinds",
   "app.activity.kinds.delivery": "Delivery",
