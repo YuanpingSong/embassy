@@ -52,12 +52,17 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     .filter((filename) => filename.endsWith(".ts"))
     .map((filename) => filename.slice(0, -3))
     .sort();
+  // The browser app bundle is the one nested runtime artifact: a
+  // module:"none" outFile with no declaration or map siblings by design.
+  const APP_BUNDLE_PATH = "dist/src/gateway/live-dashboard-app/app.js";
+  assert.ok(expected.includes(APP_BUNDLE_PATH), APP_BUNDLE_PATH);
   const manifestModules = expected
     .filter(
       (packagePath) =>
         packagePath.startsWith("dist/src/gateway/") &&
         packagePath.endsWith(".js") &&
-        !packagePath.endsWith(".js.map"),
+        !packagePath.endsWith(".js.map") &&
+        packagePath !== APP_BUNDLE_PATH,
     )
     .map((packagePath) => path.basename(packagePath, ".js"))
     .sort();
@@ -67,7 +72,8 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     (packagePath) =>
       packagePath.startsWith("dist/src/") &&
       packagePath.endsWith(".js") &&
-      !packagePath.endsWith(".js.map"),
+      !packagePath.endsWith(".js.map") &&
+      packagePath !== APP_BUNDLE_PATH,
   )) {
     const stem = javascriptPath.slice(0, -3);
     assert.ok(expected.includes(`${stem}.d.ts`), `${stem}.d.ts`);
