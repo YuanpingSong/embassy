@@ -537,6 +537,8 @@ export const dashboardCopyEn = {
   "app.routes.successions.note":
     "A task change moves the alias to a new Codex task. Nothing transfers: queued work, history, and approvals stay with the old task.",
   "app.routes.detail.absent": "Not carried by the live contract.",
+  "app.routes.expandDetails": "Expand details for {alias}",
+  "app.routes.collapseDetails": "Collapse details for {alias}",
   "app.routes.queueDepth": "Queue depth",
   "app.routes.counters": "Route counters",
   "app.routes.registered": "registered",

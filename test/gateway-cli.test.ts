@@ -74,17 +74,27 @@ function compatibilityReport(failing = false): CompatibilityCheckReport {
   return { policy: "observed", compatible: !failing, surfaces };
 }
 
-function certificationReport(): CompatibilityCertificationReport {
+function certificationReport(
+  failedSurfaces: readonly ("claude" | "codex")[] = [],
+): CompatibilityCertificationReport {
   const report = compatibilityReport();
   return {
     policy: report.policy,
-    certified: true,
+    certified: failedSurfaces.length === 0,
     withTurn: false,
     surfaces: report.surfaces.map((attestation) =>
       attachCompatibilityCertification(attestation, {
         depth: attestation.surface === "claude" ? "wire" : "thread_ops",
-        outcome: "pass",
+        outcome: failedSurfaces.includes(attestation.surface) ? "fail" : "pass",
         certifiedAt: NOW,
+        ...(failedSurfaces.includes(attestation.surface)
+          ? {
+              safeErrorCode:
+                attestation.surface === "claude"
+                  ? "CLAUDE_CERTIFICATION_WRITE_UNCONFIRMED"
+                  : "CODEX_CERTIFICATION_ROUTE_BUSY",
+            }
+          : {}),
       }),
     ),
   };
@@ -207,6 +217,55 @@ test("compat-certify preserves closed JSON, exact route grammar, and terminal ex
     assert.equal(rejected.code, gatewayCliExitCodes.invalidInput);
   }
   await server.close();
+});
+
+test("compat-certify waits for bounded live evidence and exits by failed surface", async () => {
+  const cases = [
+    {
+      failed: ["claude"] as const,
+      exitCode: gatewayCliExitCodes.claudeCertificationFailed,
+    },
+    {
+      failed: ["codex"] as const,
+      exitCode: gatewayCliExitCodes.codexCertificationFailed,
+    },
+    {
+      failed: ["claude", "codex"] as const,
+      exitCode: gatewayCliExitCodes.multipleCertificationsFailed,
+    },
+  ];
+  for (const current of cases) {
+    let observedTimeoutMs: number | undefined;
+    const stdout = capture();
+    const stderr = capture();
+    const exitCode = await runGatewayCli(["compat-certify"], {
+      env: {},
+      stdout,
+      stderr,
+      loadConfig: () =>
+        loadGatewayConfig({ EMBASSY_STATE_DIR: "/synthetic/private-state" }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async (options) => {
+        observedTimeoutMs = options.timeoutMs;
+        return {
+          protocolVersion: 1,
+          ok: true,
+          result: certificationReport(current.failed),
+        } as never;
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    });
+    assert.equal(observedTimeoutMs, 90_000);
+    assert.equal(exitCode, current.exitCode);
+    assert.equal(
+      (JSON.parse(stdout.chunks.join("")) as {
+        result: CompatibilityCertificationReport;
+      }).result.certified,
+      false,
+    );
+    for (const surface of current.failed) {
+      assert.match(stderr.chunks.join(""), new RegExp(`${surface}: fail`));
+    }
+  }
 });
 
 test("bare invocation and help flags print localized usage without side effects", async () => {

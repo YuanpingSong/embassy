@@ -542,15 +542,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         targetId,
         input.controllerStateRoot,
       );
-      let settleReceipt: ((event: ClaudePeerReceiptEvent) => void) | undefined;
-      const receipt = new Promise<ClaudePeerReceiptEvent>((resolve) => {
-        settleReceipt = resolve;
-      });
       listener = await this.peer.listen({
         onMessage: () => undefined,
-        onReceipt: (event) => {
-          if (event.status !== "held") settleReceipt?.(event);
-        },
+        onReceipt: () => undefined,
       });
       const sent = await this.peer.send(
         targetId,
@@ -570,26 +564,26 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           true,
         );
       }
-      const event = await receipt;
-      if (event.messageId !== sent.messageId || event.status !== "released") {
-        return {
-          depth,
-          outcome: "fail",
-          certifiedAt: new Date(this.now()).toISOString(),
-          safeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
-        };
-      }
+      // A direct `crossSessionInbound: accept` write emits no native
+      // peer_message_status frame. That status family describes the optional
+      // approval lifecycle, not universal delivery acknowledgement. For this
+      // wire-depth certification, the strongest portable evidence is the
+      // confirmed write to the exact, uniquely discovered scratch session.
       return {
         depth,
         outcome: "pass",
         certifiedAt: new Date(this.now()).toISOString(),
       };
-    } catch {
+    } catch (error) {
+      const observedCode =
+        error instanceof BridgeError && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+          ? error.code
+          : "CLAUDE_CERTIFICATION_FAILED";
       return {
         depth,
         outcome: "fail",
         certifiedAt: new Date(this.now()).toISOString(),
-        safeErrorCode: "CLAUDE_CERTIFICATION_FAILED",
+        safeErrorCode: observedCode,
       };
     } finally {
       await listener?.close().catch(() => undefined);

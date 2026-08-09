@@ -2109,8 +2109,12 @@ async function restoreSocketReplacement(
   }
 }
 
-function validTimeout(value: number): boolean {
+function validServerTimeout(value: number): boolean {
   return Number.isInteger(value) && value >= 50 && value <= 30_000;
+}
+
+function validClientTimeout(value: number): boolean {
+  return Number.isInteger(value) && value >= 50 && value <= 90_000;
 }
 
 export async function startGatewayControlServer(
@@ -2120,7 +2124,7 @@ export async function startGatewayControlServer(
   await prepareSocketTarget(options.socketPath);
   const requestTimeoutMs =
     options.requestTimeoutMs ?? GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS;
-  if (!validTimeout(requestTimeoutMs)) {
+  if (!validServerTimeout(requestTimeoutMs)) {
     throw controlTransportError("INVALID_SOCKET_PATH");
   }
 
@@ -2260,7 +2264,7 @@ export async function sendGatewayControlRequest<
   const maxResponseBytes =
     options.maxResponseBytes ?? GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
   if (
-    !validTimeout(timeoutMs) ||
+    !validClientTimeout(timeoutMs) ||
     !Number.isInteger(maxResponseBytes) ||
     maxResponseBytes < 256 ||
     maxResponseBytes > GATEWAY_CONTROL_MAX_RESPONSE_BYTES

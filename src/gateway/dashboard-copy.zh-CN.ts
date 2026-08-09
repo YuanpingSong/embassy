@@ -496,6 +496,8 @@ export const dashboardCopyZhCn = {
   "app.routes.successions.note":
     "任务更换只是把别名移交给新的 Codex 任务。不转移任何内容：排队的工作、历史与审批都留在旧任务上。",
   "app.routes.detail.absent": "实时契约不携带此信息。",
+  "app.routes.expandDetails": "展开 {alias} 的详情",
+  "app.routes.collapseDetails": "收起 {alias} 的详情",
   "app.routes.queueDepth": "队列深度",
   "app.routes.counters": "路由计数器",
   "app.routes.registered": "已注册",

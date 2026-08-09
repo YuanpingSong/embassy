@@ -135,12 +135,6 @@ class FakeClaudePeer {
   lastReceiptDeadlineAt: number | undefined;
   sendCalls = 0;
   lastSend: { targetId: string; content: string } | undefined;
-  certificationReceiptStatus:
-    | "released"
-    | "denied"
-    | "expired"
-    | "unconfirmed"
-    | undefined;
   truncated = false;
   rejectedDiscoveryRecords: Record<string, number> = {};
   parseableRejectedDiscoveryRecords = 0;
@@ -402,20 +396,6 @@ class FakeClaudePeer {
       messageId: PROVIDER_MESSAGE_ID,
       status: "transport_written",
     });
-    const certificationStatus = this.certificationReceiptStatus;
-    const receiptOptions =
-      options.listener === undefined
-        ? undefined
-        : this.listenerOptionsByGeneration.get(options.listener.generation);
-    if (certificationStatus !== undefined && receiptOptions !== undefined) {
-      queueMicrotask(() => {
-        void receiptOptions.onReceipt?.({
-          messageId: PROVIDER_MESSAGE_ID,
-          status: certificationStatus,
-          trust: "untrusted_same_uid_peer",
-        });
-      });
-    }
     return {
       messageId: PROVIDER_MESSAGE_ID,
       receiptStatus: "pending",
@@ -623,7 +603,7 @@ test("Claude compatibility check skips isolated invalid registry rows without di
   await provider.close();
 });
 
-test("Claude live certification targets only its bounded scratch and requires an exact native release", async () => {
+test("Claude live certification targets its bounded scratch and accepts confirmed direct wire evidence", async () => {
   const fake = new FakeClaudePeer();
   const scratch = {
     name: "embassy-compat-a1b2c3",
@@ -637,7 +617,6 @@ test("Claude live certification targets only its bounded scratch and requires an
     status: "idle",
     compatibility: "compatible",
   });
-  fake.certificationReceiptStatus = "released";
   const provider = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
     peerFactory: () => fake as never,
@@ -676,7 +655,7 @@ test("Claude live certification targets only its bounded scratch and requires an
   );
 
   scratch.closed = false;
-  fake.certificationReceiptStatus = "denied";
+  fake.sendMode = "prewrite_failure";
   const failed = await provider.runCompatibilityCertification({
     controllerStateRoot: "/synthetic/private-state",
     withTurn: false,
@@ -684,7 +663,7 @@ test("Claude live certification targets only its bounded scratch and requires an
   assert.equal(failed.outcome, "fail");
   assert.equal(
     failed.safeErrorCode,
-    "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+    "CLAUDE_PEER_TARGET_STALE",
   );
   assert.equal(scratch.closed, true);
   await provider.close();

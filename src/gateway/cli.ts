@@ -96,7 +96,12 @@ export const gatewayCliExitCodes = Object.freeze({
   unavailable: 4,
   ambiguous: 5,
   failure: 6,
+  claudeCertificationFailed: 7,
+  codexCertificationFailed: 8,
+  multipleCertificationsFailed: 9,
 } as const);
+
+const COMPAT_CERTIFY_CONTROL_TIMEOUT_MS = 90_000;
 
 type Writable = {
   write(chunk: string): unknown;
@@ -1072,6 +1077,9 @@ export async function runGatewayCli(
       response = await sendRequest({
         socketPath: config.controlSocketPath,
         request,
+        ...(command === "compat-certify"
+          ? { timeoutMs: COMPAT_CERTIFY_CONTROL_TIMEOUT_MS }
+          : {}),
       });
     }
     if (!response.ok) {
@@ -1117,9 +1125,16 @@ export async function runGatewayCli(
           }\n`,
         );
       }
-      return response.result.certified
-        ? gatewayCliExitCodes.ok
-        : gatewayCliExitCodes.failure;
+      if (response.result.certified) return gatewayCliExitCodes.ok;
+      const failedSurfaces = response.result.surfaces.filter(
+        (surface) => surface.certification?.outcome === "fail",
+      );
+      if (failedSurfaces.length > 1) {
+        return gatewayCliExitCodes.multipleCertificationsFailed;
+      }
+      return failedSurfaces[0]?.surface === "claude"
+        ? gatewayCliExitCodes.claudeCertificationFailed
+        : gatewayCliExitCodes.codexCertificationFailed;
     }
     const exitCode =
       waitedDeliveryResponse === undefined

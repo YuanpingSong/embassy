@@ -338,6 +338,7 @@ namespace Embassy {
    * columns never share it (the prototype's single `open` quirk).
    */
   function AccordionRow(props: AccordionRowProps): React.ReactElement {
+    const t = useT();
     const baseId = React.useId();
     const buttonId = `${baseId}-summary`;
     const panelId = `${baseId}-panel`;
@@ -347,6 +348,12 @@ namespace Embassy {
           type="button"
           id={buttonId}
           className="accordion__row"
+          aria-label={t(
+            props.open
+              ? "app.routes.collapseDetails"
+              : "app.routes.expandDetails",
+            { alias: props.alias },
+          )}
           aria-expanded={props.open}
           aria-controls={props.open ? panelId : undefined}
           onClick={props.onToggle}

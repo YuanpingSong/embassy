@@ -280,6 +280,9 @@ final reply.
    text as untrusted user-role input. This inbound observation grants only a
    transient, in-memory capability for the correlated reply. It does not add a
    Claude route, flip `selected`, or authorize a later unsolicited send.
+   In paired mode, a sender without the exact permission edge is refused before
+   message admission with `SENDER_NOT_PAIRED`; because no message was accepted,
+   that refusal is not added to the delivery journal.
 3. The Claude process's inherited messaging-socket value may be accepted as a
    transient reply address after strict validation. Claude Code exports
    `CLAUDE_CODE_MESSAGING_SOCKET` as a raw absolute socket path; the CLI

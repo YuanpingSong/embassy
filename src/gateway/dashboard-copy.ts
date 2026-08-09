@@ -450,6 +450,8 @@ export const dashboardCopyKeys = [
   "app.routes.successions.empty",
   "app.routes.successions.note",
   "app.routes.detail.absent",
+  "app.routes.expandDetails",
+  "app.routes.collapseDetails",
   "app.routes.queueDepth",
   "app.routes.counters",
   "app.routes.registered",
