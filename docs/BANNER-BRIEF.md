@@ -18,7 +18,7 @@ place where different powers talk under agreed rules.
 ## The brand world (current, user-approved)
 
 Warm anime / Ghibli-adjacent softness. Golden, inviting, high charm. The
-existing shipped banner (see `assets/social-preview-anime-c.png` for the
+existing shipped banner (see `assets/social-preview-art.png` for the
 untexted source and `assets/social-preview.png` for the shipped composite)
 sets the canon: **three chibi agent mascots collaborating under a big warm
 tent**:
