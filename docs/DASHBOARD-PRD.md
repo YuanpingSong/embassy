@@ -66,8 +66,12 @@ Five tabs, one question each:
 
 ### 3.3 Routes & Sessions — "Who can talk to whom, and why not?"
 - Topology first: discovered ≠ selected ≠ registered made visible as
-  concentric consent states, with the asymmetry stated (a registered
-  `codex-*` task is reachable by every live same-UID Claude session).
+  concentric consent states. Routes render as **pairs**: selection is
+  bidirectional (the selected Claude session is the only accepted inbound
+  sender for the registered task; unpaired senders are refused with a
+  terminal receipt). If the operator enables the explicit `--inbound open`
+  mode, the topology says so loudly ("any live same-UID Claude session may
+  message this task").
 - Per-session detail (progressive disclosure): Claude sessions — discovery
   state, selection binding (UUID-backed; restored/stale/reactivated),
   rename history as it affects addressing. Codex route — policy summary,
