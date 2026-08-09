@@ -24,11 +24,13 @@ answer the ambient question in under 3 seconds and to begin a forensic trace
 in one click.
 
 Security posture is inherited from the shipped live contract and is
-non-negotiable: loopback-only, one-use token bootstrap, read-only first;
-metadata only — **message bodies never appear anywhere, ever**. The first
-release of the web app is read-only; the only actions ever permitted later
-are the separately-reviewed set (refresh, select, unselect) — never
-register/send/reply/approve/interrupt from a browser.
+non-negotiable: loopback-only, one-use token bootstrap; metadata only —
+**message bodies never appear anywhere, ever**. The app is read-MOSTLY: the
+sole mutations are the operator's consent operations — select, unselect,
+and snapshot refresh — shipped behind their standing threat-model review,
+carried over the authenticated session (exact-Origin + sentinel-header
+POSTs per the live contract). Never register/send/reply/approve/interrupt
+from a browser, ever.
 
 ## 3. The operator's questions → the IA
 
@@ -73,6 +75,18 @@ Five tabs, one question each:
 - **Succession history**: each succession as an event card — predecessor,
   successor, drain outcome, what settled terminally; nothing transfers, and
   the card says so.
+- **Actions (the tab's mutations — the only ones in the app):**
+  *Select* on any discovered, compatible Claude session and *Unselect* on
+  the current selection, right in the topology; plus *Refresh discovery*.
+  Requirements: each action shows a one-line consequence before confirming
+  ("Selecting makes this session the destination Codex can send to");
+  actions ride the authenticated session with exact-Origin + sentinel
+  checks, are rate-limited, and every invocation lands in the Activity
+  ledger with an operator-action marker. Failures surface the same safe
+  codes the CLI would print. **Registration is deliberately NOT a button**:
+  it must run inside the Codex task to inherit its identity, so the tab
+  shows the copyable `register-codex` command with the ask-your-agent note
+  instead — a button here would be a lie about how identity works.
 
 ### 3.4 Activity — "What happened while I was away?"
 - Unified bounded event stream: deliveries (terminal only, by default),
