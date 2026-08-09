@@ -15,6 +15,16 @@ namespace Embassy {
     | "disconnected"
     | "stopped";
 
+  export type LiveDashboardAction =
+    | Readonly<{ action: "select_claude"; alias: string }>
+    | Readonly<{ action: "unselect_claude"; alias: string }>
+    | Readonly<{ action: "refresh_dashboard" }>;
+
+  export type LiveDashboardActionResult = Readonly<{
+    ok: boolean;
+    code: string;
+  }>;
+
   // ---------------------------------------------------------------------
   // Enum unions mirrored from src/gateway/types.ts
   // ---------------------------------------------------------------------
@@ -413,6 +423,8 @@ namespace Embassy {
 
   export type RoutesTabProps = Readonly<{
     data: RoutesData;
+    actionsEnabled: boolean;
+    onAction: (action: LiveDashboardAction) => Promise<LiveDashboardActionResult>;
   }>;
 
   export type ActivityTabProps = Readonly<{

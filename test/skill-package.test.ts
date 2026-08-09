@@ -73,7 +73,9 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /old name stops resolving immediately/);
   assert.match(skill, /send never selects a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
-  assert.match(skill, /Every exact compatible live same-UID Claude session/);
+  assert.match(skill, /default paired mode/);
+  assert.match(skill, /SENDER_NOT_PAIRED/);
+  assert.match(skill, /serve --inbound open/);
 
   assert.doesNotMatch(skill, /~\/.claude|\/tmp\/cc-socks|\.claude\/sessions/);
   assert.doesNotMatch(skill, /\b(?:printenv|set)\b/);

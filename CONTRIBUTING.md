@@ -93,9 +93,11 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
 metadata-only static dashboard files. It must not listen on TCP or HTTP. The
 only reviewed exception is the separately invoked foreground
 `embassy dashboard --live` companion, which binds an authenticated OS-assigned
-port on exact IPv4 loopback and exposes no mutation or provider method. Do not
+port on exact IPv4 loopback and exposes only the reviewed select-Claude,
+unselect-Claude, and refresh-discovery mutations, never a provider or generic
+control method. Do not
 add a wildcard/remote listener, external assets, storage, service workers,
-telemetry, or mutation endpoints. Keep the public v1 launcher foreground,
+telemetry, or additional mutation endpoints. Keep the public v1 launcher foreground,
 macOS-only, and local-host-only.
 
 ## Live validation
@@ -118,4 +120,3 @@ macOS caps socket paths at ~104 bytes — keep `TMPDIR` short (CI pins
 `TMPDIR=/tmp`; do the same locally if the transport tests hang). On Linux,
 the darwin-only lease and peer-generation tests skip explicitly (the host
 lease spawns macOS's `/usr/bin/lockf`); macOS runs the full suite.
-

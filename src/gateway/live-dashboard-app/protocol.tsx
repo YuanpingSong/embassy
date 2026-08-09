@@ -28,6 +28,9 @@ namespace Embassy {
     pause: () => void;
     reconnect: () => void;
     readNow: () => void;
+    executeAction: (
+      action: LiveDashboardAction,
+    ) => Promise<LiveDashboardActionResult>;
   }>;
 
   type ApiFetchOptions = Readonly<{
@@ -255,6 +258,44 @@ namespace Embassy {
       }
     }
 
+    function isActionResult(value: unknown): value is LiveDashboardActionResult {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return false;
+      }
+      const record = value as Readonly<Record<string, unknown>>;
+      return (
+        Object.keys(record).length === 2 &&
+        typeof record.ok === "boolean" &&
+        typeof record.code === "string" &&
+        /^(?:ok|not_found|conflict|route_mismatch|busy|unavailable|rejected|rate_limited)$/u.test(
+          record.code,
+        ) &&
+        ((record.ok && record.code === "ok") ||
+          (!record.ok && record.code !== "ok"))
+      );
+    }
+
+    async function executeAction(
+      action: LiveDashboardAction,
+    ): Promise<LiveDashboardActionResult> {
+      let result: LiveDashboardActionResult = {
+        ok: false,
+        code: "unavailable",
+      };
+      try {
+        const response = await apiFetch("action", {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(action),
+        });
+        const parsed: unknown = await response.json();
+        if (isActionResult(parsed)) result = parsed;
+      } catch {
+        // The fixed unavailable result is the only client-side fallback.
+      }
+      await fetchSnapshotNow();
+      return result;
+    }
+
     async function start(): Promise<void> {
       try {
         await exchangeCapability();
@@ -287,6 +328,7 @@ namespace Embassy {
       readNow: (): void => {
         void fetchSnapshotNow();
       },
+      executeAction,
     };
   }
 }

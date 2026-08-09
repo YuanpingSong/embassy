@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Live dashboard companion** — `embassy dashboard --live [--lang en|zh-CN]` starts a separate foreground process that streams sanitized metadata to a browser tab on `127.0.0.1`; `embassy serve` remains TCP-free and HTTP-free.
 - **One-use token authentication** — live companion access bootstraps via a 256-bit URL-fragment token exchanged for a path-scoped `HttpOnly` `SameSite=Strict` session cookie with Host, Origin, and sentinel validation.
-- **Read-only browser surface** — the live companion exposes no CORS headers, no mutation or provider routes, no storage, no telemetry, and no external assets; the browser has zero authority to register, select, send, reply, approve, or interrupt.
+- **Bounded browser actions** — the live companion exposes no CORS headers, generic control/provider routes, storage, telemetry, or external assets. Its sole mutation route accepts only confirmed select-Claude, unselect-Claude, and refresh-discovery actions, with a 1 KiB body cap and six-action-per-minute token bucket; it cannot register tasks, send, reply, approve, interrupt, or change settings.
 - **Bilingual dashboards** — the static pair renders in English and Simplified Chinese from one catalog and is switched by an in-page link; `--lang en|zh-CN` is a live-companion flag and is not accepted by `refresh-dashboard`.
 
 ### Changed
@@ -43,7 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
-- No network surface in the broker: `embassy serve` opens no TCP listener and no HTTP server, makes no provider API call, and sends no telemetry; its control and callback surfaces are private Unix-domain sockets. The opt-in `embassy dashboard --live` companion is the only network listener Embassy can create — a separate foreground process bound to `127.0.0.1` on an ephemeral port, token-authenticated and read-only (see Added). Delivered content still enters the receiving cloud-backed product as an ordinary model turn.
+- No network surface in the broker: `embassy serve` opens no TCP listener and no HTTP server, makes no provider API call, and sends no telemetry; its control and callback surfaces are private Unix-domain sockets. The opt-in `embassy dashboard --live` companion is the only network listener Embassy can create — a separate foreground process bound to `127.0.0.1` on an ephemeral port, token-authenticated, and limited to the three route-consent actions described above. Delivered content still enters the receiving cloud-backed product as an ordinary model turn.
 - Same-UID containment, not authentication: provider identity is inherited from the process environment (a Codex task's `CODEX_THREAD_ID` or a Claude session's messaging socket, never both), and every mutation is additionally checked against route ownership, exact thread/session generation, source alias, and bounds.
 - Nothing persisted beyond route rebinding: bodies, prompts, replies, raw provider frames, and socket paths are never persisted. Provider-native identifiers (Codex thread ID, Claude session UUID) are kept only inside the closed, mode-0600 private route binding used to re-observe a route after restart.
 - v1 advertises exactly **one** registered Codex task per gateway process, and once registered it is visible to every compatible live Claude session running as the same OS user — register only when comfortable with every currently running compatible Claude session, and `unregister-codex` when done.

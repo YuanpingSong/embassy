@@ -40,7 +40,8 @@ Embassy uses one private same-user Unix-domain control socket for its thin
 clients and generates a private static dashboard page in each supported
 language. `embassy serve` does not add a TCP listener, HTTP server, or public
 API. The opt-in `embassy dashboard --live` companion is a separate foreground
-process that binds a read-only authenticated listener on `127.0.0.1`; it is
+process that binds an authenticated listener with three bounded route-consent
+actions on `127.0.0.1`; it is
 described under [Live dashboard companion](#live-dashboard-companion).
 
 ### Why this uses the new feature, but is not skill-only
@@ -155,7 +156,7 @@ The status below is intentionally narrower than the target architecture.
 | Neutral gateway types, metadata store, route fencing, bounded queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies remain memory-only |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
-| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, and read-only projection; it is a separate foreground process, never part of `embassy serve` |
+| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, projection, and three bounded route-consent actions; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter pinned to 2.1.226 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224–2.1.226 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
 | Exact Claude 2.1.226 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
 | Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
@@ -686,12 +687,16 @@ gateway as unavailable when nothing is serving.
   Navigation GETs may omit Origin and carry no sentinel; non-navigation POSTs
   require the exact Origin plus `X-Embassy-Request`. There are no CORS headers,
   no cross-origin reads, and no routes outside the instance path.
-- **Projection.** The only control method the companion calls is the read-only
-  `observe_snapshot`. It cannot register, unregister, succeed, select,
-  unselect, send, reply, approve, or interrupt, and it exposes no provider,
-  mutation, storage, telemetry, or external-asset surface. An observation may
+- **Projection and actions.** The companion observes through
+  `observe_snapshot`. Its only mutations are exact `select_claude`,
+  `unselect_claude`, and `refresh_dashboard` control calls behind one closed
+  authenticated `/action` route. The browser shows the consequence and requires
+  explicit confirmation; the server rejects bodies over 1 KiB and limits the
+  companion to six actions per minute. It cannot register, unregister, succeed,
+  send, reply, approve, interrupt, change settings, or invoke a generic/provider
+  method. Every action is followed by a fresh observation. An observation may
   settle already-due lifecycle deliveries before projecting, which is a broker
-  timer effect, not a browser authority.
+  timer effect, not additional browser authority.
 - **Containment.** Authentication scopes the browser, not the machine. Any
   process running as the same OS user — including root and browser extensions
   with local filesystem access — can read what the browser can read.

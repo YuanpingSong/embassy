@@ -323,9 +323,25 @@ export const dashboardCopyEn = {
     "This live view requires JavaScript. The static gateway-dashboard.html in the state directory remains the offline floor.",
   "live.label": "Live companion",
   "live.mastheadSubtitle":
-    "Read-only live metadata stream. serve remains socket-only.",
+    "Live metadata stream with bounded route-consent controls. serve remains socket-only.",
   "live.readonlyFooter":
-    "This view has no authority to register, select, send, reply, approve, or interrupt.",
+    "This view can select, unselect, and refresh Claude discovery — nothing else.",
+  "live.action.authorityLabel": "Bounded operator authority",
+  "live.action.authorityBody":
+    "This view can select, unselect, and refresh Claude discovery. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
+  "live.action.sectionTitle": "Route consent actions",
+  "live.action.scope":
+    "Select or unselect inside a Claude session row. Refresh discovery is available here. Every action requires confirmation.",
+  "live.action.select": "Select session",
+  "live.action.unselect": "Unselect session",
+  "live.action.refresh": "Refresh discovery",
+  "live.action.confirm": "Confirm",
+  "live.action.cancel": "Cancel",
+  "live.action.pending": "Working…",
+  "live.action.succeeded": "Completed · {code}",
+  "live.action.failed": "Not completed · {code}",
+  "live.action.requiresConnected":
+    "Reconnect to current broker state before using this action.",
   "live.connection.connecting": "Connecting…",
   "live.connection.connected": "Stream connected",
   "live.connection.unavailable": "Observer unavailable — retrying",
@@ -372,7 +388,6 @@ export const dashboardCopyEn = {
   "app.missedFrames":
     "Stream frames were missed. The view was re-read from the current snapshot.",
   "app.lowerBound": "At least {count}; the display is bounded.",
-  "app.readonly": "Read-only",
   "app.copy": "Copy",
   "app.copied": "Copied",
   "app.copyFailed": "Copy failed — select the text instead",

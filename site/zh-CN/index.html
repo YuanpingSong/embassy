@@ -212,10 +212,10 @@
       <p>无需 Embassy 账户、无守护进程、无配置文件——五个动作，每一个都在您的终端中可见。</p>
       <div class="ledger">
         <div class="row"><span class="no">1</span><span class="name">启动</span><span class="what">在您信任的终端中运行 <code>embassy serve</code>。它保持在前台运行，将静态仪表盘页面——<code>gateway-dashboard.html</code> 及其 <code>gateway-dashboard.zh-CN.html</code> 版本——写入其私有状态目录，且永不守护进程化。主机级租约确保每个账户只有一个代理。</span></div>
-        <div class="row"><span class="no">2</span><span class="name">注册</span><span class="what">Codex 任务从其自身进程内部注册——要求 Codex 智能体在当前回合中将 <code>embassy register-codex --alias codex-reviewer@this-mac</code> 作为 shell 步骤运行。注册是选择加入的边界：一旦注册，以您的操作系统用户身份运行的任何兼容活跃 Claude 会话都可以在该任务中启动一个回合，遵循其现有的原生审批和沙盒策略——如果该策略是 <code>approvalPolicy: never</code>，则已接受的消息和模型回合之间没有人工审批。到达 Codex 任务永远不会为反向方向选择该 Claude 会话。使用 <code>unregister-codex</code> 注销。</span></div>
+        <div class="row"><span class="no">2</span><span class="name">注册</span><span class="what">Codex 任务从其自身进程内部注册——要求 Codex 智能体在当前回合中将 <code>embassy register-codex --alias codex-reviewer@this-mac</code> 作为 shell 步骤运行。注册会让该任务对以您的操作系统用户身份运行的兼容在线 Claude 会话可见；选择一个 Claude 会话后，它既是 Codex 的发送目的地，也是唯一被接受的入站发送方。其他发送方以 <code>SENDER_NOT_PAIRED</code> 终局结算；<code>serve --inbound open</code> 是显式退出配对的选项。已接受回合仍遵循 Codex 任务现有的原生审批和沙盒策略。使用 <code>unregister-codex</code> 注销。</span></div>
         <div class="row"><span class="no">3</span><span class="name">选择</span><span class="what">对于 Codex→Claude 方向，您需要显式选择目标——<code>embassy select-claude --alias &lt;a name from availablePeers&gt;</code>。发送永远不会静默选择已发现的会话。</span></div>
         <div class="row"><span class="no">4</span><span class="name">发送</span><span class="what">消息正文通过 stdin 传入，最大 16&nbsp;KiB，仅存在于内存中。向繁忙的 Codex 任务发送消息会排队；空闲的目标会获得一个普通回合。</span></div>
-        <div class="row" id="dashboard"><span class="no">5</span><span class="name">监控</span><span class="what">可选。<code>embassy dashboard --live</code> 打开同一元数据的只读浏览器视图——一个在 <code>127.0.0.1</code> 上的独立前台进程，经过认证且无法发送任何内容。状态目录中的 <code>gateway-dashboard.html</code> 是惰性离线副本：无脚本、无网络、无自动刷新——重新运行 <code>embassy refresh-dashboard</code> 并刷新页面。</span></div>
+        <div class="row" id="dashboard"><span class="no">5</span><span class="name">监控</span><span class="what">可选。<code>embassy dashboard --live</code> 打开同一元数据的认证浏览器视图——一个在 <code>127.0.0.1</code> 上的独立前台进程，仅提供三项需确认的路由同意操作：选择、取消选择和刷新发现结果。状态目录中的 <code>gateway-dashboard.html</code> 是惰性离线副本：无脚本、无网络、无自动刷新——重新运行 <code>embassy refresh-dashboard</code> 并刷新页面。</span></div>
       </div>
     </div>
   </section>
@@ -244,7 +244,7 @@
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#glyph-square"/></svg>
-          <p><strong><code>embassy serve</code> 不打开任何 TCP 或 HTTP 监听器；可选的实时伴侣组件才会。</strong><code>embassy dashboard --live</code> 是一个独立的前台进程，在临时端口上绑定 127.0.0.1，用于只读认证元数据流——无修改操作、无提供商接口、无 CORS 表面。认证作用域是浏览器，而非机器：以您的操作系统用户身份运行的任何进程——包括 root 和浏览器扩展——都能读取浏览器能读取的内容。<code>embassy serve</code> 本身不打开网络监听器，也不发起任何提供商 API 调用——无遥测、无云端组件。它仅通过本地 Unix 套接字通信：其 mode-0700 状态目录中的控制套接字，以及它连接的提供商拥有的 Claude 对等套接字和已在运行的 Codex App Server 套接字。智能体本身仍由云端支持：路由的消息成为普通模型回合的输入，因此其文本会到达 Anthropic 或 OpenAI，就如同您亲自在该会话中键入一样。"本地"描述的是代理和路由，而非模型推理。</p>
+          <p><strong><code>embassy serve</code> 不打开任何 TCP 或 HTTP 监听器；可选的实时伴侣组件才会。</strong><code>embassy dashboard --live</code> 是一个独立的前台进程，在临时端口上绑定 127.0.0.1，用于认证元数据流。它没有 CORS、提供商或通用控制表面；唯一的变更操作是需确认的选择、取消选择和刷新发现结果，并限制为每分钟六次。认证作用域是浏览器，而非机器：以您的操作系统用户身份运行的任何进程——包括 root 和浏览器扩展——都能读取浏览器能读取的内容。<code>embassy serve</code> 本身不打开网络监听器，也不发起任何提供商 API 调用——无遥测、无云端组件。它仅通过本地 Unix 套接字通信：其 mode-0700 状态目录中的控制套接字，以及它连接的提供商拥有的 Claude 对等套接字和已在运行的 Codex App Server 套接字。智能体本身仍由云端支持：路由的消息成为普通模型回合的输入，因此其文本会到达 Anthropic 或 OpenAI，就如同您亲自在该会话中键入一样。"本地"描述的是代理和路由，而非模型推理。</p>
         </div>
         <div class="t">
           <svg width="18" height="18" style="color:var(--ink)" aria-hidden="true"><use href="#mark-small"/></svg>
@@ -271,7 +271,7 @@ embassy serve
 embassy status
 <span class="out">  availablePeers: ["advisor@this-mac", "researcher@this-mac"]</span>
 
-<span class="c"># 可选，在第三个终端中：在 127.0.0.1 上的只读浏览器视图</span>
+<span class="c"># 可选，在第三个终端中：认证元数据与有限路由同意操作</span>
 embassy dashboard --live
 
 <span class="c"># 在 Codex 任务内部——要求 Codex 智能体将此作为 shell 步骤运行：</span>

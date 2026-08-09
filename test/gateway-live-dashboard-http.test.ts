@@ -7,6 +7,9 @@ import type { DashboardViewModel } from "../src/gateway/dashboard-model.js";
 import type { DashboardLocale } from "../src/gateway/locale.js";
 import {
   createLiveDashboardRequestHandler,
+  type LiveDashboardAction,
+  type LiveDashboardActionExecutor,
+  type LiveDashboardActionResult,
   type LiveDashboardRequestHandler,
 } from "../src/gateway/live-dashboard-http.js";
 import { LIVE_DASHBOARD_LIMITS } from "../src/gateway/live-dashboard-protocol.js";
@@ -121,9 +124,24 @@ class SyntheticHub implements LiveDashboardStreamHub {
   }
 }
 
+class SyntheticActions implements LiveDashboardActionExecutor {
+  readonly calls: LiveDashboardAction[] = [];
+
+  constructor(
+    readonly result: LiveDashboardActionResult = { ok: true, code: "ok" },
+  ) {}
+
+  async execute(action: LiveDashboardAction): Promise<LiveDashboardActionResult> {
+    this.calls.push(action);
+    return this.result;
+  }
+}
+
 function createHandler(
   hub: LiveDashboardStreamHub = new SyntheticHub(),
   lang: DashboardLocale = "en",
+  actions: LiveDashboardActionExecutor = new SyntheticActions(),
+  now?: () => number,
 ): LiveDashboardRequestHandler {
   return createLiveDashboardRequestHandler({
     instancePath: INSTANCE_PATH,
@@ -135,6 +153,8 @@ function createHandler(
     lang,
     assets: ASSETS,
     hub,
+    actions,
+    ...(now === undefined ? {} : { now }),
   });
 }
 
@@ -163,6 +183,15 @@ function authenticatedHeaders(additions: readonly string[] = []): string[] {
     "Cookie",
     `${COOKIE_NAME}=${SESSION_SECRET}`,
     ...additions,
+  ]);
+}
+
+function actionHeaders(body: string): string[] {
+  return authenticatedHeaders([
+    "Content-Type",
+    "application/json",
+    "Content-Length",
+    String(Buffer.byteLength(body, "utf8")),
   ]);
 }
 
@@ -473,6 +502,256 @@ test("enforces body framing and the bounded text capability protocol", async () 
   assertSecurityHeaders(bodyOnSnapshot);
 });
 
+test("action route forwards only the three exact authenticated verbs", async () => {
+  const actions = new SyntheticActions();
+  const handler = createHandler(undefined, "en", actions);
+  const fixtures: LiveDashboardAction[] = [
+    { action: "select_claude", alias: "claude-advisor@this-mac" },
+    { action: "unselect_claude", alias: "claude-advisor@this-mac" },
+    { action: "refresh_dashboard" },
+  ];
+
+  for (const action of fixtures) {
+    const body = JSON.stringify(action);
+    const response = await invoke(handler, {
+      method: "POST",
+      target: `${INSTANCE_PATH}/action`,
+      rawHeaders: actionHeaders(body),
+      body,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(response.bodyText()), {
+      ok: true,
+      code: "ok",
+    });
+    assertSecurityHeaders(response);
+  }
+  assert.deepEqual(actions.calls, fixtures);
+
+  const refused = new SyntheticActions({ ok: false, code: "busy" });
+  const refusedBody = JSON.stringify({ action: "refresh_dashboard" });
+  const refusedResponse = await invoke(
+    createHandler(undefined, "en", refused),
+    {
+      method: "POST",
+      target: `${INSTANCE_PATH}/action`,
+      rawHeaders: actionHeaders(refusedBody),
+      body: refusedBody,
+    },
+  );
+  assert.equal(refusedResponse.statusCode, 200);
+  assert.deepEqual(JSON.parse(refusedResponse.bodyText()), {
+    ok: false,
+    code: "busy",
+  });
+});
+
+test("action route rejects malformed or unauthenticated requests before broker contact", async () => {
+  const actions = new SyntheticActions();
+  const handler = createHandler(undefined, "en", actions);
+  const validBody = JSON.stringify({ action: "refresh_dashboard" });
+  const cases: ReadonlyArray<
+    Readonly<{
+      method: string;
+      headers: string[];
+      body?: string;
+      status: number;
+    }>
+  > = [
+    { method: "GET", headers: navigationHeaders(), status: 405 },
+    {
+      method: "PUT",
+      headers: actionHeaders(validBody),
+      body: validBody,
+      status: 405,
+    },
+    {
+      method: "DELETE",
+      headers: actionHeaders(validBody),
+      body: validBody,
+      status: 405,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(validBody).filter(
+        (_value, index) => index < 2 || index > 3,
+      ),
+      body: validBody,
+      status: 403,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(validBody).filter(
+        (_value, index) => index < 4 || index > 5,
+      ),
+      body: validBody,
+      status: 403,
+    },
+    {
+      method: "POST",
+      headers: postHeaders([
+        "Content-Type",
+        "application/json",
+        "Content-Length",
+        String(Buffer.byteLength(validBody)),
+      ]),
+      body: validBody,
+      status: 403,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(validBody).map((value, index) =>
+        index === 1 ? "localhost:43127" : value,
+      ),
+      body: validBody,
+      status: 403,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(validBody).map((value, index) =>
+        index === 3 ? "http://localhost:43127" : value,
+      ),
+      body: validBody,
+      status: 403,
+    },
+    {
+      method: "POST",
+      headers: authenticatedHeaders([
+        "Content-Type",
+        "text/plain",
+        "Content-Length",
+        String(Buffer.byteLength(validBody)),
+      ]),
+      body: validBody,
+      status: 415,
+    },
+    {
+      method: "POST",
+      headers: authenticatedHeaders([
+        "Content-Type",
+        "application/json",
+        "Content-Length",
+        String(LIVE_DASHBOARD_LIMITS.maximumActionBodyBytes + 1),
+      ]),
+      status: 413,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders("not-json"),
+      body: "not-json",
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders('{"action":"send_to_codex"}'),
+      body: '{"action":"send_to_codex"}',
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: authenticatedHeaders(["Content-Type", "application/json"]),
+      body: validBody,
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"refresh_dashboard","extra":true}',
+      ),
+      body: '{"action":"refresh_dashboard","extra":true}',
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"select_claude","alias":"NOT AN ALIAS"}',
+      ),
+      body: '{"action":"select_claude","alias":"NOT AN ALIAS"}',
+      status: 400,
+    },
+  ];
+
+  for (const fixture of cases) {
+    const response = await invoke(handler, {
+      method: fixture.method,
+      target: `${INSTANCE_PATH}/action`,
+      rawHeaders: fixture.headers,
+      ...(fixture.body === undefined ? {} : { body: fixture.body }),
+    });
+    assert.equal(response.statusCode, fixture.status);
+    assertSecurityHeaders(response);
+  }
+  assert.deepEqual(actions.calls, []);
+});
+
+test("action rate limit rejects the seventh request and refills linearly", async () => {
+  let nowMs = 0;
+  const actions = new SyntheticActions();
+  const handler = createHandler(undefined, "en", actions, () => nowMs);
+  const body = JSON.stringify({ action: "refresh_dashboard" });
+  const invokeAction = async (): Promise<SyntheticResponse> =>
+    await invoke(handler, {
+      method: "POST",
+      target: `${INSTANCE_PATH}/action`,
+      rawHeaders: actionHeaders(body),
+      body,
+    });
+
+  for (
+    let index = 0;
+    index < LIVE_DASHBOARD_LIMITS.maximumActionsPerMinute;
+    index += 1
+  ) {
+    assert.equal((await invokeAction()).statusCode, 200);
+  }
+  const limited = await invokeAction();
+  assert.equal(limited.statusCode, 429);
+  assert.equal(limited.headers["Retry-After"], "10");
+  assert.deepEqual(JSON.parse(limited.bodyText()), {
+    ok: false,
+    code: "rate_limited",
+  });
+  assert.equal(actions.calls.length, 6);
+
+  nowMs = 10_000;
+  assert.equal((await invokeAction()).statusCode, 200);
+  assert.equal(actions.calls.length, 7);
+});
+
+test("action failures are normalized without leaking broker or exception detail", async () => {
+  const body = JSON.stringify({ action: "refresh_dashboard" });
+  const executors: LiveDashboardActionExecutor[] = [
+    {
+      execute: async () => {
+        throw new Error("private control socket and stack detail");
+      },
+    },
+    {
+      execute: async () =>
+        ({ ok: true, code: "busy" }) as LiveDashboardActionResult,
+    },
+  ];
+
+  for (const executor of executors) {
+    const response = await invoke(
+      createHandler(undefined, "en", executor),
+      {
+        method: "POST",
+        target: `${INSTANCE_PATH}/action`,
+        rawHeaders: actionHeaders(body),
+        body,
+      },
+    );
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(JSON.parse(response.bodyText()), {
+      ok: false,
+      code: "unavailable",
+    });
+    assert.doesNotMatch(response.bodyText(), /socket|stack|exception/iu);
+    assertSecurityHeaders(response);
+  }
+});
+
 test("delegates duplicate, forwarding, origin, and method rejection to strict validation", async () => {
   const handler = createHandler();
   const cases = [
@@ -637,6 +916,7 @@ test("rejects invalid construction secrets and non-loopback origins", () => {
         lang: "en",
         assets: ASSETS,
         hub: new SyntheticHub(),
+        actions: new SyntheticActions(),
       }),
     /LIVE_DASHBOARD_ORIGIN_INVALID/u,
   );
@@ -652,6 +932,7 @@ test("rejects invalid construction secrets and non-loopback origins", () => {
         lang: "en",
         assets: ASSETS,
         hub: new SyntheticHub(),
+        actions: new SyntheticActions(),
       }),
     /LIVE_DASHBOARD_CAPABILITY_INVALID/u,
   );

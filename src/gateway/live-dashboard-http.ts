@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { isGatewayAlias, type GatewayDecisionCode } from "./control.js";
 import {
   assertDashboardLocale,
   getDashboardCopy,
@@ -35,6 +36,20 @@ export type LiveDashboardRequestHandler = (
   response: ServerResponse,
 ) => Promise<void>;
 
+export type LiveDashboardAction =
+  | Readonly<{ action: "select_claude"; alias: string }>
+  | Readonly<{ action: "unselect_claude"; alias: string }>
+  | Readonly<{ action: "refresh_dashboard" }>;
+
+export type LiveDashboardActionResult = Readonly<{
+  ok: boolean;
+  code: GatewayDecisionCode | "rate_limited" | "unavailable";
+}>;
+
+export type LiveDashboardActionExecutor = Readonly<{
+  execute(action: LiveDashboardAction): Promise<LiveDashboardActionResult>;
+}>;
+
 export type LiveDashboardRequestHandlerOptions = Readonly<{
   instancePath: string;
   expectedHost: string;
@@ -45,6 +60,8 @@ export type LiveDashboardRequestHandlerOptions = Readonly<{
   lang: DashboardLocale;
   assets: LiveDashboardHttpAssets;
   hub: LiveDashboardStreamHub;
+  actions: LiveDashboardActionExecutor;
+  now?: () => number;
 }>;
 
 type Route = Readonly<{
@@ -55,6 +72,7 @@ type Route = Readonly<{
     | "session"
     | "snapshot"
     | "stream"
+    | "action"
     | "style"
     | "vendorReact"
     | "vendorReactDom"
@@ -119,6 +137,8 @@ function routeFor(target: string | undefined, instancePath: string): Route | und
       return { kind: "authenticated", name: "snapshot" };
     case `${instancePath}/stream`:
       return { kind: "authenticated", name: "stream" };
+    case `${instancePath}/action`:
+      return { kind: "authenticated", name: "action" };
     default:
       return undefined;
   }
@@ -277,6 +297,76 @@ function authenticated(
   return equalSecret(supplied, sessionSecret);
 }
 
+function parseAction(body: string): LiveDashboardAction | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  const keys = Object.keys(record);
+  if (
+    record.action === "refresh_dashboard" &&
+    keys.length === 1 &&
+    keys[0] === "action"
+  ) {
+    return { action: "refresh_dashboard" };
+  }
+  if (
+    (record.action === "select_claude" ||
+      record.action === "unselect_claude") &&
+    keys.length === 2 &&
+    keys.includes("action") &&
+    keys.includes("alias") &&
+    typeof record.alias === "string" &&
+    record.alias.length <= 128 &&
+    isGatewayAlias(record.alias)
+  ) {
+    return { action: record.action, alias: record.alias };
+  }
+  return undefined;
+}
+
+function isActionResult(value: unknown): value is LiveDashboardActionResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  const validShape =
+    Object.keys(record).length === 2 &&
+    typeof record.ok === "boolean" &&
+    typeof record.code === "string" &&
+    /^(?:ok|not_found|conflict|route_mismatch|busy|unavailable|rejected)$/u.test(
+      record.code,
+    );
+  return (
+    validShape &&
+    ((record.ok === true && record.code === "ok") ||
+      (record.ok === false && record.code !== "ok"))
+  );
+}
+
+function actionResponse(
+  response: ServerResponse,
+  copy: DashboardCopy,
+  statusCode: 200 | 429 | 503,
+  result: LiveDashboardActionResult,
+  additionalHeaders: Readonly<Record<string, string>> = {},
+): void {
+  respond(
+    response,
+    copy,
+    statusCode,
+    JSON.stringify(result),
+    "application/json; charset=utf-8",
+    additionalHeaders,
+  );
+}
+
 function streamWriter(response: ServerResponse): LiveDashboardStreamWriter {
   return {
     write: (chunk) => response.write(chunk),
@@ -298,6 +388,7 @@ export function createLiveDashboardRequestHandler(
 ): LiveDashboardRequestHandler {
   assertOptions(options);
   const {
+    actions,
     assets,
     cookieName,
     expectedHost,
@@ -307,6 +398,7 @@ export function createLiveDashboardRequestHandler(
     lang,
     sessionSecret,
   } = options;
+  const now = options.now ?? Date.now;
   const copy = getDashboardCopy(lang);
   const cookieHeader = sessionCookieHeader(
     cookieName,
@@ -314,6 +406,30 @@ export function createLiveDashboardRequestHandler(
     instancePath,
   );
   let remainingCapability: string | undefined = options.capability;
+  let actionTokens: number = LIVE_DASHBOARD_LIMITS.maximumActionsPerMinute;
+  let actionRefilledAt = now();
+
+  const consumeActionToken = (): number | undefined => {
+    const observedAt = now();
+    const elapsed = Math.max(0, observedAt - actionRefilledAt);
+    actionRefilledAt = Math.max(actionRefilledAt, observedAt);
+    actionTokens = Math.min(
+      LIVE_DASHBOARD_LIMITS.maximumActionsPerMinute,
+      actionTokens +
+        (elapsed * LIVE_DASHBOARD_LIMITS.maximumActionsPerMinute) / 60_000,
+    );
+    if (actionTokens >= 1) {
+      actionTokens -= 1;
+      return undefined;
+    }
+    return Math.max(
+      1,
+      Math.ceil(
+        ((1 - actionTokens) * 60) /
+          LIVE_DASHBOARD_LIMITS.maximumActionsPerMinute,
+      ),
+    );
+  };
 
   return async (request, response) => {
     try {
@@ -484,6 +600,72 @@ export function createLiveDashboardRequestHandler(
           });
           const added = hub.add(streamWriter(response));
           if (!added.ok) response.end();
+          return;
+        }
+        case "action": {
+          if (!authenticated(validation, cookieName, sessionSecret)) {
+            respond(response, copy, 403);
+            return;
+          }
+          if (validation.headers.get("content-type") !== "application/json") {
+            respond(response, copy, 415);
+            return;
+          }
+          const contentLength = parseContentLength(
+            validation.headers.get("content-length"),
+          );
+          if (
+            contentLength === undefined ||
+            !Number.isFinite(contentLength) ||
+            contentLength < 1
+          ) {
+            respond(response, copy, 400);
+            return;
+          }
+          if (contentLength > LIVE_DASHBOARD_LIMITS.maximumActionBodyBytes) {
+            respond(response, copy, 413);
+            return;
+          }
+          const body = await readBoundedBody(
+            request,
+            contentLength,
+            LIVE_DASHBOARD_LIMITS.maximumActionBodyBytes,
+          );
+          if (!body.ok) {
+            respond(response, copy, body.statusCode);
+            return;
+          }
+          const action = parseAction(body.body);
+          if (action === undefined) {
+            respond(response, copy, 400);
+            return;
+          }
+          const retryAfter = consumeActionToken();
+          if (retryAfter !== undefined) {
+            actionResponse(
+              response,
+              copy,
+              429,
+              { ok: false, code: "rate_limited" },
+              { "Retry-After": String(retryAfter) },
+            );
+            return;
+          }
+          let result: LiveDashboardActionResult;
+          try {
+            const executed = await actions.execute(action);
+            result = isActionResult(executed)
+              ? executed
+              : { ok: false, code: "unavailable" };
+          } catch {
+            result = { ok: false, code: "unavailable" };
+          }
+          actionResponse(
+            response,
+            copy,
+            result.code === "unavailable" ? 503 : 200,
+            result,
+          );
           return;
         }
       }

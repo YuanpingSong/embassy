@@ -177,6 +177,17 @@ type ChipDomain =
 
 type EmbassyNamespace = Readonly<{
   adapter: EmbassyAdapter;
+  createProtocol(options: Readonly<{
+    onEvent: (event: unknown) => void;
+    onConnectionState: (state: string) => void;
+    onNotice?: (kind: string) => void;
+  }>): Readonly<{
+    executeAction(action:
+      | Readonly<{ action: "select_claude"; alias: string }>
+      | Readonly<{ action: "unselect_claude"; alias: string }>
+      | Readonly<{ action: "refresh_dashboard" }>,
+    ): Promise<Readonly<{ ok: boolean; code: string }>>;
+  }>;
   TERMINAL_DELIVERY_STATES: readonly DeliveryState[];
   PULSE_WINDOW_MS: number;
   chipKindFor(
@@ -225,6 +236,7 @@ type MountRecord = { container: unknown; children: unknown };
 
 type LoadedBundle = {
   Embassy: EmbassyNamespace;
+  context: Record<string, unknown>;
   source: string;
   mounts: readonly MountRecord[];
   rootElement: unknown;
@@ -422,7 +434,7 @@ function loadBundle(): LoadedBundle {
       `${BUNDLE_PATH} evaluated without defining the Embassy.adapter namespace.`,
     );
   }
-  return { Embassy: namespace, source, mounts, rootElement };
+  return { Embassy: namespace, context, source, mounts, rootElement };
 }
 
 const bundle = loadBundle();
@@ -535,6 +547,72 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
     assert.equal(bundle.mounts.length, 1, "expected one top-level mount");
     assert.equal(at(bundle.mounts, 0).container, bundle.rootElement);
   }
+});
+
+test("browser action protocol posts one closed action then reads a fresh snapshot", async () => {
+  const calls: Array<Readonly<{ input: string; init: RequestInit }>> = [];
+  const events: unknown[] = [];
+  const snapshotEvent = {
+    streamRevision: 11,
+    snapshotRevision: "snapshot-10",
+    reset: false,
+    model: HEALTHY,
+  };
+  const previousFetch = bundle.context.fetch;
+  bundle.context.fetch = (async (input: string, init: RequestInit) => {
+    calls.push({ input, init });
+    if (input.endsWith("/action")) {
+      return {
+        ok: true,
+        json: async () => ({ ok: true, code: "ok" }),
+      };
+    }
+    assert.equal(input.endsWith("/snapshot"), true);
+    return {
+      ok: true,
+      json: async () => snapshotEvent,
+    };
+  }) as typeof fetch;
+  try {
+    const protocol = bundle.Embassy.createProtocol({
+      onEvent: (event) => events.push(event),
+      onConnectionState: () => undefined,
+    });
+    assert.deepEqual(
+      plain(
+        await protocol.executeAction({
+          action: "select_claude",
+          alias: "claude-reviewer@this-mac",
+        }),
+      ),
+      { ok: true, code: "ok" },
+    );
+  } finally {
+    bundle.context.fetch = previousFetch;
+  }
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.input, "/instance_0123456789abcdef/action");
+  assert.equal(calls[0]?.init.method, "POST");
+  assert.equal(calls[0]?.init.credentials, "same-origin");
+  assert.deepEqual(plain(calls[0]?.init.headers), {
+    "X-Embassy-Request": "1",
+    "Content-Type": "application/json",
+  });
+  assert.equal(
+    calls[0]?.init.body,
+    JSON.stringify({
+      action: "select_claude",
+      alias: "claude-reviewer@this-mac",
+    }),
+  );
+  assert.equal(calls[1]?.input, "/instance_0123456789abcdef/snapshot");
+  assert.equal(calls[1]?.init.method, "POST");
+  assert.deepEqual(plain(calls[1]?.init.headers), {
+    "X-Embassy-Request": "1",
+  });
+  assert.equal(calls[1]?.init.body, undefined);
+  assert.deepEqual(plain(events), [snapshotEvent]);
 });
 
 test("fixtures carry the full DashboardViewModel shape", () => {

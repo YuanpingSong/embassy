@@ -3,7 +3,7 @@
 //
 // Everything rendered here is a pure function of OverviewTabProps (produced by
 // adapter.overviewProps) plus the shared ticking clock; there is no window.*
-// access, no mutation, and no dead control. Removed with intent versus the
+// access, no overview mutation, and no dead control. Removed with intent versus the
 // designer prototype: applyQueueRaise, the confirm bars, the useReducer
 // force-update, the EMB_DATA writes, the open-mode banner (pair modes have not
 // landed), the lease status card (not in the live contract), and the phantom

@@ -71,8 +71,10 @@ live sends routine. Never enable a real provider message in CI.
   with no JavaScript, external assets, storage, telemetry, mutation endpoint,
   or network listener.
 - The opt-in live companion may render that same bounded public model with
-  local JavaScript, but it must have no provider or mutation methods, external
-  assets, storage, service worker, telemetry, or non-loopback listener.
+  local JavaScript and the reviewed select-Claude, unselect-Claude, and
+  refresh-discovery actions. It must have no provider or generic control
+  method, additional mutation, external asset, storage, service worker,
+  telemetry, or non-loopback listener.
 - Never read, print, copy, accept, persist, or forward credentials, OAuth
   material, Keychain data, transcripts, provider histories, tool data, or raw
   diagnostics. Never write protocol diagnostics to stdout.

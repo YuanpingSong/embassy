@@ -183,6 +183,9 @@ function createHandler(
     lang,
     assets,
     hub: new SyntheticHub(),
+    actions: {
+      execute: async () => ({ ok: true, code: "ok" }),
+    },
   });
 }
 

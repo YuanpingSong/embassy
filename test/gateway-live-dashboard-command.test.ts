@@ -9,6 +9,7 @@ import {
 } from "../src/gateway/cli.js";
 import { GatewayControlTransportError } from "../src/gateway/control.js";
 import {
+  createGatewayLiveDashboardActions,
   createGatewayLiveDashboardObserver,
   runLiveDashboardCommand,
   type LiveDashboardCommandOptions,
@@ -250,7 +251,7 @@ test("live dashboard ready output is one safe result with no private launch mate
   assert.equal(harness.stderr.chunks.join(""), "");
 });
 
-test("live command validates private state, opens one scrubbed bootstrap path, observes read-only, and waits for signal", async () => {
+test("live command validates private state, opens one scrubbed bootstrap path, and waits for signal", async () => {
   const events: string[] = [];
   const listeners = new Map<string, () => void>();
   let startOptions: StartLiveDashboardOptions | undefined;
@@ -398,6 +399,91 @@ test("live command validates private state, opens one scrubbed bootstrap path, o
     "remove:SIGINT",
   ]);
   assert.equal(listeners.size, 0);
+});
+
+test("live dashboard actions forward only the three closed control methods", async () => {
+  const requests: unknown[] = [];
+  const actions = createGatewayLiveDashboardActions(
+    CONTROL_SOCKET_PATH,
+    (async (options: unknown) => {
+      requests.push(options);
+      const method = (
+        options as { request: { method: string } }
+      ).request.method;
+      if (method === "unselect_claude") {
+        return {
+          protocolVersion: 1,
+          ok: true,
+          result: { accepted: false, code: "busy" },
+        };
+      }
+      return {
+        protocolVersion: 1,
+        ok: true,
+        result: {
+          accepted: true,
+          code: "ok",
+          ...(method === "refresh_dashboard" ? { revision: 9 } : {}),
+        },
+      };
+    }) as NonNullable<LiveDashboardCommandOptions["sendRequest"]>,
+  );
+
+  assert.deepEqual(
+    await actions.execute({
+      action: "select_claude",
+      alias: "claude-reviewer@this-mac",
+    }),
+    { ok: true, code: "ok" },
+  );
+  assert.deepEqual(
+    await actions.execute({
+      action: "unselect_claude",
+      alias: "claude-reviewer@this-mac",
+    }),
+    { ok: false, code: "busy" },
+  );
+  assert.deepEqual(
+    await actions.execute({ action: "refresh_dashboard" }),
+    { ok: true, code: "ok" },
+  );
+  assert.deepEqual(requests, [
+    {
+      socketPath: CONTROL_SOCKET_PATH,
+      request: {
+        protocolVersion: 1,
+        method: "select_claude",
+        params: { alias: "claude-reviewer@this-mac" },
+      },
+    },
+    {
+      socketPath: CONTROL_SOCKET_PATH,
+      request: {
+        protocolVersion: 1,
+        method: "unselect_claude",
+        params: { alias: "claude-reviewer@this-mac" },
+      },
+    },
+    {
+      socketPath: CONTROL_SOCKET_PATH,
+      request: {
+        protocolVersion: 1,
+        method: "refresh_dashboard",
+        params: {},
+      },
+    },
+  ]);
+
+  const failed = createGatewayLiveDashboardActions(
+    CONTROL_SOCKET_PATH,
+    (async () => {
+      throw new Error("private transport detail");
+    }) as NonNullable<LiveDashboardCommandOptions["sendRequest"]>,
+  );
+  assert.deepEqual(await failed.execute({ action: "refresh_dashboard" }), {
+    ok: false,
+    code: "unavailable",
+  });
 });
 
 test("control socket validation fails before signal, server, observer, or opener side effects", async () => {

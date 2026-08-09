@@ -6,6 +6,8 @@ export const LIVE_DASHBOARD_LIMITS = Object.freeze({
   maximumConnections: 16,
   maximumStreams: 4,
   maximumSessionBodyBytes: 256,
+  maximumActionBodyBytes: 1_024,
+  maximumActionsPerMinute: 6,
   pollIntervalMs: 1_000,
   backpressureTimeoutMs: 5_000,
   heartbeatIntervalMs: 15_000,

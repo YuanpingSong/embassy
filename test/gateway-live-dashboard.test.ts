@@ -42,6 +42,10 @@ import {
 } from "../src/gateway/live-dashboard.js";
 import { dashboardFixture } from "./dashboard-fixture.js";
 
+const NOOP_ACTIONS = Object.freeze({
+  execute: async () => ({ ok: true, code: "ok" as const }),
+});
+
 type HttpSmokeResponse = Readonly<{
   statusCode: number;
   headers: IncomingHttpHeaders;
@@ -656,6 +660,7 @@ test("top-level start is ready only after verified loopback bind and private boo
   try {
     const running = await startLiveDashboard({
       privateStateRoot: temporary,
+      actions: NOOP_ACTIONS,
       locale: "zh-CN",
       observer: {
         observe: async () => {
@@ -710,6 +715,7 @@ test("shutdown force-closes a blocked connection and exact-cleans bootstrap stat
   try {
     running = await startLiveDashboard({
       privateStateRoot: temporary,
+      actions: NOOP_ACTIONS,
       observer: {
         observe: async () => ({
           snapshotRevision: 0,
@@ -758,6 +764,7 @@ test("real loopback composition exchanges a fragment session, streams, and exact
   try {
     running = await startLiveDashboard({
       privateStateRoot: temporary,
+      actions: NOOP_ACTIONS,
       observer: {
         observe: async () => {
           observerCalls += 1;
@@ -860,6 +867,7 @@ test("a pre-aborted start creates no server, randomness, file, or observation si
     await assert.rejects(
       startLiveDashboard({
         privateStateRoot: temporary,
+        actions: NOOP_ACTIONS,
         signal: controller.signal,
         observer: {
           observe: async () => {
@@ -930,6 +938,7 @@ test("abort during a hung bootstrap closes the listener and exact-cleans late co
   try {
     const starting = startLiveDashboard({
       privateStateRoot: temporary,
+      actions: NOOP_ACTIONS,
       locale: "zh-CN",
       signal: controller.signal,
       observer: {

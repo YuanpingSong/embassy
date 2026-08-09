@@ -600,15 +600,15 @@ button:not(:disabled):hover { opacity: .92; }
 .status-card__label { font-size: 14px; color: var(--body-muted); }
 .status-card__detail { font-size: 13px; color: var(--muted); }
 
-/* --- 5.4 CLI panels (read-only action replacements) ----------------------- */
+/* --- 5.4 Bounded operator actions ----------------------------------------- */
 
-.cli-panel {
+.action-panel {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 16px;
   align-items: start;
 }
-.cli-card {
+.action-card {
   border: 1px solid var(--card-border);
   border-radius: var(--radius-sm);
   padding: 18px 20px;
@@ -616,21 +616,30 @@ button:not(:disabled):hover { opacity: .92; }
   gap: 12px;
   align-content: start;
 }
-.cli-card__title {
+.action-card__title {
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: var(--mono-ls);
   text-transform: uppercase;
   color: var(--muted);
 }
-.cli-card__consequence {
+.action-card__consequence,
+.section-teaching {
   font-size: 14px;
   line-height: 1.5;
   color: var(--body-muted);
 }
-/* Subordinated CLI panel (routes) runs slightly denser than free-standing
-   CLI cards; scoped so other tabs keep the 18px/20px padding. */
-.section__sub .cli-card { padding: 16px 18px; }
+.section-teaching { margin-bottom: 12px; }
+.action-card__status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.action-card__status[data-action-result="success"] { color: var(--deep-green); }
+.action-card__status[data-action-result="failure"] { color: var(--coral-deep); }
+.action-card__buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.section__sub .action-card { padding: 16px 18px; }
 
 /* Honest-absent card: never a dead control. */
 .absent-feature {
@@ -1471,7 +1480,7 @@ button:not(:disabled):hover { opacity: .92; }
   .header-meta { width: 100%; }
 
   .grid-2 { grid-template-columns: 1fr; }
-  .cli-panel { grid-template-columns: 1fr; }
+  .action-panel { grid-template-columns: 1fr; }
   .grid-cards { grid-template-columns: 1fr; }
 
   .deliveries-layout {

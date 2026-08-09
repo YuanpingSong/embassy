@@ -2,7 +2,7 @@
 // operator-tunable settings open the tab, then connector protocols, the
 // honest-absent features, limits & pressure, and the bounded counters.
 //
-// Phase A truth enforced here: there is no mutation endpoint, so this tab
+// Mutation-boundary truth enforced here: diagnostics has no mutation action, so this tab
 // carries no number input, no Apply, no suggestion button and no confirm bar.
 // Every limit teaches the real environment-variable path instead, and every
 // feature the live contract does not carry renders as an AbsentFeature card

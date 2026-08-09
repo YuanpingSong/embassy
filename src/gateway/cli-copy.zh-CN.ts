@@ -11,7 +11,7 @@ export const cliCopyZhCn = {
   health                 检查代理健康状态
   status                 读取公开状态快照
   refresh-dashboard      发布两份静态仪表盘文件
-  dashboard --live       打开只读实时伴侣
+  dashboard --live       打开实时状态与有限路由同意操作
   register-codex         注册或继任 Codex 任务
   unregister-codex       注销当前 Codex 任务
   select-claude          选择已发现的 Claude 会话

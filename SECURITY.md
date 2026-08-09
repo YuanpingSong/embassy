@@ -51,8 +51,9 @@ against other processes running as the same OS user.
 - Codex-to-Claude delivery requires explicit operator selection of a compatible
   live Claude session. Discovery alone is never permission to send.
 - The one registered `codex-*` peer is visible to every compatible live Claude
-  session running as the same OS user. An exact native Claude sender may reach
-  it without becoming selected for the opposite direction.
+  session running as the same OS user, but paired mode accepts only the exact
+  selected session. Other senders settle terminally with `SENDER_NOT_PAIRED`.
+  `embassy serve --inbound open` is the explicit opt-out from pairing.
 - Embassy never mutates a Codex task's approval or sandbox policy and never
   answers an approval request. An inbound turn uses the task's existing native
   policy. With `approvalPolicy: never`, no human confirmation occurs on that
@@ -165,16 +166,18 @@ user can read them.
 
 ### Live companion boundary
 
-`embassy dashboard --live` binds a read-only HTTP listener on `127.0.0.1` with
+`embassy dashboard --live` binds an authenticated HTTP listener on `127.0.0.1` with
 an ephemeral port. It is a separate foreground process from `embassy serve`.
 Access requires a one-use 256-bit URL-fragment token exchanged for a
 path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header
 is checked on every request; navigation GETs permit a missing Origin and carry
 no sentinel, while non-navigation POSTs require the exact Origin plus the
-`X-Embassy-Request` sentinel. There are no CORS headers, no
-mutation or provider routes, no storage, no telemetry, and no external assets.
-The browser receives a read-only sanitized metadata snapshot and has no
-authority to register, select, send, reply, approve, or interrupt. Any process
+`X-Embassy-Request` sentinel. There are no CORS headers, generic control or
+provider routes, storage, telemetry, or external assets. The sole mutation
+route accepts only select-Claude, unselect-Claude, and refresh-discovery JSON
+bodies, capped at 1 KiB and six confirmed actions per minute. The browser
+cannot register tasks, send, reply, approve, interrupt, change settings, or
+invoke arbitrary broker/provider methods. Any process
 running as your OS user — including root and browser extensions with local
 filesystem access — can read what the browser can read.
 

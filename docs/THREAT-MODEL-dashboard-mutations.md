@@ -1,7 +1,7 @@
 # Threat Model — Live Dashboard Mutation Surface (Phase B.1)
 
-Owner: PM. Status: draft for adversarial panel review; implementation gates
-on this document surviving the panel. Scope: exactly three operator consent
+Owner: PM. Status: implemented with deterministic boundary tests; final visual
+browser QA remains a release check. Scope: exactly three operator consent
 actions — **select**, **unselect**, **refresh discovery** — added to the
 live companion's authenticated session (PRD §3.3). Registration, send,
 reply, approve, interrupt, and settings mutation remain out of scope for
@@ -10,9 +10,9 @@ broker work with their own reviews).
 
 ## 1. What changes
 
-The live companion today serves a read-only contract: navigation GETs
-(shell/assets) and three authenticated POSTs (`session`, `snapshot`,
-`stream`). Phase B.1 adds one authenticated POST route:
+The live companion retains navigation GETs (shell/assets) and three existing
+authenticated POSTs (`session`, `snapshot`, `stream`). Phase B.1 adds one
+authenticated POST route:
 
 ```
 POST <instancePath>/action
@@ -93,8 +93,7 @@ Every `/action` request must pass ALL of:
 
 Every action renders a one-line consequence before an explicit confirm
 step ("Selecting makes this session the destination Codex can send to"),
-uses the current broker truth for its language (asymmetric model today;
-paired-routes copy is reserved until that lands), reports failure with the
+uses the current paired-route broker truth for its language, reports failure with the
 broker's safe code, and never renders as available when the stream is
 disconnected (stale-state mutations are refused client-side and the
 consequence line names the staleness).

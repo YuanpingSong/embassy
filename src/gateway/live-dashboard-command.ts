@@ -16,6 +16,11 @@ import {
   type RunningLiveDashboard,
   type StartLiveDashboardOptions,
 } from "./live-dashboard.js";
+import type {
+  LiveDashboardAction,
+  LiveDashboardActionExecutor,
+  LiveDashboardActionResult,
+} from "./live-dashboard-http.js";
 import type { LiveDashboardObserver } from "./live-dashboard-stream.js";
 
 const OPEN_EXECUTABLE = "/usr/bin/open";
@@ -240,6 +245,63 @@ export function createGatewayLiveDashboardObserver(
   };
 }
 
+export function createGatewayLiveDashboardActions(
+  socketPath: string,
+  sendRequest: GatewayControlSender = sendGatewayControlRequest,
+): LiveDashboardActionExecutor {
+  return {
+    execute: async (
+      action: LiveDashboardAction,
+    ): Promise<LiveDashboardActionResult> => {
+      try {
+        let response:
+          | GatewayControlResponse<"select_claude">
+          | GatewayControlResponse<"unselect_claude">
+          | GatewayControlResponse<"refresh_dashboard">;
+        switch (action.action) {
+          case "select_claude":
+            response = await sendRequest({
+              socketPath,
+              request: {
+                protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+                method: "select_claude",
+                params: { alias: action.alias },
+              },
+            });
+            break;
+          case "unselect_claude":
+            response = await sendRequest({
+              socketPath,
+              request: {
+                protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+                method: "unselect_claude",
+                params: { alias: action.alias },
+              },
+            });
+            break;
+          case "refresh_dashboard":
+            response = await sendRequest({
+              socketPath,
+              request: {
+                protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+                method: "refresh_dashboard",
+                params: {},
+              },
+            });
+            break;
+        }
+        if (!response.ok) return { ok: false, code: "unavailable" };
+        return {
+          ok: response.result.accepted,
+          code: response.result.code,
+        };
+      } catch {
+        return { ok: false, code: "unavailable" };
+      }
+    },
+  };
+}
+
 async function openPrivateBootstrap(
   bootstrapPath: string,
   executeOpen: OpenExecutor,
@@ -274,9 +336,9 @@ function ownLateStartup(outcome: Promise<StartupOutcome>): void {
 /**
  * Run the opt-in live dashboard in the foreground until interrupted.
  *
- * The controller remains the only source of state. This command makes one
- * read-only observer available to the authenticated stream and exposes no
- * provider operation or generic control-plane escape hatch.
+ * The controller remains the only source of state. This command exposes one
+ * observer plus three closed, authenticated actions; it has no provider API
+ * or generic control-plane escape hatch.
  */
 export async function runLiveDashboardCommand(
   options: LiveDashboardCommandOptions,
@@ -317,6 +379,10 @@ export async function runLiveDashboardCommand(
       const startup = startDashboard({
         privateStateRoot: config.stateDir,
         observer: createGatewayLiveDashboardObserver(
+          config.controlSocketPath,
+          sendRequest,
+        ),
+        actions: createGatewayLiveDashboardActions(
           config.controlSocketPath,
           sendRequest,
         ),

@@ -11,7 +11,7 @@ Commands:
   health                 Check broker health
   status                 Read the public status snapshot
   refresh-dashboard      Publish both static dashboard files
-  dashboard --live       Open the read-only live companion
+  dashboard --live       Open live status and bounded route consent
   register-codex         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task
   select-claude          Select a discovered Claude session

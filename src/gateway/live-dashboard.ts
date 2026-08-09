@@ -11,7 +11,10 @@ import {
   type LiveDashboardFileSystem,
   type LiveDashboardRandomBytes,
 } from "./live-dashboard-bootstrap.js";
-import { createLiveDashboardRequestHandler } from "./live-dashboard-http.js";
+import {
+  createLiveDashboardRequestHandler,
+  type LiveDashboardActionExecutor,
+} from "./live-dashboard-http.js";
 import { liveDashboardSecurityHeaders } from "./live-dashboard-protocol.js";
 import {
   bindLiveDashboardServer,
@@ -36,6 +39,7 @@ export type LiveDashboardDependencies = Readonly<{
 export type StartLiveDashboardOptions = Readonly<{
   privateStateRoot: string;
   observer: LiveDashboardObserver;
+  actions: LiveDashboardActionExecutor;
   locale?: DashboardLocale;
   signal?: AbortSignal;
   dependencies?: LiveDashboardDependencies;
@@ -206,6 +210,10 @@ export async function startLiveDashboard(
       lang: locale,
       assets,
       hub,
+      actions: options.actions,
+      ...(dependencies.clock === undefined
+        ? {}
+        : { now: dependencies.clock.now }),
     });
     if (dependencies.openBootstrap !== undefined) {
       await awaitStartupStep(

@@ -1,7 +1,7 @@
 // App shell (integration spec §4.1): tablist navigation with roving tabindex,
 // header (wordmark, posture chip, global search, as-of, connection chip and
-// controls, language toggle), staleness/reset/missed-frame notices, read-only
-// footer, and the top-level mount.
+// controls, language toggle), staleness/reset/missed-frame notices, bounded
+// operator authority footer, and the top-level mount.
 //
 // The shell keeps zero cross-frame accumulated state (D8): every render is a
 // pure function of the latest LiveDashboardStreamEvent plus the live wall
@@ -158,6 +158,17 @@ namespace Embassy {
       setPreset(undefined);
     }, []);
 
+    const runAction = React.useCallback(
+      async (
+        action: LiveDashboardAction,
+      ): Promise<LiveDashboardActionResult> =>
+        protocolRef.current?.executeAction(action) ?? {
+          ok: false,
+          code: "unavailable",
+        },
+      [],
+    );
+
     const dismissNotice = (kind: ProtocolNoticeKind): void => {
       setNotices((previous) => ({ ...previous, [kind]: false }));
     };
@@ -231,7 +242,13 @@ namespace Embassy {
             />
           );
         case "routes":
-          return <RoutesTab data={adapter.routesProps(model, nowMs)} />;
+          return (
+            <RoutesTab
+              data={adapter.routesProps(model, nowMs)}
+              actionsEnabled={connectionState === "connected"}
+              onAction={runAction}
+            />
+          );
         case "activity":
           return (
             <ActivityTab
@@ -447,8 +464,8 @@ namespace Embassy {
           </div>
         </main>
         <footer className="app-footer">
-          <span className="mono-label">{t("app.readonly")}</span>
-          <p>{t("live.readonlyFooter")}</p>
+          <span className="mono-label">{t("live.action.authorityLabel")}</span>
+          <p>{t("live.action.authorityBody")}</p>
           <p className="footer-diagnostic">
             {t("live.metric.revision")}:{" "}
             {latest === undefined ? "—" : String(latest.streamRevision)}
