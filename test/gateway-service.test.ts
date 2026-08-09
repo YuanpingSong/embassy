@@ -3409,14 +3409,39 @@ test("unpair settles only that edge's native receipt while an adjacent receipt r
     }),
     { accepted: true, code: "ok" },
   );
-  await waitFor(() => claude.nativeInboundStatuses.length === 1);
-  assert.deepEqual(claude.nativeInboundStatuses, [
-    {
-      receiptHandle: "receipt-first-edge-unpair",
-      status: "expired",
-      diagnosticCode: "PAIR_REMOVED",
-    },
-  ]);
+  await waitFor(() =>
+    claude.nativeInboundStatuses.some(
+      ({ receiptHandle, status }) =>
+        receiptHandle === "receipt-first-edge-unpair" && status === "expired",
+    ),
+  );
+  assert.deepEqual(
+    claude.nativeInboundStatuses.filter(
+      ({ receiptHandle }) => receiptHandle === "receipt-first-edge-unpair",
+    ),
+    [
+      {
+        receiptHandle: "receipt-first-edge-unpair",
+        status: "held",
+      },
+      {
+        receiptHandle: "receipt-first-edge-unpair",
+        status: "expired",
+        diagnosticCode: "PAIR_REMOVED",
+      },
+    ],
+  );
+  assert.deepEqual(
+    claude.nativeInboundStatuses.filter(
+      ({ receiptHandle }) => receiptHandle === "receipt-adjacent-edge-unpair",
+    ),
+    [
+      {
+        receiptHandle: "receipt-adjacent-edge-unpair",
+        status: "held",
+      },
+    ],
+  );
   assert.equal(codex.dispatches.length, 0);
   assert.equal(
     (await handlers.listSnapshot()).routes.find(
@@ -3429,12 +3454,29 @@ test("unpair settles only that edge's native receipt while an adjacent receipt r
   codex.state = "idle";
   codex.emitRouteState(THREAD_ID, "idle");
   await waitFor(() => codex.dispatches.length === 1);
-  await waitFor(() => claude.nativeInboundStatuses.length === 2);
+  await waitFor(() =>
+    claude.nativeInboundStatuses.some(
+      ({ receiptHandle, status }) =>
+        receiptHandle === "receipt-adjacent-edge-unpair" &&
+        status === "delivered",
+    ),
+  );
   assert.equal(codex.dispatches[0]?.text, "adjacent edge remains queued");
-  assert.deepEqual(claude.nativeInboundStatuses[1], {
-    receiptHandle: "receipt-adjacent-edge-unpair",
-    status: "delivered",
-  });
+  assert.deepEqual(
+    claude.nativeInboundStatuses.filter(
+      ({ receiptHandle }) => receiptHandle === "receipt-adjacent-edge-unpair",
+    ),
+    [
+      {
+        receiptHandle: "receipt-adjacent-edge-unpair",
+        status: "held",
+      },
+      {
+        receiptHandle: "receipt-adjacent-edge-unpair",
+        status: "delivered",
+      },
+    ],
+  );
 });
 
 test("a pair-capacity rejection rolls a fresh Claude selection back", async (t) => {
@@ -4505,6 +4547,10 @@ test("idle Codex re-registration wakes an already-held native message without an
   assert.deepEqual(claude.nativeInboundStatuses, [
     {
       receiptHandle: "receipt-reregister-wake",
+      status: "held",
+    },
+    {
+      receiptHandle: "receipt-reregister-wake",
       status: "delivered",
     },
   ]);
@@ -4547,13 +4593,27 @@ test("exact STEER prefix bypasses older ordinary work only at a busy Codex bound
   });
 
   await waitFor(() => codex.dispatches.length === 1);
-  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  await waitFor(() =>
+    claude.nativeInboundStatuses.some(
+      ({ receiptHandle, status }) =>
+        receiptHandle === "receipt-steer-direct" && status === "delivered",
+    ),
+  );
   assert.equal(codex.dispatches[0]?.text, "STEER: inspect the next tool result");
   assert.equal(codex.dispatches[0]?.steer, true);
   assert.equal(codex.dispatches[0]?.expectsReply, false);
-  assert.deepEqual(claude.nativeInboundStatuses, [
-    { receiptHandle: "receipt-steer-direct", status: "delivered" },
-  ]);
+  assert.deepEqual(
+    claude.nativeInboundStatuses.filter(
+      ({ receiptHandle }) => receiptHandle === "receipt-steer-direct",
+    ),
+    [{ receiptHandle: "receipt-steer-direct", status: "delivered" }],
+  );
+  assert.deepEqual(
+    claude.nativeInboundStatuses.filter(
+      ({ receiptHandle }) => receiptHandle === "receipt-ordinary-before-steer",
+    ),
+    [{ receiptHandle: "receipt-ordinary-before-steer", status: "held" }],
+  );
   const snapshot = await service.handlers().listSnapshot();
   assert.equal(
     snapshot.messages.some(
@@ -4796,16 +4856,44 @@ test("a fourth queued steer supersedes the oldest with one normal terminal recei
       snapshot.routes.some(
         ({ alias, queueDepth }) =>
           alias === "codex-main@this-mac" && queueDepth === 3,
-      ) && claude.nativeInboundStatuses.length === 1
+      ) &&
+      claude.nativeInboundStatuses.some(
+        ({ receiptHandle, status }) =>
+          receiptHandle === "receipt-steer-cap-1" && status === "expired",
+      )
     );
   });
-  assert.deepEqual(claude.nativeInboundStatuses, [
-    {
-      receiptHandle: "receipt-steer-cap-1",
-      status: "expired",
-      diagnosticCode: "STEER_QUEUE_SUPERSEDED",
-    },
-  ]);
+  assert.deepEqual(
+    claude.nativeInboundStatuses.filter(
+      ({ receiptHandle }) => receiptHandle === "receipt-steer-cap-1",
+    ),
+    [
+      {
+        receiptHandle: "receipt-steer-cap-1",
+        status: "held",
+      },
+      {
+        receiptHandle: "receipt-steer-cap-1",
+        status: "expired",
+        diagnosticCode: "STEER_QUEUE_SUPERSEDED",
+      },
+    ],
+  );
+  assert.deepEqual(
+    new Set(
+      claude.nativeInboundStatuses
+        .filter(({ receiptHandle, status }) =>
+          receiptHandle.startsWith("receipt-steer-cap-") && status === "held",
+        )
+        .map(({ receiptHandle }) => receiptHandle),
+    ),
+    new Set([
+      "receipt-steer-cap-1",
+      "receipt-steer-cap-2",
+      "receipt-steer-cap-3",
+      "receipt-steer-cap-4",
+    ]),
+  );
   assert.equal(codex.dispatches.length, 0);
   const snapshot = await service.handlers().listSnapshot();
   assert.equal(
@@ -4819,7 +4907,7 @@ test("a fourth queued steer supersedes the oldest with one normal terminal recei
   );
 });
 
-test("native Claude ingress reports delivery without approval-like held notices while internal queueing remains visible", async (t) => {
+test("native Claude ingress acknowledges held only after a real provider deferral", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -4864,8 +4952,9 @@ test("native Claude ingress reports delivery without approval-like held notices 
   });
 
   await waitFor(() => codex.dispatches.length === 2);
-  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 2);
   assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-native-1", status: "held" },
     { receiptHandle: "receipt-native-1", status: "delivered" },
   ]);
   const snapshot = await service.handlers().listSnapshot();
@@ -4882,6 +4971,233 @@ test("native Claude ingress reports delivery without approval-like held notices 
         alias === "codex-main@this-mac" && status === "waiting",
     ),
     true,
+  );
+});
+
+test("native ingress emits held after the prompt boundary and then one terminal acknowledgement", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "accepted" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "5000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    releaseDispatch?.();
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "prompt-boundary receipt probe",
+    receiptHandle: "receipt-prompt-boundary",
+  });
+  await dispatchEntered;
+  await clock.advanceBy(999);
+  assert.deepEqual(claude.nativeInboundStatuses, []);
+  await clock.advanceBy(1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-prompt-boundary", status: "held" },
+  ]);
+
+  releaseDispatch?.();
+  await waitFor(() => claude.nativeInboundStatuses.length === 2);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-prompt-boundary", status: "held" },
+    { receiptHandle: "receipt-prompt-boundary", status: "delivered" },
+  ]);
+});
+
+test("a terminal provider callback observed before the prompt boundary suppresses held", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "pending" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "5000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    releaseDispatch?.();
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "pre-boundary terminal probe",
+    receiptHandle: "receipt-pre-boundary-terminal",
+  });
+  await dispatchEntered;
+  await clock.advanceBy(999);
+  const messageId = codex.dispatches[0]?.messageId;
+  assert.ok(messageId);
+  codex.callbacks?.onDelivery({ messageId, state: "completed" });
+  await clock.advanceBy(1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-pre-boundary-terminal", status: "delivered" },
+  ]);
+
+  releaseDispatch?.();
+  await immediate();
+  await immediate();
+  assert.equal(
+    claude.nativeInboundStatusAttempts.some(({ status }) => status === "held"),
+    false,
+  );
+});
+
+test("native held retries only a proven clean pre-write and never duplicates progress", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.nativeInboundStatusFailures.push(
+    new BridgeError("SYNTHETIC_HELD_PREWRITE", "not written", true),
+  );
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "5000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "clean held retry probe",
+    receiptHandle: "receipt-held-clean-retry",
+  });
+  await waitFor(() => claude.nativeInboundStatusAttempts.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, []);
+  await clock.advanceBy(249);
+  assert.equal(claude.nativeInboundStatusAttempts.length, 1);
+  await clock.advanceBy(1);
+  await waitFor(() => claude.nativeInboundStatusAttempts.length === 2);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-held-clean-retry", status: "held" },
+  ]);
+  await clock.advanceBy(1_000);
+  assert.equal(
+    claude.nativeInboundStatusAttempts.filter(({ status }) => status === "held")
+      .length,
+    2,
+  );
+});
+
+test("an ambiguous native held write is never replayed or allowed to downgrade terminal truth", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.nativeInboundStatusFailures.push(
+    new BridgeError("SYNTHETIC_HELD_AMBIGUOUS", "write may have started"),
+  );
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_MESSAGE_DEADLINE_MS: "1000",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await discoverAndRegisterCodexOnly(service.handlers());
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "ambiguous held probe",
+    receiptHandle: "receipt-held-ambiguous",
+  });
+  await waitFor(() => claude.nativeInboundStatusAttempts.length === 1);
+  await clock.advanceBy(999);
+  assert.equal(claude.nativeInboundStatusAttempts.length, 1);
+  await clock.advanceBy(1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-held-ambiguous",
+      status: "expired",
+      diagnosticCode: "MESSAGE_EXPIRED",
+    },
+  ]);
+  assert.equal(
+    claude.nativeInboundStatusAttempts.filter(({ status }) => status === "held")
+      .length,
+    1,
   );
 });
 
@@ -5037,6 +5353,13 @@ test("paired inbound terminally refuses an unselected native sender and accepts 
     receiptHandle: "receipt-paired",
     status: "delivered",
   });
+  assert.equal(
+    claude.nativeInboundStatusAttempts.some(
+      ({ receiptHandle, status }) =>
+        receiptHandle === "receipt-paired" && status === "held",
+    ),
+    false,
+  );
 });
 
 test("native Claude ingress reports delivery errors as expired with a safe diagnostic", async (t) => {
@@ -5140,7 +5463,12 @@ test("a held native message emits one distinct stall notice then one terminal ex
       queuedForMs: 500,
     },
   ]);
-  assert.deepEqual(claude.nativeInboundStatuses, []);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-native-deadline",
+      status: "held",
+    },
+  ]);
   const stalled = await handlers.listSnapshot();
   assert.equal(
     stalled.alerts.some(
@@ -5151,8 +5479,12 @@ test("a held native message emits one distinct stall notice then one terminal ex
   );
 
   await clock.advanceBy(500);
-  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 2);
   assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-native-deadline",
+      status: "held",
+    },
     {
       receiptHandle: "receipt-native-deadline",
       status: "expired",
@@ -5160,8 +5492,9 @@ test("a held native message emits one distinct stall notice then one terminal ex
     },
   ]);
   assert.equal(
-    claude.nativeInboundStatusAttempts.some(({ status }) => status === "held"),
-    false,
+    claude.nativeInboundStatusAttempts.filter(({ status }) => status === "held")
+      .length,
+    1,
   );
   assert.equal(
     (await handlers.listSnapshot()).routes.find(
@@ -6363,13 +6696,10 @@ test("native terminal acknowledgement retries only clean pre-write failures", as
   assert.deepEqual(claude.releasedNativeReceipts, []);
 });
 
-test("ambiguous native acknowledgement is never replayed and releases its receipt", async (t) => {
+test("ambiguous terminal native acknowledgement is never replayed and releases its receipt", async (t) => {
   const { root, stateDir } = await fixture();
   const clock = new ManualGatewayClock();
   const claude = new FakeProvider("claude");
-  claude.nativeInboundStatusFailures.push(
-    new BridgeError("SYNTHETIC_AMBIGUOUS", "write may have started"),
-  );
   const codex = new FakeProvider("codex");
   codex.state = "busy";
   const service = new GatewayService({
@@ -6400,15 +6730,24 @@ test("ambiguous native acknowledgement is never replayed and releases its receip
       ({ queueDepth }) => queueDepth === 1,
     ),
   );
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-native-ambiguous", status: "held" },
+  ]);
+  claude.nativeInboundStatusFailures.push(
+    new BridgeError("SYNTHETIC_AMBIGUOUS", "write may have started"),
+  );
   await clock.advanceBy(1_000);
-  await waitFor(() => claude.nativeInboundStatusAttempts.length === 1);
-  assert.equal(claude.nativeInboundStatusAttempts.length, 1);
-  assert.deepEqual(claude.nativeInboundStatuses, []);
+  await waitFor(() => claude.nativeInboundStatusAttempts.length === 2);
+  assert.equal(claude.nativeInboundStatusAttempts.length, 2);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    { receiptHandle: "receipt-native-ambiguous", status: "held" },
+  ]);
   assert.deepEqual(claude.releasedNativeReceipts, [
     "receipt-native-ambiguous",
   ]);
   await clock.advanceBy(5_000);
-  assert.equal(claude.nativeInboundStatusAttempts.length, 1);
+  assert.equal(claude.nativeInboundStatusAttempts.length, 2);
   const snapshot = await service.handlers().listSnapshot();
   assert.equal(
     snapshot.alerts.some(
@@ -6455,6 +6794,10 @@ test("shutdown settles native ingress before closing its provider", async () => 
     );
     await service.close();
     assert.deepEqual(claude.nativeInboundStatuses, [
+      {
+        receiptHandle: "receipt-native-shutdown",
+        status: "held",
+      },
       {
         receiptHandle: "receipt-native-shutdown",
         status: "expired",
@@ -6510,6 +6853,10 @@ test("route removal returns terminal settlements to held native senders", async 
     { accepted: true, code: "ok" },
   );
   assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-native-unregister",
+      status: "held",
+    },
     {
       receiptHandle: "receipt-native-unregister",
       status: "expired",

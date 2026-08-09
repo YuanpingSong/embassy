@@ -96,6 +96,7 @@ const DELIVERY_TOKEN = /^dlv_[A-Za-z0-9_-]{24}$/;
 const PRIVATE_HANDLE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_CONVERSATIONS = 1_024;
 const DELIVERY_ACK_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
+const NATIVE_HELD_THRESHOLD_MS = 1_000;
 const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
 
@@ -409,6 +410,9 @@ type MessageDeliveryTracker = {
   stallNoticeSent: boolean;
   stallNoticeAttempt: number;
   stallNoticeNextAttemptAt: number;
+  nativeHeldSent: boolean;
+  nativeHeldAttempt: number;
+  nativeHeldNextAttemptAt: number;
   deliveryToken?: string;
   nativeReceipt?: NativeReceiptTracker;
 };
@@ -3972,6 +3976,10 @@ export class GatewayService {
       input.enqueuedAt + this.config.stallNoticeMs,
       deadlineAt - 1,
     );
+    const nativeHeldNextAttemptAt = Math.min(
+      input.enqueuedAt + NATIVE_HELD_THRESHOLD_MS,
+      deadlineAt - 1,
+    );
     const tracker: MessageDeliveryTracker = {
       messageId: input.messageId,
       conversationId: input.conversationId,
@@ -3996,6 +4004,9 @@ export class GatewayService {
       stallNoticeSent: false,
       stallNoticeAttempt: 0,
       stallNoticeNextAttemptAt: stallAt,
+      nativeHeldSent: false,
+      nativeHeldAttempt: 0,
+      nativeHeldNextAttemptAt,
       ...(input.deliveryToken === undefined
         ? {}
         : { deliveryToken: input.deliveryToken }),
@@ -4076,6 +4087,70 @@ export class GatewayService {
       host: receipt.hostId,
       alias: tracker.targetAlias,
     });
+  }
+
+  /**
+   * Native `held` is progress, not terminal delivery or approval. Emit it
+   * only after this exact message is known to be waiting, or after its prompt
+   * dispatch threshold elapses. A clean pre-write may retry; an ambiguous
+   * write is never replayed, and neither path consumes the terminal receipt.
+   */
+  private async publishNativeHeldLocked(
+    tracker: MessageDeliveryTracker,
+  ): Promise<boolean> {
+    const receipt = tracker.nativeReceipt;
+    if (
+      receipt === undefined ||
+      tracker.nativeHeldSent ||
+      isTerminalDeliveryMachine(tracker.machine) ||
+      this.now().getTime() >= tracker.deadlineAt
+    ) {
+      return false;
+    }
+    const now = this.now().getTime();
+    tracker.nativeHeldAttempt += 1;
+    try {
+      const adapter = this.adapter("claude", receipt.hostId);
+      const update = adapter.updateNativeInboundStatus;
+      if (update === undefined) {
+        throw new BridgeError(
+          "NATIVE_RECEIPT_TRANSPORT_UNAVAILABLE",
+          "The Claude adapter cannot publish native held progress.",
+        );
+      }
+      await update.call(adapter, receipt.receiptHandle, "held");
+      tracker.nativeHeldSent = true;
+      return true;
+    } catch (error) {
+      const cleanPrewrite = error instanceof BridgeError && error.recoverable;
+      const delay =
+        DELIVERY_ACK_RETRY_DELAYS_MS[
+          Math.min(
+            tracker.nativeHeldAttempt - 1,
+            DELIVERY_ACK_RETRY_DELAYS_MS.length - 1,
+          )
+        ] ?? DELIVERY_ACK_RETRY_DELAYS_MS.at(-1) ?? 2_000;
+      const retryAt = now + delay;
+      if (
+        cleanPrewrite &&
+        tracker.nativeHeldAttempt <= DELIVERY_ACK_RETRY_DELAYS_MS.length &&
+        retryAt < tracker.deadlineAt
+      ) {
+        tracker.nativeHeldNextAttemptAt = retryAt;
+        this.scheduleLifecycleWakeLocked();
+        return true;
+      }
+      // The write may already have reached the sender. Mark this progress
+      // attempt complete locally so no later timer can downgrade a terminal
+      // acknowledgement or replay an ambiguous frame.
+      tracker.nativeHeldSent = true;
+      this.addRuntimeAlert("NATIVE_HELD_NOTICE_UNCONFIRMED", "warning", {
+        provider: "claude",
+        host: receipt.hostId,
+        alias: tracker.targetAlias,
+      });
+      return true;
+    }
   }
 
   private nativeReceiptNotificationFor(
@@ -4850,6 +4925,14 @@ export class GatewayService {
         );
         changed = true;
       }
+      if (
+        !isTerminalDeliveryMachine(tracker.machine) &&
+        tracker.nativeReceipt !== undefined &&
+        !tracker.nativeHeldSent &&
+        tracker.nativeHeldNextAttemptAt <= now
+      ) {
+        if (await this.publishNativeHeldLocked(tracker)) changed = true;
+      }
       const receiptRetryAt = projectDeliveryWakeups(
         tracker.machine,
       ).nativeReceiptRetryAt;
@@ -4907,6 +4990,12 @@ export class GatewayService {
           !tracker.stallNoticeSent
         ) {
           consider(tracker.stallNoticeNextAttemptAt);
+        }
+        if (
+          tracker.nativeReceipt !== undefined &&
+          !tracker.nativeHeldSent
+        ) {
+          consider(tracker.nativeHeldNextAttemptAt);
         }
         if (wakeups.deadlineAt !== undefined) consider(wakeups.deadlineAt);
         if (
@@ -5451,6 +5540,61 @@ export class GatewayService {
     }
   }
 
+  private async awaitDispatchWithNativeHeldLocked(
+    tracker: MessageDeliveryTracker,
+    operation: Promise<GatewayAdapterDispatchResult>,
+  ): Promise<GatewayAdapterDispatchResult> {
+    type Outcome =
+      | { kind: "result"; value: GatewayAdapterDispatchResult }
+      | { kind: "error"; error: unknown };
+    const outcome: Promise<Outcome> = operation.then(
+      (value) => ({ kind: "result", value }),
+      (error: unknown) => ({ kind: "error", error }),
+    );
+    const unwrap = (settled: Outcome): GatewayAdapterDispatchResult => {
+      if (settled.kind === "error") throw settled.error;
+      return settled.value;
+    };
+
+    while (true) {
+      const current = this.deliveryTrackers.get(tracker.messageId);
+      if (
+        current === undefined ||
+        current.nativeReceipt === undefined ||
+        current.nativeHeldSent ||
+        isTerminalDeliveryMachine(current.machine)
+      ) {
+        return unwrap(await outcome);
+      }
+      const now = this.now().getTime();
+      if (now >= current.deadlineAt) return unwrap(await outcome);
+      const delay = Math.max(0, current.nativeHeldNextAttemptAt - now);
+      if (delay > 0) {
+        let timer: GatewayServiceTimer | undefined;
+        const due = new Promise<{ kind: "due" }>((resolve) => {
+          timer = this.timers.setTimeout(() => resolve({ kind: "due" }), delay);
+          (timer as { unref?: () => void }).unref?.();
+        });
+        const first = await Promise.race([outcome, due]);
+        if (timer !== undefined) this.timers.clearTimeout(timer);
+        if (first.kind !== "due") return unwrap(first);
+      }
+
+      // A terminal callback may have arrived before the provider's dispatch
+      // promise resolved. Let that exact evidence win before emitting held.
+      await this.drainDeliveryCallbacksForMessageLocked(tracker.messageId);
+      const afterCallbacks = this.deliveryTrackers.get(tracker.messageId);
+      if (
+        afterCallbacks === undefined ||
+        isTerminalDeliveryMachine(afterCallbacks.machine) ||
+        this.now().getTime() >= afterCallbacks.deadlineAt
+      ) {
+        return unwrap(await outcome);
+      }
+      await this.publishNativeHeldLocked(afterCallbacks);
+    }
+  }
+
   private async dispatchOne(targetAlias: string): Promise<void> {
     if (
       !this.running ||
@@ -5637,16 +5781,19 @@ export class GatewayService {
     }
     let result: GatewayAdapterDispatchResult;
     try {
-      result = await this.adapter(binding.provider, binding.hostId).dispatch({
-        sourceAlias: item.sourceAlias,
-        binding,
-        authorization: context.authorization,
-        messageId: item.messageId,
-        text: item.body,
-        expectsReply: context?.expectsReply ?? false,
-        deadlineAt: item.deadlineAt,
-        ...(item.steer === true ? { steer: true as const } : {}),
-      });
+      result = await this.awaitDispatchWithNativeHeldLocked(
+        tracker,
+        this.adapter(binding.provider, binding.hostId).dispatch({
+          sourceAlias: item.sourceAlias,
+          binding,
+          authorization: context.authorization,
+          messageId: item.messageId,
+          text: item.body,
+          expectsReply: context?.expectsReply ?? false,
+          deadlineAt: item.deadlineAt,
+          ...(item.steer === true ? { steer: true as const } : {}),
+        }),
+      );
     } catch {
       await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
       if (await this.processLifecycleLocked()) {
@@ -6271,7 +6418,14 @@ export class GatewayService {
       });
       await this.changed();
       await this.setNativeCodexStatus(event.targetAlias, "waiting");
-      this.scheduleDispatch(event.targetAlias);
+      // Native ingress gets one immediate dispatch opportunity. Only an
+      // actual queued/waiting result earns a `held` acknowledgement; an idle
+      // fast path can therefore settle with one terminal acknowledgement.
+      await this.dispatchOne(event.targetAlias);
+      const tracker = this.deliveryTrackers.get(queued.messageId);
+      if (tracker?.machine.phase === "queued") {
+        await this.publishNativeHeldLocked(tracker);
+      }
     } catch (error) {
       const code = safeCode(
         error instanceof BridgeError ? error.code : undefined,
