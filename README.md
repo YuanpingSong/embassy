@@ -62,7 +62,7 @@ Pick one name from `availablePeers`:
 embassy select-claude --alias advisor@this-mac
 ```
 
-You should see `"accepted":true`. The registration and selection together form the pair — only this Claude session and this Codex task can now exchange messages through Embassy.
+You should see `"accepted":true`. Registration and selection together form a pair — this Claude session and this Codex task can now exchange messages through Embassy. (`select-claude` is the one-task shorthand; `embassy pair --claude <name@host> --codex <codex-alias>` names both ends explicitly, and many pairs can coexist.)
 
 ### 4. Send a message
 
@@ -110,9 +110,9 @@ The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html`
   └───────────────────────────────────────────────────────────┘
 ```
 
-Embassy publishes one registered Codex task into Claude Code's live-session registry as a `codex-*` peer. Compatible Claude sessions discover it through their native `ListAgents` and contact it with `SendMessage` — no plugin, MCP server, or settings change required.
+Embassy publishes each registered Codex task into Claude Code's live-session registry as its own `codex-*` peer. Compatible Claude sessions discover them through their native `ListAgents` and contact them with `SendMessage` — no plugin, MCP server, or settings change required.
 
-A pair is one explicit permission edge between one Claude session and one Codex task. Registration makes the task visible; selection names the Claude session that may exchange messages with it. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out that restores any-session inbound. v1 currently holds one registered task and one pair at a time; concurrent pairs are the next milestone.
+A pair is one explicit permission edge between one Claude session and one Codex task — and pairs are many-to-many: one Claude session may hold edges to several Codex tasks, and one Codex task to several Claude sessions (bounded at 128 pairs by default). Every edge is created explicitly, with `pair` or the one-task `select-claude` shorthand; nothing is ever implied. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out that restores any-session inbound.
 
 Messages queue while the Codex task is busy and start an ordinary turn when it goes idle. In the Claude-to-Codex direction only, a body with an exact leading `STEER:` prefix may enter the active turn at the App Server's next tool-call boundary; if that boundary is unavailable, the message returns to the normal queue.
 
@@ -122,7 +122,7 @@ Every settled message produces a receipt. `delivered` means terminal provider ev
 
 Four embassy terms name real features:
 
-- **Registration and selection** are the two halves of one permission edge: a Codex task is explicitly registered, and selecting a Claude session forms the pair — the only combination that can exchange messages. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
+- **Registration and pairing** are the permission model: a Codex task is explicitly registered, and each pair is one explicit Claude↔Codex edge — only paired ends exchange messages, and many edges can coexist. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
 - **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only dashboard.
 - **The pouch** is transit: bounded bodies, ephemeral inside Embassy, never persisted by it.
 - **Consulates** are the roadmap: the same model extended to Codex tasks on remote hosts over attach-only SSH — designed, and deliberately disabled in v1.
@@ -142,8 +142,9 @@ Embassy's operators are often agents themselves: `register-codex` runs inside th
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; for example, `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
-| `select-claude` / `unselect-claude` | operator | Select or unselect a discovered Claude destination |
-| `send-to-claude` | registered Codex task | Send one bounded message to an already-selected Claude session |
+| `pair` / `unpair` | operator | Add or remove one explicit Claude↔Codex edge by naming both ends: `embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac` |
+| `select-claude` / `unselect-claude` | operator | One-task shorthand for `pair`/`unpair`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
+| `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session |
 | `send-to-codex` | Claude session | Send one bounded message using the inherited native reply identity |
 | `reply` | either provider | Continue an active conversation by its public token |
 

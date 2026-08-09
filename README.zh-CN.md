@@ -62,7 +62,7 @@ embassy register-codex --alias codex-reviewer@this-mac
 embassy select-claude --alias advisor@this-mac
 ```
 
-你应看到 `"accepted":true`。注册和选择共同构成配对——现在只有这个 Claude 会话和这个 Codex 任务可以通过 Embassy 交换消息。
+你应看到 `"accepted":true`。注册和选择共同构成一个配对——现在这个 Claude 会话和这个 Codex 任务可以通过 Embassy 交换消息。（`select-claude` 是单任务场景下的简写；`embassy pair --claude <name@host> --codex <codex-alias>` 显式指定两端，且多个配对可以并存。）
 
 ### 4. 发送消息
 
@@ -110,9 +110,9 @@ MSG
   └───────────────────────────────────────────────────────────┘
 ```
 
-Embassy 将一个已注册的 Codex 任务以 `codex-*` 对等方身份发布到 Claude Code 的实时会话注册表中。兼容的 Claude 会话通过原生的 `ListAgents` 发现它，并通过 `SendMessage` 与之通信——无需插件、MCP 服务器或设置更改。
+Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份发布到 Claude Code 的实时会话注册表中。兼容的 Claude 会话通过原生的 `ListAgents` 发现它们，并通过 `SendMessage` 与之通信——无需插件、MCP 服务器或设置更改。
 
-配对是一个 Claude 会话与一个 Codex 任务之间的单一显式权限边。注册使任务可见；选择指定可与之交换消息的 Claude 会话。没有边时，发送方以 `SENDER_NOT_PAIRED` 终局结算。`embassy serve --inbound open` 是显式的退出选项，可恢复任意会话入站。v1 目前同时保持一个已注册任务和一个配对；并发配对是下一个里程碑。
+配对是一个 Claude 会话与一个 Codex 任务之间的单一显式权限边，而配对关系是多对多的：一个 Claude 会话可以与多个 Codex 任务建立边，一个 Codex 任务也可以与多个 Claude 会话建立边（默认上限 128 个配对）。每条边都通过 `pair` 或单任务简写 `select-claude` 显式创建；一切都不会被隐式推断。没有边时，发送方以 `SENDER_NOT_PAIRED` 终局结算。`embassy serve --inbound open` 是显式的退出选项，可恢复任意会话入站。
 
 消息在 Codex 任务忙碌时排队，并在任务空闲后启动普通轮次。仅在 Claude→Codex 方向，正文以精确 `STEER:` 开头的消息可以在 App Server 的下一个工具调用边界进入当前轮次；若该边界不可用，消息会回到普通队列。
 
@@ -122,7 +122,7 @@ Embassy 将一个已注册的 Codex 任务以 `codex-*` 对等方身份发布到
 
 四个 Embassy 术语对应真实功能：
 
-- **注册与选择**是同一份权限边的两半：Codex 任务通过显式注册发布，选择一个 Claude 会话则构成配对——唯一可以交换消息的组合。没有边意味着 `SENDER_NOT_PAIRED`；一切都是显式的。
+- **注册与配对**构成权限模型：Codex 任务通过显式注册发布，每个配对是一条显式的 Claude↔Codex 边——只有配对的两端可以交换消息，且多条边可以并存。没有边意味着 `SENDER_NOT_PAIRED`；一切都是显式的。
 - **账簿**是投递记录：每条已结算消息的回执，以及一个仅包含元数据的仪表盘。
 - **信袋**是传输通道：有界的消息体，在 Embassy 内部是临时的，从不被持久化。
 - **领事馆**是路线图：将同一模型通过仅限 attach 的 SSH 扩展到远程主机上的 Codex 任务——已完成设计，但在 v1 中有意禁用。
@@ -142,8 +142,9 @@ Embassy 的操作者本身往往就是代理：`register-codex` 在 Codex 任务
 | `delivery-status` | 任一提供方 | 使用 `embassy delivery-status --token dlv_<token>` 读取单条投递跟踪器 |
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
 | `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；例如，`embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
-| `select-claude` / `unselect-claude` | 操作员 | 选择或取消选择已发现的 Claude 目的地 |
-| `send-to-claude` | 已注册的 Codex 任务 | 向已选择的 Claude 会话发送一条有界消息 |
+| `pair` / `unpair` | 操作员 | 显式指定两端来添加或移除一条 Claude↔Codex 边：`embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac` |
+| `select-claude` / `unselect-claude` | 操作员 | `pair`/`unpair` 的单任务简写：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
+| `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息 |
 | `send-to-codex` | Claude 会话 | 使用继承的原生回复标识发送一条有界消息 |
 | `reply` | 任一提供方 | 通过公开令牌继续一个活跃对话 |
 

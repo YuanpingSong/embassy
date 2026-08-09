@@ -36,9 +36,9 @@ live sends routine. Never enable a real provider message in CI.
   mutable lookup aliases; historical names do not resolve. A user-supplied UUID
   may be accepted as a CLI selector, but Embassy must never print or discover
   one through public output.
-- Publish at most one process-owned `codex-*` registry record. Remove only the
-  exact-owned record and callback socket during graceful shutdown; never modify
-  another process's artifacts.
+- Publish at most one process-owned `codex-*` registry record per supervised
+  advertisement process. Remove only the exact-owned record and callback socket
+  during graceful shutdown; never modify another process's artifacts.
 - Keep bodies, prompts, replies, raw provider frames, callback addresses, and
   socket paths memory-only. Never replay a body after restart.
 - Closed private route state may retain the Codex thread ID and Claude session

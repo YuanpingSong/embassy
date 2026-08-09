@@ -48,15 +48,19 @@ against other processes running as the same OS user.
 
 - A Codex task must explicitly self-register with a `codex-*` alias before it
   can participate.
-- Codex-to-Claude delivery requires explicit operator selection of a compatible
-  live Claude session. Discovery alone is never permission to send.
-- The one registered `codex-*` peer is visible to every compatible live Claude
-  session running as the same OS user, but paired mode accepts only the exact
-  selected session. Other senders settle terminally with `SENDER_NOT_PAIRED`.
-  `embassy serve --inbound open` is the explicit opt-out from pairing.
-- Selection is singular. Selecting a different exact Claude session atomically
-  retires the old route and settles its accepted work before the new pair is
-  exposed; a two-selection intermediate state is never published.
+- Codex-to-Claude delivery requires an explicit operator-created pair with a
+  compatible live Claude session. Discovery alone is never permission to send.
+- Every registered `codex-*` peer is visible to every compatible live Claude
+  session running as the same OS user, but paired mode accepts only sessions
+  holding an explicit pair edge with that exact task. Other senders settle
+  terminally with `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the
+  explicit opt-out from pairing.
+- Pairs are additive, bounded, and per-edge: adding an edge never retires
+  another, and removing one invalidates its active conversation capabilities
+  before the change is published. Explicitly requested endpoint replacement
+  (registration succession) atomically settles the outgoing endpoint's
+  accepted work before the replacement is exposed; a half-replaced
+  intermediate state is never published.
 - Embassy never mutates a Codex task's approval or sandbox policy and never
   answers an approval request. An inbound turn uses the task's existing native
   policy. With `approvalPolicy: never`, no human confirmation occurs on that

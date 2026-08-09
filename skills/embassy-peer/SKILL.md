@@ -1,21 +1,21 @@
 ---
 name: embassy-peer
-description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for native inbound messaging, list available peers, open the local dashboard, select and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
+description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for native inbound messaging, list available peers, open the local dashboard, pair with and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
 ---
 
 # Embassy Peer Gateway
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal.
+Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, pair, unpair, select, and unselect commands do not infer a provider principal.
 
 ## Select a peer
 
 Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. The shipped launcher accepts only `this-mac`; remote connectors are deferred. Ask the user to choose a selector when it is ambiguous.
 
-Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus the one explicitly advertised `codex-*` Embassy peer.
+Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
 
-Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native `codex-*` gateway advertisements are excluded because they are not Claude destinations. A send never selects a Claude session automatically. Run `select-claude` for the exact user-chosen current name or UUID before sending; an unselected destination is not routable.
+Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native `codex-*` gateway advertisements are excluded because they are not Claude destinations. A send never pairs with a Claude session automatically. Create the exact user-chosen edge with `pair` — or the one-task shorthand `select-claude` — before sending; an unpaired destination is not routable.
 
 Accept a Claude session UUID only when the user supplies it or it is already part of the current task context. Never discover one by scanning history or configuration, and never infer a peer from a thread ID, process ID, working directory, socket path, or title.
 
@@ -43,29 +43,37 @@ embassy refresh-dashboard
 
 Run that refresh only at the passive-discovery authorization stage. Treat the response as a normalized refresh result; it does not reveal the path. The operator-facing page is `gateway-dashboard.html` in the configured state directory, by default `~/.local/state/agent-embassy/`. Use the operator's configured location when it differs. Do not search for the file or scan controller-owned paths.
 
-## Select a Claude session
+## Pair with a Claude session
 
-Select only a user-chosen, unique candidate from `availablePeers`:
+Create one explicit Claude↔Codex edge by naming both ends. The Claude end must be a user-chosen, unique candidate from `availablePeers`:
+
+```sh
+embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac
+```
+
+Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. Remove exactly the named edge:
+
+```sh
+embassy unpair --claude advisor@this-mac --codex codex-reviewer@this-mac
+```
+
+When the Codex end is unambiguous — inherited from the calling task, or the sole registered task — the one-task shorthand forms or removes the same edge:
 
 ```sh
 embassy select-claude --alias advisor@this-mac
 ```
 
-Or select the same logical session directly by UUID:
+Or address the same logical session directly by UUID:
 
 ```sh
 embassy select-claude --session 123e4567-e89b-42d3-a456-426614174000
 ```
 
+With zero or several possible Codex ends, the shorthands fail closed and name the explicit verb; never guess an end on the caller's behalf.
+
 Let the gateway resolve either selector against the current genuine Claude discovery snapshot. It refreshes process and socket coordinates by UUID; those transport details are never caller inputs. If discovery is ambiguous, incompatible, or unavailable, stop on the result.
 
-Remove the selected route without touching the Claude session:
-
-```sh
-embassy unselect-claude --alias advisor@this-mac
-```
-
-If the selected session is offline or was renamed while Embassy was stopped, the user may instead supply its UUID with `--session`. Selection and removal manage only the gateway route. They do not start, interrupt, configure, or terminate Claude Code.
+If the paired session is offline or was renamed while Embassy was stopped, the user may instead supply its UUID with `--session`. Pairing and removal manage only the gateway edge. They do not start, interrupt, configure, or terminate Claude Code.
 
 ## Register a Codex task
 
@@ -107,7 +115,7 @@ If the task identity or selector does not match, stop on the fail-closed result.
 
 Pass a non-empty UTF-8 body through standard input. Never place message text in a gateway argument or a temporary file.
 
-From a registered Codex task to an already-selected Claude session:
+From a registered Codex task to a paired Claude session:
 
 ```sh
 embassy send-to-claude \
@@ -122,7 +130,7 @@ address the same logical route; a former name is not retained as an alias.
 
 Let the CLI read the current `CODEX_THREAD_ID`; do not inspect or forward it.
 
-The foreground launcher supports native bidirectional messaging for one explicitly registered `codex-*` task. Claude discovers it with native `ListAgents` and sends with native `SendMessage`. In default paired mode, the task accepts only the exact selected compatible live Claude session; every other sender settles terminally with `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit operator opt-out that accepts any compatible live same-UID session. The Codex task's existing native approval and sandbox policy governs an accepted turn. Claude Code's `crossSessionInbound` controls messages entering the selected Claude session, including Embassy's outbound Codex-to-Claude delivery. Embassy starts the Codex turn and returns its final reply to the originating Claude session.
+The foreground launcher supports native bidirectional messaging for each explicitly registered `codex-*` task. Claude discovers them with native `ListAgents` and sends with native `SendMessage`. In default paired mode, a task accepts only compatible live Claude sessions holding an explicit pair edge with it; every other sender settles terminally with `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit operator opt-out that accepts any compatible live same-UID session. The Codex task's existing native approval and sandbox policy governs an accepted turn. Claude Code's `crossSessionInbound` controls messages entering the paired Claude session, including Embassy's outbound Codex-to-Claude delivery. Embassy starts the Codex turn and returns its final reply to the originating Claude session.
 
 An accepted send returns a public conversation token and a fresh delivery token. The delivery token is an opaque, memory-only correlation handle, exactly `dlv_` plus 24 base64url characters. Copy the exact returned value; do not construct, shorten, log, or persist it.
 
@@ -175,10 +183,10 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Keep the gateway local, single-user, and non-hosted.
 - Keep the shipped launcher local-host-only.
 - Never read provider credentials, authentication state, history, settings, registries, raw sockets, or Keychain entries.
-- Publish only the gateway process's registered `codex-*` peer record and remove it on shutdown.
+- Publish only the gateway's registered `codex-*` peer records and remove them on shutdown.
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.
 
 
-Agents do not use the live dashboard; it is an operator-facing browser surface whose only mutations are explicitly confirmed select-Claude, unselect-Claude, and refresh-discovery actions. It has no registration, send, reply, approval, interruption, settings, or generic provider authority. Agent-facing paths remain `embassy status` for a sanitized snapshot and the static `gateway-dashboard.html` for offline metadata. A status snapshot observation may settle already-due lifecycle deliveries before projecting state.
+Agents do not use the live dashboard; it is an operator-facing browser surface whose only mutations are explicitly confirmed two-endpoint pair, unpair, and refresh-discovery actions. It has no registration, send, reply, approval, interruption, settings, or generic provider authority. Agent-facing paths remain `embassy status` for a sanitized snapshot and the static `gateway-dashboard.html` for offline metadata. A status snapshot observation may settle already-due lifecycle deliveries before projecting state.

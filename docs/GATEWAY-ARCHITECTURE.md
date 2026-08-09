@@ -266,12 +266,15 @@ terminal success or permits a retry.
 
 ### Claude to Codex
 
-This path is enabled for one explicitly registered `codex-*` task. The
-gateway publishes its process-owned native registry entry, accepts Claude's
-native `SendMessage`, starts an App Server turn, and returns the final reply.
+This path is enabled for each explicitly registered `codex-*` task. The
+gateway publishes a process-owned native registry entry per task, accepts
+Claude's native `SendMessage`, starts an App Server turn, and returns the
+final reply.
 
-1. The gateway advertises one process-owned `codex-*` record in Claude's
-   native registry.
+1. The gateway advertises one process-owned `codex-*` record per registered
+   task in Claude's native registry. A supervised helper process owns each
+   advertisement's registry record and callback socket; the broker remains
+   the sole owner of state, queues, and dispatch.
 2. A real Claude session uses native `ListAgents` and `SendMessage`; the
    gateway validates that exact live registry/socket generation and treats the
    text as untrusted user-role input. This inbound observation grants only a
@@ -691,15 +694,15 @@ gateway as unavailable when nothing is serving.
   require the exact Origin plus `X-Embassy-Request`. There are no CORS headers,
   no cross-origin reads, and no routes outside the instance path.
 - **Projection and actions.** The companion observes through
-  `observe_snapshot`. Its only mutations are exact `select_claude`,
-  `unselect_claude`, and `refresh_dashboard` control calls behind one closed
+  `observe_snapshot`. Its only mutations are exact two-endpoint `pair`,
+  `unpair`, and `refresh_dashboard` control calls behind one closed
   authenticated `/action` route. The browser shows the consequence and requires
   explicit confirmation; the server rejects bodies over 1 KiB and limits the
   companion to six actions per minute. It cannot register, unregister, succeed,
   send, reply, approve, interrupt, change settings, or invoke a generic/provider
-  method. Selecting a different Claude session atomically settles and retires
-  the prior route in the same durable mutation that installs the one new pair;
-  no snapshot exposes two selected sessions. Every action is followed by a
+  method. Each mutation touches only the edge it names: adding an edge never
+  retires another, and removing one settles its accepted work before the
+  change is published. Every action is followed by a
   fresh observation. An observation may
   settle already-due lifecycle deliveries before projecting, which is a broker
   timer effect, not additional browser authority.
