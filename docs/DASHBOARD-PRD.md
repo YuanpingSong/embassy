@@ -135,9 +135,27 @@ not copy suggestions.
 
 ## 6. Non-goals
 
-- No message bodies, previews, or excerpts — metadata only, permanently.
-- No mutation surface beyond the approved future set (refresh/select/
-  unselect); never register/send/reply/approve/interrupt.
+- Approve and interrupt stay native-only (interrupt permanently, per the
+  operator's standing ruling; approvals belong to each agent's own flow).
+- No remote access, accounts, cloud, or telemetry — ambition stays local.
+
+## 6b. Ambitious scope (user-directed; each item gates on broker work +
+threat-model review)
+
+- **Message content, opt-in**: the broker gains a bounded operator-review
+  retention window (last N bodies, off by default, size-capped, disclosed in
+  SECURITY). The Deliveries timeline then shows what was said, not just
+  when; previews truncate, full body behind disclosure. When retention is
+  off, the UI says so honestly instead of pretending there is nothing.
+- **Operator console**: operator-originated send and reply as a NEW
+  first-class protocol identity (no such verb exists today even in the CLI —
+  agent identities are inherited, not impersonated). The dashboard becomes a
+  participant surface: compose to any consented route, thread into
+  conversations, with operator provenance stamped on every message and
+  ledger row.
+- **Full consent management**: select/unselect (already specified in 3.3)
+  plus steering kill-switch state and, if engineering finds an honest
+  identity path, browser-assisted registration flows.
 - No remote access, no accounts, no cloud, no telemetry.
 - No replacement of `embassy status` for agents — this is a human surface;
   agents keep the CLI.
