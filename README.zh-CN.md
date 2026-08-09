@@ -140,6 +140,15 @@ Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份
 
 Embassy 的操作者本身往往就是代理：`register-codex` 在 Codex 任务内部运行，而 Claude 端完全通过原生工具驱动。仓库附带 [`skills/embassy-peer/SKILL.md`](skills/embassy-peer/SKILL.md)——请将你的代理指向该技能，而非向它复述本 README。
 
+该技能随 npm 包一同发布；将它安装到各代理发现技能的目录：
+
+```bash
+cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.codex/skills/
+cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
+```
+
+之后即可在 Codex 任务中通过 `$embassy-peer` 调用；Claude Code 会将其作为用户技能自动发现。
+
 ## 命令一览
 
 | 命令 | 执行者 | 用途 |
