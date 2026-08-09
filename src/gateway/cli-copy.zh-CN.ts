@@ -1,5 +1,8 @@
 import type { CliCopy } from "./cli-copy.js";
 
+export const callerIdentityConflictHintZhCn =
+  "同时继承了两种代理身份；Codex App Server 守护进程可能是在代理会话内启动的。请在普通终端中运行：codex app-server daemon restart";
+
 export const cliCopyZhCn = {
   "help.usage": `Embassy — Claude Code 与 Codex 的本地消息通道
 

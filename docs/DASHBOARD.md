@@ -39,16 +39,26 @@ path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header i
 missing Origin and carry no sentinel, while non-navigation POSTs require the
 exact Origin plus the X-Embassy-Request sentinel. There are no CORS headers, no
 generic control or provider routes, no server-side storage, no telemetry, and
-no external assets. The only mutation route accepts exact select-Claude,
-unselect-Claude, and refresh-discovery actions, requires an explicit in-page
-confirmation, rejects bodies over 1 KiB, and is limited to six actions per
-minute. The browser client keeps only a display-preference key
+no external assets. The only mutation route accepts exact pair, unpair,
+refresh-discovery, and stale-Codex-registration-removal actions, requires an
+explicit in-page confirmation, rejects bodies over 1 KiB, and is limited to
+six actions per minute. Removal names only a public `codex-*` alias; the broker
+accepts it only when the registration is stale and its endpoint generation is
+dead. No task ID or endpoint generation enters the browser contract. The
+browser client keeps only a display-preference key
 (active tab and language) in `localStorage`.
-The browser cannot register tasks, send, reply, approve, interrupt, change
-settings, or invoke arbitrary broker/provider methods. It receives a sanitized
+The browser cannot create or live-unregister tasks, send, reply, approve,
+interrupt, change settings, or invoke arbitrary broker/provider methods. It receives a sanitized
 metadata snapshot via authenticated `fetch`; after each bounded action it reads
 a fresh snapshot. A snapshot observation may settle already-due
 lifecycle deliveries before projecting state.
+
+A compatibility-gated App Server endpoint refresh appears in Activity as an
+automatic event, distinct from operator actions. Diagnostics reports the safe
+compatibility tier when a replacement is incompatible, while a missing or
+duplicate exact task remains stale. The dashboard never exposes the retained
+task ID or either endpoint generation, and endpoint recovery never replays a
+message body.
 
 An optional `--lang en|zh-CN` flag selects the display language. It belongs to
 the live companion only; the static pair is always written in both languages

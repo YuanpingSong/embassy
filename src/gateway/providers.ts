@@ -21,10 +21,13 @@ import {
   type ClaudeCompatibilityScratchFactory,
 } from "./claude-compatibility-scratch.js";
 import {
+  certifiedCompatibilityVersions,
   compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
   sharesCompatibilityMajor,
   type CompatibilityAttestation,
   type CompatibilityCertification,
+  type CompatibilityPolicy,
   type CompatibilityProbeName,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
@@ -54,6 +57,7 @@ import type {
   GatewayAdapterDiscovery,
   GatewayAdapterDiscoverySnapshot,
   GatewayAdapterDispatchResult,
+  GatewayAdapterEndpointRefresh,
   GatewayAdapterRouteState,
   GatewayAdapterRouteObservationState,
   GatewayAdapterStart,
@@ -79,6 +83,7 @@ const DEFAULT_CODEX_CLEANUP_TIMEOUT_MS = 5_000;
 const DEFAULT_CODEX_CLEANUP_POLL_MS = 25;
 const DEFAULT_CODEX_RECOVERY_INITIAL_MS = 250;
 const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
+const MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES = 3;
 const COMPATIBILITY_PROBE_THREAD_ID =
   "00000000-0000-7000-8000-000000000000";
 const COMPATIBILITY_TURN_TIMEOUT_MS = 60_000;
@@ -2334,6 +2339,10 @@ export function createLocalClaudeGatewayProvider(
 
 export type LocalCodexGatewayProviderOptions = {
   factory: LocalCodexTransportFactory;
+  /** Re-resolves the exact pinned managed install after its generation moves. */
+  refreshFactory?: () => Promise<LocalCodexTransportFactory>;
+  /** Controller policy retained across every endpoint generation. */
+  compatibilityPolicy?: CompatibilityPolicy;
   cleanupPollMs?: number;
   cleanupTimeoutMs?: number;
   recoveryInitialMs?: number;
@@ -2346,20 +2355,32 @@ export type LocalCodexGatewayProviderOptions = {
 
 type CodexRoute = {
   connector: CodexAppServerConnector;
+  endpointGeneration: string;
   generation: symbol;
   threadId: string;
   transport: LocalCodexOwnedTransport;
 };
 
 type CodexCallbackEvent =
-  | { type: "delivery"; value: GatewayAdapterDelivery }
+  | {
+      type: "delivery";
+      endpointGeneration: string;
+      value: GatewayAdapterDelivery;
+    }
   | {
       type: "route";
+      endpointGeneration: string;
       generation: symbol;
       routeHandle: string;
       state: GatewayAdapterRouteObservationState;
       safeErrorCode?: string;
     };
+
+type CodexEndpointRefreshResult = {
+  event: GatewayAdapterEndpointRefresh;
+  delivery: "callback" | "selector";
+  selectorClaimed: boolean;
+};
 
 type CodexCertificationTurn = {
   resolve: (result: CodexTransientTurnResult) => void;
@@ -2372,8 +2393,7 @@ function validateCodexFactory(factory: LocalCodexTransportFactory): void {
   const certified = CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
     factory.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
   );
-  const observedCandidate =
-    factory.compatibilityPolicy === "observed" &&
+  const schemaCandidate =
     schema.observedSchemaCandidate === true &&
     CODEX_APP_SERVER_WRITABLE_VERSIONS.some((version) =>
       sharesCompatibilityMajor(version, factory.appServerVersion),
@@ -2382,7 +2402,7 @@ function validateCodexFactory(factory: LocalCodexTransportFactory): void {
     factory.hostId !== LOCAL_HOST ||
     factory.protocol !== "codex-app-server" ||
     factory.protocolVersion !== factory.appServerVersion ||
-    (!certified && !observedCandidate) ||
+    (!certified && !schemaCandidate) ||
     schema.appServerVersion !== factory.appServerVersion ||
     schema.endpointGeneration !== factory.endpointGeneration ||
     schema.protocol !== "app-server-v2-stable" ||
@@ -2440,11 +2460,11 @@ function codexRouteSafeCode(
 }
 
 export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
-  readonly identity: PrivateEndpointIdentity;
-  readonly protocol: string;
-  readonly protocolVersion: string;
-
-  private readonly factory: LocalCodexTransportFactory;
+  private factory: LocalCodexTransportFactory;
+  private readonly refreshFactory:
+    | (() => Promise<LocalCodexTransportFactory>)
+    | undefined;
+  private readonly compatibilityPolicy: CompatibilityPolicy;
   private readonly maxCallbacks: number;
   private readonly maxRoutes: number;
   private readonly maxReplyBytes: number;
@@ -2460,13 +2480,32 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly routeRecoveryTimers = new Map<string, NodeJS.Timeout>();
   private readonly routeRecoveries = new Map<string, Promise<void>>();
   private readonly routesRequiringRecovery = new Set<string>();
+  private readonly trackedRoutes = new Set<string>();
+  private retiredEndpointGeneration: string | undefined;
   private readonly expectsReply = new Map<string, boolean>();
   private readonly compatibilityCertifyingRoutes = new Set<string>();
   private readonly compatibilityTurns = new Map<string, CodexCertificationTurn>();
   private readonly callbackQueue: CodexCallbackEvent[] = [];
   private callbackScheduled = false;
   private callbacks: GatewayAdapterCallbacks | undefined;
+  private endpointRefresh:
+    | Promise<CodexEndpointRefreshResult | undefined>
+    | undefined;
+  private endpointRefreshDelivery: "callback" | "selector" | undefined;
+  private endpointActivationRetry:
+    | Readonly<{
+        event: GatewayAdapterEndpointRefresh;
+        attempt: number;
+      }>
+    | undefined;
+  private endpointActivationRetryTimer: NodeJS.Timeout | undefined;
+  private callbackDrainFrozen = false;
   private compatibilityAttested: boolean;
+  private endpointUnavailable = false;
+  private pendingEndpointAttestation: CompatibilityAttestation | undefined;
+  private pendingEndpointRefreshEvent:
+    | Extract<GatewayAdapterEndpointRefresh, { outcome: "compatible" }>
+    | undefined;
   private initialized = false;
   private closing = false;
   private closed = false;
@@ -2474,13 +2513,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   constructor(options: LocalCodexGatewayProviderOptions) {
     validateCodexFactory(options.factory);
     this.factory = options.factory;
-    this.identity = {
-      provider: "codex",
-      hostId: exactLocalHost(options.factory.hostId),
-      endpointGeneration: options.factory.endpointGeneration,
-    };
-    this.protocol = options.factory.protocol;
-    this.protocolVersion = options.factory.protocolVersion;
+    this.refreshFactory = options.refreshFactory;
+    this.compatibilityPolicy =
+      options.compatibilityPolicy ?? options.factory.compatibilityPolicy;
+    exactLocalHost(options.factory.hostId);
     this.compatibilityAttested = CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
       options.factory.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
     );
@@ -2534,38 +2570,77 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.now = options.now ?? (() => new Date());
   }
 
+  get identity(): PrivateEndpointIdentity {
+    return {
+      provider: "codex",
+      hostId: exactLocalHost(this.factory.hostId),
+      endpointGeneration: this.factory.endpointGeneration,
+    };
+  }
+
+  get protocol(): string {
+    return this.factory.protocol;
+  }
+
+  get protocolVersion(): string {
+    return this.factory.protocolVersion;
+  }
+
   compatibilitySurface(): CompatibilitySurfaceObservation {
     return { surface: "codex", version: this.factory.appServerVersion };
   }
 
   acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
+    const pending = this.pendingEndpointAttestation;
     if (
       attestation.surface !== "codex" ||
       attestation.version !== this.factory.appServerVersion ||
-      attestation.tier === "incompatible"
+      attestation.tier === "incompatible" ||
+      (this.endpointUnavailable && pending === undefined) ||
+      (pending !== undefined &&
+        (attestation.checkedAt !== pending.checkedAt ||
+          attestation.tier !== pending.tier ||
+          attestation.safeErrorCode !== pending.safeErrorCode ||
+          attestation.probes.length !== pending.probes.length ||
+          attestation.probes.some(
+            (probe, index) =>
+              probe.name !== pending.probes[index]?.name ||
+              probe.outcome !== pending.probes[index]?.outcome ||
+              probe.safeErrorCode !== pending.probes[index]?.safeErrorCode,
+          )))
     ) {
       throw new BridgeError(
         "CODEX_COMPATIBILITY_ATTESTATION_MISMATCH",
         "The Codex compatibility attestation does not match this endpoint.",
       );
     }
+    this.pendingEndpointAttestation = undefined;
+    this.pendingEndpointRefreshEvent = undefined;
+    this.clearEndpointActivationRetry();
     this.compatibilityAttested = true;
+    this.endpointUnavailable = false;
   }
 
   async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
+    return await this.runCompatibilityProbesFor(this.factory);
+  }
+
+  private async runCompatibilityProbesFor(
+    factory: LocalCodexTransportFactory,
+  ): Promise<readonly CompatibilityProbeResult[]> {
     const [installation, control, initialize, threadList] =
       compatibilityProbeNames.codex;
     let transport: LocalCodexOwnedTransport | undefined;
     let connector: CodexAppServerConnector | undefined;
     let stage: "transport" | "initialize" | "thread_list" = "transport";
     try {
-      transport = await this.factory.connectTransport();
+      transport = await factory.connectTransport();
       stage = "initialize";
       connector = await CodexAppServerConnector.connect({
-        compatibility: this.factory.schemaCompatibility,
+        compatibility: factory.schemaCompatibility,
         writesEnabled: false,
         route: {
-          endpointGeneration: this.identity.endpointGeneration,
+          endpointGeneration: factory.endpointGeneration,
           threadId: COMPATIBILITY_PROBE_THREAD_ID,
         },
         transport,
@@ -2576,7 +2651,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       });
       stage = "thread_list";
       await connector.observeLoadedThread(connector.guard());
-      this.compatibilityAttested = true;
       return [
         passedProbe(installation),
         passedProbe(control),
@@ -2584,6 +2658,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         passedProbe(threadList),
       ];
     } catch (error) {
+      if (this.isEndpointGenerationChanged(error)) throw error;
       if (stage === "transport") {
         const controlFailure =
           error instanceof LocalCodexTransportError &&
@@ -2762,8 +2837,18 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   async selectRoute(input: {
     alias: string;
     routeHandle: string;
-  }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }> {
-    this.assertReady();
+  }): Promise<{
+    routeHandle: string;
+    state: GatewayAdapterRouteState;
+    endpointRefresh?: GatewayAdapterEndpointRefresh;
+  }> {
+    if (!this.initialized || this.closing || this.closed) {
+      throw new BridgeError(
+        "CODEX_PROVIDER_UNAVAILABLE",
+        "The local Codex provider is unavailable.",
+        true,
+      );
+    }
     if (
       !PUBLIC_ALIAS.test(input.alias) ||
       !input.alias.endsWith(`@${this.identity.hostId}`)
@@ -2780,30 +2865,151 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.cancelRouteRecovery(input.routeHandle);
-    const route = await this.ensureRoute(input.routeHandle);
+    let refreshResult: CodexEndpointRefreshResult | undefined;
+    let selectorRefreshReserved = false;
+    let route: CodexRoute;
+    const stageRefreshedRoute = async (
+      result: CodexEndpointRefreshResult | undefined,
+    ): Promise<CodexRoute> => {
+      if (
+        result === undefined ||
+        result.event.outcome !== "compatible"
+      ) {
+        throw new BridgeError(
+          "CODEX_ROUTE_SETUP_REJECTED",
+          "The exact Codex endpoint replacement was not compatibility-attested.",
+        );
+      }
+      refreshResult = result;
+      selectorRefreshReserved = this.reserveSelectorRefresh(result);
+      if (!selectorRefreshReserved) {
+        throw new BridgeError(
+          "CODEX_PROVIDER_UNAVAILABLE",
+          "The Codex endpoint replacement is awaiting controller activation.",
+          true,
+        );
+      }
+      try {
+        return await this.ensureRoute(input.routeHandle, false, true);
+      } catch (selectionError) {
+        this.emitSelectorRefreshFallback(result, input.routeHandle);
+        throw selectionError;
+      }
+    };
+
+    if (this.endpointRefresh !== undefined) {
+      route = await stageRefreshedRoute(
+        await this.refreshEndpoint("selector"),
+      );
+    } else if (
+      this.endpointUnavailable &&
+      this.pendingEndpointAttestation === undefined
+    ) {
+      route = await stageRefreshedRoute(
+        await this.refreshEndpoint("selector"),
+      );
+    } else {
+      this.assertReady();
+      try {
+        route = await this.ensureRoute(input.routeHandle);
+      } catch (error) {
+        const refreshPending =
+          error instanceof BridgeError &&
+          error.code === "CODEX_ENDPOINT_REFRESH_PENDING";
+        if (!this.isEndpointGenerationChanged(error) && !refreshPending) {
+          throw error;
+        }
+        if (this.isEndpointGenerationChanged(error)) {
+          this.endpointUnavailable = true;
+          route = await stageRefreshedRoute(
+            await this.refreshEndpoint("selector"),
+          );
+        } else if (this.endpointRefresh !== undefined) {
+          route = await stageRefreshedRoute(
+            await this.refreshEndpoint("selector"),
+          );
+        } else {
+          throw new BridgeError(
+            "CODEX_PROVIDER_UNAVAILABLE",
+            "The Codex endpoint replacement is awaiting controller activation.",
+            true,
+          );
+        }
+      }
+      if (
+        refreshResult === undefined &&
+        (route.endpointGeneration !== this.factory.endpointGeneration ||
+          this.endpointUnavailable ||
+          this.endpointRefresh !== undefined)
+      ) {
+        if (this.endpointRefresh === undefined) {
+          throw new BridgeError(
+            "CODEX_PROVIDER_UNAVAILABLE",
+            "The Codex endpoint replacement is awaiting controller activation.",
+            true,
+          );
+        }
+        route = await stageRefreshedRoute(
+          await this.refreshEndpoint("selector"),
+        );
+      }
+    }
     const observation = route.connector.observation();
     const state = codexRouteState(observation);
     if (state === "stale") {
-      await this.releaseRoute(input.routeHandle);
+      if (refreshResult !== undefined && selectorRefreshReserved) {
+        // Publish the transition before any asynchronous connector cleanup so
+        // the controller can accept or durably reject the exact replacement
+        // generation. A route which closed after refresh staging is not valid
+        // re-anchoring evidence and must be removed from both the callback and
+        // its retained retry authority.
+        this.emitSelectorRefreshFallback(refreshResult, input.routeHandle);
+      }
+      this.routesRequiringRecovery.add(input.routeHandle);
+      await this.releaseRouteInternal(input.routeHandle);
+      if (this.trackedRoutes.has(input.routeHandle)) {
+        this.scheduleRouteRecovery(input.routeHandle);
+      }
       throw new BridgeError(
         "CODEX_ROUTE_SETUP_REJECTED",
         "The exact Codex task connection closed during route selection.",
       );
     }
-    this.queueRouteObservation(route, observation);
+    this.trackedRoutes.add(input.routeHandle);
+    if (refreshResult === undefined) {
+      this.queueRouteObservation(route, observation);
+    }
+    const endpointRefresh =
+      refreshResult === undefined || !selectorRefreshReserved
+        ? undefined
+        : refreshResult.event;
+    if (endpointRefresh !== undefined) {
+      this.armEndpointActivationRetry(endpointRefresh);
+    }
     return {
       routeHandle: input.routeHandle,
       state,
+      ...(endpointRefresh === undefined ? {} : { endpointRefresh }),
     };
   }
 
   observeRouteSuccessionBarrier(
     routeHandle: string,
   ): CodexRouteSuccessionBarrier {
-    this.assertReady();
+    if (!this.initialized || this.closing || this.closed) {
+      throw new BridgeError(
+        "CODEX_PROVIDER_UNAVAILABLE",
+        "The local Codex provider is unavailable.",
+        true,
+      );
+    }
     const route = this.routes.get(routeHandle);
     const observation = route?.connector.observation();
-    const routeCreationInFlight = this.routeCreations.has(routeHandle);
+    const routeCreationInFlight =
+      this.routeCreations.has(routeHandle) ||
+      this.routeRecoveries.has(routeHandle) ||
+      (this.endpointRefresh !== undefined && this.trackedRoutes.has(routeHandle)) ||
+      this.pendingEndpointActivationClaims(routeHandle);
     const routeReleaseInFlight = this.routeReleases.has(routeHandle);
     const pendingReplyCorrelations = this.expectsReply.size;
     const pendingCallbacks = Math.max(
@@ -2854,6 +3060,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       !this.initialized ||
       this.closing ||
       this.closed ||
+      this.endpointUnavailable ||
+      this.endpointRefresh !== undefined ||
       !this.compatibilityAttested ||
       input.authorization !== "selected_route" ||
       !sameEndpoint(input.binding, this.identity)
@@ -2863,7 +3071,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const route = this.routes.get(input.binding.routeHandle);
     if (
       route === undefined ||
-      this.routeReleases.has(input.binding.routeHandle)
+      this.routeReleases.has(input.binding.routeHandle) ||
+      route.endpointGeneration !== input.binding.endpointGeneration ||
+      route.endpointGeneration !== this.factory.endpointGeneration
     ) {
       return { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" };
     }
@@ -2929,9 +3139,26 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   }
 
   async releaseRoute(routeHandle: string): Promise<void> {
+    if (this.pendingEndpointActivationClaims(routeHandle)) {
+      throw new BridgeError(
+        "CODEX_ENDPOINT_ACTIVATION_PENDING",
+        "The exact Codex route still belongs to an unaccepted endpoint transition.",
+        true,
+      );
+    }
+    this.trackedRoutes.delete(routeHandle);
     this.cancelRouteRecovery(routeHandle);
     const recovery = this.routeRecoveries.get(routeHandle);
     if (recovery !== undefined) await recovery;
+    const endpointRefresh = this.endpointRefresh;
+    if (endpointRefresh !== undefined) await endpointRefresh;
+    if (this.pendingEndpointActivationClaims(routeHandle)) {
+      throw new BridgeError(
+        "CODEX_ENDPOINT_ACTIVATION_PENDING",
+        "The exact Codex route acquired endpoint-transition authority during release.",
+        true,
+      );
+    }
     await this.releaseRouteInternal(routeHandle);
   }
 
@@ -2959,6 +3186,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     for (const timer of this.routeRecoveryTimers.values()) clearTimeout(timer);
     this.routeRecoveryTimers.clear();
     this.routesRequiringRecovery.clear();
+    this.clearEndpointActivationRetry();
+    this.pendingEndpointRefreshEvent = undefined;
+    this.pendingEndpointAttestation = undefined;
+    const refreshResult =
+      this.endpointRefresh === undefined
+        ? []
+        : await Promise.allSettled([this.endpointRefresh]);
     const entries = [...this.routes.entries()];
     const routeResults = await Promise.allSettled(
       entries.map(async ([routeHandle]) => this.releaseRoute(routeHandle)),
@@ -2968,7 +3202,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       ...this.routeCreations.values(),
     ]);
     this.drainCallbackQueue();
-    if (routeResults.some((result) => result.status === "rejected")) {
+    if (
+      refreshResult.some((result) => result.status === "rejected") ||
+      routeResults.some((result) => result.status === "rejected")
+    ) {
       this.closing = false;
       throw new BridgeError(
         "CODEX_PROVIDER_CLEANUP_FAILED",
@@ -2998,6 +3235,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     this.compatibilityTurns.clear();
     this.compatibilityCertifyingRoutes.clear();
+    this.pendingEndpointAttestation = undefined;
+    this.pendingEndpointRefreshEvent = undefined;
+    this.trackedRoutes.clear();
     this.expectsReply.clear();
     this.callbacks = undefined;
   }
@@ -3007,6 +3247,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       !this.initialized ||
       this.closing ||
       this.closed ||
+      this.endpointUnavailable ||
+      this.endpointRefresh !== undefined ||
       !this.compatibilityAttested
     ) {
       throw new BridgeError(
@@ -3017,12 +3259,30 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  private async ensureRoute(threadId: string): Promise<CodexRoute> {
-    this.assertReady();
+  private async ensureRoute(
+    threadId: string,
+    queueInitialObservation = true,
+    allowPendingEndpointAttestation = false,
+  ): Promise<CodexRoute> {
+    if (allowPendingEndpointAttestation) {
+      if (!this.initialized || this.closing || this.closed) {
+        throw new BridgeError(
+          "CODEX_PROVIDER_UNAVAILABLE",
+          "The local Codex provider is unavailable.",
+          true,
+        );
+      }
+    } else {
+      this.assertReady();
+    }
     const pendingRelease = this.routeReleases.get(threadId);
     if (pendingRelease !== undefined) {
       await pendingRelease;
-      return await this.ensureRoute(threadId);
+      return await this.ensureRoute(
+        threadId,
+        queueInitialObservation,
+        allowPendingEndpointAttestation,
+      );
     }
     const existing = this.routes.get(threadId);
     if (existing !== undefined) {
@@ -3034,7 +3294,11 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       // a fresh one. The identity-checked release lets automatic recovery and
       // an explicit selector join the same cleanup safely.
       await this.releaseRouteInternal(threadId);
-      return await this.ensureRoute(threadId);
+      return await this.ensureRoute(
+        threadId,
+        queueInitialObservation,
+        allowPendingEndpointAttestation,
+      );
     }
     const pending = this.routeCreations.get(threadId);
     if (pending !== undefined) return await pending;
@@ -3045,10 +3309,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         true,
       );
     }
-    const creation = this.createRoute(threadId);
-    this.routeCreations.set(threadId, creation);
-    try {
-      const route = await creation;
+    const admittedFactory = this.factory;
+    const creation = (async () => {
+      const route = await this.createRoute(
+        threadId,
+        admittedFactory,
+        queueInitialObservation,
+      );
       if (this.closing || this.closed) {
         await this.closeRoute(route);
         throw new BridgeError(
@@ -3056,29 +3323,49 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
           "The local Codex provider closed during route creation.",
         );
       }
+      if (
+        !allowPendingEndpointAttestation &&
+        (this.endpointUnavailable ||
+          this.endpointRefresh !== undefined ||
+          admittedFactory !== this.factory ||
+          route.endpointGeneration !== this.factory.endpointGeneration)
+      ) {
+        await this.closeRoute(route);
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_PENDING",
+          "The Codex endpoint moved during exact route creation.",
+          true,
+        );
+      }
       this.routes.set(threadId, route);
       return route;
+    })();
+    this.routeCreations.set(threadId, creation);
+    try {
+      return await creation;
     } finally {
       this.routeCreations.delete(threadId);
     }
   }
 
-  private async createRoute(threadId: string): Promise<CodexRoute> {
+  private async createRoute(
+    threadId: string,
+    factory: LocalCodexTransportFactory,
+    queueInitialObservation: boolean,
+  ): Promise<CodexRoute> {
     let transport: LocalCodexOwnedTransport | undefined;
     let connector: CodexAppServerConnector | undefined;
     const generation = Symbol(threadId);
     try {
-      transport = await this.factory.connectTransport();
+      transport = await factory.connectTransport();
       const writesEnabled =
-        this.factory.writableReady &&
-        this.factory.writeCompatibility !== null;
+        factory.writableReady && factory.writeCompatibility !== null;
       connector = await CodexAppServerConnector.connect({
         compatibility:
-          this.factory.writeCompatibility ??
-          this.factory.schemaCompatibility,
+          factory.writeCompatibility ?? factory.schemaCompatibility,
         writesEnabled,
         route: {
-          endpointGeneration: this.identity.endpointGeneration,
+          endpointGeneration: factory.endpointGeneration,
           threadId,
         },
         transport,
@@ -3086,7 +3373,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         now: this.now,
         onEvent: (event) =>
           this.onConnectorEvent(threadId, generation, event),
-        onTurnResult: (result) => this.onTurnResult(result),
+        onTurnResult: (result) =>
+          this.onTurnResult(factory.endpointGeneration, result),
       });
       const loaded = await connector.observeLoadedThread(connector.guard());
       if (!loaded.selectedThreadLoaded) {
@@ -3098,11 +3386,14 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       await connector.resumeThread(connector.guard());
       const route = {
         connector,
+        endpointGeneration: factory.endpointGeneration,
         generation,
         threadId,
         transport,
       };
-      this.queueRouteObservation(route, connector.observation());
+      if (queueInitialObservation) {
+        this.queueRouteObservation(route, connector.observation());
+      }
       return route;
     } catch (error) {
       if (connector !== undefined) {
@@ -3110,6 +3401,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       } else if (transport !== undefined) {
         await transport.close().catch(() => undefined);
       }
+      if (this.isEndpointGenerationChanged(error)) throw error;
       if (error instanceof BridgeError) throw error;
       if (error instanceof CodexConnectorError) {
         throw new BridgeError(
@@ -3186,6 +3478,31 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       return;
     }
     try {
+      if (this.endpointUnavailable) {
+        if (this.pendingEndpointAttestation !== undefined) {
+          throw new BridgeError(
+            "CODEX_ENDPOINT_REFRESH_PENDING",
+            "The replacement Codex endpoint is awaiting controller activation.",
+            true,
+          );
+        }
+        const refreshed = await this.refreshEndpoint("callback");
+        if (
+          refreshed?.event.outcome === "compatible" &&
+          refreshed.event.routes.some(
+            (route) => route.routeHandle === threadId,
+          )
+        ) {
+          this.routesRequiringRecovery.delete(threadId);
+          this.routeRecoveryAttempts.delete(threadId);
+          return;
+        }
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_PENDING",
+          "The replacement Codex endpoint is not ready.",
+          true,
+        );
+      }
       const current = this.routes.get(threadId);
       if (
         current !== undefined &&
@@ -3208,7 +3525,23 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         replacement,
         replacement.connector.observation(),
       );
-    } catch {
+    } catch (error) {
+      if (this.isEndpointGenerationChanged(error)) {
+        this.endpointUnavailable = true;
+        const refreshed = await this.refreshEndpoint("callback").catch(
+          () => undefined,
+        );
+        if (
+          refreshed?.event.outcome === "compatible" &&
+          refreshed.event.routes.some(
+            (route) => route.routeHandle === threadId,
+          )
+        ) {
+          this.routesRequiringRecovery.delete(threadId);
+          this.routeRecoveryAttempts.delete(threadId);
+          return;
+        }
+      }
       this.routeRecoveryAttempts.set(
         threadId,
         (this.routeRecoveryAttempts.get(threadId) ?? 0) + 1,
@@ -3224,7 +3557,405 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.routeRecoveryTimers.delete(threadId);
   }
 
-  private onTurnResult(result: CodexTransientTurnResult): void {
+  private isEndpointGenerationChanged(error: unknown): boolean {
+    return (
+      error instanceof LocalCodexTransportError &&
+      error.code === "ENDPOINT_GENERATION_CHANGED"
+    );
+  }
+
+  private pendingEndpointActivationClaims(routeHandle: string): boolean {
+    const event = this.pendingEndpointRefreshEvent;
+    return (
+      event !== undefined &&
+      event.current.endpointGeneration === this.factory.endpointGeneration &&
+      event.routes.some((route) => route.routeHandle === routeHandle)
+    );
+  }
+
+  private async refreshEndpoint(
+    delivery: "callback" | "selector",
+  ): Promise<CodexEndpointRefreshResult | undefined> {
+    if (this.refreshFactory === undefined || this.closing || this.closed) {
+      return undefined;
+    }
+    const existing = this.endpointRefresh;
+    if (existing !== undefined) {
+      // A selector already running inside the controller lock takes ownership
+      // of the transition result. This avoids waiting on a callback that needs
+      // that same lock while still ensuring exactly one activation path.
+      if (delivery === "selector") this.endpointRefreshDelivery = "selector";
+      return await existing;
+    }
+    this.endpointRefreshDelivery = delivery;
+    const refresh = this.performEndpointRefresh();
+    this.endpointRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.endpointRefresh === refresh) {
+        this.endpointRefresh = undefined;
+        this.endpointRefreshDelivery = undefined;
+      }
+    }
+  }
+
+  private async performEndpointRefresh(): Promise<
+    CodexEndpointRefreshResult | undefined
+  > {
+    const refreshFactory = this.refreshFactory;
+    if (refreshFactory === undefined) return undefined;
+    const previousFactory = this.factory;
+    const previous = this.identity;
+    let candidate: LocalCodexTransportFactory | undefined;
+    try {
+      const resolved = await this.resolveEndpointRefreshCandidate(
+        refreshFactory,
+        previousFactory,
+        previous,
+      );
+      candidate = resolved.factory;
+      const { attestation, identity: candidateIdentity } = resolved;
+      await this.retireEndpointGeneration(
+        previousFactory,
+        previous.endpointGeneration,
+      );
+      if (attestation.tier === "incompatible") {
+        await candidate.close();
+        candidate = undefined;
+        this.compatibilityAttested = false;
+        this.pendingEndpointAttestation = undefined;
+        this.pendingEndpointRefreshEvent = undefined;
+        for (const routeHandle of this.trackedRoutes) {
+          this.routesRequiringRecovery.add(routeHandle);
+        }
+        if (this.closing || this.closed) return undefined;
+        const result: CodexEndpointRefreshResult = {
+          event: {
+            outcome: "incompatible",
+            previous,
+            candidate: candidateIdentity,
+            attestation,
+          },
+          delivery: "callback",
+          selectorClaimed: true,
+        };
+        this.emitEndpointRefresh(result.event);
+        for (const routeHandle of this.routesRequiringRecovery) {
+          if (this.trackedRoutes.has(routeHandle)) {
+            this.scheduleRouteRecovery(routeHandle);
+          }
+        }
+        return result;
+      }
+      if (this.closing || this.closed) {
+        await candidate.close();
+        candidate = undefined;
+        return undefined;
+      }
+
+      this.factory = candidate;
+      candidate = undefined;
+      this.retiredEndpointGeneration = undefined;
+      this.compatibilityAttested = false;
+      this.endpointUnavailable = true;
+      this.pendingEndpointAttestation = attestation;
+      const refreshedRoutes: Array<{
+        routeHandle: string;
+        state: GatewayAdapterRouteState;
+      }> = [];
+      for (const routeHandle of [...this.trackedRoutes]) {
+        if (this.closing || this.closed) break;
+        try {
+          const route = await this.createRoute(
+            routeHandle,
+            this.factory,
+            false,
+          );
+          if (this.closing || this.closed) {
+            await this.closeRoute(route);
+            break;
+          }
+          const state = codexRouteState(route.connector.observation());
+          if (state === "stale") {
+            await this.closeRoute(route);
+            throw new BridgeError(
+              "CODEX_ROUTE_SETUP_REJECTED",
+              "The exact Codex task was stale on the replacement endpoint.",
+            );
+          }
+          this.routes.set(routeHandle, route);
+          this.routesRequiringRecovery.delete(routeHandle);
+          this.routeRecoveryAttempts.delete(routeHandle);
+          refreshedRoutes.push({ routeHandle, state });
+        } catch {
+          this.routesRequiringRecovery.add(routeHandle);
+        }
+      }
+      if (this.closing || this.closed) return undefined;
+      const result: CodexEndpointRefreshResult = {
+        event: {
+          outcome: "compatible",
+          previous,
+          current: this.identity,
+          attestation,
+          routes: refreshedRoutes,
+        },
+        delivery: this.endpointRefreshDelivery ?? "callback",
+        selectorClaimed: false,
+      };
+      if (result.event.outcome === "compatible") {
+        this.pendingEndpointRefreshEvent = result.event;
+      }
+      if (result.delivery === "callback") {
+        result.selectorClaimed = true;
+        this.publishEndpointRefresh(result.event);
+      }
+      for (const routeHandle of this.routesRequiringRecovery) {
+        if (this.trackedRoutes.has(routeHandle)) {
+          this.scheduleRouteRecovery(routeHandle);
+        }
+      }
+      return result;
+    } catch (error) {
+      if (candidate !== undefined && candidate !== previousFactory) {
+        await candidate.close().catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      if (this.callbackDrainFrozen) {
+        this.callbackDrainFrozen = false;
+        this.drainCallbackQueue();
+      }
+    }
+  }
+
+  private async resolveEndpointRefreshCandidate(
+    refreshFactory: () => Promise<LocalCodexTransportFactory>,
+    previousFactory: LocalCodexTransportFactory,
+    previous: PrivateEndpointIdentity,
+  ): Promise<Readonly<{
+    factory: LocalCodexTransportFactory;
+    identity: PrivateEndpointIdentity;
+    attestation: CompatibilityAttestation;
+  }>> {
+    for (
+      let attempt = 0;
+      attempt < MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES;
+      attempt += 1
+    ) {
+      let candidate: LocalCodexTransportFactory | undefined;
+      try {
+        candidate = await refreshFactory();
+        validateCodexFactory(candidate);
+        if (
+          candidate.hostId !== previous.hostId ||
+          candidate.protocol !== previousFactory.protocol ||
+          candidate.compatibilityPolicy !== this.compatibilityPolicy
+        ) {
+          throw new BridgeError(
+            "CODEX_FACTORY_ATTESTATION_INVALID",
+            "The replacement Codex factory moved outside its pinned boundary.",
+          );
+        }
+        if (
+          candidate === previousFactory ||
+          candidate.endpointGeneration === previous.endpointGeneration
+        ) {
+          if (candidate !== previousFactory) await candidate.close();
+          candidate = undefined;
+          if (attempt + 1 < MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES) {
+            continue;
+          }
+          throw new BridgeError(
+            "CODEX_ENDPOINT_GENERATION_CHURN",
+            "The Codex endpoint did not stabilize within its bounded refresh window.",
+            true,
+          );
+        }
+
+        // Endpoint generations never inherit cached compatibility. Every
+        // candidate independently proves all four read-only wire probes.
+        const probes = await this.runCompatibilityProbesFor(candidate);
+        const attestation = evaluateCompatibilityAttestation({
+          surface: "codex",
+          version: candidate.appServerVersion,
+          checkedAt: this.now().toISOString(),
+          policy: this.compatibilityPolicy,
+          certifiedVersions: certifiedCompatibilityVersions.codex,
+          probes,
+        });
+        return {
+          factory: candidate,
+          identity: {
+            provider: "codex",
+            hostId: previous.hostId,
+            endpointGeneration: candidate.endpointGeneration,
+          },
+          attestation,
+        };
+      } catch (error) {
+        if (candidate !== undefined && candidate !== previousFactory) {
+          await candidate.close();
+        }
+        if (this.isEndpointGenerationChanged(error)) {
+          if (attempt + 1 < MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES) {
+            continue;
+          }
+          throw new BridgeError(
+            "CODEX_ENDPOINT_GENERATION_CHURN",
+            "The Codex endpoint did not stabilize within its bounded refresh window.",
+            true,
+          );
+        }
+        throw error;
+      }
+    }
+    throw new BridgeError(
+      "CODEX_ENDPOINT_GENERATION_CHURN",
+      "The Codex endpoint did not stabilize within its bounded refresh window.",
+      true,
+    );
+  }
+
+  private async retireEndpointGeneration(
+    factory: LocalCodexTransportFactory,
+    endpointGeneration: string,
+  ): Promise<void> {
+    this.callbackDrainFrozen = true;
+    this.drainCallbackQueue(true);
+    // Fence every operation admitted on the previous immutable factory.
+    // Ordinary route creation is blocked by endpointRefresh; joining these
+    // exact promises ensures none can be inserted after the close sweep.
+    await Promise.allSettled([...this.routeCreations.values()]);
+    await Promise.allSettled([...this.routeReleases.values()]);
+    this.drainCallbackQueue(true);
+    for (const [routeHandle, route] of [...this.routes]) {
+      if (route.endpointGeneration !== endpointGeneration) continue;
+      await this.closeRoute(route);
+      if (this.routes.get(routeHandle) === route) {
+        this.routes.delete(routeHandle);
+      }
+    }
+    this.drainCallbackQueue(true);
+    await factory.close();
+    this.drainCallbackQueue(true);
+    this.retiredEndpointGeneration = endpointGeneration;
+  }
+
+  private reserveSelectorRefresh(result: CodexEndpointRefreshResult): boolean {
+    if (result.delivery !== "selector" || result.selectorClaimed) {
+      return false;
+    }
+    result.selectorClaimed = true;
+    return true;
+  }
+
+  private emitSelectorRefreshFallback(
+    result: CodexEndpointRefreshResult,
+    staleRouteHandle?: string,
+  ): void {
+    if (result.delivery !== "selector" || !result.selectorClaimed) return;
+    let event = result.event;
+    if (
+      staleRouteHandle !== undefined &&
+      event.outcome === "compatible" &&
+      event.routes.some((route) => route.routeHandle === staleRouteHandle)
+    ) {
+      event = {
+        ...event,
+        routes: event.routes.filter(
+          (route) => route.routeHandle !== staleRouteHandle,
+        ),
+      };
+      result.event = event;
+      this.pendingEndpointRefreshEvent = event;
+    }
+    this.publishEndpointRefresh(event);
+  }
+
+  private publishEndpointRefresh(event: GatewayAdapterEndpointRefresh): void {
+    this.emitEndpointRefresh(event);
+    if (event.outcome === "compatible") {
+      this.armEndpointActivationRetry(event);
+    }
+  }
+
+  private armEndpointActivationRetry(
+    event: GatewayAdapterEndpointRefresh,
+  ): void {
+    this.clearEndpointActivationRetry();
+    this.endpointActivationRetry = { event, attempt: 0 };
+    this.scheduleEndpointActivationRetry();
+  }
+
+  private scheduleEndpointActivationRetry(): void {
+    const pending = this.endpointActivationRetry;
+    if (
+      pending === undefined ||
+      this.closing ||
+      this.closed ||
+      pending.attempt >= 3 ||
+      (pending.event.outcome === "compatible" &&
+        this.pendingEndpointAttestation === undefined)
+    ) {
+      this.clearEndpointActivationRetry();
+      return;
+    }
+    const delay = Math.max(
+      DEFAULT_CODEX_RECOVERY_INITIAL_MS,
+      Math.min(
+        this.recoveryMaxMs,
+        this.recoveryInitialMs * 2 ** pending.attempt,
+      ),
+    );
+    const timer = setTimeout(() => {
+      if (this.endpointActivationRetryTimer !== timer) return;
+      this.endpointActivationRetryTimer = undefined;
+      const current = this.endpointActivationRetry;
+      if (current === undefined || current.event !== pending.event) return;
+      if (
+        current.event.outcome === "compatible" &&
+        this.pendingEndpointAttestation === undefined
+      ) {
+        this.clearEndpointActivationRetry();
+        return;
+      }
+      this.emitEndpointRefresh(current.event);
+      if (
+        this.endpointActivationRetry === undefined ||
+        this.endpointActivationRetry.event !== current.event
+      ) {
+        return;
+      }
+      this.endpointActivationRetry = {
+        event: current.event,
+        attempt: current.attempt + 1,
+      };
+      this.scheduleEndpointActivationRetry();
+    }, delay);
+    timer.unref();
+    this.endpointActivationRetryTimer = timer;
+  }
+
+  private clearEndpointActivationRetry(): void {
+    if (this.endpointActivationRetryTimer !== undefined) {
+      clearTimeout(this.endpointActivationRetryTimer);
+    }
+    this.endpointActivationRetryTimer = undefined;
+    this.endpointActivationRetry = undefined;
+  }
+
+  private emitEndpointRefresh(event: GatewayAdapterEndpointRefresh): void {
+    const callbacks = this.callbacks;
+    if (callbacks?.onEndpointRefresh === undefined) return;
+    invokeCallback(() => callbacks.onEndpointRefresh?.(event));
+  }
+
+  private onTurnResult(
+    endpointGeneration: string,
+    result: CodexTransientTurnResult,
+  ): void {
     const certification = this.compatibilityTurns.get(result.messageId);
     if (certification !== undefined) {
       clearTimeout(certification.timer);
@@ -3265,6 +3996,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
               : "CODEX_DELIVERY_AMBIGUOUS";
     this.enqueueCodexCallback({
       type: "delivery",
+      endpointGeneration,
       value: {
         messageId: result.messageId,
         state,
@@ -3280,6 +4012,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   ): void {
     this.enqueueCodexCallback({
       type: "route",
+      endpointGeneration: route.endpointGeneration,
       generation: route.generation,
       routeHandle: route.threadId,
       state: codexRouteState(observation),
@@ -3304,6 +4037,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       }
     }
     this.callbackQueue.push(event);
+    if (this.callbackDrainFrozen) return;
     if (this.callbackScheduled) return;
     this.callbackScheduled = true;
     queueMicrotask(() => {
@@ -3316,6 +4050,12 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const event = this.callbackQueue.shift();
     const callbacks = this.callbacks;
     if (event === undefined || callbacks === undefined) return;
+    if (
+      event.endpointGeneration !== this.factory.endpointGeneration ||
+      this.retiredEndpointGeneration === event.endpointGeneration
+    ) {
+      return;
+    }
     if (event.type === "delivery") {
       invokeCallback(() => callbacks.onDelivery(event.value));
     } else {
@@ -3326,7 +4066,14 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       }
       invokeCallback(() =>
         callbacks.onRouteState({
-          endpoint: callbackEndpoint(this.identity, event.routeHandle),
+          endpoint: callbackEndpoint(
+            {
+              provider: "codex",
+              hostId: this.identity.hostId,
+              endpointGeneration: event.endpointGeneration,
+            },
+            event.routeHandle,
+          ),
           state: event.state,
           ...(event.safeErrorCode === undefined
             ? {}
@@ -3336,7 +4083,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  private drainCallbackQueue(): void {
+  private drainCallbackQueue(force = false): void {
+    if (this.callbackDrainFrozen && !force) return;
     while (this.callbackQueue.length > 0) this.drainOneCallback();
   }
 

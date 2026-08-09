@@ -502,7 +502,7 @@ test("enforces body framing and the bounded text capability protocol", async () 
   assertSecurityHeaders(bodyOnSnapshot);
 });
 
-test("action route forwards only the three exact authenticated verbs", async () => {
+test("action route forwards only the four exact authenticated verbs", async () => {
   const actions = new SyntheticActions();
   const handler = createHandler(undefined, "en", actions);
   const fixtures: LiveDashboardAction[] = [
@@ -515,6 +515,10 @@ test("action route forwards only the three exact authenticated verbs", async () 
       action: "unpair",
       claudeAlias: "claude-advisor@this-mac",
       codexAlias: "codex-builder@this-mac",
+    },
+    {
+      action: "remove_stale_codex_registration",
+      alias: "codex-orphan@this-mac",
     },
     { action: "refresh_dashboard" },
   ];
@@ -647,6 +651,22 @@ test("action route rejects malformed or unauthenticated requests before broker c
       method: "POST",
       headers: actionHeaders("not-json"),
       body: "not-json",
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"remove_stale_codex_registration","alias":"claude-advisor@this-mac"}',
+      ),
+      body: '{"action":"remove_stale_codex_registration","alias":"claude-advisor@this-mac"}',
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"remove_stale_codex_registration","alias":"codex-orphan@this-mac","threadId":"private"}',
+      ),
+      body: '{"action":"remove_stale_codex_registration","alias":"codex-orphan@this-mac","threadId":"private"}',
       status: 400,
     },
     {

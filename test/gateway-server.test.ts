@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
-import os from "node:os";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 
@@ -231,7 +230,13 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     JSON.stringify(codexFactoryOptions).includes(SYNTHETIC_SECRET),
     false,
   );
-  assert.deepEqual(Object.keys(codexProviderOptions ?? {}), ["factory"]);
+  assert.deepEqual(Object.keys(codexProviderOptions ?? {}), [
+    "factory",
+    "refreshFactory",
+    "compatibilityPolicy",
+  ]);
+  assert.equal(typeof codexProviderOptions?.refreshFactory, "function");
+  assert.equal(codexProviderOptions?.compatibilityPolicy, "observed");
   assert.equal(serviceOptions?.store, store);
   assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
@@ -259,6 +264,75 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     "close-service",
     "close-instance",
   ]);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("strict assembly keeps exact startup resolution and uses the refresh-only candidate resolver after startup", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+    EMBASSY_COMPAT_POLICY: "strict",
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+  const initial = factory(() => undefined);
+  const candidate = factory(() => undefined);
+  let startupCalls = 0;
+  let candidateCalls = 0;
+  let providerOptions:
+    | {
+        refreshFactory?: () => Promise<LocalCodexTransportFactory>;
+        compatibilityPolicy?: string;
+      }
+    | undefined;
+
+  await runGatewayServer(
+    {
+      env,
+      signal: abort.signal,
+      onReady: () => abort.abort(),
+    },
+    {
+      ...signals.dependencies,
+      loadConfig: () => config,
+      loginHome: () => SYNTHETIC_HOME,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => provider(() => undefined),
+      createStore: () => new GatewayStore(config),
+      createCodexFactory: async (options) => {
+        startupCalls += 1;
+        assert.equal(options.compatibilityPolicy, "strict");
+        return initial;
+      },
+      createCodexRefreshCandidateFactory: async (options) => {
+        candidateCalls += 1;
+        assert.equal(options.appServerVersion, "0.147.0");
+        assert.equal(options.compatibilityPolicy, "strict");
+        assert.equal(options.writableProtocolAttested, true);
+        return candidate;
+      },
+      createCodexProvider: (options) => {
+        providerOptions = options;
+        return provider(() => undefined);
+      },
+      createService: () => ({
+        start: async () => {
+          assert.equal(startupCalls, 1);
+          assert.equal(candidateCalls, 0);
+          assert.equal(providerOptions?.compatibilityPolicy, "strict");
+          const refreshFactory = providerOptions?.refreshFactory;
+          assert.notEqual(refreshFactory, undefined);
+          assert.strictEqual(await refreshFactory!(), candidate);
+        },
+        close: async () => undefined,
+      }),
+    },
+  );
+
+  assert.equal(startupCalls, 1);
+  assert.equal(candidateCalls, 1);
   assert.equal(signals.listenerCount(), 0);
 });
 
@@ -565,8 +639,7 @@ test(
   "different EMBASSY_STATE_DIR values cannot start two controllers for one login home",
   { skip: process.platform !== "darwin" },
   async (t) => {
-    const temporary = await realpath(os.tmpdir());
-    const home = await mkdtemp(path.join(temporary, "embassy-server-lease-"));
+    const home = await mkdtemp(path.join("/private/tmp", "esl-"));
     await chmod(home, 0o700);
     t.after(async () => rm(home, { recursive: true, force: true }));
     const firstAbort = new AbortController();

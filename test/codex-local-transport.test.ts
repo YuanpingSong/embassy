@@ -12,13 +12,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { CodexAppServerTransport } from "../src/gateway/codex-app-server.js";
 import {
   buildLocalCodexProxyEnvironment,
+  createLocalCodexRefreshCandidateTransportFactory,
   createLocalCodexTransportFactory,
   LocalCodexTransportError,
   resolveManagedLocalCodexInstallation,
@@ -39,9 +39,8 @@ type InstallationFixture = {
 async function installationFixture(
   releaseLeaf = VERSION,
 ): Promise<InstallationFixture> {
-  const root = await mkdtemp(
-    path.join(await realpath(os.tmpdir()), "codex-local-transport-"),
-  );
+  // Keep the synthetic Unix-domain socket below macOS's short sun_path cap.
+  const root = await mkdtemp(path.join("/tmp", "clt-"));
   const home = path.join(root, "home");
   const standalone = path.join(home, ".codex", "packages", "standalone");
   const release = path.join(standalone, "releases", releaseLeaf);
@@ -344,6 +343,75 @@ test("observed policy admits only a same-major managed Codex candidate", async (
     );
   } finally {
     await major.close();
+  }
+});
+
+test("strict refresh candidate resolution inspects same-major drift without relaxing startup", async () => {
+  const drifted = await installationFixture("0.148.0");
+  try {
+    await assert.rejects(
+      createLocalCodexTransportFactory(
+        {
+          appServerVersion: VERSION,
+          compatibilityPolicy: "strict",
+          environment: { HOME: drifted.home },
+          writableProtocolAttested: true,
+        },
+        { loginHome: () => drifted.home },
+      ),
+      (error: unknown) =>
+        error instanceof LocalCodexTransportError &&
+        error.code === "APP_SERVER_VERSION_MISMATCH",
+    );
+
+    let spawnCalls = 0;
+    const candidate = await createLocalCodexRefreshCandidateTransportFactory(
+      {
+        appServerVersion: VERSION,
+        compatibilityPolicy: "strict",
+        environment: { HOME: drifted.home },
+        writableProtocolAttested: true,
+      },
+      {
+        loginHome: () => drifted.home,
+        spawn: () => {
+          spawnCalls += 1;
+          throw new Error("candidate resolution must not connect by itself");
+        },
+      },
+    );
+    assert.equal(candidate.appServerVersion, "0.148.0");
+    assert.equal(candidate.protocolVersion, "0.148.0");
+    assert.equal(candidate.compatibilityPolicy, "strict");
+    assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
+    assert.equal(spawnCalls, 0);
+    await candidate.close();
+  } finally {
+    await drifted.close();
+  }
+});
+
+test("refresh candidate resolution rejects a major jump and non-numeric build", async () => {
+  for (const release of ["1.0.0", "0.148.0-alpha.1"] as const) {
+    const drifted = await installationFixture(release);
+    try {
+      await assert.rejects(
+        createLocalCodexRefreshCandidateTransportFactory(
+          {
+            appServerVersion: VERSION,
+            compatibilityPolicy: "strict",
+            environment: { HOME: drifted.home },
+            writableProtocolAttested: true,
+          },
+          { loginHome: () => drifted.home },
+        ),
+        (error: unknown) =>
+          error instanceof LocalCodexTransportError &&
+          error.code === "APP_SERVER_VERSION_MISMATCH",
+      );
+    } finally {
+      await drifted.close();
+    }
   }
 });
 

@@ -2,7 +2,8 @@
 // actions, the two accordion columns, and successions.
 //
 // The action surface is deliberately not a generic control plane: it can only
-// pair, unpair, or refresh discovery after an explicit consequence step.
+// pair, unpair, refresh discovery, or request bounded stale-registration
+// recovery after an explicit consequence step.
 // The prototype's crash on an empty peer array is structurally impossible here
 // — every column, edge, and detail block derives from possibly-empty arrays,
 // each index read is guarded, and both zero-peer and zero-route branches are
@@ -86,6 +87,13 @@ namespace Embassy {
   /** Identity that survives re-sorted frames better than a bare alias. */
   function rowIdentity(alias: string, host: string): string {
     return `${alias}\u0000${host}`;
+  }
+
+  /** UI affordance only; the broker independently proves the endpoint dead. */
+  export function canRequestStaleCodexRegistrationRemoval(
+    route: DashboardRouteRow,
+  ): boolean {
+    return route.provider === "codex" && route.state === "stale";
   }
 
   function topologyRowCenterY(index: number): number {
@@ -540,6 +548,8 @@ namespace Embassy {
     view: CodexRouteView;
     open: boolean;
     onToggle: () => void;
+    actionsEnabled: boolean;
+    onAction: RoutesTabProps["onAction"];
   }>;
 
   function CodexAccordionRow(props: CodexRowProps): React.ReactElement {
@@ -616,6 +626,19 @@ namespace Embassy {
         )}
         <AbsentDetail fields={["policy", "identity lock", "registered"]} />
         <RouteCountersTable alias={route.alias} counters={route.counters} />
+        {canRequestStaleCodexRegistrationRemoval(route) ? (
+          <ActionControl
+            action={{
+              action: "remove_stale_codex_registration",
+              alias: route.alias,
+            }}
+            consequence={t("app.routes.removeStaleCodex.consequence", {
+              alias: route.alias,
+            })}
+            enabled={props.actionsEnabled}
+            onAction={props.onAction}
+          />
+        ) : null}
       </AccordionRow>
     );
   }
@@ -680,6 +703,8 @@ namespace Embassy {
         return "live.action.pair";
       case "unpair":
         return "live.action.unpair";
+      case "remove_stale_codex_registration":
+        return "live.action.removeStaleCodexRegistration";
       case "refresh_dashboard":
         return "live.action.refresh";
     }
@@ -692,20 +717,34 @@ namespace Embassy {
     const [result, setResult] = React.useState<
       LiveDashboardActionResult | undefined
     >(undefined);
-    const actionIdentity =
-      props.action.action === "refresh_dashboard"
-        ? props.action.action
-        : `${props.action.action}:${props.action.claudeAlias}:${props.action.codexAlias}`;
+    const actionIdentity = (() => {
+      switch (props.action.action) {
+        case "refresh_dashboard":
+          return props.action.action;
+        case "remove_stale_codex_registration":
+          return `${props.action.action}:${props.action.alias}`;
+        case "pair":
+        case "unpair":
+          return `${props.action.action}:${props.action.claudeAlias}:${props.action.codexAlias}`;
+      }
+    })();
     React.useEffect(() => {
       setConfirming(false);
       setPending(false);
       setResult(undefined);
     }, [actionIdentity]);
     const baseLabel = t(actionLabelKey(props.action));
-    const label =
-      props.action.action === "refresh_dashboard"
-        ? baseLabel
-        : `${baseLabel}: ${props.action.claudeAlias} ↔ ${props.action.codexAlias}`;
+    const label = (() => {
+      switch (props.action.action) {
+        case "refresh_dashboard":
+          return baseLabel;
+        case "remove_stale_codex_registration":
+          return `${baseLabel}: ${props.action.alias}`;
+        case "pair":
+        case "unpair":
+          return `${baseLabel}: ${props.action.claudeAlias} ↔ ${props.action.codexAlias}`;
+      }
+    })();
 
     const confirm = async (): Promise<void> => {
       if (!props.enabled || pending) return;
@@ -987,6 +1026,8 @@ namespace Embassy {
                     key={`${identity}|${index}`}
                     view={view}
                     open={openRoute === identity}
+                    actionsEnabled={props.actionsEnabled}
+                    onAction={props.onAction}
                     onToggle={() => {
                       setOpenRoute(
                         openRoute === identity ? undefined : identity,

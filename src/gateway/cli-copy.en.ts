@@ -1,5 +1,8 @@
 import type { CliCopy } from "./cli-copy.js";
 
+export const callerIdentityConflictHintEn =
+  "both agent identities were inherited; the Codex App Server daemon may have been started inside an agent session. From a normal terminal, run: codex app-server daemon restart";
+
 export const cliCopyEn = {
   "help.usage": `Embassy — local messaging for Claude Code and Codex
 

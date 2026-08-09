@@ -8,6 +8,7 @@ import {
   compatibilitySurfaces,
   attachCompatibilityCertification,
   evaluateCompatibilityAttestation,
+  isCompatibilityAttestation,
   isCompatibilityCertification,
   isCompatibilityCertificationReport,
   isCompatibilityCheckReport,
@@ -182,6 +183,28 @@ export type GatewayAdapterDelivery = {
   replyText?: string;
 };
 
+/**
+ * One provider-wide Codex endpoint transition. Native thread and generation
+ * identifiers stay inside this controller boundary and are never projected.
+ */
+export type GatewayAdapterEndpointRefresh =
+  | Readonly<{
+      outcome: "compatible";
+      previous: PrivateEndpointIdentity;
+      current: PrivateEndpointIdentity;
+      attestation: CompatibilityAttestation;
+      routes: readonly Readonly<{
+        routeHandle: string;
+        state: GatewayAdapterRouteState;
+      }>[];
+    }>
+  | Readonly<{
+      outcome: "incompatible";
+      previous: PrivateEndpointIdentity;
+      candidate: PrivateEndpointIdentity;
+      attestation: CompatibilityAttestation;
+    }>;
+
 export type GatewayAdapterCallbacks = {
   onDelivery: (event: GatewayAdapterDelivery) => void;
   onRouteState: (event: {
@@ -203,6 +226,8 @@ export type GatewayAdapterCallbacks = {
   }) => void;
   /** Bounded provider protocol diagnostics; never includes raw frame data. */
   onProtocolNotice?: (event: { code: string }) => void;
+  /** Provider-wide, compatibility-gated Codex endpoint replacement. */
+  onEndpointRefresh?: (event: GatewayAdapterEndpointRefresh) => void;
 };
 
 export type GatewayAdapterStart = {
@@ -247,7 +272,11 @@ export interface GatewayProviderAdapter {
   selectRoute(input: {
     alias: string;
     routeHandle: string;
-  }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }>;
+  }): Promise<{
+    routeHandle: string;
+    state: GatewayAdapterRouteState;
+    endpointRefresh?: GatewayAdapterEndpointRefresh;
+  }>;
   /** Claude-only workspace guard. Codex registration has no workspace gate. */
   assertWorkspaceDisjoint?(
     routeHandle: string,
@@ -492,7 +521,17 @@ type CallbackEvent =
       type: "protocol_notice";
       source: PrivateEndpointIdentity;
       value: { code: string };
+    }
+  | {
+      type: "endpoint_refresh";
+      adapter: GatewayProviderAdapter;
+      value: GatewayAdapterEndpointRefresh;
     };
+
+type EndpointRefreshCallback = Extract<
+  CallbackEvent,
+  { type: "endpoint_refresh" }
+>;
 
 type Candidate = GatewayAdapterDiscovery & {
   adapter: GatewayProviderAdapter;
@@ -518,6 +557,49 @@ function bindingKey(binding: PrivateRouteBinding): string {
     binding.routeHandle,
     binding.ownerLease,
   ].join("\0");
+}
+
+function endpointRefreshCallbackKey(
+  event: GatewayAdapterEndpointRefresh,
+): string {
+  const attestation = {
+    schemaVersion: event.attestation.schemaVersion,
+    surface: event.attestation.surface,
+    version: event.attestation.version,
+    tier: event.attestation.tier,
+    checkedAt: event.attestation.checkedAt,
+    probes: event.attestation.probes.map((probe) => ({
+      name: probe.name,
+      outcome: probe.outcome,
+      ...(probe.safeErrorCode === undefined
+        ? {}
+        : { safeErrorCode: probe.safeErrorCode }),
+    })),
+    ...(event.attestation.certification === undefined
+      ? {}
+      : { certification: { ...event.attestation.certification } }),
+    ...(event.attestation.safeErrorCode === undefined
+      ? {}
+      : { safeErrorCode: event.attestation.safeErrorCode }),
+  };
+  return event.outcome === "compatible"
+    ? JSON.stringify({
+        outcome: event.outcome,
+        previous: event.previous,
+        current: event.current,
+        attestation,
+        routes: [...event.routes]
+          .map((route) => ({ ...route }))
+          .sort((left, right) =>
+            left.routeHandle.localeCompare(right.routeHandle),
+          ),
+      })
+    : JSON.stringify({
+        outcome: event.outcome,
+        previous: event.previous,
+        candidate: event.candidate,
+        attestation,
+      });
 }
 
 function stableLease(provider: "codex" | "claude", value: string): string {
@@ -626,6 +708,7 @@ export class GatewayService {
   private readonly deliveryTokens = new Map<string, string>();
   private readonly runtimeAlerts: SafeGatewayAlert[] = [];
   private readonly activityEvents: PublicGatewayActivityEvent[] = [];
+  private activeCodexIncompatibility: CompatibilityAttestation | undefined;
   private activitySequence = 0;
   private readonly detachedReceiptWrites = new Set<Promise<void>>();
   private readonly nativeIngressByConversation = new Map<
@@ -633,6 +716,42 @@ export class GatewayService {
     NativeIngressCapability
   >();
   private readonly callbackQueue: CallbackEvent[] = [];
+  /**
+   * Endpoint replacement is authority-bearing lifecycle evidence, not an
+   * ordinary refreshable observation. Keep one coalesced slot outside the
+   * bounded callback queue so delivery evidence can never displace it (or be
+   * displaced by it).
+   */
+  private endpointRefreshCallback: EndpointRefreshCallback | undefined;
+  private activeEndpointRefreshCallback: EndpointRefreshCallback | undefined;
+  private endpointRefreshRetryRequested: EndpointRefreshCallback | undefined;
+  private endpointRefreshConflictBoundary: EndpointRefreshCallback | undefined;
+  private activeEndpointRefreshCallbackKey: string | undefined;
+  private endpointRefreshCallbackPoisoned = false;
+  private endpointRefreshConflictPending = false;
+  /** Last successfully activated transition per allowed Codex host. */
+  private readonly activatedEndpointRefreshes = new Map<string, string>();
+  /** Durable reanchors awaiting their exact native-listener activation. */
+  private readonly durablyAppliedEndpointRefreshes = new Map<string, string>();
+  /** Selector transitions staged until their exact registration owns a helper. */
+  private readonly pendingSelectorEndpointActivations = new Map<
+    string,
+    {
+      transitionKey: string;
+      route: {
+        alias: string;
+        threadId: string;
+        state: GatewayAdapterRouteState;
+      };
+    }
+  >();
+  /** Last incompatible transition already projected per allowed Codex host. */
+  private readonly handledIncompatibleEndpointRefreshes = new Map<
+    string,
+    string
+  >();
+  /** Process-local dedupe for automatic public activity rows across retries. */
+  private readonly endpointRefreshActivityKeys = new Set<string>();
   private callbackWorker: Promise<void> | undefined;
   private callbackScheduled = false;
   private readonly callbackCapacity: number;
@@ -658,6 +777,15 @@ export class GatewayService {
   /** Route-scoped fences; unrelated Codex registrations remain dispatchable. */
   private readonly codexSuccessionDispatchFrozen = new Set<string>();
   private readonly codexSuccessionPoisoned = new Set<string>();
+  /**
+   * Exact stale authority whose process-owned native advertisement was already
+   * removed, but whose durable orphan deletion did not commit. Keep dispatch
+   * frozen and permit only the same exact cleanup transaction to retry.
+   */
+  private readonly codexOrphanCleanupPending = new Map<
+    string,
+    { binding: PrivateRouteBinding; previousSequence: number }
+  >();
   private codexSuccessionState: CodexRegistrationSuccessionState | undefined;
   private pendingCodexSuccessionRecovery:
     | PendingCodexSuccessionRecovery
@@ -732,9 +860,7 @@ export class GatewayService {
           throw new BridgeError("GATEWAY_ADAPTER_NOT_ALLOWED", "A provider adapter is duplicated or outside the host allowlist.");
         }
         seen.add(key);
-        const observation = await adapter.initialize(
-          this.callbacksFor(adapter.identity),
-        );
+        const observation = await adapter.initialize(this.callbacksFor(adapter));
         assertStartActive();
         await this.store.observeConnector({
           identity: adapter.identity,
@@ -913,6 +1039,19 @@ export class GatewayService {
         this.detachedReceiptWrites.clear();
         this.nativeIngressByConversation.clear();
         this.callbackQueue.length = 0;
+        this.endpointRefreshCallback = undefined;
+        this.activeEndpointRefreshCallback = undefined;
+        this.endpointRefreshRetryRequested = undefined;
+        this.endpointRefreshConflictBoundary = undefined;
+        this.activeEndpointRefreshCallbackKey = undefined;
+        this.endpointRefreshConflictPending = false;
+        this.endpointRefreshCallbackPoisoned = true;
+        this.activatedEndpointRefreshes.clear();
+        this.durablyAppliedEndpointRefreshes.clear();
+        this.pendingSelectorEndpointActivations.clear();
+        this.handledIncompatibleEndpointRefreshes.clear();
+        this.endpointRefreshActivityKeys.clear();
+        this.codexOrphanCleanupPending.clear();
         this.candidates.clear();
         this.routeBindings.clear();
         this.routeStates.clear();
@@ -961,6 +1100,15 @@ export class GatewayService {
           {
             kind: "registration",
             action: "codex_unregistered",
+            aliases: [params.alias],
+          },
+        ),
+      removeStaleCodexRegistration: async (params) =>
+        await this.exclusiveDecision(
+          async () => this.removeStaleCodexRegistration(params.alias),
+          {
+            kind: "recovery",
+            action: "codex_orphan_removed",
             aliases: [params.alias],
           },
         ),
@@ -1350,9 +1498,10 @@ export class GatewayService {
     return createHash("sha256").update(encoded, "utf8").digest("base64url");
   }
 
-  private callbacksFor(source: PrivateEndpointIdentity): GatewayAdapterCallbacks {
+  private callbacksFor(adapter: GatewayProviderAdapter): GatewayAdapterCallbacks {
     return {
       onDelivery: (event) => {
+        const source = adapter.identity;
         if (
           !this.running ||
           !MESSAGE_ID.test(event.messageId) ||
@@ -1386,6 +1535,7 @@ export class GatewayService {
         });
       },
       onRouteState: (event) => {
+          const source = adapter.identity;
           if (
             !this.running ||
             event.endpoint.provider !== source.provider ||
@@ -1410,6 +1560,7 @@ export class GatewayService {
           });
       },
       onClaudeReply: (event) => {
+        const source = adapter.identity;
         if (
           !this.running ||
           event.endpoint.provider !== source.provider ||
@@ -1443,6 +1594,7 @@ export class GatewayService {
         });
       },
       onClaudeMessage: (event) => {
+        const source = adapter.identity;
         const ingressFailureCode = this.closing
           ? "GATEWAY_SHUTDOWN"
           : "NATIVE_INGRESS_INVALID";
@@ -1489,6 +1641,7 @@ export class GatewayService {
         }
       },
       onProtocolNotice: (event) => {
+        const source = adapter.identity;
         if (!this.running || !SAFE_CODE.test(event.code)) return;
         this.enqueueCallback({
           type: "protocol_notice",
@@ -1496,11 +1649,67 @@ export class GatewayService {
           value: { code: event.code },
         });
       },
+      onEndpointRefresh: (event) => {
+        if (
+          !this.running ||
+          adapter.identity.provider !== "codex" ||
+          event.previous.provider !== "codex" ||
+          event.previous.hostId !== adapter.identity.hostId ||
+          !isCompatibilityAttestation(event.attestation) ||
+          event.attestation.surface !== "codex"
+        ) {
+          return;
+        }
+        if (event.outcome === "compatible") {
+          const routeHandles = event.routes.map((route) => route.routeHandle);
+          if (
+            event.current.provider !== "codex" ||
+            event.current.hostId !== event.previous.hostId ||
+            event.current.endpointGeneration !==
+              adapter.identity.endpointGeneration ||
+            event.attestation.version !== adapter.protocolVersion ||
+            event.attestation.tier === "incompatible" ||
+            routeHandles.length > this.config.limits.maxRoutes ||
+            new Set(routeHandles).size !== routeHandles.length ||
+            routeHandles.some((routeHandle) => !PRIVATE_HANDLE.test(routeHandle))
+          ) {
+            return;
+          }
+        } else if (
+          event.candidate.provider !== "codex" ||
+          event.candidate.hostId !== event.previous.hostId ||
+          event.previous.endpointGeneration !==
+            adapter.identity.endpointGeneration ||
+          event.attestation.tier !== "incompatible"
+        ) {
+          return;
+        }
+        this.enqueueCallback({
+          type: "endpoint_refresh",
+          adapter,
+          value:
+            event.outcome === "compatible"
+              ? {
+                  ...event,
+                  previous: { ...event.previous },
+                  current: { ...event.current },
+                  routes: event.routes.map((route) => ({ ...route })),
+                }
+              : {
+                  ...event,
+                  previous: { ...event.previous },
+                  candidate: { ...event.candidate },
+                },
+        });
+      },
     };
   }
 
   private enqueueCallback(event: CallbackEvent): boolean {
     if (!this.acceptingCallbacks) return false;
+    if (event.type === "endpoint_refresh") {
+      return this.enqueueEndpointRefreshCallback(event);
+    }
     if (event.type === "delivery") {
       const duplicate = this.callbackQueue.findIndex(
         (candidate) =>
@@ -1555,7 +1764,8 @@ export class GatewayService {
       // no-replay and deadline arbitration. Never evict them. A stale route
       // observation is safe to replace because discovery re-observes it.
       const replaceable = this.callbackQueue.findIndex(
-        (candidate) => candidate.type === "route",
+        (candidate) =>
+          candidate.type === "route" || candidate.type === "protocol_notice",
       );
       if (replaceable < 0) {
         this.dashboardHealthy = false;
@@ -1564,26 +1774,58 @@ export class GatewayService {
       this.callbackQueue.splice(replaceable, 1);
     }
     this.callbackQueue.push(event);
-    if (this.callbackScheduled) return true;
-    this.callbackScheduled = true;
-    setImmediate(() => {
-      this.callbackScheduled = false;
-      const worker = this.mutex.run("service", async () => {
-        await this.drainCallbackQueueLocked();
-      });
-      this.callbackWorker = worker;
-      worker
-        .catch(() => {
-          this.dashboardHealthy = false;
-        })
-        .finally(() => {
-          if (this.callbackWorker === worker) this.callbackWorker = undefined;
-          if (this.callbackQueue.length > 0 && !this.closing) {
-            this.enqueueCallbackWorkerOnly();
-          }
-        });
-    });
+    this.enqueueCallbackWorkerOnly();
     return true;
+  }
+
+  private enqueueEndpointRefreshCallback(
+    event: EndpointRefreshCallback,
+  ): boolean {
+    if (this.endpointRefreshCallbackPoisoned) return false;
+    const key = endpointRefreshCallbackKey(event.value);
+    if (this.activeEndpointRefreshCallbackKey !== undefined) {
+      if (this.activeEndpointRefreshCallbackKey === key) {
+        this.endpointRefreshRetryRequested = event;
+        return true;
+      }
+      this.poisonEndpointRefreshCallbacks(event);
+      return false;
+    }
+    if (this.endpointRefreshCallback !== undefined) {
+      if (
+        endpointRefreshCallbackKey(this.endpointRefreshCallback.value) === key
+      ) {
+        return true;
+      }
+      this.poisonEndpointRefreshCallbacks(event);
+      return false;
+    }
+    this.endpointRefreshCallback = event;
+    this.enqueueCallbackWorkerOnly();
+    return true;
+  }
+
+  private poisonEndpointRefreshCallbacks(
+    conflicting: EndpointRefreshCallback,
+  ): void {
+    this.endpointRefreshConflictBoundary =
+      this.activeEndpointRefreshCallback ??
+      this.endpointRefreshCallback ??
+      conflicting;
+    this.endpointRefreshCallback = undefined;
+    this.endpointRefreshRetryRequested = undefined;
+    this.endpointRefreshCallbackPoisoned = true;
+    this.endpointRefreshConflictPending = true;
+    this.dashboardHealthy = false;
+    this.enqueueCallbackWorkerOnly();
+  }
+
+  private hasPendingCallbackWork(): boolean {
+    return (
+      this.callbackQueue.length > 0 ||
+      this.endpointRefreshCallback !== undefined ||
+      this.endpointRefreshConflictPending
+    );
   }
 
   private enqueueCallbackWorkerOnly(): void {
@@ -1601,7 +1843,7 @@ export class GatewayService {
         })
         .finally(() => {
           if (this.callbackWorker === worker) this.callbackWorker = undefined;
-          if (this.callbackQueue.length > 0 && !this.closing) {
+          if (this.hasPendingCallbackWork() && !this.closing) {
             this.enqueueCallbackWorkerOnly();
           }
         });
@@ -1615,9 +1857,99 @@ export class GatewayService {
       await this.publish();
     }
     this.pruneTransient();
-    while (this.callbackQueue.length > 0) {
-      const event = this.callbackQueue.shift();
-      if (event === undefined) continue;
+    while (this.hasPendingCallbackWork()) {
+      // Preserve the complete ordinary queue order. In particular, every
+      // delivery observation already retained before endpoint replacement is
+      // reduced before the lifecycle transition can settle its generation.
+      const ordinaryBatch = this.callbackQueue.splice(
+        0,
+        this.callbackQueue.length,
+      );
+      for (const event of ordinaryBatch) {
+        try {
+          if (event.type === "delivery") {
+            await this.onDelivery(event.source, event.value, event.receivedAt);
+          } else if (event.type === "route") {
+            await this.onRouteState(event.source, event.value);
+          } else if (event.type === "claude_reply") {
+            await this.onClaudeReply(event.value);
+          } else if (event.type === "claude_message") {
+            await this.onClaudeMessage(event.value);
+          } else if (event.type === "protocol_notice") {
+            this.addRuntimeAlert(event.value.code, "warning", {
+              provider: event.source.provider,
+              host: event.source.hostId,
+            });
+            await this.changed();
+          }
+        } catch {
+          this.dashboardHealthy = false;
+        }
+      }
+      await this.drainPreDeadlineDeliveryCallbacksLocked();
+      if (this.endpointRefreshConflictPending) {
+        this.endpointRefreshConflictPending = false;
+        const boundary = this.endpointRefreshConflictBoundary;
+        if (boundary !== undefined) {
+          await this.failClosedEndpointRefreshConflict(boundary);
+        } else {
+          this.addRuntimeAlert(
+            "CODEX_ENDPOINT_REFRESH_CONFLICT",
+            "error",
+            { provider: "codex" },
+          );
+          await this.changed();
+        }
+        continue;
+      }
+      const endpointRefresh = this.endpointRefreshCallback;
+      if (endpointRefresh === undefined) continue;
+      const key = endpointRefreshCallbackKey(endpointRefresh.value);
+      this.endpointRefreshCallback = undefined;
+      this.activeEndpointRefreshCallback = endpointRefresh;
+      this.activeEndpointRefreshCallbackKey = key;
+      let succeeded = false;
+      try {
+        await this.onCodexEndpointRefresh(
+          endpointRefresh.adapter,
+          endpointRefresh.value,
+        );
+        succeeded = true;
+      } catch {
+        this.dashboardHealthy = false;
+      } finally {
+        this.activeEndpointRefreshCallback = undefined;
+        if (this.activeEndpointRefreshCallbackKey === key) {
+          this.activeEndpointRefreshCallbackKey = undefined;
+        }
+      }
+      const requestedRetry = this.endpointRefreshRetryRequested;
+      this.endpointRefreshRetryRequested = undefined;
+      if (
+        !succeeded &&
+        !this.endpointRefreshCallbackPoisoned &&
+        requestedRetry !== undefined
+      ) {
+        this.endpointRefreshCallback = requestedRetry;
+      }
+    }
+  }
+
+  /**
+   * A selector can synchronously admit callbacks while its promise is still
+   * running under the service mutex. Drain exactly the ordinary work that was
+   * retained before the selector returned before applying a returned endpoint
+   * transition. Delivery evidence wins within that fixed snapshot; callbacks
+   * admitted while it is reduced remain queued for the ordinary worker, and
+   * the dedicated endpoint-transition slot is never consumed recursively.
+   */
+  private async drainSelectorCallbackSnapshotLocked(): Promise<void> {
+    const snapshot = this.callbackQueue.splice(0, this.callbackQueue.length);
+    const ordered = [
+      ...snapshot.filter((event) => event.type === "delivery"),
+      ...snapshot.filter((event) => event.type !== "delivery"),
+    ];
+    for (const event of ordered) {
       try {
         if (event.type === "delivery") {
           await this.onDelivery(event.source, event.value, event.receivedAt);
@@ -1627,7 +1959,7 @@ export class GatewayService {
           await this.onClaudeReply(event.value);
         } else if (event.type === "claude_message") {
           await this.onClaudeMessage(event.value);
-        } else {
+        } else if (event.type === "protocol_notice") {
           this.addRuntimeAlert(event.value.code, "warning", {
             provider: event.source.provider,
             host: event.source.hostId,
@@ -1638,6 +1970,78 @@ export class GatewayService {
         this.dashboardHealthy = false;
       }
     }
+    // Synchronous dispatch may have admitted authoritative delivery evidence,
+    // and rejected native ingress may have started a detached terminal write.
+    // Join both before the endpoint boundary can move to its next generation.
+    await this.drainPreDeadlineDeliveryCallbacksLocked();
+    await this.drainDetachedReceiptWritesLocked();
+  }
+
+  private async failClosedEndpointRefreshConflict(
+    boundary: EndpointRefreshCallback,
+  ): Promise<void> {
+    const identities = [
+      boundary.value.previous,
+      ...(boundary.value.outcome === "compatible"
+        ? [boundary.value.current]
+        : []),
+    ];
+    for (const identity of identities) {
+      const routes = (await this.store.inspectPrivateCodexRoutes()).filter(
+        (route) =>
+          route.binding.hostId === identity.hostId &&
+          route.binding.endpointGeneration === identity.endpointGeneration,
+      );
+      const aliases = routes.map((route) => route.alias);
+      const inFlightSettlements =
+        aliases.length === 0
+          ? []
+          : await this.planRoutesInFlightSettlementsLocked(aliases, {
+              unwrittenOutcome: "failed",
+              safeErrorCode: "CODEX_ENDPOINT_REFRESH_CONFLICT",
+            });
+      try {
+        const settlements = await this.store.markConnectorOffline(
+          identity,
+          "CODEX_ENDPOINT_REFRESH_CONFLICT",
+          inFlightSettlements,
+        );
+        for (const settlement of settlements) {
+          await this.applyTerminalSettlementLocked(settlement);
+        }
+        for (const route of routes) {
+          this.routeStates.set(route.alias, "stale");
+        }
+        break;
+      } catch (error) {
+        if (
+          error instanceof BridgeError &&
+          error.code === "CONNECTOR_NOT_FOUND"
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    this.addRuntimeAlert(
+      "CODEX_ENDPOINT_REFRESH_CONFLICT",
+      "error",
+      { provider: "codex", host: boundary.value.previous.hostId },
+    );
+    await this.changed();
+  }
+
+  private async requireEndpointRefreshUnconflicted(): Promise<void> {
+    if (!this.endpointRefreshCallbackPoisoned) return;
+    this.endpointRefreshConflictPending = false;
+    const boundary = this.endpointRefreshConflictBoundary;
+    if (boundary !== undefined) {
+      await this.failClosedEndpointRefreshConflict(boundary);
+    }
+    throw new BridgeError(
+      "CODEX_ENDPOINT_REFRESH_CONFLICT",
+      "Conflicting Codex endpoint transitions require a clean broker restart.",
+    );
   }
 
   private isTerminalAdapterDelivery(event: GatewayAdapterDelivery): boolean {
@@ -2821,7 +3225,7 @@ export class GatewayService {
       claude.rejectedInboundSettlements === 0 &&
       codexQuiet &&
       this.successionServiceStateClean(aliases) &&
-      this.callbackQueue.length === 0 &&
+      this.endpointCallbacksQuiet() &&
       this.detachedReceiptWrites.size === 0
     );
   }
@@ -2863,7 +3267,7 @@ export class GatewayService {
       claude.monitorFrozen &&
       codex.clean &&
       this.successionServiceStateClean(aliases) &&
-      this.callbackQueue.length === 0 &&
+      this.endpointCallbacksQuiet() &&
       this.detachedReceiptWrites.size === 0
     );
   }
@@ -2872,6 +3276,66 @@ export class GatewayService {
     for (const [alias, state] of this.routeStates) {
       if (state === "idle") this.scheduleDispatch(alias);
     }
+  }
+
+  private codexSuccessionIsStable(): boolean {
+    const state = this.codexSuccessionState;
+    return (
+      state === undefined ||
+      state.phase === "active_old" ||
+      (state.phase === "active_new" && state.retired === null)
+    );
+  }
+
+  private async requireUnchangedStaleCodexOrphan(
+    alias: string,
+    expected: PrivateRouteBinding,
+  ): Promise<void> {
+    let current: PrivateRouteBinding;
+    try {
+      current = await this.store.inspectStaleCodexOrphan(alias);
+    } catch {
+      throw new BridgeError(
+        "CODEX_ORPHAN_RECOVERY_MISMATCH",
+        "The stale Codex registration changed during recovery.",
+      );
+    }
+    if (bindingKey(current) !== bindingKey(expected)) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_RECOVERY_MISMATCH",
+        "The stale Codex registration changed during recovery.",
+      );
+    }
+  }
+
+  private nativeCodexOrphanBarrierClean(
+    observation: Awaited<
+      ReturnType<
+        NonNullable<
+          GatewayProviderAdapter["observeNativeCodexSuccessionBarrier"]
+        >
+      >
+    >,
+    generation: string,
+  ): boolean {
+    return (
+      observation.clean &&
+      observation.generation === generation &&
+      observation.activeGenerationMatched &&
+      observation.ingressQuiesced &&
+      observation.monitorFrozen &&
+      !observation.discoveryInFlight &&
+      observation.pendingOutboundReceipts === 0 &&
+      observation.pendingInboundReceipts === 0 &&
+      observation.rejectedInboundSettlements === 0
+    );
+  }
+
+  private endpointCallbacksQuiet(): boolean {
+    return (
+      !this.hasPendingCallbackWork() &&
+      this.activeEndpointRefreshCallbackKey === undefined
+    );
   }
 
   private async registerCodex(params: ValidatedRegisterCodexParams): Promise<void> {
@@ -2883,8 +3347,10 @@ export class GatewayService {
     }
     if (
       this.codexSuccessionPoisoned.has(params.alias) ||
+      this.codexOrphanCleanupPending.has(params.alias) ||
       (params.succeedsAlias !== undefined &&
-        this.codexSuccessionPoisoned.has(params.succeedsAlias))
+        (this.codexSuccessionPoisoned.has(params.succeedsAlias) ||
+          this.codexOrphanCleanupPending.has(params.succeedsAlias)))
     ) {
       throw new BridgeError(
         "CODEX_SUCCESSION_RECOVERY_REQUIRED",
@@ -2946,11 +3412,32 @@ export class GatewayService {
       alias: params.alias,
       routeHandle: params.threadId,
     });
+    await this.drainSelectorCallbackSnapshotLocked();
     if (registered.routeHandle !== params.threadId) {
       throw new BridgeError(
         "ROUTE_MISMATCH",
         "The connector registered a different task.",
       );
+    }
+    let deferredEndpointRefresh = false;
+    if (registered.endpointRefresh !== undefined) {
+      try {
+        deferredEndpointRefresh = await this.onCodexEndpointRefresh(
+          adapter,
+          registered.endpointRefresh,
+          {
+            deferActivation: true,
+            deferredRoute: {
+              alias: params.alias,
+              threadId: params.threadId,
+              state: registered.state,
+            },
+          },
+        );
+      } catch (error) {
+        await adapter.releaseRoute?.(params.threadId).catch(() => undefined);
+        throw error;
+      }
     }
     const binding: PrivateRouteBinding = {
       ...adapter.identity,
@@ -2958,12 +3445,20 @@ export class GatewayService {
       ownerLease: stableLease("codex", `${params.hostId}\0${params.threadId}`),
     };
     try {
-      await this.registerOrRebind(
-        params.alias,
-        binding,
-        "endpoint_reobserved",
-        registered.state,
-      );
+      const afterRefresh = await this.store.inspectPrivateRoute(params.alias);
+      const alreadyInstalledExactly =
+        afterRefresh !== undefined &&
+        afterRefresh.enabled &&
+        afterRefresh.compatibility === "compatible" &&
+        bindingKey(afterRefresh.binding) === bindingKey(binding);
+      if (!alreadyInstalledExactly || !deferredEndpointRefresh) {
+        await this.registerOrRebind(
+          params.alias,
+          binding,
+          "endpoint_reobserved",
+          registered.state,
+        );
+      }
     } catch (error) {
       await adapter.releaseRoute?.(params.threadId).catch(() => undefined);
       throw error;
@@ -2994,9 +3489,42 @@ export class GatewayService {
         params.alias,
       );
       await this.completePendingCodexSuccessionRecoveryLocked(params);
+      this.lockCodexRegistration(params, listenerGeneration);
+      if (
+        deferredEndpointRefresh &&
+        registered.endpointRefresh !== undefined
+      ) {
+        await this.onCodexEndpointRefresh(
+          adapter,
+          registered.endpointRefresh,
+          {
+            requiredRoute: {
+              alias: params.alias,
+              threadId: params.threadId,
+              state: registered.state,
+            },
+          },
+        );
+      }
       await this.changed();
     } catch (error) {
       if (routeBeforeRegistration !== undefined) {
+        if (
+          deferredEndpointRefresh &&
+          registered.endpointRefresh?.outcome === "compatible"
+        ) {
+          try {
+            await this.store.markConnectorOffline(
+              registered.endpointRefresh.current,
+              "CODEX_ENDPOINT_ACTIVATION_FAILED",
+              [],
+            );
+            this.routeStates.set(params.alias, "stale");
+            await this.changed();
+          } catch {
+            this.dashboardHealthy = false;
+          }
+        }
         // A persisted or live exact route, its queue, and any advertisement
         // predate this invocation, so a later status/dashboard failure cannot
         // safely delete them as "rollback". A post-restart reactivation also
@@ -3135,6 +3663,331 @@ export class GatewayService {
         this.dashboardHealthy = false;
       });
     await this.changed();
+  }
+
+  private finalizeStaleCodexOrphanRemovalLocked(alias: string): void {
+    const aliases = new Set([alias]);
+    this.forgetBinding(alias);
+    this.purgeSuccessionTransientState(aliases);
+    const lock = this.codexRegistrationLocks.get(alias);
+    if (lock !== undefined) {
+      this.codexRegistrationLocks.delete(alias);
+      const state = this.codexSuccessionState;
+      if (
+        (state?.phase === "active_old" && state.active.alias === alias) ||
+        (state?.phase === "active_new" && state.active.alias === alias)
+      ) {
+        this.codexSuccessionState = undefined;
+      }
+    }
+    this.codexOrphanCleanupPending.delete(alias);
+    this.codexSuccessionDispatchFrozen.delete(alias);
+  }
+
+  private async removeStaleCodexRegistration(alias: string): Promise<void> {
+    const pendingCleanup = this.codexOrphanCleanupPending.get(alias);
+    if (
+      pendingCleanup !== undefined &&
+      (await this.store.wasStaleCodexOrphanRemovalCommitted({
+        alias,
+        binding: pendingCleanup.binding,
+        previousSequence: pendingCleanup.previousSequence,
+      }))
+    ) {
+      this.finalizeStaleCodexOrphanRemovalLocked(alias);
+      await this.changed();
+      return;
+    }
+    const authority =
+      await this.store.inspectStaleCodexOrphanRemovalAuthority(alias);
+    const binding = authority.binding;
+    const aliases = new Set([alias]);
+    const resumesExactCleanup =
+      pendingCleanup !== undefined &&
+      bindingKey(pendingCleanup.binding) === bindingKey(binding) &&
+      pendingCleanup.previousSequence === authority.previousSequence;
+    if (pendingCleanup !== undefined && !resumesExactCleanup) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_RECOVERY_MISMATCH",
+        "The stale Codex registration changed after native cleanup.",
+      );
+    }
+    if (
+      !this.codexSuccessionIsStable() ||
+      this.pendingCodexSuccessionRecovery !== undefined ||
+      this.codexSuccessionPoisoned.has(alias) ||
+      (this.codexSuccessionDispatchFrozen.has(alias) && !resumesExactCleanup)
+    ) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_RECOVERY_BLOCKED",
+        "Codex orphan recovery cannot run during registration succession.",
+      );
+    }
+    const lock = this.codexRegistrationLocks.get(alias);
+    if (
+      lock !== undefined &&
+      (lock.threadId !== binding.routeHandle ||
+        lock.hostId !== binding.hostId ||
+        lock.generation === "unconfirmed" ||
+        !isCodexRegistrationGeneration(lock.generation))
+    ) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+        "The native Codex listener identity cannot be proven for orphan recovery.",
+      );
+    }
+
+    const claudeAdapter = this.adapter("claude", binding.hostId);
+    const codexAdapter = this.adapter("codex", binding.hostId);
+    const currentNative = claudeAdapter.currentNativeCodexPeerGeneration;
+    if (currentNative === undefined) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+        "The Claude provider cannot prove whether the native Codex listener exists.",
+      );
+    }
+
+    this.codexSuccessionDispatchFrozen.add(alias);
+    this.scheduledDispatchTargets.delete(alias);
+    let nativeGeneration: string | undefined;
+    let nativeQuiesceAttempted = false;
+    let irreversibleCleanupStarted = resumesExactCleanup;
+    try {
+      try {
+        const observed = currentNative.call(claudeAdapter, alias);
+        if (!isCodexRegistrationGeneration(observed)) {
+          throw new BridgeError(
+            "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+            "The native Codex listener generation is malformed.",
+          );
+        }
+        if (lock !== undefined && lock.generation !== observed) {
+          throw new BridgeError(
+            "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+            "The native Codex listener generation changed before orphan recovery.",
+          );
+        }
+        nativeGeneration = observed;
+      } catch (error) {
+        const exactAbsence =
+          error instanceof BridgeError &&
+          error.code === "CODEX_PEER_GENERATION_MISMATCH";
+        if (!exactAbsence || (lock !== undefined && !resumesExactCleanup)) {
+          if (
+            error instanceof BridgeError &&
+            error.code === "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN"
+          ) {
+            throw error;
+          }
+          throw new BridgeError(
+            "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+            "The native Codex listener identity cannot be proven for orphan recovery.",
+          );
+        }
+      }
+
+      let observeNative:
+        | NonNullable<
+            GatewayProviderAdapter["observeNativeCodexSuccessionBarrier"]
+          >
+        | undefined;
+      if (nativeGeneration !== undefined) {
+        const quiesce = this.requireSuccessionMethod(
+          claudeAdapter,
+          "quiesceNativeCodexPeerGeneration",
+        );
+        // Require the inverse operation before acquiring the quiescence fence
+        // so every pre-unadvertise failure has one exact cleanup path.
+        this.requireSuccessionMethod(
+          claudeAdapter,
+          "resumeNativeCodexPeerGeneration",
+        );
+        observeNative = this.requireSuccessionMethod(
+          claudeAdapter,
+          "observeNativeCodexSuccessionBarrier",
+        );
+        nativeQuiesceAttempted = true;
+        await quiesce.call(claudeAdapter, nativeGeneration);
+      }
+
+      // Join every native frame admitted before the exact generation fence,
+      // and every detached terminal receipt write those frames create.
+      await this.drainPreDeadlineDeliveryCallbacksLocked();
+      await this.drainCallbackQueueLocked();
+      await this.drainDetachedReceiptWritesLocked();
+      await this.requireUnchangedStaleCodexOrphan(alias, binding);
+
+      const observeCodex = codexAdapter.observeRouteSuccessionBarrier;
+      if (observeCodex === undefined) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_RECOVERY_BUSY",
+          "The Codex provider cannot prove an empty orphan route boundary.",
+        );
+      }
+      const beforeRelease = observeCodex.call(
+        codexAdapter,
+        binding.routeHandle,
+      );
+      if (
+        beforeRelease.routePresent ||
+        !this.codexRouteSuccessionQuiet(beforeRelease) ||
+        beforeRelease.routeCreationInFlight ||
+        beforeRelease.routeReleaseInFlight
+      ) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_RECOVERY_BUSY",
+          "The stale Codex registration still has a live provider or endpoint-refresh claim.",
+        );
+      }
+      if (nativeGeneration !== undefined) {
+        const nativeBarrier = await observeNative!.call(
+          claudeAdapter,
+          nativeGeneration,
+        );
+        if (!this.nativeCodexOrphanBarrierClean(nativeBarrier, nativeGeneration)) {
+          throw new BridgeError(
+            "CODEX_ORPHAN_RECOVERY_BUSY",
+            "The native Codex listener still owns ingress or receipt work.",
+          );
+        }
+      }
+      if (
+        !this.successionServiceStateClean(aliases) ||
+        !this.endpointCallbacksQuiet() ||
+        this.detachedReceiptWrites.size !== 0
+      ) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_RECOVERY_BUSY",
+          "The stale Codex registration still has a live service claim.",
+        );
+      }
+      // The awaited native barrier can admit a provider-side route recovery
+      // claim. Re-sample the Codex boundary after that last await and directly
+      // before the generation-unqualified release call.
+      const releaseBoundary = observeCodex.call(
+        codexAdapter,
+        binding.routeHandle,
+      );
+      if (
+        releaseBoundary.routePresent ||
+        !this.codexRouteSuccessionQuiet(releaseBoundary) ||
+        releaseBoundary.routeCreationInFlight ||
+        releaseBoundary.routeReleaseInFlight
+      ) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_RECOVERY_BUSY",
+          "The stale Codex registration acquired a provider recovery claim before release.",
+        );
+      }
+
+      // The pre-barrier proves this release targets an absent stale handle and
+      // cannot join an already-observed creation. Revalidate immediately after
+      // the provider join before touching the native advertisement.
+      await codexAdapter.releaseRoute?.(binding.routeHandle);
+      await this.drainCallbackQueueLocked();
+      await this.drainDetachedReceiptWritesLocked();
+      await this.requireUnchangedStaleCodexOrphan(alias, binding);
+      const afterRelease = observeCodex.call(
+        codexAdapter,
+        binding.routeHandle,
+      );
+      if (
+        afterRelease.routePresent ||
+        !this.codexRouteSuccessionQuiet(afterRelease) ||
+        afterRelease.routeCreationInFlight ||
+        afterRelease.routeReleaseInFlight ||
+        !this.successionServiceStateClean(aliases) ||
+        !this.endpointCallbacksQuiet() ||
+        this.detachedReceiptWrites.size !== 0
+      ) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_RECOVERY_BUSY",
+          "The stale Codex registration changed at the provider cleanup boundary.",
+        );
+      }
+      if (nativeGeneration !== undefined) {
+        const nativeBarrier = await observeNative!.call(
+          claudeAdapter,
+          nativeGeneration,
+        );
+        if (!this.nativeCodexOrphanBarrierClean(nativeBarrier, nativeGeneration)) {
+          throw new BridgeError(
+            "CODEX_ORPHAN_RECOVERY_BUSY",
+            "The native Codex listener changed during provider cleanup.",
+          );
+        }
+        if (currentNative.call(claudeAdapter, alias) !== nativeGeneration) {
+          throw new BridgeError(
+            "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+            "The native Codex listener generation changed before removal.",
+          );
+        }
+      }
+      await this.requireUnchangedStaleCodexOrphan(alias, binding);
+
+      if (nativeGeneration !== undefined) {
+        const unadvertise = claudeAdapter.unadvertiseNativeCodexPeer;
+        if (unadvertise === undefined) {
+          throw new BridgeError(
+            "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
+            "The native Codex listener cannot be removed exactly.",
+          );
+        }
+        irreversibleCleanupStarted = true;
+        this.codexOrphanCleanupPending.set(alias, {
+          binding: { ...binding },
+          previousSequence: authority.previousSequence,
+        });
+        // The supervisor may remove the exact helper and then report an
+        // ambiguous close failure. Retain retry authority before invoking the
+        // irreversible operation; a retry proves whether the listener remains.
+        await unadvertise.call(claudeAdapter, alias);
+      }
+      // Exact native absence is also an irreversible cleanup boundary: if the
+      // durable mutation fails, only this same binding may resume removal.
+      this.codexOrphanCleanupPending.set(alias, {
+        binding: { ...binding },
+        previousSequence: authority.previousSequence,
+      });
+      irreversibleCleanupStarted = true;
+      const removed = await this.store.removeStaleCodexOrphan({ alias });
+      if (bindingKey(removed.binding) !== bindingKey(binding)) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_RECOVERY_MISMATCH",
+          "The stale Codex registration changed during recovery.",
+        );
+      }
+      this.finalizeStaleCodexOrphanRemovalLocked(alias);
+      await this.changed();
+    } catch (error) {
+      if (!irreversibleCleanupStarted) {
+        let resumeFailed = false;
+        if (nativeGeneration !== undefined && nativeQuiesceAttempted) {
+          try {
+            const resume = this.requireSuccessionMethod(
+              claudeAdapter,
+              "resumeNativeCodexPeerGeneration",
+            );
+            await resume.call(claudeAdapter, nativeGeneration);
+          } catch {
+            resumeFailed = true;
+            this.dashboardHealthy = false;
+          }
+        }
+        if (!resumeFailed) {
+          this.codexSuccessionDispatchFrozen.delete(alias);
+          if (this.routeStates.get(alias) === "idle") {
+            this.scheduleDispatch(alias);
+          }
+        } else {
+          throw new BridgeError(
+            "CODEX_ORPHAN_RECOVERY_CLEANUP_FAILED",
+            "The native Codex listener could not be resumed after failed orphan recovery.",
+          );
+        }
+      }
+      throw error;
+    }
   }
 
   private async discoveryPublicFingerprint(): Promise<string> {
@@ -3900,6 +4753,7 @@ export class GatewayService {
       previous !== undefined &&
       bindingKey(previous) !== bindingKey(binding)
     ) {
+      this.bindingAliases.delete(bindingKey(previous));
       this.pendingClaudeReplies.delete(bindingKey(previous));
     }
     this.routeBindings.set(alias, binding);
@@ -6540,6 +7394,584 @@ export class GatewayService {
     }
   }
 
+  private async onCodexEndpointRefresh(
+    adapter: GatewayProviderAdapter,
+    event: GatewayAdapterEndpointRefresh,
+    options: {
+      deferActivation?: boolean;
+      deferredRoute?: {
+        alias: string;
+        threadId: string;
+        state: GatewayAdapterRouteState;
+      };
+      requiredRoute?: {
+        alias: string;
+        threadId: string;
+        state: GatewayAdapterRouteState;
+      };
+    } = {},
+  ): Promise<boolean> {
+    const transitionKey = endpointRefreshCallbackKey(event);
+    if (
+      this.endpointRefreshCallbackPoisoned &&
+      this.activeEndpointRefreshCallbackKey !== transitionKey
+    ) {
+      throw new BridgeError(
+        "CODEX_ENDPOINT_REFRESH_CONFLICT",
+        "Conflicting Codex endpoint transitions require a clean broker restart.",
+      );
+    }
+    const ownsActiveTransition =
+      this.activeEndpointRefreshCallbackKey === undefined;
+    if (
+      !ownsActiveTransition &&
+      this.activeEndpointRefreshCallbackKey !== transitionKey
+    ) {
+      this.poisonEndpointRefreshCallbacks({
+        type: "endpoint_refresh",
+        adapter,
+        value: event,
+      });
+      throw new BridgeError(
+        "CODEX_ENDPOINT_REFRESH_CONFLICT",
+        "Conflicting Codex endpoint transitions require a clean broker restart.",
+      );
+    }
+    if (ownsActiveTransition) {
+      this.activeEndpointRefreshCallback = {
+        type: "endpoint_refresh",
+        adapter,
+        value: event,
+      };
+      this.activeEndpointRefreshCallbackKey = transitionKey;
+    }
+    let succeeded = false;
+    let activationDeferred = false;
+    try {
+      activationDeferred = await this.applyCodexEndpointRefresh(
+        adapter,
+        event,
+        transitionKey,
+        options,
+      );
+      succeeded = true;
+      return activationDeferred;
+    } finally {
+      if (
+        ownsActiveTransition &&
+        this.activeEndpointRefreshCallbackKey === transitionKey
+      ) {
+        this.activeEndpointRefreshCallback = undefined;
+        this.activeEndpointRefreshCallbackKey = undefined;
+        const requestedRetry = this.endpointRefreshRetryRequested;
+        this.endpointRefreshRetryRequested = undefined;
+        if (
+          (!succeeded || activationDeferred) &&
+          !this.endpointRefreshCallbackPoisoned &&
+          requestedRetry !== undefined
+        ) {
+          this.endpointRefreshCallback = requestedRetry;
+          this.enqueueCallbackWorkerOnly();
+        }
+      }
+    }
+  }
+
+  private async applyCodexEndpointRefresh(
+    adapter: GatewayProviderAdapter,
+    event: GatewayAdapterEndpointRefresh,
+    transitionKey: string,
+    options: {
+      deferActivation?: boolean;
+      deferredRoute?: {
+        alias: string;
+        threadId: string;
+        state: GatewayAdapterRouteState;
+      };
+      requiredRoute?: {
+        alias: string;
+        threadId: string;
+        state: GatewayAdapterRouteState;
+      };
+    },
+  ): Promise<boolean> {
+    if (
+      this.closing ||
+      (event.outcome !== "compatible" && event.outcome !== "incompatible") ||
+      !isCompatibilityAttestation(event.attestation) ||
+      event.attestation.surface !== "codex" ||
+      event.previous.provider !== "codex" ||
+      !PRIVATE_HANDLE.test(event.previous.endpointGeneration) ||
+      adapter.identity.provider !== "codex" ||
+      adapter.identity.hostId !== event.previous.hostId ||
+      !this.config.allowedHosts.includes(event.previous.hostId)
+    ) {
+      throw new BridgeError(
+        "CODEX_ENDPOINT_REFRESH_MISMATCH",
+        "The Codex endpoint transition failed closed runtime validation.",
+      );
+    }
+    if (event.outcome === "compatible") {
+      const routeHandles = Array.isArray(event.routes)
+        ? event.routes.map((route) => route.routeHandle)
+        : [];
+      if (
+        event.current.provider !== "codex" ||
+        event.current.hostId !== event.previous.hostId ||
+        !PRIVATE_HANDLE.test(event.current.endpointGeneration) ||
+        event.current.endpointGeneration ===
+          event.previous.endpointGeneration ||
+        adapter.identity.endpointGeneration !==
+          event.current.endpointGeneration ||
+        event.attestation.version !== adapter.protocolVersion ||
+        event.attestation.tier === "incompatible" ||
+        !Array.isArray(event.routes) ||
+        event.routes.length > this.config.limits.maxRoutes ||
+        new Set(routeHandles).size !== routeHandles.length ||
+        event.routes.some(
+          (route) =>
+            !PRIVATE_HANDLE.test(route.routeHandle) ||
+            !["idle", "busy", "awaiting_approval"].includes(route.state),
+        )
+      ) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_MISMATCH",
+          "The refreshed Codex provider identity changed before activation.",
+        );
+      }
+      if (
+        this.activatedEndpointRefreshes.get(event.current.hostId) ===
+        transitionKey
+      ) {
+        return false;
+      }
+    } else {
+      if (
+        event.candidate.provider !== "codex" ||
+        event.candidate.hostId !== event.previous.hostId ||
+        !PRIVATE_HANDLE.test(event.candidate.endpointGeneration) ||
+        event.candidate.endpointGeneration ===
+          event.previous.endpointGeneration ||
+        adapter.identity.endpointGeneration !==
+          event.previous.endpointGeneration ||
+        event.attestation.tier !== "incompatible"
+      ) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_MISMATCH",
+          "The incompatible Codex candidate no longer matches the active endpoint.",
+        );
+      }
+      if (
+        this.handledIncompatibleEndpointRefreshes.get(
+          event.previous.hostId,
+        ) === transitionKey
+      ) {
+        return false;
+      }
+    }
+
+    let inventory = await this.store.inspectPrivateCodexRoutes();
+    const previousRoutes = inventory.filter(
+      (route) =>
+        route.binding.hostId === event.previous.hostId &&
+        route.binding.endpointGeneration === event.previous.endpointGeneration,
+    );
+    const aliases = previousRoutes.map((route) => route.alias);
+    await this.drainPreDeadlineDeliveryCallbacksLocked();
+    const inFlightSettlements =
+      aliases.length === 0
+        ? []
+        : await this.planRoutesInFlightSettlementsLocked(aliases, {
+            unwrittenOutcome: "failed",
+            safeErrorCode: "ENDPOINT_GENERATION_CHANGED",
+          });
+    let settlements: Awaited<
+      ReturnType<GatewayStore["markConnectorOffline"]>
+    > = [];
+    try {
+      settlements = await this.store.markConnectorOffline(
+        event.previous,
+        "ENDPOINT_GENERATION_CHANGED",
+        inFlightSettlements,
+      );
+    } catch (error) {
+      const alreadyInvalidatedCompatibleTransition =
+        event.outcome === "compatible" &&
+        error instanceof BridgeError &&
+        error.code === "CONNECTOR_NOT_FOUND" &&
+        previousRoutes.every(
+          (route) =>
+            route.state === "stale" && route.compatibility === "expired",
+        );
+      if (!alreadyInvalidatedCompatibleTransition) throw error;
+    }
+    for (const settlement of settlements) {
+      await this.applyTerminalSettlementLocked(settlement);
+    }
+    for (const route of previousRoutes) {
+      this.routeStates.set(route.alias, "stale");
+    }
+    await this.store.recordCompatibilityAttestation(event.attestation);
+    if (event.outcome === "incompatible") {
+      await this.requireEndpointRefreshUnconflicted();
+      this.activeCodexIncompatibility = structuredClone(event.attestation);
+      this.addRuntimeAlert(
+        event.attestation.safeErrorCode ?? "CODEX_ENDPOINT_INCOMPATIBLE",
+        "error",
+        { provider: "codex", host: event.previous.hostId },
+      );
+      this.handledIncompatibleEndpointRefreshes.set(
+        event.previous.hostId,
+        transitionKey,
+      );
+      await this.changed();
+      return false;
+    }
+    await this.store.observeConnector({
+      identity: event.current,
+      health: "healthy",
+      compatibility: "compatible",
+      protocol: adapter.protocol,
+      protocolVersion: adapter.protocolVersion,
+    });
+
+    const refreshedByHandle = new Map(
+      event.routes.map((route) => [route.routeHandle, route.state] as const),
+    );
+    const pendingReanchors = previousRoutes.flatMap((route) => {
+      const state = refreshedByHandle.get(route.binding.routeHandle);
+      return state === undefined
+        ? []
+        : [
+            {
+              alias: route.alias,
+              threadId: route.binding.routeHandle,
+              ownerLease: route.binding.ownerLease,
+              state,
+            },
+          ];
+    });
+    if (pendingReanchors.length > 0) {
+      try {
+        await this.store.reanchorCodexRoutes({
+          oldEndpoint: event.previous,
+          newEndpoint: event.current,
+          routes: pendingReanchors,
+        });
+        this.durablyAppliedEndpointRefreshes.set(
+          event.current.hostId,
+          transitionKey,
+        );
+      } catch (error) {
+        // Persistence may commit and then report an unknown outcome. Because
+        // service/store mutation is serialized, exact G2 ownership for every
+        // requested G1 alias proves this transition durably applied and gives
+        // a later identical retry authority to restore a fail-closed G2 route.
+        const after = await this.store.inspectPrivateCodexRoutes();
+        const committedExactly = pendingReanchors.every((expected) => {
+          const matches = after.filter(
+            (route) =>
+              route.alias === expected.alias &&
+              route.binding.provider === "codex" &&
+              route.binding.hostId === event.current.hostId &&
+              route.binding.endpointGeneration ===
+                event.current.endpointGeneration &&
+              route.binding.routeHandle === expected.threadId &&
+              route.binding.ownerLease === expected.ownerLease &&
+              route.enabled &&
+              route.compatibility === "compatible",
+          );
+          return matches.length === 1;
+        });
+        if (committedExactly) {
+          this.durablyAppliedEndpointRefreshes.set(
+            event.current.hostId,
+            transitionKey,
+          );
+          try {
+            await this.store.markConnectorOffline(
+              event.current,
+              "CODEX_ENDPOINT_ACTIVATION_FAILED",
+              [],
+            );
+            for (const route of pendingReanchors) {
+              this.routeStates.set(route.alias, "stale");
+            }
+            await this.changed();
+          } catch {
+            this.dashboardHealthy = false;
+          }
+        }
+        throw error;
+      }
+    }
+
+    // A retry may arrive after the store commit but before native status or
+    // provider activation. Re-read exact durable authority and accept only one
+    // unique current-generation owner for every claimed task.
+    inventory = await this.store.inspectPrivateCodexRoutes();
+    if (
+      this.durablyAppliedEndpointRefreshes.get(event.current.hostId) ===
+      transitionKey
+    ) {
+      const observedStates = new Map(
+        event.routes.map((route) => [route.routeHandle, route.state] as const),
+      );
+      for (const route of inventory) {
+        const state = observedStates.get(route.binding.routeHandle);
+        if (
+          state === undefined ||
+          route.binding.hostId !== event.current.hostId ||
+          route.binding.endpointGeneration !==
+            event.current.endpointGeneration ||
+          route.state !== "stale" ||
+          route.compatibility !== "expired"
+        ) {
+          continue;
+        }
+        await this.registerOrRebind(
+          route.alias,
+          route.binding,
+          "endpoint_reobserved",
+          state,
+          route.binding.ownerLease,
+        );
+      }
+      inventory = await this.store.inspectPrivateCodexRoutes();
+    }
+    const previousRouteHandles = new Set(
+      previousRoutes.map((route) => route.binding.routeHandle),
+    );
+    const activatedRoutes = event.routes.flatMap((observed) => {
+      const matches = inventory.filter(
+        (route) =>
+          route.binding.provider === "codex" &&
+          route.binding.hostId === event.current.hostId &&
+          route.binding.endpointGeneration ===
+            event.current.endpointGeneration &&
+          route.binding.routeHandle === observed.routeHandle &&
+          route.enabled &&
+          route.compatibility === "compatible",
+      );
+      if (matches.length > 1) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_MISMATCH",
+          "A refreshed Codex task has multiple durable owners.",
+        );
+      }
+      if (matches.length === 0) {
+        // A selector-triggered refresh can report the freshly selected task
+        // before registerRoute installs that new alias. It has no prior G1
+        // owner to re-anchor, so activation covers only already-durable tasks;
+        // the caller installs this one immediately after the provider ack.
+        if (!previousRouteHandles.has(observed.routeHandle)) return [];
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_MISMATCH",
+          "A previously durable Codex task was not re-anchored exactly.",
+        );
+      }
+      const match = matches[0];
+      if (match === undefined) return [];
+      return {
+        alias: match.alias,
+        threadId: observed.routeHandle,
+        ownerLease: match.binding.ownerLease,
+        state: observed.state,
+      };
+    });
+    const pendingSelector = this.pendingSelectorEndpointActivations.get(
+      event.current.hostId,
+    );
+    const requiredRoute =
+      options.deferActivation === true
+        ? undefined
+        : options.requiredRoute ??
+          (pendingSelector?.transitionKey === transitionKey
+            ? pendingSelector.route
+            : undefined);
+    if (
+      requiredRoute !== undefined &&
+      !activatedRoutes.some(
+        (route) =>
+          route.alias === requiredRoute.alias &&
+          route.threadId === requiredRoute.threadId,
+      )
+    ) {
+      const matches = inventory.filter(
+        (route) =>
+          route.alias === requiredRoute.alias &&
+          route.binding.provider === "codex" &&
+          route.binding.hostId === event.current.hostId &&
+          route.binding.endpointGeneration ===
+            event.current.endpointGeneration &&
+          route.binding.routeHandle === requiredRoute.threadId &&
+          route.enabled &&
+          route.compatibility === "compatible",
+      );
+      const match = matches[0];
+      if (matches.length !== 1 || match === undefined) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_MISMATCH",
+          "The registering Codex task was not durably installed exactly.",
+        );
+      }
+      activatedRoutes.push({
+        alias: requiredRoute.alias,
+        threadId: requiredRoute.threadId,
+        ownerLease: match.binding.ownerLease,
+        state: requiredRoute.state,
+      });
+    }
+    if (options.deferActivation === true) {
+      const deferredRoute = options.deferredRoute;
+      if (deferredRoute === undefined) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_MISMATCH",
+          "A deferred selector transition requires one exact registration.",
+        );
+      }
+      const existing = this.pendingSelectorEndpointActivations.get(
+        event.current.hostId,
+      );
+      if (
+        existing !== undefined &&
+        (existing.transitionKey !== transitionKey ||
+          existing.route.alias !== deferredRoute.alias ||
+          existing.route.threadId !== deferredRoute.threadId)
+      ) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_CONFLICT",
+          "A different selector transition is already awaiting native activation.",
+        );
+      }
+      this.pendingSelectorEndpointActivations.set(event.current.hostId, {
+        transitionKey,
+        route: { ...deferredRoute },
+      });
+      return true;
+    }
+
+    const requireNativeContinuity = (
+      route: (typeof activatedRoutes)[number],
+    ): void => {
+      const registration = this.codexRegistrationLocks.get(route.alias);
+      if (
+        registration === undefined ||
+        registration.hostId !== event.current.hostId ||
+        registration.threadId !== route.threadId ||
+        !isCodexRegistrationGeneration(registration.generation)
+      ) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_NATIVE_LISTENER_MISSING",
+          "The refreshed Codex route has no exact live native listener authority.",
+        );
+      }
+      const nativeGeneration = this.requireCurrentNativeCodexGeneration(
+        this.adapter("claude", event.current.hostId),
+        route.alias,
+      );
+      if (nativeGeneration !== registration.generation) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_NATIVE_LISTENER_MISSING",
+          "The refreshed Codex route's native listener generation changed before activation.",
+        );
+      }
+    };
+
+    try {
+      for (const route of activatedRoutes) {
+        const binding: PrivateRouteBinding = {
+          ...event.current,
+          routeHandle: route.threadId,
+          ownerLease: route.ownerLease,
+        };
+        this.rememberBinding(route.alias, binding, route.state);
+      }
+      for (const route of activatedRoutes) {
+        requireNativeContinuity(route);
+        await this.setNativeCodexStatus(
+          route.alias,
+          route.state === "idle"
+            ? "idle"
+            : route.state === "awaiting_approval"
+              ? "waiting"
+              : "busy",
+          true,
+        );
+        requireNativeContinuity(route);
+      }
+      await this.requireEndpointRefreshUnconflicted();
+      for (const route of activatedRoutes) {
+        const activityKey = `${transitionKey}\0${route.alias}`;
+        if (!this.endpointRefreshActivityKeys.has(activityKey)) {
+          this.endpointRefreshActivityKeys.add(activityKey);
+          while (
+            this.endpointRefreshActivityKeys.size > RUNTIME_ACTIVITY_CAPACITY
+          ) {
+            const oldest = this.endpointRefreshActivityKeys.values().next().value;
+            if (oldest === undefined) break;
+            this.endpointRefreshActivityKeys.delete(oldest);
+          }
+          this.activitySequence += 1;
+          this.activityEvents.push({
+            sequence: this.activitySequence,
+            timestamp: this.now().toISOString(),
+            kind: "endpoint",
+            action: "endpoint_refreshed",
+            outcome: "accepted",
+            aliases: [route.alias],
+            operatorAction: false,
+          });
+          while (this.activityEvents.length > RUNTIME_ACTIVITY_CAPACITY) {
+            this.activityEvents.shift();
+          }
+        }
+        if (route.state === "idle") this.scheduleDispatch(route.alias);
+      }
+      await this.changed();
+      await this.requireEndpointRefreshUnconflicted();
+      for (const route of activatedRoutes) {
+        requireNativeContinuity(route);
+      }
+      // Provider writes remain closed until every durable and native transition
+      // above is complete. This acknowledgement is deliberately the final
+      // fallible activation step.
+      const accept = adapter.acceptCompatibilityAttestation;
+      if (accept === undefined) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_ACTIVATION_UNAVAILABLE",
+          "The Codex provider cannot acknowledge the validated endpoint transition.",
+        );
+      }
+      accept.call(adapter, event.attestation);
+    } catch (error) {
+      try {
+        await this.store.markConnectorOffline(
+          event.current,
+          "CODEX_ENDPOINT_ACTIVATION_FAILED",
+          [],
+        );
+        for (const route of activatedRoutes) {
+          this.routeStates.set(route.alias, "stale");
+        }
+        await this.changed();
+      } catch {
+        this.dashboardHealthy = false;
+      }
+      throw error;
+    }
+    this.activatedEndpointRefreshes.set(event.current.hostId, transitionKey);
+    if (
+      this.pendingSelectorEndpointActivations.get(event.current.hostId)
+        ?.transitionKey === transitionKey
+    ) {
+      this.pendingSelectorEndpointActivations.delete(event.current.hostId);
+    }
+    this.handledIncompatibleEndpointRefreshes.delete(event.current.hostId);
+    this.activeCodexIncompatibility = undefined;
+    return false;
+  }
+
   private async onRouteState(
     source: PrivateEndpointIdentity,
     event: {
@@ -6634,14 +8066,34 @@ export class GatewayService {
   private async setNativeCodexStatus(
     alias: string,
     status: "idle" | "busy" | "waiting",
+    requireSuccess = false,
   ): Promise<void> {
     const binding = this.routeBindings.get(alias);
     if (binding?.provider !== "codex") return;
-    await this.adapter("claude", binding.hostId)
-      .updateNativeCodexPeerStatus?.(alias, status)
-      .catch(() => {
-        this.dashboardHealthy = false;
-      });
+    const adapter = this.adapter("claude", binding.hostId);
+    const update = adapter.updateNativeCodexPeerStatus;
+    if (update === undefined) {
+      if (requireSuccess) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_NATIVE_STATUS_FAILED",
+          "The native listener does not support refreshed Codex status activation.",
+          true,
+        );
+      }
+      return;
+    }
+    try {
+      await update.call(adapter, alias, status);
+    } catch (error) {
+      this.dashboardHealthy = false;
+      if (requireSuccess) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_NATIVE_STATUS_FAILED",
+          "The refreshed Codex route could not be activated in the native listener.",
+          true,
+        );
+      }
+    }
   }
 
   private rejectDetachedNativeReceipt(
@@ -6756,18 +8208,41 @@ export class GatewayService {
   private async publicSnapshotLocked(): Promise<GatewayPublicSnapshot> {
     const base = await this.store.publicSnapshot();
     const compatibilityChecks: CompatibilityAttestation[] = [];
-    for (const adapter of this.adapters) {
-      const observation = adapter.compatibilitySurface?.();
-      if (observation === undefined) continue;
-      const attestation = await this.store.inspectCompatibilityAttestation(
-        observation.surface,
-        observation.version,
-      );
-      if (attestation !== undefined) compatibilityChecks.push(attestation);
+    for (const surface of compatibilitySurfaces) {
+      if (surface === "codex" && this.activeCodexIncompatibility !== undefined) {
+        compatibilityChecks.push(
+          structuredClone(this.activeCodexIncompatibility),
+        );
+        continue;
+      }
+      const currentVersions = [
+        ...new Set(
+          this.adapters.flatMap((adapter) => {
+            const observation = adapter.compatibilitySurface?.();
+            return observation?.surface === surface ? [observation.version] : [];
+          }),
+        ),
+      ].sort((left, right) => left.localeCompare(right));
+      const currentAttestations = (
+        await Promise.all(
+          currentVersions.map(
+            async (version) =>
+              await this.store.inspectCompatibilityAttestation(surface, version),
+          ),
+        )
+      )
+        .filter(
+          (attestation): attestation is CompatibilityAttestation =>
+            attestation !== undefined,
+        )
+        .sort((left, right) => {
+          const checkedAt = right.checkedAt.localeCompare(left.checkedAt);
+          if (checkedAt !== 0) return checkedAt;
+          return left.version.localeCompare(right.version);
+        });
+      const selected = currentAttestations[0];
+      if (selected !== undefined) compatibilityChecks.push(selected);
     }
-    compatibilityChecks.sort((left, right) =>
-      left.surface.localeCompare(right.surface),
-    );
     const peers = this.availablePeers.map((peer) => ({ ...peer }));
     if (!arePublicAvailablePeerSnapshots(peers)) {
       throw new BridgeError(

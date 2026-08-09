@@ -42,6 +42,10 @@ export type LiveDashboardAction =
       claudeAlias: string;
       codexAlias: string;
     }>
+  | Readonly<{
+      action: "remove_stale_codex_registration";
+      alias: string;
+    }>
   | Readonly<{ action: "refresh_dashboard" }>;
 
 export type LiveDashboardActionResult = Readonly<{
@@ -318,6 +322,21 @@ function parseAction(body: string): LiveDashboardAction | undefined {
     keys[0] === "action"
   ) {
     return { action: "refresh_dashboard" };
+  }
+  if (
+    record.action === "remove_stale_codex_registration" &&
+    keys.length === 2 &&
+    keys.includes("action") &&
+    keys.includes("alias") &&
+    typeof record.alias === "string" &&
+    record.alias.length <= 128 &&
+    isGatewayAlias(record.alias) &&
+    record.alias.startsWith("codex-")
+  ) {
+    return {
+      action: "remove_stale_codex_registration",
+      alias: record.alias,
+    };
   }
   if (
     (record.action === "pair" || record.action === "unpair") &&

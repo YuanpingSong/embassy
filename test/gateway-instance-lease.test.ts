@@ -53,6 +53,17 @@ async function homeFixture(t: TestContext): Promise<string> {
   return home;
 }
 
+async function shortHomeFixture(t: TestContext): Promise<string> {
+  // Keep this test-owned home short enough for Darwin's Unix socket pathname
+  // limit. os.tmpdir() can be a long per-user path there, while the real store
+  // validates the nested control socket path. This never uses live user state.
+  const createdHome = await mkdtemp(path.join("/tmp", "embassy-il-"));
+  const home = await realpath(createdHome);
+  await chmod(home, 0o700);
+  t.after(async () => rm(home, { recursive: true, force: true }));
+  return home;
+}
+
 function lockRecord(pid: number, token: string): string {
   return `${JSON.stringify({
     schemaVersion: 1,
@@ -228,7 +239,7 @@ test(
   "a fresh default host lease establishes store ownership before the real store initializes",
   { skip: process.platform !== "darwin" },
   async (t) => {
-    const home = await homeFixture(t);
+    const home = await shortHomeFixture(t);
     const stateDir = path.join(home, HOST_ROOT);
     const lease = await acquireGatewayInstanceLease(home);
     const config = loadGatewayConfig({ EMBASSY_STATE_DIR: stateDir });

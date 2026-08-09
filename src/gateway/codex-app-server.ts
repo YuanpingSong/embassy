@@ -722,7 +722,7 @@ export class CodexAppServerConnector {
       options.clientInfo ?? {
         name: "agent_embassy_gateway",
         title: "Embassy Gateway",
-        version: "1.0.0",
+        version: "1.1.0",
       },
     );
     this.maxFrameBytes = positiveInteger(
@@ -814,7 +814,14 @@ export class CodexAppServerConnector {
       ) {
         throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH");
       }
-      const selectedThreadLoaded = data.includes(this.route.threadId);
+      const selectedThreadMatches = data.reduce(
+        (count, item) => count + (item === this.route.threadId ? 1 : 0),
+        0,
+      );
+      if (selectedThreadMatches > 1) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH");
+      }
+      const selectedThreadLoaded = selectedThreadMatches === 1;
       if (this.selectedThreadObserved !== selectedThreadLoaded) {
         this.selectedThreadObserved = selectedThreadLoaded;
         this.bumpRevision();

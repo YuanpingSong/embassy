@@ -197,6 +197,10 @@ type EmbassyNamespace = Readonly<{
           claudeAlias: string;
           codexAlias: string;
         }>
+      | Readonly<{
+          action: "remove_stale_codex_registration";
+          alias: string;
+        }>
       | Readonly<{ action: "refresh_dashboard" }>,
     ): Promise<Readonly<{ ok: boolean; code: string }>>;
   }>;
@@ -232,6 +236,12 @@ type EmbassyNamespace = Readonly<{
     direction?: MessageDirection,
   ): string;
   camelCaseToken(token: string): string;
+  canRequestStaleCodexRegistrationRemoval(
+    route: DashboardRouteRow,
+  ): boolean;
+  activityAuthority(
+    event: DashboardActivityEventRow,
+  ): "operator" | "automatic";
 }>;
 
 // ---------------------------------------------------------------------------
@@ -592,9 +602,8 @@ test("browser action protocol posts one closed action then reads a fresh snapsho
     assert.deepEqual(
       plain(
         await protocol.executeAction({
-          action: "pair",
-          claudeAlias: "claude-reviewer@this-mac",
-          codexAlias: "codex-builder@this-mac",
+          action: "remove_stale_codex_registration",
+          alias: "codex-orphan@this-mac",
         }),
       ),
       { ok: true, code: "ok" },
@@ -614,9 +623,8 @@ test("browser action protocol posts one closed action then reads a fresh snapsho
   assert.equal(
     calls[0]?.init.body,
     JSON.stringify({
-      action: "pair",
-      claudeAlias: "claude-reviewer@this-mac",
-      codexAlias: "codex-builder@this-mac",
+      action: "remove_stale_codex_registration",
+      alias: "codex-orphan@this-mac",
     }),
   );
   assert.equal(calls[1]?.input, "/instance_0123456789abcdef/snapshot");
@@ -999,6 +1007,35 @@ test("monitor-only is driven by CODEX_WRITES_DISABLED", () => {
   );
 });
 
+test("stale-registration recovery is offered only on stale Codex rows", () => {
+  const staleCodex = DEGRADED.routes.find(
+    (route) => route.provider === "codex" && route.state === "stale",
+  ) as DashboardRouteRow;
+  const disabledCodex = DEGRADED.routes.find(
+    (route) => route.provider === "codex" && route.state === "disabled",
+  ) as DashboardRouteRow;
+  const claude = DEGRADED.routes.find(
+    (route) => route.provider === "claude",
+  ) as DashboardRouteRow;
+
+  assert.equal(
+    bundle.Embassy.canRequestStaleCodexRegistrationRemoval(staleCodex),
+    true,
+  );
+  assert.equal(
+    bundle.Embassy.canRequestStaleCodexRegistrationRemoval(disabledCodex),
+    false,
+  );
+  assert.equal(
+    bundle.Embassy.canRequestStaleCodexRegistrationRemoval({
+      ...claude,
+      state: "stale",
+    }),
+    false,
+  );
+  assert.match(bundle.source, /remove_stale_codex_registration/u);
+});
+
 test("routesProps keeps the server's route order and drops claude routes", () => {
   const data = adapter.routesProps(DEGRADED, GENERATED_MS);
   assert.equal(data.inboundMode, "paired");
@@ -1238,6 +1275,7 @@ test("activityRows includes body-free broker operations in timeline order", () =
       action: "routes_paired",
       outcome: "accepted",
       aliases: ["claude-alpha@this-mac", "codex-main@this-mac"],
+      operatorAction: true,
     },
   ];
   assert.deepEqual(plain(adapter.activityRows(model)), [
@@ -1247,6 +1285,31 @@ test("activityRows includes body-free broker operations in timeline order", () =
       event: model.brokerActivity[0],
     },
   ]);
+});
+
+test("live activity authority labels automatic refreshes and operator recovery distinctly", () => {
+  const endpoint: DashboardActivityEventRow = {
+    sequence: 1,
+    timestamp: "2026-08-08T12:00:00.000Z",
+    kind: "endpoint",
+    action: "endpoint_refreshed",
+    outcome: "accepted",
+    aliases: ["codex-main@this-mac"],
+    operatorAction: false,
+  };
+  const recovery: DashboardActivityEventRow = {
+    sequence: 2,
+    timestamp: "2026-08-08T12:00:01.000Z",
+    kind: "recovery",
+    action: "codex_orphan_removed",
+    outcome: "accepted",
+    aliases: ["codex-orphan@this-mac"],
+    operatorAction: true,
+  };
+
+  assert.equal(bundle.Embassy.activityAuthority(endpoint), "automatic");
+  assert.equal(bundle.Embassy.activityAuthority(recovery), "operator");
+  assert.match(bundle.source, /data-activity-authority/u);
 });
 
 test("activityRows drops in-flight groups and alerts without a timestamp", () => {

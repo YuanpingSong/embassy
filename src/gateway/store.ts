@@ -37,6 +37,8 @@ import {
   type ProgressWatchOutcome,
 } from "./progress-watch-machine.js";
 import {
+  CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY,
+  CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY,
   compatibilityStates,
   connectorHealthStates,
   deliveryStates,
@@ -46,6 +48,8 @@ import {
   routeRegistrationModes,
   routeStates,
   type ConnectorRecord,
+  type CodexEndpointRefreshJournalEvent,
+  type CodexOrphanRemovalJournalEvent,
   type DeadlinePressureBucket,
   type DedupeRecord,
   type DeliveryState,
@@ -73,13 +77,19 @@ import {
   type PublicProgressWatchSnapshot,
   type PublicRouteSnapshot,
   type QueuedMessageMetadata,
+  type ReanchorCodexRoutesInput,
+  type ReanchorCodexRoutesResult,
   type RebindStaleRouteInput,
   type RegisterRouteInput,
   type RequeueInFlightMessageResult,
   type RouteCounters,
+  type RemoveStaleCodexOrphanInput,
+  type RemoveStaleCodexOrphanResult,
   type SafeGatewayAlert,
   type SettleMessageInput,
   type SettleMessageResult,
+  type StaleCodexOrphanRemovalAuthority,
+  type StaleCodexOrphanRemovalCommitProofInput,
   type TerminalMessageSettlement,
   type TransientNativeClaudePeer,
   type TransientQueuedMessage,
@@ -423,6 +433,57 @@ function isPrivateRouteBinding(value: unknown): value is PrivateRouteBinding {
     }) &&
     isPrivateToken(value.routeHandle) &&
     isPrivateToken(value.ownerLease)
+  );
+}
+
+function isCodexEndpointRefreshJournalEvent(
+  value: unknown,
+): value is CodexEndpointRefreshJournalEvent {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, [
+      "sequence",
+      "timestamp",
+      "alias",
+      "hostId",
+      "threadId",
+      "oldEndpointGeneration",
+      "newEndpointGeneration",
+    ]) &&
+    isPositiveInteger(value.sequence) &&
+    isIsoTimestamp(value.timestamp) &&
+    typeof value.alias === "string" &&
+    ALIAS_PATTERN.test(value.alias) &&
+    value.alias.startsWith("codex-") &&
+    typeof value.hostId === "string" &&
+    HOST_PATTERN.test(value.hostId) &&
+    value.alias.endsWith(`@${value.hostId}`) &&
+    isPrivateToken(value.threadId) &&
+    isPrivateToken(value.oldEndpointGeneration) &&
+    isPrivateToken(value.newEndpointGeneration) &&
+    value.oldEndpointGeneration !== value.newEndpointGeneration
+  );
+}
+
+function isCodexOrphanRemovalJournalEvent(
+  value: unknown,
+): value is CodexOrphanRemovalJournalEvent {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, [
+      "sequence",
+      "timestamp",
+      "alias",
+      "hostId",
+    ]) &&
+    isPositiveInteger(value.sequence) &&
+    isIsoTimestamp(value.timestamp) &&
+    typeof value.alias === "string" &&
+    ALIAS_PATTERN.test(value.alias) &&
+    value.alias.startsWith("codex-") &&
+    typeof value.hostId === "string" &&
+    HOST_PATTERN.test(value.hostId) &&
+    value.alias.endsWith(`@${value.hostId}`)
   );
 }
 
@@ -1003,6 +1064,49 @@ function migratePreCompatibilityAttestations(value: unknown): unknown {
   return { ...value, compatibilityAttestations: [] };
 }
 
+const PRE_CODEX_ENDPOINT_REFRESH_STATE_KEYS = [
+  ...PRE_COMPATIBILITY_ATTESTATION_STATE_KEYS,
+  "compatibilityAttestations",
+] as const;
+
+/** Add an empty bounded private endpoint-refresh journal to exact legacy v1. */
+function migratePreCodexEndpointRefreshJournal(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !hasOnlyKeys(value, PRE_CODEX_ENDPOINT_REFRESH_STATE_KEYS)
+  ) {
+    return value;
+  }
+  return {
+    ...value,
+    codexEndpointRefreshSequence: 0,
+    codexEndpointRefreshEvents: [],
+  };
+}
+
+const PRE_CODEX_ORPHAN_REMOVAL_STATE_KEYS = [
+  ...PRE_CODEX_ENDPOINT_REFRESH_STATE_KEYS,
+  "codexEndpointRefreshSequence",
+  "codexEndpointRefreshEvents",
+] as const;
+
+/** Add an empty private orphan-removal journal to exact preceding v1 state. */
+function migratePreCodexOrphanRemovalJournal(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !hasOnlyKeys(value, PRE_CODEX_ORPHAN_REMOVAL_STATE_KEYS)
+  ) {
+    return value;
+  }
+  return {
+    ...value,
+    codexOrphanRemovalSequence: 0,
+    codexOrphanRemovalEvents: [],
+  };
+}
+
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -1024,6 +1128,10 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       "progressWatches",
       "progressWatchEvents",
       "compatibilityAttestations",
+      "codexEndpointRefreshSequence",
+      "codexEndpointRefreshEvents",
+      "codexOrphanRemovalSequence",
+      "codexOrphanRemovalEvents",
       "codexSuccession",
     ]) ||
     value.schemaVersion !== 1 ||
@@ -1031,6 +1139,8 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     !isIsoTimestamp(value.updatedAt) ||
     !isNonNegativeInteger(value.eventSequence) ||
     !isNonNegativeInteger(value.watchSequence) ||
+    !isNonNegativeInteger(value.codexEndpointRefreshSequence) ||
+    !isNonNegativeInteger(value.codexOrphanRemovalSequence) ||
     !Array.isArray(value.routes) ||
     !value.routes.every(isRouteRecord) ||
     !Array.isArray(value.pairs) ||
@@ -1045,6 +1155,18 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     value.compatibilityAttestations.length >
       COMPATIBILITY_ATTESTATION_CAPACITY ||
     !value.compatibilityAttestations.every(isCompatibilityAttestation) ||
+    !Array.isArray(value.codexEndpointRefreshEvents) ||
+    value.codexEndpointRefreshEvents.length >
+      CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY ||
+    !value.codexEndpointRefreshEvents.every(
+      isCodexEndpointRefreshJournalEvent,
+    ) ||
+    !Array.isArray(value.codexOrphanRemovalEvents) ||
+    value.codexOrphanRemovalEvents.length >
+      CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY ||
+    !value.codexOrphanRemovalEvents.every(
+      isCodexOrphanRemovalJournalEvent,
+    ) ||
     !Array.isArray(value.connectors) ||
     !value.connectors.every(isConnectorRecord) ||
     !Array.isArray(value.queue) ||
@@ -1203,6 +1325,31 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       index === 0 ||
       event.sequence > (candidate.events[index - 1]?.sequence ?? 0),
   );
+  const endpointRefreshSequenceConsistent =
+    candidate.codexEndpointRefreshEvents.length === 0
+      ? candidate.codexEndpointRefreshSequence === 0
+      : candidate.codexEndpointRefreshEvents.at(-1)?.sequence ===
+          candidate.codexEndpointRefreshSequence &&
+        candidate.codexEndpointRefreshEvents.every(
+          (event, index) =>
+            index === 0 ||
+            event.sequence ===
+              (candidate.codexEndpointRefreshEvents[index - 1]?.sequence ??
+                0) +
+                1,
+        );
+  const orphanRemovalSequenceConsistent =
+    candidate.codexOrphanRemovalEvents.length === 0
+      ? candidate.codexOrphanRemovalSequence === 0
+      : candidate.codexOrphanRemovalEvents.at(-1)?.sequence ===
+          candidate.codexOrphanRemovalSequence &&
+        candidate.codexOrphanRemovalEvents.every(
+          (event, index) =>
+            index === 0 ||
+            event.sequence ===
+              (candidate.codexOrphanRemovalEvents[index - 1]?.sequence ?? 0) +
+                1,
+        );
   return (
     aliases.size === candidate.routes.length &&
     new Set(pairKeys).size === pairKeys.length &&
@@ -1220,6 +1367,8 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     candidate.events.every(
       (event) => event.sequence <= candidate.eventSequence,
     ) &&
+    endpointRefreshSequenceConsistent &&
+    orphanRemovalSequenceConsistent &&
     candidate.routes.every(
       (route) =>
         route.alias.endsWith(`@${route.binding.hostId}`) &&
@@ -1691,6 +1840,10 @@ export class GatewayStore {
           progressWatches: [],
           progressWatchEvents: [],
           compatibilityAttestations: [],
+          codexEndpointRefreshSequence: 0,
+          codexEndpointRefreshEvents: [],
+          codexOrphanRemovalSequence: 0,
+          codexOrphanRemovalEvents: [],
           codexSuccession: null,
         };
         if (this.state.pairs.length > this.config.limits.maxPairs) {
@@ -2343,6 +2496,238 @@ export class GatewayStore {
     });
   }
 
+  /**
+   * Atomically re-anchor only the exact Codex tasks proved present on a newly
+   * compatible App Server generation. Omitted stale tasks stay untouched.
+   */
+  async reanchorCodexRoutes(
+    input: ReanchorCodexRoutesInput,
+  ): Promise<ReanchorCodexRoutesResult> {
+    return await this.mutate(async (state, now) => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(input, ["oldEndpoint", "newEndpoint", "routes"]) ||
+        !isPrivateEndpointIdentity(input.oldEndpoint) ||
+        !isPrivateEndpointIdentity(input.newEndpoint) ||
+        input.oldEndpoint.provider !== "codex" ||
+        input.newEndpoint.provider !== "codex" ||
+        input.oldEndpoint.hostId !== input.newEndpoint.hostId ||
+        input.oldEndpoint.endpointGeneration ===
+          input.newEndpoint.endpointGeneration ||
+        !Array.isArray(input.routes) ||
+        input.routes.length > this.config.limits.maxRoutes
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_ENDPOINT_REFRESH",
+          "Codex endpoint refresh requires two distinct exact generations on one allowlisted host and a bounded route subset.",
+        );
+      }
+      this.assertAllowedIdentity(input.oldEndpoint);
+      this.assertAllowedIdentity(input.newEndpoint);
+      const newConnector = state.connectors.find((candidate) =>
+        sameEndpoint(candidate, input.newEndpoint),
+      );
+      if (
+        newConnector === undefined ||
+        !["healthy", "degraded"].includes(newConnector.health) ||
+        newConnector.compatibility !== "compatible"
+      ) {
+        throw new BridgeError(
+          "ROUTE_ENDPOINT_NOT_OBSERVED",
+          "The replacement Codex endpoint generation must be positively observed and compatible.",
+        );
+      }
+
+      const aliases = new Set<string>();
+      const threadIds = new Set<string>();
+      const ownerLeases = new Set<string>();
+      const replacements: Array<{
+        route: GatewayRouteRecord;
+        state: "idle" | "busy" | "awaiting_approval";
+      }> = [];
+      for (const candidate of input.routes) {
+        if (
+          !isObject(candidate) ||
+          !hasOnlyKeys(
+            candidate,
+            ["alias", "threadId", "ownerLease"],
+            ["state"],
+          ) ||
+          typeof candidate.alias !== "string" ||
+          !ALIAS_PATTERN.test(candidate.alias) ||
+          !candidate.alias.startsWith("codex-") ||
+          !candidate.alias.endsWith(`@${input.oldEndpoint.hostId}`) ||
+          !isPrivateToken(candidate.threadId) ||
+          !isPrivateToken(candidate.ownerLease) ||
+          (candidate.state !== undefined &&
+            candidate.state !== "idle" &&
+            candidate.state !== "busy" &&
+            candidate.state !== "awaiting_approval")
+        ) {
+          throw new BridgeError(
+            "INVALID_CODEX_ENDPOINT_REFRESH",
+            "A Codex endpoint refresh route proof is malformed.",
+          );
+        }
+        if (
+          aliases.has(candidate.alias) ||
+          threadIds.has(candidate.threadId) ||
+          ownerLeases.has(candidate.ownerLease)
+        ) {
+          throw new BridgeError(
+            "AMBIGUOUS_CODEX_ENDPOINT_REFRESH",
+            "A Codex endpoint refresh cannot contain duplicate alias, task, or lease claims.",
+          );
+        }
+        aliases.add(candidate.alias);
+        threadIds.add(candidate.threadId);
+        ownerLeases.add(candidate.ownerLease);
+        const route = state.routes.find(
+          (stored) => stored.alias === candidate.alias,
+        );
+        if (
+          route === undefined ||
+          route.binding.provider !== "codex" ||
+          route.registrationMode !== "explicit_opt_in" ||
+          !route.enabled ||
+          route.state !== "stale" ||
+          route.compatibility !== "expired" ||
+          route.queueDepth !== 0 ||
+          !sameEndpoint(route.binding, input.oldEndpoint) ||
+          route.binding.routeHandle !== candidate.threadId ||
+          route.binding.ownerLease !== candidate.ownerLease ||
+          state.queue.some(
+            (item) =>
+              item.sourceAlias === route.alias ||
+              item.targetAlias === route.alias,
+          ) ||
+          state.inFlight.some(
+            (item) =>
+              item.sourceAlias === route.alias ||
+              item.targetAlias === route.alias,
+          )
+        ) {
+          throw new BridgeError(
+            "CODEX_ENDPOINT_REFRESH_NOT_SAFE",
+            "Only an exact enabled, expired, empty stale Codex task on the retired generation may be refreshed.",
+          );
+        }
+        const newBinding: PrivateRouteBinding = {
+          ...route.binding,
+          endpointGeneration: input.newEndpoint.endpointGeneration,
+        };
+        if (
+          state.routes.some(
+            (stored) =>
+              stored !== route &&
+              (sameRouteTarget(stored.binding, newBinding) ||
+                stored.binding.ownerLease === newBinding.ownerLease),
+          )
+        ) {
+          throw new BridgeError(
+            "ROUTE_BINDING_COLLISION",
+            "A refreshed Codex task or ownership lease is already claimed by another route.",
+          );
+        }
+        replacements.push({ route, state: candidate.state ?? "idle" });
+      }
+
+      if (
+        state.codexEndpointRefreshSequence >
+        Number.MAX_SAFE_INTEGER - replacements.length
+      ) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
+          "The bounded Codex endpoint-refresh sequence is exhausted.",
+        );
+      }
+
+      for (const replacement of replacements) {
+        const oldEndpointGeneration =
+          replacement.route.binding.endpointGeneration;
+        replacement.route.binding = {
+          ...replacement.route.binding,
+          endpointGeneration: input.newEndpoint.endpointGeneration,
+        };
+        replacement.route.state = replacement.state;
+        replacement.route.compatibility = "compatible";
+        replacement.route.updatedAt = now.toISOString();
+        replacement.route.lastSeenAt = now.toISOString();
+        delete replacement.route.safeErrorCode;
+        this.appendCodexEndpointRefreshEvent(state, {
+          timestamp: now.toISOString(),
+          alias: replacement.route.alias,
+          hostId: replacement.route.binding.hostId,
+          threadId: replacement.route.binding.routeHandle,
+          oldEndpointGeneration,
+          newEndpointGeneration: input.newEndpoint.endpointGeneration,
+        });
+      }
+      return { reboundAliases: replacements.map(({ route }) => route.alias) };
+    });
+  }
+
+  /**
+   * Dashboard recovery primitive for one abandoned Codex registration. The
+   * alias is only authority to request evaluation; durable state must prove
+   * the task is empty, stale, expired, and on a dead or superseded generation.
+   */
+  async removeStaleCodexOrphan(
+    input: RemoveStaleCodexOrphanInput,
+  ): Promise<RemoveStaleCodexOrphanResult> {
+    return await this.mutate(async (state, now) => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(input, ["alias"]) ||
+        typeof input.alias !== "string"
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_ORPHAN_RECOVERY",
+          "Codex orphan recovery requires one exact Codex alias.",
+        );
+      }
+      const route = this.requireStaleCodexOrphan(state, input.alias);
+
+      const aliases = new Set([route.alias]);
+      const removedPairs = state.pairs
+        .filter(
+          (pair) =>
+            pair.claudeAlias === route.alias || pair.codexAlias === route.alias,
+        )
+        .map((pair) => ({
+          claudeAlias: pair.claudeAlias,
+          codexAlias: pair.codexAlias,
+        }));
+      if (state.codexOrphanRemovalSequence >= Number.MAX_SAFE_INTEGER) {
+        throw new BridgeError(
+          "CODEX_ORPHAN_REMOVAL_SEQUENCE_EXHAUSTED",
+          "The bounded Codex orphan-removal sequence is exhausted.",
+        );
+      }
+      this.settleProgressWatchesForAliases(state, aliases, now);
+      state.routes = state.routes.filter((candidate) => candidate !== route);
+      removePairsForAliases(state, aliases);
+      state.rateBuckets = state.rateBuckets.filter(
+        (bucket) => bucket.sourceAlias !== route.alias,
+      );
+      state.dedupe = state.dedupe.filter(
+        (record) =>
+          record.sourceAlias !== route.alias &&
+          record.targetAlias !== route.alias,
+      );
+      this.appendCodexOrphanRemovalEvent(state, {
+        timestamp: now.toISOString(),
+        alias: route.alias,
+        hostId: route.binding.hostId,
+      });
+      return {
+        alias: route.alias,
+        binding: { ...route.binding },
+        removedPairs,
+      };
+    });
+  }
+
   async disableRoute(
     alias: string,
     ownerLease: string,
@@ -2537,6 +2922,83 @@ export class GatewayStore {
           ? {}
           : { safeErrorCode: route.safeErrorCode }),
       };
+    });
+  }
+
+  /**
+   * Read-only preflight for service-side provider cleanup. Removal repeats the
+   * identical proof atomically so no intervening state change can authorize it.
+   */
+  async inspectStaleCodexOrphan(
+    alias: string,
+  ): Promise<PrivateRouteBinding> {
+    return this.mutex.run("gateway", async () => {
+      const route = this.requireStaleCodexOrphan(this.requireState(), alias);
+      return { ...route.binding };
+    });
+  }
+
+  /**
+   * Capture the exact pre-mutation authority needed to reconcile a possible
+   * post-rename orphan-removal commit. This value remains controller-private.
+   */
+  async inspectStaleCodexOrphanRemovalAuthority(
+    alias: string,
+  ): Promise<StaleCodexOrphanRemovalAuthority> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      const route = this.requireStaleCodexOrphan(state, alias);
+      return {
+        binding: { ...route.binding },
+        previousSequence: state.codexOrphanRemovalSequence,
+      };
+    });
+  }
+
+  /**
+   * Fail-closed reconciliation for one exact removal whose durable rename may
+   * have committed before a directory-sync error. The latest private journal
+   * row, monotonic predecessor, alias absence, and native authority absence
+   * must all corroborate the same mutation.
+   */
+  async wasStaleCodexOrphanRemovalCommitted(
+    input: StaleCodexOrphanRemovalCommitProofInput,
+  ): Promise<boolean> {
+    return this.mutex.run("gateway", async () => {
+      if (
+        !isObject(input) ||
+        !hasOnlyKeys(input, ["alias", "binding", "previousSequence"]) ||
+        typeof input.alias !== "string" ||
+        !ALIAS_PATTERN.test(input.alias) ||
+        !input.alias.startsWith("codex-") ||
+        !isPrivateRouteBinding(input.binding) ||
+        input.binding.provider !== "codex" ||
+        !input.alias.endsWith(`@${input.binding.hostId}`) ||
+        !isNonNegativeInteger(input.previousSequence) ||
+        input.previousSequence >= Number.MAX_SAFE_INTEGER
+      ) {
+        throw new BridgeError(
+          "INVALID_CODEX_ORPHAN_COMMIT_PROOF",
+          "Codex orphan-removal reconciliation requires one exact private pre-mutation authority.",
+        );
+      }
+      this.assertAllowedIdentity(endpointOf(input.binding));
+      const state = this.requireState();
+      const expectedSequence = input.previousSequence + 1;
+      const latest = state.codexOrphanRemovalEvents.at(-1);
+      const routeOrAuthorityPresent = state.routes.some(
+        (route) =>
+          route.alias === input.alias ||
+          sameRouteTarget(route.binding, input.binding) ||
+          route.binding.ownerLease === input.binding.ownerLease,
+      );
+      return (
+        !routeOrAuthorityPresent &&
+        state.codexOrphanRemovalSequence === expectedSequence &&
+        latest?.sequence === expectedSequence &&
+        latest.alias === input.alias &&
+        latest.hostId === input.binding.hostId
+      );
     });
   }
 
@@ -4456,6 +4918,77 @@ export class GatewayStore {
     return route;
   }
 
+  private requireStaleCodexOrphan(
+    state: GatewayPersistedState,
+    alias: string,
+  ): GatewayRouteRecord {
+    if (
+      typeof alias !== "string" ||
+      !ALIAS_PATTERN.test(alias) ||
+      !alias.startsWith("codex-")
+    ) {
+      throw new BridgeError(
+        "INVALID_CODEX_ORPHAN_RECOVERY",
+        "Codex orphan recovery requires one exact Codex alias.",
+      );
+    }
+    const route = state.routes.find((candidate) => candidate.alias === alias);
+    if (route === undefined) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_NOT_FOUND",
+        "No Codex registration matches the requested alias.",
+      );
+    }
+    if (
+      route.binding.provider !== "codex" ||
+      route.registrationMode !== "explicit_opt_in" ||
+      !route.enabled ||
+      route.state !== "stale" ||
+      route.compatibility !== "expired" ||
+      route.queueDepth !== 0 ||
+      state.queue.some(
+        (item) =>
+          item.sourceAlias === route.alias || item.targetAlias === route.alias,
+      ) ||
+      state.inFlight.some(
+        (item) =>
+          item.sourceAlias === route.alias || item.targetAlias === route.alias,
+      )
+    ) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_RECOVERY_NOT_SAFE",
+        "Only an enabled, expired, empty stale Codex registration can be removed as an orphan.",
+      );
+    }
+    const connector = state.connectors.find(
+      (candidate) =>
+        candidate.provider === "codex" &&
+        candidate.hostId === route.binding.hostId,
+    );
+    const generationProvedDead =
+      connector !== undefined &&
+      (connector.endpointGeneration !== route.binding.endpointGeneration ||
+        connector.health === "offline");
+    if (!generationProvedDead) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_GENERATION_LIVE",
+        "The Codex registration cannot be removed while its endpoint generation may still be live.",
+      );
+    }
+    const succession = this.journal(state);
+    if (
+      succession !== null &&
+      (routeMatchesSuccessionIdentity(route, succession.old) ||
+        routeMatchesSuccessionIdentity(route, succession.new))
+    ) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_RECOVERY_BLOCKED",
+        "A Codex registration owned by an active succession cannot be removed as an orphan.",
+      );
+    }
+    return route;
+  }
+
   private requireAvailableRoute(
     state: GatewayPersistedState,
     alias: string,
@@ -5010,6 +5543,52 @@ export class GatewayStore {
     state.events.push({ sequence: state.eventSequence, ...event });
     while (state.events.length > this.config.limits.eventCapacity) {
       state.events.shift();
+    }
+  }
+
+  private appendCodexEndpointRefreshEvent(
+    state: GatewayPersistedState,
+    event: Omit<CodexEndpointRefreshJournalEvent, "sequence">,
+  ): void {
+    if (state.codexEndpointRefreshSequence >= Number.MAX_SAFE_INTEGER) {
+      throw new BridgeError(
+        "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
+        "The bounded Codex endpoint-refresh sequence is exhausted.",
+      );
+    }
+    state.codexEndpointRefreshSequence += 1;
+    state.codexEndpointRefreshEvents.push({
+      sequence: state.codexEndpointRefreshSequence,
+      ...event,
+    });
+    while (
+      state.codexEndpointRefreshEvents.length >
+      CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY
+    ) {
+      state.codexEndpointRefreshEvents.shift();
+    }
+  }
+
+  private appendCodexOrphanRemovalEvent(
+    state: GatewayPersistedState,
+    event: Omit<CodexOrphanRemovalJournalEvent, "sequence">,
+  ): void {
+    if (state.codexOrphanRemovalSequence >= Number.MAX_SAFE_INTEGER) {
+      throw new BridgeError(
+        "CODEX_ORPHAN_REMOVAL_SEQUENCE_EXHAUSTED",
+        "The bounded Codex orphan-removal sequence is exhausted.",
+      );
+    }
+    state.codexOrphanRemovalSequence += 1;
+    state.codexOrphanRemovalEvents.push({
+      sequence: state.codexOrphanRemovalSequence,
+      ...event,
+    });
+    while (
+      state.codexOrphanRemovalEvents.length >
+      CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY
+    ) {
+      state.codexOrphanRemovalEvents.shift();
     }
   }
 
@@ -6035,6 +6614,8 @@ export class GatewayStore {
     parsed = migratePrePairGraph(parsed);
     parsed = migratePreProgressWatches(parsed);
     parsed = migratePreCompatibilityAttestations(parsed);
+    parsed = migratePreCodexEndpointRefreshJournal(parsed);
+    parsed = migratePreCodexOrphanRemovalJournal(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

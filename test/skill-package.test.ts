@@ -78,6 +78,10 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /default paired mode/);
   assert.match(skill, /SENDER_NOT_PAIRED/);
   assert.match(skill, /serve --inbound open/);
+  assert.match(skill, /CALLER_IDENTITY_CONFLICT/);
+  assert.match(skill, /normal terminal/);
+  assert.match(skill, /codex app-server daemon restart/);
+  assert.match(skill, /wrong principal/);
 
   assert.doesNotMatch(skill, /~\/.claude|\/tmp\/cc-socks|\.claude\/sessions/);
   assert.doesNotMatch(skill, /\b(?:printenv|set)\b/);

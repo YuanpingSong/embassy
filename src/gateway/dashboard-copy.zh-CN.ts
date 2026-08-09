@@ -347,17 +347,18 @@ export const dashboardCopyZhCn = {
   "live.label": "实时伴侣",
   "live.mastheadSubtitle": "实时元数据流，并提供有限的路由同意控制。serve 仍限套接字通道。",
   "live.readonlyFooter":
-    "此视图仅可配对、取消配对并刷新 Claude 发现结果。",
+    "此视图仅可配对、取消配对、刷新 Claude 发现结果，以及请求移除陈旧的 Codex 注册。",
   "live.action.authorityLabel": "有限的操作权限",
   "live.action.authorityBody":
-    "此视图可配对或取消配对具名端点，并刷新 Claude 发现结果；不能注册任务、发送、回复、批准、中断或更改设置。",
-  "live.action.sectionTitle": "路由同意操作",
+    "此视图可配对或取消配对具名端点、刷新 Claude 发现结果，并且仅在代理确认具名 Codex 注册陈旧且其端点代际已失效时请求移除；不能注册任务、发送、回复、批准、中断或更改设置。",
+  "live.action.sectionTitle": "有限的路由操作",
   "live.action.scope":
-    "请为具名 Claude 与 Codex 端点配对或取消配对；可在此刷新发现结果。每项操作都必须确认。",
+    "可为具名 Claude 与 Codex 端点配对或取消配对、刷新发现结果，或回收孤立的 Codex 别名。每项操作都必须确认并由代理重新验证。",
   "live.action.select": "选择会话",
   "live.action.unselect": "取消选择会话",
   "live.action.pair": "配对端点",
   "live.action.unpair": "取消端点配对",
+  "live.action.removeStaleCodexRegistration": "移除陈旧注册",
   "live.action.refresh": "刷新发现结果",
   "live.action.confirm": "确认",
   "live.action.cancel": "取消",
@@ -487,6 +488,8 @@ export const dashboardCopyZhCn = {
   "app.routes.unselectCmd.consequenceOpen":
     "仅移除此出站边。开放入站仍对同一操作系统用户下的所有在线 Claude 会话启用。",
   "app.routes.refreshCmd": "重新读取本地发现结果，并重写静态面板文件。",
+  "app.routes.removeStaleCodex.consequence":
+    "仅当代理确认 {alias} 的注册已陈旧且其端点代际已失效时才会移除。相关同意边也会移除；在线注册绝不会被触碰。",
   "app.routes.monitorOnlyReason":
     "仅监控——此路由因 CODEX_WRITES_DISABLED 而停用写入。",
   "app.routes.noPeers": "此快照中没有发现任何 Claude 会话。",
@@ -521,6 +524,10 @@ export const dashboardCopyZhCn = {
   "app.activity.operation.routesPaired": "已建立同意边",
   "app.activity.operation.routesUnpaired": "已移除同意边",
   "app.activity.operation.watchEnded": "已结束进度监视",
+  "app.activity.operation.endpointRefreshed": "已刷新 Codex 端点",
+  "app.activity.operation.codexOrphanRemoved": "已移除陈旧的 Codex 注册",
+  "app.activity.operation.operator": "操作者",
+  "app.activity.operation.automatic": "自动",
   "app.activity.operation.accepted": "已接受",
   "app.activity.operation.rejected": "已拒绝",
   "app.activity.limited":

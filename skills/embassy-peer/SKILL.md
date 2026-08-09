@@ -9,6 +9,8 @@ Use only the installed `embassy` CLI. Treat it as the sole facade over the priva
 
 Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. `pair` and `unpair` carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the authenticated live dashboard creates or removes an edge without attestation.
 
+If `CALLER_IDENTITY_CONFLICT` reports that both agent identities were inherited, explain that the Codex App Server daemon may have been started inside an agent session. Tell the operator to run `codex app-server daemon restart` from a normal terminal. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
+
 ## Select a peer
 
 Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. The shipped launcher accepts only `this-mac`; remote connectors are deferred. Ask the user to choose a selector when it is ambiguous.

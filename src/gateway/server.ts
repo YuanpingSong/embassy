@@ -8,6 +8,7 @@ import {
   type ClaudePeerRuntimeOptions,
 } from "./claude-runtime.js";
 import {
+  createLocalCodexRefreshCandidateTransportFactory,
   createLocalCodexTransportFactory,
   type LocalCodexTransportFactory,
   type LocalCodexTransportFactoryOptions,
@@ -82,6 +83,10 @@ export type GatewayServerDependencies = {
   acquireInstanceLease?: (loginHome: string) => Promise<GatewayInstanceLease>;
   createStore?: (config: GatewayConfig) => GatewayStore;
   createCodexFactory?: (
+    options: LocalCodexTransportFactoryOptions,
+  ) => Promise<LocalCodexTransportFactory>;
+  /** Refresh-only resolver; may inspect same-major drift for read-only probes. */
+  createCodexRefreshCandidateFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
   createCodexProvider?: (
@@ -253,6 +258,9 @@ export async function runGatewayServer(
     dependencies.createStore ?? ((config) => new GatewayStore(config));
   const createCodexFactory =
     dependencies.createCodexFactory ?? createLocalCodexTransportFactory;
+  const createCodexRefreshCandidateFactory =
+    dependencies.createCodexRefreshCandidateFactory ??
+    createLocalCodexRefreshCandidateTransportFactory;
   const createCodexProvider =
     dependencies.createCodexProvider ?? createLocalCodexGatewayProvider;
   const createService =
@@ -363,21 +371,31 @@ export async function runGatewayServer(
         : { deliveryNotices: config.deliveryNotices }),
     });
     store = createStore(config);
-    const createdCodexFactory = await awaitWhileLeaseHeld(
-      Promise.resolve().then(() =>
-        createCodexFactory({
-          appServerVersion: GATEWAY_CODEX_APP_SERVER_VERSION,
-          compatibilityPolicy: config.compatibilityPolicy ?? "observed",
-          environment: localCodexProviderEnvironment(env),
-          hostId: GATEWAY_LOCAL_HOST_ID,
-          writableProtocolAttested: true,
-        }),
-      ),
-      async (lateFactory) => lateFactory.close(),
+    const codexFactoryOptions: LocalCodexTransportFactoryOptions = {
+      appServerVersion: GATEWAY_CODEX_APP_SERVER_VERSION,
+      compatibilityPolicy: config.compatibilityPolicy ?? "observed",
+      environment: localCodexProviderEnvironment(env),
+      hostId: GATEWAY_LOCAL_HOST_ID,
+      writableProtocolAttested: true,
+    };
+    const createOwnedCodexFactory = async (
+      creator: (
+        options: LocalCodexTransportFactoryOptions,
+      ) => Promise<LocalCodexTransportFactory>,
+    ): Promise<LocalCodexTransportFactory> =>
+      await awaitWhileLeaseHeld(
+        Promise.resolve().then(() => creator(codexFactoryOptions)),
+        async (lateFactory) => lateFactory.close(),
+      );
+    const createdCodexFactory = await createOwnedCodexFactory(
+      createCodexFactory,
     );
     codexFactory = createdCodexFactory;
     codexProvider = createCodexProvider({
       factory: createdCodexFactory,
+      refreshFactory: async () =>
+        await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
+      compatibilityPolicy: config.compatibilityPolicy ?? "observed",
     });
     const createdService = createService({
       config,

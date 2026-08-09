@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.1.0] - 2026-08-09
+
+### Added
+
+- **Automatic Codex endpoint reactivation** — when the managed App Server moves from one endpoint generation to another, Embassy freezes the old connector, runs the existing bounded compatibility probe against the replacement, and re-anchors each retained route only after `thread/loaded/list` finds its byte-identical task exactly once. The alias, owner lease, and pair edges survive; the private bounded journal records the generation refresh without projecting the task ID or either endpoint generation.
+- **Bounded stale-registration recovery** — the authenticated live dashboard can request removal of one canonical `codex-*` alias after an explicit confirmation. The broker accepts the operation only for a stale registration whose owning endpoint generation is dead, revalidates and quiesces the exact route, removes its incident pair edges, and records the successful recovery in its private bounded journal. Ready, merely offline, current-generation, and ambiguous routes fail closed.
+
+### Changed
+
+- `CALLER_IDENTITY_CONFLICT` now gives a targeted bilingual recovery hint only when both Codex and Claude identities were inherited: restart the Codex App Server daemon from a normal terminal with `codex app-server daemon restart`. Wrong-principal failures keep the generic fail-closed advice.
+
+### Security
+
+- Endpoint replacement never restores or replays a body, callback, receipt handle, reply capability, conversation capability, or delivery token. An incompatible replacement, a missing or duplicate exact task, or an unclean transition leaves the retained route stale and surfaces bounded compatibility evidence for diagnosis rather than retargeting it.
+
 ## [1.0.0] - 2026-08-09
 
 ### Added

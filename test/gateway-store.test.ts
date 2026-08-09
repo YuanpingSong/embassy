@@ -31,6 +31,8 @@ import type {
   RegisterRouteInput,
 } from "../src/gateway/types.js";
 import {
+  CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY,
+  CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY,
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   arePublicAvailablePeerSnapshots,
   isPublicAvailablePeerSnapshot,
@@ -2565,6 +2567,752 @@ test("route invalidation atomically applies an exact in-flight terminal plan onc
   await store.close();
 });
 
+test("Codex endpoint refresh re-anchors only the exact present subset and journals once", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.observeConnector({
+    identity: endpoint(claudeBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "claude-peer",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "codex-one@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.registerRoute({
+    alias: "codex-two@this-mac",
+    binding: successorCodexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.registerRoute({
+    alias: "advisor@this-mac",
+    binding: claudeBinding,
+    registrationMode: "selected_live_peer",
+  });
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "codex-one@this-mac",
+  });
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "codex-two@this-mac",
+  });
+  const accounted = await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "codex-one@this-mac",
+    body: "counter survives endpoint refresh",
+    dedupeKey: "endpoint-refresh-counter",
+  });
+  assert.ok(accounted.messageId);
+  await store.cancelQueuedMessage(accounted.messageId);
+
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  const newEndpoint = {
+    ...endpoint(codexBinding),
+    endpointGeneration: "codex-generation-0002",
+  } as const;
+  await store.observeConnector({
+    identity: newEndpoint,
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "2",
+  });
+
+  await assert.rejects(
+    store.reanchorCodexRoutes({
+      oldEndpoint: endpoint(codexBinding),
+      newEndpoint,
+      routes: [
+        {
+          alias: "codex-one@this-mac",
+          threadId: codexBinding.routeHandle,
+          ownerLease: codexBinding.ownerLease,
+        },
+        {
+          alias: "codex-two@this-mac",
+          threadId: successorCodexBinding.routeHandle,
+          ownerLease: "wrong-owner-lease",
+        },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ENDPOINT_REFRESH_NOT_SAFE",
+  );
+  assert.ok(
+    (await store.inspectPrivateCodexRoutes()).every(
+      (route) =>
+        route.binding.endpointGeneration === codexBinding.endpointGeneration,
+    ),
+  );
+  assert.equal(
+    (
+      JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+        codexEndpointRefreshEvents: unknown[];
+      }
+    ).codexEndpointRefreshEvents.length,
+    0,
+  );
+
+  assert.deepEqual(
+    await store.reanchorCodexRoutes({
+      oldEndpoint: endpoint(codexBinding),
+      newEndpoint,
+      routes: [
+        {
+          alias: "codex-one@this-mac",
+          threadId: codexBinding.routeHandle,
+          ownerLease: codexBinding.ownerLease,
+          state: "busy",
+        },
+      ],
+    }),
+    { reboundAliases: ["codex-one@this-mac"] },
+  );
+  const routes = await store.inspectPrivateCodexRoutes();
+  assert.equal(
+    routes.find((route) => route.alias === "codex-one@this-mac")?.binding
+      .endpointGeneration,
+    newEndpoint.endpointGeneration,
+  );
+  assert.equal(
+    routes.find((route) => route.alias === "codex-one@this-mac")?.state,
+    "busy",
+  );
+  assert.equal(
+    routes.find((route) => route.alias === "codex-two@this-mac")?.binding
+      .endpointGeneration,
+    codexBinding.endpointGeneration,
+  );
+  assert.equal(
+    routes.find((route) => route.alias === "codex-two@this-mac")?.state,
+    "stale",
+  );
+  assert.deepEqual(await store.inspectPairs(), [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-one@this-mac",
+    },
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-two@this-mac",
+    },
+  ]);
+  const publicSnapshot = await store.publicSnapshot();
+  assert.equal(
+    publicSnapshot.routes.find(
+      (route) => route.alias === "codex-one@this-mac",
+    )?.counters.cancelled,
+    1,
+  );
+  assert.equal(
+    JSON.stringify(publicSnapshot).includes(codexBinding.routeHandle),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(publicSnapshot).includes(newEndpoint.endpointGeneration),
+    false,
+  );
+
+  const persisted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    codexEndpointRefreshSequence: number;
+    codexEndpointRefreshEvents: Array<Record<string, unknown>>;
+  };
+  assert.equal(persisted.codexEndpointRefreshSequence, 1);
+  assert.deepEqual(persisted.codexEndpointRefreshEvents, [
+    {
+      sequence: 1,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      alias: "codex-one@this-mac",
+      hostId: "this-mac",
+      threadId: codexBinding.routeHandle,
+      oldEndpointGeneration: codexBinding.endpointGeneration,
+      newEndpointGeneration: newEndpoint.endpointGeneration,
+    },
+  ]);
+  await assert.rejects(
+    store.reanchorCodexRoutes({
+      oldEndpoint: endpoint(codexBinding),
+      newEndpoint,
+      routes: [
+        {
+          alias: "codex-one@this-mac",
+          threadId: codexBinding.routeHandle,
+          ownerLease: codexBinding.ownerLease,
+        },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ENDPOINT_REFRESH_NOT_SAFE",
+  );
+  const afterRejectedRetry = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as { codexEndpointRefreshEvents: unknown[] };
+  assert.equal(afterRejectedRetry.codexEndpointRefreshEvents.length, 1);
+  assert.deepEqual(
+    await store.reanchorCodexRoutes({
+      oldEndpoint: endpoint(codexBinding),
+      newEndpoint,
+      routes: [
+        {
+          alias: "codex-two@this-mac",
+          threadId: successorCodexBinding.routeHandle,
+          ownerLease: successorCodexBinding.ownerLease,
+        },
+      ],
+    }),
+    { reboundAliases: ["codex-two@this-mac"] },
+  );
+  const afterSecondAlias = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    codexEndpointRefreshSequence: number;
+    codexEndpointRefreshEvents: Array<{ alias: string }>;
+  };
+  assert.equal(afterSecondAlias.codexEndpointRefreshSequence, 2);
+  assert.deepEqual(
+    afterSecondAlias.codexEndpointRefreshEvents.map((event) => event.alias),
+    ["codex-one@this-mac", "codex-two@this-mac"],
+  );
+  await store.close();
+});
+
+test("Codex endpoint-refresh sequence exhaustion is all-or-none", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "codex-exhaust@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  const newEndpoint = {
+    ...endpoint(codexBinding),
+    endpointGeneration: "codex-generation-0002",
+  } as const;
+  await store.observeConnector({
+    identity: newEndpoint,
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "2",
+  });
+  await store.close();
+
+  const exhausted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  exhausted.codexEndpointRefreshSequence = Number.MAX_SAFE_INTEGER;
+  exhausted.codexEndpointRefreshEvents = [
+    {
+      sequence: Number.MAX_SAFE_INTEGER,
+      timestamp: "2026-08-09T12:00:00.000Z",
+      alias: "codex-history@this-mac",
+      hostId: "this-mac",
+      threadId: "codex-thread-private-history",
+      oldEndpointGeneration: "codex-generation-history-old",
+      newEndpointGeneration: "codex-generation-history-new",
+    },
+  ];
+  await writeFile(store.stateFilePath, `${JSON.stringify(exhausted)}\n`, {
+    mode: 0o600,
+  });
+
+  const recovered = new GatewayStore(config);
+  await recovered.initialize();
+  await recovered.observeConnector({
+    identity: newEndpoint,
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "2",
+  });
+  await assert.rejects(
+    recovered.reanchorCodexRoutes({
+      oldEndpoint: endpoint(codexBinding),
+      newEndpoint,
+      routes: [
+        {
+          alias: "codex-exhaust@this-mac",
+          threadId: codexBinding.routeHandle,
+          ownerLease: codexBinding.ownerLease,
+        },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
+  );
+  const retained = await recovered.inspectPrivateRoute(
+    "codex-exhaust@this-mac",
+  );
+  assert.equal(retained?.state, "stale");
+  assert.equal(
+    retained?.binding.endpointGeneration,
+    codexBinding.endpointGeneration,
+  );
+  const after = JSON.parse(
+    await readFile(recovered.stateFilePath, "utf8"),
+  ) as {
+    codexEndpointRefreshSequence: number;
+    codexEndpointRefreshEvents: unknown[];
+  };
+  assert.equal(after.codexEndpointRefreshSequence, Number.MAX_SAFE_INTEGER);
+  assert.equal(after.codexEndpointRefreshEvents.length, 1);
+  await recovered.close();
+});
+
+test("Codex orphan removal requires dead-generation proof and preserves the rest of the graph", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.observeConnector({
+    identity: endpoint(claudeBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "claude-peer",
+    protocolVersion: "1",
+  });
+  for (const [alias, binding] of [
+    ["codex-orphan@this-mac", codexBinding],
+    ["codex-kept@this-mac", successorCodexBinding],
+  ] as const) {
+    await store.registerRoute({
+      alias,
+      binding,
+      registrationMode: "explicit_opt_in",
+    });
+  }
+  await store.registerRoute({
+    alias: "advisor@this-mac",
+    binding: claudeBinding,
+    registrationMode: "selected_live_peer",
+  });
+  for (const codexAlias of [
+    "codex-orphan@this-mac",
+    "codex-kept@this-mac",
+  ]) {
+    await store.pairRoutes({
+      claudeAlias: "advisor@this-mac",
+      codexAlias,
+    });
+    const queued = await store.enqueueMessage({
+      sourceAlias: codexAlias,
+      targetAlias: "advisor@this-mac",
+      body: "leave bounded rate and dedupe metadata",
+      dedupeKey: `orphan-metadata-${codexAlias}`,
+    });
+    assert.ok(queued.messageId);
+    await store.cancelQueuedMessage(queued.messageId);
+  }
+  await store.openProgressWatch({
+    conversationId: "conv_orphanwatch00001",
+    ownerAlias: "advisor@this-mac",
+    workerAlias: "codex-orphan@this-mac",
+    idleMs: 60_000,
+  });
+  await assert.rejects(
+    store.removeStaleCodexOrphan({ alias: "codex-orphan@this-mac" }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ORPHAN_RECOVERY_NOT_SAFE",
+  );
+  await store.invalidateRoute(codexBinding, "CODEX_ROUTE_STALE");
+  await assert.rejects(
+    store.removeStaleCodexOrphan({ alias: "codex-orphan@this-mac" }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ORPHAN_GENERATION_LIVE",
+  );
+  await assert.rejects(
+    store.inspectStaleCodexOrphan("codex-orphan@this-mac"),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ORPHAN_GENERATION_LIVE",
+  );
+  const afterRejectedRemoval = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    codexOrphanRemovalSequence: number;
+    codexOrphanRemovalEvents: unknown[];
+  };
+  assert.equal(afterRejectedRemoval.codexOrphanRemovalSequence, 0);
+  assert.deepEqual(afterRejectedRemoval.codexOrphanRemovalEvents, []);
+
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  assert.deepEqual(
+    await store.inspectStaleCodexOrphan("codex-orphan@this-mac"),
+    codexBinding,
+  );
+  const removed = await store.removeStaleCodexOrphan({
+    alias: "codex-orphan@this-mac",
+  });
+  assert.equal(removed.alias, "codex-orphan@this-mac");
+  assert.deepEqual(removed.binding, codexBinding);
+  assert.deepEqual(removed.removedPairs, [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-orphan@this-mac",
+    },
+  ]);
+  assert.deepEqual(await store.inspectPairs(), [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-kept@this-mac",
+    },
+  ]);
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-orphan@this-mac")) === undefined,
+    true,
+  );
+  assert.equal(
+    (await store.inspectPrivateRoute("codex-kept@this-mac"))?.state,
+    "stale",
+  );
+  assert.deepEqual(await store.inspectProgressWatches(), []);
+  const persisted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    dedupe: Array<{ sourceAlias: string; targetAlias: string }>;
+    rateBuckets: Array<{ sourceAlias: string }>;
+    progressWatchEvents: Array<{ kind: string }>;
+    codexOrphanRemovalSequence: number;
+    codexOrphanRemovalEvents: Array<Record<string, unknown>>;
+  };
+  assert.equal(
+    persisted.dedupe.some(
+      (record) =>
+        record.sourceAlias === "codex-orphan@this-mac" ||
+        record.targetAlias === "codex-orphan@this-mac",
+    ),
+    false,
+  );
+  assert.equal(
+    persisted.dedupe.some(
+      (record) => record.sourceAlias === "codex-kept@this-mac",
+    ),
+    true,
+  );
+  assert.equal(
+    persisted.rateBuckets.some(
+      (bucket) => bucket.sourceAlias === "codex-orphan@this-mac",
+    ),
+    false,
+  );
+  assert.equal(
+    persisted.rateBuckets.some(
+      (bucket) => bucket.sourceAlias === "codex-kept@this-mac",
+    ),
+    true,
+  );
+  assert.equal(
+    persisted.progressWatchEvents.at(-1)?.kind,
+    "endpoint_retired",
+  );
+  assert.equal(persisted.codexOrphanRemovalSequence, 1);
+  assert.deepEqual(persisted.codexOrphanRemovalEvents, [
+    {
+      sequence: 1,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      alias: "codex-orphan@this-mac",
+      hostId: "this-mac",
+    },
+  ]);
+  assert.equal(
+    JSON.stringify(await store.publicSnapshot()).includes(
+      "codexOrphanRemoval",
+    ),
+    false,
+  );
+  await store.observeConnector({
+    identity: {
+      ...endpoint(codexBinding),
+      endpointGeneration: "codex-generation-0002",
+    },
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "2",
+  });
+  assert.equal(
+    (
+      await store.removeStaleCodexOrphan({
+        alias: "codex-kept@this-mac",
+      })
+    ).alias,
+    "codex-kept@this-mac",
+  );
+  const afterSecondRemoval = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    codexOrphanRemovalSequence: number;
+    codexOrphanRemovalEvents: Array<{ alias: string }>;
+  };
+  assert.equal(afterSecondRemoval.codexOrphanRemovalSequence, 2);
+  assert.deepEqual(
+    afterSecondRemoval.codexOrphanRemovalEvents.map((event) => event.alias),
+    ["codex-orphan@this-mac", "codex-kept@this-mac"],
+  );
+  await store.close();
+});
+
+test("Codex orphan-removal sequence exhaustion preserves the route and consent edge", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  await store.renameRoute(
+    "reviewer@this-mac",
+    "codex-orphan-exhaust@this-mac",
+    codexBinding.ownerLease,
+  );
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  await store.close();
+
+  const exhausted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  exhausted.codexOrphanRemovalSequence = Number.MAX_SAFE_INTEGER;
+  exhausted.codexOrphanRemovalEvents = [
+    {
+      sequence: Number.MAX_SAFE_INTEGER,
+      timestamp: "2026-08-09T12:00:00.000Z",
+      alias: "codex-history@this-mac",
+      hostId: "this-mac",
+    },
+  ];
+  await writeFile(store.stateFilePath, `${JSON.stringify(exhausted)}\n`, {
+    mode: 0o600,
+  });
+
+  const recovered = new GatewayStore(config);
+  await recovered.initialize();
+  await assert.rejects(
+    recovered.removeStaleCodexOrphan({
+      alias: "codex-orphan-exhaust@this-mac",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_ORPHAN_REMOVAL_SEQUENCE_EXHAUSTED",
+  );
+  assert.ok(
+    await recovered.inspectPrivateRoute("codex-orphan-exhaust@this-mac"),
+  );
+  assert.deepEqual(await recovered.inspectPairs(), [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-orphan-exhaust@this-mac",
+    },
+  ]);
+  const after = JSON.parse(
+    await readFile(recovered.stateFilePath, "utf8"),
+  ) as {
+    codexOrphanRemovalSequence: number;
+    codexOrphanRemovalEvents: unknown[];
+  };
+  assert.equal(after.codexOrphanRemovalSequence, Number.MAX_SAFE_INTEGER);
+  assert.equal(after.codexOrphanRemovalEvents.length, 1);
+  await recovered.close();
+});
+
+test("Codex orphan removal reconciles an exact verified post-rename commit", async () => {
+  let failNextRename = false;
+  const { store } = await fixture({
+    afterStateFileRename: () => {
+      if (!failNextRename) return;
+      failNextRename = false;
+      throw new Error("synthetic orphan post-rename failure");
+    },
+  });
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "codex-uncertain@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  const authority =
+    await store.inspectStaleCodexOrphanRemovalAuthority(
+      "codex-uncertain@this-mac",
+    );
+  assert.deepEqual(authority, {
+    binding: codexBinding,
+    previousSequence: 0,
+  });
+
+  failNextRename = true;
+  await assert.rejects(
+    store.removeStaleCodexOrphan({ alias: "codex-uncertain@this-mac" }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
+  );
+  assert.equal(
+    await store.wasStaleCodexOrphanRemovalCommitted({
+      alias: "codex-uncertain@this-mac",
+      binding: authority.binding,
+      previousSequence: authority.previousSequence,
+    }),
+    true,
+  );
+  assert.equal(
+    await store.inspectPrivateRoute("codex-uncertain@this-mac"),
+    undefined,
+  );
+  await store.close();
+});
+
+test("Codex orphan commit proof fails closed for absent, unrelated, newer, and route-present state", async () => {
+  const emptyFixture = await fixture();
+  await emptyFixture.store.initialize();
+  assert.equal(
+    await emptyFixture.store.wasStaleCodexOrphanRemovalCommitted({
+      alias: "codex-absent@this-mac",
+      binding: codexBinding,
+      previousSequence: 0,
+    }),
+    false,
+  );
+  await emptyFixture.store.close();
+
+  const { store } = await fixture();
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "codex-first@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.registerRoute({
+    alias: "codex-second@this-mac",
+    binding: successorCodexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  const firstAuthority =
+    await store.inspectStaleCodexOrphanRemovalAuthority(
+      "codex-first@this-mac",
+    );
+  await store.removeStaleCodexOrphan({ alias: "codex-first@this-mac" });
+  assert.equal(
+    await store.wasStaleCodexOrphanRemovalCommitted({
+      alias: "codex-first@this-mac",
+      binding: firstAuthority.binding,
+      previousSequence: firstAuthority.previousSequence,
+    }),
+    true,
+  );
+  assert.equal(
+    await store.wasStaleCodexOrphanRemovalCommitted({
+      alias: "codex-unrelated@this-mac",
+      binding: independentCodexBinding,
+      previousSequence: 0,
+    }),
+    false,
+  );
+
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "codex-first@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  assert.equal(
+    await store.wasStaleCodexOrphanRemovalCommitted({
+      alias: "codex-first@this-mac",
+      binding: firstAuthority.binding,
+      previousSequence: firstAuthority.previousSequence,
+    }),
+    false,
+  );
+  await store.unregisterRoute(
+    "codex-first@this-mac",
+    codexBinding.ownerLease,
+  );
+  await store.markConnectorOffline(
+    endpoint(codexBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  const secondAuthority =
+    await store.inspectStaleCodexOrphanRemovalAuthority(
+      "codex-second@this-mac",
+    );
+  assert.equal(secondAuthority.previousSequence, 1);
+  await store.removeStaleCodexOrphan({ alias: "codex-second@this-mac" });
+  assert.equal(
+    await store.wasStaleCodexOrphanRemovalCommitted({
+      alias: "codex-first@this-mac",
+      binding: firstAuthority.binding,
+      previousSequence: firstAuthority.previousSequence,
+    }),
+    false,
+  );
+  await store.close();
+});
+
 test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();
@@ -3446,6 +4194,10 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
     progressWatches?: unknown;
     progressWatchEvents?: unknown;
     compatibilityAttestations?: unknown;
+    codexEndpointRefreshSequence?: unknown;
+    codexEndpointRefreshEvents?: unknown;
+    codexOrphanRemovalSequence?: unknown;
+    codexOrphanRemovalEvents?: unknown;
   };
   delete legacy.accounting.unconfirmed;
   for (const route of legacy.routes) delete route.counters.unconfirmed;
@@ -3455,6 +4207,10 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   delete legacy.progressWatches;
   delete legacy.progressWatchEvents;
   delete legacy.compatibilityAttestations;
+  delete legacy.codexEndpointRefreshSequence;
+  delete legacy.codexEndpointRefreshEvents;
+  delete legacy.codexOrphanRemovalSequence;
+  delete legacy.codexOrphanRemovalEvents;
   await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
     mode: 0o600,
   });
@@ -3492,6 +4248,10 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
     routes: Array<{ counters: Record<string, unknown> }>;
     codexSuccession?: unknown;
     compatibilityAttestations?: unknown;
+    codexEndpointRefreshSequence?: unknown;
+    codexEndpointRefreshEvents?: unknown;
+    codexOrphanRemovalSequence?: unknown;
+    codexOrphanRemovalEvents?: unknown;
   };
   assert.equal(persisted.accounting.unconfirmed, 0);
   assert.ok(
@@ -3499,6 +4259,10 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   );
   assert.equal(persisted.codexSuccession, null);
   assert.deepEqual(persisted.compatibilityAttestations, []);
+  assert.equal(persisted.codexEndpointRefreshSequence, 0);
+  assert.deepEqual(persisted.codexEndpointRefreshEvents, []);
+  assert.equal(persisted.codexOrphanRemovalSequence, 0);
+  assert.deepEqual(persisted.codexOrphanRemovalEvents, []);
   await migrated.close();
 });
 
@@ -3510,6 +4274,10 @@ test("startup staging defers migrations and observations until one explicit comm
     await readFile(store.stateFilePath, "utf8"),
   ) as Record<string, unknown>;
   delete legacy.compatibilityAttestations;
+  delete legacy.codexEndpointRefreshSequence;
+  delete legacy.codexEndpointRefreshEvents;
+  delete legacy.codexOrphanRemovalSequence;
+  delete legacy.codexOrphanRemovalEvents;
   const legacyBytes = `${JSON.stringify(legacy)}\n`;
   await writeFile(store.stateFilePath, legacyBytes, { mode: 0o600 });
 
@@ -3585,6 +4353,223 @@ test("compatibility attestations are strict, persistent, cached by surface and v
     false,
   );
   await recovered.close();
+});
+
+test("one additive migration adds the orphan-removal journal without changing endpoint-refresh evidence", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await store.close();
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  legacy.codexEndpointRefreshSequence = 1;
+  legacy.codexEndpointRefreshEvents = [
+    {
+      sequence: 1,
+      timestamp: "2026-08-09T12:00:00.000Z",
+      alias: "codex-journal@this-mac",
+      hostId: "this-mac",
+      threadId: "codex-thread-private-journal",
+      oldEndpointGeneration: "codex-generation-old",
+      newEndpointGeneration: "codex-generation-new",
+    },
+  ];
+  delete legacy.codexOrphanRemovalSequence;
+  delete legacy.codexOrphanRemovalEvents;
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
+
+  const migrated = new GatewayStore(config);
+  await migrated.initialize();
+  const persisted = JSON.parse(
+    await readFile(migrated.stateFilePath, "utf8"),
+  ) as Record<string, unknown>;
+  assert.equal(persisted.codexEndpointRefreshSequence, 1);
+  assert.deepEqual(persisted.codexEndpointRefreshEvents, [
+    {
+      sequence: 1,
+      timestamp: "2026-08-09T12:00:00.000Z",
+      alias: "codex-journal@this-mac",
+      hostId: "this-mac",
+      threadId: "codex-thread-private-journal",
+      oldEndpointGeneration: "codex-generation-old",
+      newEndpointGeneration: "codex-generation-new",
+    },
+  ]);
+  assert.equal(persisted.codexOrphanRemovalSequence, 0);
+  assert.deepEqual(persisted.codexOrphanRemovalEvents, []);
+  await migrated.close();
+});
+
+test("private Codex endpoint-refresh journal rejects malformed, out-of-sequence, and oversized state", async () => {
+  const event = (sequence: number): Record<string, unknown> => ({
+    sequence,
+    timestamp: "2026-08-09T12:00:00.000Z",
+    alias: "codex-journal@this-mac",
+    hostId: "this-mac",
+    threadId: "codex-thread-private-journal",
+    oldEndpointGeneration: `codex-generation-${sequence}`,
+    newEndpointGeneration: `codex-generation-${sequence + 1}`,
+  });
+  const corruptions: Array<
+    readonly [string, (state: Record<string, unknown>) => void]
+  > = [
+    [
+      "unknown content-bearing field",
+      (state) => {
+        const row = event(1);
+        row.body = "MUST_NOT_BE_ACCEPTED";
+        state.codexEndpointRefreshSequence = 1;
+        state.codexEndpointRefreshEvents = [row];
+      },
+    ],
+    [
+      "non-increasing sequence",
+      (state) => {
+        state.codexEndpointRefreshSequence = 2;
+        state.codexEndpointRefreshEvents = [event(2), event(1)];
+      },
+    ],
+    [
+      "sequence above counter",
+      (state) => {
+        state.codexEndpointRefreshSequence = 0;
+        state.codexEndpointRefreshEvents = [event(1)];
+      },
+    ],
+    [
+      "nonzero counter with empty journal",
+      (state) => {
+        state.codexEndpointRefreshSequence = 1;
+        state.codexEndpointRefreshEvents = [];
+      },
+    ],
+    [
+      "gap in retained sequence",
+      (state) => {
+        state.codexEndpointRefreshSequence = 3;
+        state.codexEndpointRefreshEvents = [event(1), event(3)];
+      },
+    ],
+    [
+      "counter above last retained event",
+      (state) => {
+        state.codexEndpointRefreshSequence = 2;
+        state.codexEndpointRefreshEvents = [event(1)];
+      },
+    ],
+    [
+      "oversized bounded journal",
+      (state) => {
+        state.codexEndpointRefreshSequence =
+          CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY + 1;
+        state.codexEndpointRefreshEvents = Array.from(
+          { length: CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY + 1 },
+          (_, index) => event(index + 1),
+        );
+      },
+    ],
+  ];
+
+  for (const [label, corrupt] of corruptions) {
+    const { store, config } = await fixture();
+    await store.initialize();
+    await store.close();
+    const persisted = JSON.parse(
+      await readFile(store.stateFilePath, "utf8"),
+    ) as Record<string, unknown>;
+    corrupt(persisted);
+    await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      new GatewayStore(config).initialize(),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+      label,
+    );
+  }
+});
+
+test("private Codex orphan-removal journal rejects malformed, impossible, and oversized state", async () => {
+  const event = (sequence: number): Record<string, unknown> => ({
+    sequence,
+    timestamp: "2026-08-09T12:00:00.000Z",
+    alias: "codex-orphan-journal@this-mac",
+    hostId: "this-mac",
+  });
+  const corruptions: Array<
+    readonly [string, (state: Record<string, unknown>) => void]
+  > = [
+    [
+      "unknown content-bearing field",
+      (state) => {
+        const row = event(1);
+        row.body = "MUST_NOT_BE_ACCEPTED";
+        state.codexOrphanRemovalSequence = 1;
+        state.codexOrphanRemovalEvents = [row];
+      },
+    ],
+    [
+      "nonzero counter with empty journal",
+      (state) => {
+        state.codexOrphanRemovalSequence = 1;
+        state.codexOrphanRemovalEvents = [];
+      },
+    ],
+    [
+      "event above zero counter",
+      (state) => {
+        state.codexOrphanRemovalSequence = 0;
+        state.codexOrphanRemovalEvents = [event(1)];
+      },
+    ],
+    [
+      "gap in retained sequence",
+      (state) => {
+        state.codexOrphanRemovalSequence = 3;
+        state.codexOrphanRemovalEvents = [event(1), event(3)];
+      },
+    ],
+    [
+      "counter above last retained event",
+      (state) => {
+        state.codexOrphanRemovalSequence = 2;
+        state.codexOrphanRemovalEvents = [event(1)];
+      },
+    ],
+    [
+      "oversized bounded journal",
+      (state) => {
+        state.codexOrphanRemovalSequence =
+          CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY + 1;
+        state.codexOrphanRemovalEvents = Array.from(
+          { length: CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY + 1 },
+          (_, index) => event(index + 1),
+        );
+      },
+    ],
+  ];
+
+  for (const [label, corrupt] of corruptions) {
+    const { store, config } = await fixture();
+    await store.initialize();
+    await store.close();
+    const persisted = JSON.parse(
+      await readFile(store.stateFilePath, "utf8"),
+    ) as Record<string, unknown>;
+    corrupt(persisted);
+    await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      new GatewayStore(config).initialize(),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+      label,
+    );
+  }
 });
 
 test("strict succession journal rejects malformed oversized and unknown fields", async () => {

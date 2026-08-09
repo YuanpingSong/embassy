@@ -278,6 +278,36 @@ export type GatewayAccounting = {
   queuedBytes: number;
 };
 
+/**
+ * Private proof that one exact Codex task was re-anchored after its App Server
+ * endpoint generation changed. Native task and endpoint identifiers in this
+ * journal must never enter a public snapshot, event, error, or log.
+ */
+export type CodexEndpointRefreshJournalEvent = {
+  sequence: number;
+  timestamp: string;
+  alias: string;
+  hostId: string;
+  threadId: string;
+  oldEndpointGeneration: string;
+  newEndpointGeneration: string;
+};
+
+export const CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY = 256;
+
+/**
+ * Private durable evidence that an operator removed one safely proven stale
+ * Codex registration. No native task or endpoint identifiers are retained.
+ */
+export type CodexOrphanRemovalJournalEvent = {
+  sequence: number;
+  timestamp: string;
+  alias: string;
+  hostId: string;
+};
+
+export const CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY = 256;
+
 export type GatewayPersistedState = {
   schemaVersion: 1;
   createdAt: string;
@@ -297,6 +327,14 @@ export type GatewayPersistedState = {
   progressWatchEvents: ProgressWatchJournalEvent[];
   /** Bounded, body-free probe evidence keyed by provider surface and version. */
   compatibilityAttestations: CompatibilityAttestation[];
+  /** Monotonic sequence for the bounded private endpoint-refresh journal. */
+  codexEndpointRefreshSequence: number;
+  /** Strictly private route-lifecycle evidence; never publicly projected. */
+  codexEndpointRefreshEvents: CodexEndpointRefreshJournalEvent[];
+  /** Monotonic sequence for bounded private operator-recovery evidence. */
+  codexOrphanRemovalSequence: number;
+  /** Strictly private orphan-removal evidence; never publicly projected. */
+  codexOrphanRemovalEvents: CodexOrphanRemovalJournalEvent[];
   /** Strictly validated internal restart journal; never publicly projected. */
   codexSuccession?: unknown;
 };
@@ -372,6 +410,8 @@ export const gatewayActivityKinds = [
   "registration",
   "pairing",
   "watch",
+  "endpoint",
+  "recovery",
 ] as const;
 export type GatewayActivityKind = (typeof gatewayActivityKinds)[number];
 
@@ -385,6 +425,8 @@ export const gatewayActivityActions = [
   "routes_paired",
   "routes_unpaired",
   "watch_ended",
+  "endpoint_refreshed",
+  "codex_orphan_removed",
 ] as const;
 export type GatewayActivityAction = (typeof gatewayActivityActions)[number];
 
@@ -396,7 +438,7 @@ export type PublicGatewayActivityEvent = {
   action: GatewayActivityAction;
   outcome: "accepted" | "rejected";
   aliases: string[];
-  operatorAction: true;
+  operatorAction: boolean;
   safeErrorCode?: string;
 };
 
@@ -934,6 +976,52 @@ export type RebindStaleRouteInput = {
     | "peer_explicitly_reselected"
     | "peer_identity_reobserved";
   state?: "idle" | "busy" | "awaiting_approval";
+};
+
+export type ReanchorCodexRouteInput = {
+  alias: string;
+  /** Exact private App Server thread identifier proved present by loaded/list. */
+  threadId: string;
+  /** Existing registration authority; a refresh never rotates this lease. */
+  ownerLease: string;
+  state?: "idle" | "busy" | "awaiting_approval";
+};
+
+export type ReanchorCodexRoutesInput = {
+  oldEndpoint: PrivateEndpointIdentity;
+  newEndpoint: PrivateEndpointIdentity;
+  /** Only the exact loaded/list-present subset is named here. */
+  routes: readonly ReanchorCodexRouteInput[];
+};
+
+export type ReanchorCodexRoutesResult = {
+  reboundAliases: string[];
+};
+
+export type RemoveStaleCodexOrphanInput = {
+  /** Dashboard-confirmed exact public alias; no native identifier is accepted. */
+  alias: string;
+};
+
+export type StaleCodexOrphanRemovalAuthority = {
+  binding: PrivateRouteBinding;
+  previousSequence: number;
+};
+
+export type StaleCodexOrphanRemovalCommitProofInput = {
+  alias: string;
+  binding: PrivateRouteBinding;
+  previousSequence: number;
+};
+
+export type RemoveStaleCodexOrphanResult = {
+  alias: string;
+  /** Private result used only to reconcile in-process service bindings. */
+  binding: PrivateRouteBinding;
+  removedPairs: Array<{
+    claudeAlias: string;
+    codexAlias: string;
+  }>;
 };
 
 export type EnqueueMessageInput = {

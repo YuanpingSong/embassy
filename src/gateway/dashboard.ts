@@ -587,6 +587,8 @@ function renderActivity(context: RenderContext): string {
     routes_paired: "app.activity.operation.routesPaired",
     routes_unpaired: "app.activity.operation.routesUnpaired",
     watch_ended: "app.activity.operation.watchEnded",
+    endpoint_refreshed: "app.activity.operation.endpointRefreshed",
+    codex_orphan_removed: "app.activity.operation.codexOrphanRemoved",
   };
   const operations = context.model.brokerActivity.length === 0
     ? ""
@@ -594,7 +596,7 @@ function renderActivity(context: RenderContext): string {
         .slice()
         .reverse()
         .map(
-          (event) => `<li data-dashboard-row="operator-action">${renderTimestampAtSnapshot(context, event.timestamp)} ${escapeDashboardHtml(t(context, operationCopyKeys[event.action]))} ${statusPill(t(context, event.outcome === "accepted" ? "app.activity.operation.accepted" : "app.activity.operation.rejected"), event.outcome === "accepted" ? "good" : "warning")}${event.aliases.length === 0 ? "" : ` <code>${event.aliases.map(escapeDashboardHtml).join(" · ")}</code>`}${event.safeErrorCode === undefined ? "" : ` <code>${event.safeErrorCode}</code>`}</li>`,
+          (event) => `<li data-dashboard-row="${event.operatorAction ? "operator-action" : "automatic-event"}" data-activity-authority="${event.operatorAction ? "operator" : "automatic"}">${renderTimestampAtSnapshot(context, event.timestamp)} ${statusPill(t(context, event.operatorAction ? "app.activity.operation.operator" : "app.activity.operation.automatic"), event.operatorAction ? "info" : "quiet")} ${escapeDashboardHtml(t(context, operationCopyKeys[event.action]))} ${statusPill(t(context, event.outcome === "accepted" ? "app.activity.operation.accepted" : "app.activity.operation.rejected"), event.outcome === "accepted" ? "good" : "warning")}${event.aliases.length === 0 ? "" : ` <code>${event.aliases.map(escapeDashboardHtml).join(" · ")}</code>`}${event.safeErrorCode === undefined ? "" : ` <code>${event.safeErrorCode}</code>`}</li>`,
         )
         .join("")}</ol></details>`;
   return `<section class="section" aria-labelledby="activity-title">

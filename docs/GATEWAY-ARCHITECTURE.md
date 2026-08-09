@@ -40,8 +40,8 @@ Embassy uses one private same-user Unix-domain control socket for its thin
 clients and generates a private static dashboard page in each supported
 language. `embassy serve` does not add a TCP listener, HTTP server, or public
 API. The opt-in `embassy dashboard --live` companion is a separate foreground
-process that binds an authenticated listener with three bounded route-consent
-actions on `127.0.0.1`; it is
+process that binds an authenticated listener with four bounded route actions
+on `127.0.0.1`; it is
 described under [Live dashboard companion](#live-dashboard-companion).
 
 ### Why this uses the new feature, but is not skill-only
@@ -156,7 +156,7 @@ The status below is intentionally narrower than the target architecture.
 | Neutral gateway types, metadata store, route fencing, bounded queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies remain memory-only |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
-| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, projection, and three bounded route-consent actions; it is a separate foreground process, never part of `embassy serve` |
+| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, projection, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter pinned to 2.1.226 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224–2.1.226 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
 | Exact Claude 2.1.226 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
 | Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
@@ -206,6 +206,30 @@ Codex registration is explicit. A task registers its own alias and
 authoritative `CODEX_THREAD_ID`; the gateway does not enumerate global Codex
 history to invent routes. A route becomes usable only after the matching host
 connector positively observes that exact task on the current endpoint
+generation.
+
+An App Server endpoint-generation change is a fenced route transition, not a
+new registration. Embassy stops dispatch through the old connector, creates a
+replacement connector, and runs the existing bounded compatibility probe
+against that replacement. Only a compatible result may proceed to
+`thread/loaded/list`, where every retained private thread ID must occur exactly
+once. The connector resumes that exact task with history excluded, and the
+store atomically re-anchors the same alias, owner lease, and pair edges to the
+new endpoint generation. Each successful re-anchor is recorded in a bounded
+private journal; neither thread IDs nor endpoint generations enter public
+activity, diagnostics, logs, or CLI output. An incompatible endpoint, a
+missing or duplicate exact task, or an unclean transition leaves the route
+stale and write-disabled. No body, callback, receipt handle, reply capability,
+conversation capability, delivery token, or ambiguous write crosses this
+boundary by replay.
+
+The live dashboard exposes one bounded recovery operation for an orphaned
+Codex registration. It carries only the public canonical `codex-*` alias and
+requires explicit operator confirmation. The broker revalidates that the
+route is stale and its owning endpoint generation is dead, then quiesces that
+exact route before removing it and its incident pair edges and appending the
+private recovery journal. Ready, merely offline, current-generation, and
+ambiguous cases fail closed; the browser cannot name a thread ID or endpoint
 generation.
 
 Claude discovery is passive and limited to currently advertised genuine
@@ -698,10 +722,15 @@ gateway as unavailable when nothing is serving.
   no cross-origin reads, and no routes outside the instance path.
 - **Projection and actions.** The companion observes through
   `observe_snapshot`. Its only mutations are exact two-endpoint `pair`,
-  `unpair`, and `refresh_dashboard` control calls behind one closed
-  authenticated `/action` route. The browser shows the consequence and requires
+  `unpair`, `refresh_dashboard`, and `remove_stale_codex_registration`
+  control calls behind one closed authenticated `/action` route. The recovery
+  action carries only a canonical public `codex-*` alias and is accepted only
+  after the broker revalidates that the route is stale and its endpoint
+  generation is dead; native task and generation IDs never enter the browser
+  contract. The browser shows the consequence and requires
   explicit confirmation; the server rejects bodies over 1 KiB and limits the
-  companion to six actions per minute. It cannot register, unregister, succeed,
+  companion to six actions per minute. It cannot create a registration,
+  unregister a live route, succeed,
   send, reply, approve, interrupt, change settings, or invoke a generic/provider
   method. Each mutation touches only the edge it names: adding an edge never
   retires another, and removing one settles its accepted work before the
