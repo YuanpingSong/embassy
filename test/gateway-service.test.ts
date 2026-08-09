@@ -19,6 +19,7 @@ import {
   type GatewayAdapterDiscovery,
   type GatewayAdapterDiscoverySnapshot,
   type GatewayAdapterDispatchResult,
+  type GatewayAdapterRouteObservationState,
   type GatewayAdapterRouteState,
   type GatewayProviderAdapter,
 } from "../src/gateway/service.js";
@@ -165,8 +166,11 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
-async function waitForAsync(predicate: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 2_000;
+async function waitForAsync(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error("synthetic dispatch timed out");
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -279,6 +283,7 @@ class FakeProvider implements GatewayProviderAdapter {
     receiptHandle: string;
     reason:
       | "ROUTE_BUSY"
+      | "CODEX_ROUTE_STALE"
       | "ROUTE_UNAVAILABLE"
       | "AWAITING_EXTERNAL_APPROVAL";
     queuedForMs: number;
@@ -287,6 +292,7 @@ class FakeProvider implements GatewayProviderAdapter {
     receiptHandle: string;
     reason:
       | "ROUTE_BUSY"
+      | "CODEX_ROUTE_STALE"
       | "ROUTE_UNAVAILABLE"
       | "AWAITING_EXTERNAL_APPROVAL";
     queuedForMs: number;
@@ -442,6 +448,7 @@ class FakeProvider implements GatewayProviderAdapter {
       kind: "stall";
       reason:
         | "ROUTE_BUSY"
+        | "CODEX_ROUTE_STALE"
         | "ROUTE_UNAVAILABLE"
         | "AWAITING_EXTERNAL_APPROVAL";
       queuedForMs: number;
@@ -691,10 +698,15 @@ class FakeProvider implements GatewayProviderAdapter {
     });
   }
 
-  emitRouteState(routeHandle: string, state: GatewayAdapterRouteState): void {
+  emitRouteState(
+    routeHandle: string,
+    state: GatewayAdapterRouteObservationState,
+    safeErrorCode?: string,
+  ): void {
     this.callbacks?.onRouteState({
       endpoint: { ...this.identity, routeHandle },
       state,
+      ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
     });
   }
 
@@ -3380,6 +3392,18 @@ test("transient Codex dispatch failures return to held queue and retry", async (
   const handlers = service.handlers();
   await selectAndRegister(handlers);
 
+  claude.callbacks?.onProtocolNotice?.({
+    code: "UNKNOWN_RECEIPT",
+  });
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).alerts.some(
+      (alert) =>
+        alert.code === "UNKNOWN_RECEIPT" &&
+        alert.provider === "claude" &&
+        alert.host === "this-mac",
+    ),
+  );
+
   const accepted = await handlers.sendToCodex(
     toCodex("uds:/synthetic/claude.sock"),
   );
@@ -3406,6 +3430,146 @@ test("transient Codex dispatch failures return to held queue and retry", async (
     ),
     false,
   );
+});
+
+test("a stale Codex route terminally fails held work and rejects new sends", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  codex.state = "busy";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const accepted = await handlers.sendToCodex(
+    toCodex("uds:/synthetic/claude.sock"),
+  );
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  const secondAccepted = await handlers.sendToCodex(
+    toCodex("uds:/synthetic/claude.sock"),
+  );
+  assert.equal(secondAccepted.accepted, true);
+  if (!secondAccepted.accepted) return;
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      (route) =>
+        route.alias === "codex-main@this-mac" && route.queueDepth === 2,
+    ),
+  );
+
+  codex.emitRouteState(THREAD_ID, "stale", "CODEX_ROUTE_STALE");
+  await waitForAsync(async () => {
+    const current = await handlers.deliveryStatus({
+      token: accepted.deliveryToken,
+    });
+    return current.found && current.terminal;
+  }, 5_000);
+  await waitForAsync(async () => {
+    const current = await handlers.deliveryStatus({
+      token: secondAccepted.deliveryToken,
+    });
+    return current.found && current.terminal;
+  }, 5_000);
+  const status = await handlers.deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found && status.terminal, true);
+  if (status.found) {
+    assert.equal(status.state, "failed");
+    assert.equal(status.safeErrorCode, "CODEX_ROUTE_STALE");
+  }
+  const secondStatus = await handlers.deliveryStatus({
+    token: secondAccepted.deliveryToken,
+  });
+  assert.equal(secondStatus.found && secondStatus.terminal, true);
+  if (secondStatus.found) {
+    assert.equal(secondStatus.state, "failed");
+    assert.equal(secondStatus.safeErrorCode, "CODEX_ROUTE_STALE");
+  }
+  assert.equal(codex.dispatches.length, 0);
+  const snapshot = await handlers.listSnapshot();
+  assert.equal(
+    snapshot.routes.some(
+      (route) =>
+        route.alias === "codex-main@this-mac" &&
+        route.state === "stale" &&
+        route.safeErrorCode === "CODEX_ROUTE_STALE",
+    ),
+    true,
+    JSON.stringify(snapshot.routes),
+  );
+  assert.equal(
+    snapshot.connectors.some(
+      (connector) =>
+        connector.provider === "codex" &&
+        connector.health === "degraded" &&
+        connector.compatibility === "expired" &&
+        connector.safeErrorCode === "CODEX_ROUTE_STALE",
+    ),
+    true,
+  );
+  assert.equal(
+    snapshot.messages.some(
+      (event) =>
+        event.direction === "claude_to_codex" &&
+        event.state === "failed" &&
+        event.safeErrorCode === "CODEX_ROUTE_STALE",
+    ),
+    true,
+  );
+  assert.equal(
+    snapshot.alerts.some(
+      (alert) =>
+        alert.code === "CODEX_ROUTE_STALE" &&
+        alert.severity === "error" &&
+        alert.alias === "codex-main@this-mac",
+    ),
+    true,
+  );
+  assert.deepEqual(
+    await handlers.sendToCodex(toCodex("uds:/synthetic/claude.sock")),
+    { accepted: false, code: "unavailable" },
+  );
+
+  codex.emitRouteState(THREAD_ID, "idle");
+  await waitForAsync(async () => {
+    const recovered = await handlers.listSnapshot();
+    return (
+      recovered.routes.some(
+        (route) =>
+          route.alias === "codex-main@this-mac" &&
+          route.state === "idle" &&
+          route.compatibility === "compatible",
+      ) &&
+      recovered.connectors.some(
+        (connector) =>
+          connector.provider === "codex" &&
+          connector.health === "healthy" &&
+          connector.compatibility === "compatible",
+      )
+    );
+  });
 });
 
 test("idle Codex re-registration wakes an already-held native message without another route notification", async (t) => {

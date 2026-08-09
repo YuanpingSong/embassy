@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
+import { CLAUDE_PEER_COMPATIBILITY } from "../src/gateway/claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
 import type { LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
@@ -26,10 +27,11 @@ const SYNTHETIC_LAUNCHER = "/synthetic/login-home/.local/bin/claude";
 const SYNTHETIC_SECRET = "SYNTHETIC_CREDENTIAL_MUST_NOT_BE_FORWARDED";
 
 function runtime(): AttestedClaudePeerRuntime {
+  const version = CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion;
   return {
     claudeExecutable:
-      "/synthetic/login-home/.local/share/claude/versions/2.1.225",
-    claudeCodeVersion: "2.1.225",
+      `/synthetic/login-home/.local/share/claude/versions/${version}`,
+    claudeCodeVersion: version,
     sessionsDir: "/synthetic/login-home/.claude/sessions",
     socketDir: "/synthetic/tmp/cc-socks",
   };

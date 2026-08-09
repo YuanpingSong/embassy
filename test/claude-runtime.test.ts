@@ -13,12 +13,15 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
+import { CLAUDE_PEER_COMPATIBILITY } from "../src/gateway/claude-peer.js";
 import {
   attestClaudePeerRuntime,
   type ClaudeVersionCommand,
 } from "../src/gateway/claude-runtime.js";
 
 const UID = process.getuid?.() ?? 501;
+const PINNED_VERSION = CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion;
+const PINNED_VERSION_OUTPUT = `${PINNED_VERSION} (Claude Code)\n`;
 
 type RuntimeFixture = {
   root: string;
@@ -40,7 +43,7 @@ async function fixture(t: TestContext): Promise<RuntimeFixture> {
   await chmod(home, 0o700);
   await writeFile(
     executable,
-    '#!/bin/sh\n[ "$1" = "--version" ] || exit 9\nprintf "2.1.225 (Claude Code)\\n"\n',
+    `#!/bin/sh\n[ "$1" = "--version" ] || exit 9\nprintf "${PINNED_VERSION} (Claude Code)\\n"\n`,
     { mode: 0o700 },
   );
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -64,7 +67,7 @@ test("runtime attestation invokes only --version with a closed non-secret enviro
       userInfo: () => current.user,
       runVersion: async (command) => {
         captured = command;
-        return { stdout: "2.1.225 (Claude Code)\n", stderr: "" };
+        return { stdout: PINNED_VERSION_OUTPUT, stderr: "" };
       },
     },
   );
@@ -90,7 +93,7 @@ test("runtime attestation invokes only --version with a closed non-secret enviro
   assert.equal(captured?.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
   assert.deepEqual(runtime, {
     claudeExecutable: current.executable,
-    claudeCodeVersion: "2.1.225",
+    claudeCodeVersion: PINNED_VERSION,
     sessionsDir: path.join(current.home, ".claude", "sessions"),
     socketDir: "/tmp/cc-socks",
   });
@@ -102,7 +105,7 @@ test("default runner executes the synthetic binary and no provider command", asy
     { claudeExecutable: current.executable },
     { userInfo: () => current.user },
   );
-  assert.equal(runtime.claudeCodeVersion, "2.1.225");
+  assert.equal(runtime.claudeCodeVersion, PINNED_VERSION);
 });
 
 test("runtime accepts only the exact official same-home pinned launcher symlink", async (t) => {
@@ -114,9 +117,9 @@ test("runtime accepts only the exact official same-home pinned launcher symlink"
     "claude",
     "versions",
   );
-  const target = path.join(versionsDir, "2.1.225");
+  const target = path.join(versionsDir, PINNED_VERSION);
   await mkdir(versionsDir, { recursive: true, mode: 0o700 });
-  await writeFile(target, '#!/bin/sh\nprintf "2.1.225 (Claude Code)\\n"\n', {
+  await writeFile(target, `#!/bin/sh\nprintf "${PINNED_VERSION} (Claude Code)\\n"\n`, {
     mode: 0o700,
   });
   await unlink(current.executable);
@@ -128,7 +131,7 @@ test("runtime accepts only the exact official same-home pinned launcher symlink"
       userInfo: () => current.user,
       runVersion: async (command) => {
         invokedExecutable = command.executable;
-        return { stdout: "2.1.225 (Claude Code)\n", stderr: "" };
+        return { stdout: PINNED_VERSION_OUTPUT, stderr: "" };
       },
     },
   );
@@ -154,7 +157,7 @@ test("runtime rejects version drift, stderr, and oversized output without reflec
   const current = await fixture(t);
   for (const output of [
     { stdout: "2.1.224 (Claude Code)\n", stderr: "" },
-    { stdout: "2.1.225 (Claude Code)\n", stderr: "warning" },
+    { stdout: PINNED_VERSION_OUTPUT, stderr: "warning" },
     { stdout: "x".repeat(4_097), stderr: "" },
   ]) {
     await assert.rejects(
@@ -228,7 +231,7 @@ test("runtime rejects a binary generation changed during version attestation", a
             '#!/bin/sh\nprintf "changed"\n',
             { mode: 0o700 },
           );
-          return { stdout: "2.1.225 (Claude Code)\n", stderr: "" };
+          return { stdout: PINNED_VERSION_OUTPUT, stderr: "" };
         },
       },
     ),
@@ -247,7 +250,7 @@ test("runtime rejects a pinned launcher symlink replaced during attestation", as
     "claude",
     "versions",
   );
-  const target = path.join(versionsDir, "2.1.225");
+  const target = path.join(versionsDir, PINNED_VERSION);
   await mkdir(versionsDir, { recursive: true, mode: 0o700 });
   await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   await unlink(current.executable);
@@ -260,7 +263,7 @@ test("runtime rejects a pinned launcher symlink replaced during attestation", as
         runVersion: async () => {
           await unlink(current.executable);
           await symlink(target, current.executable);
-          return { stdout: "2.1.225 (Claude Code)\n", stderr: "" };
+          return { stdout: PINNED_VERSION_OUTPUT, stderr: "" };
         },
       },
     ),

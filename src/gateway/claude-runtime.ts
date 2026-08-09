@@ -8,7 +8,9 @@ import { BridgeError } from "../errors.js";
 import { CLAUDE_PEER_COMPATIBILITY } from "./claude-peer.js";
 
 const MAX_VERSION_OUTPUT_BYTES = 4_096;
-const VERSION_OUTPUT_PATTERN = /^2\.1\.225 \(Claude Code\)\r?\n?$/;
+const VERSION_OUTPUT_PATTERN = new RegExp(
+  `^${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion.replaceAll(".", "\\.")} \\(Claude Code\\)\\r?\\n?$`,
+);
 const USERNAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 export type ClaudePeerRuntimeOptions = {

@@ -1390,14 +1390,17 @@ export class GatewayStore {
           "No enabled route matches the exact private binding and ownership lease.",
         );
       }
-      if (
-        !connector ||
-        !["healthy", "degraded"].includes(connector.health) ||
-        connector.compatibility !== "compatible"
-      ) {
+      const endpointObservationValid =
+        input.state === "stale"
+          ? connector?.health === "degraded" &&
+            connector.compatibility === "expired"
+          : connector !== undefined &&
+            ["healthy", "degraded"].includes(connector.health) &&
+            connector.compatibility === "compatible";
+      if (!endpointObservationValid) {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The exact compatible endpoint generation must be live before a route observation is accepted.",
+          "The route observation must match the exact endpoint generation's current health and compatibility.",
         );
       }
       route.state = input.state;
@@ -1699,6 +1702,18 @@ export class GatewayStore {
       const state = this.requireState();
       const route = state.routes.find((candidate) => candidate.alias === alias);
       if (
+        route?.enabled === true &&
+        route.binding.provider === "codex" &&
+        route.state === "stale" &&
+        route.safeErrorCode === "CODEX_ROUTE_STALE"
+      ) {
+        throw new BridgeError(
+          "CODEX_ROUTE_STALE",
+          "The selected Codex route exists but its connector is stale.",
+          true,
+        );
+      }
+      if (
         !route ||
         !route.enabled ||
         !["idle", "busy", "awaiting_approval"].includes(route.state) ||
@@ -1739,6 +1754,9 @@ export class GatewayStore {
         enabled: route.enabled,
         state: route.state,
         compatibility: route.compatibility,
+        ...(route.safeErrorCode === undefined
+          ? {}
+          : { safeErrorCode: route.safeErrorCode }),
       };
     });
   }

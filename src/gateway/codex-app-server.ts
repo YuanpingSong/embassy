@@ -177,6 +177,8 @@ export type CodexAppServerTransport = {
 export type WebSocketDuplexTransportOptions = {
   closeTimeoutMs?: number;
   handshakeTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
+  heartbeatTimeoutMs?: number;
   maxFrameBytes?: number;
 };
 
@@ -192,6 +194,9 @@ export type SocketCompatibleDuplex = Duplex & {
 
 const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_TURN_WATCHDOG_MS = 2 * 60_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_INPUT_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUE_DEPTH = 32;
 const DEFAULT_MAX_MESSAGE_IDS = 4_096;
@@ -229,9 +234,22 @@ export class WebSocketDuplexTransport implements CodexAppServerTransport {
       options.closeTimeoutMs ?? 2_000,
       "INVALID_CONFIGURATION",
     );
+    const heartbeatIntervalMs = positiveInteger(
+      options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+      "INVALID_CONFIGURATION",
+    );
+    const heartbeatTimeoutMs = positiveInteger(
+      options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
+      "INVALID_CONFIGURATION",
+    );
+    if (heartbeatTimeoutMs >= heartbeatIntervalMs) {
+      throw new CodexConnectorError("INVALID_CONFIGURATION");
+    }
 
     const socket = new WebSocket("ws://localhost/rpc", {
       createConnection: () => {
+        stream.setNoDelay(true);
+        stream.setKeepAlive(true, heartbeatIntervalMs);
         queueMicrotask(() => stream.emit("connect"));
         return stream as never;
       },
@@ -268,17 +286,28 @@ export class WebSocketDuplexTransport implements CodexAppServerTransport {
       socket.once("unexpected-response", onUnexpectedResponse);
     });
 
-    return new WebSocketDuplexTransport(socket, maxFrameBytes, closeTimeoutMs);
+    return new WebSocketDuplexTransport(
+      socket,
+      maxFrameBytes,
+      closeTimeoutMs,
+      heartbeatIntervalMs,
+      heartbeatTimeoutMs,
+    );
   }
 
   private readonly closeListeners = new Set<() => void>();
   private readonly errorListeners = new Set<() => void>();
   private readonly messageListeners = new Set<(payload: string) => void>();
+  private heartbeatInterval: NodeJS.Timeout | undefined;
+  private heartbeatTimeout: NodeJS.Timeout | undefined;
+  private heartbeatFailed = false;
 
   private constructor(
     private readonly socket: WebSocket,
     private readonly maxFrameBytes: number,
     private readonly closeTimeoutMs: number,
+    heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+    private readonly heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
   ) {
     socket.on("message", (data, isBinary) => {
       if (isBinary) {
@@ -295,10 +324,22 @@ export class WebSocketDuplexTransport implements CodexAppServerTransport {
       const payload = bytes.toString("utf8");
       for (const listener of this.messageListeners) listener(payload);
     });
-    socket.on("error", () => this.emitError());
+    socket.on("pong", () => {
+      if (this.heartbeatTimeout !== undefined) {
+        clearTimeout(this.heartbeatTimeout);
+        this.heartbeatTimeout = undefined;
+      }
+    });
+    socket.on("error", () => this.failHeartbeat());
     socket.on("close", () => {
+      this.stopHeartbeat();
       for (const listener of this.closeListeners) listener();
     });
+    this.heartbeatInterval = setInterval(
+      () => this.sendHeartbeat(),
+      heartbeatIntervalMs,
+    );
+    this.heartbeatInterval.unref();
   }
 
   onMessage(listener: (payload: string) => void): () => void {
@@ -332,6 +373,7 @@ export class WebSocketDuplexTransport implements CodexAppServerTransport {
   }
 
   async close(): Promise<void> {
+    this.stopHeartbeat();
     if (this.socket.readyState === WebSocket.CLOSED) return;
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -354,6 +396,49 @@ export class WebSocketDuplexTransport implements CodexAppServerTransport {
   private emitError(): void {
     for (const listener of this.errorListeners) listener();
   }
+
+  private sendHeartbeat(): void {
+    if (
+      this.socket.readyState !== WebSocket.OPEN ||
+      this.heartbeatFailed ||
+      this.heartbeatTimeout !== undefined
+    ) {
+      return;
+    }
+    try {
+      this.socket.ping(undefined, undefined, (error) => {
+        if (error != null) this.failHeartbeat();
+      });
+    } catch {
+      this.failHeartbeat();
+      return;
+    }
+    if (this.heartbeatFailed) return;
+    this.heartbeatTimeout = setTimeout(
+      () => this.failHeartbeat(),
+      this.heartbeatTimeoutMs,
+    );
+    this.heartbeatTimeout.unref();
+  }
+
+  private failHeartbeat(): void {
+    if (this.heartbeatFailed) return;
+    this.heartbeatFailed = true;
+    this.stopHeartbeat();
+    this.emitError();
+    this.socket.terminate();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval !== undefined) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
+    }
+    if (this.heartbeatTimeout !== undefined) {
+      clearTimeout(this.heartbeatTimeout);
+      this.heartbeatTimeout = undefined;
+    }
+  }
 }
 
 type ClientInfo = {
@@ -375,6 +460,7 @@ export type CodexAppServerConnectorOptions = {
   onEvent?: (event: CodexConnectorEvent) => void;
   onTurnResult?: (result: CodexTransientTurnResult) => void;
   requestTimeoutMs?: number;
+  turnWatchdogMs?: number;
   route: CodexRouteIdentity;
   transport: CodexAppServerTransport;
   /** Immutable outer authorization; monitor-only connectors set this false. */
@@ -567,6 +653,7 @@ export class CodexAppServerConnector {
   private eventSequence = 0;
   private expectedClose = false;
   private faulting = false;
+  private consecutiveRequestTimeouts = 0;
   private inFlightMethod: CodexAppServerV1Method | null = null;
   private initializeRequested = false;
   private initialized = false;
@@ -581,6 +668,7 @@ export class CodexAppServerConnector {
   private statusEpoch = 0;
   private transientReply: string | null = null;
   private transientReplyTooLarge = false;
+  private turnWatchdogTimer: NodeJS.Timeout | undefined;
   private readonly unlisten: Array<() => void> = [];
 
   private readonly clientInfo: ClientInfo;
@@ -597,6 +685,7 @@ export class CodexAppServerConnector {
     | ((result: CodexTransientTurnResult) => void)
     | undefined;
   private readonly requestTimeoutMs: number;
+  private readonly turnWatchdogMs: number;
   private readonly route: CodexRouteIdentity;
   private readonly transport: CodexAppServerTransport;
   private readonly writesEnabled: boolean;
@@ -642,6 +731,10 @@ export class CodexAppServerConnector {
     );
     this.requestTimeoutMs = positiveInteger(
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      "INVALID_CONFIGURATION",
+    );
+    this.turnWatchdogMs = positiveInteger(
+      options.turnWatchdogMs ?? DEFAULT_TURN_WATCHDOG_MS,
       "INVALID_CONFIGURATION",
     );
     this.now = options.now ?? (() => new Date());
@@ -952,6 +1045,7 @@ export class CodexAppServerConnector {
 
   async close(): Promise<void> {
     if (this.connection === "closed" || this.connection === "faulted") return;
+    this.clearTurnWatchdog();
     this.expectedClose = true;
     try {
       await this.transport.close();
@@ -1106,6 +1200,7 @@ export class CodexAppServerConnector {
         this.setRouteStatus("active");
       }
       this.emit("turn_started", { messageBytes: message.byteLength });
+      this.armTurnWatchdog();
       return "started";
     } catch (error) {
       const normalized = this.normalizeError(error, true);
@@ -1355,7 +1450,15 @@ export class CodexAppServerConnector {
         const pending = this.pending.get(id);
         if (pending === undefined) return;
         this.pending.delete(id);
+        this.consecutiveRequestTimeouts += 1;
         pending.reject(new CodexConnectorError("REQUEST_TIMEOUT", true));
+        if (this.consecutiveRequestTimeouts >= 2) {
+          queueMicrotask(() => {
+            if (this.connection === "ready") {
+              this.protocolFault("REQUEST_TIMEOUT");
+            }
+          });
+        }
       }, this.requestTimeoutMs);
       this.pending.set(id, { method, reject, resolve, timer });
       let write: Promise<void>;
@@ -1421,6 +1524,7 @@ export class CodexAppServerConnector {
     }
     this.pending.delete(parsed.id);
     clearTimeout(pending.timer);
+    this.consecutiveRequestTimeouts = 0;
     if (hasError) {
       if (
         !isRecord(parsed.error) ||
@@ -1493,6 +1597,7 @@ export class CodexAppServerConnector {
         return;
       }
       if (status === "not_loaded") {
+        this.clearTurnWatchdog();
         this.selectedThreadObserved = false;
         this.settleActiveDelivery("ambiguous");
         this.activeTurnId = null;
@@ -1509,6 +1614,13 @@ export class CodexAppServerConnector {
         return;
       }
       this.setRouteStatus(status);
+      if (
+        (status === "active" || status === "waiting_approval") &&
+        this.ownsActiveTurn &&
+        this.activeTurnId !== null
+      ) {
+        this.armTurnWatchdog();
+      }
       this.emit(
         status === "waiting_approval"
           ? "approval_waiting"
@@ -1525,6 +1637,7 @@ export class CodexAppServerConnector {
       }
       if (params.threadId !== this.route.threadId) return;
       this.settleActiveDelivery("ambiguous");
+      this.clearTurnWatchdog();
       this.activeTurnId = null;
       this.selectedThreadObserved = false;
       this.activeMessageId = null;
@@ -1566,6 +1679,7 @@ export class CodexAppServerConnector {
         this.ownsActiveTurn && this.activeMessageId !== null;
       this.setRouteStatus("active");
       this.emit("turn_started");
+      this.armTurnWatchdog();
       return;
     }
 
@@ -1589,6 +1703,7 @@ export class CodexAppServerConnector {
         return;
       }
       const outcome = turn.status as CodexTurnOutcome;
+      this.clearTurnWatchdog();
       if (!this.ownsActiveTurn || this.activeMessageId === null) {
         // An approval request from another client records the external turn ID
         // so Embassy can wait without answering it. Its terminal notification
@@ -1722,6 +1837,7 @@ export class CodexAppServerConnector {
     }
     this.transientReply = item.text;
     this.transientReplyTooLarge = false;
+    this.armTurnWatchdog();
   }
 
   private clearTransientReply(): void {
@@ -1744,6 +1860,7 @@ export class CodexAppServerConnector {
   }
 
   private settleActiveDelivery(outcome: "abandoned" | "ambiguous"): void {
+    this.clearTurnWatchdog();
     if (this.activeMessageId !== null) {
       this.settleDelivery(this.activeMessageId, outcome);
     }
@@ -1829,6 +1946,7 @@ export class CodexAppServerConnector {
     this.initialized = false;
     this.routeStatus = "stale";
     this.selectedThreadObserved = false;
+    this.clearTurnWatchdog();
     this.settleActiveDelivery("ambiguous");
     this.activeTurnId = null;
     const droppedMessages = this.dropQueuedMessages();
@@ -1847,6 +1965,7 @@ export class CodexAppServerConnector {
     this.initialized = false;
     this.routeStatus = "stale";
     this.selectedThreadObserved = false;
+    this.clearTurnWatchdog();
     this.settleActiveDelivery("ambiguous");
     this.activeTurnId = null;
     const droppedMessages = this.dropQueuedMessages();
@@ -1858,5 +1977,105 @@ export class CodexAppServerConnector {
       ...(!this.expectedClose ? { errorCode: "TRANSPORT_CLOSED" as const } : {}),
     });
     for (const remove of this.unlisten.splice(0)) remove();
+  }
+
+  private armTurnWatchdog(delayMs = this.turnWatchdogMs): void {
+    this.clearTurnWatchdog();
+    if (
+      this.connection !== "ready" ||
+      !this.ownsActiveTurn ||
+      this.activeMessageId === null ||
+      this.activeTurnId === null
+    ) {
+      return;
+    }
+    this.turnWatchdogTimer = setTimeout(() => {
+      this.turnWatchdogTimer = undefined;
+      void this.probeOwnedTurnStatus();
+    }, delayMs);
+    this.turnWatchdogTimer.unref();
+  }
+
+  private clearTurnWatchdog(): void {
+    if (this.turnWatchdogTimer === undefined) return;
+    clearTimeout(this.turnWatchdogTimer);
+    this.turnWatchdogTimer = undefined;
+  }
+
+  private async probeOwnedTurnStatus(): Promise<void> {
+    if (
+      this.connection !== "ready" ||
+      !this.ownsActiveTurn ||
+      this.activeMessageId === null ||
+      this.activeTurnId === null
+    ) {
+      return;
+    }
+    if (this.inFlightMethod !== null) {
+      this.armTurnWatchdog(
+        Math.min(this.turnWatchdogMs, this.requestTimeoutMs),
+      );
+      return;
+    }
+
+    const watchedMessageId = this.activeMessageId;
+    const watchedTurnId = this.activeTurnId;
+    this.beginRequest("thread/resume");
+    try {
+      const result = await this.request("thread/resume", {
+        excludeTurns: true,
+        threadId: this.route.threadId,
+      });
+      if (
+        !isRecord(result) ||
+        !isRecord(result.thread) ||
+        result.thread.id !== this.route.threadId ||
+        !Array.isArray(result.thread.turns) ||
+        result.thread.turns.length !== 0
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      const status = parseRouteStatus(result.thread.status);
+      if (status === null) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (
+        !this.ownsActiveTurn ||
+        this.activeMessageId !== watchedMessageId ||
+        this.activeTurnId !== watchedTurnId
+      ) {
+        return;
+      }
+      if (status === "active" || status === "waiting_approval") {
+        this.setRouteStatus(status);
+        this.emit(
+          status === "waiting_approval"
+            ? "approval_waiting"
+            : "route_status_changed",
+        );
+        this.armTurnWatchdog();
+        return;
+      }
+
+      this.settleActiveDelivery("ambiguous");
+      this.activeTurnId = null;
+      if (status === "not_loaded") this.selectedThreadObserved = false;
+      this.setRouteStatus(status);
+      this.emit("route_status_changed");
+      if (status === "idle") this.scheduleDrain();
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      this.handleActionError(normalized);
+      if (
+        this.connection === "ready" &&
+        this.ownsActiveTurn &&
+        this.activeMessageId === watchedMessageId &&
+        this.activeTurnId === watchedTurnId
+      ) {
+        this.armTurnWatchdog();
+      }
+    } finally {
+      this.finishRequest("thread/resume");
+    }
   }
 }

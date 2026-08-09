@@ -9,6 +9,7 @@ import {
   type ClaudePeerInboundMessage,
   type ClaudePeerInboundProgress,
   type ClaudePeerListener,
+  type ClaudePeerProtocolNotice,
   type ClaudePeerReceiptEvent,
   type ClaudePeerRegistryPublicationOutcome,
   type ClaudePeerTransportEvent,
@@ -34,6 +35,7 @@ import type {
   GatewayAdapterDiscoverySnapshot,
   GatewayAdapterDispatchResult,
   GatewayAdapterRouteState,
+  GatewayAdapterRouteObservationState,
   GatewayAdapterStart,
   GatewayProviderAdapter,
 } from "./service.js";
@@ -55,6 +57,8 @@ const MAX_CODEX_CALLBACKS = 512;
 const MAX_TRANSIENT_REPLY_BYTES = 64 * 1024;
 const DEFAULT_CODEX_CLEANUP_TIMEOUT_MS = 5_000;
 const DEFAULT_CODEX_CLEANUP_POLL_MS = 25;
+const DEFAULT_CODEX_RECOVERY_INITIAL_MS = 250;
+const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
 
 type ClaudePeerFactory = (
   runtime: AttestedClaudePeerRuntime,
@@ -381,6 +385,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           if (listenerGeneration !== undefined) {
             this.onReceipt(listenerGeneration, event);
           }
+        },
+        onProtocolNotice: (notice: ClaudePeerProtocolNotice) => {
+          this.callbacks?.onProtocolNotice?.({ code: notice.code });
         },
       });
       listenerGeneration = {
@@ -1904,6 +1911,8 @@ export type LocalCodexGatewayProviderOptions = {
   factory: LocalCodexTransportFactory;
   cleanupPollMs?: number;
   cleanupTimeoutMs?: number;
+  recoveryInitialMs?: number;
+  recoveryMaxMs?: number;
   maxCallbackEvents?: number;
   maxRoutes?: number;
   maxReplyBytes?: number;
@@ -1923,7 +1932,7 @@ type CodexCallbackEvent =
       type: "route";
       generation: symbol;
       routeHandle: string;
-      state: GatewayAdapterRouteState;
+      state: GatewayAdapterRouteObservationState;
       safeErrorCode?: string;
     };
 
@@ -1956,18 +1965,30 @@ function validateCodexFactory(factory: LocalCodexTransportFactory): void {
 
 function codexRouteState(
   observation: CodexConnectorObservation,
-): GatewayAdapterRouteState {
+): GatewayAdapterRouteObservationState {
+  if (observation.connection !== "ready") return "stale";
   if (observation.routeStatus === "idle") return "idle";
   if (observation.routeStatus === "waiting_approval") {
     return "awaiting_approval";
   }
-  return "busy";
+  if (
+    observation.routeStatus === "starting" ||
+    observation.routeStatus === "active" ||
+    observation.routeStatus === "interrupting"
+  ) {
+    return "busy";
+  }
+  // Unknown, not-loaded, uncertain, system-error, and explicit stale states
+  // are never cosmetic busy. They cannot authorize another write.
+  return "stale";
 }
 
 function codexRouteSafeCode(
   observation: CodexConnectorObservation,
 ): string | undefined {
-  if (observation.connection !== "ready") return "CODEX_ROUTE_STALE";
+  if (codexRouteState(observation) === "stale") {
+    return "CODEX_ROUTE_STALE";
+  }
   if (!observation.writableReady) {
     return "CODEX_WRITES_DISABLED";
   }
@@ -1985,10 +2006,16 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly maxReplyBytes: number;
   private readonly cleanupPollMs: number;
   private readonly cleanupTimeoutMs: number;
+  private readonly recoveryInitialMs: number;
+  private readonly recoveryMaxMs: number;
   private readonly now: () => Date;
   private readonly routes = new Map<string, CodexRoute>();
   private readonly routeCreations = new Map<string, Promise<CodexRoute>>();
   private readonly routeReleases = new Map<string, Promise<void>>();
+  private readonly routeRecoveryAttempts = new Map<string, number>();
+  private readonly routeRecoveryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly routeRecoveries = new Map<string, Promise<void>>();
+  private readonly routesRequiringRecovery = new Set<string>();
   private readonly expectsReply = new Map<string, boolean>();
   private readonly callbackQueue: CodexCallbackEvent[] = [];
   private callbackScheduled = false;
@@ -2038,6 +2065,22 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         "The cleanup polling interval must be shorter than its deadline.",
       );
     }
+    this.recoveryInitialMs = positiveBounded(
+      options.recoveryInitialMs,
+      DEFAULT_CODEX_RECOVERY_INITIAL_MS,
+      60_000,
+    );
+    this.recoveryMaxMs = positiveBounded(
+      options.recoveryMaxMs,
+      DEFAULT_CODEX_RECOVERY_MAX_MS,
+      5 * 60_000,
+    );
+    if (this.recoveryInitialMs > this.recoveryMaxMs) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_PROVIDER_CONFIGURATION",
+        "The Codex recovery initial delay cannot exceed its capped delay.",
+      );
+    }
     this.now = options.now ?? (() => new Date());
   }
 
@@ -2081,9 +2124,11 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         "The Codex task identifier is outside the exact provider boundary.",
       );
     }
+    this.cancelRouteRecovery(input.routeHandle);
     const route = await this.ensureRoute(input.routeHandle);
     const observation = route.connector.observation();
-    if (observation.connection !== "ready") {
+    const state = codexRouteState(observation);
+    if (state === "stale") {
       await this.releaseRoute(input.routeHandle);
       throw new BridgeError(
         "CODEX_ROUTE_SETUP_REJECTED",
@@ -2093,7 +2138,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.queueRouteObservation(route, observation);
     return {
       routeHandle: input.routeHandle,
-      state: codexRouteState(observation),
+      state,
     };
   }
 
@@ -2215,6 +2260,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   }
 
   async releaseRoute(routeHandle: string): Promise<void> {
+    this.cancelRouteRecovery(routeHandle);
+    const recovery = this.routeRecoveries.get(routeHandle);
+    if (recovery !== undefined) await recovery;
+    await this.releaseRouteInternal(routeHandle);
+  }
+
+  private async releaseRouteInternal(routeHandle: string): Promise<void> {
     const pending = this.routeReleases.get(routeHandle);
     if (pending !== undefined) return await pending;
     const route = this.routes.get(routeHandle);
@@ -2235,10 +2287,17 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   async close(): Promise<void> {
     if (this.closed || this.closing) return;
     this.closing = true;
+    for (const timer of this.routeRecoveryTimers.values()) clearTimeout(timer);
+    this.routeRecoveryTimers.clear();
+    this.routesRequiringRecovery.clear();
     const entries = [...this.routes.entries()];
     const routeResults = await Promise.allSettled(
       entries.map(async ([routeHandle]) => this.releaseRoute(routeHandle)),
     );
+    await Promise.allSettled([
+      ...this.routeRecoveries.values(),
+      ...this.routeCreations.values(),
+    ]);
     this.drainCallbackQueue();
     if (routeResults.some((result) => result.status === "rejected")) {
       this.closing = false;
@@ -2286,11 +2345,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         return existing;
       }
       // A cached connector cannot recover after its transport closes or the
-      // protocol faults. Explicit route selection is the operator's recovery
-      // boundary: fully release that exact connector before constructing a
-      // fresh one. releaseRoute is identity-checked, so a concurrent selector
-      // joins the same cleanup instead of closing a replacement.
-      await this.releaseRoute(threadId);
+      // protocol faults. Fully release that exact connector before constructing
+      // a fresh one. The identity-checked release lets automatic recovery and
+      // an explicit selector join the same cleanup safely.
+      await this.releaseRouteInternal(threadId);
       return await this.ensureRoute(threadId);
     }
     const pending = this.routeCreations.get(threadId);
@@ -2306,7 +2364,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.routeCreations.set(threadId, creation);
     try {
       const route = await creation;
-      if (this.closed) {
+      if (this.closing || this.closed) {
         await this.closeRoute(route);
         throw new BridgeError(
           "CODEX_PROVIDER_UNAVAILABLE",
@@ -2391,6 +2449,94 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const route = this.routes.get(threadId);
     if (route === undefined || route.generation !== generation) return;
     this.queueRouteObservation(route, event);
+    if (
+      event.kind === "protocol_fault" ||
+      (event.kind === "connection_closed" &&
+        event.details?.errorCode !== undefined) ||
+      (event.kind === "route_status_changed" &&
+        codexRouteState(event) === "stale")
+    ) {
+      this.routesRequiringRecovery.add(threadId);
+      this.scheduleRouteRecovery(threadId);
+    }
+  }
+
+  private scheduleRouteRecovery(threadId: string): void {
+    if (
+      this.closed ||
+      this.closing ||
+      !this.routesRequiringRecovery.has(threadId) ||
+      this.routeRecoveryTimers.has(threadId) ||
+      this.routeRecoveries.has(threadId)
+    ) {
+      return;
+    }
+    const attempt = this.routeRecoveryAttempts.get(threadId) ?? 0;
+    const delay = Math.min(
+      this.recoveryMaxMs,
+      this.recoveryInitialMs * 2 ** Math.min(attempt, 16),
+    );
+    const timer = setTimeout(() => {
+      if (this.routeRecoveryTimers.get(threadId) !== timer) return;
+      this.routeRecoveryTimers.delete(threadId);
+      const recovery = this.recoverRoute(threadId);
+      this.routeRecoveries.set(threadId, recovery);
+      void recovery.finally(() => {
+        if (this.routeRecoveries.get(threadId) === recovery) {
+          this.routeRecoveries.delete(threadId);
+        }
+        this.scheduleRouteRecovery(threadId);
+      });
+    }, delay);
+    timer.unref();
+    this.routeRecoveryTimers.set(threadId, timer);
+  }
+
+  private async recoverRoute(threadId: string): Promise<void> {
+    if (
+      this.closed ||
+      this.closing ||
+      !this.routesRequiringRecovery.has(threadId)
+    ) {
+      return;
+    }
+    try {
+      const current = this.routes.get(threadId);
+      if (
+        current !== undefined &&
+        codexRouteState(current.connector.observation()) === "stale"
+      ) {
+        await this.releaseRouteInternal(threadId);
+      }
+      if (!this.routesRequiringRecovery.has(threadId)) return;
+      const replacement = await this.ensureRoute(threadId);
+      if (!this.routesRequiringRecovery.has(threadId)) {
+        // An explicit selector can join this exact creation after cancelling
+        // automatic recovery. In that case the replacement is now operator-
+        // owned and must remain live. Explicit release waits for this recovery
+        // promise before closing any late-created replacement.
+        return;
+      }
+      this.routesRequiringRecovery.delete(threadId);
+      this.routeRecoveryAttempts.delete(threadId);
+      this.queueRouteObservation(
+        replacement,
+        replacement.connector.observation(),
+      );
+    } catch {
+      this.routeRecoveryAttempts.set(
+        threadId,
+        (this.routeRecoveryAttempts.get(threadId) ?? 0) + 1,
+      );
+    }
+  }
+
+  private cancelRouteRecovery(threadId: string): void {
+    this.routesRequiringRecovery.delete(threadId);
+    this.routeRecoveryAttempts.delete(threadId);
+    const timer = this.routeRecoveryTimers.get(threadId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.routeRecoveryTimers.delete(threadId);
   }
 
   private onTurnResult(result: CodexTransientTurnResult): void {

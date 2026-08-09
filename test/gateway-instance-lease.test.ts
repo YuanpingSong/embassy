@@ -105,6 +105,29 @@ test(
   },
 );
 
+test("a closed lease-helper stdin is normalized as ordinary contention", async (t) => {
+  const home = await homeFixture(t);
+  await assert.rejects(
+    acquireGatewayInstanceLease(home, {
+      hostLeaseExitTimeoutMs: 250,
+      spawnLeaseHelper: (_command, _args, options) => {
+        const helper = spawn(
+          process.execPath,
+          ["--eval", "setInterval(() => undefined, 1000)"],
+          options,
+        );
+        const error = Object.assign(new Error("synthetic closed pipe"), {
+          code: "EPIPE",
+        });
+        helper.stdin.destroy(error);
+        return helper;
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE",
+  );
+});
+
 test(
   "the host lease reports an unexpected helper exit and remains safely closable",
   { skip: process.platform !== "darwin" },

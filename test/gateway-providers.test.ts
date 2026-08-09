@@ -52,6 +52,7 @@ function callbacks(): {
   messages: NonNullable<
     Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0]
   >[];
+  notices: Array<{ code: string }>;
   routes: Parameters<GatewayAdapterCallbacks["onRouteState"]>[0][];
 } {
   const deliveries: GatewayAdapterDelivery[] = [];
@@ -59,6 +60,7 @@ function callbacks(): {
   const messages: NonNullable<
     Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0]
   >[] = [];
+  const notices: Array<{ code: string }> = [];
   const routes: Parameters<GatewayAdapterCallbacks["onRouteState"]>[0][] = [];
   return {
     callbacks: {
@@ -67,12 +69,20 @@ function callbacks(): {
         replies.push({ endpoint: { ...event.endpoint }, text: event.text }),
       onClaudeMessage: (event) =>
         messages.push({ ...event, endpoint: { ...event.endpoint } }),
+      onProtocolNotice: (event) => notices.push({ ...event }),
       onRouteState: (event) =>
-        routes.push({ endpoint: { ...event.endpoint }, state: event.state }),
+        routes.push({
+          endpoint: { ...event.endpoint },
+          state: event.state,
+          ...(event.safeErrorCode === undefined
+            ? {}
+            : { safeErrorCode: event.safeErrorCode }),
+        }),
     },
     deliveries,
     replies,
     messages,
+    notices,
     routes,
   };
 }
@@ -293,6 +303,12 @@ class FakeClaudePeer {
     return { release, started };
   }
 
+  emitUnknownReceiptNotice(): void {
+    this.listenerOptions?.onProtocolNotice?.({
+      code: "UNKNOWN_RECEIPT",
+    });
+  }
+
   async assertTargetWorkspaceDisjoint(
     routeHandle: string,
     stateRoot: string,
@@ -461,8 +477,8 @@ async function waitFor(
 
 function claudeRuntime(): AttestedClaudePeerRuntime {
   return {
-    claudeExecutable: "/synthetic/home/.local/share/claude/versions/2.1.225",
-    claudeCodeVersion: "2.1.225",
+    claudeExecutable: "/synthetic/home/.local/share/claude/versions/2.1.226",
+    claudeCodeVersion: "2.1.226",
     sessionsDir: "/synthetic/home/.claude/sessions",
     socketDir: "/synthetic/tmp/cc-socks",
   };
@@ -1440,7 +1456,12 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
       error.code === "CLAUDE_PROVIDER_UNAVAILABLE",
   );
 
-  await provider.initialize(callbacks().callbacks);
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  fake.emitUnknownReceiptNotice();
+  assert.deepEqual(observed.notices, [
+    { code: "UNKNOWN_RECEIPT" },
+  ]);
   await provider.advertiseNativeCodexPeer({
     alias: "codex-reviewer@this-mac",
     cwd: SAFE_WORKSPACE,
@@ -2020,6 +2041,8 @@ class FakeCodexFactory {
   readonly writeCompatibility: typeof this.schemaCompatibility | null;
   readonly writableReady: boolean;
   readonly transports: FakeCodexTransport[] = [];
+  connectAttempts = 0;
+  connectGate: Promise<void> | undefined;
   closed = false;
   failNextConnect = false;
   faultNextRouteAfterResume = false;
@@ -2038,6 +2061,10 @@ class FakeCodexFactory {
   }
 
   async connectTransport(): Promise<LocalCodexOwnedTransport> {
+    this.connectAttempts += 1;
+    const gate = this.connectGate;
+    this.connectGate = undefined;
+    if (gate !== undefined) await gate;
     if (this.failNextConnect) {
       this.failNextConnect = false;
       throw new Error("synthetic connection failure");
@@ -2063,11 +2090,16 @@ class FakeCodexFactory {
 
 function codexProvider(
   factory: FakeCodexFactory,
-  cleanup: { cleanupPollMs?: number; cleanupTimeoutMs?: number } = {},
+  options: {
+    cleanupPollMs?: number;
+    cleanupTimeoutMs?: number;
+    recoveryInitialMs?: number;
+    recoveryMaxMs?: number;
+  } = {},
 ) {
   return createLocalCodexGatewayProvider({
     factory: factory as unknown as LocalCodexTransportFactory,
-    ...cleanup,
+    ...options,
   });
 }
 
@@ -2160,7 +2192,10 @@ test("Codex succession barrier exposes only an exact quiet connector", async () 
 
 test("local Codex provider attaches one exact route, refreshes it before write, and hands off a bounded final reply", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);
-  const provider = codexProvider(factory);
+  const provider = codexProvider(factory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
   const observed = callbacks();
   assert.deepEqual(await provider.initialize(observed.callbacks), {
     health: "healthy",
@@ -2234,6 +2269,8 @@ test("local Codex provider attaches one exact route, refreshes it before write, 
 
   await provider.releaseRoute(THREAD_ID);
   assert.equal(transport.cleanupConfirmed, true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(factory.transports.length, 1);
   await provider.close();
   assert.equal(factory.closed, true);
 });
@@ -2320,6 +2357,216 @@ for (const failureMode of ["disconnect", "fault"] as const) {
     assert.equal(replacement.cleanupConfirmed, true);
   });
 }
+
+test("a dead Codex connector becomes stale and auto-recovers without replay", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  const first = factory.transports[0]!;
+  const messageId = "gateway-auto-recovery";
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId,
+      text: "settle once, then rebuild the route",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  first.disconnectUnexpectedly();
+
+  await waitFor(() =>
+    observed.routes.some(
+      (event) =>
+        event.endpoint.routeHandle === THREAD_ID &&
+        event.state === "stale" &&
+        event.safeErrorCode === "CODEX_ROUTE_STALE",
+    ),
+  );
+  assert.equal(
+    observed.deliveries.filter(
+      (event) => event.messageId === messageId && event.state === "ambiguous",
+    ).length,
+    1,
+  );
+
+  await waitFor(() => factory.transports.length === 2);
+  await waitFor(() => observed.routes.at(-1)?.state === "idle");
+  assert.equal(first.cleanupConfirmed, true);
+  assert.equal(
+    first.sent.filter((message) => message.method === "turn/start").length,
+    1,
+  );
+  const replacement = factory.transports[1]!;
+  assert.equal(
+    replacement.sent.some((message) => message.method === "turn/start"),
+    false,
+  );
+
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-after-auto-recovery",
+      text: "use the rebuilt connector",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  assert.equal(
+    replacement.sent.filter((message) => message.method === "turn/start")
+      .length,
+    1,
+  );
+  await provider.close();
+});
+
+test("unusable Codex thread states are stale rather than busy and auto-recover", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  factory.transports[0]!.emit({
+    method: "thread/closed",
+    params: { threadId: THREAD_ID },
+  });
+  await waitFor(() =>
+    observed.routes.some(
+      (event) =>
+        event.state === "stale" &&
+        event.safeErrorCode === "CODEX_ROUTE_STALE",
+    ),
+  );
+  await waitFor(() => factory.transports.length === 2);
+  await waitFor(() => observed.routes.at(-1)?.state === "idle");
+  assert.equal(factory.transports[0]!.cleanupConfirmed, true);
+
+  factory.transports[1]!.emit({
+    method: "thread/status/changed",
+    params: {
+      status: { type: "systemError" },
+      threadId: THREAD_ID,
+    },
+  });
+  await waitFor(
+    () =>
+      observed.routes.filter((event) => event.state === "stale").length >= 2,
+  );
+  await waitFor(() => factory.transports.length === 3);
+  await waitFor(() => observed.routes.at(-1)?.state === "idle");
+  assert.equal(factory.transports[1]!.cleanupConfirmed, true);
+  await provider.close();
+});
+
+test("explicit release joins an in-flight automatic recovery and closes its late replacement", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  await provider.initialize(callbacks().callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  let releaseConnect: (() => void) | undefined;
+  factory.connectGate = new Promise<void>((resolve) => {
+    releaseConnect = resolve;
+  });
+  factory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => factory.connectAttempts === 2);
+
+  const released = provider.releaseRoute(THREAD_ID);
+  releaseConnect?.();
+  await released;
+  assert.equal(factory.transports.length, 2);
+  assert.equal(
+    factory.transports.every((transport) => transport.cleanupConfirmed),
+    true,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(factory.connectAttempts, 2);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-after-explicit-release",
+      text: "must not recreate the released route",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
+  );
+  await provider.close();
+});
+
+test("explicit selection can adopt an in-flight automatic recovery replacement", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory, {
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  await provider.initialize(callbacks().callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+
+  let releaseConnect: (() => void) | undefined;
+  factory.connectGate = new Promise<void>((resolve) => {
+    releaseConnect = resolve;
+  });
+  factory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => factory.connectAttempts === 2);
+
+  const selected = provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  releaseConnect?.();
+  assert.deepEqual(await selected, { routeHandle: THREAD_ID, state: "idle" });
+  assert.equal(factory.transports.length, 2);
+  assert.equal(factory.transports[1]!.cleanupConfirmed, false);
+  assert.deepEqual(
+    await provider.dispatch({
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-after-explicit-reselection",
+      text: "use the shared recovery replacement once",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  assert.equal(
+    factory.transports[1]!.sent.filter(
+      (message) => message.method === "turn/start",
+    ).length,
+    1,
+  );
+  await provider.close();
+});
 
 test("failed Codex route recovery removes the stale connector and leaves no writable route", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);

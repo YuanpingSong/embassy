@@ -269,10 +269,16 @@ function waitForHostLeaseReady(
     };
     const onError = (): void => finish(unavailable());
     const onExit = (): void => finish(unavailable());
+    const onStdinError = (): void => finish(unavailable());
 
     child.stdout.on("data", onData);
     child.once("error", onError);
     child.once("exit", onExit);
+    // A contending lockf helper may exit before the challenge write reaches
+    // its pipe. Its stdin then emits EPIPE/ERR_STREAM_DESTROYED in addition to
+    // invoking the write callback. Treat that as the same bounded contention
+    // outcome instead of allowing an unhandled stream error to escape.
+    child.stdin.on("error", onStdinError);
     child.stdin.write(challenge, "utf8", (error) => {
       if (error !== null && error !== undefined) finish(unavailable());
     });

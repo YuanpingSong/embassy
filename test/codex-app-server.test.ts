@@ -105,6 +105,7 @@ function fixture(
     maxReplyBytes?: number;
     now?: () => Date;
     requestTimeoutMs?: number;
+    turnWatchdogMs?: number;
     writesEnabled?: boolean;
   } = {},
 ): {
@@ -153,6 +154,9 @@ function fixture(
         ...(options.requestTimeoutMs === undefined
           ? {}
           : { requestTimeoutMs: options.requestTimeoutMs }),
+        ...(options.turnWatchdogMs === undefined
+          ? {}
+          : { turnWatchdogMs: options.turnWatchdogMs }),
         route: {
           endpointGeneration: ENDPOINT_GENERATION,
           threadId: THREAD_ID,
@@ -229,6 +233,53 @@ test("WebSocket transport treats nullish send callbacks as success", async () =>
       assertConnectorError(error, "TRANSPORT_WRITE_FAILED") &&
       (error as CodexConnectorError).ambiguous,
   );
+});
+
+test("WebSocket heartbeat terminates a socket that stops answering pings", async () => {
+  class FakeSocket extends EventEmitter {
+    readyState = 1;
+    pings = 0;
+    terminations = 0;
+
+    ping(
+      _data: undefined,
+      _mask: undefined,
+      callback: (error?: Error) => void,
+    ): void {
+      this.pings += 1;
+      callback();
+    }
+
+    terminate(): void {
+      this.terminations += 1;
+      this.readyState = 3;
+    }
+  }
+
+  const TransportConstructor = WebSocketDuplexTransport as unknown as new (
+    socket: never,
+    maxFrameBytes: number,
+    closeTimeoutMs: number,
+    heartbeatIntervalMs: number,
+    heartbeatTimeoutMs: number,
+  ) => WebSocketDuplexTransport;
+  const socket = new FakeSocket();
+  const transport = new TransportConstructor(
+    socket as never,
+    1_024,
+    100,
+    5,
+    3,
+  );
+  let errors = 0;
+  transport.onError(() => {
+    errors += 1;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(socket.pings, 1);
+  assert.equal(socket.terminations, 1);
+  assert.equal(errors, 1);
 });
 
 test("initializes once with output opt-outs and exposes only the reviewed v1 methods", async () => {
@@ -1752,6 +1803,112 @@ test("faults on uncorrelated responses and never retries an ambiguous turn start
     },
   ]);
   await secondConnector.close();
+});
+
+test("owned-turn watchdog releases a route whose completion notification was lost", async () => {
+  let turnStarted = false;
+  const { connect, replies, transport } = fixture(
+    (message, fake) => {
+      if (message.method === "thread/resume") {
+        fake.respond(message, {
+          thread: {
+            id: THREAD_ID,
+            status: { type: "idle" },
+            turns: [],
+          },
+        });
+      } else if (message.method === "turn/start") {
+        turnStarted = true;
+        fake.respond(message, {
+          turn: { id: "turn-watchdog-reconcile", status: "inProgress" },
+        });
+      }
+    },
+    { requestTimeoutMs: 50, turnWatchdogMs: 10 },
+  );
+  const connector = await connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+  await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-watchdog-reconcile",
+    text: "reconcile the missing completion",
+  });
+  assert.equal(turnStarted, true);
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(connector.observation().connection, "ready");
+  assert.equal(connector.observation().routeStatus, "idle");
+  assert.equal(connector.observation().hasActiveTurn, false);
+  assert.deepEqual(replies, [
+    {
+      messageId: "message-watchdog-reconcile",
+      outcome: "ambiguous",
+      replyCode: "REPLY_UNAVAILABLE",
+      text: null,
+    },
+  ]);
+  assert.equal(
+    transport.sent.filter((message) => message.method === "turn/start").length,
+    1,
+  );
+  assert.equal(
+    transport.sent.filter((message) => message.method === "thread/resume")
+      .length,
+    3,
+  );
+  await connector.close();
+});
+
+test("two consecutive watchdog request timeouts fault the connector stale", async () => {
+  let resumeCount = 0;
+  const { connect, events, replies, transport } = fixture(
+    (message, fake) => {
+      if (message.method === "thread/resume") {
+        resumeCount += 1;
+        if (resumeCount <= 2) {
+          fake.respond(message, {
+            thread: {
+              id: THREAD_ID,
+              status: { type: "idle" },
+              turns: [],
+            },
+          });
+        }
+      } else if (message.method === "turn/start") {
+        fake.respond(message, {
+          turn: { id: "turn-watchdog-timeout", status: "inProgress" },
+        });
+      }
+    },
+    { requestTimeoutMs: 10, turnWatchdogMs: 5 },
+  );
+  const connector = await connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+  await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-watchdog-timeout",
+    text: "detect the missing app-server responses",
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(connector.observation().connection, "faulted");
+  assert.equal(connector.observation().routeStatus, "stale");
+  assert.deepEqual(replies, [
+    {
+      messageId: "message-watchdog-timeout",
+      outcome: "ambiguous",
+      replyCode: "REPLY_UNAVAILABLE",
+      text: null,
+    },
+  ]);
+  const fault = events.find((event) => event.kind === "protocol_fault");
+  assert.equal(fault?.details?.errorCode, "REQUEST_TIMEOUT");
+  assert.equal(
+    transport.sent.filter((message) => message.method === "turn/start").length,
+    1,
+  );
 });
 
 test("blocks method smuggling and faults on malformed targeted notifications", async () => {

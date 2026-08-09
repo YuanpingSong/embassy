@@ -86,6 +86,10 @@ export type GatewayAdapterRouteState = Extract<
   "idle" | "busy" | "awaiting_approval"
 >;
 
+export type GatewayAdapterRouteObservationState =
+  | GatewayAdapterRouteState
+  | "stale";
+
 export type GatewayAdapterDiscovery = {
   /** Canonical public alias. The service never lowercases or truncates it. */
   alias: string;
@@ -131,7 +135,7 @@ export type GatewayAdapterCallbacks = {
   onDelivery: (event: GatewayAdapterDelivery) => void;
   onRouteState: (event: {
     endpoint: PrivateEndpointIdentity & { routeHandle: string };
-    state: GatewayAdapterRouteState;
+    state: GatewayAdapterRouteObservationState;
     safeErrorCode?: string;
   }) => void;
   /** A callback user frame has no conversation ID; correlation is service-owned. */
@@ -146,6 +150,8 @@ export type GatewayAdapterCallbacks = {
     text: string;
     receiptHandle?: string;
   }) => void;
+  /** Bounded provider protocol diagnostics; never includes raw frame data. */
+  onProtocolNotice?: (event: { code: string }) => void;
 };
 
 export type GatewayAdapterStart = {
@@ -208,6 +214,7 @@ export interface GatewayProviderAdapter {
       reason:
         | "ROUTE_BUSY"
         | "ROUTE_UNAVAILABLE"
+        | "CODEX_ROUTE_STALE"
         | "AWAITING_EXTERNAL_APPROVAL";
       queuedForMs: number;
     },
@@ -380,7 +387,7 @@ type CallbackEvent =
       source: PrivateEndpointIdentity;
       value: {
         routeHandle: string;
-        state: GatewayAdapterRouteState;
+        state: GatewayAdapterRouteObservationState;
         safeErrorCode?: string;
       };
     }
@@ -400,6 +407,11 @@ type CallbackEvent =
         text: string;
         receiptHandle?: string;
       };
+    }
+  | {
+      type: "protocol_notice";
+      source: PrivateEndpointIdentity;
+      value: { code: string };
     };
 
 type Candidate = GatewayAdapterDiscovery & {
@@ -509,7 +521,10 @@ export class GatewayService {
   private readonly successionGeneration: () => string;
   private readonly mutex = new KeyedMutex();
   private readonly routeBindings = new Map<string, PrivateRouteBinding>();
-  private readonly routeStates = new Map<string, GatewayAdapterRouteState>();
+  private readonly routeStates = new Map<
+    string,
+    GatewayAdapterRouteObservationState
+  >();
   private readonly bindingAliases = new Map<string, string>();
   private readonly candidates = new Map<string, Candidate>();
   private availablePeers: PublicAvailablePeerSnapshot[] = [];
@@ -522,6 +537,10 @@ export class GatewayService {
   private readonly activeDispatchByTarget = new Map<string, string>();
   private readonly scheduledDispatchTargets = new Set<string>();
   private readonly dispatchRunnerTargets = new Set<string>();
+  private readonly heldRedispatchTimers = new Map<
+    string,
+    GatewayServiceTimer
+  >();
   private readonly pendingClaudeReplies = new Map<string, PendingClaudeReply>();
   private readonly deliveryTrackers = new Map<string, MessageDeliveryTracker>();
   private readonly deliveryTokens = new Map<string, string>();
@@ -771,6 +790,10 @@ export class GatewayService {
         this.activeDispatchByTarget.clear();
         this.scheduledDispatchTargets.clear();
         this.dispatchRunnerTargets.clear();
+        for (const timer of this.heldRedispatchTimers.values()) {
+          this.timers.clearTimeout(timer);
+        }
+        this.heldRedispatchTimers.clear();
         this.pendingClaudeReplies.clear();
         this.deliveryTrackers.clear();
         this.deliveryTokens.clear();
@@ -1022,6 +1045,14 @@ export class GatewayService {
           );
         }
       },
+      onProtocolNotice: (event) => {
+        if (!this.running || !SAFE_CODE.test(event.code)) return;
+        this.enqueueCallback({
+          type: "protocol_notice",
+          source: { ...source },
+          value: { code: event.code },
+        });
+      },
     };
   }
 
@@ -1151,8 +1182,14 @@ export class GatewayService {
           await this.onRouteState(event.source, event.value);
         } else if (event.type === "claude_reply") {
           await this.onClaudeReply(event.value);
-        } else {
+        } else if (event.type === "claude_message") {
           await this.onClaudeMessage(event.value);
+        } else {
+          this.addRuntimeAlert(event.value.code, "warning", {
+            provider: event.source.provider,
+            host: event.source.hostId,
+          });
+          await this.changed();
         }
       } catch {
         this.dashboardHealthy = false;
@@ -3089,6 +3126,11 @@ export class GatewayService {
   }
 
   private forgetBinding(alias: string): void {
+    const heldTimer = this.heldRedispatchTimers.get(alias);
+    if (heldTimer !== undefined) {
+      this.timers.clearTimeout(heldTimer);
+      this.heldRedispatchTimers.delete(alias);
+    }
     const binding = this.routeBindings.get(alias);
     if (binding !== undefined) {
       this.bindingAliases.delete(bindingKey(binding));
@@ -3114,6 +3156,27 @@ export class GatewayService {
   private async verifyCodex(alias: string, threadId: string): Promise<PrivateRouteBinding> {
     const binding = await this.store.resolveRoute(alias);
     if (binding.provider !== "codex" || binding.routeHandle !== threadId) throw new BridgeError("ROUTE_MISMATCH", "The caller does not own this exact task route.");
+    const state = this.routeStates.get(alias);
+    if (state === undefined || state === "stale") {
+      throw new BridgeError(
+        "ROUTE_UNAVAILABLE",
+        "The caller's exact Codex route is not positively observed.",
+        true,
+      );
+    }
+    const adapter = this.adapter("codex", binding.hostId);
+    await this.store.observeConnector({
+      identity: adapter.identity,
+      health: "healthy",
+      compatibility: "compatible",
+      protocol: adapter.protocol,
+      protocolVersion: adapter.protocolVersion,
+    });
+    await this.store.observeRoute({
+      binding,
+      state,
+      compatibility: "compatible",
+    });
     return binding;
   }
 
@@ -3834,9 +3897,11 @@ export class GatewayService {
   ):
     | "ROUTE_BUSY"
     | "ROUTE_UNAVAILABLE"
+    | "CODEX_ROUTE_STALE"
     | "AWAITING_EXTERNAL_APPROVAL" {
     const state = this.routeStates.get(tracker.targetAlias);
     if (state === "awaiting_approval") return "AWAITING_EXTERNAL_APPROVAL";
+    if (state === "stale") return "CODEX_ROUTE_STALE";
     if (state === "busy") return "ROUTE_BUSY";
     return "ROUTE_UNAVAILABLE";
   }
@@ -4472,6 +4537,22 @@ export class GatewayService {
         routeState === "idle" ||
         (binding.provider === "claude" && routeState === "busy");
       const inspection = await this.store.inspectPrivateRoute(targetAlias);
+      const codexRouteStale =
+        binding.provider === "codex" &&
+        (routeState === "stale" ||
+          inspection?.state === "stale" ||
+          inspection?.safeErrorCode === "CODEX_ROUTE_STALE");
+      if (codexRouteStale) {
+        await this.advanceDeliveryLocked(item.messageId, {
+          type: "route_terminated",
+          at: this.now().getTime(),
+          unwrittenOutcome: "failed",
+          safeErrorCode: "CODEX_ROUTE_STALE",
+        });
+        await this.changed();
+        this.scheduleDispatch(targetAlias);
+        return;
+      }
       const storedDispatchable =
         inspection?.state === "idle" ||
         (binding.provider === "claude" && inspection?.state === "busy");
@@ -4491,6 +4572,15 @@ export class GatewayService {
         );
         if (result.status === "settled") {
           await this.applyTerminalSettlementLocked(result.settlement);
+        }
+        if (
+          binding.provider === "codex" &&
+          (routeState === "busy" ||
+            routeState === "awaiting_approval" ||
+            inspection?.state === "busy" ||
+            inspection?.state === "awaiting_approval")
+        ) {
+          this.scheduleHeldRedispatch(targetAlias);
         }
         await this.changed();
         return;
@@ -4705,6 +4795,17 @@ export class GatewayService {
           this.dashboardHealthy = false;
         });
     });
+  }
+
+  private scheduleHeldRedispatch(targetAlias: string): void {
+    if (this.closing || this.heldRedispatchTimers.has(targetAlias)) return;
+    const timer = this.timers.setTimeout(() => {
+      if (this.heldRedispatchTimers.get(targetAlias) !== timer) return;
+      this.heldRedispatchTimers.delete(targetAlias);
+      this.scheduleDispatch(targetAlias);
+    }, 500);
+    this.heldRedispatchTimers.set(targetAlias, timer);
+    (timer as { unref?: () => void }).unref?.();
   }
 
   private async onDelivery(
@@ -5188,7 +5289,7 @@ export class GatewayService {
     source: PrivateEndpointIdentity,
     event: {
       routeHandle: string;
-      state: GatewayAdapterRouteState;
+      state: GatewayAdapterRouteObservationState;
       safeErrorCode?: string;
     },
   ): Promise<void> {
@@ -5202,8 +5303,57 @@ export class GatewayService {
     );
     if (entry === undefined) return;
     const [alias, binding] = entry;
+    const previousState = this.routeStates.get(alias);
     this.routeStates.set(alias, event.state);
-    await this.store.observeRoute({ binding, state: event.state, compatibility: "compatible", ...(event.safeErrorCode === undefined ? {} : { safeErrorCode: safeCode(event.safeErrorCode, "ROUTE_DEGRADED") }) });
+    const staleSafeCode =
+      binding.provider === "codex"
+        ? "CODEX_ROUTE_STALE"
+        : safeCode(event.safeErrorCode, "ROUTE_STALE");
+    const adapter = this.adapter(source.provider, source.hostId);
+    await this.store.observeConnector({
+      identity: source,
+      health: event.state === "stale" ? "degraded" : "healthy",
+      compatibility: event.state === "stale" ? "expired" : "compatible",
+      protocol: adapter.protocol,
+      protocolVersion: adapter.protocolVersion,
+      ...(event.safeErrorCode === undefined
+        ? {}
+        : {
+            safeErrorCode: safeCode(
+              event.safeErrorCode,
+              "CONNECTOR_DEGRADED",
+            ),
+          }),
+    });
+    if (event.state === "stale") {
+      if (previousState !== "stale") {
+        this.addRuntimeAlert(
+          staleSafeCode,
+          "error",
+          { provider: binding.provider, host: binding.hostId, alias },
+        );
+      }
+      await this.store.observeRoute({
+        binding,
+        state: "stale",
+        compatibility: "expired",
+        safeErrorCode: staleSafeCode,
+      });
+    } else {
+      await this.store.observeRoute({
+        binding,
+        state: event.state,
+        compatibility: "compatible",
+        ...(event.safeErrorCode === undefined
+          ? {}
+          : {
+              safeErrorCode: safeCode(
+                event.safeErrorCode,
+                "ROUTE_DEGRADED",
+              ),
+            }),
+      });
+    }
     await this.changed();
     if (binding.provider === "codex") {
       await this.setNativeCodexStatus(
@@ -5215,7 +5365,14 @@ export class GatewayService {
             : "busy",
       );
     }
-    if (event.state === "idle") this.scheduleDispatch(alias);
+    if (event.state === "idle" || event.state === "stale") {
+      const heldTimer = this.heldRedispatchTimers.get(alias);
+      if (heldTimer !== undefined) {
+        this.timers.clearTimeout(heldTimer);
+        this.heldRedispatchTimers.delete(alias);
+      }
+      this.scheduleDispatch(alias);
+    }
   }
 
   private async setNativeCodexStatus(

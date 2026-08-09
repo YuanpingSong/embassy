@@ -265,7 +265,7 @@ test("adapter pins the reviewed Claude Code and normalized private roots", async
       new ClaudePeerAdapter({
         sessionsDir: "relative/sessions",
         socketDir: "/synthetic/sockets",
-        attestedClaudeCodeVersion: "2.1.225",
+        attestedClaudeCodeVersion: "2.1.226",
       }),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "INVALID_PEER_PATH",
@@ -349,13 +349,19 @@ test("discovery accepts live same-protocol records across a Claude Code patch up
     version: "2.1.225",
     omitStatus: true,
   });
+  await addPeer(current, {
+    pid: 41_114,
+    sessionId: "00000000-0000-4000-8000-000000000004",
+    name: "current-peer",
+    version: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+  });
 
   assert.equal((await lstat(manual.registryPath)).mode & 0o777, 0o644);
   const result = await current.adapter.discover();
   assert.deepEqual(result.rejected, {});
   assert.deepEqual(
     result.peers.map((peer) => peer.alias).sort(),
-    ["derived-peer", "manual-monitor", "print-session"],
+    ["current-peer", "derived-peer", "manual-monitor", "print-session"],
   );
   assert.equal(
     result.peers.find((peer) => peer.alias === "print-session")?.status,
@@ -1216,6 +1222,62 @@ test("known held receipt flow is normalized without claiming task completion", a
     status: "released",
     trust: "untrusted_same_uid_peer",
   });
+});
+
+test("outbound receipt control re-resolves the stable session after each expired lease", async (t) => {
+  let clock = 50_000;
+  const receipts: ClaudePeerReceiptEvent[] = [];
+  const current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    now: () => clock,
+    receiptDeadlineMs: 2_000,
+    targetLeaseMs: 100,
+  });
+  const peer = await addPeer(current, {
+    pid: 46_102,
+    sessionId: SESSION_ONE,
+    handler: (socket) => socket.resume(),
+  });
+  const listener = await current.adapter.listen({
+    onMessage: () => undefined,
+    onReceipt: (event) => {
+      receipts.push(event);
+    },
+  });
+  const target = await selectFirstPeer(current);
+  await current.adapter.send(target.targetId, "receipt outlives discovery lease", {
+    listener,
+    receiptDeadlineAt: clock + 2_000,
+  });
+
+  const statusFrame = (status: "held" | "delivered", messageId: string) =>
+    `${JSON.stringify({
+      type: "control",
+      action: "peer_message_status",
+      status,
+      reason: "not surfaced",
+      from: `uds:${peer.socketPath}`,
+      orig_msg_id: MESSAGE_ONE,
+      msgV: 1,
+      msg_id: messageId,
+    })}\n`;
+
+  clock += 101;
+  await sendLines(listener.address.slice(4), [
+    statusFrame("held", MESSAGE_TWO),
+  ]);
+  await eventually(() => receipts.length === 1);
+  assert.equal(receipts[0]?.status, "held");
+
+  clock += 101;
+  await sendLines(listener.address.slice(4), [
+    statusFrame("delivered", "00000000-0000-4000-8000-000000000104"),
+  ]);
+  await eventually(() => receipts.length === 2);
+  assert.deepEqual(
+    receipts.map((event) => event.status),
+    ["held", "released"],
+  );
 });
 
 test("a confirmed write without a native terminal becomes unconfirmed", async (t) => {

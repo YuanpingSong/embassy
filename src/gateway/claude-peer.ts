@@ -30,7 +30,7 @@ import { isDashboardLocale, type DashboardLocale } from "./locale.js";
  * registry and NDJSON formats are not a stable public integration contract.
  */
 export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({
-  claudeCodeVersion: "2.1.225",
+  claudeCodeVersion: "2.1.226",
   peerProtocol: 1,
   messageVersion: 1,
 });
@@ -39,6 +39,7 @@ export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({
 export const CLAUDE_PEER_COMPATIBLE_SESSION_VERSIONS = Object.freeze([
   "2.1.224",
   "2.1.225",
+  "2.1.226",
 ] as const);
 
 const UUID_PATTERN =
@@ -143,6 +144,7 @@ export type ClaudePeerDeliveryDiagnostic = {
 export const claudePeerInboundStallReasons = [
   "ROUTE_BUSY",
   "ROUTE_UNAVAILABLE",
+  "CODEX_ROUTE_STALE",
   "AWAITING_EXTERNAL_APPROVAL",
 ] as const;
 export type ClaudePeerInboundStallReason =
@@ -667,8 +669,9 @@ function parseRegistryRecord(
     kind: value.kind as ClaudePeerKind,
     messagingSocketPath: value.messagingSocketPath,
     name: value.name,
-    // Claude Code print/SDK sessions in 2.1.225 omit status fields while the
-    // model turn is active. Treat that live process conservatively as busy.
+    // Some reviewed Claude Code print/SDK session records omit status fields
+    // while the model turn is active. Treat that live process conservatively
+    // as busy.
     status: (value.status ?? "busy") as ClaudePeerStatus,
   };
 }
@@ -3405,16 +3408,24 @@ export class ClaudePeerListener {
       await this.#notice("UNKNOWN_RECEIPT");
       return;
     }
-    if (frame.from !== `uds:${pending.binding.record.messagingSocketPath}`) {
-      await this.#notice("UNKNOWN_RECEIPT");
-      return;
-    }
+    let currentBinding: TargetBinding;
     try {
-      await this.#revalidateBinding(pending.binding);
+      // Receipt authority is the stable Claude session UUID, not the
+      // short-lived send-time registry/socket lease. Re-discover the exact
+      // session on every receipt so legitimate held/terminal frames remain
+      // valid for the full message deadline and across socket rotation.
+      currentBinding = await this.#resolveSessionBinding(
+        pending.binding.targetId,
+      );
     } catch {
       await this.#notice("UNKNOWN_RECEIPT");
       return;
     }
+    if (frame.from !== `uds:${currentBinding.record.messagingSocketPath}`) {
+      await this.#notice("UNKNOWN_RECEIPT");
+      return;
+    }
+    pending.binding = currentBinding;
     if (this.#now() >= pending.deadlineAt) {
       clearTimeout(pending.timer);
       this.#pending.delete(frame.originalMessageId);

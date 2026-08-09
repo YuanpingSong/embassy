@@ -155,6 +155,7 @@ export type GatewayPrivateRouteInspection = {
   enabled: boolean;
   state: RouteState;
   compatibility: CompatibilityState;
+  safeErrorCode?: string;
 };
 
 export type ConnectorRecord = {
@@ -626,12 +627,19 @@ export type ObserveConnectorInput = {
   safeErrorCode?: string;
 };
 
-export type ObserveRouteInput = {
-  binding: PrivateRouteBinding;
-  state: "idle" | "busy" | "awaiting_approval";
-  compatibility: "compatible";
-  safeErrorCode?: string;
-};
+export type ObserveRouteInput =
+  | {
+      binding: PrivateRouteBinding;
+      state: "idle" | "busy" | "awaiting_approval";
+      compatibility: "compatible";
+      safeErrorCode?: string;
+    }
+  | {
+      binding: PrivateRouteBinding;
+      state: "stale";
+      compatibility: "expired";
+      safeErrorCode: string;
+    };
 
 export type RebindStaleRouteInput = {
   /** The currently persisted alias. */
