@@ -54,6 +54,8 @@ jobs:
         run: npm ci --force
 
       - name: Run deterministic checks
+        env:
+          TMPDIR: /tmp
         run: npm run check
 
   package:
