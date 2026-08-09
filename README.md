@@ -67,6 +67,8 @@ Selection is bidirectional consent — the selected Claude session and the regis
 - **Claude → Codex:** registration makes the `codex-*` task *visible* to every compatible live Claude session running as the same OS user (that registry is machine-wide by nature), but the task *accepts* messages only from the paired session. Any other sender settles terminally with `SENDER_NOT_PAIRED` in its native receipt. `embassy serve --inbound open` is the explicit opt-out that restores any-session inbound.
 - **Codex → Claude:** the Codex task must be registered, and you must explicitly select the destination Claude session first. Sending never silently selects a discovered session. With nothing selected, a registered task accepts no inbound messages at all.
 
+There is exactly one pair. Explicitly selecting a different Claude session atomically retires the prior selection and settles its queued or in-flight work under the normal unselection rules; Embassy never leaves both sessions selected.
+
 Embassy normally queues messages while the Codex task is busy and starts an ordinary turn when it is available. In the Claude→Codex direction only, an exact leading `STEER:` body may be admitted to the active turn at App Server's next tool-call boundary. It is never injected mid-generation and never authorizes an interrupt; if that boundary is unavailable, the message silently returns to the normal queue.
 
 The gateway creates one callback socket and one `codex-*` registry record while it runs. It removes both during graceful shutdown. After a crash, stale artifacts are rejected by process-liveness and generation checks. A fixed host-wide lease permits only one Embassy controller for the current login account, even when `EMBASSY_STATE_DIR` differs between launches.

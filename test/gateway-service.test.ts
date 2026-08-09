@@ -2680,6 +2680,108 @@ test("fresh Claude selection releases provider state when the selected handle ch
   );
 });
 
+test("selecting a second Claude session atomically swaps the pair and settles old work", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+    {
+      alias: "claude-two@this-mac",
+      routeHandle: "claude_target_2",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.refreshDashboard();
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
+    { accepted: true, code: "ok" },
+  );
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+
+  const oldDelivery = await handlers.sendToClaude({
+    ...toClaude("settle this attempt during the pair swap"),
+    expectsReply: false,
+  });
+  assert.equal(oldDelivery.accepted, true);
+  if (!oldDelivery.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-two@this-mac" }),
+    { accepted: true, code: "ok" },
+  );
+  const snapshot = await handlers.listSnapshot();
+  assert.deepEqual(
+    snapshot.routes
+      .filter((route) => route.provider === "claude")
+      .map((route) => route.alias),
+    ["claude-two@this-mac"],
+  );
+  assert.deepEqual(
+    snapshot.availablePeers.map(({ alias, selected }) => ({
+      alias,
+      selected,
+    })),
+    [
+      { alias: "claude-one@this-mac", selected: false },
+      { alias: "claude-two@this-mac", selected: true },
+    ],
+  );
+  assert.deepEqual(claude.releasedRoutes, ["claude_target_1"]);
+  const oldStatus = await handlers.deliveryStatus({
+    token: oldDelivery.deliveryToken,
+  });
+  assert.equal(oldStatus.found, true);
+  if (oldStatus.found) {
+    assert.equal(oldStatus.state, "cancelled");
+    assert.equal(oldStatus.safeErrorCode, "ROUTE_UNREGISTERED");
+  }
+
+  assert.deepEqual(
+    await handlers.sendToClaude({
+      ...toClaude("the retired peer must not remain routable"),
+      expectsReply: false,
+    }),
+    { accepted: false, code: "rejected" },
+  );
+  const replacementDelivery = await handlers.sendToClaude({
+    ...toClaude("the replacement peer owns the only route"),
+    toAlias: "claude-two@this-mac",
+    expectsReply: false,
+  });
+  assert.equal(replacementDelivery.accepted, true);
+  await waitFor(() => claude.dispatches.length === 2);
+  assert.equal(
+    claude.dispatches[1]?.binding.routeHandle,
+    "claude_target_2",
+  );
+});
+
 test("a failed send publishes discovery invalidation exactly once", async (t) => {
   const { root, stateDir } = await fixture();
   const published: GatewayPublicSnapshot[] = [];
@@ -2975,7 +3077,7 @@ test("incomplete, colliding, and workspace-failed discovery cannot restore a dur
   assert.equal(snapshot.routes[0]?.state, "idle");
 });
 
-test("a same-name different UUID cannot retarget a durable selection and a failed atomic rename releases provider state", async (t) => {
+test("a same-name different UUID requires an explicit atomic selection swap", async (t) => {
   const { root, stateDir } = await fixture();
   const config = loadGatewayConfig({
     EMBASSY_STATE_DIR: stateDir,
@@ -2985,15 +3087,8 @@ test("a same-name different UUID cannot retarget a durable selection and a faile
   const firstClaude = new FakeProvider("claude");
   firstClaude.discoveries = [
     {
-      alias: "first@this-mac",
-      routeHandle: CLAUDE_SESSION_ID,
-      kind: "interactive",
-      state: "idle",
-      compatibility: "compatible",
-    },
-    {
       alias: "second@this-mac",
-      routeHandle: otherSession,
+      routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
       compatibility: "compatible",
@@ -3001,7 +3096,6 @@ test("a same-name different UUID cannot retarget a durable selection and a faile
   ];
   const first = new GatewayService({ config, adapters: [firstClaude] });
   await first.start();
-  await first.handlers().selectClaude({ alias: "first@this-mac" });
   await first.handlers().selectClaude({ alias: "second@this-mac" });
   await first.close();
 
@@ -3009,7 +3103,7 @@ test("a same-name different UUID cannot retarget a durable selection and a faile
   secondClaude.discoveries = [
     {
       alias: "second@this-mac",
-      routeHandle: CLAUDE_SESSION_ID,
+      routeHandle: otherSession,
       kind: "interactive",
       state: "idle",
       compatibility: "compatible",
@@ -3024,26 +3118,20 @@ test("a same-name different UUID cannot retarget a durable selection and a faile
 
   await second.handlers().refreshDashboard();
   let snapshot = await second.snapshot();
-  assert.deepEqual(secondClaude.selectedRoutes, [
-    { alias: "second@this-mac", routeHandle: CLAUDE_SESSION_ID },
-  ]);
-  assert.deepEqual(secondClaude.releasedRoutes, [CLAUDE_SESSION_ID]);
+  assert.deepEqual(secondClaude.selectedRoutes, []);
+  assert.deepEqual(secondClaude.releasedRoutes, []);
   assert.equal(snapshot.availablePeers[0]?.selected, false);
   assert.equal(snapshot.routes.every((route) => route.state === "stale"), true);
 
   assert.deepEqual(
     await second.handlers().selectClaude({ alias: "second@this-mac" }),
-    { accepted: false, code: "conflict" },
-  );
-  snapshot = await second.snapshot();
-  assert.equal(snapshot.routes.every((route) => route.state === "stale"), true);
-
-  assert.deepEqual(
-    await second.handlers().unselectClaude({ alias: "second@this-mac" }),
     { accepted: true, code: "ok" },
   );
-  await second.handlers().refreshDashboard();
   snapshot = await second.snapshot();
+  assert.deepEqual(secondClaude.selectedRoutes, [
+    { alias: "second@this-mac", routeHandle: otherSession },
+  ]);
+  assert.deepEqual(secondClaude.releasedRoutes, [CLAUDE_SESSION_ID]);
   assert.equal(snapshot.availablePeers[0]?.selected, true);
   assert.deepEqual(
     snapshot.routes.map((route) => route.alias),

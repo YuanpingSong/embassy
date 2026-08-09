@@ -26,7 +26,9 @@ The handler forwards the verb to the broker over the same private control
 socket the observer already uses, and returns the broker's `{ok, code}`
 verbatim (safe codes only, no internals). State truth stays in the broker;
 the dashboard learns the outcome the same way it learns everything — from
-the next snapshot.
+the next snapshot. `select_claude` is a singular-pair replacement: if another
+Claude session is selected, one durable broker mutation settles the retired
+route and installs the replacement before any new snapshot can expose it.
 
 ## 2. Authentication and request policy (unchanged core + action tier)
 
@@ -118,8 +120,11 @@ rows — the Activity tab shows what the broker records, nothing more.
    refills.
 3. Happy paths: each verb forwards exactly once with exactly the validated
    params; broker `{ok:false, code}` passes through verbatim.
-4. Static analysis: no `dangerouslySetInnerHTML`, no new CORS headers, no
+4. Pair replacement: selecting a second session leaves exactly one selected
+   route, releases the prior provider route, and settles its queued/in-flight
+   work exactly once under the ordinary unselection contract.
+5. Static analysis: no `dangerouslySetInnerHTML`, no new CORS headers, no
    change to session/snapshot/stream handlers (snapshot tests on the
    route table).
-5. UI: consequence-confirm flow reachable by keyboard; actions disabled
+6. UI: consequence-confirm flow reachable by keyboard; actions disabled
    while disconnected; footer authority copy updated in both locales.

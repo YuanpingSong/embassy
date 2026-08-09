@@ -129,6 +129,11 @@ export type RouteInFlightSettlementInput = Readonly<{
   safeErrorCode?: string;
 }>;
 
+export type ReplaceClaudeSelectionInput = Readonly<{
+  replacement: RegisterRouteInput;
+  inFlightSettlements?: readonly RouteInFlightSettlementInput[];
+}>;
+
 export const codexSuccessionJournalStages = [
   "prepared",
   "publication_armed",
@@ -1306,6 +1311,25 @@ export class GatewayStore {
           "The exact compatible endpoint generation must be observed before a route can be registered.",
         );
       }
+      if (
+        input.binding.provider === "claude" &&
+        input.registrationMode === "selected_live_peer" &&
+        state.routes.some(
+          (route) =>
+            route.binding.provider === "claude" &&
+            route.registrationMode === "selected_live_peer" &&
+            !(
+              route.binding.hostId === input.binding.hostId &&
+              route.binding.routeHandle === input.binding.routeHandle &&
+              route.binding.ownerLease === input.binding.ownerLease
+            ),
+        )
+      ) {
+        throw new BridgeError(
+          "CLAUDE_SELECTION_CONFLICT",
+          "A different Claude session is already selected; replace it atomically instead of adding another selection.",
+        );
+      }
       const byAlias = state.routes.find((route) => route.alias === input.alias);
       const byBinding = state.routes.find((route) =>
         sameRouteTarget(route.binding, input.binding),
@@ -1368,6 +1392,195 @@ export class GatewayStore {
         queueDepth: 0,
         counters: emptyCounters(),
       });
+    });
+  }
+
+  /**
+   * Replace the complete selected-Claude set with one exact live session in a
+   * single durable mutation. Work owned by every retired selection settles by
+   * the same evidence-aware rules as explicit unselection; no public snapshot
+   * can observe a two-selection intermediate state.
+   */
+  async replaceClaudeSelection(
+    input: ReplaceClaudeSelectionInput,
+  ): Promise<TerminalMessageSettlement[]> {
+    return await this.mutate(async (state, now) => {
+      const replacement = input.replacement;
+      this.validateRouteInput(replacement);
+      this.assertAllowedIdentity(endpointOf(replacement.binding));
+      if (
+        replacement.binding.provider !== "claude" ||
+        replacement.registrationMode !== "selected_live_peer"
+      ) {
+        throw new BridgeError(
+          "INVALID_CLAUDE_SELECTION_REPLACEMENT",
+          "A Claude selection replacement must name one exact selected live peer.",
+        );
+      }
+      const connector = state.connectors.find((candidate) =>
+        sameEndpoint(candidate, replacement.binding),
+      );
+      if (
+        !connector ||
+        !["healthy", "degraded"].includes(connector.health) ||
+        connector.compatibility !== "compatible"
+      ) {
+        throw new BridgeError(
+          "ROUTE_ENDPOINT_NOT_OBSERVED",
+          "The exact compatible endpoint generation must be observed before a Claude selection can replace another.",
+        );
+      }
+
+      const selectedClaudeRoutes = state.routes.filter(
+        (route) =>
+          route.binding.provider === "claude" &&
+          route.registrationMode === "selected_live_peer",
+      );
+      const logicalMatches = selectedClaudeRoutes.filter(
+        (route) =>
+          route.binding.hostId === replacement.binding.hostId &&
+          route.binding.routeHandle === replacement.binding.routeHandle &&
+          route.binding.ownerLease === replacement.binding.ownerLease,
+      );
+      if (logicalMatches.length > 1) {
+        throw new BridgeError(
+          "CLAUDE_SELECTION_STATE_CORRUPT",
+          "More than one durable selection claims the same exact Claude session authority.",
+        );
+      }
+      const retained = logicalMatches[0];
+      if (
+        retained !== undefined &&
+        !sameBinding(retained.binding, replacement.binding) &&
+        (!retained.enabled ||
+          retained.state !== "stale" ||
+          retained.compatibility !== "expired")
+      ) {
+        throw new BridgeError(
+          "ROUTE_REBIND_IDENTITY_MISMATCH",
+          "Only a stale exact Claude session may adopt a newly observed endpoint generation during replacement.",
+        );
+      }
+      const aliasOwner = state.routes.find(
+        (route) => route.alias === replacement.alias,
+      );
+      if (
+        aliasOwner !== undefined &&
+        aliasOwner !== retained &&
+        !selectedClaudeRoutes.includes(aliasOwner)
+      ) {
+        throw new BridgeError(
+          "ROUTE_ALIAS_COLLISION",
+          "The replacement alias belongs to a different non-retired route.",
+        );
+      }
+
+      const retired = selectedClaudeRoutes.filter(
+        (route) => route !== retained,
+      );
+      const retiredAliases = new Set(retired.map((route) => route.alias));
+      const settlementPlan = this.validateAffectedInFlightSettlements(
+        state,
+        retiredAliases,
+        input.inFlightSettlements ?? [],
+      );
+      const settlements = this.terminateAffectedMessages(
+        state,
+        retiredAliases,
+        now,
+        "ROUTE_UNREGISTERED",
+        settlementPlan,
+      );
+      state.routes = state.routes.filter((route) => !retired.includes(route));
+      state.rateBuckets = state.rateBuckets.filter(
+        (bucket) => !retiredAliases.has(bucket.sourceAlias),
+      );
+      state.dedupe = state.dedupe.filter(
+        (record) =>
+          !retiredAliases.has(record.sourceAlias) &&
+          !retiredAliases.has(record.targetAlias),
+      );
+
+      if (
+        state.routes.some(
+          (route) =>
+            route !== retained &&
+            (sameRouteTarget(route.binding, replacement.binding) ||
+              route.binding.ownerLease === replacement.binding.ownerLease),
+        )
+      ) {
+        throw new BridgeError(
+          "ROUTE_BINDING_COLLISION",
+          "The replacement Claude authority collides with a non-retired route.",
+        );
+      }
+
+      if (retained !== undefined) {
+        const previousAlias = retained.alias;
+        retained.alias = replacement.alias;
+        retained.binding = { ...replacement.binding };
+        retained.enabled = true;
+        retained.state = replacement.state ?? "idle";
+        retained.compatibility = "compatible";
+        retained.updatedAt = now.toISOString();
+        retained.lastSeenAt = now.toISOString();
+        delete retained.safeErrorCode;
+        if (previousAlias !== replacement.alias) {
+          for (const item of [...state.queue, ...state.inFlight]) {
+            if (item.sourceAlias === previousAlias) {
+              item.sourceAlias = replacement.alias;
+            }
+            if (item.targetAlias === previousAlias) {
+              item.targetAlias = replacement.alias;
+            }
+          }
+          for (const record of state.dedupe) {
+            if (record.sourceAlias === previousAlias) {
+              record.sourceAlias = replacement.alias;
+            }
+            if (record.targetAlias === previousAlias) {
+              record.targetAlias = replacement.alias;
+            }
+          }
+          renameRateBucket(state, previousAlias, replacement.alias);
+        }
+      } else {
+        if (state.routes.length >= this.config.limits.maxRoutes) {
+          throw new BridgeError(
+            "ROUTE_CAPACITY_REACHED",
+            "The bounded gateway route registry is full.",
+            true,
+          );
+        }
+        state.routes.push({
+          alias: replacement.alias,
+          binding: { ...replacement.binding },
+          registrationMode: replacement.registrationMode,
+          enabled: true,
+          state: replacement.state ?? "idle",
+          compatibility: "compatible",
+          busyPolicy: "queue",
+          registeredAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          lastSeenAt: now.toISOString(),
+          queueDepth: 0,
+          counters: emptyCounters(),
+        });
+      }
+
+      if (
+        state.routes.filter(
+          (route) =>
+            route.binding.provider === "claude" &&
+            route.registrationMode === "selected_live_peer",
+        ).length !== 1
+      ) {
+        throw new BridgeError(
+          "CLAUDE_SELECTION_STATE_CORRUPT",
+          "A successful replacement must leave exactly one selected Claude session.",
+        );
+      }
+      return settlements;
     });
   }
 

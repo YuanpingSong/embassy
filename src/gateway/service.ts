@@ -2983,6 +2983,102 @@ export class GatewayService {
     }
   }
 
+  private async replaceClaudeSelectionCandidate(
+    candidate: Candidate,
+    retained: GatewayPrivateRouteInspection | undefined,
+    retired: readonly GatewayPrivateRouteInspection[],
+    alreadyLive: boolean,
+  ): Promise<void> {
+    await this.assertClaudeWorkspaceDisjoint(
+      candidate.adapter,
+      candidate.routeHandle,
+    );
+    const binding: PrivateRouteBinding = {
+      ...candidate.adapter.identity,
+      routeHandle: candidate.routeHandle,
+      ownerLease: stableLease("claude", candidate.routeHandle),
+    };
+    const observedState = this.routeStates.get(candidate.alias);
+    let selectedState: GatewayAdapterRouteState =
+      observedState === undefined || observedState === "stale"
+        ? candidate.state
+        : observedState;
+    let newlySelected = false;
+    let storeCommitted = false;
+    if (!alreadyLive) {
+      const selected = await candidate.adapter.selectRoute({
+        alias: candidate.alias,
+        routeHandle: candidate.routeHandle,
+      });
+      newlySelected = true;
+      if (selected.routeHandle !== candidate.routeHandle) {
+        await candidate.adapter
+          .releaseRoute?.(candidate.routeHandle)
+          .catch(() => {
+            this.dashboardHealthy = false;
+          });
+        throw new BridgeError(
+          "ROUTE_MISMATCH",
+          "The peer identity changed during selection.",
+        );
+      }
+      selectedState = selected.state;
+    }
+
+    try {
+      await this.drainPreDeadlineDeliveryCallbacksLocked();
+      const inFlightSettlements =
+        await this.planRoutesInFlightSettlementsLocked(
+          retired.map((route) => route.alias),
+          {
+            unwrittenOutcome: "cancelled",
+            safeErrorCode: "ROUTE_UNREGISTERED",
+          },
+        );
+      const settlements = await this.store.replaceClaudeSelection({
+        replacement: {
+          alias: candidate.alias,
+          binding,
+          registrationMode: "selected_live_peer",
+          state: selectedState,
+          compatibility: "compatible",
+        },
+        inFlightSettlements,
+      });
+      storeCommitted = true;
+      for (const settlement of settlements) {
+        await this.applyTerminalSettlementLocked(settlement);
+      }
+
+      for (const route of retired) this.forgetBinding(route.alias);
+      if (retained !== undefined && retained.alias !== candidate.alias) {
+        this.forgetBinding(retained.alias);
+      }
+      this.rememberBinding(candidate.alias, binding, selectedState);
+      for (const route of retired) {
+        await this.adapters
+          .find(
+            (adapter) =>
+              adapter.identity.provider === "claude" &&
+              adapter.identity.hostId === route.binding.hostId,
+          )
+          ?.releaseRoute?.(route.binding.routeHandle)
+          .catch(() => {
+            this.dashboardHealthy = false;
+          });
+      }
+    } catch (error) {
+      if (newlySelected && !storeCommitted) {
+        await candidate.adapter
+          .releaseRoute?.(candidate.routeHandle)
+          .catch(() => {
+            this.dashboardHealthy = false;
+          });
+      }
+      throw error;
+    }
+  }
+
   private async resolveSelectedClaudeDestination(
     selector: string,
   ): Promise<{ alias: string; discoveryChanged: boolean }> {
@@ -3018,31 +3114,31 @@ export class GatewayService {
     const candidate = this.claudeCandidate(params.alias);
     if (candidate === undefined) throw new BridgeError("PEER_NOT_FOUND", "No unique compatible interactive peer matches that current name or session UUID.");
     const persisted = await this.store.inspectPrivateClaudeRoutes();
-    const byAlias = persisted.find((route) => route.alias === candidate.alias);
     const byIdentity = persisted.find(
       (route) =>
         route.binding.hostId === candidate.adapter.identity.hostId &&
         route.binding.routeHandle === candidate.routeHandle,
     );
-    if (
-      byAlias !== undefined &&
-      byAlias.binding.routeHandle !== candidate.routeHandle
-    ) {
-      throw new BridgeError(
-        "ROUTE_ALIAS_COLLISION",
-        "That current name belongs to a different durable Claude selection; unselect it before selecting another session.",
-      );
-    }
+    const retired = persisted.filter((route) => route !== byIdentity);
     const live = this.routeBindings.get(candidate.alias);
-    if (
+    const alreadyLive =
       live?.provider === "claude" &&
       live.hostId === candidate.adapter.identity.hostId &&
-      live.routeHandle === candidate.routeHandle
-    ) {
+      live.routeHandle === candidate.routeHandle;
+    if (alreadyLive && retired.length === 0) {
       if (discoveryChanged) await this.publish();
       return;
     }
-    await this.selectClaudeCandidate(candidate, byIdentity);
+    if (retired.length === 0) {
+      await this.selectClaudeCandidate(candidate, byIdentity);
+    } else {
+      await this.replaceClaudeSelectionCandidate(
+        candidate,
+        byIdentity,
+        retired,
+        alreadyLive,
+      );
+    }
     await this.refreshClaudeDiscovery();
     await this.publish();
   }
@@ -3493,7 +3589,17 @@ export class GatewayService {
       safeErrorCode: string;
     },
   ): Promise<RouteInFlightSettlementInput[]> {
-    const affected = await this.store.inspectAffectedInFlightMessages([alias]);
+    return await this.planRoutesInFlightSettlementsLocked([alias], input);
+  }
+
+  private async planRoutesInFlightSettlementsLocked(
+    aliases: readonly string[],
+    input: {
+      unwrittenOutcome: "cancelled" | "failed";
+      safeErrorCode: string;
+    },
+  ): Promise<RouteInFlightSettlementInput[]> {
+    const affected = await this.store.inspectAffectedInFlightMessages(aliases);
     const observedAt = this.now().getTime();
     return affected.map(({ messageId }) => {
       const tracker = this.deliveryTrackers.get(messageId);

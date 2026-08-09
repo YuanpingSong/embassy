@@ -694,7 +694,10 @@ gateway as unavailable when nothing is serving.
   explicit confirmation; the server rejects bodies over 1 KiB and limits the
   companion to six actions per minute. It cannot register, unregister, succeed,
   send, reply, approve, interrupt, change settings, or invoke a generic/provider
-  method. Every action is followed by a fresh observation. An observation may
+  method. Selecting a different Claude session atomically settles and retires
+  the prior route in the same durable mutation that installs the one new pair;
+  no snapshot exposes two selected sessions. Every action is followed by a
+  fresh observation. An observation may
   settle already-due lifecycle deliveries before projecting, which is a broker
   timer effect, not additional browser authority.
 - **Containment.** Authentication scopes the browser, not the machine. Any

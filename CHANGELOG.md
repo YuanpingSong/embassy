@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Re-running `register-codex` replaces a closed or faulted App Server connector; an idle recovered route wakes held work without retrying any ambiguous write.
 - The first successful Codex registration fixes its exact alias, task, and host until it is explicitly succeeded. Exact re-registration remains available for connector recovery. `register-codex --alias <new> --succeeds <current>`, run from inside the successor task on the same host, is the only way to change the registered Codex identity without restarting the broker: Embassy freezes the outgoing route, drains its accepted work to terminal settlement, then publishes the successor on a fresh listener generation. Nothing transfers — no queued body, conversation, reply capability, or delivery token — and a succession that cannot be completed pins the identity fail-closed until manual recovery rather than leaving two live registrations.
 - Failed reactivation of a retained Codex route, or a fresh registration whose cleanup cannot be fully confirmed, pins that exact identity fail-closed until exact retry or confirmed unregister followed by restart.
+- Claude selection is singular: selecting a different exact live session atomically settles and retires the prior selected route while installing the replacement, so the paired topology never exposes two selected Claude sessions.
 
 ### Removed
 

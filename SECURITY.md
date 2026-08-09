@@ -54,6 +54,9 @@ against other processes running as the same OS user.
   session running as the same OS user, but paired mode accepts only the exact
   selected session. Other senders settle terminally with `SENDER_NOT_PAIRED`.
   `embassy serve --inbound open` is the explicit opt-out from pairing.
+- Selection is singular. Selecting a different exact Claude session atomically
+  retires the old route and settles its accepted work before the new pair is
+  exposed; a two-selection intermediate state is never published.
 - Embassy never mutates a Codex task's approval or sandbox policy and never
   answers an approval request. An inbound turn uses the task's existing native
   policy. With `approvalPolicy: never`, no human confirmation occurs on that
