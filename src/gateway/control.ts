@@ -74,6 +74,7 @@ export const gatewayControlMethods = [
   "list_snapshot",
   "observe_snapshot",
   "delivery_status",
+  "untrack",
   "send_to_claude",
   "send_to_codex",
   "reply",
@@ -114,7 +115,7 @@ export type SelectClaudeParams = {
 export type PairParams = {
   claudeAlias: string;
   codexAlias: string;
-  /** Task attestation for agent calls; omitted only by the authenticated operator UI. */
+  /** Optional task attestation: when supplied it must match the alias's live registered thread exactly; when omitted, pairing binds to the alias's live registered endpoint without thread attestation. */
   codexThreadId?: string;
 };
 
@@ -125,6 +126,7 @@ export type SendToClaudeParams = {
   toAlias: string;
   text: string;
   expectsReply?: boolean;
+  trackIdleMinutes?: number;
 };
 
 export type ValidatedSendToClaudeParams = {
@@ -133,6 +135,7 @@ export type ValidatedSendToClaudeParams = {
   toAlias: string;
   text: string;
   expectsReply: boolean;
+  trackIdleMinutes?: number;
 };
 
 export type SendToCodexParams = {
@@ -141,6 +144,7 @@ export type SendToCodexParams = {
   text: string;
   replyAddress?: string;
   expectsReply?: boolean;
+  trackIdleMinutes?: number;
 };
 
 export type ValidatedSendToCodexParams = {
@@ -149,6 +153,7 @@ export type ValidatedSendToCodexParams = {
   text: string;
   replyAddress?: string;
   expectsReply: boolean;
+  trackIdleMinutes?: number;
 };
 
 export type GatewayReplyCaller =
@@ -169,6 +174,11 @@ export type ReplyParams = {
   conversationId: string;
   text: string;
   caller: GatewayReplyCaller;
+  trackIdleMinutes?: number;
+};
+
+export type UntrackParams = {
+  conversationId: string;
 };
 
 export type DeliveryStatusParams = {
@@ -228,6 +238,11 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
+      method: "untrack";
+      params: UntrackParams;
+    }
+  | {
+      protocolVersion: 1;
       method: "send_to_claude";
       params: SendToClaudeParams;
     }
@@ -262,6 +277,7 @@ type ValidatedGatewayControlRequest =
   | Extract<GatewayControlRequest, { method: "list_snapshot" }>
   | Extract<GatewayControlRequest, { method: "observe_snapshot" }>
   | Extract<GatewayControlRequest, { method: "delivery_status" }>
+  | Extract<GatewayControlRequest, { method: "untrack" }>
   | {
       protocolVersion: 1;
       method: "send_to_claude";
@@ -362,6 +378,7 @@ type ResultByMethod = {
   list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation;
   delivery_status: GatewayDeliveryStatusResult;
+  untrack: GatewayDecision;
   send_to_claude: GatewaySendResult;
   send_to_codex: GatewaySendResult;
   reply: GatewaySendResult;
@@ -391,6 +408,7 @@ export type GatewayControlHandlers = {
   deliveryStatus: (
     params: Readonly<DeliveryStatusParams>,
   ) => MaybePromise<GatewayDeliveryStatusResult>;
+  untrack: (params: Readonly<UntrackParams>) => MaybePromise<GatewayDecision>;
   sendToClaude: (
     params: Readonly<ValidatedSendToClaudeParams>,
   ) => MaybePromise<GatewaySendResult>;
@@ -562,6 +580,15 @@ function isNonNegativeInteger(value: unknown): value is number {
   );
 }
 
+function isTrackIdleMinutes(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= 24 * 60
+  );
+}
+
 function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string" || !ISO_TIMESTAMP_PATTERN.test(value)) {
     return false;
@@ -658,6 +685,15 @@ function normalizeParams(
         throw new ProtocolFault("INVALID_REQUEST");
       }
       return { token: value.token };
+    }
+    case "untrack": {
+      if (
+        !hasExactKeys(value, ["conversationId"]) ||
+        !isConversationId(value.conversationId)
+      ) {
+        throw new ProtocolFault("INVALID_REQUEST");
+      }
+      return { conversationId: value.conversationId };
     }
     case "register_codex": {
       if (
@@ -761,7 +797,7 @@ function normalizeParams(
         !hasExactKeys(
           value,
           ["fromAlias", "threadId", "toAlias", "text"],
-          ["expectsReply"],
+          ["expectsReply", "trackIdleMinutes"],
         ) ||
         !isAlias(value.fromAlias) ||
         !isUuid(value.threadId) ||
@@ -769,7 +805,9 @@ function normalizeParams(
           !isClaudeSessionSelector(value.toAlias)) ||
         !isMessageText(value.text) ||
         (value.expectsReply !== undefined &&
-          typeof value.expectsReply !== "boolean")
+          typeof value.expectsReply !== "boolean") ||
+        (value.trackIdleMinutes !== undefined &&
+          !isTrackIdleMinutes(value.trackIdleMinutes))
       ) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
@@ -781,6 +819,9 @@ function normalizeParams(
           : value.toAlias,
         text: value.text,
         expectsReply: value.expectsReply ?? false,
+        ...(value.trackIdleMinutes === undefined
+          ? {}
+          : { trackIdleMinutes: value.trackIdleMinutes }),
       };
     }
     case "send_to_codex": {
@@ -788,7 +829,7 @@ function normalizeParams(
         !hasExactKeys(
           value,
           ["fromAlias", "toAlias", "text"],
-          ["replyAddress", "expectsReply"],
+          ["replyAddress", "expectsReply", "trackIdleMinutes"],
         ) ||
         !isAlias(value.fromAlias) ||
         !isAlias(value.toAlias) ||
@@ -797,7 +838,9 @@ function normalizeParams(
           (typeof value.replyAddress !== "string" ||
             !isGatewayReplyAddress(value.replyAddress))) ||
         (value.expectsReply !== undefined &&
-          typeof value.expectsReply !== "boolean")
+          typeof value.expectsReply !== "boolean") ||
+        (value.trackIdleMinutes !== undefined &&
+          !isTrackIdleMinutes(value.trackIdleMinutes))
       ) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
@@ -809,13 +852,22 @@ function normalizeParams(
           ? {}
           : { replyAddress: value.replyAddress }),
         expectsReply: value.expectsReply ?? false,
+        ...(value.trackIdleMinutes === undefined
+          ? {}
+          : { trackIdleMinutes: value.trackIdleMinutes }),
       };
     }
     case "reply": {
       if (
-        !hasExactKeys(value, ["conversationId", "text", "caller"]) ||
+        !hasExactKeys(
+          value,
+          ["conversationId", "text", "caller"],
+          ["trackIdleMinutes"],
+        ) ||
         !isConversationId(value.conversationId) ||
-        !isMessageText(value.text)
+        !isMessageText(value.text) ||
+        (value.trackIdleMinutes !== undefined &&
+          !isTrackIdleMinutes(value.trackIdleMinutes))
       ) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
@@ -823,6 +875,9 @@ function normalizeParams(
         conversationId: value.conversationId,
         text: value.text,
         caller: normalizeReplyCaller(value.caller),
+        ...(value.trackIdleMinutes === undefined
+          ? {}
+          : { trackIdleMinutes: value.trackIdleMinutes }),
       };
     }
   }
@@ -1350,6 +1405,8 @@ function isResultForMethod<M extends GatewayControlMethod>(
       return isSnapshotObservation(value);
     case "delivery_status":
       return isDeliveryStatusResult(value);
+    case "untrack":
+      return isDecision(value);
     case "send_to_claude":
     case "send_to_codex":
     case "reply":
@@ -1405,6 +1462,9 @@ async function dispatch(
         break;
       case "delivery_status":
         result = await handlers.deliveryStatus(request.params);
+        break;
+      case "untrack":
+        result = await handlers.untrack(request.params);
         break;
       case "send_to_claude":
         result = await handlers.sendToClaude(request.params);

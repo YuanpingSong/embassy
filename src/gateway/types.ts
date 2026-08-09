@@ -729,6 +729,21 @@ export type EnqueueMessageInput = {
   deadlineAt?: string;
   hopCount?: number;
   steer?: true;
+  /**
+   * Controller-derived watch intent committed in the same mutation as the
+   * accepted message. Bodies and command flags are never persisted here.
+   */
+  progressWatch?: {
+    conversationId: string;
+    actorAlias: string;
+    openIdleMs?: number;
+    completionSignal?: true;
+  };
+  /** Controller-authored nudge committed atomically with its queued body. */
+  progressWatchNudge?: {
+    conversationId: string;
+    nudgeNumber: 1 | 2;
+  };
 };
 
 /**

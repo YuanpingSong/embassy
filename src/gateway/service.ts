@@ -48,6 +48,7 @@ import {
   createCodexRegistrationGeneration,
   isCodexRegistrationGeneration,
 } from "./codex-registration-generation.js";
+import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 import {
   GatewayStore,
   type CodexSuccessionRecoveryAuthority,
@@ -59,6 +60,7 @@ import {
   arePublicAvailablePeerSnapshots,
   projectGatewayPublicSnapshot,
   type CompatibilityState,
+  type EnqueueMessageInput,
   type GatewayPrivateRouteInspection,
   type GatewayPublicSnapshot,
   type PrivateEndpointIdentity,
@@ -81,6 +83,34 @@ const MAX_CONVERSATIONS = 1_024;
 const DELIVERY_ACK_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
+
+function progressWatchActivity(
+  text: string,
+  conversationId: string,
+  actorAlias: string,
+  explicitIdleMinutes?: number,
+): NonNullable<EnqueueMessageInput["progressWatch"]> {
+  const prefixedOpen = text.startsWith("TRACK:");
+  const completionSignal = text.startsWith("DONE:");
+  if (completionSignal && (prefixedOpen || explicitIdleMinutes !== undefined)) {
+    throw new BridgeError(
+      "PROGRESS_WATCH_SIGNAL_CONFLICT",
+      "A single message cannot both open and complete a progress watch.",
+    );
+  }
+  const openIdleMs =
+    explicitIdleMinutes === undefined
+      ? prefixedOpen
+        ? PROGRESS_WATCH_DEFAULT_IDLE_MS
+        : undefined
+      : explicitIdleMinutes * 60_000;
+  return {
+    conversationId,
+    actorAlias,
+    ...(openIdleMs === undefined ? {} : { openIdleMs }),
+    ...(completionSignal ? { completionSignal: true as const } : {}),
+  };
+}
 
 export type GatewayAdapterRouteState = Extract<
   RouteState,
@@ -574,6 +604,7 @@ export class GatewayService {
   private readonly deliveryTokenCapacity: number;
   private lifecycleTimer: GatewayServiceTimer | undefined;
   private nextDashboardRefreshAt: number | undefined;
+  private nextProgressWatchAt: number | undefined;
   private control: GatewayControlServer | undefined;
   /** Coarse controller mutation revision exposed by `health`. */
   private revision = 0;
@@ -693,6 +724,7 @@ export class GatewayService {
       this.control = control;
       this.running = true;
       this.nextDashboardRefreshAt = undefined;
+      await this.refreshNextProgressWatchWakeLocked();
       this.scheduleLifecycleWakeLocked();
       await this.publish();
       assertStartActive();
@@ -860,6 +892,20 @@ export class GatewayService {
       listSnapshot: async () => (await this.observeSnapshot()).snapshot,
       observeSnapshot: async () => await this.observeSnapshot(),
       deliveryStatus: async (params) => await this.deliveryStatus(params.token),
+      untrack: async (params) =>
+        await this.exclusiveDecision(async () => {
+          const settled = await this.store.settleProgressWatch({
+            conversationId: params.conversationId,
+            outcome: "done",
+          });
+          if (!settled) {
+            throw new BridgeError(
+              "PROGRESS_WATCH_NOT_FOUND",
+              "No active progress watch matches that conversation token.",
+            );
+          }
+          await this.changed();
+        }),
       sendToClaude: async (params) => await this.acceptToClaude(params),
       sendToCodex: async (params) => await this.acceptToCodex(params),
       reply: async (params) => await this.acceptReply(params),
@@ -4379,9 +4425,80 @@ export class GatewayService {
     return "ROUTE_UNAVAILABLE";
   }
 
+  private async refreshNextProgressWatchWakeLocked(): Promise<void> {
+    const next = await this.store.nextProgressWatchActionAt();
+    const parsed = next === undefined ? Number.NaN : Date.parse(next);
+    this.nextProgressWatchAt = Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private async processProgressWatchesLocked(now: number): Promise<boolean> {
+    if (
+      this.nextProgressWatchAt === undefined ||
+      this.nextProgressWatchAt > now
+    ) {
+      return false;
+    }
+    const actions = await this.store.advanceDueProgressWatches();
+    let changed = actions.length > 0;
+    for (const action of actions) {
+      if (action.type === "settled") {
+        this.addRuntimeAlert(
+          action.outcome === "unresponsive"
+            ? "PROGRESS_WATCH_UNRESPONSIVE"
+            : "PROGRESS_WATCH_ENDPOINT_RETIRED",
+          action.outcome === "unresponsive" ? "error" : "warning",
+          { alias: action.ownerAlias },
+        );
+        continue;
+      }
+      if (action.type === "notify_capability_degraded") {
+        this.addRuntimeAlert("PROGRESS_WATCH_CAPABILITY_DEGRADED", "warning", {
+          alias: action.ownerAlias,
+        });
+        continue;
+      }
+      const text =
+        `[Embassy automated liveness check — ${action.conversationId} / ` +
+        `Embassy 自动活跃检查 — ${action.conversationId}]\n` +
+        "Reply with the result or a status. / 请回复结果或状态。";
+      try {
+        await this.enqueue(
+          action.ownerAlias,
+          action.workerAlias,
+          text,
+          false,
+          false,
+          {
+            existingConversationId: action.conversationId,
+            requestedHopCount: 0,
+            exposeDeliveryToken: false,
+            skipProgressWatchActivity: true,
+            preserveConversationHop: true,
+            progressWatchNudge: {
+              conversationId: action.conversationId,
+              nudgeNumber: action.nudgeNumber,
+            },
+          },
+        );
+        this.addRuntimeAlert("PROGRESS_WATCH_NUDGE", "warning", {
+          alias: action.ownerAlias,
+        });
+      } catch {
+        await this.store.deferProgressWatchNudge(action.conversationId);
+        this.addRuntimeAlert("PROGRESS_WATCH_NUDGE_DEFERRED", "warning", {
+          alias: action.ownerAlias,
+        });
+        changed = true;
+      }
+    }
+    await this.refreshNextProgressWatchWakeLocked();
+    return changed;
+  }
+
   private async processLifecycleLocked(): Promise<boolean> {
     const now = this.now().getTime();
     let changed = false;
+    if (await this.processProgressWatchesLocked(now)) changed = true;
     await this.drainPreDeadlineDeliveryCallbacksLocked();
     for (const tracker of this.deliveryTrackers.values()) {
       if (tracker.pendingTerminalEvent !== undefined) {
@@ -4522,6 +4639,9 @@ export class GatewayService {
       const deadlineAt = Date.parse(continuation.deadlineAt);
       if (Number.isFinite(deadlineAt)) consider(deadlineAt);
     }
+    if (this.nextProgressWatchAt !== undefined) {
+      consider(this.nextProgressWatchAt);
+    }
     if (hasNonterminal) {
       this.nextDashboardRefreshAt ??= now + DELIVERY_DASHBOARD_REFRESH_MS;
       consider(this.nextDashboardRefreshAt);
@@ -4603,6 +4723,9 @@ export class GatewayService {
           params.text,
           params.expectsReply,
           false,
+          params.trackIdleMinutes === undefined
+            ? {}
+            : { trackIdleMinutes: params.trackIdleMinutes },
         ));
       } catch (error) {
         // A successful enqueue publishes both the discovery and message
@@ -4627,7 +4750,12 @@ export class GatewayService {
             params.text,
             steer ? false : params.expectsReply,
             false,
-            steer ? { steer: true } : undefined,
+            {
+              ...(steer ? { steer: true as const } : {}),
+              ...(params.trackIdleMinutes === undefined
+                ? {}
+                : { trackIdleMinutes: params.trackIdleMinutes }),
+            },
           ),
         );
       } catch (error) {
@@ -4655,6 +4783,8 @@ export class GatewayService {
                 from,
                 params.text,
                 conversation.lastHopCount + 1,
+                true,
+                params.trackIdleMinutes,
               )
             : await this.enqueue(
                 from,
@@ -4665,6 +4795,9 @@ export class GatewayService {
                 {
                   existingConversationId: conversation.id,
                   requestedHopCount: conversation.lastHopCount + 1,
+                  ...(params.trackIdleMinutes === undefined
+                    ? {}
+                    : { trackIdleMinutes: params.trackIdleMinutes }),
                 },
               );
         return this.acceptedControlResult(result);
@@ -4685,6 +4818,13 @@ export class GatewayService {
       requestedHopCount?: number;
       exposeDeliveryToken?: boolean;
       steer?: true;
+      trackIdleMinutes?: number;
+      skipProgressWatchActivity?: true;
+      progressWatchNudge?: {
+        conversationId: string;
+        nudgeNumber: 1 | 2;
+      };
+      preserveConversationHop?: true;
     } = {},
   ): Promise<EnqueuedMessageResult> {
     if (
@@ -4738,6 +4878,19 @@ export class GatewayService {
       hopCount,
       deadlineAt,
       ...(options.steer === true ? { steer: true as const } : {}),
+      ...(options.skipProgressWatchActivity === true
+        ? {}
+        : {
+            progressWatch: progressWatchActivity(
+              text,
+              conversationId,
+              sourceAlias,
+              options.trackIdleMinutes,
+            ),
+          }),
+      ...(options.progressWatchNudge === undefined
+        ? {}
+        : { progressWatchNudge: options.progressWatchNudge }),
     });
     if (!queued.accepted || queued.messageId === undefined) throw new BridgeError("MESSAGE_REJECTED", "The message was not accepted.");
     if (queued.supersededSettlement !== undefined) {
@@ -4746,7 +4899,9 @@ export class GatewayService {
     this.conversations.set(conversationId, conversation);
     if (queued.pair === true) conversation.pair = true;
     conversation.nextSequence += 1;
-    conversation.lastHopCount = hopCount;
+    if (options.preserveConversationHop !== true) {
+      conversation.lastHopCount = hopCount;
+    }
     conversation.lastActivityAt = this.now().toISOString();
     this.messageContexts.set(queued.messageId, {
       conversationId,
@@ -4792,6 +4947,7 @@ export class GatewayService {
     text: string,
     requestedHopCount: number,
     exposeDeliveryToken = true,
+    trackIdleMinutes?: number,
   ): Promise<EnqueuedMessageResult> {
     this.pruneTransient();
     const capability = this.nativeIngressByConversation.get(conversation.id);
@@ -4828,6 +4984,12 @@ export class GatewayService {
       hopCount: requestedHopCount,
       deadlineAt,
       ...(conversation.pair === true ? { pair: true as const } : {}),
+      progressWatch: progressWatchActivity(
+        text,
+        conversation.id,
+        sourceAlias,
+        trackIdleMinutes,
+      ),
     });
     if (!queued.accepted || queued.messageId === undefined) {
       throw new BridgeError(
@@ -4906,8 +5068,13 @@ export class GatewayService {
       body: text,
       dedupeKey: `${conversation.id}:${sequence}`,
       hopCount: requestedHopCount,
-      deadlineAt,
-      authorizedPairTeardownReply: true,
+        deadlineAt,
+        authorizedPairTeardownReply: true,
+        progressWatch: progressWatchActivity(
+          text,
+          conversation.id,
+          conversation.targetAlias,
+        ),
     });
     if (!queued.accepted || queued.messageId === undefined) {
       throw new BridgeError(
@@ -5744,6 +5911,11 @@ export class GatewayService {
         hopCount: 0,
         deadlineAt,
         ...(steer ? { steer: true as const } : {}),
+        progressWatch: progressWatchActivity(
+          event.text,
+          conversationId,
+          event.sourceAlias,
+        ),
       });
       if (!queued.accepted || queued.messageId === undefined) {
         throw new BridgeError(
@@ -5904,9 +6076,10 @@ export class GatewayService {
                 event.safeErrorCode,
                 "ROUTE_DEGRADED",
               ),
-            }),
+        }),
       });
     }
+    await this.store.touchProgressWatchesForAlias(alias);
     await this.changed();
     if (binding.provider === "codex") {
       await this.setNativeCodexStatus(
@@ -6011,6 +6184,7 @@ export class GatewayService {
 
   private async changed(): Promise<void> {
     this.revision += 1;
+    await this.refreshNextProgressWatchWakeLocked();
     this.scheduleLifecycleWakeLocked();
     await this.publish();
   }

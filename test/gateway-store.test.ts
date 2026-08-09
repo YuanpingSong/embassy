@@ -769,7 +769,8 @@ test("progress watches persist exact edge authority and advance owner-ended epis
   );
 
   testClock.advance(60_000);
-  assert.deepEqual(await store.advanceDueProgressWatches(), [
+  const due = await store.advanceDueProgressWatches();
+  assert.deepEqual(due, [
     {
       type: "send_nudge",
       conversationId: "conv_abcdefghijklmnop",
@@ -778,6 +779,23 @@ test("progress watches persist exact edge authority and advance owner-ended epis
       nudgeNumber: 1,
     },
   ]);
+  assert.equal((await store.inspectProgressWatches())[0]?.phase, "quiet");
+  assert.equal(
+    (
+      await store.enqueueMessage({
+        sourceAlias: "reviewer@this-mac",
+        targetAlias: "advisor@this-mac",
+        body: "[Embassy automated liveness check]",
+        dedupeKey: "watch-nudge-1",
+        progressWatchNudge: {
+          conversationId: "conv_abcdefghijklmnop",
+          nudgeNumber: 1,
+        },
+      })
+    ).accepted,
+    true,
+  );
+  assert.equal((await store.inspectProgressWatches())[0]?.phase, "episode");
   assert.equal(
     await store.touchProgressWatch({
       conversationId: "conv_abcdefghijklmnop",

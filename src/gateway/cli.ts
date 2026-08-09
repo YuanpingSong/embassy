@@ -50,6 +50,7 @@ import {
   runGatewayServer,
   type GatewayServerOptions,
 } from "./server.js";
+import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -66,6 +67,7 @@ export const gatewayCliCommands = [
   "status",
   "delivery-status",
   "wait-delivery",
+  "untrack",
   "refresh-dashboard",
   "dashboard",
   "register-codex",
@@ -306,6 +308,27 @@ function requireClaudeSelector(options: ParsedOptions, name: string): string {
   return selector;
 }
 
+function trackIdleMinutes(options: ParsedOptions): number | undefined {
+  const tracking = options.track === true;
+  const raw = options["idle-minutes"];
+  if (raw !== undefined && !tracking) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  if (!tracking) return undefined;
+  if (raw === undefined) return PROGRESS_WATCH_DEFAULT_IDLE_MS / 60_000;
+  if (
+    typeof raw !== "string" ||
+    !/^[1-9][0-9]{0,3}$/.test(raw)
+  ) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  const minutes = Number(raw);
+  if (!Number.isSafeInteger(minutes) || minutes > 24 * 60) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  return minutes;
+}
+
 function requireDeliveryToken(options: ParsedOptions, name: string): string {
   const token = requireString(options, name);
   if (!isGatewayDeliveryToken(token)) {
@@ -469,6 +492,19 @@ async function buildRequest(
         params: { token: requireDeliveryToken(options, "token") },
       };
     }
+    case "untrack": {
+      const options = parseOptions(args, ["conversation"]);
+      assertExactOptionCount(options, 1);
+      const conversationId = requireString(options, "conversation");
+      if (!isGatewayConversationId(conversationId)) {
+        throw new CliFault("INVALID_ARGUMENTS");
+      }
+      return {
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        method: "untrack",
+        params: { conversationId },
+      };
+    }
     case "refresh-dashboard":
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
@@ -562,9 +598,14 @@ async function buildRequest(
       };
     }
     case "send-to-claude": {
-      const options = parseOptions(args, ["from", "to"], ["expects-reply"]);
-      assertExactOptionCount(options, 2, 3);
+      const options = parseOptions(
+        args,
+        ["from", "to", "idle-minutes"],
+        ["expects-reply", "track"],
+      );
+      assertExactOptionCount(options, 2, 5);
       const threadId = requireExclusiveCodexThreadId(env);
+      const idleMinutes = trackIdleMinutes(options);
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "send_to_claude",
@@ -574,13 +615,21 @@ async function buildRequest(
           toAlias: requireClaudeSelector(options, "to"),
           text: await readMessageBody(stdin),
           expectsReply: options["expects-reply"] === true,
+          ...(idleMinutes === undefined
+            ? {}
+            : { trackIdleMinutes: idleMinutes }),
         },
       };
     }
     case "send-to-codex": {
-      const options = parseOptions(args, ["from", "to"], ["expects-reply"]);
-      assertExactOptionCount(options, 2, 3);
+      const options = parseOptions(
+        args,
+        ["from", "to", "idle-minutes"],
+        ["expects-reply", "track"],
+      );
+      assertExactOptionCount(options, 2, 5);
       const replyAddress = requireExclusiveClaudeReplyAddress(env);
+      const idleMinutes = trackIdleMinutes(options);
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "send_to_codex",
@@ -590,17 +639,25 @@ async function buildRequest(
           text: await readMessageBody(stdin),
           replyAddress,
           expectsReply: options["expects-reply"] === true,
+          ...(idleMinutes === undefined
+            ? {}
+            : { trackIdleMinutes: idleMinutes }),
         },
       };
     }
     case "reply": {
-      const options = parseOptions(args, ["conversation", "alias"]);
-      assertExactOptionCount(options, 2);
+      const options = parseOptions(
+        args,
+        ["conversation", "alias", "idle-minutes"],
+        ["track"],
+      );
+      assertExactOptionCount(options, 2, 4);
       const conversationId = requireString(options, "conversation");
       if (!isGatewayConversationId(conversationId)) {
         throw new CliFault("INVALID_ARGUMENTS");
       }
       const alias = requireAlias(options, "alias");
+      const idleMinutes = trackIdleMinutes(options);
       const threadId = env.CODEX_THREAD_ID;
       const replyAddress = optionalClaudeReplyAddress(env);
       const hasCodexIdentity = hasInheritedIdentity(threadId);
@@ -617,6 +674,9 @@ async function buildRequest(
         params: {
           conversationId,
           text: await readMessageBody(stdin),
+          ...(idleMinutes === undefined
+            ? {}
+            : { trackIdleMinutes: idleMinutes }),
           caller: hasCodexIdentity
             ? {
                 kind: "codex",

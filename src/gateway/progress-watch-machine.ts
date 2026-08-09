@@ -83,6 +83,7 @@ export type ProgressWatchEvent =
       at: number;
       conversationCapabilityRestored: boolean;
     }>
+  | Readonly<{ type: "nudge_deferred"; at: number; retryAt: number }>
   | Readonly<{ type: "owner_done"; at: number }>
   | Readonly<{ type: "endpoint_retired"; at: number }>
   | Readonly<{ type: "disabled"; at: number }>;
@@ -203,6 +204,23 @@ export function transitionProgressWatch(
           degradedNoticeSent: true,
         },
         effects: notify ? [{ type: "notify_capability_degraded" }] : [],
+      };
+    }
+    case "nudge_deferred": {
+      if (
+        !Number.isFinite(event.retryAt) ||
+        event.retryAt <= at ||
+        event.retryAt > at + Math.min(state.idleMs, 60_000)
+      ) {
+        throw new RangeError("INVALID_PROGRESS_WATCH_RETRY_AT");
+      }
+      return {
+        state: {
+          ...state,
+          updatedAt: timestamp,
+          nextActionAt: iso(event.retryAt),
+        },
+        effects: [],
       };
     }
     case "due": {

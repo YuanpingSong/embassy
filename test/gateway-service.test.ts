@@ -5720,6 +5720,164 @@ test("delivery tokens expose queued, stalled, and exact terminal states", async 
   });
 });
 
+test("opt-in progress watches nudge through the ordinary queue and settle boundedly", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  claude.dispatchResults.push(
+    { state: "delivered" },
+    { state: "delivered" },
+    { state: "delivered" },
+  );
+  const codex = new FakeProvider("codex");
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const store = new GatewayStore(config, { now: clock.now });
+  const service = new GatewayService({
+    config,
+    store,
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const accepted = await handlers.sendToClaude({
+    ...toClaude("please complete the bounded task"),
+    expectsReply: false,
+    trackIdleMinutes: 1,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  assert.equal((await store.inspectProgressWatches())[0]?.phase, "quiet");
+
+  await clock.advanceBy(60_000);
+  await waitFor(() => claude.dispatches.length === 2);
+  assert.match(claude.dispatches[1]!.text, /automated liveness check/);
+  assert.match(claude.dispatches[1]!.text, new RegExp(accepted.conversationId));
+  assert.deepEqual(
+    (await store.inspectProgressWatches()).map(
+      ({ phase, nudgeCount }) => ({ phase, nudgeCount }),
+    ),
+    [{ phase: "episode", nudgeCount: 1 }],
+  );
+
+  await clock.advanceBy(60_000);
+  await waitFor(() => claude.dispatches.length === 3);
+  assert.deepEqual(
+    (await store.inspectProgressWatches()).map(
+      ({ phase, nudgeCount }) => ({ phase, nudgeCount }),
+    ),
+    [{ phase: "episode", nudgeCount: 2 }],
+  );
+
+  await clock.advanceBy(120_000);
+  assert.deepEqual(await store.inspectProgressWatches(), []);
+  assert.equal(
+    (await handlers.listSnapshot()).alerts.some(
+      (alert) => alert.code === "PROGRESS_WATCH_UNRESPONSIVE",
+    ),
+    true,
+  );
+});
+
+test("TRACK and DONE prefixes preserve owner-only completion and untrack capability", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  claude.dispatchResults.push({ state: "delivered" }, { state: "delivered" });
+  const codex = new FakeProvider("codex");
+  codex.dispatchResults.push({ state: "delivered" });
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const store = new GatewayStore(config);
+  const service = new GatewayService({
+    config,
+    store,
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const opened = await handlers.sendToClaude({
+    ...toClaude("TRACK: keep this long-running exchange visible"),
+    expectsReply: false,
+  });
+  assert.equal(opened.accepted, true);
+  if (!opened.accepted) return;
+  await waitFor(() => claude.dispatches.length === 1);
+  assert.equal((await store.inspectProgressWatches())[0]?.ownerAlias, "codex-main@this-mac");
+
+  const workerHint = await handlers.reply({
+    conversationId: opened.conversationId,
+    text: "DONE: worker reports the result is ready",
+    caller: { kind: "claude", alias: "claude-one@this-mac" },
+  });
+  assert.equal(workerHint.accepted, true);
+  await waitFor(() => codex.dispatches.length === 1);
+  assert.notEqual(
+    (await store.inspectProgressWatches())[0]?.workerReportedCompleteAt,
+    undefined,
+  );
+
+  const ownerDone = await handlers.reply({
+    conversationId: opened.conversationId,
+    text: "DONE: thank you",
+    caller: {
+      kind: "codex",
+      alias: "codex-main@this-mac",
+      threadId: THREAD_ID,
+    },
+  });
+  assert.equal(ownerDone.accepted, true);
+  assert.deepEqual(await store.inspectProgressWatches(), []);
+
+  const second = await handlers.sendToClaude({
+    ...toClaude("TRACK: another bounded watch"),
+    expectsReply: false,
+  });
+  assert.equal(second.accepted, true);
+  if (!second.accepted) return;
+  assert.deepEqual(await handlers.untrack({ conversationId: second.conversationId }), {
+    accepted: true,
+    code: "ok",
+  });
+  assert.deepEqual(await store.inspectProgressWatches(), []);
+});
+
 test("every accepted send and reply gets a fresh process-local delivery token", async (t) => {
   const { root, stateDir } = await fixture();
   const config = loadGatewayConfig({

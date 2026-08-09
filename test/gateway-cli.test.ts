@@ -238,6 +238,7 @@ test("all client commands use one private control socket and expose only normali
   const sendsToCodex: ValidatedSendToCodexParams[] = [];
   const replies: ReplyParams[] = [];
   const deliveryStatuses: string[] = [];
+  const untracked: string[] = [];
   const handlers: GatewayControlHandlers = {
     health: () => ({ status: "ok", revision: 1 }),
     registerCodex: (params) => {
@@ -278,6 +279,10 @@ test("all client commands use one private control socket and expose only normali
         updatedAt: NOW,
         deadlineAt: DEADLINE,
       };
+    },
+    untrack: ({ conversationId }) => {
+      untracked.push(conversationId);
+      return { accepted: true, code: "ok" };
     },
     sendToClaude: (params) => {
       sendsToClaude.push({ ...params });
@@ -335,6 +340,10 @@ test("all client commands use one private control socket and expose only normali
     },
     {
       argv: ["wait-delivery", "--token", DELIVERY_TOKEN],
+      env: BOTH_IDENTITIES,
+    },
+    {
+      argv: ["untrack", "--conversation", CONVERSATION_ID],
       env: BOTH_IDENTITIES,
     },
     { argv: ["refresh-dashboard"], env: BOTH_IDENTITIES },
@@ -421,6 +430,9 @@ test("all client commands use one private control socket and expose only normali
         "advisor@this-mac",
         "--to",
         "codex-reviewer@this-mac",
+        "--track",
+        "--idle-minutes",
+        "7",
       ],
       body: SECRET_BODY,
       env: { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH },
@@ -432,6 +444,7 @@ test("all client commands use one private control socket and expose only normali
         CONVERSATION_ID,
         "--alias",
         "codex-reviewer@this-mac",
+        "--track",
       ],
       body: SECRET_BODY,
       env: { CODEX_THREAD_ID: THREAD_ID },
@@ -516,6 +529,7 @@ test("all client commands use one private control socket and expose only normali
   ]);
   assert.deepEqual(unpairs, pairs);
   assert.deepEqual(deliveryStatuses, [DELIVERY_TOKEN, DELIVERY_TOKEN]);
+  assert.deepEqual(untracked, [CONVERSATION_ID]);
   assert.deepEqual(sendsToClaude, [
     {
       fromAlias: "codex-reviewer@this-mac",
@@ -539,6 +553,7 @@ test("all client commands use one private control socket and expose only normali
       text: SECRET_BODY,
       replyAddress: REPLY_ADDRESS,
       expectsReply: false,
+      trackIdleMinutes: 7,
     },
   ]);
   assert.deepEqual(replies, [
@@ -550,6 +565,7 @@ test("all client commands use one private control socket and expose only normali
         alias: "codex-reviewer@this-mac",
         threadId: THREAD_ID,
       },
+      trackIdleMinutes: 5,
     },
     {
       conversationId: CONVERSATION_ID,
@@ -1676,6 +1692,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         snapshot: emptySnapshot(),
       }),
       deliveryStatus: () => ({ found: false }),
+      untrack: () => ({ accepted: true, code: "ok" }),
       sendToClaude: () => ({
         accepted: true,
         code: "ok",

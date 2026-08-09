@@ -130,14 +130,27 @@ export type OpenProgressWatchInput = Readonly<{
   idleMs: number;
 }>;
 
-export type ProgressWatchAction = Readonly<{
-  type: "send_nudge" | "notify_capability_degraded" | "settled";
-  conversationId: string;
-  ownerAlias: string;
-  workerAlias: string;
-  nudgeNumber?: 1 | 2;
-  outcome?: ProgressWatchOutcome;
-}>;
+export type ProgressWatchAction =
+  | Readonly<{
+      type: "send_nudge";
+      conversationId: string;
+      ownerAlias: string;
+      workerAlias: string;
+      nudgeNumber: 1 | 2;
+    }>
+  | Readonly<{
+      type: "notify_capability_degraded";
+      conversationId: string;
+      ownerAlias: string;
+      workerAlias: string;
+    }>
+  | Readonly<{
+      type: "settled";
+      conversationId: string;
+      ownerAlias: string;
+      workerAlias: string;
+      outcome: ProgressWatchOutcome;
+    }>;
 
 export type SettleQueuedMessageInput = {
   messageId: string;
@@ -2860,6 +2873,12 @@ export class GatewayStore {
     input: OpenProgressWatchInput,
   ): Promise<{ created: boolean; watch: ProgressWatchMachine }> {
     return this.mutate(async (state, now) => {
+      if (this.config.trackingEnabled === false) {
+        throw new BridgeError(
+          "PROGRESS_TRACKING_DISABLED",
+          "Progress tracking is disabled by the controller configuration.",
+        );
+      }
       if (
         !CONVERSATION_ID_PATTERN.test(input.conversationId) ||
         !ALIAS_PATTERN.test(input.ownerAlias) ||
@@ -3065,52 +3084,16 @@ export class GatewayStore {
           retained.push(watch);
           continue;
         }
-        const owner = state.routes.find(
-          (route) =>
-            route.alias === watch.ownerAlias &&
-            route.binding.ownerLease === watch.ownerLease,
+        const transition = this.progressWatchDueTransition(state, watch, now);
+        const nudge = transition.effects.find(
+          (effect) => effect.type === "send_nudge",
         );
-        const worker = state.routes.find(
-          (route) =>
-            route.alias === watch.workerAlias &&
-            route.binding.ownerLease === watch.workerLease,
-        );
-        const pairPresent =
-          owner !== undefined &&
-          worker !== undefined &&
-          state.pairs.some(
-            (pair) =>
-              ((pair.claudeAlias === owner.alias &&
-                pair.codexAlias === worker.alias) ||
-                (pair.claudeAlias === worker.alias &&
-                  pair.codexAlias === owner.alias)) &&
-              pair.claudeOwnerLease ===
-                (owner.binding.provider === "claude"
-                  ? owner.binding.ownerLease
-                  : worker.binding.ownerLease) &&
-              pair.codexOwnerLease ===
-                (owner.binding.provider === "codex"
-                  ? owner.binding.ownerLease
-                  : worker.binding.ownerLease),
-          );
-        const transition = transitionProgressWatch(watch, {
-          type: "due",
-          at: now.getTime(),
-          bothIdle: owner?.state === "idle" && worker?.state === "idle",
-          endpointsPresent: pairPresent,
-        });
-        if (transition.state !== null) retained.push(transition.state);
+        // A nudge is only reserved here. Its state transition and journal row
+        // commit atomically with the ordinary queued body.
+        if (nudge !== undefined) retained.push(watch);
+        else if (transition.state !== null) retained.push(transition.state);
         for (const effect of transition.effects) {
           if (effect.type === "send_nudge") {
-            this.appendProgressWatchEvent(
-              state,
-              transition.state ?? watch,
-              {
-                kind: "nudge",
-                timestamp: now.toISOString(),
-                nudgeNumber: effect.nudgeNumber,
-              },
-            );
             actions.push({
               type: "send_nudge",
               conversationId: watch.conversationId,
@@ -3148,6 +3131,31 @@ export class GatewayStore {
         undefined,
       ),
     );
+  }
+
+  async deferProgressWatchNudge(
+    conversationId: string,
+    retryDelayMs = 1_000,
+  ): Promise<boolean> {
+    return this.mutate(async (state, now) => {
+      const index = state.progressWatches.findIndex(
+        (watch) => watch.conversationId === conversationId,
+      );
+      const watch = state.progressWatches[index];
+      if (watch === undefined) return false;
+      const boundedDelay = Math.max(
+        1,
+        Math.min(retryDelayMs, watch.idleMs, 60_000),
+      );
+      const transition = transitionProgressWatch(watch, {
+        type: "nudge_deferred",
+        at: now.getTime(),
+        retryAt: now.getTime() + boundedDelay,
+      });
+      if (transition.state === null) return false;
+      state.progressWatches[index] = transition.state;
+      return true;
+    });
   }
 
   async hasPair(input: GatewayPairInput): Promise<boolean> {
@@ -4364,7 +4372,13 @@ export class GatewayStore {
     now: Date,
     input: Pick<
       EnqueueMessageInput,
-      "body" | "dedupeKey" | "deadlineAt" | "hopCount" | "steer"
+      | "body"
+      | "dedupeKey"
+      | "deadlineAt"
+      | "hopCount"
+      | "steer"
+      | "progressWatch"
+      | "progressWatchNudge"
     >,
     sides: ResolvedEnqueueSides,
   ): EnqueueMessageResult {
@@ -4532,6 +4546,27 @@ export class GatewayStore {
         true,
       );
     }
+    if (
+      input.progressWatch !== undefined &&
+      input.progressWatchNudge !== undefined
+    ) {
+      throw new BridgeError(
+        "INVALID_PROGRESS_WATCH",
+        "A queued message cannot be both endpoint activity and a controller nudge.",
+      );
+    }
+    this.applyProgressWatchMessageActivity(
+      state,
+      now,
+      input.progressWatch,
+      sides,
+    );
+    this.commitProgressWatchNudge(
+      state,
+      now,
+      input.progressWatchNudge,
+      sides,
+    );
     let supersededSettlement: TerminalMessageSettlement | undefined;
     if (superseded !== undefined) {
       state.queue.splice(oldestSteerIndex, 1);
@@ -4715,6 +4750,222 @@ export class GatewayStore {
     while (state.events.length > this.config.limits.eventCapacity) {
       state.events.shift();
     }
+  }
+
+  /** Commit watch activity only after every message-admission check succeeds. */
+  private applyProgressWatchMessageActivity(
+    state: GatewayPersistedState,
+    now: Date,
+    activity: EnqueueMessageInput["progressWatch"],
+    sides: ResolvedEnqueueSides,
+  ): void {
+    if (activity === undefined) return;
+    if (
+      !CONVERSATION_ID_PATTERN.test(activity.conversationId) ||
+      activity.actorAlias !== sides.sourceAlias ||
+      (activity.openIdleMs !== undefined &&
+        (!Number.isSafeInteger(activity.openIdleMs) ||
+          activity.openIdleMs < PROGRESS_WATCH_MIN_IDLE_MS ||
+          activity.openIdleMs > PROGRESS_WATCH_MAX_IDLE_MS)) ||
+      (activity.completionSignal === true &&
+        activity.openIdleMs !== undefined)
+    ) {
+      throw new BridgeError(
+        "INVALID_PROGRESS_WATCH",
+        "The message watch activity is malformed or contradictory.",
+      );
+    }
+
+    const index = state.progressWatches.findIndex(
+      (watch) => watch.conversationId === activity.conversationId,
+    );
+    const existing = state.progressWatches[index];
+    if (existing !== undefined) {
+      if (
+        activity.actorAlias !== existing.ownerAlias &&
+        activity.actorAlias !== existing.workerAlias
+      ) {
+        throw new BridgeError(
+          "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
+          "The watched conversation belongs to different exact endpoints.",
+        );
+      }
+      if (
+        activity.openIdleMs !== undefined &&
+        activity.actorAlias !== existing.ownerAlias
+      ) {
+        throw new BridgeError(
+          "PROGRESS_WATCH_OWNER_REQUIRED",
+          "Only the exact watch owner may reassert tracking options.",
+        );
+      }
+      if (
+        activity.completionSignal === true &&
+        activity.actorAlias === existing.ownerAlias
+      ) {
+        state.progressWatches.splice(index, 1);
+        this.appendProgressWatchEvent(state, existing, {
+          kind: "done",
+          timestamp: now.toISOString(),
+        });
+        return;
+      }
+      const workerReportedComplete =
+        activity.completionSignal === true &&
+        activity.actorAlias === existing.workerAlias;
+      const transition = transitionProgressWatch(existing, {
+        type: "activity",
+        at: now.getTime(),
+        ...(workerReportedComplete
+          ? { workerReportedComplete: true as const }
+          : {}),
+      });
+      if (transition.state !== null) {
+        state.progressWatches[index] = transition.state;
+        if (workerReportedComplete) {
+          this.appendProgressWatchEvent(state, transition.state, {
+            kind: "worker_reported_complete",
+            timestamp: now.toISOString(),
+          });
+        }
+      }
+      return;
+    }
+
+    if (activity.openIdleMs === undefined) return;
+    if (this.config.trackingEnabled === false) {
+      throw new BridgeError(
+        "PROGRESS_TRACKING_DISABLED",
+        "Progress tracking is disabled by the controller configuration.",
+      );
+    }
+    if (sides.pair !== true) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_EDGE_REQUIRED",
+        "Progress tracking requires one exact paired consent edge.",
+      );
+    }
+    if (
+      state.progressWatches.length >=
+      (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY)
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_CAPACITY_REACHED",
+        "The bounded progress-watch inventory is full.",
+        true,
+      );
+    }
+    const owner = state.routes.find(
+      (route) => route.alias === sides.sourceAlias,
+    );
+    const worker = state.routes.find(
+      (route) => route.alias === sides.targetAlias,
+    );
+    if (owner === undefined || worker === undefined) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_EDGE_REQUIRED",
+        "Progress tracking requires both exact paired routes to be registered.",
+      );
+    }
+    const watch = createProgressWatchMachine({
+      conversationId: activity.conversationId,
+      ownerAlias: owner.alias,
+      workerAlias: worker.alias,
+      ownerLease: owner.binding.ownerLease,
+      workerLease: worker.binding.ownerLease,
+      idleMs: activity.openIdleMs,
+      at: now.getTime(),
+    });
+    state.progressWatches.push(watch);
+    this.appendProgressWatchEvent(state, watch, {
+      kind: "opened",
+      timestamp: now.toISOString(),
+    });
+  }
+
+  private progressWatchDueTransition(
+    state: GatewayPersistedState,
+    watch: ProgressWatchMachine,
+    now: Date,
+  ): ReturnType<typeof transitionProgressWatch> {
+    const owner = state.routes.find(
+      (route) =>
+        route.alias === watch.ownerAlias &&
+        route.binding.ownerLease === watch.ownerLease,
+    );
+    const worker = state.routes.find(
+      (route) =>
+        route.alias === watch.workerAlias &&
+        route.binding.ownerLease === watch.workerLease,
+    );
+    const pairPresent =
+      owner !== undefined &&
+      worker !== undefined &&
+      state.pairs.some(
+        (pair) =>
+          ((pair.claudeAlias === owner.alias &&
+            pair.codexAlias === worker.alias) ||
+            (pair.claudeAlias === worker.alias &&
+              pair.codexAlias === owner.alias)) &&
+          pair.claudeOwnerLease ===
+            (owner.binding.provider === "claude"
+              ? owner.binding.ownerLease
+              : worker.binding.ownerLease) &&
+          pair.codexOwnerLease ===
+            (owner.binding.provider === "codex"
+              ? owner.binding.ownerLease
+              : worker.binding.ownerLease),
+      );
+    return transitionProgressWatch(watch, {
+      type: "due",
+      at: now.getTime(),
+      bothIdle: owner?.state === "idle" && worker?.state === "idle",
+      endpointsPresent: pairPresent,
+    });
+  }
+
+  private commitProgressWatchNudge(
+    state: GatewayPersistedState,
+    now: Date,
+    nudge: EnqueueMessageInput["progressWatchNudge"],
+    sides: ResolvedEnqueueSides,
+  ): void {
+    if (nudge === undefined) return;
+    const index = state.progressWatches.findIndex(
+      (watch) => watch.conversationId === nudge.conversationId,
+    );
+    const watch = state.progressWatches[index];
+    if (
+      watch === undefined ||
+      sides.sourceAlias !== watch.ownerAlias ||
+      sides.targetAlias !== watch.workerAlias
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
+        "The controller nudge no longer matches its exact watch edge.",
+      );
+    }
+    const transition = this.progressWatchDueTransition(state, watch, now);
+    if (
+      transition.state === null ||
+      !transition.effects.some(
+        (effect) =>
+          effect.type === "send_nudge" &&
+          effect.nudgeNumber === nudge.nudgeNumber,
+      )
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_NUDGE_NOT_DUE",
+        "The requested progress-watch nudge is not currently due.",
+        true,
+      );
+    }
+    state.progressWatches[index] = transition.state;
+    this.appendProgressWatchEvent(state, transition.state, {
+      kind: "nudge",
+      timestamp: now.toISOString(),
+      nudgeNumber: nudge.nudgeNumber,
+    });
   }
 
   private appendProgressWatchEvent(
@@ -5084,6 +5335,15 @@ export class GatewayStore {
   private recoverAfterRestart(now: Date): void {
     const state = this.requireState();
     this.recoverCodexSuccessionAfterRestart(state, now);
+    if (this.config.trackingEnabled === false) {
+      for (const watch of state.progressWatches) {
+        this.appendProgressWatchEvent(state, watch, {
+          kind: "disabled",
+          timestamp: now.toISOString(),
+        });
+      }
+      state.progressWatches = [];
+    }
     for (let index = 0; index < state.progressWatches.length; index += 1) {
       const watch = state.progressWatches[index];
       if (watch === undefined) continue;
