@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
@@ -16,9 +16,15 @@ import {
 } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import {
+  startClaudeCompatibilityScratch,
+  type ClaudeCompatibilityScratch,
+  type ClaudeCompatibilityScratchFactory,
+} from "./claude-compatibility-scratch.js";
+import {
   compatibilityProbeNames,
   sharesCompatibilityMajor,
   type CompatibilityAttestation,
+  type CompatibilityCertification,
   type CompatibilityProbeName,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
@@ -75,6 +81,9 @@ const DEFAULT_CODEX_RECOVERY_INITIAL_MS = 250;
 const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
 const COMPATIBILITY_PROBE_THREAD_ID =
   "00000000-0000-7000-8000-000000000000";
+const COMPATIBILITY_TURN_TIMEOUT_MS = 60_000;
+const CLAUDE_CERTIFICATION_TIMEOUT_MS = 10_000;
+const CLAUDE_CERTIFICATION_DISCOVERY_POLL_MS = 100;
 
 function passedProbe(name: CompatibilityProbeName): CompatibilityProbeResult {
   return { name, outcome: "pass" };
@@ -111,6 +120,8 @@ export type LocalClaudeGatewayProviderOptions = {
   }>;
   /** Deterministic test seam. Production callers must omit this. */
   peerFactory?: ClaudePeerFactory;
+  /** Deterministic test seam. Production starts one bounded local scratch. */
+  compatibilityScratchFactory?: ClaudeCompatibilityScratchFactory;
 };
 
 type ClaudePending = {
@@ -313,6 +324,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly now: () => number;
   private readonly selectedStateRoots = new Map<string, string>();
   private readonly nativeHelpers: ClaudeNativeHelperSupervisor | undefined;
+  private readonly compatibilityScratchFactory: ClaudeCompatibilityScratchFactory;
   private readonly discovered = new Map<string, GatewayAdapterDiscovery>();
   private readonly selected = new Map<string, string>();
   /** Exact live same-UID sessions observed through native inbound frames. */
@@ -359,6 +371,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   /** Fences discovery callbacks and monitor restarts across listener rotation. */
   private nativeCodexSuccessionFreeze: string | undefined;
+  private compatibilityCertificationInFlight = false;
   private initialized = false;
   private closed = false;
 
@@ -401,6 +414,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       options.locale ?? "en",
       options.deliveryNotices ?? "merged",
     );
+    this.compatibilityScratchFactory =
+      options.compatibilityScratchFactory ??
+      (() => startClaudeCompatibilityScratch(options.runtime));
     this.nativeHelpers =
       options.nativeHelpers === undefined
         ? undefined
@@ -452,6 +468,130 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         failedProbe(socket, "CLAUDE_SOCKET_VALIDATION_UNAVAILABLE"),
         passedProbe(protocol),
       ];
+    }
+  }
+
+  async runCompatibilityCertification(input: Readonly<{
+    controllerStateRoot: string;
+    routeHandle?: string;
+    withTurn: boolean;
+  }>): Promise<CompatibilityCertification> {
+    void input.routeHandle;
+    void input.withTurn;
+    const depth = "wire" as const;
+    let scratch: ClaudeCompatibilityScratch | undefined;
+    let listener: ClaudePeerListener | undefined;
+    if (this.compatibilityCertificationInFlight) {
+      return {
+        depth,
+        outcome: "fail",
+        certifiedAt: new Date(this.now()).toISOString(),
+        safeErrorCode: "CLAUDE_CERTIFICATION_BUSY",
+      };
+    }
+    this.compatibilityCertificationInFlight = true;
+    try {
+      this.assertReady();
+      scratch = await this.compatibilityScratchFactory();
+      const deadlineAt = this.now() + CLAUDE_CERTIFICATION_TIMEOUT_MS;
+      let targetId: string | undefined;
+      while (this.now() < deadlineAt) {
+        scratch.assertRunning();
+        const discovery = await this.peer.discover();
+        if (discovery.truncated) {
+          throw new BridgeError(
+            "CLAUDE_CERTIFICATION_DISCOVERY_INCOMPLETE",
+            "The scratch session could not be proven from a complete registry scan.",
+            true,
+          );
+        }
+        const matches = discovery.peers.filter(
+          (peer) =>
+            peer.alias === scratch?.name && peer.targetId === scratch?.sessionId,
+        );
+        if (matches.length > 1) {
+          throw new BridgeError(
+            "CLAUDE_CERTIFICATION_TARGET_COLLISION",
+            "The scratch session identity was not unique.",
+          );
+        }
+        if (matches.length === 1) {
+          targetId = matches[0]?.targetId;
+          break;
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(
+            resolve,
+            CLAUDE_CERTIFICATION_DISCOVERY_POLL_MS,
+          );
+          timer.unref();
+        });
+      }
+      if (targetId === undefined) {
+        throw new BridgeError(
+          "CLAUDE_CERTIFICATION_TARGET_UNAVAILABLE",
+          "The bounded scratch session did not publish a discoverable peer record.",
+          true,
+        );
+      }
+      await this.peer.assertTargetWorkspaceDisjoint(
+        targetId,
+        input.controllerStateRoot,
+      );
+      let settleReceipt: ((event: ClaudePeerReceiptEvent) => void) | undefined;
+      const receipt = new Promise<ClaudePeerReceiptEvent>((resolve) => {
+        settleReceipt = resolve;
+      });
+      listener = await this.peer.listen({
+        onMessage: () => undefined,
+        onReceipt: (event) => {
+          if (event.status !== "held") settleReceipt?.(event);
+        },
+      });
+      const sent = await this.peer.send(
+        targetId,
+        "[embassy compat-certify] ignore",
+        {
+          listener,
+          receiptDeadlineAt: deadlineAt,
+        },
+      );
+      if (
+        sent.transportStatus !== "transport_written" ||
+        sent.receiptStatus !== "pending"
+      ) {
+        throw new BridgeError(
+          "CLAUDE_CERTIFICATION_WRITE_UNCONFIRMED",
+          "The scratch diagnostic frame was not accepted for receipt tracking.",
+          true,
+        );
+      }
+      const event = await receipt;
+      if (event.messageId !== sent.messageId || event.status !== "released") {
+        return {
+          depth,
+          outcome: "fail",
+          certifiedAt: new Date(this.now()).toISOString(),
+          safeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+        };
+      }
+      return {
+        depth,
+        outcome: "pass",
+        certifiedAt: new Date(this.now()).toISOString(),
+      };
+    } catch {
+      return {
+        depth,
+        outcome: "fail",
+        certifiedAt: new Date(this.now()).toISOString(),
+        safeErrorCode: "CLAUDE_CERTIFICATION_FAILED",
+      };
+    } finally {
+      await listener?.close().catch(() => undefined);
+      await scratch?.close().catch(() => undefined);
+      await this.peer.discover().catch(() => undefined);
+      this.compatibilityCertificationInFlight = false;
     }
   }
 
@@ -2223,6 +2363,11 @@ type CodexCallbackEvent =
       safeErrorCode?: string;
     };
 
+type CodexCertificationTurn = {
+  resolve: (result: CodexTransientTurnResult) => void;
+  timer: NodeJS.Timeout;
+};
+
 function validateCodexFactory(factory: LocalCodexTransportFactory): void {
   const schema = factory.schemaCompatibility;
   const write = factory.writeCompatibility;
@@ -2318,6 +2463,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly routeRecoveries = new Map<string, Promise<void>>();
   private readonly routesRequiringRecovery = new Set<string>();
   private readonly expectsReply = new Map<string, boolean>();
+  private readonly compatibilityCertifyingRoutes = new Set<string>();
+  private readonly compatibilityTurns = new Map<string, CodexCertificationTurn>();
   private readonly callbackQueue: CodexCallbackEvent[] = [];
   private callbackScheduled = false;
   private callbacks: GatewayAdapterCallbacks | undefined;
@@ -2478,6 +2625,122 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
+  async runCompatibilityCertification(input: Readonly<{
+    controllerStateRoot: string;
+    routeHandle?: string;
+    withTurn: boolean;
+  }>): Promise<CompatibilityCertification> {
+    void input.controllerStateRoot;
+    const certifiedAt = this.now().toISOString();
+    const depth = input.withTurn ? "turn" : "thread_ops";
+    const routeHandle = input.routeHandle;
+    if (routeHandle === undefined || this.compatibilityCertifyingRoutes.has(routeHandle)) {
+      return {
+        depth,
+        outcome: "fail",
+        certifiedAt,
+        safeErrorCode: "CODEX_CERTIFICATION_ROUTE_REQUIRED",
+      };
+    }
+    this.assertReady();
+    const route = this.routes.get(routeHandle);
+    if (route === undefined || !this.observeRouteSuccessionBarrier(routeHandle).clean) {
+      return {
+        depth,
+        outcome: "fail",
+        certifiedAt,
+        safeErrorCode: "CODEX_CERTIFICATION_ROUTE_BUSY",
+      };
+    }
+    this.compatibilityCertifyingRoutes.add(routeHandle);
+    try {
+      const loaded = await route.connector.observeLoadedThread(
+        route.connector.guard(),
+      );
+      if (!loaded.selectedThreadLoaded) {
+        return {
+          depth,
+          outcome: "fail",
+          certifiedAt: this.now().toISOString(),
+          safeErrorCode: "CODEX_CERTIFICATION_THREAD_UNAVAILABLE",
+        };
+      }
+      await route.connector.certifyThreadOperations(route.connector.guard());
+      if (!input.withTurn) {
+        return {
+          depth,
+          outcome: "pass",
+          certifiedAt: this.now().toISOString(),
+        };
+      }
+
+      const messageId = `compat_${randomBytes(12).toString("hex")}`;
+      const result = new Promise<CodexTransientTurnResult>((resolve) => {
+        const timer = setTimeout(() => {
+          this.compatibilityTurns.delete(messageId);
+          resolve({
+            messageId,
+            outcome: "expired",
+            replyCode: "REPLY_UNAVAILABLE",
+            text: null,
+          });
+        }, COMPATIBILITY_TURN_TIMEOUT_MS);
+        timer.unref();
+        this.compatibilityTurns.set(messageId, { resolve, timer });
+      });
+      try {
+        const disposition = await route.connector.submitMessage(
+          route.connector.guard(),
+          {
+            deadlineAt: new Date(
+              this.now().getTime() + COMPATIBILITY_TURN_TIMEOUT_MS,
+            ).toISOString(),
+            messageId,
+            text: "reply OK",
+          },
+        );
+        if (disposition.disposition !== "started") {
+          throw new BridgeError(
+            "CODEX_CERTIFICATION_TURN_NOT_STARTED",
+            "The bounded certification turn did not start on the exact idle route.",
+          );
+        }
+        const settled = await result;
+        if (
+          settled.outcome !== "completed" ||
+          settled.text?.trim() !== "OK"
+        ) {
+          return {
+            depth,
+            outcome: "fail",
+            certifiedAt: this.now().toISOString(),
+            safeErrorCode: "CODEX_CERTIFICATION_TURN_FAILED",
+          };
+        }
+        return {
+          depth,
+          outcome: "pass",
+          certifiedAt: this.now().toISOString(),
+        };
+      } finally {
+        const pending = this.compatibilityTurns.get(messageId);
+        if (pending !== undefined) {
+          clearTimeout(pending.timer);
+          this.compatibilityTurns.delete(messageId);
+        }
+      }
+    } catch {
+      return {
+        depth,
+        outcome: "fail",
+        certifiedAt: this.now().toISOString(),
+        safeErrorCode: "CODEX_CERTIFICATION_FAILED",
+      };
+    } finally {
+      this.compatibilityCertifyingRoutes.delete(routeHandle);
+    }
+  }
+
   async initialize(
     callbacks: GatewayAdapterCallbacks,
   ): Promise<GatewayAdapterStart> {
@@ -2606,6 +2869,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     ) {
       return { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" };
     }
+    if (this.compatibilityCertifyingRoutes.has(input.binding.routeHandle)) {
+      return { state: "deferred", safeErrorCode: "CODEX_ROUTE_HELD" };
+    }
     if (
       !this.factory.writableReady ||
       this.factory.writeCompatibility === null
@@ -2723,6 +2989,17 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.closed = true;
     this.closing = false;
     this.callbackQueue.length = 0;
+    for (const [messageId, pending] of this.compatibilityTurns) {
+      clearTimeout(pending.timer);
+      pending.resolve({
+        messageId,
+        outcome: "abandoned",
+        replyCode: "REPLY_UNAVAILABLE",
+        text: null,
+      });
+    }
+    this.compatibilityTurns.clear();
+    this.compatibilityCertifyingRoutes.clear();
     this.expectsReply.clear();
     this.callbacks = undefined;
   }
@@ -2950,6 +3227,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   }
 
   private onTurnResult(result: CodexTransientTurnResult): void {
+    const certification = this.compatibilityTurns.get(result.messageId);
+    if (certification !== undefined) {
+      clearTimeout(certification.timer);
+      this.compatibilityTurns.delete(result.messageId);
+      certification.resolve(result);
+      return;
+    }
     const wantsReply = this.expectsReply.get(result.messageId) === true;
     this.expectsReply.delete(result.messageId);
     let replyText: string | undefined;

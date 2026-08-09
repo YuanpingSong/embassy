@@ -6,9 +6,14 @@ import type { GatewayConfig } from "./config.js";
 import {
   certifiedCompatibilityVersions,
   compatibilitySurfaces,
+  attachCompatibilityCertification,
   evaluateCompatibilityAttestation,
+  isCompatibilityCertification,
+  isCompatibilityCertificationReport,
   isCompatibilityCheckReport,
   type CompatibilityAttestation,
+  type CompatibilityCertification,
+  type CompatibilityCertificationReport,
   type CompatibilityCheckReport,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
@@ -227,6 +232,11 @@ export interface GatewayProviderAdapter {
   acceptCompatibilityAttestation?(
     attestation: CompatibilityAttestation,
   ): void;
+  runCompatibilityCertification?(input: Readonly<{
+    controllerStateRoot: string;
+    routeHandle?: string;
+    withTurn: boolean;
+  }>): Promise<CompatibilityCertification>;
   initialize(callbacks: GatewayAdapterCallbacks): Promise<GatewayAdapterStart>;
   discoverClaudePeers?(): Promise<GatewayAdapterDiscoverySnapshot>;
   selectRoute(input: {
@@ -927,6 +937,8 @@ export class GatewayService {
       listSnapshot: async () => (await this.observeSnapshot()).snapshot,
       observeSnapshot: async () => await this.observeSnapshot(),
       compatibilityCheck: async () => await this.compatibilityCheck(),
+      compatibilityCertify: async (params) =>
+        await this.compatibilityCertify(params),
       deliveryStatus: async (params) => await this.deliveryStatus(params.token),
       untrack: async (params) =>
         await this.exclusiveDecision(async () => {
@@ -963,6 +975,164 @@ export class GatewayService {
     return await this.mutex.run("service", async () =>
       await this.compatibilityCheckLocked(),
     );
+  }
+
+  async compatibilityCertify(params: Readonly<{
+    codexAlias?: string;
+    withTurn: boolean;
+  }>): Promise<CompatibilityCertificationReport> {
+    const plan = await this.mutex.run("service", async () => {
+      if (!this.running || this.closing) {
+        throw new BridgeError(
+          "COMPAT_PROVIDER_UNAVAILABLE",
+          "Compatibility certification requires one running broker.",
+        );
+      }
+      const report = await this.compatibilityCheckLocked();
+      const codexRoutes = (await this.store.inspectPrivateCodexRoutes()).filter(
+        (route) => route.enabled,
+      );
+      const codexRoute =
+        params.codexAlias === undefined
+          ? codexRoutes.length === 1
+            ? codexRoutes[0]
+            : undefined
+          : codexRoutes.find((route) => route.alias === params.codexAlias);
+      if (codexRoute === undefined) {
+        throw new BridgeError(
+          "COMPAT_CERTIFY_CODEX_ROUTE_REQUIRED",
+          "Choose one exact registered Codex route for live certification.",
+        );
+      }
+      const adapters = new Map(
+        this.adapters.map((adapter) => [adapter.identity.provider, adapter]),
+      );
+      return { adapters, codexRoute, report };
+    });
+
+    const certifiedAt = this.now().toISOString();
+    const updated: CompatibilityAttestation[] = [];
+    for (const attestation of plan.report.surfaces) {
+      const adapter = plan.adapters.get(attestation.surface);
+      let certification: CompatibilityCertification;
+      if (
+        attestation.tier === "incompatible" ||
+        adapter?.runCompatibilityCertification === undefined
+      ) {
+        certification = {
+          depth: attestation.surface === "claude"
+            ? "wire"
+            : params.withTurn
+              ? "turn"
+              : "thread_ops",
+          outcome: "fail",
+          certifiedAt,
+          safeErrorCode:
+            attestation.safeErrorCode ??
+            `${attestation.surface.toUpperCase()}_CERTIFICATION_UNAVAILABLE`,
+        };
+      } else {
+        try {
+          certification = await adapter.runCompatibilityCertification({
+            controllerStateRoot: this.store.rootDir,
+            withTurn: params.withTurn,
+            ...(attestation.surface === "codex"
+              ? { routeHandle: plan.codexRoute.binding.routeHandle }
+              : {}),
+          });
+        } catch {
+          certification = {
+            depth: attestation.surface === "claude"
+              ? "wire"
+              : params.withTurn
+                ? "turn"
+                : "thread_ops",
+            outcome: "fail",
+            certifiedAt: this.now().toISOString(),
+            safeErrorCode: `${attestation.surface.toUpperCase()}_CERTIFICATION_FAILED`,
+          };
+        }
+      }
+      const expectedDepth =
+        attestation.surface === "claude"
+          ? "wire"
+          : params.withTurn
+            ? "turn"
+            : "thread_ops";
+      if (
+        !isCompatibilityCertification(certification) ||
+        certification.depth !== expectedDepth
+      ) {
+        certification = {
+          depth: expectedDepth,
+          outcome: "fail",
+          certifiedAt: this.now().toISOString(),
+          safeErrorCode: `${attestation.surface.toUpperCase()}_CERTIFICATION_EVIDENCE_INVALID`,
+        };
+      }
+      updated.push(
+        attachCompatibilityCertification(attestation, certification),
+      );
+    }
+
+    return await this.mutex.run("service", async () => {
+      const currentCodexRoute = (
+        await this.store.inspectPrivateCodexRoutes()
+      ).find(
+        (route) =>
+          route.enabled &&
+          route.alias === plan.codexRoute.alias &&
+          bindingKey(route.binding) === bindingKey(plan.codexRoute.binding),
+      );
+      const reconciled = updated.map((attestation) => {
+        if (attestation.surface === "codex" && currentCodexRoute === undefined) {
+          return attachCompatibilityCertification(attestation, {
+            depth: params.withTurn ? "turn" : "thread_ops",
+            outcome: "fail",
+            certifiedAt: this.now().toISOString(),
+            safeErrorCode: "CODEX_CERTIFICATION_ROUTE_CHANGED",
+          });
+        }
+        const observation = plan.adapters
+          .get(attestation.surface)
+          ?.compatibilitySurface?.();
+        if (
+          observation?.surface === attestation.surface &&
+          observation.version === attestation.version
+        ) {
+          return attestation;
+        }
+        return attachCompatibilityCertification(attestation, {
+          depth: attestation.surface === "claude"
+            ? "wire"
+            : params.withTurn
+              ? "turn"
+              : "thread_ops",
+          outcome: "fail",
+          certifiedAt: this.now().toISOString(),
+          safeErrorCode: `${attestation.surface.toUpperCase()}_CERTIFICATION_VERSION_CHANGED`,
+        });
+      });
+      const result: CompatibilityCertificationReport = {
+        policy: plan.report.policy,
+        certified: reconciled.every(
+          (attestation) => attestation.certification?.outcome === "pass",
+        ),
+        withTurn: params.withTurn,
+        surfaces: reconciled,
+      };
+      if (!isCompatibilityCertificationReport(result)) {
+        throw new BridgeError(
+          "COMPAT_CERTIFICATION_REPORT_INVALID",
+          "Compatibility certification evidence failed its closed report schema.",
+        );
+      }
+      for (const attestation of reconciled) {
+        await this.store.recordCompatibilityAttestation(attestation);
+      }
+      await this.changed();
+      return result;
+    });
   }
 
   private async compatibilityCheckLocked(): Promise<CompatibilityCheckReport> {
@@ -1007,7 +1177,7 @@ export class GatewayService {
       const probes =
         cached?.probes ?? (await entry.adapter.runCompatibilityProbes!());
       const checkedAt = cached?.checkedAt ?? this.now().toISOString();
-      const attestation = evaluateCompatibilityAttestation({
+      let attestation = evaluateCompatibilityAttestation({
         surface,
         version: entry.observation.version,
         checkedAt,
@@ -1015,6 +1185,15 @@ export class GatewayService {
         certifiedVersions: certifiedCompatibilityVersions[surface],
         probes,
       });
+      if (
+        cached?.certification !== undefined &&
+        attestation.tier !== "incompatible"
+      ) {
+        attestation = attachCompatibilityCertification(
+          attestation,
+          cached.certification,
+        );
+      }
       if (
         cached === undefined ||
         JSON.stringify(cached) !== JSON.stringify(attestation)
@@ -6354,6 +6533,24 @@ export class GatewayService {
         },
       ];
     });
+    const certificationAlerts: SafeGatewayAlert[] = compatibilityChecks.flatMap(
+      (attestation) => {
+        const certification = attestation.certification;
+        if (certification?.outcome !== "fail") return [];
+        const adapter = this.adapters.find(
+          (candidate) => candidate.identity.provider === attestation.surface,
+        );
+        return [
+          {
+            code: "COMPATIBILITY_CERTIFICATION_FAILED",
+            severity: "error" as const,
+            timestamp: certification.certifiedAt,
+            provider: attestation.surface,
+            host: adapter?.identity.hostId ?? "this-mac",
+          },
+        ];
+      },
+    );
     return projectGatewayPublicSnapshot({
       ...base,
       ...(compatibilityChecks.length === 0 ? {} : { compatibilityChecks }),
@@ -6361,6 +6558,7 @@ export class GatewayService {
       alerts: [
         ...base.alerts,
         ...this.runtimeAlerts.map((alert) => ({ ...alert })),
+        ...certificationAlerts,
         ...stalledAlerts,
       ],
     });

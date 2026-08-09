@@ -291,12 +291,17 @@ namespace Embassy {
     | "certified"
     | "schema_attested"
     | "incompatible";
+  export type CompatibilityCertificationDepth = "wire" | "thread_ops" | "turn";
 
   export type DashboardCompatibilityCheckRow = Readonly<{
     surface: CompatibilitySurface;
     version: string;
     tier: CompatibilityTier;
     checkedAt: string;
+    certificationDepth?: CompatibilityCertificationDepth | undefined;
+    certificationOutcome?: "pass" | "fail" | undefined;
+    certifiedAt?: string | undefined;
+    certificationSafeErrorCode?: string | undefined;
     failedProbe?: string | undefined;
     safeErrorCode?: string | undefined;
   }>;

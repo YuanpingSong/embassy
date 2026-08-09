@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  attachCompatibilityCertification,
   compatibilityCacheKey,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
+  isCompatibilityCertification,
+  isCompatibilityCertificationReport,
   type CompatibilityProbeResult,
   type CompatibilitySurface,
 } from "../src/gateway/compatibility.js";
@@ -53,6 +56,65 @@ test("compatibility tiers distinguish certified, observed, strict, and major dri
     assert.equal(result.tier, "incompatible");
     assert.equal(result.safeErrorCode, "CLAUDE_VERSION_DRIFT");
   }
+});
+
+test("compatibility certification is closed, depth-scoped, and outcome-consistent", () => {
+  const checkedAt = "2026-08-09T12:00:00.000Z";
+  const surfaces = (["claude", "codex"] as const).map((surface) =>
+    attachCompatibilityCertification(
+      evaluateCompatibilityAttestation({
+        surface,
+        version: surface === "claude" ? "2.1.226" : "0.147.0",
+        checkedAt,
+        policy: "observed",
+        certifiedVersions: [surface === "claude" ? "2.1.226" : "0.147.0"],
+        probes: passing(surface),
+      }),
+      {
+        depth: surface === "claude" ? "wire" : "thread_ops",
+        outcome: "pass",
+        certifiedAt: checkedAt,
+      },
+    ),
+  );
+  const report = {
+    policy: "observed" as const,
+    certified: true,
+    withTurn: false,
+    surfaces,
+  };
+  assert.equal(isCompatibilityCertificationReport(report), true);
+  assert.equal(
+    isCompatibilityCertification({
+      depth: "wire",
+      outcome: "fail",
+      certifiedAt: checkedAt,
+    }),
+    false,
+  );
+  assert.equal(
+    isCompatibilityCertificationReport({ ...report, withTurn: true }),
+    false,
+  );
+  assert.equal(
+    isCompatibilityCertificationReport({ ...report, certified: false }),
+    false,
+  );
+  const failed = attachCompatibilityCertification(surfaces[0]!, {
+    depth: "wire",
+    outcome: "fail",
+    certifiedAt: checkedAt,
+    safeErrorCode: "CLAUDE_CERTIFICATION_FAILED",
+  });
+  assert.equal(isCompatibilityAttestation(failed), true);
+  assert.equal(
+    isCompatibilityCertificationReport({
+      ...report,
+      certified: false,
+      surfaces: [failed, surfaces[1]],
+    }),
+    true,
+  );
 });
 
 test("one failed bounded probe fails closed and malformed evidence is rejected", () => {

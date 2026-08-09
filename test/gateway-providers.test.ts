@@ -120,6 +120,11 @@ class FakeClaudePeer {
     },
   ];
   listenerOptions: ClaudePeerListenerOptions | undefined;
+  readonly listenerOptionsByGeneration = new Map<
+    string,
+    ClaudePeerListenerOptions
+  >();
+  listenCalls = 0;
   readonly preparedListenerOptions = new Map<
     string,
     ClaudePeerListenerOptions
@@ -129,6 +134,13 @@ class FakeClaudePeer {
   lastListenerGeneration: string | undefined;
   lastReceiptDeadlineAt: number | undefined;
   sendCalls = 0;
+  lastSend: { targetId: string; content: string } | undefined;
+  certificationReceiptStatus:
+    | "released"
+    | "denied"
+    | "expired"
+    | "unconfirmed"
+    | undefined;
   truncated = false;
   asserted: Array<{ routeHandle: string; stateRoot: string }> = [];
   closed = false;
@@ -264,8 +276,14 @@ class FakeClaudePeer {
   }
 
   async listen(options: ClaudePeerListenerOptions): Promise<ClaudePeerListener> {
-    this.listenerOptions = options;
-    return this.listener;
+    this.listenCalls += 1;
+    const listener =
+      this.listenCalls === 1
+        ? this.listener
+        : this.createListener(`compat_listener_${this.listenCalls}`);
+    this.listenerOptionsByGeneration.set(listener.generation, options);
+    if (this.listenCalls === 1) this.listenerOptions = options;
+    return listener;
   }
 
   async listenPrepared(
@@ -329,11 +347,12 @@ class FakeClaudePeer {
   }
 
   async send(
-    _targetId: string,
-    _content: string,
+    targetId: string,
+    content: string,
     options: ClaudePeerSendOptions,
   ): Promise<ClaudePeerSendResult> {
     this.sendCalls += 1;
+    this.lastSend = { targetId, content };
     this.listenerUsed = options.listener === this.listener;
     this.lastListenerGeneration = options.listener?.generation;
     this.lastReceiptDeadlineAt = options.receiptDeadlineAt;
@@ -369,6 +388,20 @@ class FakeClaudePeer {
       messageId: PROVIDER_MESSAGE_ID,
       status: "transport_written",
     });
+    const certificationStatus = this.certificationReceiptStatus;
+    const receiptOptions =
+      options.listener === undefined
+        ? undefined
+        : this.listenerOptionsByGeneration.get(options.listener.generation);
+    if (certificationStatus !== undefined && receiptOptions !== undefined) {
+      queueMicrotask(() => {
+        void receiptOptions.onReceipt?.({
+          messageId: PROVIDER_MESSAGE_ID,
+          status: certificationStatus,
+          trust: "untrusted_same_uid_peer",
+        });
+      });
+    }
     return {
       messageId: PROVIDER_MESSAGE_ID,
       receiptStatus: "pending",
@@ -543,6 +576,73 @@ test("Claude compatibility check strictly scans the registry without dispatching
     outcome: "fail",
     safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
   });
+  await provider.close();
+});
+
+test("Claude live certification targets only its bounded scratch and requires an exact native release", async () => {
+  const fake = new FakeClaudePeer();
+  const scratch = {
+    name: "embassy-compat-a1b2c3",
+    sessionId: "22222222-2222-4222-8222-222222222222",
+    closed: false,
+  };
+  fake.peers.push({
+    targetId: scratch.sessionId,
+    alias: scratch.name,
+    kind: "interactive",
+    status: "idle",
+    compatibility: "compatible",
+  });
+  fake.certificationReceiptStatus = "released";
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    peerFactory: () => fake as never,
+    compatibilityScratchFactory: async () => ({
+      name: scratch.name,
+      sessionId: scratch.sessionId,
+      assertRunning: () => undefined,
+      close: async () => {
+        scratch.closed = true;
+      },
+    }),
+  });
+  await provider.initialize(callbacks().callbacks);
+  const passed = await provider.runCompatibilityCertification({
+    controllerStateRoot: "/synthetic/private-state",
+    withTurn: false,
+  });
+  assert.deepEqual(passed, {
+    depth: "wire",
+    outcome: "pass",
+    certifiedAt: passed.certifiedAt,
+  });
+  assert.deepEqual(fake.lastSend, {
+    targetId: scratch.sessionId,
+    content: "[embassy compat-certify] ignore",
+  });
+  assert.deepEqual(fake.asserted.at(-1), {
+    routeHandle: scratch.sessionId,
+    stateRoot: "/synthetic/private-state",
+  });
+  assert.equal(scratch.closed, true);
+  assert.ok(
+    fake.closedListenerGenerations.some((generation) =>
+      generation.startsWith("compat_listener_"),
+    ),
+  );
+
+  scratch.closed = false;
+  fake.certificationReceiptStatus = "denied";
+  const failed = await provider.runCompatibilityCertification({
+    controllerStateRoot: "/synthetic/private-state",
+    withTurn: false,
+  });
+  assert.equal(failed.outcome, "fail");
+  assert.equal(
+    failed.safeErrorCode,
+    "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+  );
+  assert.equal(scratch.closed, true);
   await provider.close();
 });
 
@@ -2193,6 +2293,84 @@ test("Codex compatibility check initializes and lists without touching a thread 
     ["initialize", "initialized", "thread/loaded/list"],
   );
   assert.equal(factory.transports[0]!.cleanupConfirmed, true);
+  await provider.close();
+});
+
+test("Codex live certification proves thread ops and starts a turn only when explicitly requested", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory);
+  await provider.initialize(callbacks().callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  await delayImmediate();
+  const transport = factory.transports[0]!;
+  const startsBefore = transport.sent.filter(
+    (message) => message.method === "turn/start",
+  ).length;
+  const threadOps = await provider.runCompatibilityCertification({
+    controllerStateRoot: "/synthetic/private-state",
+    routeHandle: THREAD_ID,
+    withTurn: false,
+  });
+  assert.equal(threadOps.outcome, "pass");
+  assert.equal(threadOps.depth, "thread_ops");
+  assert.equal(
+    transport.sent.filter((message) => message.method === "turn/start").length,
+    startsBefore,
+  );
+  assert.deepEqual(
+    transport.sent.slice(-2).map((message) => message.method),
+    ["thread/loaded/list", "thread/resume"],
+  );
+
+  await delayImmediate();
+  const turnCertification = provider.runCompatibilityCertification({
+    controllerStateRoot: "/synthetic/private-state",
+    routeHandle: THREAD_ID,
+    withTurn: true,
+  });
+  await waitFor(
+    () =>
+      transport.sent.filter((message) => message.method === "turn/start")
+        .length ===
+      startsBefore + 1,
+  );
+  assert.deepEqual(
+    await provider.dispatch({
+      binding: codexBinding(provider),
+      authorization: "selected_route",
+      messageId: "msg_00000000-0000-4000-8000-000000000099",
+      text: "ordinary work waits behind live certification",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "deferred", safeErrorCode: "CODEX_ROUTE_HELD" },
+  );
+  transport.emit({
+    method: "item/completed",
+    params: {
+      item: {
+        id: "item-certification-final",
+        phase: "final_answer",
+        text: "OK",
+        type: "agentMessage",
+      },
+      threadId: THREAD_ID,
+      turnId: "turn-provider-1",
+    },
+  });
+  transport.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-provider-1", status: "completed" },
+    },
+  });
+  const turn = await turnCertification;
+  assert.equal(turn.outcome, "pass");
+  assert.equal(turn.depth, "turn");
   await provider.close();
 });
 

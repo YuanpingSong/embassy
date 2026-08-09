@@ -38,6 +38,7 @@ import type {
 import { BridgeError } from "../src/errors.js";
 import {
   compatibilityProbeNames,
+  type CompatibilityCertification,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
 } from "../src/gateway/compatibility.js";
@@ -258,6 +259,13 @@ class FakeProvider implements GatewayProviderAdapter {
   selectedRouteHandleOverride: string | undefined;
   closed = false;
   compatibilityProbeCalls = 0;
+  compatibilityCertificationCalls: Array<{
+    controllerStateRoot: string;
+    routeHandle?: string;
+    withTurn: boolean;
+  }> = [];
+  compatibilityVersion: string | undefined;
+  compatibilityCertificationResult: CompatibilityCertification | undefined;
   compatibilitySurface?: () => CompatibilitySurfaceObservation;
   runCompatibilityProbes?: () => Promise<readonly CompatibilityProbeResult[]>;
   closeError: Error | undefined;
@@ -352,13 +360,34 @@ class FakeProvider implements GatewayProviderAdapter {
 
   enableCompatibility(version: string): void {
     const surface = this.identity.provider;
-    this.compatibilitySurface = () => ({ surface, version });
+    this.compatibilityVersion = version;
+    this.compatibilitySurface = () => ({
+      surface,
+      version: this.compatibilityVersion ?? version,
+    });
     this.runCompatibilityProbes = async () => {
       this.compatibilityProbeCalls += 1;
       return compatibilityProbeNames[surface].map((name) => ({
         name,
         outcome: "pass" as const,
       }));
+    };
+  }
+
+  async runCompatibilityCertification(input: Readonly<{
+    controllerStateRoot: string;
+    routeHandle?: string;
+    withTurn: boolean;
+  }>): Promise<CompatibilityCertification> {
+    this.compatibilityCertificationCalls.push({ ...input });
+    return this.compatibilityCertificationResult ?? {
+      depth: this.identity.provider === "claude"
+        ? "wire"
+        : input.withTurn
+          ? "turn"
+          : "thread_ops",
+      outcome: "pass",
+      certifiedAt: "2026-08-09T12:00:00.000Z",
     };
   }
 
@@ -934,6 +963,123 @@ test("compatibility probes are cached once per surface and version and strict mo
   );
   await strict.close().catch(() => undefined);
   await rm(strictFixture.root, { recursive: true, force: true });
+});
+
+test("live compatibility certification binds one exact Codex route and rejects version races", async () => {
+  const { root, stateDir, workspace } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  claude.enableCompatibility("2.1.226");
+  codex.enableCompatibility("0.147.0");
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_CODEX_WORKSPACE: workspace,
+    }),
+    adapters: [claude, codex],
+  });
+  try {
+    await service.start();
+    await service.handlers().registerCodex(codexRegistration());
+    const report = await service.handlers().compatibilityCertify({
+      codexAlias: "codex-main@this-mac",
+      withTurn: false,
+    });
+    assert.equal(report.certified, true);
+    assert.deepEqual(
+      report.surfaces.map((surface) => surface.certification?.depth),
+      ["wire", "thread_ops"],
+    );
+    assert.equal(claude.compatibilityCertificationCalls[0]?.routeHandle, undefined);
+    assert.equal(
+      codex.compatibilityCertificationCalls[0]?.routeHandle,
+      THREAD_ID,
+    );
+
+    claude.compatibilityCertificationResult = {
+      depth: "wire",
+      outcome: "fail",
+      certifiedAt: "2026-08-09T12:00:30.000Z",
+      safeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+    };
+    const failed = await service.handlers().compatibilityCertify({
+      codexAlias: "codex-main@this-mac",
+      withTurn: false,
+    });
+    assert.equal(failed.certified, false);
+    const snapshot = await service.handlers().listSnapshot();
+    assert.equal(
+      snapshot.alerts.some(
+        (alert) =>
+          alert.code === "COMPATIBILITY_CERTIFICATION_FAILED" &&
+          alert.provider === "claude",
+      ),
+      true,
+    );
+    claude.compatibilityCertificationResult = undefined;
+
+    claude.runCompatibilityCertification = async (input) => {
+      claude.compatibilityCertificationCalls.push({ ...input });
+      claude.compatibilityVersion = "2.1.227";
+      return {
+        depth: "wire",
+        outcome: "pass",
+        certifiedAt: "2026-08-09T12:01:00.000Z",
+      };
+    };
+    const raced = await service.handlers().compatibilityCertify({
+      codexAlias: "codex-main@this-mac",
+      withTurn: false,
+    });
+    assert.equal(raced.certified, false);
+    assert.equal(
+      raced.surfaces[0]?.certification?.safeErrorCode,
+      "CLAUDE_CERTIFICATION_VERSION_CHANGED",
+    );
+
+    claude.compatibilityVersion = "2.1.226";
+    let markCodexCertificationEntered: (() => void) | undefined;
+    let releaseCodexCertification: (() => void) | undefined;
+    const codexCertificationEntered = new Promise<void>((resolve) => {
+      markCodexCertificationEntered = resolve;
+    });
+    const codexCertificationMayFinish = new Promise<void>((resolve) => {
+      releaseCodexCertification = resolve;
+    });
+    codex.runCompatibilityCertification = async (input) => {
+      codex.compatibilityCertificationCalls.push({ ...input });
+      markCodexCertificationEntered?.();
+      await codexCertificationMayFinish;
+      return {
+        depth: "thread_ops",
+        outcome: "pass",
+        certifiedAt: "2026-08-09T12:02:00.000Z",
+      };
+    };
+    const routeRace = service.handlers().compatibilityCertify({
+      codexAlias: "codex-main@this-mac",
+      withTurn: false,
+    });
+    await codexCertificationEntered;
+    assert.deepEqual(
+      await service.handlers().unregisterCodex({
+        alias: "codex-main@this-mac",
+        threadId: THREAD_ID,
+      }),
+      { accepted: true, code: "ok" },
+    );
+    releaseCodexCertification?.();
+    const routeRaced = await routeRace;
+    assert.equal(routeRaced.certified, false);
+    assert.equal(
+      routeRaced.surfaces[1]?.certification?.safeErrorCode,
+      "CODEX_CERTIFICATION_ROUTE_CHANGED",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("aborted startup cannot become active after an in-flight adapter initialization resumes", async () => {

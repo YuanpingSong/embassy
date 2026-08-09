@@ -169,6 +169,8 @@ namespace Embassy {
               <th scope="col">{t("diagnostics.version")}</th>
               <th scope="col">{t("diagnostics.tier")}</th>
               <th scope="col">{t("diagnostics.checkedAt")}</th>
+              <th scope="col">{t("diagnostics.certification")}</th>
+              <th scope="col">{t("diagnostics.certifiedAt")}</th>
               <th scope="col">{t("diagnostics.failedProbe")}</th>
               <th scope="col">{t("column.issue")}</th>
             </tr>
@@ -176,7 +178,7 @@ namespace Embassy {
           <tbody>
             {props.checks.length === 0 ? (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={8}>
                   {t("diagnostics.compatibilityChecks.empty")}
                 </td>
               </tr>
@@ -194,10 +196,22 @@ namespace Embassy {
                     <TimeAgo iso={check.checkedAt} />
                   </td>
                   <td className="cell-mono">
+                    {check.certificationOutcome === undefined
+                      ? DIAGNOSTICS_ABSENT_FIELD
+                      : `${check.certificationOutcome} / ${check.certificationDepth}`}
+                  </td>
+                  <td>
+                    {check.certifiedAt === undefined
+                      ? DIAGNOSTICS_ABSENT_FIELD
+                      : <TimeAgo iso={check.certifiedAt} />}
+                  </td>
+                  <td className="cell-mono">
                     {check.failedProbe ?? DIAGNOSTICS_ABSENT_FIELD}
                   </td>
                   <td className="cell-mono">
-                    {check.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
+                    {check.certificationSafeErrorCode ??
+                      check.safeErrorCode ??
+                      DIAGNOSTICS_ABSENT_FIELD}
                   </td>
                 </tr>
               ))

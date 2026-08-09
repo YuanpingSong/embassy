@@ -1,6 +1,7 @@
 import { arePublicAvailablePeerSnapshots } from "./types.js";
 import {
   isCompatibilityAttestation,
+  type CompatibilityCertificationDepth,
   type CompatibilityTier,
   type CompatibilitySurface,
 } from "./compatibility.js";
@@ -197,6 +198,10 @@ export type DashboardCompatibilityCheckRow = Readonly<{
   version: string;
   tier: CompatibilityTier;
   checkedAt: string;
+  certificationDepth?: CompatibilityCertificationDepth | undefined;
+  certificationOutcome?: "pass" | "fail" | undefined;
+  certifiedAt?: string | undefined;
+  certificationSafeErrorCode?: string | undefined;
   failedProbe?: string | undefined;
   safeErrorCode?: string | undefined;
 }>;
@@ -739,6 +744,20 @@ export function buildDashboardViewModel(
         version: boundedText(attestation.version),
         tier: attestation.tier,
         checkedAt: attestation.checkedAt,
+        ...(attestation.certification === undefined
+          ? {}
+          : {
+              certificationDepth: attestation.certification.depth,
+              certificationOutcome: attestation.certification.outcome,
+              certifiedAt: attestation.certification.certifiedAt,
+              ...(safeCode(attestation.certification.safeErrorCode) === undefined
+                ? {}
+                : {
+                    certificationSafeErrorCode: safeCode(
+                      attestation.certification.safeErrorCode,
+                    ),
+                  }),
+            }),
         ...(failed === undefined ? {} : { failedProbe: failed.name }),
         ...(safeCode(attestation.safeErrorCode) === undefined
           ? {}

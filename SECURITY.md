@@ -137,6 +137,9 @@ Embassy's provider-facing access is intentionally enumerable:
 - read and execute the configured Claude launcher only for bounded exact-version
   attestation;
 - read the live Claude session registry and connect validated peer sockets;
+- for an explicit `compat-certify`, start one bounded no-stdin Claude print
+  session in a scrubbed environment, route one marked diagnostic frame only to
+  that scratch session, and terminate it after the receipt deadline;
 - create and later remove its one callback socket and one registry record;
 - resolve the managed Codex installation and attach to the already-running
   local App Server; and
@@ -205,6 +208,15 @@ as accessing a session without presenting the cookie.
 
 Routine tests use temporary directories, fake peers, and fake App Server
 transports. They do not inspect live provider state or contact a model.
+
+The default `observed` compatibility policy may admit an unknown same-major
+provider version only after the bounded schema probe passes. That evidence
+cannot detect a semantic change that preserves every validated shape. Runtime
+record, frame, response, identity, and deadline checks remain mandatory, and
+operators can use `compat-certify` for explicit on-machine wire evidence after
+an upstream update. `compat-check` creates no message or turn;
+`compat-certify --with-turn` is the only certification form that explicitly
+starts a Codex model turn.
 
 Passive live discovery, a live provider connection, a native message, and an
 App Server turn are distinct authorization gates. Each requires an explicit

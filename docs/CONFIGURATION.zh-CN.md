@@ -10,6 +10,7 @@ Embassy 通过 `embassy serve` 启动时读取的环境变量进行配置。本�
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`，当 `XDG_STATE_HOME` 未设置时为 `$HOME/.local/state/agent-embassy` | 私有状态、控制套接字和仪表盘；覆盖值必须为绝对路径，且不会迁移固定的主机级租约 |
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`，解析到固定版本目标 | Claude Code 启动器的绝对路径；不搜索 `PATH` |
+| `EMBASSY_COMPAT_POLICY` | `observed` | `observed` 仅在有界结构探测通过后接纳未知的同主版本提供方；`strict` 只接纳本版本的已认证版本清单 |
 | `EMBASSY_STEERING_ENABLED` | `1` | 全局 `STEER:` 停用开关；精确设为 `0` 后，所有正文都按普通排队消息处理 |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
 
@@ -37,14 +38,52 @@ Embassy 通过 `embassy serve` 启动时读取的环境变量进行配置。本�
 
 ## 兼容性约定
 
-Embassy 目前使用两个版本固定的接口，这些接口并未被记录为稳定的第三方 API：
+Embassy 使用两个未被记录为稳定第三方 API 的提供方接口。本版本的已认证清单为 Claude Code 2.1.224–2.1.226（对等协议 1）以及 Codex App Server 0.147.0。
 
-- Claude Code 2.1.226，对等协议 1；在补丁过渡期间接受仍在运行的兼容 2.1.224 和 2.1.225 会话
-- Codex App Server 0.147.0
+兼容性分为三个明确层级：
 
-每条记录、套接字和响应结构在使用前都会被验证。未知的提供方版本会以关闭状态失败，而非被猜测为兼容。请预期在任一提供方更改这些内部接口后，Embassy 适配器将需要更新。
+- **已认证（certified）**：精确版本位于本版本的确定性测试清单中；
+- **结构已验证（schema-attested）**：在默认 `observed` 策略下，未知的同主版本通过了有界启动探测；
+- **不兼容（incompatible）**：必需探测失败、主版本变化，或 `strict` 策略拒绝了认证清单外的版本。
+
+探测会验证启动器或托管安装、注册表/控制套接字结构、初始化与列表响应结构，以及协议常量；它不会发送消息或启动回合。结果按提供方版本缓存一次。运行时仍会严格验证每条记录、帧和响应。结构已验证的版本仍可能在结构不变的情况下改变语义；上游更新后若这一剩余风险很重要，请执行在线认证。
+
+运行 `embassy compat-check` 执行不产生流量的有界探测。运行 `embassy compat-certify [--codex <alias>]` 增加本机线缆级证据：Embassy 创建一个短寿命、无标准输入的 Claude 打印会话，只向该临时会话发送带标记的诊断帧，要求精确的原生释放回执，随后关闭会话；所选空闲 Codex 任务只执行恢复与刷新，不启动回合。注册多个 Codex 路由时必须提供 `--codex`。仅当你明确希望用一个最小 Codex 模型回合（`reply OK`）取得更深证据时，才添加 `--with-turn`。认证失败会返回非零状态，与提供方版本一同保留并显示在“诊断”中；它不会放宽运行时验证。
 
 托管的 Codex 安装通过精确路径和版本解析；`PATH` 上其他位置的 `codex` 不会被使用或修改。Claude 从 `EMBASSY_CLAUDE_BIN` 或官方的用户级启动器解析，从不搜索 `PATH`。
+
+### 跟进提供方更新
+
+仓库不会安装后台任务。如果你选择自动检查，请单独监管 `embassy serve`，并使用两个由当前用户拥有的 LaunchAgent：
+
+1. 更新触发任务：`ProgramArguments` 依次为 Embassy 二进制文件绝对路径、`compat-certify`、`--codex` 和一个精确的已注册别名；`WatchPaths` 包含 Claude 启动器与 Codex 应用包的绝对路径；
+2. 每日兜底任务：`ProgramArguments` 为 Embassy 二进制文件绝对路径与 `compat-check`，并按需设置 `StartCalendarInterval`。
+
+受监视任务的最小核心如下；加载前请把所有占位符替换为本机绝对路径或别名：
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/ABSOLUTE/PATH/TO/embassy</string>
+  <string>compat-certify</string>
+  <string>--codex</string>
+  <string>codex-main@this-mac</string>
+</array>
+<key>WatchPaths</key>
+<array>
+  <string>/ABSOLUTE/HOME/.local/bin/claude</string>
+  <string>/Applications/Codex.app</string>
+</array>
+```
+
+每日任务将 `WatchPaths` 替换为：
+
+```xml
+<key>StartCalendarInterval</key>
+<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+```
+
+并在 `ProgramArguments` 中只使用 `compat-check`。这些命令会联系已经运行的本地代理，而不会启动它。因此，如果所选路由不存在或正忙，受监视认证会安全失败。该方案刻意省略 `--with-turn`，不会选择进入 Codex 模型调用深度。
 
 ## 寻址
 

@@ -51,7 +51,10 @@ import {
   type GatewayServerOptions,
 } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
-import { isCompatibilityCheckReport } from "./compatibility.js";
+import {
+  isCompatibilityCertificationReport,
+  isCompatibilityCheckReport,
+} from "./compatibility.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -67,6 +70,7 @@ export const gatewayCliCommands = [
   "health",
   "status",
   "compat-check",
+  "compat-certify",
   "delivery-status",
   "wait-delivery",
   "untrack",
@@ -490,6 +494,22 @@ async function buildRequest(
         method: "compat_check",
         params: emptyParams(args),
       };
+    case "compat-certify": {
+      const options = parseOptions(args, ["codex"], ["with-turn"]);
+      assertExactOptionCount(options, 0, 2);
+      const codexAlias =
+        options.codex === undefined
+          ? undefined
+          : requireCodexAlias(options, "codex");
+      return {
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        method: "compat_certify",
+        params: {
+          withTurn: options["with-turn"] === true,
+          ...(codexAlias === undefined ? {} : { codexAlias }),
+        },
+      };
+    }
     case "delivery-status":
     case "wait-delivery": {
       const options = parseOptions(args, ["token"]);
@@ -1079,6 +1099,25 @@ export async function runGatewayCli(
         );
       }
       return response.result.compatible
+        ? gatewayCliExitCodes.ok
+        : gatewayCliExitCodes.failure;
+    }
+    if (
+      command === "compat-certify" &&
+      isCompatibilityCertificationReport(response.result)
+    ) {
+      for (const surface of response.result.surfaces) {
+        const certification = surface.certification;
+        if (certification === undefined) continue;
+        stderr.write(
+          `[embassy] ${surface.surface}: ${certification.outcome} (${certification.depth})${
+            certification.safeErrorCode === undefined
+              ? ""
+              : ` — ${certification.safeErrorCode}`
+          }\n`,
+        );
+      }
+      return response.result.certified
         ? gatewayCliExitCodes.ok
         : gatewayCliExitCodes.failure;
     }

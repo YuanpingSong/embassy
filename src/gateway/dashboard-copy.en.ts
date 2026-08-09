@@ -270,6 +270,8 @@ export const dashboardCopyEn = {
   "diagnostics.version": "Version",
   "diagnostics.tier": "Tier",
   "diagnostics.checkedAt": "Checked",
+  "diagnostics.certification": "Live certification",
+  "diagnostics.certifiedAt": "Certified",
   "diagnostics.failedProbe": "Failed probe",
   "compatibilityTier.certified": "Certified",
   "compatibilityTier.schema_attested": "Schema-attested",

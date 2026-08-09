@@ -218,6 +218,8 @@ export const dashboardCopyKeys = [
   "diagnostics.version",
   "diagnostics.tier",
   "diagnostics.checkedAt",
+  "diagnostics.certification",
+  "diagnostics.certifiedAt",
   "diagnostics.failedProbe",
   "compatibilityTier.certified",
   "compatibilityTier.schema_attested",

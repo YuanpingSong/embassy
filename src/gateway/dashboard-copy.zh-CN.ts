@@ -242,6 +242,8 @@ export const dashboardCopyZhCn = {
   "diagnostics.version": "版本",
   "diagnostics.tier": "层级",
   "diagnostics.checkedAt": "检查时间",
+  "diagnostics.certification": "实时认证",
+  "diagnostics.certifiedAt": "认证时间",
   "diagnostics.failedProbe": "失败探测",
   "compatibilityTier.certified": "已认证",
   "compatibilityTier.schema_attested": "架构已证明",

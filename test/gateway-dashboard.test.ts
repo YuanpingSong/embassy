@@ -7,6 +7,62 @@ import {
   DASHBOARD_MODEL_LIMITS,
 } from "../src/gateway/dashboard-model.js";
 import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
+import {
+  attachCompatibilityCertification,
+  certifiedCompatibilityVersions,
+  compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
+} from "../src/gateway/compatibility.js";
+
+test("diagnostics project live certification depth, time, and failure truth", () => {
+  const snapshot = dashboardFixture();
+  snapshot.compatibilityChecks = (["claude", "codex"] as const).map(
+    (surface) =>
+      attachCompatibilityCertification(
+        evaluateCompatibilityAttestation({
+          surface,
+          version: certifiedCompatibilityVersions[surface][0]!,
+          checkedAt: "2026-08-08T11:58:00.000Z",
+          policy: "observed",
+          certifiedVersions: certifiedCompatibilityVersions[surface],
+          probes: compatibilityProbeNames[surface].map((name) => ({
+            name,
+            outcome: "pass" as const,
+          })),
+        }),
+        surface === "claude"
+          ? {
+              depth: "wire",
+              outcome: "fail",
+              certifiedAt: "2026-08-08T11:59:00.000Z",
+              safeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+            }
+          : {
+              depth: "thread_ops",
+              outcome: "pass",
+              certifiedAt: "2026-08-08T11:59:01.000Z",
+            },
+      ),
+  );
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(model.compatibilityChecks[0], {
+    surface: "claude",
+    version: certifiedCompatibilityVersions.claude[0],
+    tier: "certified",
+    checkedAt: "2026-08-08T11:58:00.000Z",
+    certificationDepth: "wire",
+    certificationOutcome: "fail",
+    certifiedAt: "2026-08-08T11:59:00.000Z",
+    certificationSafeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+  });
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Live certification/);
+  assert.match(en, /fail \/ wire/);
+  assert.match(en, /CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED/);
+  assert.match(zh, /实时认证/);
+  assert.match(zh, /pass \/ thread_ops/);
+});
 
 test("progress watches project bounded countdowns, attention, and bilingual metadata only", () => {
   const snapshot = dashboardFixture();

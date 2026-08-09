@@ -39,9 +39,11 @@ import {
 } from "../src/gateway/control.js";
 import { projectGatewayPublicSnapshot } from "../src/gateway/types.js";
 import {
+  attachCompatibilityCertification,
   certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
+  type CompatibilityCertificationReport,
   type CompatibilityCheckReport,
 } from "../src/gateway/compatibility.js";
 
@@ -258,6 +260,7 @@ function handlers(
     listSnapshot: () => snapshot(),
     observeSnapshot: () => ({ snapshotRevision: 3, snapshot: snapshot() }),
     compatibilityCheck: () => compatibilityReport(),
+    compatibilityCertify: () => compatibilityCertificationReport(),
     deliveryStatus: () => ({
       found: true,
       state: "delivered",
@@ -308,6 +311,22 @@ function compatibilityReport(): CompatibilityCheckReport {
     }),
   );
   return { policy: "observed", compatible: true, surfaces };
+}
+
+function compatibilityCertificationReport(): CompatibilityCertificationReport {
+  const report = compatibilityReport();
+  return {
+    policy: report.policy,
+    certified: true,
+    withTurn: false,
+    surfaces: report.surfaces.map((attestation) =>
+      attachCompatibilityCertification(attestation, {
+        depth: attestation.surface === "claude" ? "wire" : "thread_ops",
+        outcome: "pass",
+        certifiedAt: NOW,
+      }),
+    ),
+  };
 }
 
 async function rawRequest(
@@ -730,6 +749,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "list_snapshot",
     "observe_snapshot",
     "compat_check",
+    "compat_certify",
     "delivery_status",
     "untrack",
     "send_to_claude",
@@ -1382,6 +1402,64 @@ test("compat_check accepts only the exact bounded report schema", async () => {
     wireRequest("compat_check", {}),
   );
   assertWireError(rejected, "INVALID_HANDLER_RESPONSE");
+  await invalidServer.close();
+});
+
+test("compat_certify accepts only one exact route choice and closed evidence", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const observed: unknown[] = [];
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      compatibilityCertify: (params) => {
+        observed.push(params);
+        return compatibilityCertificationReport();
+      },
+    }),
+  });
+  const accepted = await rawRequest(
+    socketPath,
+    wireRequest("compat_certify", {
+      codexAlias: "codex-main@this-mac",
+      withTurn: false,
+    }),
+  );
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(observed, [
+    { codexAlias: "codex-main@this-mac", withTurn: false },
+  ]);
+  for (const params of [
+    {},
+    { withTurn: false, extra: true },
+    { codexAlias: "claude-main@this-mac", withTurn: false },
+    { withTurn: "false" },
+  ]) {
+    assertWireError(
+      await rawRequest(socketPath, wireRequest("compat_certify", params)),
+      "INVALID_REQUEST",
+    );
+  }
+  await server.close();
+
+  const invalidState = await privateState();
+  const invalidServer = await startGatewayControlServer({
+    stateDir: invalidState.stateDir,
+    socketPath: invalidState.socketPath,
+    handlers: handlers({
+      compatibilityCertify: () => ({
+        ...compatibilityCertificationReport(),
+        certified: false,
+      }),
+    }),
+  });
+  assertWireError(
+    await rawRequest(
+      invalidState.socketPath,
+      wireRequest("compat_certify", { withTurn: false }),
+    ),
+    "INVALID_HANDLER_RESPONSE",
+  );
   await invalidServer.close();
 });
 

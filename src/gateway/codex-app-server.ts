@@ -918,6 +918,60 @@ export class CodexAppServerConnector {
     return this.observation();
   }
 
+  /**
+   * Revalidate the exact selected thread/resume schema without creating a
+   * turn. Unlike initial route setup, certification is permitted while the
+   * route is already idle; every other state remains fail-closed.
+   */
+  async certifyThreadOperations(
+    guard: CodexRouteGuard,
+  ): Promise<CodexConnectorObservation> {
+    this.assertGuard(guard);
+    this.assertReady();
+    this.assertNoRequest();
+    if (!this.selectedThreadObserved) {
+      throw new CodexConnectorError("THREAD_NOT_OBSERVED");
+    }
+    if (this.routeStatus !== "idle") {
+      throw new CodexConnectorError("ROUTE_BUSY");
+    }
+    const statusEpoch = this.statusEpoch;
+    this.beginRequest("thread/resume");
+    try {
+      const result = await this.request("thread/resume", {
+        excludeTurns: true,
+        threadId: this.route.threadId,
+      });
+      if (
+        !isRecord(result) ||
+        !isRecord(result.thread) ||
+        result.thread.id !== this.route.threadId ||
+        !Array.isArray(result.thread.turns) ||
+        result.thread.turns.length !== 0
+      ) {
+        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+      }
+      if (this.statusEpoch === statusEpoch) {
+        const status = parseRouteStatus(result.thread.status);
+        if (status !== "idle") {
+          throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
+        }
+        this.setRouteStatus(status);
+      }
+      this.emit("thread_resumed");
+    } catch (error) {
+      const normalized = this.normalizeError(error, true);
+      if (normalized.ambiguous && this.connection === "ready") {
+        this.setRouteStatus("uncertain");
+      }
+      this.handleActionError(normalized);
+      throw normalized;
+    } finally {
+      this.finishRequest("thread/resume");
+    }
+    return this.observation();
+  }
+
   async unsubscribeThread(
     guard: CodexRouteGuard,
   ): Promise<CodexUnsubscribeResult> {

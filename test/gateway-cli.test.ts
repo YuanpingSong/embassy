@@ -28,9 +28,11 @@ import {
   runGatewayCli,
 } from "../src/gateway/cli.js";
 import {
+  attachCompatibilityCertification,
   certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
+  type CompatibilityCertificationReport,
   type CompatibilityCheckReport,
 } from "../src/gateway/compatibility.js";
 
@@ -70,6 +72,22 @@ function compatibilityReport(failing = false): CompatibilityCheckReport {
     }),
   );
   return { policy: "observed", compatible: !failing, surfaces };
+}
+
+function certificationReport(): CompatibilityCertificationReport {
+  const report = compatibilityReport();
+  return {
+    policy: report.policy,
+    certified: true,
+    withTurn: false,
+    surfaces: report.surfaces.map((attestation) =>
+      attachCompatibilityCertification(attestation, {
+        depth: attestation.surface === "claude" ? "wire" : "thread_ops",
+        outcome: "pass",
+        certifiedAt: NOW,
+      }),
+    ),
+  };
 }
 const execFileAsync = promisify(execFile);
 
@@ -132,6 +150,63 @@ test("compat-check prints bounded surface summaries and exits nonzero on incompa
     "[embassy] claude: incompatible (2.1.224) — CLAUDE_VERSION_DRIFT\n" +
       "[embassy] codex: certified (0.147.0)\n",
   );
+});
+
+test("compat-certify preserves closed JSON, exact route grammar, and terminal exit truth", async () => {
+  const state = await privateState();
+  const calls: unknown[] = [];
+  const server = await startGatewayControlServer({
+    stateDir: state.stateDir,
+    socketPath: state.socketPath,
+    handlers: {
+      health: () => ({ status: "ok", revision: 1 }),
+      registerCodex: () => ({ accepted: true, code: "ok" }),
+      unregisterCodex: () => ({ accepted: true, code: "ok" }),
+      selectClaude: () => ({ accepted: true, code: "ok" }),
+      unselectClaude: () => ({ accepted: true, code: "ok" }),
+      pair: () => ({ accepted: true, code: "ok" }),
+      unpair: () => ({ accepted: true, code: "ok" }),
+      listSnapshot: () => emptySnapshot(),
+      observeSnapshot: () => ({ snapshotRevision: 0, snapshot: emptySnapshot() }),
+      compatibilityCheck: () => compatibilityReport(),
+      compatibilityCertify: (params) => {
+        calls.push(params);
+        return certificationReport();
+      },
+      deliveryStatus: () => ({ found: false }),
+      untrack: () => ({ accepted: true, code: "ok" }),
+      sendToClaude: () => ({ accepted: false, code: "rejected" }),
+      sendToCodex: () => ({ accepted: false, code: "rejected" }),
+      reply: () => ({ accepted: false, code: "rejected" }),
+      refreshDashboard: () => ({ accepted: true, code: "ok", revision: 1 }),
+    },
+  });
+  const passed = await invoke(state.stateDir, [
+    "compat-certify",
+    "--codex",
+    "codex-main@this-mac",
+  ]);
+  assert.equal(passed.code, 0);
+  assert.deepEqual(calls, [
+    { codexAlias: "codex-main@this-mac", withTurn: false },
+  ]);
+  assert.equal(
+    (JSON.parse(passed.stdout) as { result: { certified: boolean } }).result
+      .certified,
+    true,
+  );
+  assert.match(passed.stderr, /claude: pass \(wire\)/);
+  assert.match(passed.stderr, /codex: pass \(thread_ops\)/);
+
+  for (const args of [
+    ["compat-certify", "--with-turn", "extra"],
+    ["compat-certify", "--codex", "claude-main@this-mac"],
+    ["compat-certify", "--unknown"],
+  ]) {
+    const rejected = await invoke(state.stateDir, args);
+    assert.equal(rejected.code, gatewayCliExitCodes.invalidInput);
+  }
+  await server.close();
 });
 
 test("bare invocation and help flags print localized usage without side effects", async () => {
@@ -326,6 +401,7 @@ test("all client commands use one private control socket and expose only normali
       snapshot: emptySnapshot(),
     }),
     compatibilityCheck: () => compatibilityReport(),
+    compatibilityCertify: () => certificationReport(),
     deliveryStatus: ({ token }) => {
       deliveryStatuses.push(token);
       return {
@@ -1757,6 +1833,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         snapshot: emptySnapshot(),
       }),
       compatibilityCheck: () => compatibilityReport(),
+      compatibilityCertify: () => certificationReport(),
       deliveryStatus: () => ({ found: false }),
       untrack: () => ({ accepted: true, code: "ok" }),
       sendToClaude: () => ({

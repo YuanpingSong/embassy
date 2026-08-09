@@ -14,6 +14,7 @@ or CLI flags.
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute and does not relocate the fixed host-wide lease |
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`, resolved to the pinned version target | Absolute Claude Code launcher path; `PATH` is not searched |
+| `EMBASSY_COMPAT_POLICY` | `observed` | `observed` admits an unknown same-major provider build only after its bounded schema probe passes; `strict` admits only the release's certified version inventory |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global `STEER:` kill switch; set exactly `0` to treat every body as an ordinary queued message |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
 
@@ -45,14 +46,52 @@ that decision. Configure it in Claude Code, not in Embassy.
 
 ## Compatibility contract
 
-Embassy currently speaks two version-pinned surfaces that are not documented as stable third-party APIs:
+Embassy speaks two provider surfaces that are not documented as stable third-party APIs. This release's certified inventory is Claude Code 2.1.224–2.1.226 with peer protocol 1, and Codex App Server 0.147.0.
 
-- Claude Code 2.1.226, peer protocol 1; compatible still-running 2.1.224 and 2.1.225 sessions are accepted during a patch transition
-- Codex App Server 0.147.0
+Compatibility has three explicit tiers:
 
-Every record, socket, and response shape is validated before use. An unknown provider version fails closed instead of being guessed compatible. Expect an Embassy adapter update after either provider changes these internal surfaces.
+- **certified** — the exact version is in this release's deterministic test inventory;
+- **schema-attested** — under the default `observed` policy, an unknown same-major version passed the bounded startup probe; and
+- **incompatible** — a required probe failed, the major version changed, or `strict` policy rejected a version outside the certified inventory.
+
+The probe validates the launcher or managed installation, registry/control-socket shape, initialization and listing schemas, and protocol constants without sending a message or starting a turn. Its result is cached once per provider version. Runtime validation remains strict on every record, frame, and response. A schema-attested build can still change behavior without changing shape; use live certification after an upstream update when that residual risk matters.
+
+Run `embassy compat-check` for the bounded non-traffic probe. Run `embassy compat-certify [--codex <alias>]` to add on-machine wire evidence: Embassy creates a short-lived, no-stdin Claude print session, sends only a marked diagnostic frame to that scratch session, requires an exact native release receipt, and then closes it; the chosen idle Codex task is resumed and refreshed without starting a turn. When more than one Codex route is registered, `--codex` is required. Add `--with-turn` only when you explicitly want one minimal Codex model turn (`reply OK`) as deeper evidence. Certification failures are nonzero, retained with the provider version, and shown in Diagnostics; they do not weaken runtime validation.
 
 The managed Codex installation is resolved by exact path and version; a `codex` elsewhere on `PATH` is neither used nor modified. Claude is resolved from `EMBASSY_CLAUDE_BIN` or the official per-user launcher, never by searching `PATH`.
+
+### Keeping up with provider updates
+
+The repository does not install a background job. If you choose to automate checks, keep `embassy serve` separately supervised and use two user-owned LaunchAgents:
+
+1. an update-triggered job whose `ProgramArguments` are the absolute Embassy binary path, `compat-certify`, `--codex`, and one exact registered alias, with `WatchPaths` containing the absolute Claude launcher and Codex app-bundle paths; and
+2. a daily fallback whose `ProgramArguments` are the absolute Embassy binary path and `compat-check`, with a `StartCalendarInterval` of your choosing.
+
+A minimal watched-job core looks like this; replace every placeholder with an absolute local path or alias before loading it:
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/ABSOLUTE/PATH/TO/embassy</string>
+  <string>compat-certify</string>
+  <string>--codex</string>
+  <string>codex-main@this-mac</string>
+</array>
+<key>WatchPaths</key>
+<array>
+  <string>/ABSOLUTE/HOME/.local/bin/claude</string>
+  <string>/Applications/Codex.app</string>
+</array>
+```
+
+For the daily job, replace `WatchPaths` with:
+
+```xml
+<key>StartCalendarInterval</key>
+<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+```
+
+and use only `compat-check` in `ProgramArguments`. These commands contact the already-running local broker; they do not start it. The watched certification therefore fails safely if the selected route is missing or busy. The recipe intentionally omits `--with-turn`, so it never opts into the Codex model-call depth.
 
 ## Addressing
 
