@@ -6,22 +6,26 @@ import path from "node:path";
 
 import { BridgeError } from "../errors.js";
 import { CLAUDE_PEER_COMPATIBILITY } from "./claude-peer.js";
+import {
+  isCompatibilityVersion,
+  sharesCompatibilityMajor,
+  type CompatibilityPolicy,
+} from "./compatibility.js";
 
 const MAX_VERSION_OUTPUT_BYTES = 4_096;
-const VERSION_OUTPUT_PATTERN = new RegExp(
-  `^${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion.replaceAll(".", "\\.")} \\(Claude Code\\)\\r?\\n?$`,
-);
+const VERSION_OUTPUT_PATTERN = /^(\d{1,4}\.\d{1,4}\.\d{1,4}) \(Claude Code\)\r?\n?$/;
 const USERNAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 export type ClaudePeerRuntimeOptions = {
   /** Trusted operator configuration; there is no PATH-based lookup. */
   claudeExecutable: string;
   versionTimeoutMs?: number;
+  compatibilityPolicy?: CompatibilityPolicy;
 };
 
 export type AttestedClaudePeerRuntime = {
   claudeExecutable: string;
-  claudeCodeVersion: typeof CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion;
+  claudeCodeVersion: string;
   sessionsDir: string;
   socketDir: string;
 };
@@ -250,6 +254,7 @@ async function attestRegularExecutable(
 async function attestExecutablePath(
   configuredExecutable: string,
   user: RuntimeUser,
+  compatibilityPolicy: CompatibilityPolicy,
 ): Promise<ExecutableAttestation> {
   const homeStat = await lstat(user.homedir);
   if (
@@ -310,14 +315,6 @@ async function attestExecutablePath(
     }
 
     const officialLink = path.join(user.homedir, ".local", "bin", "claude");
-    const officialTarget = path.join(
-      user.homedir,
-      ".local",
-      "share",
-      "claude",
-      "versions",
-      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-    );
     if (configuredExecutable !== officialLink || stat.uid !== user.uid) {
       throw new BridgeError(
         "UNSAFE_CLAUDE_EXECUTABLE",
@@ -337,28 +334,38 @@ async function attestExecutablePath(
         "The official Claude launcher symlink target is outside its pinned version directory.",
       );
     }
-    if (
-      linkTarget !== officialTarget ||
-      path.basename(linkTarget) !==
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion
-    ) {
+    const targetVersion = path.basename(linkTarget);
+    if (targetVersion !== CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion) {
       // A version-shaped target inside the official versions directory that
       // is not the pinned version is drift from an auto-update, not
       // tampering. Still fail closed, but say what happened and how to move
       // forward. Only a strictly version-shaped basename is ever reflected.
-      const foundVersion = /^\d+\.\d+\.\d+$/.test(path.basename(linkTarget))
-        ? path.basename(linkTarget)
+      const foundVersion = isCompatibilityVersion(targetVersion)
+        ? targetVersion
         : undefined;
       if (foundVersion !== undefined) {
+        if (
+          compatibilityPolicy === "observed" &&
+          sharesCompatibilityMajor(
+            foundVersion,
+            CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+          )
+        ) {
+          // The version command and executable generation are still verified
+          // below. This only admits a same-major official update for bounded
+          // schema attestation.
+        } else {
         throw new BridgeError(
           "CLAUDE_VERSION_DRIFT",
           `Installed Claude Code is ${foundVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
         );
+        }
+      } else {
+        throw new BridgeError(
+          "UNSAFE_CLAUDE_EXECUTABLE",
+          "The official Claude launcher symlink target is outside its pinned version directory.",
+        );
       }
-      throw new BridgeError(
-        "UNSAFE_CLAUDE_EXECUTABLE",
-        "The official Claude launcher symlink target is outside its pinned version directory.",
-      );
     }
     const linkAfterRead = await lstat(configuredExecutable);
     if (
@@ -460,7 +467,12 @@ export async function attestClaudePeerRuntime(
     options.claudeExecutable,
     user.homedir,
   );
-  const before = await attestExecutablePath(configuredExecutable, user);
+  const compatibilityPolicy = options.compatibilityPolicy ?? "strict";
+  const before = await attestExecutablePath(
+    configuredExecutable,
+    user,
+    compatibilityPolicy,
+  );
   const executable = before.executable;
   const command: ClaudeVersionCommand = {
     executable,
@@ -485,31 +497,48 @@ export async function attestClaudePeerRuntime(
       "The bounded Claude Code version check failed without accessing provider state.",
     );
   }
+  const versionMatch = VERSION_OUTPUT_PATTERN.exec(output.stdout);
   if (
     Buffer.byteLength(output.stdout, "utf8") > MAX_VERSION_OUTPUT_BYTES ||
     Buffer.byteLength(output.stderr, "utf8") > MAX_VERSION_OUTPUT_BYTES ||
     output.stderr.length !== 0 ||
-    !VERSION_OUTPUT_PATTERN.test(output.stdout)
+    versionMatch === null
   ) {
     // Well-formed output for a different version is auto-update drift and
     // gets the actionable code; anything else stays the strict refusal.
-    const drifted =
-      output.stderr.length === 0 &&
-      Buffer.byteLength(output.stdout, "utf8") <= MAX_VERSION_OUTPUT_BYTES
-        ? /^(\d+\.\d+\.\d+) \(Claude Code\)\r?\n?$/.exec(output.stdout)
-        : null;
-    if (drifted !== null) {
-      throw new BridgeError(
-        "CLAUDE_VERSION_DRIFT",
-        `Installed Claude Code reports ${drifted[1]}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
-      );
-    }
     throw new BridgeError(
       "CLAUDE_PEER_VERSION_UNSUPPORTED",
       `Claude peer compatibility is pinned to Claude Code ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}.`,
     );
   }
-  const after = await attestExecutablePath(configuredExecutable, user);
+  const reportedVersion = versionMatch[1] as string;
+  if (
+    before.linkTarget !== undefined &&
+    path.basename(before.linkTarget) !== reportedVersion
+  ) {
+    throw new BridgeError(
+      "CLAUDE_EXECUTABLE_CHANGED",
+      "The Claude launcher target and reported version disagree.",
+    );
+  }
+  if (
+    reportedVersion !== CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion &&
+    (compatibilityPolicy === "strict" ||
+      !sharesCompatibilityMajor(
+        reportedVersion,
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      ))
+  ) {
+    throw new BridgeError(
+      "CLAUDE_VERSION_DRIFT",
+      `Installed Claude Code reports ${reportedVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
+    );
+  }
+  const after = await attestExecutablePath(
+    configuredExecutable,
+    user,
+    compatibilityPolicy,
+  );
   if (
     before.executable !== after.executable ||
     before.linkTarget !== after.linkTarget ||
@@ -530,7 +559,7 @@ export async function attestClaudePeerRuntime(
 
   return {
     claudeExecutable: executable,
-    claudeCodeVersion: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+    claudeCodeVersion: reportedVersion,
     sessionsDir: path.join(user.homedir, ".claude", "sessions"),
     socketDir: path.join(path.sep, "tmp", "cc-socks"),
   };

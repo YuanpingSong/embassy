@@ -214,8 +214,12 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     },
   );
 
-  assert.deepEqual(claudeOptions, { claudeExecutable: SYNTHETIC_LAUNCHER });
+  assert.deepEqual(claudeOptions, {
+    claudeExecutable: SYNTHETIC_LAUNCHER,
+    compatibilityPolicy: "observed",
+  });
   assert.equal(codexFactoryOptions?.appServerVersion, "0.147.0");
+  assert.equal(codexFactoryOptions?.compatibilityPolicy, "observed");
   assert.equal(codexFactoryOptions?.hostId, "this-mac");
   assert.equal(codexFactoryOptions?.writableProtocolAttested, true);
   assert.deepEqual(codexFactoryOptions?.environment, {

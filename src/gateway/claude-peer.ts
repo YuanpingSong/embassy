@@ -24,6 +24,7 @@ import {
 } from "./codex-registration-generation.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
+import { sharesCompatibilityMajor } from "./compatibility.js";
 
 /**
  * This adapter intentionally pins the inspected, implementation-specific
@@ -622,8 +623,9 @@ function parseRegistryRecord(
     value.procStart.length === 0 ||
     value.procStart.includes("\0") ||
     typeof value.version !== "string" ||
-    !CLAUDE_PEER_COMPATIBLE_SESSION_VERSIONS.includes(
-      value.version as (typeof CLAUDE_PEER_COMPATIBLE_SESSION_VERSIONS)[number],
+    !sharesCompatibilityMajor(
+      value.version,
+      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
     ) ||
     !isBoundedString(value.entrypoint, 64) ||
     !/^[A-Za-z0-9._-]+$/.test(value.entrypoint) ||
@@ -911,6 +913,7 @@ export class ClaudePeerAdapter {
   readonly #createId: () => string;
   readonly #createGeneration: () => string;
   readonly #locale: DashboardLocale;
+  readonly #attestedClaudeCodeVersion: string;
   readonly #deliveryNotices: GatewayDeliveryNoticeMode;
   readonly #registryRename: (
     source: string,
@@ -941,8 +944,10 @@ export class ClaudePeerAdapter {
       );
     }
     if (
-      options.attestedClaudeCodeVersion !==
-      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion
+      !sharesCompatibilityMajor(
+        options.attestedClaudeCodeVersion,
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      )
     ) {
       throw new BridgeError(
         "CLAUDE_PEER_VERSION_UNSUPPORTED",
@@ -956,6 +961,7 @@ export class ClaudePeerAdapter {
       );
     }
     this.#locale = options.locale ?? "en";
+    this.#attestedClaudeCodeVersion = options.attestedClaudeCodeVersion;
     if (
       options.deliveryNotices !== undefined &&
       !["merged", "verbose", "quiet"].includes(options.deliveryNotices)
@@ -1657,6 +1663,7 @@ export class ClaudePeerAdapter {
       now: this.#now,
       locale: this.#locale,
       deliveryNotices: this.#deliveryNotices,
+      attestedClaudeCodeVersion: this.#attestedClaudeCodeVersion,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
       resolveSessionBinding: async (sessionId) => {
@@ -1990,6 +1997,7 @@ type ListenerCreateOptions = {
   now: () => number;
   locale: DashboardLocale;
   deliveryNotices: GatewayDeliveryNoticeMode;
+  attestedClaudeCodeVersion: string;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
@@ -2038,6 +2046,7 @@ export class ClaudePeerListener {
   readonly #now: () => number;
   readonly #locale: DashboardLocale;
   readonly #deliveryNotices: GatewayDeliveryNoticeMode;
+  readonly #attestedClaudeCodeVersion: string;
   readonly #resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   readonly #resolveSessionBinding: (
     sessionId: string,
@@ -2103,6 +2112,7 @@ export class ClaudePeerListener {
     this.#now = options.now;
     this.#locale = options.locale;
     this.#deliveryNotices = options.deliveryNotices;
+    this.#attestedClaudeCodeVersion = options.attestedClaudeCodeVersion;
     this.#resolveReplyAddress = options.resolveReplyAddress;
     this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
@@ -2274,7 +2284,7 @@ export class ClaudePeerListener {
       record.pid === process.pid &&
       UUID_PATTERN.test(record.sessionId) &&
       record.messagingSocketPath === this.#socketPath &&
-      record.version === CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion &&
+      record.version === this.#attestedClaudeCodeVersion &&
       record.peerProtocol === CLAUDE_PEER_COMPATIBILITY.peerProtocol &&
       record.kind === "interactive" &&
       record.entrypoint === "cli" &&
@@ -2528,7 +2538,7 @@ export class ClaudePeerListener {
       cwd,
       startedAt: now,
       procStart: new Date(now - process.uptime() * 1_000).toString(),
-      version: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      version: this.#attestedClaudeCodeVersion,
       peerProtocol: CLAUDE_PEER_COMPATIBILITY.peerProtocol,
       kind: "interactive",
       entrypoint: "cli",

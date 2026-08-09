@@ -248,13 +248,13 @@ async function eventually(
   }
 }
 
-test("adapter pins the reviewed Claude Code and normalized private roots", async () => {
+test("adapter accepts the reviewed Claude major and normalized private roots", async () => {
   assert.throws(
     () =>
       new ClaudePeerAdapter({
         sessionsDir: "/synthetic/sessions",
         socketDir: "/synthetic/sockets",
-        attestedClaudeCodeVersion: "2.1.224",
+        attestedClaudeCodeVersion: "3.0.0",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&

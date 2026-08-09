@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { Duplex } from "node:stream";
 
 import WebSocket from "ws";
+import { sharesCompatibilityMajor } from "./compatibility.js";
 
 /**
  * Stable App Server methods reviewed for the gateway's first writable version.
@@ -58,6 +59,8 @@ export type CodexEndpointCompatibilityAttestation = {
   appServerVersion: string;
   endpointGeneration: string;
   protocol: "app-server-v2-stable";
+  /** Set only by the local managed-runtime gate for an observed same-major candidate. */
+  observedSchemaCandidate?: true;
   steering: {
     method: "turn/steer";
     requestSchema: "expected-turn-id-text-v1";
@@ -596,8 +599,14 @@ function validateCompatibility(
     compatibility.steering?.method !== "turn/steer" ||
     compatibility.steering.requestSchema !== "expected-turn-id-text-v1" ||
     compatibility.steering.deliveryBoundary !== "next-tool-call-boundary" ||
-    !CODEX_APP_SERVER_WRITABLE_VERSIONS.some(
-      (version) => version === compatibility.appServerVersion,
+    !(
+      CODEX_APP_SERVER_WRITABLE_VERSIONS.some(
+        (version) => version === compatibility.appServerVersion,
+      ) ||
+      (compatibility.observedSchemaCandidate === true &&
+        CODEX_APP_SERVER_WRITABLE_VERSIONS.some((version) =>
+          sharesCompatibilityMajor(version, compatibility.appServerVersion),
+        ))
     )
   ) {
     throw new CodexConnectorError("INVALID_CONFIGURATION");

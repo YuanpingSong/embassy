@@ -285,6 +285,22 @@ namespace Embassy {
     safeErrorCode?: string | undefined;
   }>;
 
+  export type CompatibilitySurface = "claude" | "codex";
+
+  export type CompatibilityTier =
+    | "certified"
+    | "schema_attested"
+    | "incompatible";
+
+  export type DashboardCompatibilityCheckRow = Readonly<{
+    surface: CompatibilitySurface;
+    version: string;
+    tier: CompatibilityTier;
+    checkedAt: string;
+    failedProbe?: string | undefined;
+    safeErrorCode?: string | undefined;
+  }>;
+
   export type DashboardOmissions = Readonly<{
     connectors: number;
     availablePeers: number;
@@ -331,6 +347,7 @@ namespace Embassy {
     watchEvents: readonly DashboardProgressWatchEventRow[];
     graph: DashboardGraphFacts;
     connectors: readonly DashboardConnectorRow[];
+    compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
     accounting: DashboardAccounting;
     omissions: DashboardOmissions;
   }>;
@@ -460,6 +477,7 @@ namespace Embassy {
   export type DiagnosticsData = Readonly<{
     connectors: readonly DashboardConnectorRow[];
     connectorsOmitted: number;
+    compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
     /** Lifetime expired count from accounting; feeds the deadline pressure card. */
     expiredCount: number;
     queuedMessages: number;

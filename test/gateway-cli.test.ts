@@ -8,6 +8,7 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { BridgeError } from "../src/errors.js";
+import { loadGatewayConfig } from "../src/gateway/config.js";
 import {
   GatewayControlTransportError,
   startGatewayControlServer,
@@ -26,6 +27,12 @@ import {
   gatewayCliExitCodes,
   runGatewayCli,
 } from "../src/gateway/cli.js";
+import {
+  certifiedCompatibilityVersions,
+  compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
+  type CompatibilityCheckReport,
+} from "../src/gateway/compatibility.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
@@ -42,6 +49,28 @@ const BOTH_IDENTITIES = {
   CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
 } as const;
 const roots = new Set<string>();
+
+function compatibilityReport(failing = false): CompatibilityCheckReport {
+  const surfaces = (["claude", "codex"] as const).map((surface) =>
+    evaluateCompatibilityAttestation({
+      surface,
+      version: certifiedCompatibilityVersions[surface][0]!,
+      checkedAt: NOW,
+      policy: "observed",
+      certifiedVersions: certifiedCompatibilityVersions[surface],
+      probes: compatibilityProbeNames[surface].map((name, index) =>
+        failing && surface === "claude" && index === 0
+          ? {
+              name,
+              outcome: "fail" as const,
+              safeErrorCode: "CLAUDE_VERSION_DRIFT",
+            }
+          : { name, outcome: "pass" as const },
+      ),
+    }),
+  );
+  return { policy: "observed", compatible: !failing, surfaces };
+}
 const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
@@ -77,6 +106,32 @@ test("version flags are deterministic and never contact the gateway", async () =
     assert.equal(stdout.chunks.join(""), `embassy ${EMBASSY_VERSION}\n`);
     assert.equal(stderr.chunks.join(""), "");
   }
+});
+
+test("compat-check prints bounded surface summaries and exits nonzero on incompatibility", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  const code = await runGatewayCli(["compat-check"], {
+    env: {},
+    stdout,
+    stderr,
+    loadConfig: () =>
+      loadGatewayConfig({ EMBASSY_STATE_DIR: "/synthetic/private-state" }),
+    validateControlSocket: async () => undefined,
+    sendRequest: (async () =>
+      ({
+        protocolVersion: 1,
+        ok: true,
+        result: compatibilityReport(true),
+      }) as never) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.equal((JSON.parse(stdout.chunks.join("")) as { ok: boolean }).ok, true);
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] claude: incompatible (2.1.224) — CLAUDE_VERSION_DRIFT\n" +
+      "[embassy] codex: certified (0.147.0)\n",
+  );
 });
 
 test("bare invocation and help flags print localized usage without side effects", async () => {
@@ -270,6 +325,7 @@ test("all client commands use one private control socket and expose only normali
       snapshotRevision: 0,
       snapshot: emptySnapshot(),
     }),
+    compatibilityCheck: () => compatibilityReport(),
     deliveryStatus: ({ token }) => {
       deliveryStatuses.push(token);
       return {
@@ -334,6 +390,7 @@ test("all client commands use one private control socket and expose only normali
   }> = [
     { argv: ["health"], env: BOTH_IDENTITIES },
     { argv: ["status"], env: BOTH_IDENTITIES },
+    { argv: ["compat-check"], env: BOTH_IDENTITIES },
     {
       argv: ["delivery-status", "--token", DELIVERY_TOKEN],
       env: BOTH_IDENTITIES,
@@ -476,7 +533,15 @@ test("all client commands use one private control socket and expose only normali
       },
     );
     assert.equal(result.code, gatewayCliExitCodes.ok);
-    assert.equal(result.stderr, "");
+    if (current.argv[0] === "compat-check") {
+      assert.equal(
+        result.stderr,
+        "[embassy] claude: certified (2.1.224)\n" +
+          "[embassy] codex: certified (0.147.0)\n",
+      );
+    } else {
+      assert.equal(result.stderr, "");
+    }
     const parsed = JSON.parse(result.stdout) as {
       ok: boolean;
       command: string;
@@ -1691,6 +1756,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         snapshotRevision: 0,
         snapshot: emptySnapshot(),
       }),
+      compatibilityCheck: () => compatibilityReport(),
       deliveryStatus: () => ({ found: false }),
       untrack: () => ({ accepted: true, code: "ok" }),
       sendToClaude: () => ({

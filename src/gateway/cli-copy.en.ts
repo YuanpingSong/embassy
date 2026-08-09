@@ -10,6 +10,7 @@ Commands:
   serve [--inbound open] Run the socket-only broker (paired inbound by default)
   health                 Check broker health
   status                 Read the public status snapshot
+  compat-check           Run bounded no-traffic compatibility probes
   refresh-dashboard      Publish both static dashboard files
   dashboard --live       Open live status and bounded route consent
   register-codex         Register or succeed a Codex task

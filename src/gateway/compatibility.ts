@@ -6,6 +6,12 @@ export type CompatibilityPolicy = (typeof compatibilityPolicies)[number];
 export const compatibilitySurfaces = ["claude", "codex"] as const;
 export type CompatibilitySurface = (typeof compatibilitySurfaces)[number];
 
+/** Exact upstream builds exercised by this release's deterministic suite. */
+export const certifiedCompatibilityVersions = Object.freeze({
+  claude: Object.freeze(["2.1.224", "2.1.225", "2.1.226"]),
+  codex: Object.freeze(["0.147.0"]),
+} satisfies Readonly<Record<CompatibilitySurface, readonly string[]>>);
+
 export const compatibilityTiers = [
   "certified",
   "schema_attested",
@@ -48,6 +54,17 @@ export type CompatibilityAttestation = Readonly<{
   safeErrorCode?: string;
 }>;
 
+export type CompatibilitySurfaceObservation = Readonly<{
+  surface: CompatibilitySurface;
+  version: string;
+}>;
+
+export type CompatibilityCheckReport = Readonly<{
+  policy: CompatibilityPolicy;
+  compatible: boolean;
+  surfaces: readonly CompatibilityAttestation[];
+}>;
+
 const VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
@@ -69,6 +86,21 @@ function versionMajor(version: string): number {
     );
   }
   return Number(version.slice(0, version.indexOf(".")));
+}
+
+export function isCompatibilityVersion(value: unknown): value is string {
+  return typeof value === "string" && VERSION_PATTERN.test(value);
+}
+
+export function sharesCompatibilityMajor(
+  left: string,
+  right: string,
+): boolean {
+  return (
+    isCompatibilityVersion(left) &&
+    isCompatibilityVersion(right) &&
+    versionMajor(left) === versionMajor(right)
+  );
 }
 
 function normalizeProbes(
@@ -219,4 +251,35 @@ export function compatibilityCacheKey(
   attestation: Pick<CompatibilityAttestation, "surface" | "version">,
 ): string {
   return `${attestation.surface}\0${attestation.version}`;
+}
+
+export function isCompatibilityCheckReport(
+  value: unknown,
+): value is CompatibilityCheckReport {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    Object.keys(candidate).length !== 3 ||
+    !Object.hasOwn(candidate, "policy") ||
+    !Object.hasOwn(candidate, "compatible") ||
+    !Object.hasOwn(candidate, "surfaces") ||
+    !compatibilityPolicies.includes(candidate.policy as CompatibilityPolicy) ||
+    typeof candidate.compatible !== "boolean" ||
+    !Array.isArray(candidate.surfaces) ||
+    candidate.surfaces.length !== compatibilitySurfaces.length ||
+    !candidate.surfaces.every(isCompatibilityAttestation)
+  ) {
+    return false;
+  }
+  const surfaces = candidate.surfaces as CompatibilityAttestation[];
+  return (
+    surfaces.every(
+      (attestation, index) =>
+        attestation.surface === compatibilitySurfaces[index],
+    ) &&
+    candidate.compatible ===
+      surfaces.every((attestation) => attestation.tier !== "incompatible")
+  );
 }

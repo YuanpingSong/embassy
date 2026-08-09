@@ -51,6 +51,7 @@ import {
   type GatewayServerOptions,
 } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
+import { isCompatibilityCheckReport } from "./compatibility.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -65,6 +66,7 @@ export const gatewayCliCommands = [
   "serve",
   "health",
   "status",
+  "compat-check",
   "delivery-status",
   "wait-delivery",
   "untrack",
@@ -480,6 +482,12 @@ async function buildRequest(
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "list_snapshot",
+        params: emptyParams(args),
+      };
+    case "compat-check":
+      return {
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        method: "compat_check",
         params: emptyParams(args),
       };
     case "delivery-status":
@@ -1060,6 +1068,20 @@ export async function runGatewayCli(
         result: response.result,
       }),
     );
+    if (command === "compat-check" && isCompatibilityCheckReport(response.result)) {
+      for (const surface of response.result.surfaces) {
+        stderr.write(
+          `[embassy] ${surface.surface}: ${surface.tier} (${surface.version})${
+            surface.safeErrorCode === undefined
+              ? ""
+              : ` — ${surface.safeErrorCode}`
+          }\n`,
+        );
+      }
+      return response.result.compatible
+        ? gatewayCliExitCodes.ok
+        : gatewayCliExitCodes.failure;
+    }
     const exitCode =
       waitedDeliveryResponse === undefined
         ? responseExitCode(response)

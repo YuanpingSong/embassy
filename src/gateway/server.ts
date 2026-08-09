@@ -348,7 +348,10 @@ export async function runGatewayServer(
     assertLeaseHeld();
     const runtime = await awaitWhileLeaseHeld(
       Promise.resolve().then(() =>
-        attestClaudeRuntime({ claudeExecutable }),
+        attestClaudeRuntime({
+          claudeExecutable,
+          compatibilityPolicy: config.compatibilityPolicy ?? "observed",
+        }),
       ),
     );
     claudeProvider = createClaudeProvider({
@@ -364,6 +367,7 @@ export async function runGatewayServer(
       Promise.resolve().then(() =>
         createCodexFactory({
           appServerVersion: GATEWAY_CODEX_APP_SERVER_VERSION,
+          compatibilityPolicy: config.compatibilityPolicy ?? "observed",
           environment: localCodexProviderEnvironment(env),
           hostId: GATEWAY_LOCAL_HOST_ID,
           writableProtocolAttested: true,

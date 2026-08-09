@@ -4,6 +4,16 @@ import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
 import {
+  certifiedCompatibilityVersions,
+  compatibilitySurfaces,
+  evaluateCompatibilityAttestation,
+  isCompatibilityCheckReport,
+  type CompatibilityAttestation,
+  type CompatibilityCheckReport,
+  type CompatibilityProbeResult,
+  type CompatibilitySurfaceObservation,
+} from "./compatibility.js";
+import {
   createGatewayConversationId,
   isGatewaySnapshot,
   startGatewayControlServer,
@@ -211,6 +221,12 @@ export interface GatewayProviderAdapter {
   readonly identity: PrivateEndpointIdentity;
   readonly protocol: string;
   readonly protocolVersion: string;
+  /** Version identity is cheap; probes are invoked only on a cache miss. */
+  compatibilitySurface?(): CompatibilitySurfaceObservation;
+  runCompatibilityProbes?(): Promise<readonly CompatibilityProbeResult[]>;
+  acceptCompatibilityAttestation?(
+    attestation: CompatibilityAttestation,
+  ): void;
   initialize(callbacks: GatewayAdapterCallbacks): Promise<GatewayAdapterStart>;
   discoverClaudePeers?(): Promise<GatewayAdapterDiscoverySnapshot>;
   selectRoute(input: {
@@ -708,6 +724,25 @@ export class GatewayService {
         });
         assertStartActive();
       }
+      if (
+        this.adapters.length > 0 &&
+        this.adapters.every(
+          (adapter) =>
+            adapter.compatibilitySurface !== undefined &&
+            adapter.runCompatibilityProbes !== undefined,
+        )
+      ) {
+        const report = await this.compatibilityCheckLocked();
+        const incompatible = report.surfaces.find(
+          (surface) => surface.tier === "incompatible",
+        );
+        if (incompatible !== undefined) {
+          throw new BridgeError(
+            incompatible.safeErrorCode ?? "COMPATIBILITY_CHECK_FAILED",
+            "A local provider failed bounded compatibility attestation.",
+          );
+        }
+      }
       await this.recoverCodexSuccessionAfterRestartLocked();
       assertStartActive();
       const control = await startGatewayControlServer({
@@ -891,6 +926,7 @@ export class GatewayService {
         await this.exclusiveDecision(async () => this.unpairRoutes(params)),
       listSnapshot: async () => (await this.observeSnapshot()).snapshot,
       observeSnapshot: async () => await this.observeSnapshot(),
+      compatibilityCheck: async () => await this.compatibilityCheck(),
       deliveryStatus: async (params) => await this.deliveryStatus(params.token),
       untrack: async (params) =>
         await this.exclusiveDecision(async () => {
@@ -921,6 +957,89 @@ export class GatewayService {
 
   async snapshot(): Promise<GatewayPublicSnapshot> {
     return (await this.observeSnapshot()).snapshot;
+  }
+
+  async compatibilityCheck(): Promise<CompatibilityCheckReport> {
+    return await this.mutex.run("service", async () =>
+      await this.compatibilityCheckLocked(),
+    );
+  }
+
+  private async compatibilityCheckLocked(): Promise<CompatibilityCheckReport> {
+    const bySurface = new Map(
+      this.adapters.map((adapter) => {
+        if (
+          adapter.compatibilitySurface === undefined ||
+          adapter.runCompatibilityProbes === undefined
+        ) {
+          throw new BridgeError(
+            "COMPAT_PROVIDER_UNAVAILABLE",
+            "Every local provider must expose the bounded compatibility probe contract.",
+          );
+        }
+        const observation = adapter.compatibilitySurface();
+        return [observation.surface, { adapter, observation }] as const;
+      }),
+    );
+    if (
+      bySurface.size !== compatibilitySurfaces.length ||
+      compatibilitySurfaces.some((surface) => !bySurface.has(surface))
+    ) {
+      throw new BridgeError(
+        "COMPAT_PROVIDER_UNAVAILABLE",
+        "The bounded compatibility probe requires one Claude and one Codex surface.",
+      );
+    }
+
+    const attestations: CompatibilityAttestation[] = [];
+    for (const surface of compatibilitySurfaces) {
+      const entry = bySurface.get(surface);
+      if (entry === undefined) {
+        throw new BridgeError(
+          "COMPAT_PROVIDER_UNAVAILABLE",
+          "A required compatibility surface is unavailable.",
+        );
+      }
+      const cached = await this.store.inspectCompatibilityAttestation(
+        surface,
+        entry.observation.version,
+      );
+      const probes =
+        cached?.probes ?? (await entry.adapter.runCompatibilityProbes!());
+      const checkedAt = cached?.checkedAt ?? this.now().toISOString();
+      const attestation = evaluateCompatibilityAttestation({
+        surface,
+        version: entry.observation.version,
+        checkedAt,
+        policy: this.config.compatibilityPolicy ?? "observed",
+        certifiedVersions: certifiedCompatibilityVersions[surface],
+        probes,
+      });
+      if (
+        cached === undefined ||
+        JSON.stringify(cached) !== JSON.stringify(attestation)
+      ) {
+        await this.store.recordCompatibilityAttestation(attestation);
+      }
+      if (attestation.tier !== "incompatible") {
+        entry.adapter.acceptCompatibilityAttestation?.(attestation);
+      }
+      attestations.push(attestation);
+    }
+    const report: CompatibilityCheckReport = {
+      policy: this.config.compatibilityPolicy ?? "observed",
+      compatible: attestations.every(
+        (attestation) => attestation.tier !== "incompatible",
+      ),
+      surfaces: attestations,
+    };
+    if (!isCompatibilityCheckReport(report)) {
+      throw new BridgeError(
+        "COMPAT_REPORT_INVALID",
+        "Compatibility evidence failed its closed report schema.",
+      );
+    }
+    return report;
   }
 
   async observeSnapshot(): Promise<GatewaySnapshotObservation> {
@@ -6191,6 +6310,19 @@ export class GatewayService {
 
   private async publicSnapshotLocked(): Promise<GatewayPublicSnapshot> {
     const base = await this.store.publicSnapshot();
+    const compatibilityChecks: CompatibilityAttestation[] = [];
+    for (const adapter of this.adapters) {
+      const observation = adapter.compatibilitySurface?.();
+      if (observation === undefined) continue;
+      const attestation = await this.store.inspectCompatibilityAttestation(
+        observation.surface,
+        observation.version,
+      );
+      if (attestation !== undefined) compatibilityChecks.push(attestation);
+    }
+    compatibilityChecks.sort((left, right) =>
+      left.surface.localeCompare(right.surface),
+    );
     const peers = this.availablePeers.map((peer) => ({ ...peer }));
     if (!arePublicAvailablePeerSnapshots(peers)) {
       throw new BridgeError(
@@ -6224,6 +6356,7 @@ export class GatewayService {
     });
     return projectGatewayPublicSnapshot({
       ...base,
+      ...(compatibilityChecks.length === 0 ? {} : { compatibilityChecks }),
       availablePeers: peers,
       alerts: [
         ...base.alerts,

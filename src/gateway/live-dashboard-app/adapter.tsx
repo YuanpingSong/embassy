@@ -415,6 +415,7 @@ namespace Embassy {
     return {
       connectors: model.connectors,
       connectorsOmitted: model.omissions.connectors,
+      compatibilityChecks: model.compatibilityChecks ?? [],
       expiredCount: model.accounting.expired,
       queuedMessages: model.exchange.queuedMessages,
       queueCountIsLowerBound: model.exchange.queueCountIsLowerBound,

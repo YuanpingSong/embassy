@@ -96,6 +96,7 @@ export type BusyPolicy = "queue";
 /** Canonical closed-array bounds shared by store projections and control/UI. */
 export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64,
+  compatibilityChecks: 2,
   availablePeers: 256,
   routes: 256,
   pairs: 256,
@@ -482,6 +483,7 @@ export type GatewayPublicSnapshot = {
   inboundMode: GatewayInboundMode;
   health: ConnectorHealth;
   connectors: PublicConnectorSnapshot[];
+  compatibilityChecks?: CompatibilityAttestation[];
   availablePeers: PublicAvailablePeerSnapshot[];
   routes: PublicRouteSnapshot[];
   pairs: PublicPairSnapshot[];
@@ -495,6 +497,7 @@ export type GatewayPublicSnapshot = {
 
 export type GatewaySnapshotTruncation = {
   connectors: number;
+  compatibilityChecks?: number;
   availablePeers: number;
   routes: number;
   pairs: number;
@@ -556,6 +559,14 @@ export function projectGatewayPublicSnapshot(
   const projected: GatewayPublicSnapshot = {
     ...snapshot,
     connectors: snapshot.connectors.slice(0, gatewayPublicSnapshotLimits.connectors),
+    ...(snapshot.compatibilityChecks === undefined
+      ? {}
+      : {
+          compatibilityChecks: snapshot.compatibilityChecks.slice(
+            0,
+            gatewayPublicSnapshotLimits.compatibilityChecks,
+          ),
+        }),
     availablePeers: snapshot.availablePeers.slice(
       0,
       gatewayPublicSnapshotLimits.availablePeers,
@@ -584,6 +595,17 @@ export function projectGatewayPublicSnapshot(
       connectors:
         snapshot.truncation.connectors +
         Math.max(0, snapshot.connectors.length - gatewayPublicSnapshotLimits.connectors),
+      ...(snapshot.compatibilityChecks === undefined
+        ? {}
+        : {
+            compatibilityChecks:
+              (snapshot.truncation.compatibilityChecks ?? 0) +
+              Math.max(
+                0,
+                snapshot.compatibilityChecks.length -
+                  gatewayPublicSnapshotLimits.compatibilityChecks,
+              ),
+          }),
       availablePeers:
         snapshot.truncation.availablePeers +
         Math.max(

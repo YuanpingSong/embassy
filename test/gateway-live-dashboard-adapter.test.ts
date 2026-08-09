@@ -128,6 +128,7 @@ type ActivityRow =
 type DiagnosticsData = Readonly<{
   connectors: DashboardViewModel["connectors"];
   connectorsOmitted: number;
+  compatibilityChecks: DashboardViewModel["compatibilityChecks"];
   expiredCount: number;
   queuedMessages: number;
   queueCountIsLowerBound: boolean;
@@ -1477,8 +1478,33 @@ test("diagnosticsProps forwards counters, omissions and queue pressure", () => {
   assert.equal(data.expiredCount, 3);
   assert.equal(data.queuedMessages, 7);
   assert.equal(data.queueCountIsLowerBound, true);
+  assert.deepEqual(plain(data.compatibilityChecks), []);
   assert.deepEqual(plain(data.accounting), plain(DEGRADED.accounting));
   assert.deepEqual(plain(data.omissions), plain(DEGRADED.omissions));
+});
+
+test("diagnosticsProps forwards bounded provider compatibility attestations", () => {
+  const model = mutableClone(DEGRADED);
+  model.compatibilityChecks = [
+    {
+      surface: "claude",
+      version: "2.1.226",
+      tier: "certified",
+      checkedAt: "2026-08-09T12:00:00.000Z",
+    },
+    {
+      surface: "codex",
+      version: "0.148.0",
+      tier: "schema_attested",
+      checkedAt: "2026-08-09T12:00:01.000Z",
+      failedProbe: "thread/loaded/list",
+      safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",
+    },
+  ];
+  assert.deepEqual(
+    plain(adapter.diagnosticsProps(model).compatibilityChecks),
+    plain(model.compatibilityChecks),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1514,6 +1540,7 @@ test("empty peers, routes, connectors and activity produce empty props, never a 
 
   const diagnostics = adapter.diagnosticsProps(EMPTY);
   assert.equal(diagnostics.connectors.length, 0);
+  assert.equal(diagnostics.compatibilityChecks.length, 0);
   assert.equal(diagnostics.expiredCount, 0);
   assert.equal(diagnostics.queuedMessages, 0);
 });

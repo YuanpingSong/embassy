@@ -21,6 +21,11 @@ import net, { type Server, type Socket } from "node:net";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import {
+  isCompatibilityAttestation,
+  isCompatibilityCheckReport,
+  type CompatibilityCheckReport,
+} from "./compatibility.js";
+import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
 } from "./types.js";
@@ -76,6 +81,7 @@ export const gatewayControlMethods = [
   "unpair",
   "list_snapshot",
   "observe_snapshot",
+  "compat_check",
   "delivery_status",
   "untrack",
   "send_to_claude",
@@ -236,6 +242,11 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
+      method: "compat_check";
+      params: Record<string, never>;
+    }
+  | {
+      protocolVersion: 1;
       method: "delivery_status";
       params: DeliveryStatusParams;
     }
@@ -279,6 +290,7 @@ type ValidatedGatewayControlRequest =
   | Extract<GatewayControlRequest, { method: "unpair" }>
   | Extract<GatewayControlRequest, { method: "list_snapshot" }>
   | Extract<GatewayControlRequest, { method: "observe_snapshot" }>
+  | Extract<GatewayControlRequest, { method: "compat_check" }>
   | Extract<GatewayControlRequest, { method: "delivery_status" }>
   | Extract<GatewayControlRequest, { method: "untrack" }>
   | {
@@ -380,6 +392,7 @@ type ResultByMethod = {
   unpair: GatewayDecision;
   list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation;
+  compat_check: CompatibilityCheckReport;
   delivery_status: GatewayDeliveryStatusResult;
   untrack: GatewayDecision;
   send_to_claude: GatewaySendResult;
@@ -408,6 +421,7 @@ export type GatewayControlHandlers = {
   unpair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
+  compatibilityCheck: () => MaybePromise<CompatibilityCheckReport>;
   deliveryStatus: (
     params: Readonly<DeliveryStatusParams>,
   ) => MaybePromise<GatewayDeliveryStatusResult>;
@@ -674,6 +688,7 @@ function normalizeParams(
     case "health":
     case "list_snapshot":
     case "observe_snapshot":
+    case "compat_check":
     case "refresh_dashboard":
       if (!hasExactKeys(value, [])) {
         throw new ProtocolFault("INVALID_REQUEST");
@@ -1374,7 +1389,7 @@ function isSnapshotTruncation(value: unknown): boolean {
         "messages",
         "alerts",
       ],
-      ["progressWatches", "progressWatchEvents"],
+      ["compatibilityChecks", "progressWatches", "progressWatchEvents"],
     ) &&
     isNonNegativeInteger(value.connectors) &&
     isNonNegativeInteger(value.availablePeers) &&
@@ -1382,6 +1397,8 @@ function isSnapshotTruncation(value: unknown): boolean {
     isNonNegativeInteger(value.pairs) &&
     isNonNegativeInteger(value.messages) &&
     isNonNegativeInteger(value.alerts) &&
+    (value.compatibilityChecks === undefined ||
+      isNonNegativeInteger(value.compatibilityChecks)) &&
     (value.progressWatches === undefined ||
       isNonNegativeInteger(value.progressWatches)) &&
     (value.progressWatchEvents === undefined ||
@@ -1408,7 +1425,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
         "alerts",
         "truncation",
       ],
-      ["progressWatches", "progressWatchEvents"],
+      ["compatibilityChecks", "progressWatches", "progressWatchEvents"],
     ) ||
     value.schemaVersion !== 1 ||
     !isIsoTimestamp(value.generatedAt) ||
@@ -1417,6 +1434,11 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
     !Array.isArray(value.connectors) ||
     value.connectors.length > gatewayPublicSnapshotLimits.connectors ||
     !value.connectors.every(isConnectorSnapshot) ||
+    (value.compatibilityChecks !== undefined &&
+      (!Array.isArray(value.compatibilityChecks) ||
+        value.compatibilityChecks.length >
+          gatewayPublicSnapshotLimits.compatibilityChecks ||
+        !value.compatibilityChecks.every(isCompatibilityAttestation))) ||
     !Array.isArray(value.availablePeers) ||
     value.availablePeers.length > gatewayPublicSnapshotLimits.availablePeers ||
     !value.availablePeers.every(isAvailablePeerSnapshot) ||
@@ -1501,6 +1523,8 @@ function isResultForMethod<M extends GatewayControlMethod>(
       return isGatewaySnapshot(value);
     case "observe_snapshot":
       return isSnapshotObservation(value);
+    case "compat_check":
+      return isCompatibilityCheckReport(value);
     case "delivery_status":
       return isDeliveryStatusResult(value);
     case "untrack":
@@ -1557,6 +1581,9 @@ async function dispatch(
         break;
       case "observe_snapshot":
         result = await handlers.observeSnapshot();
+        break;
+      case "compat_check":
+        result = await handlers.compatibilityCheck();
         break;
       case "delivery_status":
         result = await handlers.deliveryStatus(request.params);

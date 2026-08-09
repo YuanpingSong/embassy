@@ -151,6 +151,63 @@ namespace Embassy {
     );
   }
 
+  function DiagnosticsCompatibilityTable(
+    props: Readonly<{
+      checks: readonly DashboardCompatibilityCheckRow[];
+    }>,
+  ): React.ReactElement {
+    const t = useT();
+    return (
+      <div className="table-wrap">
+        <table className="data-table">
+          <caption className="sr-only">
+            {t("diagnostics.compatibilityChecks.caption")}
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">{t("app.diag.col.provider")}</th>
+              <th scope="col">{t("diagnostics.version")}</th>
+              <th scope="col">{t("diagnostics.tier")}</th>
+              <th scope="col">{t("diagnostics.checkedAt")}</th>
+              <th scope="col">{t("diagnostics.failedProbe")}</th>
+              <th scope="col">{t("column.issue")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.checks.length === 0 ? (
+              <tr>
+                <td colSpan={6}>
+                  {t("diagnostics.compatibilityChecks.empty")}
+                </td>
+              </tr>
+            ) : (
+              props.checks.map((check) => (
+                <tr key={check.surface}>
+                  <th scope="row">
+                    {check.surface === "claude"
+                      ? t("provider.claude")
+                      : t("provider.codex")}
+                  </th>
+                  <td className="cell-mono">{check.version}</td>
+                  <td>{t(`compatibilityTier.${check.tier}`)}</td>
+                  <td>
+                    <TimeAgo iso={check.checkedAt} />
+                  </td>
+                  <td className="cell-mono">
+                    {check.failedProbe ?? DIAGNOSTICS_ABSENT_FIELD}
+                  </td>
+                  <td className="cell-mono">
+                    {check.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
   /**
    * Accounting counters: the prototype's flush-right two-column row list,
    * capped at 480px (`.counters-list` / `.data-table--counters`). It stays a
@@ -521,11 +578,21 @@ namespace Embassy {
         </section>
 
         <div className="grid-2">
-          <AbsentFeature
-            title={t("app.diag.attestation.title")}
-            body={t("app.diag.attestation.absent")}
-            cmd="embassy health"
-          />
+          <section
+            className="card"
+            aria-labelledby="compatibility-attestation-title"
+          >
+            <div className="card__head">
+              <h3
+                className="card__title"
+                id="compatibility-attestation-title"
+              >
+                {t("app.diag.attestation.title")}
+              </h3>
+            </div>
+            <DiagnosticsCompatibilityTable checks={data.compatibilityChecks} />
+            <CopyCmd cmd="embassy compat-check" />
+          </section>
           <AbsentFeature
             title={t("app.diag.lease.title")}
             body={t("app.diag.lease.absent")}

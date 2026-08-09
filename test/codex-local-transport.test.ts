@@ -291,6 +291,62 @@ test("managed installation pins release binary and already-running private socke
   }
 });
 
+test("observed policy admits only a same-major managed Codex candidate", async () => {
+  const observed = await installationFixture("0.148.0");
+  try {
+    await assert.rejects(
+      createLocalCodexTransportFactory(
+        {
+          appServerVersion: VERSION,
+          compatibilityPolicy: "strict",
+          environment: { HOME: observed.home },
+          writableProtocolAttested: true,
+        },
+        { loginHome: () => observed.home },
+      ),
+      (error: unknown) =>
+        error instanceof LocalCodexTransportError &&
+        error.code === "APP_SERVER_VERSION_MISMATCH",
+    );
+    const factory = await createLocalCodexTransportFactory(
+      {
+        appServerVersion: VERSION,
+        compatibilityPolicy: "observed",
+        environment: { HOME: observed.home },
+        writableProtocolAttested: true,
+      },
+      { loginHome: () => observed.home },
+    );
+    assert.equal(factory.appServerVersion, "0.148.0");
+    assert.equal(factory.compatibilityPolicy, "observed");
+    assert.equal(factory.schemaCompatibility.observedSchemaCandidate, true);
+    assert.deepEqual(factory.writeCompatibility, factory.schemaCompatibility);
+    await factory.close();
+  } finally {
+    await observed.close();
+  }
+
+  const major = await installationFixture("1.0.0");
+  try {
+    await assert.rejects(
+      createLocalCodexTransportFactory(
+        {
+          appServerVersion: VERSION,
+          compatibilityPolicy: "observed",
+          environment: { HOME: major.home },
+          writableProtocolAttested: true,
+        },
+        { loginHome: () => major.home },
+      ),
+      (error: unknown) =>
+        error instanceof LocalCodexTransportError &&
+        error.code === "APP_SERVER_VERSION_MISMATCH",
+    );
+  } finally {
+    await major.close();
+  }
+});
+
 test("managed target-suffixed releases require the exact runtime architecture", async () => {
   const matching = await installationFixture(
     `${VERSION}-aarch64-apple-darwin`,

@@ -1,4 +1,9 @@
 import { arePublicAvailablePeerSnapshots } from "./types.js";
+import {
+  isCompatibilityAttestation,
+  type CompatibilityTier,
+  type CompatibilitySurface,
+} from "./compatibility.js";
 import type {
   AlertSeverity,
   CompatibilityState,
@@ -187,6 +192,15 @@ export type DashboardConnectorRow = Readonly<{
   safeErrorCode?: string | undefined;
 }>;
 
+export type DashboardCompatibilityCheckRow = Readonly<{
+  surface: CompatibilitySurface;
+  version: string;
+  tier: CompatibilityTier;
+  checkedAt: string;
+  failedProbe?: string | undefined;
+  safeErrorCode?: string | undefined;
+}>;
+
 export type DashboardOmissions = Readonly<{
   connectors: number;
   availablePeers: number;
@@ -233,6 +247,7 @@ export type DashboardViewModel = Readonly<{
   watchEvents: readonly DashboardProgressWatchEventRow[];
   graph: DashboardGraphFacts;
   connectors: readonly DashboardConnectorRow[];
+  compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
   accounting: GatewayPublicSnapshot["accounting"];
   omissions: DashboardOmissions;
 }>;
@@ -710,6 +725,28 @@ export function buildDashboardViewModel(
       compareText(`${left.provider}\0${left.host}`, `${right.provider}\0${right.host}`),
     )
     .slice(0, DASHBOARD_MODEL_LIMITS.connectors);
+  const compatibilityChecks = (
+    Array.isArray(snapshot.compatibilityChecks)
+      ? snapshot.compatibilityChecks.filter(isCompatibilityAttestation)
+      : []
+  )
+    .map((attestation): DashboardCompatibilityCheckRow => {
+      const failed = attestation.probes.find(
+        (probe) => probe.outcome === "fail",
+      );
+      return {
+        surface: attestation.surface,
+        version: boundedText(attestation.version),
+        tier: attestation.tier,
+        checkedAt: attestation.checkedAt,
+        ...(failed === undefined ? {} : { failedProbe: failed.name }),
+        ...(safeCode(attestation.safeErrorCode) === undefined
+          ? {}
+          : { safeErrorCode: safeCode(attestation.safeErrorCode) }),
+      };
+    })
+    .sort((left, right) => compareText(left.surface, right.surface))
+    .slice(0, 2);
 
   const messages = buildMessageGroups(snapshot.messages);
   const queuedMessages = allRoutes.reduce(
@@ -1007,6 +1044,7 @@ export function buildDashboardViewModel(
     watchEvents,
     graph,
     connectors,
+    compatibilityChecks,
     accounting: {
       accepted: normalizedInteger(snapshot.accounting.accepted) ?? 0,
       duplicates: normalizedInteger(snapshot.accounting.duplicates) ?? 0,

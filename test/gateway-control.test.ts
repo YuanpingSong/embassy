@@ -38,6 +38,12 @@ import {
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
 import { projectGatewayPublicSnapshot } from "../src/gateway/types.js";
+import {
+  certifiedCompatibilityVersions,
+  compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
+  type CompatibilityCheckReport,
+} from "../src/gateway/compatibility.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
@@ -251,6 +257,7 @@ function handlers(
     unpair: () => ({ accepted: true, code: "ok" }),
     listSnapshot: () => snapshot(),
     observeSnapshot: () => ({ snapshotRevision: 3, snapshot: snapshot() }),
+    compatibilityCheck: () => compatibilityReport(),
     deliveryStatus: () => ({
       found: true,
       state: "delivered",
@@ -284,6 +291,23 @@ function handlers(
     }),
     ...overrides,
   };
+}
+
+function compatibilityReport(): CompatibilityCheckReport {
+  const surfaces = (["claude", "codex"] as const).map((surface) =>
+    evaluateCompatibilityAttestation({
+      surface,
+      version: certifiedCompatibilityVersions[surface][0]!,
+      checkedAt: NOW,
+      policy: "observed",
+      certifiedVersions: certifiedCompatibilityVersions[surface],
+      probes: compatibilityProbeNames[surface].map((name) => ({
+        name,
+        outcome: "pass" as const,
+      })),
+    }),
+  );
+  return { policy: "observed", compatible: true, surfaces };
 }
 
 async function rawRequest(
@@ -704,10 +728,11 @@ test("only exposes queue-mode lifecycle methods", () => {
     "pair",
     "unpair",
     "list_snapshot",
-      "observe_snapshot",
-      "delivery_status",
-      "untrack",
-      "send_to_claude",
+    "observe_snapshot",
+    "compat_check",
+    "delivery_status",
+    "untrack",
+    "send_to_claude",
     "send_to_codex",
     "reply",
     "refresh_dashboard",
@@ -889,6 +914,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["delivery_status", { token: "dlv_too-short" }],
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     ["observe_snapshot", { extra: true }],
+    ["compat_check", { extra: true }],
     [
       "reply",
       {
@@ -1323,6 +1349,40 @@ test("observe_snapshot carries a maximally projected snapshot under the control 
     projected.truncation.messages,
   );
   await server.close();
+});
+
+test("compat_check accepts only the exact bounded report schema", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers(),
+  });
+  const accepted = await rawRequest(
+    socketPath,
+    wireRequest("compat_check", {}),
+  );
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(accepted.result, compatibilityReport());
+  await server.close();
+
+  const invalidState = await privateState();
+  const invalidServer = await startGatewayControlServer({
+    stateDir: invalidState.stateDir,
+    socketPath: invalidState.socketPath,
+    handlers: handlers({
+      compatibilityCheck: () => ({
+        ...compatibilityReport(),
+        compatible: false,
+      }),
+    }),
+  });
+  const rejected = await rawRequest(
+    invalidState.socketPath,
+    wireRequest("compat_check", {}),
+  );
+  assertWireError(rejected, "INVALID_HANDLER_RESPONSE");
+  await invalidServer.close();
 });
 
 test("caps concurrent same-user control connections with a normalized busy response", async () => {

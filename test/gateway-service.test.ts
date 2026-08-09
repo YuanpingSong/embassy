@@ -36,6 +36,11 @@ import type {
   PrivateRouteBinding,
 } from "../src/gateway/types.js";
 import { BridgeError } from "../src/errors.js";
+import {
+  compatibilityProbeNames,
+  type CompatibilityProbeResult,
+  type CompatibilitySurfaceObservation,
+} from "../src/gateway/compatibility.js";
 
 /** Legacy scenario helper: tests opt into the former any-session policy. */
 function loadGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
@@ -252,6 +257,9 @@ class FakeProvider implements GatewayProviderAdapter {
   releasedRoutes: string[] = [];
   selectedRouteHandleOverride: string | undefined;
   closed = false;
+  compatibilityProbeCalls = 0;
+  compatibilitySurface?: () => CompatibilitySurfaceObservation;
+  runCompatibilityProbes?: () => Promise<readonly CompatibilityProbeResult[]>;
   closeError: Error | undefined;
   state: GatewayAdapterRouteState = "idle";
   dispatchResults: GatewayAdapterDispatchResult[] = [];
@@ -340,6 +348,18 @@ class FakeProvider implements GatewayProviderAdapter {
         this.attested.push(routeHandle);
       };
     }
+  }
+
+  enableCompatibility(version: string): void {
+    const surface = this.identity.provider;
+    this.compatibilitySurface = () => ({ surface, version });
+    this.runCompatibilityProbes = async () => {
+      this.compatibilityProbeCalls += 1;
+      return compatibilityProbeNames[surface].map((name) => ({
+        name,
+        outcome: "pass" as const,
+      }));
+    };
   }
 
   async initialize(callbacks: GatewayAdapterCallbacks): Promise<{
@@ -850,6 +870,71 @@ async function discoverAndRegisterCodexOnly(
     code: "ok",
   });
 }
+
+test("compatibility probes are cached once per surface and version and strict mode rejects drift", async () => {
+  const observedFixture = await fixture();
+  const observedConfig = loadGatewayConfig({
+    EMBASSY_STATE_DIR: observedFixture.stateDir,
+    EMBASSY_HOSTS: "this-mac",
+    EMBASSY_COMPAT_POLICY: "observed",
+  });
+  const makeObservedProviders = () => {
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider("codex");
+    claude.enableCompatibility("2.1.227");
+    codex.enableCompatibility("0.148.0");
+    return { claude, codex };
+  };
+
+  const firstProviders = makeObservedProviders();
+  const first = new GatewayService({
+    config: observedConfig,
+    adapters: [firstProviders.claude, firstProviders.codex],
+  });
+  await first.start();
+  const firstReport = await first.handlers().compatibilityCheck();
+  assert.equal(firstReport.compatible, true);
+  assert.deepEqual(
+    firstReport.surfaces.map((surface) => surface.tier),
+    ["schema_attested", "schema_attested"],
+  );
+  assert.equal(firstProviders.claude.compatibilityProbeCalls, 1);
+  assert.equal(firstProviders.codex.compatibilityProbeCalls, 1);
+  assert.equal((await first.store.inspectCompatibilityAttestations()).length, 2);
+  await first.close();
+
+  const restartedProviders = makeObservedProviders();
+  const restarted = new GatewayService({
+    config: observedConfig,
+    adapters: [restartedProviders.claude, restartedProviders.codex],
+  });
+  await restarted.start();
+  assert.equal(restartedProviders.claude.compatibilityProbeCalls, 0);
+  assert.equal(restartedProviders.codex.compatibilityProbeCalls, 0);
+  await restarted.close();
+  await rm(observedFixture.root, { recursive: true, force: true });
+
+  const strictFixture = await fixture();
+  const strictClaude = new FakeProvider("claude");
+  const strictCodex = new FakeProvider("codex");
+  strictClaude.enableCompatibility("2.1.227");
+  strictCodex.enableCompatibility("0.147.0");
+  const strict = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: strictFixture.stateDir,
+      EMBASSY_HOSTS: "this-mac",
+      EMBASSY_COMPAT_POLICY: "strict",
+    }),
+    adapters: [strictClaude, strictCodex],
+  });
+  await assert.rejects(
+    strict.start(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CLAUDE_VERSION_DRIFT",
+  );
+  await strict.close().catch(() => undefined);
+  await rm(strictFixture.root, { recursive: true, force: true });
+});
 
 test("aborted startup cannot become active after an in-flight adapter initialization resumes", async () => {
   const { root, stateDir } = await fixture();

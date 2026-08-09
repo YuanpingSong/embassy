@@ -23,6 +23,7 @@ import type {
   LocalCodexTransportFactory,
 } from "../src/gateway/codex-local-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
+import { compatibilityProbeNames } from "../src/gateway/compatibility.js";
 import {
   createLocalClaudeGatewayProvider,
   createLocalCodexGatewayProvider,
@@ -511,6 +512,38 @@ test("local Claude provider forwards the exact delivery notice policy", () => {
   });
   assert.equal(receivedLocale, "zh-CN");
   assert.equal(receivedDeliveryNotices, "quiet");
+});
+
+test("Claude compatibility check strictly scans the registry without dispatching", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    peerFactory: () => fake as never,
+  });
+  assert.deepEqual(provider.compatibilitySurface(), {
+    surface: "claude",
+    version: "2.1.226",
+  });
+  assert.deepEqual(
+    (await provider.runCompatibilityProbes()).map((probe) => probe.name),
+    compatibilityProbeNames.claude,
+  );
+  assert.equal(
+    (await provider.runCompatibilityProbes()).every(
+      (probe) => probe.outcome === "pass",
+    ),
+    true,
+  );
+  assert.equal(fake.sendCalls, 0);
+
+  fake.truncated = true;
+  const rejected = await provider.runCompatibilityProbes();
+  assert.deepEqual(rejected[2], {
+    name: "registry_schema",
+    outcome: "fail",
+    safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+  });
+  await provider.close();
 });
 
 test("closing during Claude listen fences and closes the late listener", async () => {
@@ -2140,6 +2173,74 @@ function codexBinding(
     ownerLease: "lease_codex_synthetic",
   };
 }
+
+test("Codex compatibility check initializes and lists without touching a thread or turn", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory);
+  assert.deepEqual(provider.compatibilitySurface(), {
+    surface: "codex",
+    version: "0.147.0",
+  });
+  const probes = await provider.runCompatibilityProbes();
+  assert.deepEqual(
+    probes.map((probe) => probe.name),
+    compatibilityProbeNames.codex,
+  );
+  assert.equal(probes.every((probe) => probe.outcome === "pass"), true);
+  assert.equal(factory.transports.length, 1);
+  assert.deepEqual(
+    factory.transports[0]!.sent.map((message) => message.method),
+    ["initialize", "initialized", "thread/loaded/list"],
+  );
+  assert.equal(factory.transports[0]!.cleanupConfirmed, true);
+  await provider.close();
+});
+
+test("an observed Codex candidate cannot select or write until its bounded probe passes", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const observedCompatibility = {
+    ...factory.schemaCompatibility,
+    appServerVersion: "0.148.0",
+    observedSchemaCandidate: true as const,
+  };
+  Object.defineProperties(factory, {
+    appServerVersion: { configurable: true, value: "0.148.0" },
+    compatibilityPolicy: { configurable: true, value: "observed" },
+    protocolVersion: { configurable: true, value: "0.148.0" },
+    schemaCompatibility: {
+      configurable: true,
+      value: observedCompatibility,
+    },
+    writeCompatibility: {
+      configurable: true,
+      value: observedCompatibility,
+    },
+  });
+  const provider = codexProvider(factory);
+  await provider.initialize(callbacks().callbacks);
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
+  );
+  assert.equal(
+    (await provider.runCompatibilityProbes()).every(
+      (probe) => probe.outcome === "pass",
+    ),
+    true,
+  );
+  assert.deepEqual(
+    await provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    { routeHandle: THREAD_ID, state: "idle" },
+  );
+  await provider.close();
+});
 
 test("Codex succession barrier exposes only an exact quiet connector", async () => {
   const factory = new FakeCodexFactory(THREAD_ID, true);
