@@ -2168,6 +2168,41 @@ export class GatewayStore {
         );
       }
       this.validateTransientNativeClaudePeer(state, input.source, target);
+      if (this.config.inboundMode === "paired") {
+        const paired = state.routes.find(
+          (route) =>
+            route.alias === input.source.alias &&
+            route.binding.provider === "claude" &&
+            route.registrationMode === "selected_live_peer" &&
+            route.enabled &&
+            route.compatibility === "compatible" &&
+            ["idle", "busy", "awaiting_approval"].includes(route.state) &&
+            sameBinding(route.binding, input.source.binding),
+        );
+        if (paired === undefined) {
+          const bytes =
+            typeof input.body === "string"
+              ? Math.max(1, Buffer.byteLength(input.body, "utf8"))
+              : 1;
+          this.recordRejection(
+            state,
+            {
+              sourceAlias: input.source.alias,
+              targetAlias: target.alias,
+              direction: "claude_to_codex",
+              targetRoute: target,
+            },
+            bytes,
+            now,
+            "SENDER_NOT_PAIRED",
+            input.steer,
+          );
+          throw new BridgeError(
+            "SENDER_NOT_PAIRED",
+            "The native Claude sender is not the exact session paired with this Codex task.",
+          );
+        }
+      }
       return this.enqueueResolvedMessage(state, now, input, {
         sourceAlias: input.source.alias,
         targetAlias: target.alias,
@@ -2652,6 +2687,7 @@ export class GatewayStore {
       return projectGatewayPublicSnapshot({
         schemaVersion: 1,
         generatedAt: now.toISOString(),
+        inboundMode: this.config.inboundMode,
         health,
         connectors,
         availablePeers: [],
@@ -3053,7 +3089,14 @@ export class GatewayStore {
     }
     const bytes = Buffer.byteLength(input.body, "utf8");
     if (bytes > this.config.limits.maxMessageBytes) {
-      this.recordRejection(state, sides, bytes, now, "MESSAGE_TOO_LARGE");
+      this.recordRejection(
+        state,
+        sides,
+        bytes,
+        now,
+        "MESSAGE_TOO_LARGE",
+        input.steer,
+      );
       throw new BridgeError(
         "MESSAGE_TOO_LARGE",
         "The transient message exceeds the configured byte limit.",
@@ -3064,7 +3107,14 @@ export class GatewayStore {
       !isNonNegativeInteger(hopCount) ||
       hopCount > this.config.limits.maxHopCount
     ) {
-      this.recordRejection(state, sides, bytes, now, "HOP_LIMIT_EXCEEDED");
+      this.recordRejection(
+        state,
+        sides,
+        bytes,
+        now,
+        "HOP_LIMIT_EXCEEDED",
+        input.steer,
+      );
       throw new BridgeError(
         "HOP_LIMIT_EXCEEDED",
         "The message exceeds the configured gateway hop limit.",
@@ -3120,7 +3170,14 @@ export class GatewayStore {
       deadline.getTime() <= now.getTime() ||
       deadline.getTime() > now.getTime() + this.config.limits.messageDeadlineMs
     ) {
-      this.recordRejection(state, sides, bytes, now, "INVALID_DEADLINE");
+      this.recordRejection(
+        state,
+        sides,
+        bytes,
+        now,
+        "INVALID_DEADLINE",
+        input.steer,
+      );
       throw new BridgeError(
         "INVALID_DEADLINE",
         "The message deadline must be in the future and within the configured maximum.",
@@ -3163,7 +3220,14 @@ export class GatewayStore {
       queuedBytesAfterSupersession + bytes >
         this.config.limits.maxQueueBytes
     ) {
-      this.recordRejection(state, sides, bytes, now, "QUEUE_FULL");
+      this.recordRejection(
+        state,
+        sides,
+        bytes,
+        now,
+        "QUEUE_FULL",
+        input.steer,
+      );
       throw new BridgeError(
         "GATEWAY_QUEUE_FULL",
         "The bounded gateway queue cannot accept another message.",
@@ -3310,6 +3374,7 @@ export class GatewayStore {
     bytes: number,
     now: Date,
     safeErrorCode: string,
+    steer?: true,
   ): void {
     const suffix = this.randomId().replaceAll("-", "").slice(-8).toLowerCase();
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
@@ -3325,6 +3390,7 @@ export class GatewayStore {
       bytes: Math.max(1, bytes),
       hopCount: 0,
       safeErrorCode,
+      ...(steer === true ? { steer: true as const } : {}),
     });
   }
 

@@ -146,7 +146,11 @@ namespace Embassy {
   export function chipKindFor(
     state: string,
     direction?: MessageDirection,
+    safeErrorCode?: string,
   ): ChipKind {
+    if (state === "rejected" && safeErrorCode === "SENDER_NOT_PAIRED") {
+      return "inert";
+    }
     if (state === "delivered" && direction === "codex_to_claude") {
       return "qualified";
     }
@@ -256,7 +260,9 @@ namespace Embassy {
       case "expired":
         return "activity.meaning.expired";
       case "rejected":
-        return "activity.meaning.rejected";
+        return safeErrorCode === "SENDER_NOT_PAIRED"
+          ? "activity.meaning.senderNotPaired"
+          : "activity.meaning.rejected";
       case "cancelled":
         return "activity.meaning.cancelled";
       case "abandoned":

@@ -36,6 +36,10 @@ import {
   type GatewayServiceOptions,
 } from "./service.js";
 import { GatewayStore } from "./store.js";
+import {
+  gatewayInboundModes,
+  type GatewayInboundMode,
+} from "./types.js";
 
 export const GATEWAY_CODEX_APP_SERVER_VERSION = "0.147.0";
 export const GATEWAY_LOCAL_HOST_ID = "this-mac";
@@ -49,6 +53,8 @@ export type GatewayServerReadyResult = Readonly<{
 
 export type GatewayServerOptions = {
   env?: NodeJS.ProcessEnv;
+  /** Defaults to paired; only the explicit CLI flag may opt into open. */
+  inboundMode?: GatewayInboundMode;
   /** Locale for bounded user-visible notices emitted by the broker. */
   locale?: DashboardLocale;
   signal?: AbortSignal;
@@ -273,7 +279,18 @@ export async function runGatewayServer(
   let startupAbort: AbortController | undefined;
 
   try {
-    const config = loadConfig(env);
+    const loadedConfig = loadConfig(env);
+    const inboundMode = options.inboundMode ?? loadedConfig.inboundMode;
+    if (!(gatewayInboundModes as readonly string[]).includes(inboundMode)) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_CONFIGURATION",
+        "The gateway inbound mode must be paired or open.",
+      );
+    }
+    const config: GatewayConfig = {
+      ...loadedConfig,
+      inboundMode,
+    };
     if (
       config.allowedHosts.length !== 1 ||
       config.allowedHosts[0] !== GATEWAY_LOCAL_HOST_ID

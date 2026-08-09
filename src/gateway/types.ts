@@ -2,6 +2,10 @@ export const gatewayProviders = ["codex", "claude"] as const;
 
 export type GatewayProvider = (typeof gatewayProviders)[number];
 
+export const gatewayInboundModes = ["paired", "open"] as const;
+
+export type GatewayInboundMode = (typeof gatewayInboundModes)[number];
+
 export const connectorHealthStates = [
   "offline",
   "connecting",
@@ -402,6 +406,8 @@ export type SafeGatewayAlert = {
 export type GatewayPublicSnapshot = {
   schemaVersion: 1;
   generatedAt: string;
+  /** Launch-time Claude-to-Codex consent policy; paired is the safe default. */
+  inboundMode: GatewayInboundMode;
   health: ConnectorHealth;
   connectors: PublicConnectorSnapshot[];
   availablePeers: PublicAvailablePeerSnapshot[];

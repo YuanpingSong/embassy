@@ -2583,6 +2583,7 @@ export class GatewayService {
       availablePeers: this.availablePeers.map((peer) => ({ ...peer })),
     });
     return JSON.stringify({
+      inboundMode: snapshot.inboundMode,
       health: snapshot.health,
       connectors: snapshot.connectors.map(
         ({ lastSeenAt: _lastSeenAt, ...connector }) => connector,

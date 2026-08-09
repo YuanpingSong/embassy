@@ -402,6 +402,14 @@ function emptyParams(args: readonly string[]): Record<string, never> {
   return {};
 }
 
+function parseServeInboundMode(args: readonly string[]): "paired" | "open" {
+  const options = parseOptions(args, ["inbound"]);
+  if (Object.keys(options).length === 0) return "paired";
+  assertExactOptionCount(options, 1);
+  if (options.inbound !== "open") throw new CliFault("INVALID_ARGUMENTS");
+  return "open";
+}
+
 function validateLiveDashboardArgs(args: readonly string[]): void {
   if (args.length === 0) {
     throw new CliFault(
@@ -847,10 +855,11 @@ export async function runGatewayCli(
     }
     if (command === undefined) throw new CliFault("UNKNOWN_COMMAND");
     if (command === "serve") {
-      emptyParams(common.args);
+      const inboundMode = parseServeInboundMode(common.args);
       await runServer({
         env,
         locale,
+        inboundMode,
         ...(dependencies.serverSignal === undefined
           ? {}
           : { signal: dependencies.serverSignal }),

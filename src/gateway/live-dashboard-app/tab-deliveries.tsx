@@ -216,7 +216,11 @@ namespace Embassy {
       <div className="lifecycle">
         {events.map((event, index) => {
           const isLast = index === events.length - 1;
-          const kind = chipKindFor(event.state, props.group.direction);
+          const kind = chipKindFor(
+            event.state,
+            props.group.direction,
+            event.safeErrorCode,
+          );
           const noteParts: string[] = [];
           if (event.safeErrorCode !== undefined) {
             noteParts.push(event.safeErrorCode);

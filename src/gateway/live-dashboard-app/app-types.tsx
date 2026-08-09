@@ -235,6 +235,7 @@ namespace Embassy {
   export type DashboardViewModel = Readonly<{
     schemaVersion: 1;
     generatedAt?: string | undefined;
+    inboundMode: "paired" | "open";
     health: ConnectorHealth;
     overall: "ready" | "setup" | "attention";
     exchange: Readonly<{
@@ -320,6 +321,7 @@ namespace Embassy {
 
   export type OverviewData = Readonly<{
     generatedAt: string | undefined;
+    inboundMode: "paired" | "open";
     overall: DashboardViewModel["overall"];
     statusStrip: StatusStripData;
     exchange: DashboardViewModel["exchange"];
@@ -359,6 +361,7 @@ namespace Embassy {
   }>;
 
   export type RoutesData = Readonly<{
+    inboundMode: "paired" | "open";
     peers: readonly DashboardPeerRow[];
     peersOmitted: number;
     codexRoutes: readonly CodexRouteView[];

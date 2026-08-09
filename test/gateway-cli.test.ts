@@ -135,6 +135,7 @@ function emptySnapshot(): GatewaySnapshot {
   return {
     schemaVersion: 1,
     generatedAt: "2026-08-07T12:34:56.000Z",
+    inboundMode: "paired" as const,
     health: "healthy",
     connectors: [],
     availablePeers: [],
@@ -717,6 +718,7 @@ test("all five stderr categories localize without changing stdout protocol", asy
     allowedHosts: ["this-mac"],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
+    inboundMode: "paired" as const,
     limits: {} as never,
   });
   const scenarios = [
@@ -872,6 +874,7 @@ test("wait-delivery polls at fixed intervals and emits only the terminal status"
         allowedHosts: ["this-mac"],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
+        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -932,6 +935,7 @@ test("wait-delivery returns a retained terminal result after its deadline window
         allowedHosts: ["this-mac"],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
+        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -987,6 +991,7 @@ test("wait-delivery preserves every non-delivered terminal state and uses one fa
           allowedHosts: ["this-mac"],
           stallNoticeMs: 30_000,
           steeringEnabled: true,
+          inboundMode: "paired",
           limits: {} as never,
         }),
         validateControlSocket: async () => undefined,
@@ -1015,6 +1020,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
     allowedHosts: ["this-mac"],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
+    inboundMode: "paired" as const,
     limits: {} as never,
   });
 
@@ -1134,6 +1140,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
         allowedHosts: ["this-mac"],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
+        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -1182,6 +1189,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
         allowedHosts: ["this-mac"],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
+        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -1479,6 +1487,7 @@ test("serve emits one normalized ready result without using the client socket or
       calls += 1;
       assert.equal(options.env, env);
       assert.equal(options.locale, "zh-CN");
+      assert.equal(options.inboundMode, "paired");
       await options.onReady({
         status: "ready",
         hostId: "this-mac",
@@ -1504,6 +1513,51 @@ test("serve emits one normalized ready result without using the client socket or
   assert.equal(stdout.chunks.join("").includes(SECRET_BODY), false);
   assert.equal(stdout.chunks.join("").includes(THREAD_ID), false);
   assert.equal(stdout.chunks.join("").includes(CLAUDE_SOCKET_PATH), false);
+});
+
+test("serve accepts only the exact explicit open-inbound opt-out", async () => {
+  let observedMode: string | undefined;
+  const exitCode = await runGatewayCli(["serve", "--inbound", "open"], {
+    env: {},
+    stdout: capture(),
+    stderr: capture(),
+    runServer: async (options) => {
+      observedMode = options.inboundMode;
+      await options.onReady({
+        status: "ready",
+        hostId: "this-mac",
+        codexMode: "native_messaging",
+        dashboardFile: "gateway-dashboard.html",
+      });
+    },
+  });
+  assert.equal(exitCode, gatewayCliExitCodes.ok);
+  assert.equal(observedMode, "open");
+
+  for (const argv of [
+    ["serve", "--inbound"],
+    ["serve", "--inbound", "paired"],
+    ["serve", "--inbound", "OPEN"],
+    ["serve", "--inbound", "open", "--inbound", "open"],
+  ]) {
+    let started = false;
+    const stdout = capture();
+    const invalid = await runGatewayCli(argv, {
+      env: {},
+      stdout,
+      stderr: capture(),
+      runServer: async () => {
+        started = true;
+      },
+    });
+    assert.equal(invalid, gatewayCliExitCodes.invalidInput);
+    assert.equal(started, false);
+    assert.equal(
+      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } })
+        .error.code,
+      "INVALID_ARGUMENTS",
+    );
+  }
 });
 
 test("serve reports startup failure once and never appends protocol output after ready", async () => {

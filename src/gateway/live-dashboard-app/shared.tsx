@@ -18,7 +18,10 @@ namespace Embassy {
   export function StateChip(props: StateChipProps): React.ReactElement {
     const t = useT();
     const domain = props.domain ?? "delivery";
-    const kind = chipKindByDomain(domain, props.state, props.direction);
+    const kind =
+      domain === "delivery"
+        ? chipKindFor(props.state, props.direction, props.safeErrorCode)
+        : chipKindByDomain(domain, props.state, props.direction);
     const meaning =
       props.note ??
       t(

@@ -69,6 +69,7 @@ type StatusStripData = Readonly<{
 
 type OverviewData = Readonly<{
   generatedAt: string | undefined;
+  inboundMode: "paired" | "open";
   overall: DashboardViewModel["overall"];
   statusStrip: StatusStripData;
   exchange: DashboardViewModel["exchange"];
@@ -100,6 +101,7 @@ type SuccessionView = Readonly<{
 }>;
 
 type RoutesData = Readonly<{
+  inboundMode: "paired" | "open";
   peers: readonly DashboardPeerRow[];
   peersOmitted: number;
   codexRoutes: readonly CodexRouteView[];
@@ -177,7 +179,11 @@ type EmbassyNamespace = Readonly<{
   adapter: EmbassyAdapter;
   TERMINAL_DELIVERY_STATES: readonly DeliveryState[];
   PULSE_WINDOW_MS: number;
-  chipKindFor(state: string, direction?: MessageDirection): string;
+  chipKindFor(
+    state: string,
+    direction?: MessageDirection,
+    safeErrorCode?: string,
+  ): string;
   chipKindByDomain(
     domain: ChipDomain,
     state: string,
@@ -908,6 +914,7 @@ test("monitor-only is driven by CODEX_WRITES_DISABLED", () => {
 
 test("routesProps keeps the server's route order and drops claude routes", () => {
   const data = adapter.routesProps(DEGRADED, GENERATED_MS);
+  assert.equal(data.inboundMode, "paired");
   assert.deepEqual(
     plain(data.codexRoutes).map((view) => view.route.alias),
     ["codex-builder@this-mac", "codex-reviewer@this-mac"],
@@ -918,6 +925,13 @@ test("routesProps keeps the server's route order and drops claude routes", () =>
   assert.equal(data.pairReady, false);
   assert.equal(at(data.codexRoutes, 0).oldestAgeMs, 450_000);
   assert.equal(at(data.codexRoutes, 1).oldestAgeMs, undefined);
+});
+
+test("overview and routes preserve the explicit open-inbound policy", () => {
+  const open = mutableClone(EMPTY);
+  open.inboundMode = "open";
+  assert.equal(adapter.overviewProps(open, GENERATED_MS).inboundMode, "open");
+  assert.equal(adapter.routesProps(open, GENERATED_MS).inboundMode, "open");
 });
 
 test("extractSuccessions keeps only succession guidance, in server order", () => {
@@ -1201,6 +1215,14 @@ test("held is progress, duplicate is inert, rejected is warning", () => {
   // PM ruling: a by-design refusal is actionable (coral warning), never
   // failure-red.
   assert.equal(bundle.Embassy.chipKindFor("rejected"), "warning");
+  assert.equal(
+    bundle.Embassy.chipKindFor(
+      "rejected",
+      "claude_to_codex",
+      "SENDER_NOT_PAIRED",
+    ),
+    "inert",
+  );
   assert.equal(bundle.Embassy.chipKindFor("cancelled"), "inert");
   assert.equal(bundle.Embassy.chipKindFor("abandoned"), "inert");
   assert.equal(bundle.Embassy.chipKindFor("queued"), "progress");
@@ -1216,6 +1238,10 @@ test("held is progress, duplicate is inert, rejected is warning", () => {
   assert.equal(
     bundle.Embassy.deliveryMeaningKey("rejected"),
     "activity.meaning.rejected",
+  );
+  assert.equal(
+    bundle.Embassy.deliveryMeaningKey("rejected", "SENDER_NOT_PAIRED"),
+    "activity.meaning.senderNotPaired",
   );
 });
 

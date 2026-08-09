@@ -4,6 +4,7 @@ export function dashboardFixture(): GatewayPublicSnapshot {
   return {
     schemaVersion: 1,
     generatedAt: "2026-08-08T12:00:00.000Z",
+    inboundMode: "paired",
     health: "healthy",
     connectors: [
       {

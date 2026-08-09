@@ -161,7 +161,7 @@ test("Codex succession alerts distinguish a busy boundary from manual recovery",
   assert.match(zh, /不会猜测哪个任务拥有路由/);
 });
 
-test("first-run exchange board gives truthful asymmetric setup actions", () => {
+test("first-run exchange board gives truthful paired setup actions", () => {
   const snapshot = dashboardFixture();
   snapshot.routes = [];
   snapshot.availablePeers = snapshot.availablePeers.map((peer) => ({
@@ -176,7 +176,42 @@ test("first-run exchange board gives truthful asymmetric setup actions", () => {
   const noPeers = renderDashboardHtml(snapshot);
   assert.match(noPeers, /Start or keep a Claude Code session running/);
   assert.match(noPeers, /embassy refresh-dashboard/);
-  assert.match(noPeers, /Every compatible live Claude session under the same OS user/);
+  assert.match(noPeers, /No Claude session is paired/);
+  assert.match(noPeers, /accepts no inbound messages/);
+  assert.match(noPeers, /data-inbound-mode="paired"/);
+
+  snapshot.inboundMode = "open";
+  const openInbound = renderDashboardHtml(snapshot);
+  assert.match(openInbound, /Open inbound/);
+  assert.match(
+    openInbound,
+    /Any live Claude session under this OS user may message this task/,
+  );
+  assert.match(openInbound, /data-inbound-mode="open"/);
+});
+
+test("unpaired sender refusal is neutral and explains the pairing boundary", () => {
+  const snapshot = dashboardFixture();
+  snapshot.messages.push({
+    sequence: 5,
+    timestamp: "2026-08-08T12:00:00.000Z",
+    messageIdSuffix: "bad0ff",
+    direction: "claude_to_codex",
+    sourceAlias: "claude-unpaired@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
+    state: "rejected",
+    bytes: 42,
+    hopCount: 0,
+    safeErrorCode: "SENDER_NOT_PAIRED",
+  });
+
+  const html = renderDashboardHtml(snapshot);
+  assert.match(html, /SENDER_NOT_PAIRED/);
+  assert.match(html, /configured pairing policy refused this sender/);
+  assert.match(
+    html,
+    /data-delivery-state="rejected">[\s\S]*?status status--quiet[\s\S]*?SENDER_NOT_PAIRED/,
+  );
 });
 
 test("only compatible live collision-free peers drive the select call to action", () => {

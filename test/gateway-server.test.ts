@@ -135,7 +135,8 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     CODEX_THREAD_ID: "00000000-0000-7000-8000-000000000701",
   };
   const config = loadGatewayConfig(env);
-  const store = new GatewayStore(config);
+  const effectiveConfig = { ...config, inboundMode: "open" as const };
+  const store = new GatewayStore(effectiveConfig);
   const abort = new AbortController();
   const signals = signalHarness();
   const events: string[] = [];
@@ -149,6 +150,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     {
       env,
       locale: "zh-CN",
+      inboundMode: "open",
       signal: abort.signal,
       onReady: (result) => {
         events.push("ready");
@@ -183,7 +185,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
       },
       createStore: (received) => {
         events.push("create-store");
-        assert.equal(received, config);
+        assert.deepEqual(received, effectiveConfig);
         return store;
       },
       createCodexFactory: async (options) => {
@@ -225,6 +227,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
   );
   assert.deepEqual(Object.keys(codexProviderOptions ?? {}), ["factory"]);
   assert.equal(serviceOptions?.store, store);
+  assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
     2,

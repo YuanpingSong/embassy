@@ -147,6 +147,7 @@ export type DashboardOmissions = Readonly<{
 export type DashboardViewModel = Readonly<{
   schemaVersion: 1;
   generatedAt?: string | undefined;
+  inboundMode: "paired" | "open";
   health: ConnectorHealth;
   overall: "ready" | "setup" | "attention";
   exchange: Readonly<{
@@ -440,6 +441,7 @@ export function buildDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
 ): DashboardViewModel {
   const generatedAt = normalizedTimestamp(snapshot.generatedAt);
+  const inboundMode = snapshot.inboundMode === "open" ? "open" : "paired";
   const validPeers = arePublicAvailablePeerSnapshots(snapshot.availablePeers)
     ? snapshot.availablePeers
     : [];
@@ -717,6 +719,7 @@ export function buildDashboardViewModel(
   return {
     schemaVersion: 1,
     ...(generatedAt === undefined ? {} : { generatedAt }),
+    inboundMode,
     health: snapshot.health,
     overall,
     exchange: {

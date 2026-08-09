@@ -7,7 +7,7 @@ export const cliCopyZhCn = {
   embassy <command> [options] [--lang en|zh-CN]
 
 命令：
-  serve                  在前台运行仅使用套接字的代理
+  serve [--inbound open] 在前台运行仅使用套接字的代理（默认配对入站）
   health                 检查代理健康状态
   status                 读取公开状态快照
   refresh-dashboard      发布两份静态仪表盘文件

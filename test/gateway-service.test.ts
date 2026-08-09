@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { loadGatewayConfig } from "../src/gateway/config.js";
+import {
+  loadGatewayConfig as loadBaseGatewayConfig,
+  type GatewayConfig,
+} from "../src/gateway/config.js";
 import type {
   GatewayControlHandlers,
   ValidatedRegisterCodexParams,
@@ -34,6 +37,11 @@ import type {
 } from "../src/gateway/types.js";
 import { BridgeError } from "../src/errors.js";
 
+/** Legacy scenario helper: tests opt into the former any-session policy. */
+function loadGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
+  return { ...loadBaseGatewayConfig(env), inboundMode: "open" };
+}
+
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OTHER_THREAD_ID = "00000000-0000-7000-8000-000000000702";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000042";
@@ -55,6 +63,7 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
   return {
     schemaVersion: 1,
     generatedAt,
+    inboundMode: "paired",
     health: "healthy",
     connectors: [
       {
@@ -4028,7 +4037,7 @@ test("native Claude ingress reports delivery without approval-like held notices 
   );
 });
 
-test("an exact unselected native Claude peer can reach Codex and receive only its correlated reply", async (t) => {
+test("open inbound accepts an exact unselected native Claude peer and returns only its correlated reply", async (t) => {
   const { root, stateDir, workspace } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -4094,6 +4103,92 @@ test("an exact unselected native Claude peer can reach Codex and receive only it
     snapshot.availablePeers.map(({ alias, selected }) => ({ alias, selected })),
     [{ alias: "claude-one@this-mac", selected: false }],
   );
+  assert.equal(snapshot.inboundMode, "open");
+});
+
+test("paired inbound terminally refuses an unselected native sender and accepts it after selection", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  const service = new GatewayService({
+    config: loadBaseGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await discoverAndRegisterCodexOnly(handlers);
+
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "PAIRED_REFUSAL_PRIVATE_BODY",
+    receiptHandle: "receipt-not-paired",
+  });
+  await waitFor(() => claude.nativeInboundStatuses.length === 1);
+  assert.deepEqual(claude.nativeInboundStatuses, [
+    {
+      receiptHandle: "receipt-not-paired",
+      status: "expired",
+      diagnosticCode: "SENDER_NOT_PAIRED",
+    },
+  ]);
+  assert.equal(codex.dispatches.length, 0);
+  const refused = await handlers.listSnapshot();
+  assert.equal(refused.inboundMode, "paired");
+  assert.equal(
+    refused.routes.find((route) => route.provider === "codex")?.queueDepth,
+    0,
+  );
+  assert.equal(
+    refused.messages.some(
+      (event) =>
+        event.state === "rejected" &&
+        event.safeErrorCode === "SENDER_NOT_PAIRED" &&
+        event.sourceAlias === "claude-one@this-mac" &&
+        event.targetAlias === "codex-main@this-mac",
+    ),
+    true,
+  );
+  assert.equal(
+    JSON.stringify(refused).includes("PAIRED_REFUSAL_PRIVATE_BODY"),
+    false,
+  );
+
+  assert.deepEqual(
+    await handlers.selectClaude({ alias: "claude-one@this-mac" }),
+    { accepted: true, code: "ok" },
+  );
+  codex.dispatchResults.push({ state: "delivered" });
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    text: "paired sender accepted",
+    receiptHandle: "receipt-paired",
+  });
+  await waitFor(() => codex.dispatches.length === 1);
+  await waitFor(() => claude.nativeInboundStatuses.length === 2);
+  assert.deepEqual(claude.nativeInboundStatuses.at(-1), {
+    receiptHandle: "receipt-paired",
+    status: "delivered",
+  });
 });
 
 test("native Claude ingress reports delivery errors as expired with a safe diagnostic", async (t) => {

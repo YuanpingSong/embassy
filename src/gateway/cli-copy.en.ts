@@ -7,7 +7,7 @@ Usage:
   embassy <command> [options] [--lang en|zh-CN]
 
 Commands:
-  serve                  Run the socket-only broker in the foreground
+  serve [--inbound open] Run the socket-only broker (paired inbound by default)
   health                 Check broker health
   status                 Read the public status snapshot
   refresh-dashboard      Publish both static dashboard files

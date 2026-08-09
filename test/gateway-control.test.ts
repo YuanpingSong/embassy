@@ -88,6 +88,7 @@ function snapshot(): GatewaySnapshot {
   return {
     schemaVersion: 1,
     generatedAt: NOW,
+    inboundMode: "paired",
     health: "healthy",
     connectors: [
       {
@@ -1115,6 +1116,8 @@ test("never reflects handler exceptions or invalid private response fields", asy
 test("list_snapshot requires bounded projection and explicit omission counts", async () => {
   const { stateDir, socketPath } = await privateState();
   const { truncation: _omitted, ...withoutTruncation } = snapshot();
+  const { inboundMode: _inboundMode, ...withoutInboundMode } = snapshot();
+  const invalidInboundMode = { ...snapshot(), inboundMode: "closed" };
   const invalidCount = snapshot();
   invalidCount.truncation.messages = -1;
   const inconsistentQueueAge = snapshot();
@@ -1135,10 +1138,13 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   }));
   const candidates = [
     withoutTruncation,
+    withoutInboundMode,
+    invalidInboundMode,
     invalidCount,
     inconsistentQueueAge,
     unprojected,
   ];
+  const attempts = candidates.length;
   const server = await startGatewayControlServer({
     stateDir,
     socketPath,
@@ -1147,7 +1153,7 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     }),
   });
 
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const response = await rawRequest(
       socketPath,
       wireRequest("list_snapshot", {}),

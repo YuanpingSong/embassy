@@ -317,6 +317,7 @@ namespace Embassy {
     const strip = data.statusStrip;
     const queueOut = data.queueClaudeToCodex;
     const queueIn = data.queueCodexToClaude;
+    const openInbound = data.inboundMode === "open";
     // Queued work is shown even without a ready pair — hiding a non-empty
     // queue behind the "no pair" state would conceal the stall it explains.
     // The board still renders exactly three columns (claude · middle · codex):
@@ -333,7 +334,7 @@ namespace Embassy {
         ? null
         : `${t("next.label")} · ${who}: ${t(NEXT_ACTION_COPY_KEYS[action])}`;
     const boardNotes: readonly string[] = [
-      showEdges && !data.pairReady
+      !openInbound && showEdges && !data.pairReady
         ? `${t("app.overview.noPair.title")} — ${t("app.overview.noPair.body")}`
         : null,
       nextActionLine(t("provider.claude"), data.exchange.claude.nextAction),
@@ -392,6 +393,27 @@ namespace Embassy {
               <span className="info-dot">i</span>
             </Tooltip>
           </div>
+          <div className="inbound-policy" data-inbound-mode={data.inboundMode}>
+            <span
+              className="chip chip--small"
+              data-kind={openInbound ? "warning" : "inert"}
+            >
+              {t(
+                openInbound
+                  ? "inbound.open.badge"
+                  : "inbound.paired.badge",
+              )}
+            </span>
+            <p>
+              {t(
+                openInbound
+                  ? "inbound.open.body"
+                  : data.pairReady
+                    ? "inbound.paired.body"
+                    : "inbound.noPair.body",
+              )}
+            </p>
+          </div>
           <div className="exchange-board">
             <ExchangeNode
               title={t("app.overview.node.claude.title")}
@@ -419,10 +441,18 @@ namespace Embassy {
             ) : (
               <div className="no-pair">
                 <span className="no-pair__label">
-                  {t("app.overview.noPair.title")}
+                  {t(
+                    openInbound
+                      ? "inbound.open.badge"
+                      : "app.overview.noPair.title",
+                  )}
                 </span>
                 <span className="no-pair__body">
-                  {t("app.overview.noPair.body")}
+                  {t(
+                    openInbound
+                      ? "inbound.open.body"
+                      : "app.overview.noPair.body",
+                  )}
                 </span>
               </div>
             )}

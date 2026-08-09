@@ -234,7 +234,13 @@ function toneForPeer(state: PublicAvailablePeerState): DashboardTone {
   return "danger";
 }
 
-function toneForDelivery(state: DeliveryState): DashboardTone {
+function toneForDelivery(
+  state: DeliveryState,
+  safeErrorCode?: string,
+): DashboardTone {
+  if (state === "rejected" && safeErrorCode === "SENDER_NOT_PAIRED") {
+    return "quiet";
+  }
   if (state === "delivered") return "good";
   if (
     state === "queued" ||
@@ -337,10 +343,27 @@ function renderExchange(context: RenderContext): string {
           context.model.exchange.queueCountIsLowerBound,
         ),
       });
+  const paired = context.model.inboundMode === "paired";
+  const hasPair =
+    context.model.exchange.claude.ready > 0 &&
+    context.model.exchange.codex.ready > 0;
+  const policyBody = paired
+    ? t(context, hasPair ? "inbound.paired.body" : "inbound.noPair.body")
+    : t(context, "inbound.open.body");
   return `<section class="section exchange" aria-labelledby="exchange-title">
     <div class="section-heading">
       <div><p class="eyebrow">${t(context, "exchange.eyebrow")}</p><h2 id="exchange-title">${t(context, "exchange.title")}</h2></div>
       <p>${t(context, "exchange.note")}</p>
+    </div>
+    <div class="inbound-policy" data-inbound-mode="${context.model.inboundMode}">
+      ${statusPill(
+        t(
+          context,
+          paired ? "inbound.paired.badge" : "inbound.open.badge",
+        ),
+        paired ? "quiet" : "warning",
+      )}
+      <p>${policyBody}</p>
     </div>
     <div class="exchange-board">
       ${renderParty(context, context.model.exchange.claude)}
@@ -465,7 +488,11 @@ function deliveryLabelKey(state: DeliveryState): DashboardCopyKey {
 function deliveryMeaningKey(
   state: DeliveryState,
   direction: DashboardMessageGroup["direction"],
+  safeErrorCode?: string,
 ): DashboardCopyKey {
+  if (state === "rejected" && safeErrorCode === "SENDER_NOT_PAIRED") {
+    return "activity.meaning.senderNotPaired";
+  }
   if (state === "delivered") {
     return direction === "codex_to_claude"
       ? "activity.meaning.delivered.codexToClaude"
@@ -482,7 +509,7 @@ function renderMessageHistory(context: RenderContext, message: DashboardMessageG
   }
   return `<details class="history"><summary>${t(context, "activity.history.many", { count: formatInteger(message.events.length) })}</summary><ol>${message.events
     .map(
-      (event) => `<li data-dashboard-row="message-event">${renderTimestampAtSnapshot(context, event.timestamp)} ${statusPill(t(context, deliveryLabelKey(event.state)), toneForDelivery(event.state))}${event.safeErrorCode === undefined ? "" : `<code>${event.safeErrorCode}</code>`}</li>`,
+      (event) => `<li data-dashboard-row="message-event">${renderTimestampAtSnapshot(context, event.timestamp)} ${statusPill(t(context, deliveryLabelKey(event.state)), toneForDelivery(event.state, event.safeErrorCode))}${event.safeErrorCode === undefined ? "" : `<code>${event.safeErrorCode}</code>`}</li>`,
     )
     .join("")}</ol></details>`;
 }
@@ -496,7 +523,7 @@ function renderActivity(context: RenderContext): string {
             <td data-label="${t(context, "activity.column.updated")}">${renderTimestampAtSnapshot(context, message.timestamp)}</td>
             <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${t(context, message.direction === "claude_to_codex" ? "direction.claudeToCodex" : "direction.codexToClaude")}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
             <td data-label="${t(context, "activity.column.id")}"><code>…${message.messageIdSuffix ?? "—"}</code></td>
-            <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction))}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
+            <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state, message.safeErrorCode))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction, message.safeErrorCode))}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
             <td data-label="${t(context, "activity.column.elapsed")}" class="numeric">${formatDuration(message.latencyMs)}</td>
             <td data-label="${t(context, "activity.column.size")}" class="numeric">${formatBytes(message.bytes)}</td>
             <td data-label="${t(context, "activity.column.history")}">${renderMessageHistory(context, message)}</td>
@@ -670,6 +697,9 @@ const DASHBOARD_STYLES = `
     .section-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(14rem, .72fr); gap: 2rem; align-items: end; margin-bottom: 1.25rem; }
     .section-heading > p { margin: 0; color: var(--muted); font-size: .88rem; }
     .exchange-board { display: grid; grid-template-columns: minmax(0, 1fr) minmax(11rem, .38fr) minmax(0, 1fr); align-items: stretch; border: 1px solid var(--ink); background: var(--sheet); }
+    .inbound-policy { display: flex; align-items: center; gap: .75rem; margin: 0 0 1rem; padding: .65rem .8rem; border: 1px solid var(--hairline); background: var(--paper-deep); }
+    .inbound-policy p { margin: 0; }
+    .inbound-policy[data-inbound-mode="open"] { border-color: var(--warning); background: var(--warning-soft); }
     .exchange-party { min-width: 0; padding: 1.3rem; }
     .exchange-party--claude { border-right: 1px solid var(--hairline); }
     .exchange-party--codex { border-left: 1px solid var(--hairline); }

@@ -19,7 +19,15 @@ export const dashboardCopyEn = {
   "exchange.eyebrow": "Exchange board",
   "exchange.title": "Two directions, two explicit boundaries",
   "exchange.note":
-    "Codex sends only to a selected Claude session. Every compatible live Claude session under the same OS user can see a registered Codex task.",
+    "Selection controls the Codex destination and, in paired mode, the only Claude sender that task accepts. Native visibility remains machine-wide.",
+  "inbound.paired.badge": "Paired inbound",
+  "inbound.paired.body":
+    "The registered Codex task accepts messages only from the selected Claude session.",
+  "inbound.open.badge": "Open inbound",
+  "inbound.open.body":
+    "Any live Claude session under this OS user may message this task.",
+  "inbound.noPair.body":
+    "No Claude session is paired; a registered Codex task accepts no inbound messages.",
   "exchange.claude.title": "Claude selection",
   "exchange.claude.note": "Destination for Codex → Claude",
   "exchange.codex.title": "Codex registration",
@@ -169,6 +177,8 @@ export const dashboardCopyEn = {
     "A duplicate of an already-accepted message. This copy was never accepted.",
   "activity.meaning.rejected":
     "Refused before acceptance — for example an invalid deadline or a full queue. It never entered the queue.",
+  "activity.meaning.senderNotPaired":
+    "The configured pairing policy refused this sender; no message body was accepted.",
   "activity.meaning.failed":
     "Settled as failed. The safe code names the cause; never retry an ambiguous delivery automatically.",
   "activity.meaning.expired":
@@ -386,7 +396,7 @@ export const dashboardCopyEn = {
     "{ready} ready · {total} registered · {monitorOnly} monitor-only",
   "app.overview.noPair.title": "No pair",
   "app.overview.noPair.body":
-    "One side is not ready, so nothing can cross. Select a Claude session and register a Codex task, and this link appears.",
+    "A registered Codex task accepts no inbound messages until a Claude session is selected; Codex also has no Claude destination.",
   "app.overview.queueC2x": "Claude → Codex",
   "app.overview.queueX2c": "Claude ← Codex",
   "app.overview.depth": "depth",
@@ -427,9 +437,13 @@ export const dashboardCopyEn = {
   "app.routes.codexRoutes": "Codex tasks",
   "app.routes.selectCmd.title": "Select a Claude session",
   "app.routes.selectCmd.consequence":
-    "Selection is what lets Codex reach Claude. Exactly one selected session receives Codex → Claude messages.",
+    "Pair this session with the registered Codex task. It becomes the destination Codex sends to and the only Claude sender the task accepts.",
+  "app.routes.selectCmd.consequenceOpen":
+    "Select this session as the destination Codex sends to. Open inbound still accepts any live Claude session under this OS user.",
   "app.routes.unselectCmd.consequence":
-    "Unselecting stops Codex → Claude delivery. Claude → Codex is unaffected.",
+    "Unpair this session. Codex cannot send to Claude, and the task accepts no inbound messages until another session is paired.",
+  "app.routes.unselectCmd.consequenceOpen":
+    "Clear the Codex → Claude destination. Open inbound remains enabled for every live Claude session under this OS user.",
   "app.routes.refreshCmd":
     "Re-read local discovery and rewrite the static dashboard file.",
   "app.routes.monitorOnlyReason":

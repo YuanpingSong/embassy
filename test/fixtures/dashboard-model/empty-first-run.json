@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedAt": "2026-08-08T09:30:00.000Z",
+  "inboundMode": "paired",
   "health": "connecting",
   "overall": "setup",
   "exchange": {

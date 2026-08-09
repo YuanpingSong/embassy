@@ -309,6 +309,7 @@ namespace Embassy {
   ): OverviewData {
     return {
       generatedAt: model.generatedAt,
+      inboundMode: model.inboundMode,
       overall: model.overall,
       statusStrip: {
         broker: model.health,
@@ -365,6 +366,7 @@ namespace Embassy {
         }),
       );
     return {
+      inboundMode: model.inboundMode,
       peers: model.peers,
       peersOmitted: model.omissions.availablePeers,
       codexRoutes,

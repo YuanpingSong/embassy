@@ -93,6 +93,7 @@ async function fixture(
     allowedHosts: ["this-mac", "build-mac"],
     stallNoticeMs: 2_500,
     steeringEnabled: true,
+    inboundMode: "paired",
     limits: limits(),
   };
   const testClock = clock();
@@ -264,6 +265,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   });
   assert.deepEqual(config.allowedHosts, ["this-mac", "build-mac"]);
   assert.equal(config.controlSocketPath, "/tmp/private-gateway-test/control.sock");
+  assert.equal(config.inboundMode, "paired");
   assert.equal(config.steeringEnabled, true);
   assert.equal(config.stallNoticeMs, 150_000);
   assert.equal(config.limits.maxMessageBytes, 16_384);
@@ -1211,6 +1213,7 @@ test("persistence contains metadata but no body, dedupe key, or public native ID
 
 test("native Claude ingress queues for an explicit Codex route without registering the peer", async () => {
   const { store, workspace, config } = await fixture();
+  config.inboundMode = "open";
   config.limits.rateLimitPerRoute = 1;
   await store.initialize();
   await observeAndRegisterCodexOnly(store);
@@ -1303,8 +1306,86 @@ test("native Claude ingress queues for an explicit Codex route without registeri
   await store.close();
 });
 
+test("paired native ingress accepts only the exact selected Claude binding", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegisterCodexOnly(store);
+
+  const input = {
+    source: transientClaudePeer,
+    targetAlias: "reviewer@this-mac",
+    body: "PAIRING_PRIVATE_BODY",
+    dedupeKey: "paired-native-ingress",
+  } as const;
+  await assert.rejects(
+    store.enqueueNativeIngress(input),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED",
+  );
+
+  await store.registerRoute({
+    alias: transientClaudePeer.alias,
+    binding: transientClaudePeer.binding,
+    registrationMode: "selected_live_peer",
+  });
+  const otherPeer = {
+    alias: "other-advisor@this-mac",
+    binding: {
+      ...transientClaudePeer.binding,
+      routeHandle: "00000000-0000-4000-8000-000000000288",
+      ownerLease: "native-claude-call-proof-0002",
+    },
+  } as const;
+  await assert.rejects(
+    store.enqueueNativeIngress({
+      ...input,
+      source: otherPeer,
+      dedupeKey: "unpaired-native-ingress",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED",
+  );
+
+  const accepted = await store.enqueueNativeIngress(input);
+  assert.equal(accepted.accepted, true);
+  const snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.inboundMode, "paired");
+  assert.equal(snapshot.accounting.accepted, 1);
+  assert.equal(snapshot.accounting.rejected, 2);
+  assert.equal(snapshot.routes.find((route) => route.provider === "codex")?.queueDepth, 1);
+  assert.deepEqual(
+    snapshot.messages
+      .filter((event) => event.safeErrorCode === "SENDER_NOT_PAIRED")
+      .map((event) => ({
+        state: event.state,
+        sourceAlias: event.sourceAlias,
+        targetAlias: event.targetAlias,
+        safeErrorCode: event.safeErrorCode,
+      })),
+    [
+      {
+        state: "rejected",
+        sourceAlias: transientClaudePeer.alias,
+        targetAlias: "reviewer@this-mac",
+        safeErrorCode: "SENDER_NOT_PAIRED",
+      },
+      {
+        state: "rejected",
+        sourceAlias: otherPeer.alias,
+        targetAlias: "reviewer@this-mac",
+        safeErrorCode: "SENDER_NOT_PAIRED",
+      },
+    ],
+  );
+  const exposed = JSON.stringify(snapshot);
+  assert.equal(exposed.includes("PAIRING_PRIVATE_BODY"), false);
+  assert.equal(exposed.includes(otherPeer.binding.routeHandle), false);
+  await store.close();
+});
+
 test("queued steers retain three newest per route and expose an exact journal marker", async () => {
   const { store, config } = await fixture();
+  config.inboundMode = "open";
   config.limits.maxQueueMessages = 6;
   config.limits.maxQueueMessagesPerRoute = 6;
   await store.initialize();
@@ -1369,6 +1450,7 @@ test("queued steers retain three newest per route and expose an exact journal ma
 
 test("a rejected fourth steer does not displace an already accepted body", async () => {
   const { store, config } = await fixture();
+  config.inboundMode = "open";
   config.limits.maxQueueMessages = 6;
   config.limits.maxQueueMessagesPerRoute = 6;
   config.limits.maxQueueBytes = 100;
@@ -1477,6 +1559,7 @@ test("a correlated native reply retains transient-target queue semantics and no 
 
 test("native messages fail closed on peer scope and abandon transient authority across restart", async () => {
   const { store, workspace, config, clock: testClock } = await fixture();
+  config.inboundMode = "open";
   await store.initialize();
   await observeAndRegisterCodexOnly(store);
 
@@ -1625,6 +1708,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
   const snapshot: GatewayPublicSnapshot = {
     schemaVersion: 1,
     generatedAt: timestamp,
+    inboundMode: "paired",
     health: "degraded",
     connectors: Array.from({ length: 64 }, (_, index) => ({
       provider: index % 2 === 0 ? "codex" : "claude",
@@ -1736,7 +1820,8 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
 });
 
 test("stale rebind preserves counters but cannot silently retarget an alias", async () => {
-  const { store, workspace } = await fixture();
+  const { store, workspace, config } = await fixture();
+  config.inboundMode = "open";
   await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({

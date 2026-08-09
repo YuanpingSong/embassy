@@ -18,7 +18,12 @@ export const dashboardCopyZhCn = {
   "exchange.eyebrow": "交换台",
   "exchange.title": "两个方向，两道明确边界",
   "exchange.note":
-    "Codex 只会向已选择的 Claude 会话发送消息。同一操作系统用户下，每个兼容且在线的 Claude 会话都能看到已注册的 Codex 任务。",
+    "选择决定 Codex 的目标；在配对入站模式下，它也决定该任务唯一接受的 Claude 发送方。原生可见性仍覆盖整台机器。",
+  "inbound.paired.badge": "配对入站",
+  "inbound.paired.body": "已注册的 Codex 任务只接受来自已选择 Claude 会话的消息。",
+  "inbound.open.badge": "开放入站",
+  "inbound.open.body": "同一操作系统用户下，任何在线的 Claude 会话都可向此任务发送消息。",
+  "inbound.noPair.body": "当前没有配对的 Claude 会话；已注册的 Codex 任务不接受入站消息。",
   "exchange.claude.title": "Claude 选择",
   "exchange.claude.note": "Codex → Claude 的目标",
   "exchange.codex.title": "Codex 注册",
@@ -149,6 +154,8 @@ export const dashboardCopyZhCn = {
   "activity.meaning.duplicate": "与已接收消息重复。本条从未被接收。",
   "activity.meaning.rejected":
     "在接收前被拒绝——例如截止时间无效或队列已满。它从未进入队列。",
+  "activity.meaning.senderNotPaired":
+    "当前配对策略拒绝了此发送方；消息正文未被接受。",
   "activity.meaning.failed":
     "已按失败终局。安全代码说明原因；切勿自动重试结果不确定的投递。",
   "activity.meaning.expired": "在观察到任何传输写入之前，投递截止时间已过。",
@@ -354,7 +361,7 @@ export const dashboardCopyZhCn = {
     "已就绪 {ready} · 已注册 {total} · 仅监控 {monitorOnly}",
   "app.overview.noPair.title": "无配对",
   "app.overview.noPair.body":
-    "有一侧尚未就绪，消息无法通过。请选择一个 Claude 会话并注册一个 Codex 任务，这条连线才会出现。",
+    "在选择 Claude 会话之前，已注册的 Codex 任务不接受入站消息；Codex 也没有 Claude 发送目标。",
   "app.overview.queueC2x": "Claude → Codex",
   "app.overview.queueX2c": "Claude ← Codex",
   "app.overview.depth": "深度",
@@ -392,9 +399,13 @@ export const dashboardCopyZhCn = {
   "app.routes.codexRoutes": "Codex 任务",
   "app.routes.selectCmd.title": "选择 Claude 会话",
   "app.routes.selectCmd.consequence":
-    "只有完成选择，Codex 才能发往 Claude。有且只有一个已选择的会话会接收 Codex → Claude 消息。",
+    "将此会话与已注册的 Codex 任务配对。它既是 Codex 的发送目标，也是该任务唯一接受的 Claude 发送方。",
+  "app.routes.selectCmd.consequenceOpen":
+    "将此会话选为 Codex 的发送目标。开放入站仍会接受同一操作系统用户下的任何在线 Claude 会话。",
   "app.routes.unselectCmd.consequence":
-    "取消选择会停止 Codex → Claude 的投递。Claude → Codex 不受影响。",
+    "取消此配对。Codex 将无法发往 Claude；在重新配对之前，该任务也不接受入站消息。",
+  "app.routes.unselectCmd.consequenceOpen":
+    "清除 Codex → Claude 的目标。开放入站仍对同一操作系统用户下的所有在线 Claude 会话启用。",
   "app.routes.refreshCmd": "重新读取本地发现结果，并重写静态面板文件。",
   "app.routes.monitorOnlyReason":
     "仅监控——此路由因 CODEX_WRITES_DISABLED 而停用写入。",

@@ -1182,6 +1182,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
     !hasExactKeys(value, [
       "schemaVersion",
       "generatedAt",
+      "inboundMode",
       "health",
       "connectors",
       "availablePeers",
@@ -1193,6 +1194,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
     ]) ||
     value.schemaVersion !== 1 ||
     !isIsoTimestamp(value.generatedAt) ||
+    (value.inboundMode !== "paired" && value.inboundMode !== "open") ||
     !isConnectorHealth(value.health) ||
     !Array.isArray(value.connectors) ||
     value.connectors.length > gatewayPublicSnapshotLimits.connectors ||

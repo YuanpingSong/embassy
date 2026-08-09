@@ -3,6 +3,7 @@ import path from "node:path";
 import { BridgeError } from "../errors.js";
 import {
   gatewayPublicSnapshotLimits,
+  type GatewayInboundMode,
   type GatewayStoreLimits,
 } from "./types.js";
 
@@ -12,6 +13,8 @@ export type GatewayConfig = {
   allowedHosts: readonly string[];
   /** Global fail-closed switch for Claude-to-Codex `STEER:` delivery. */
   steeringEnabled: boolean;
+  /** Claude-to-Codex sender consent. Only an explicit CLI opt-out is open. */
+  inboundMode: GatewayInboundMode;
   /** One sender-visible progress notice is due this long after enqueue. */
   stallNoticeMs: number;
   limits: GatewayStoreLimits;
@@ -248,6 +251,7 @@ export function loadGatewayConfig(
       "EMBASSY_STEERING_ENABLED",
       env.EMBASSY_STEERING_ENABLED,
     ),
+    inboundMode: "paired",
     stallNoticeMs,
     limits,
   };

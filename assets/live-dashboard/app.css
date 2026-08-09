@@ -890,6 +890,22 @@ button:not(:disabled):hover { opacity: .92; }
 }
 /* Long next-action / no-pair sentences render once beneath the board. */
 .exchange-notes { margin-top: 14px; }
+.inbound-policy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-xs);
+  color: var(--body-muted);
+  font-size: 12px;
+}
+.inbound-policy[data-inbound-mode="open"] {
+  border-color: var(--coral-deep);
+  background: var(--coral-wash-soft);
+  color: var(--ink);
+}
 
 /* --- 5.9 Attention list --------------------------------------------------- */
 
