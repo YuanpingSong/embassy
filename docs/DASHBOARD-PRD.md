@@ -135,8 +135,10 @@ not copy suggestions.
 
 ## 6. Non-goals
 
-- Approve and interrupt stay native-only (interrupt permanently, per the
-  operator's standing ruling; approvals belong to each agent's own flow).
+- Mid-generation interruption stays out permanently (the Desktop stop
+  button's equivalent — stopping a turn mid-generation is undefined behavior
+  for an agent, per the operator's clarified ruling). Boundary-delivered
+  steering is explicitly IN scope. Approvals stay native to each agent.
 - No remote access, accounts, cloud, or telemetry — ambition stays local.
 
 ## 6b. Ambitious scope (user-directed; each item gates on broker work +
@@ -152,7 +154,9 @@ threat-model review)
   agent identities are inherited, not impersonated). The dashboard becomes a
   participant surface: compose to any consented route, thread into
   conversations, with operator provenance stamped on every message and
-  ledger row.
+  ledger row. Includes **operator steering**: a composed message marked
+  urgent delivers at the receiving turn's next tool-call boundary (the
+  STEER: semantics), never mid-generation.
 - **Full consent management**: select/unselect (already specified in 3.3)
   plus steering kill-switch state and, if engineering finds an honest
   identity path, browser-assisted registration flows.
