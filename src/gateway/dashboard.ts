@@ -861,8 +861,8 @@ const DASHBOARD_STYLES = `
     .pair-list li { display: flex; justify-content: space-between; gap: .8rem; align-items: center; padding-top: .45rem; border-top: 1px solid var(--hairline); overflow-wrap: anywhere; }
     .attention { border-bottom-color: var(--danger); }
     .attention-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--hairline); }
-    .attention-projection-note { margin: 0; padding: 1rem; border-left: 3px solid var(--warning); background: var(--warning-soft); }
-    .attention-item { padding: 1.1rem 0 1.1rem 1rem; border-bottom: 1px solid var(--hairline); border-left: 3px solid currentColor; }
+    .attention-projection-note { margin: 0; padding: 1rem; background: var(--warning-soft); }
+    .attention-item { padding: 1.1rem 0; border-bottom: 1px solid var(--hairline); }
     .attention-item--danger { color: var(--danger); }
     .attention-item--warning { color: var(--warning); }
     .attention-item--info { color: var(--info); }
