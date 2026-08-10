@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-10
+
 ### Added
 
 - The live dashboard flags mail that was written but may not have been seen: a `delivered` Codex-to-Claude write older than two minutes whose recipient session is currently unobserved raises a warning pointing at that session's own window. The oldest unconsumed write owns the notice.
