@@ -188,6 +188,26 @@ async function observeRoute(
   assert.equal(result.selectedThreadLoaded, true);
 }
 
+/**
+ * Poll a real-timer outcome instead of sleeping for a fixed budget. Trigger
+ * intervals stay short so the behaviour under test fires immediately, while the
+ * observation deadline stays generous enough that a loaded runner cannot turn
+ * late timer delivery into a failure.
+ */
+async function waitFor(
+  predicate: () => boolean,
+  description: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${description}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function requestMethods(transport: FakeTransport): string[] {
   return transport.sent.flatMap((message) =>
     typeof message.id === "number" && typeof message.method === "string"
@@ -275,21 +295,28 @@ test("WebSocket heartbeat terminates a socket that stops answering pings", async
     heartbeatTimeoutMs: number,
   ) => WebSocketDuplexTransport;
   const socket = new FakeSocket();
+  // Real socket timers: keep the trigger fast (ping at 50ms, unanswered pong
+  // deadline 10ms later) but observe the outcome by polling, never by sleeping
+  // for a fixed budget a loaded runner can overrun.
   const transport = new TransportConstructor(
     socket as never,
     1_024,
     100,
-    5,
-    3,
+    50,
+    10,
   );
   let errors = 0;
   transport.onError(() => {
     errors += 1;
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(
+    () => socket.terminations > 0,
+    "the unanswered heartbeat to terminate the socket",
+  );
   assert.equal(socket.pings, 1);
   assert.equal(socket.terminations, 1);
+  assert.equal(socket.readyState, 3);
   assert.equal(errors, 1);
 });
 
@@ -2165,9 +2192,18 @@ test("two consecutive watchdog request timeouts fault the connector stale", asyn
     text: "detect the missing app-server responses",
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  // Two watchdog probes must each time out before the fault: the trigger stays
+  // fast (5ms watchdog, 10ms request timeout) while the observation deadline is
+  // generous, so a loaded runner delays the fault instead of hiding it.
+  await waitFor(
+    () => connector.observation().connection === "faulted",
+    "two consecutive watchdog timeouts to fault the connector",
+  );
   assert.equal(connector.observation().connection, "faulted");
   assert.equal(connector.observation().routeStatus, "stale");
+  // thread/resume 1 answered by resumeThread, 2 answered by the pre-turn route
+  // refresh, then 3 and 4 unanswered: exactly two consecutive timeouts.
+  assert.equal(resumeCount, 4);
   assert.deepEqual(replies, [
     {
       messageId: "message-watchdog-timeout",
