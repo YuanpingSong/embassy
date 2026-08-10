@@ -76,6 +76,54 @@ test("Simplified Chinese README preserves the complete executable contract", asy
   assert.equal(chinese.includes("```markdown"), false);
 });
 
+test("public locales document provenance framing and recipient continuation", async () => {
+  const [
+    englishReadme,
+    chineseReadme,
+    englishDelivery,
+    chineseDelivery,
+    englishConfiguration,
+    chineseConfiguration,
+    englishSite,
+    chineseSite,
+  ] = await Promise.all([
+    readPublicFile("README.md"),
+    readPublicFile("README.zh-CN.md"),
+    readPublicFile("docs/DELIVERY.md"),
+    readPublicFile("docs/DELIVERY.zh-CN.md"),
+    readPublicFile("docs/CONFIGURATION.md"),
+    readPublicFile("docs/CONFIGURATION.zh-CN.md"),
+    readPublicFile("site/index.html"),
+    readPublicFile("site/zh-CN/index.html"),
+  ]);
+
+  for (const document of [
+    englishReadme,
+    chineseReadme,
+    englishDelivery,
+    chineseDelivery,
+  ]) {
+    assert.ok(document.includes("cross-session-message"));
+    assert.ok(document.includes("embassy-reply-hint"));
+    assert.ok(document.includes("conv_"));
+    assert.ok(document.includes("reply"));
+  }
+
+  for (const document of [englishConfiguration, chineseConfiguration]) {
+    assert.ok(document.includes("conv_"));
+    assert.ok(document.includes("reply"));
+    assert.ok(document.includes("HOP_LIMIT_EXCEEDED"));
+  }
+
+  for (const page of [englishSite, chineseSite]) {
+    assert.ok(page.includes("conv_"));
+    assert.ok(page.includes("reply"));
+  }
+
+  assert.doesNotMatch(englishReadme, /raw anonymous body/i);
+  assert.doesNotMatch(englishReadme, /recipient currently receives no/i);
+});
+
 test("marketing pages preserve structure, protocol tokens, and reciprocal locale links", async () => {
   const [english, chinese] = await Promise.all([
     readPublicFile("site/index.html"),

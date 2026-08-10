@@ -40,6 +40,11 @@ against other processes running as the same OS user.
   reply capability, not a credential.
 - Aliases are labels. They do not grant authority and are re-resolved against
   the exact private route binding before delivery.
+- Immediately before provider delivery, Embassy places the body inside one
+  broker-owned `cross-session-message` textual frame. Its sender attribution
+  and first-child reply hint come from validated broker metadata, not from the
+  message body. This is a provenance boundary for the receiving model, not a
+  cryptographic signature or authentication against same-UID code.
 - Any process already running as the same OS user may be able to present local
   environment or socket capabilities. Embassy is not a sandbox for untrusted
   same-user code.
@@ -67,10 +72,15 @@ against other processes running as the same OS user.
   path; with an approval-requiring policy, the turn may wait for the user.
 - Claude's native `crossSessionInbound` setting controls messages entering a
   Claude session. Embassy cannot override an accept, hold, or refuse decision.
+- A CLI initiator receives the full conversation token in the accepted control
+  result, and every routed recipient receives it in the broker-owned first
+  `embassy-reply-hint`. The token is a transient participant-scoped locator,
+  not sufficient authority: `reply` rechecks inherited caller identity,
+  conversation membership, current routing policy, and hop count.
 
 Every routed message is untrusted input capable of steering the receiving
-agent. Registration and selection control reachability; they do not make the
-message content trustworthy.
+agent. Registration and routing control reachability; the provenance marker
+does not make the message content or asserted intent trustworthy.
 
 The literal leading `STEER:` prefix is a protocol instruction, not proof of a
 trusted author or safe intent. Any exact same-UID Claude sender already allowed
@@ -114,6 +124,11 @@ broker.
 - Queues, frames, bodies, callbacks, deadlines, hop counts, deduplication,
   rate limits, and transient conversations are bounded. Ambiguous writes are
   never retried automatically.
+- Raw-body classification and accounting happen before framing. In the
+  untrusted body only, Embassy case-insensitively neutralizes boundary-shaped
+  opening or closing copies of `cross-session-message` and
+  `embassy-reply-hint` before composing the real outer frame. Framing or size
+  failure occurs before provider write and is never an ambiguous write.
 - The only network listener Embassy can create belongs to the opt-in
   `embassy dashboard --live` companion, described under "Live companion
   boundary". Everything enumerated above concerns `embassy serve`.
@@ -160,6 +175,15 @@ configuration contents. Report a bug if any normal code path attempts to do so.
 Message bodies, prompts, replies, raw provider frames, tool data, stderr,
 callback addresses, and socket paths remain memory-only. They are discarded on
 restart and never replayed.
+
+The full `conv_` token exposed to a CLI initiator or routed recipient travels
+only inside the accepted CLI result or transient provider payload. It is never
+persisted, journaled, logged, placed in a receipt, projected through public
+events or snapshots, or rendered on either dashboard; public metadata may
+retain only an existing non-reconstructable suffix. Broker-owned marker fields
+introduce no socket paths, Codex thread IDs, Claude session UUIDs, endpoint
+generations, or private route handles. The untrusted body remains opaque text
+and may itself contain sender-provided strings.
 
 The closed private binding store may retain the exact Codex thread ID and Claude
 session UUID required for ownership and endpoint re-observation. Native IDs are

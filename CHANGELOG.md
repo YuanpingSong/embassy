@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Broker-owned provenance envelopes and recipient replies** — every routed body now reaches Codex or Claude inside one deterministic `cross-session-message` textual frame with broker-validated sender attribution. Its first `embassy-reply-hint` carries the full conversation token, the exact recipient alias, and the stdin-based `embassy reply` command, so either participant can continue without reconstructing a token. Codex receives the full token as an outer `conversation` attribute as well; Claude retains its canonical outer shape and receives the token in the hint. Sender aliases over Claude's 64-character display bound use a deterministic hashed label while preserving the exact alias in the hint.
+
+### Security
+
+- The envelope is a structural provenance marker, not XML, a cryptographic signature, or authentication against same-UID code. Broker-reserved opening and closing tag shapes inside the untrusted body are neutralized before delivery; framing happens exactly once at the final provider boundary, and invalid metadata or framed-size overflow fails before any write. The full conversation token remains transient and participant-scoped: reply rechecks caller, conversation membership, route, and hop policy, and the token never enters durable state, journals, logs, receipts, public snapshots, events, or dashboards.
+
 ## [1.1.0] - 2026-08-09
 
 ### Added

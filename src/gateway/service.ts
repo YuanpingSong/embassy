@@ -248,6 +248,24 @@ export type GatewayAdapterDispatchResult =
     };
 
 /**
+ * One transient, service-authorized provider dispatch. Provenance fields are
+ * carried beside the raw body so the provider can frame it exactly once at
+ * its semantic write boundary. They must not be projected or persisted.
+ */
+export type GatewayAdapterDispatchInput = {
+  sourceAlias: string;
+  targetAlias: string;
+  conversationId: string;
+  binding: PrivateRouteBinding;
+  authorization: "selected_route" | "native_reply";
+  messageId: string;
+  text: string;
+  expectsReply: boolean;
+  deadlineAt: string;
+  steer?: true;
+};
+
+/**
  * Narrow provider boundary. Production adapters wrap ClaudePeerAdapter or one
  * exact CodexAppServerConnector; tests use in-memory fakes. Implementations
  * must never retry a dispatch after a write may have occurred.
@@ -375,16 +393,7 @@ export interface GatewayProviderAdapter {
     pendingCallbacks: number;
     clean: boolean;
   }>;
-  dispatch(input: {
-    sourceAlias: string;
-    binding: PrivateRouteBinding;
-    authorization: "selected_route" | "native_reply";
-    messageId: string;
-    text: string;
-    expectsReply: boolean;
-    deadlineAt: string;
-    steer?: true;
-  }): Promise<GatewayAdapterDispatchResult>;
+  dispatch(input: GatewayAdapterDispatchInput): Promise<GatewayAdapterDispatchResult>;
   releaseRoute?(routeHandle: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -6716,6 +6725,8 @@ export class GatewayService {
         tracker,
         this.adapter(binding.provider, binding.hostId).dispatch({
           sourceAlias: item.sourceAlias,
+          targetAlias: item.targetAlias,
+          conversationId: context.conversationId,
           binding,
           authorization: context.authorization,
           messageId: item.messageId,

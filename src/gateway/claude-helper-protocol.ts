@@ -9,7 +9,10 @@ import type {
 import type { PrivateRouteBinding } from "./types.js";
 
 export const CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION = 1 as const;
-export const CLAUDE_NATIVE_HELPER_MAX_IPC_BYTES = 32 * 1024;
+// A valid raw 16 KiB dispatch can expand to nearly 96 KiB when JSON escapes
+// control characters. Keep the private IPC frame bounded while carrying that
+// exact reviewed raw-body maximum without changing the provider wire limit.
+export const CLAUDE_NATIVE_HELPER_MAX_IPC_BYTES = 128 * 1024;
 export const CLAUDE_NATIVE_HELPER_MAX_REQUESTS = 64;
 
 export type ClaudeNativeHelperRegistration = Readonly<{
@@ -49,6 +52,9 @@ export type ClaudeNativeHelperCommand =
       binding: PrivateRouteBinding;
       authorization: "selected_route" | "native_reply";
       messageId: string;
+      sourceAlias: string;
+      targetAlias: string;
+      conversationId: string;
       text: string;
       expectsReply: boolean;
       deadlineAt: string;
@@ -203,6 +209,7 @@ const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const GENERATION = /^[A-Za-z0-9_-]{1,32}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALIAS = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
+const CONVERSATION_ID = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const ROUTE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -325,6 +332,9 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
           "binding",
           "authorization",
           "messageId",
+          "sourceAlias",
+          "targetAlias",
+          "conversationId",
           "text",
           "expectsReply",
           "deadlineAt",
@@ -333,6 +343,13 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         (value.authorization === "selected_route" ||
           value.authorization === "native_reply") &&
         boundedString(value.messageId, 256) &&
+        typeof value.sourceAlias === "string" &&
+        ALIAS.test(value.sourceAlias) &&
+        value.sourceAlias.startsWith("codex-") &&
+        typeof value.targetAlias === "string" &&
+        ALIAS.test(value.targetAlias) &&
+        typeof value.conversationId === "string" &&
+        CONVERSATION_ID.test(value.conversationId) &&
         typeof value.text === "string" &&
         Buffer.byteLength(value.text, "utf8") <= 16 * 1024 &&
         typeof value.expectsReply === "boolean" &&

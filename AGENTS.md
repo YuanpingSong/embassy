@@ -16,6 +16,21 @@ A live provider read, connection, or message requires the user's explicit
 authorization for that exact operation. A previous authorization does not make
 live sends routine. Never enable a real provider message in CI.
 
+## Working style
+
+- Prefer the smallest implementation that solves the approved product problem.
+  Avoid speculative abstractions, process ceremony, and extra gates that do not
+  improve the shipped result.
+- Optimize for concrete progress while preserving the security boundaries and
+  required verification in this file. Stop expanding scope once the requested
+  outcome is complete.
+- Use subagents as leverage for substantial independent work or genuinely hard
+  review, not for minute searches or edits. Give each one a clear, non-overlapping
+  result and coordinate shared files explicitly.
+- Keep progress updates concise and outcome-oriented. Spend effort on working
+  code, focused evidence, and user-visible value rather than elaborate planning
+  artifacts.
+
 ## Product invariants
 
 - Keep the shipped v1 launcher macOS-only, foreground, same-machine, and
