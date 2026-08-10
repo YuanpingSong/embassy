@@ -87,10 +87,10 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <p class="lede">Every claim below means exactly what it says — that's the product.</p>
 <div class="truths">
 <div><b>delivered ≠ read</b><p>Delivered means the receiver's runtime accepted the message. Nothing implies it was read, understood, or acted on.</p></div>
-<div><b>queues never interrupt</b><p>Messages wait for a turn boundary. Interrupting a generation mid-thought is undefined behavior for an agent, so Embassy never does it.</p></div>
+<div><b>queues never interrupt</b><p>Messages wait for a turn boundary. Interrupting a generation mid-thought is undefined behavior for an agent, so Embassy never does it. A message waiting on a busy peer shows as held — progress, never success.</p></div>
 <div><b>restarts drop bodies — on purpose</b><p>The broker keeps receipts, not conversations. Stop it and undelivered bodies are gone by design.</p></div>
 <div><b>unknown versions fail closed</b><p>If a surface can't prove compatibility, nothing moves. No best-effort delivery across a protocol gap.</p></div>
-<div><b>no network listener</b><p><code style="font-size:13px">embassy serve</code> binds nothing. The opt-in live dashboard is the sole loopback listener, one-use token bootstrap.</p></div>
+<div><b>no network listener</b><p><code style="font-size:13px">embassy serve</code> binds nothing. The opt-in live dashboard is the sole loopback listener — 127.0.0.1, ephemeral port, one-use token bootstrap.</p></div>
 <div><b>a routed message is a new input path</b><p>Treat anything that arrives as untrusted input to its receiver — the same discipline you'd apply to any tool result.</p></div>
 </div>
 <div class="states">
@@ -110,7 +110,7 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <div class="wrap">
 <p class="eyebrow">Dashboard</p>
 <h2>Watch the embassy work</h2>
-<p class="lede">The optional live dashboard: broker health, the exchange board, per-delivery lifecycles, consent topology, and honest diagnostics. Metadata only — message bodies never appear here.</p>
+<p class="lede">The optional live dashboard: broker health, the exchange board, per-delivery lifecycles, consent topology, and honest diagnostics. Metadata only — message bodies never appear here. The broker also writes static snapshots — gateway-dashboard.html and its gateway-dashboard.zh-CN.html twin — that need no server at all.</p>
 <figure class="dash" style="margin:0">
 <img src="assets/dashboard.png" alt="The Embassy live dashboard, Overview tab: a status strip of five healthy state chips, an exchange board showing claude-main and codex-embassy with queue depths, a needs-attention alert with a copyable command, and an activity pulse.">
 <figcaption>The live companion's Overview tab — metadata only, message bodies never appear. Design preview render.</figcaption>

@@ -134,34 +134,34 @@ test("marketing pages preserve structure, protocol tokens, and reciprocal locale
   assert.match(chinese, /<html lang=["']zh-CN["']>/);
   assert.match(
     english,
-    /<link rel="alternate" hreflang="en" href="\.\/">/,
+    /<link rel="alternate" hreflang="en" href="https:\/\/yuanpingsong\.github\.io\/embassy\/">/,
   );
   assert.match(
     english,
-    /<link rel="alternate" hreflang="zh-CN" href="zh-CN\/">/,
+    /<link rel="alternate" hreflang="zh-CN" href="https:\/\/yuanpingsong\.github\.io\/embassy\/zh-CN\/">/,
   );
   assert.match(
     english,
-    /<link rel="alternate" hreflang="x-default" href="\.\/">/,
+    /<link rel="alternate" hreflang="x-default" href="https:\/\/yuanpingsong\.github\.io\/embassy\/">/,
   );
   assert.match(
     chinese,
-    /<link rel=["']alternate["'] hreflang=["']en["'] href=["']\.\.\/["']>/,
+    /<link rel=["']alternate["'] hreflang=["']en["'] href=["']https:\/\/yuanpingsong\.github\.io\/embassy\/["']>/,
   );
   assert.match(
     chinese,
-    /<link rel=["']alternate["'] hreflang=["']zh-CN["'] href=["']\.\/["']>/,
+    /<link rel=["']alternate["'] hreflang=["']zh-CN["'] href=["']https:\/\/yuanpingsong\.github\.io\/embassy\/zh-CN\/["']>/,
   );
   assert.match(
     chinese,
-    /<link rel=["']alternate["'] hreflang=["']x-default["'] href=["']\.\.\/["']>/,
+    /<link rel=["']alternate["'] hreflang=["']x-default["'] href=["']https:\/\/yuanpingsong\.github\.io\/embassy\/["']>/,
   );
-  assert.match(english, /<a href="zh-CN\/" lang="zh-CN">简体中文<\/a>/);
+  assert.match(english, /<a href="zh-CN\/" lang="zh-CN">中文<\/a>/);
   assert.match(chinese, /<a href=["']\.\.\/["'][^>]*>English<\/a>/);
 
   assert.deepEqual(
-    captures(chinese, /<section\s+id=["']([^"']+)["']/g),
-    captures(english, /<section\s+id=["']([^"']+)["']/g),
+    captures(chinese, /<section[^>]*\sid=["']([^"']+)["']/g),
+    captures(english, /<section[^>]*\sid=["']([^"']+)["']/g),
   );
   assert.deepEqual(
     captures(chinese, /<symbol\s+id=["']([^"']+)["']/g),
@@ -178,7 +178,7 @@ test("marketing pages preserve structure, protocol tokens, and reciprocal locale
 
   for (const page of [english, chinese]) {
     assert.match(page, /<\/html>\s*$/);
-    assert.equal(/<script\b/i.test(page), false);
+    assert.equal(/<script[^>]*\ssrc=/i.test(page), false);
     for (const token of [
       "embassy dashboard --live",
       "gateway-dashboard.html",

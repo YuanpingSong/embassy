@@ -87,10 +87,10 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <p class="lede">下面每一条声明的含义与字面完全一致 — 这正是产品本身。</p>
 <div class="truths">
 <div><b>delivered ≠ 已读</b><p>delivered 表示接收方运行时已接受消息。不暗示它被阅读、被理解或被执行。</p></div>
-<div><b>队列绝不打断</b><p>消息等待回合边界。在生成中途打断智能体是未定义行为，所以 Embassy 从不这样做。</p></div>
+<div><b>队列绝不打断</b><p>消息等待回合边界。在生成中途打断智能体是未定义行为，所以 Embassy 从不这样做。等待繁忙对端的消息显示为 held — 是进展，绝不是成功。</p></div>
 <div><b>重启即丢弃消息体 — 设计如此</b><p>broker 保留回执，不保留对话。停止它，未投递的消息体按设计消失。</p></div>
 <div><b>未知版本即关闭</b><p>如果一个表面无法证明兼容性，一切停止移动。不存在跨协议缺口的"尽力投递"。</p></div>
-<div><b>无网络监听</b><p><code style="font-size:13px">embassy serve</code> 不绑定任何端口。可选的实时仪表盘是唯一的 loopback 监听者，一次性令牌引导。</p></div>
+<div><b>无网络监听</b><p><code style="font-size:13px">embassy serve</code> 不绑定任何端口。可选的实时仪表盘是唯一的 loopback 监听者 — 127.0.0.1、临时端口、一次性令牌引导。</p></div>
 <div><b>路由消息是一条新的输入路径</b><p>把任何到达的内容当作接收方的不可信输入 — 与对待任何工具结果相同的纪律。</p></div>
 </div>
 <div class="states">
@@ -110,7 +110,7 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <div class="wrap">
 <p class="eyebrow">仪表盘</p>
 <h2>看着大使馆运转</h2>
-<p class="lede">可选的实时仪表盘：broker 健康状态、交换面板、每条投递的生命周期、同意拓扑与诚实的诊断。仅元数据 — 消息正文绝不在此出现。</p>
+<p class="lede">可选的实时仪表盘：broker 健康状态、交换面板、每条投递的生命周期、同意拓扑与诚实的诊断。仅元数据 — 消息正文绝不在此出现。broker 还会写出静态快照 — gateway-dashboard.html 及其 gateway-dashboard.zh-CN.html 孪生页 — 完全不需要服务器。</p>
 <figure class="dash" style="margin:0">
 <img src="../assets/dashboard.png" alt="Embassy 实时仪表盘总览页：五个健康状态芯片组成的状态条、显示 claude-main 与 codex-embassy 及队列深度的交换面板、带可复制命令的关注提醒，以及活动脉搏。">
 <figcaption>实时伴随程序的总览页 — 仅元数据，消息正文绝不出现。设计预览渲染图。</figcaption>
