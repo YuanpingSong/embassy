@@ -5,6 +5,8 @@ import type { DashboardLocale } from "./locale.js";
 export const cliCopyKeys = [
   "help.usage",
   "hint.dashboardLiveRequired",
+  "hint.dashboardPortInUse",
+  "hint.controlInvalidResponse",
   "error.input",
   "error.decision",
   "error.unavailable",

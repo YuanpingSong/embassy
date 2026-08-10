@@ -3,20 +3,19 @@
 Owner: PM. Status: implemented with deterministic boundary tests; final visual
 browser QA remains a release check. Scope: exactly four bounded operator
 actions — **pair**, **unpair**, **refresh discovery**, and **remove a stale
-Codex registration** — available to the live companion's authenticated
-session (PRD §3.3 plus the v1.1 recovery change order). Registration creation, send,
+Codex registration** — available to the live companion (PRD §3.3 plus the
+v1.1 recovery change order). Registration creation, send,
 reply, approve, interrupt, and settings mutation remain out of scope for
 this surface (registration handshake and the settings store are separate
 broker work with their own reviews).
 
 ## 1. What changes
 
-The live companion retains navigation GETs (shell/assets) and three existing
-authenticated POSTs (`session`, `snapshot`, `stream`). Phase B.1 adds one
-authenticated POST route:
+The live companion serves navigation GETs (shell/assets), POST-based snapshot
+and stream reads, and one POST action route:
 
 ```
-POST <instancePath>/action
+POST /action
 Content-Type: application/json
 {"action": "pair", "claudeAlias": "<claude-alias>", "codexAlias": "<codex-alias>"}
 {"action": "unpair", "claudeAlias": "<claude-alias>", "codexAlias": "<codex-alias>"}
@@ -34,56 +33,65 @@ endpoint generation is dead, settles bounded work at the boundary, removes its
 incident pair edges, and journals the operator action. A live generation makes
 the request fail closed.
 
-## 2. Authentication and request policy (unchanged core + action tier)
+## 2. Access and request policy
+
+The companion binds exact `127.0.0.1` on stable port `41961` by default, or the
+integer supplied through the per-invocation `--port <n>` option in the closed
+range 1024 through 65535. Its direct root URL has no authentication ceremony
+and is usable from multiple windows and browsers. There is no fragment
+capability, cookie, browser session, random instance path, or bootstrap file. A
+port collision fails closed and directs the operator to `--port`; it never
+chooses another port automatically.
 
 Every `/action` request must pass ALL of:
 
 1. Exact `Host: 127.0.0.1:<port>` (existing pipeline).
-2. Valid session cookie — HttpOnly, `SameSite=Strict`, path-scoped, minted
-   once from the one-use 256-bit URL-fragment capability.
-3. Exact `Origin: http://127.0.0.1:<port>` (non-navigation POST rule).
-4. `X-Embassy-Request: 1` sentinel header.
-5. Method POST; `Content-Type: application/json`; body ≤ 1 KiB.
-6. Action allowlist: exactly `pair | unpair | refresh_dashboard |
+2. Exact `Origin: http://127.0.0.1:<port>` (every-POST rule).
+3. `X-Embassy-Request: 1` sentinel header.
+4. Method POST; `Content-Type: application/json`; body ≤ 1 KiB.
+5. Action allowlist: exactly `pair | unpair | refresh_dashboard |
    remove_stale_codex_registration`. Unknown action → 400 before any broker
    contact. Recovery accepts exactly `{action, alias}` with a canonical
    `codex-*` alias; native IDs and extra fields are rejected.
-7. Rate limit: a token bucket per session of 6 actions per 60 s, refilling
+6. Rate limit: one companion-wide token bucket of 6 actions per 60 s, refilling
    linearly; excess → 429 with `Retry-After`. The bucket is in-memory in
-   the companion (single session by design).
+   the companion.
 
-`session`, `snapshot`, `stream`, and all navigation routes are untouched.
+The exact Host check applies to every request. `snapshot` and `stream` are
+POSTs and therefore require the same exact Origin and sentinel. Navigation
+GETs may omit Origin. `OPTIONS` is rejected and the server sends no CORS
+headers.
 
 ## 3. Assets and trust boundaries
 
-- **Asset**: the operator's consent topology (which Claude session Codex
-  can reach). Wrong selection = misdirected agent messages (same-user
-  sessions only; bodies still never cross the dashboard).
-- **Boundary 1 — network**: loopback bind, ephemeral port. Remote origins
-  cannot reach the listener at all.
-- **Boundary 2 — browser**: the cookie. Only the tab that claimed the
-  one-use capability holds it. `SameSite=Strict` + exact-Origin + custom
-  sentinel means a hostile page (any origin, including other loopback
-  ports) cannot ride the session: cross-site POSTs omit the cookie, can't
-  set the sentinel without a CORS preflight (which the server never
-  answers permissively — there are no CORS headers at all), and carry the
-  wrong Origin.
-- **Boundary 3 — machine/user**: any same-UID process already owns the
-  private control socket directly; the dashboard adds no authority a local
-  actor lacks. This surface changes the *browser's* authority only, and
-  only for the one authenticated tab.
+- **Asset**: the operator's consent topology (which Claude session Codex can
+  reach) plus bounded retained message bodies. Wrong selection means
+  misdirected agent messages.
+- **Boundary 1 — network**: exact IPv4 loopback bind on a stable configured
+  port. A remote network peer cannot connect to that interface.
+- **Boundary 2 — browser origin**: exact Host on every request plus exact
+  Origin and the custom sentinel on every POST prevent a hostile web origin
+  from reading or mutating through ambient browser authority. Such a page
+  cannot set the sentinel without a CORS preflight, and the server rejects
+  `OPTIONS` and sends no CORS headers.
+- **Boundary 3 — machine/user**: the intended posture is one operator and
+  software already trusted under that operator's macOS UID. The HTTP listener
+  does not authenticate a process or UID; any local software that can reach or
+  spoof loopback can read the view and invoke its bounded operations. The
+  product therefore assumes a trusted single-user machine; request-shape
+  guards are not a sandbox against local code or an OS-level same-UID check.
 
 ## 4. Abuse cases considered
 
 | # | Attack | Disposition |
 |---|---|---|
-| A1 | CSRF from a hostile web page | Defeated three ways independently: SameSite=Strict cookie, exact-Origin check, sentinel header (unsettable cross-origin without a preflight that never succeeds). |
+| A1 | CSRF from a hostile web page | Exact-Origin plus the sentinel header block the POST; the sentinel is unsettable cross-origin without a preflight, and `OPTIONS` is rejected with no CORS headers. |
 | A2 | XSS inside the dashboard escalating to mutations | CSP `script-src 'self'` with zero inline script; the app renders exclusively through React text nodes; no `dangerouslySetInnerHTML` anywhere (test-enforced). Residual risk accepted: an attacker who can modify served assets already owns the user account (Boundary 3). |
-| A3 | Token/capability theft from the URL fragment | Fragment is stripped by `history.replaceState` before the session exchange; one-use server-side; never logged. Unchanged from the read contract; mutations raise the stakes but not the exposure. |
-| A4 | Replay of a captured action request | Requires the HttpOnly cookie, which never leaves the browser. Loopback traffic is not capturable cross-user without root (out of scope: root owns everything). Pair, unpair, and refresh are repeat-safe. Replaying a completed stale-registration removal returns `not_found`; it cannot widen the target beyond the exact alias and is bounded by the rate limit. |
+| A3 | Local process or local user opens the stable URL | Accepted only under the explicit trusted single-user-machine assumption. The companion does not authenticate a process or UID; run it only where all local software is trusted. |
+| A4 | Replay of an action request | Local software can construct requests by design. Pair, unpair, and refresh are repeat-safe; replaying a completed stale-registration removal returns `not_found`. Broker revalidation, the exact action allowlist, alias bounds, and the companion-wide rate limit contain each request. |
 | A5 | Confused deputy via crafted alias | The companion validates shape only (string, length ≤ 128, gateway alias grammar) and forwards; the broker's own verb validation is authoritative — the same validation the CLI path uses. The dashboard can not name a verb outside the allowlist. |
-| A6 | Flooding actions to churn selection state | Rate limit (6/min) + single-session design + journal visibility. Selection churn is also self-evident in the UI. |
-| A7 | Downgrade/differential: tricking the read-only footer | The footer copy MUST name the exact authority the session now carries (pair, unpair, refresh discovery, and request stale-registration removal — nothing else). Claiming read-only while carrying mutations would violate the honesty canon; treated as a release blocker. |
+| A6 | Flooding actions to churn selection state | Companion-wide rate limit (6/min) plus journal visibility. Selection churn is also self-evident in the UI. |
+| A7 | Downgrade/differential: tricking the read-only footer | The footer copy MUST name the exact authority the live surface carries (pair, unpair, refresh discovery, and request stale-registration removal — nothing else). Claiming read-only while carrying mutations would violate the honesty canon; treated as a release blocker. |
 | A8 | Unavailable broker mid-action | The control call fails closed; the UI surfaces the safe code and re-reads the snapshot. No retry loops; the operator decides. |
 | A9 | Crafted recovery request targets a live task | The browser can name only a canonical public alias. The broker independently requires stale route state plus a dead owning endpoint generation; a live generation or any ambiguity fails closed. |
 
@@ -96,8 +104,8 @@ Every `/action` request must pass ALL of:
   keep sole authority over content flow.
 - No settings mutation (deadline, queue depth, inbound mode, steering
   switch) — requires the broker settings store; separate review.
-- No new listener, no new socket, no CORS, no cookie scope change, no
-  capability lifetime change.
+- No non-loopback listener, no authentication ceremony, no CORS, and no
+  fallback port.
 
 ## 6. UX consent contract (PRD §3.3 requirements binding here)
 
@@ -117,8 +125,8 @@ tab shows only the broker's bounded public journal.
 
 ## 8. Test obligations
 
-1. `/action` refuses: missing cookie, wrong Origin, missing sentinel,
-   wrong Host, GET/PUT/DELETE, oversized body, unknown action, non-JSON
+1. `/action` refuses: wrong Origin, missing sentinel, wrong Host,
+   GET/PUT/DELETE/OPTIONS, oversized body, unknown action, non-JSON
    body — each with the correct status and no broker contact (assert via
    a recording control stub).
 2. Rate limit: 7th action within the window → 429 + `Retry-After`; bucket
@@ -128,8 +136,7 @@ tab shows only the broker's bounded public journal.
 4. Recovery boundary: the browser forwards only the public alias; the broker
    refuses ready, merely offline, or live-generation routes and removes only a
    stale registration whose owning generation is dead.
-5. Static analysis: no `dangerouslySetInnerHTML`, no new CORS headers, no
-   change to session/snapshot/stream handlers (snapshot tests on the
-   route table).
+5. Static analysis: no `dangerouslySetInnerHTML` and no CORS headers; route
+   tests cover root/assets plus the snapshot, stream, and action POSTs.
 6. UI: consequence-confirm flow reachable by keyboard; actions disabled
    while disconnected; footer authority copy updated in both locales.

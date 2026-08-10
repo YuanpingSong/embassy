@@ -200,32 +200,39 @@ user can read them.
 
 ### Live companion boundary
 
-`embassy dashboard --live` binds an authenticated HTTP listener on `127.0.0.1` with
-an ephemeral port. It is a separate foreground process from `embassy serve`.
-Access requires a one-use 256-bit URL-fragment token exchanged for a
-path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header
-is checked on every request; navigation GETs permit a missing Origin and carry
-no sentinel, while non-navigation POSTs require the exact Origin plus the
-`X-Embassy-Request` sentinel. There are no CORS headers, generic control or
-provider routes, storage, telemetry, or external assets. The sole mutation
-route accepts only select-Claude, unselect-Claude, and refresh-discovery JSON
+`embassy dashboard --live` binds exact `127.0.0.1` on one stable port: `41961`
+by default, or the integer from the per-invocation `--port <n>` option (1024
+through 65535). It is a separate foreground process from `embassy serve` and
+serves the direct root URL `http://127.0.0.1:<port>/`. Multiple windows and
+browsers may use that URL while the companion runs. If the port is occupied,
+startup fails with `LIVE_DASHBOARD_PORT_IN_USE`, points to `--port`, and never
+falls back to another port.
+
+The live companion has no login, capability token, URL fragment, cookie,
+browser session, random instance path, or bootstrap file. Its intended posture
+is one operator and software already trusted under that operator's macOS UID.
+The HTTP listener deliberately does not authenticate processes or OS users,
+so this is a trusted single-user-machine assumption, not a same-UID
+enforcement mechanism: any local software that can reach or spoof loopback can
+read retained message bodies from the live view and invoke its bounded actions.
+
+The exact Host header is checked on every request. Navigation GETs may omit
+Origin; every POST requires the exact Origin plus
+`X-Embassy-Request: 1`. `OPTIONS` is rejected and no CORS headers are sent.
+Those checks block ambient cross-origin browser requests but do not authenticate
+local software. There are no generic control or provider routes, telemetry, or
+external assets. The sole mutation route accepts only exact pair, unpair,
+refresh-discovery, and broker-guarded stale-Codex-registration-removal JSON
 bodies, capped at 1 KiB and six confirmed actions per minute. The browser
-cannot register tasks, send, reply, approve, interrupt, change settings, or
-invoke arbitrary broker/provider methods. Any process
-running as your OS user — including root and browser extensions with local
-filesystem access — can read what the browser can read.
+cannot create a registration, live-unregister a task, send, reply, approve,
+interrupt, change settings, or invoke arbitrary broker/provider methods.
 
-The bootstrap URL, including its one-use capability, is written to a mode-0600
-`bootstrap.html` inside a fresh mode-0700 run directory under the private state
-root and removed when the companion exits; treat that directory with the same
-care as the rest of the state root.
-
-Reports involving the live companion are in scope if they demonstrate a path by
-which a remote origin, a cross-site request, or a process running as a
-different OS user can read the authenticated stream or bypass the token-to-cookie
-exchange. Same-UID local reads are within the documented containment model and
-are not treated as vulnerabilities unless they bypass an explicit control such
-as accessing a session without presenting the cookie.
+Reports involving the live companion are in scope if they demonstrate a
+non-loopback bind, a bypass of the documented Host/Origin/sentinel action
+guards from a browser origin, or authority beyond the four allowlisted
+actions. Access by local software or another local UID is within the documented
+trusted-machine model and is not itself treated as an authentication bypass,
+because this surface intentionally has no such authentication boundary.
 
 
 ## Validation boundary

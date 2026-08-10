@@ -1,11 +1,10 @@
-// Session exchange + SSE-over-fetch + connection FSM.
+// SSE-over-fetch + connection FSM.
 //
-// Port of the proven vanilla client (live-dashboard-assets.ts client()) with
-// byte-for-byte request/parse semantics: capability exchange from the URL
-// fragment, POST-based SSE (EventSource cannot send POST or the
-// X-Embassy-Request header), CRLF normalization, double-newline block split,
-// 1 MiB buffer cap, and the six-state connection FSM. Spec additions (§1.6,
-// deviation R6): a 35 s heartbeat watchdog while connected, bounded
+// POST-based SSE keeps the exact-Origin + X-Embassy-Request boundary that a
+// plain EventSource cannot express. The client retains CRLF normalization,
+// double-newline block splitting, a 1 MiB buffer cap, and the six-state
+// connection FSM. Spec additions (§1.6, deviation R6): a 35 s heartbeat
+// watchdog while connected, bounded
 // auto-reconnect (5 s delay, max 3 attempts, only from "disconnected"), and
 // streamRevision gap detection that raises a missed-frames notice and fires
 // one recovery snapshot read.
@@ -42,13 +41,9 @@ namespace Embassy {
   type FrameSource = "stream" | "snapshot";
 
   export function createProtocol(options: ProtocolOptions): Protocol {
-    // Same base derivation as the vanilla client: the app is served from
-    // <instancePath>/bootstrap and all API routes are siblings.
-    const base = location.pathname.endsWith("/bootstrap")
-      ? location.pathname.slice(0, -10)
-      : location.pathname.endsWith("/")
-        ? location.pathname.slice(0, -1)
-        : location.pathname;
+    const base = location.pathname.endsWith("/")
+      ? location.pathname.slice(0, -1)
+      : location.pathname;
     const api = (name: string): string => base + "/" + name;
 
     let connectionState: ConnectionState = "connecting";
@@ -62,7 +57,7 @@ namespace Embassy {
     function apiFetch(name: string, fetchOptions: ApiFetchOptions = {}): Promise<Response> {
       const init: RequestInit = {
         method: "POST",
-        credentials: "same-origin",
+        credentials: "omit",
         cache: "no-store",
         headers: { "X-Embassy-Request": "1", ...(fetchOptions.headers ?? {}) },
       };
@@ -159,21 +154,6 @@ namespace Embassy {
             gapRecoveryInFlight = false;
           });
         }
-      }
-    }
-
-    async function exchangeCapability(): Promise<void> {
-      const capability = location.hash.slice(1);
-      if (!capability) {
-        return;
-      }
-      history.replaceState(null, "", location.pathname);
-      const response = await apiFetch("session", {
-        headers: { "Content-Type": "text/plain;charset=UTF-8" },
-        body: capability,
-      });
-      if (!response.ok) {
-        throw new Error("session");
       }
     }
 
@@ -297,15 +277,6 @@ namespace Embassy {
     }
 
     async function start(): Promise<void> {
-      try {
-        await exchangeCapability();
-      } catch {
-        // The vanilla client rendered a fatal notice here; the FSM has no
-        // fatal state, so surface it as "disconnected" (bounded auto-retries
-        // apply, then manual only).
-        setConnectionState("disconnected");
-        return;
-      }
       await connect();
     }
 

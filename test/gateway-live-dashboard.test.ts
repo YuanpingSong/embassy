@@ -1,28 +1,18 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import {
   request as httpRequest,
   type IncomingHttpHeaders,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import os from "node:os";
-import path from "node:path";
 import { test } from "node:test";
 import { Script } from "node:vm";
 
 import { getDashboardCopy } from "../src/gateway/dashboard-copy.js";
 import { renderLiveDashboardAssets } from "../src/gateway/live-dashboard-assets.js";
 import {
-  createLiveDashboardBootstrap,
-  defaultLiveDashboardFileSystem,
-  type LiveDashboardFileSystem,
-} from "../src/gateway/live-dashboard-bootstrap.js";
-import {
   LIVE_DASHBOARD_LIMITS,
   liveDashboardSecurityHeaders,
-  readSingleCookie,
-  sessionCookieHeader,
   validateLiveDashboardRequest,
 } from "../src/gateway/live-dashboard-protocol.js";
 import {
@@ -45,6 +35,9 @@ import { dashboardFixture } from "./dashboard-fixture.js";
 const NOOP_ACTIONS = Object.freeze({
   execute: async () => ({ ok: true, code: "ok" as const }),
 });
+
+const TEST_LIVE_DASHBOARD_PORT = 41_961;
+const TEST_LIVE_DASHBOARD_URL = `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}/`;
 
 type HttpSmokeResponse = Readonly<{
   statusCode: number;
@@ -145,14 +138,14 @@ function validRequest(
 ) {
   return {
     method: overrides.method ?? "POST",
-    target: overrides.target ?? "/instance/snapshot",
+    target: overrides.target ?? "/snapshot",
     rawHeaders:
       overrides.rawHeaders ??
       [
         "Host",
-        "127.0.0.1:48123",
+        `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "Origin",
-        "http://127.0.0.1:48123",
+        `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "X-Embassy-Request",
         "1",
       ],
@@ -161,23 +154,27 @@ function validRequest(
 
 test("live request validation rejects proxy forms, alternate origins, and duplicate sensitive headers", () => {
   const expected = {
-    expectedHost: "127.0.0.1:48123",
-    expectedOrigin: "http://127.0.0.1:48123",
-    kind: "authenticated" as const,
+    expectedHost: `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
+    expectedOrigin: `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
+    kind: "api" as const,
   };
   assert.equal(validateLiveDashboardRequest(validRequest(), expected).ok, true);
   for (const request of [
-    validRequest({ target: "http://127.0.0.1:48123/instance/snapshot" }),
-    validRequest({ target: "//127.0.0.1:48123/instance/snapshot" }),
+    validRequest({
+      target: `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}/snapshot`,
+    }),
+    validRequest({
+      target: `//127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}/snapshot`,
+    }),
     validRequest({ method: "OPTIONS" }),
     validRequest({
       rawHeaders: [
         "Host",
-        "127.0.0.1:48123",
+        `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "Host",
         "attacker.invalid",
         "Origin",
-        "http://127.0.0.1:48123",
+        `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "X-Embassy-Request",
         "1",
       ],
@@ -185,7 +182,7 @@ test("live request validation rejects proxy forms, alternate origins, and duplic
     validRequest({
       rawHeaders: [
         "Host",
-        "127.0.0.1:48123",
+        `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "Origin",
         "http://attacker.invalid",
         "X-Embassy-Request",
@@ -195,9 +192,9 @@ test("live request validation rejects proxy forms, alternate origins, and duplic
     validRequest({
       rawHeaders: [
         "Host",
-        "127.0.0.1:48123",
+        `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "Origin",
-        "http://127.0.0.1:48123",
+        `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "X-Embassy-Request",
         "1",
         "Forwarded",
@@ -207,9 +204,9 @@ test("live request validation rejects proxy forms, alternate origins, and duplic
     validRequest({
       rawHeaders: [
         "Host",
-        "127.0.0.1:48123",
+        `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "Origin",
-        "http://127.0.0.1:48123",
+        `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
         "X-Embassy-Request",
         "1",
         "Transfer-Encoding",
@@ -221,16 +218,16 @@ test("live request validation rejects proxy forms, alternate origins, and duplic
   }
 });
 
-test("navigation permits an absent Origin but authenticated reads require the exact origin and sentinel", () => {
+test("navigation permits an absent Origin but API reads require the exact origin and sentinel", () => {
   const navigation = validateLiveDashboardRequest(
     {
       method: "GET",
-      target: "/instance/bootstrap",
-      rawHeaders: ["Host", "127.0.0.1:48123"],
+      target: "/",
+      rawHeaders: ["Host", `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`],
     },
     {
-      expectedHost: "127.0.0.1:48123",
-      expectedOrigin: "http://127.0.0.1:48123",
+      expectedHost: `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
+      expectedOrigin: `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
       kind: "navigation",
     },
   );
@@ -238,16 +235,16 @@ test("navigation permits an absent Origin but authenticated reads require the ex
   const missingSentinel = validRequest({
     rawHeaders: [
       "Host",
-      "127.0.0.1:48123",
+      `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
       "Origin",
-      "http://127.0.0.1:48123",
+      `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
     ],
   });
   assert.deepEqual(
     validateLiveDashboardRequest(missingSentinel, {
-      expectedHost: "127.0.0.1:48123",
-      expectedOrigin: "http://127.0.0.1:48123",
-      kind: "authenticated",
+      expectedHost: `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
+      expectedOrigin: `http://127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`,
+      kind: "api",
     }),
     {
       ok: false,
@@ -257,70 +254,12 @@ test("navigation permits an absent Origin but authenticated reads require the ex
   );
 });
 
-test("cookie and response helpers keep the session path-scoped and non-persistent", () => {
-  const cookie = sessionCookieHeader(
-    "embassy_live",
-    "a".repeat(43),
-    "/abcdefghijklmnopqrstuv",
-  );
-  assert.equal(
-    cookie,
-    `embassy_live=${"a".repeat(43)}; Path=/abcdefghijklmnopqrstuv/; HttpOnly; SameSite=Strict`,
-  );
-  assert.doesNotMatch(cookie, /Domain|Expires|Max-Age|Secure/u);
-  assert.equal(
-    readSingleCookie(`other=x; embassy_live=${"a".repeat(43)}`, "embassy_live"),
-    "a".repeat(43),
-  );
-  assert.equal(
-    readSingleCookie(
-      `embassy_live=${"a".repeat(43)}; embassy_live=${"b".repeat(43)}`,
-      "embassy_live",
-    ),
-    undefined,
-  );
+test("response helpers remain local, non-cacheable, and credential-free", () => {
   const headers = liveDashboardSecurityHeaders();
   assert.equal(headers["Cache-Control"], "no-store");
   assert.equal("Access-Control-Allow-Origin" in headers, false);
+  assert.equal("Set-Cookie" in headers, false);
   assert.match(headers["Content-Security-Policy"] ?? "", /default-src 'none'/u);
-});
-
-test("private bootstrap uses a fragment capability and exact-owned cleanup", async () => {
-  const temporary = path.join(
-    os.tmpdir(),
-    `embassy-live-test-${process.pid}-${Date.now()}`,
-  );
-  await mkdir(temporary, { mode: 0o700 });
-  await chmod(temporary, 0o700);
-  try {
-    let call = 0;
-    const artifacts = await createLiveDashboardBootstrap({
-      privateStateRoot: temporary,
-      bootstrapTargetWithoutFragment:
-        "http://127.0.0.1:48123/abcdefghijklmnopqrstuv/bootstrap",
-      lang: "zh-CN",
-      random: (size) => new Uint8Array(size).fill(++call),
-    });
-    const document = await readFile(artifacts.bootstrapPath, "utf8");
-    assert.match(document, /^<!doctype html>\n<html lang="zh-CN">/u);
-    assert.match(document, /<title>打开 Embassy 实时面板<\/title>/u);
-    assert.match(document, />打开 Embassy 实时面板<\/a>/u);
-    assert.doesNotMatch(document, /hreflang/u);
-    assert.match(
-      document,
-      /http:\/\/127\.0\.0\.1:48123\/abcdefghijklmnopqrstuv\/bootstrap#[A-Za-z0-9_-]{43}/u,
-    );
-    assert.equal(document.includes("?" + artifacts.capability), false);
-    assert.equal(document.includes(`#${artifacts.capability}`), true);
-    assert.equal((await stat(path.dirname(artifacts.bootstrapPath))).mode & 0o077, 0);
-    assert.equal((await stat(artifacts.bootstrapPath)).mode & 0o177, 0);
-    const runDirectory = path.dirname(artifacts.bootstrapPath);
-    await artifacts.close();
-    await assert.rejects(stat(runDirectory), /ENOENT/u);
-    await artifacts.close();
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
 });
 
 type FakeClock = LiveDashboardClock & {
@@ -611,9 +550,8 @@ type FakeHttpHarness = Readonly<{
     forceCloseCalls: number;
     listenOptions?: Readonly<{
       host: "127.0.0.1";
-      port: 0;
+      port: number;
       exclusive: true;
-      signal?: AbortSignal;
     }>;
   };
 }>;
@@ -623,8 +561,15 @@ function fakeHttpHarness(
     address: string;
     family: string;
     port: number;
-  }> = { address: "127.0.0.1", family: "IPv4", port: 48123 },
-  options: Readonly<{ blockedConnection?: boolean }> = {},
+  }> = {
+    address: "127.0.0.1",
+    family: "IPv4",
+    port: TEST_LIVE_DASHBOARD_PORT,
+  },
+  behavior: Readonly<{
+    blockedConnection?: boolean;
+    listenError?: Error;
+  }> = {},
 ): FakeHttpHarness {
   const callbacks = new Map<string, Set<(...arguments_: never[]) => void>>();
   let requestListener:
@@ -642,20 +587,19 @@ function fakeHttpHarness(
     listenOptions: undefined as
       | Readonly<{
           host: "127.0.0.1";
-          port: 0;
+          port: number;
           exclusive: true;
-          signal?: AbortSignal;
         }>
       | undefined,
     listen(
       options: Readonly<{
         host: "127.0.0.1";
-        port: 0;
+        port: number;
         exclusive: true;
-        signal?: AbortSignal;
       }>,
     ) {
       this.listenOptions = options;
+      if (behavior.listenError !== undefined) throw behavior.listenError;
       queueMicrotask(() => {
         const listeners = [...(callbacks.get("listening") ?? [])];
         callbacks.delete("listening");
@@ -674,7 +618,7 @@ function fakeHttpHarness(
     close(callback: (error?: Error) => void) {
       this.closed = true;
       this.closeCalls += 1;
-      if (options.blockedConnection === true) {
+      if (behavior.blockedConnection === true) {
         pendingClose = callback;
         return;
       }
@@ -703,124 +647,95 @@ function fakeHttpHarness(
   };
 }
 
-test("top-level start is ready only after verified loopback bind and private bootstrap", async () => {
-  const temporary = path.join(
-    os.tmpdir(),
-    `embassy-live-start-${process.pid}-${Date.now()}`,
-  );
-  await mkdir(temporary, { mode: 0o700 });
-  await chmod(temporary, 0o700);
+test("top-level start binds the exact requested loopback port and opens its root URL", async () => {
   const harness = fakeHttpHarness();
-  let randomCall = 0;
   let observerCalls = 0;
-  let openedPath: string | undefined;
-  try {
-    const running = await startLiveDashboard({
-      privateStateRoot: temporary,
-      actions: NOOP_ACTIONS,
-      locale: "zh-CN",
-      observer: {
-        observe: async () => {
-          observerCalls += 1;
-          return { snapshotRevision: 0, snapshot: dashboardFixture() };
-        },
+  let openedUrl: string | undefined;
+  const running = await startLiveDashboard({
+    port: TEST_LIVE_DASHBOARD_PORT,
+    actions: NOOP_ACTIONS,
+    locale: "zh-CN",
+    observer: {
+      observe: async () => {
+        observerCalls += 1;
+        return { snapshotRevision: 0, snapshot: dashboardFixture() };
       },
-      dependencies: {
-        http: harness.factory,
-        random: (size) => new Uint8Array(size).fill(++randomCall),
-        openBootstrap: (bootstrapPath) => {
-          openedPath = bootstrapPath;
-        },
+    },
+    dependencies: {
+      http: harness.factory,
+      openDashboard: (url) => {
+        openedUrl = url;
       },
-    });
-    assert.deepEqual(running.address, { host: "127.0.0.1", port: 48123 });
-    assert.equal(openedPath, running.bootstrapPath);
-    const bootstrapDocument = await readFile(running.bootstrapPath, "utf8");
-    assert.match(bootstrapDocument, /<html lang="zh-CN">/u);
-    assert.match(bootstrapDocument, /打开 Embassy 实时面板/u);
-    assert.equal(observerCalls, 0);
-    assert.deepEqual(harness.server.listenOptions, {
-      host: "127.0.0.1",
-      port: 0,
-      exclusive: true,
-    });
-    assert.equal(harness.server.maxConnections, LIVE_DASHBOARD_LIMITS.maximumConnections);
-    assert.equal(harness.server.headersTimeout, LIVE_DASHBOARD_LIMITS.headersTimeoutMs);
-    assert.equal((await stat(running.bootstrapPath)).mode & 0o177, 0);
-    const runDirectory = path.dirname(running.bootstrapPath);
-    await running.close();
-    assert.equal(harness.server.closed, true);
-    await assert.rejects(stat(runDirectory), /ENOENT/u);
-    await running.close();
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
+    },
+  });
+  assert.deepEqual(running.address, {
+    host: "127.0.0.1",
+    port: TEST_LIVE_DASHBOARD_PORT,
+  });
+  assert.equal(running.url, TEST_LIVE_DASHBOARD_URL);
+  assert.equal(openedUrl, TEST_LIVE_DASHBOARD_URL);
+  assert.equal(observerCalls, 0);
+  assert.deepEqual(harness.server.listenOptions, {
+    host: "127.0.0.1",
+    port: TEST_LIVE_DASHBOARD_PORT,
+    exclusive: true,
+  });
+  assert.equal(
+    harness.server.maxConnections,
+    LIVE_DASHBOARD_LIMITS.maximumConnections,
+  );
+  assert.equal(
+    harness.server.headersTimeout,
+    LIVE_DASHBOARD_LIMITS.headersTimeoutMs,
+  );
+  await running.close();
+  assert.equal(harness.server.closed, true);
+  await running.close();
+  assert.equal(harness.server.closeCalls, 1);
 });
 
-test("shutdown force-closes a blocked connection and exact-cleans bootstrap state", async () => {
-  const temporary = path.join(
-    os.tmpdir(),
-    `embassy-live-blocked-close-${process.pid}-${Date.now()}`,
-  );
-  await mkdir(temporary, { mode: 0o700 });
-  await chmod(temporary, 0o700);
+test("shutdown force-closes a blocked connection exactly once", async () => {
   const harness = fakeHttpHarness(
-    { address: "127.0.0.1", family: "IPv4", port: 48123 },
+    {
+      address: "127.0.0.1",
+      family: "IPv4",
+      port: TEST_LIVE_DASHBOARD_PORT,
+    },
     { blockedConnection: true },
   );
-  let running: Awaited<ReturnType<typeof startLiveDashboard>> | undefined;
-  try {
-    running = await startLiveDashboard({
-      privateStateRoot: temporary,
-      actions: NOOP_ACTIONS,
-      observer: {
-        observe: async () => ({
-          snapshotRevision: 0,
-          snapshot: dashboardFixture(),
-        }),
-      },
-      dependencies: {
-        http: harness.factory,
-        random: (size) => new Uint8Array(size).fill(1),
-        openBootstrap: () => undefined,
-      },
-    });
-    const runDirectory = path.dirname(running.bootstrapPath);
-    const closing = Promise.all([running.close(), running.close()]);
-    let hangTimer: NodeJS.Timeout | undefined;
-    const outcome = await Promise.race([
-      closing.then(() => "closed" as const),
-      new Promise<"hung">((resolve) => {
-        hangTimer = setTimeout(() => resolve("hung"), 250);
+  const running = await startLiveDashboard({
+    port: TEST_LIVE_DASHBOARD_PORT,
+    actions: NOOP_ACTIONS,
+    observer: {
+      observe: async () => ({
+        snapshotRevision: 0,
+        snapshot: dashboardFixture(),
       }),
-    ]);
-    if (hangTimer !== undefined) clearTimeout(hangTimer);
-    assert.equal(outcome, "closed");
-    assert.equal(harness.server.closeCalls, 1);
-    assert.equal(harness.server.forceCloseCalls, 1);
-    await assert.rejects(stat(runDirectory), /ENOENT/u);
-    assert.deepEqual(await readdir(temporary), []);
-    running = undefined;
-  } finally {
-    await running?.close().catch(() => undefined);
-    await rm(temporary, { recursive: true, force: true });
-  }
+    },
+    dependencies: { http: harness.factory },
+  });
+  const closing = Promise.all([running.close(), running.close()]);
+  let hangTimer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    closing.then(() => "closed" as const),
+    new Promise<"hung">((resolve) => {
+      hangTimer = setTimeout(() => resolve("hung"), 250);
+    }),
+  ]);
+  if (hangTimer !== undefined) clearTimeout(hangTimer);
+  assert.equal(outcome, "closed");
+  assert.equal(harness.server.closeCalls, 1);
+  assert.equal(harness.server.forceCloseCalls, 1);
 });
 
-test("real loopback composition exchanges a fragment session, streams, and exact-cleans", async () => {
-  const temporary = path.join(
-    os.tmpdir(),
-    `embassy-live-http-smoke-${process.pid}-${Date.now()}`,
-  );
-  await mkdir(temporary, { mode: 0o700 });
-  await chmod(temporary, 0o700);
-  let randomCall = 0;
+test("real loopback composition serves multiple windows directly and closes cleanly", async () => {
   let observerCalls = 0;
-  let openedPath: string | undefined;
+  let openedUrl: string | undefined;
   let running: Awaited<ReturnType<typeof startLiveDashboard>> | undefined;
   try {
     running = await startLiveDashboard({
-      privateStateRoot: temporary,
+      // A real-listener test must never claim the production stable port.
+      port: 0,
       actions: NOOP_ACTIONS,
       observer: {
         observe: async () => {
@@ -829,172 +744,121 @@ test("real loopback composition exchanges a fragment session, streams, and exact
         },
       },
       dependencies: {
-        random: (size) => new Uint8Array(size).fill(++randomCall),
-        openBootstrap: (bootstrapPath) => {
-          openedPath = bootstrapPath;
+        openDashboard: (url) => {
+          openedUrl = url;
         },
       },
     });
-    assert.equal(openedPath, running.bootstrapPath);
-    const runDirectory = path.dirname(running.bootstrapPath);
-    const bootstrapDocument = await readFile(running.bootstrapPath, "utf8");
-    const targetMatch =
-      /http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[A-Za-z0-9_-]{22}\/bootstrap#[A-Za-z0-9_-]{43}/u.exec(
-        bootstrapDocument,
-      );
-    assert.ok(targetMatch);
-    const bootstrapUrl = new URL(targetMatch[0]);
-    const capability = bootstrapUrl.hash.slice(1);
-    assert.equal(capability.length, 43);
-    bootstrapUrl.hash = "";
-    assert.deepEqual(
-      { host: bootstrapUrl.hostname, port: Number(bootstrapUrl.port) },
-      running.address,
+    assert.equal(running.address.host, "127.0.0.1");
+    assert.equal(running.address.port > 0, true);
+    assert.equal(
+      running.url,
+      `http://127.0.0.1:${running.address.port}/`,
+    );
+    assert.equal(openedUrl, running.url);
+    const dashboardUrl = new URL(running.url);
+    const [firstWindow, secondWindow] = await Promise.all([
+      requestHttpSmoke(dashboardUrl),
+      requestHttpSmoke(dashboardUrl),
+    ]);
+    for (const shell of [firstWindow, secondWindow]) {
+      assert.equal(shell.statusCode, 200);
+      assert.match(shell.body, /id="root"/u);
+      assert.equal(shell.headers["cache-control"], "no-store");
+      assert.equal(shell.headers["set-cookie"], undefined);
+    }
+
+    const snapshotUrl = new URL("snapshot", dashboardUrl);
+    const rejectedSnapshot = await requestHttpSmoke(snapshotUrl, {
+      method: "POST",
+      headers: { "Content-Length": "0" },
+    });
+    assert.equal(rejectedSnapshot.statusCode, 403);
+
+    const apiHeaders = {
+      Origin: dashboardUrl.origin,
+      "X-Embassy-Request": "1",
+      "Content-Length": "0",
+    };
+    const snapshots = await Promise.all([
+      requestHttpSmoke(snapshotUrl, { method: "POST", headers: apiHeaders }),
+      requestHttpSmoke(snapshotUrl, { method: "POST", headers: apiHeaders }),
+    ]);
+    assert.equal(snapshots.every(({ statusCode }) => statusCode === 200), true);
+    assert.equal(
+      snapshots.every(({ headers }) => headers["set-cookie"] === undefined),
+      true,
     );
 
-    const shell = await requestHttpSmoke(bootstrapUrl);
-    assert.equal(shell.statusCode, 200);
-    assert.match(shell.body, /id="root"/u);
-    assert.equal(shell.body.includes(capability), false);
-    assert.equal(shell.headers["cache-control"], "no-store");
-
-    const sessionUrl = new URL("session", bootstrapUrl);
-    const sessionHeaders = {
-      Origin: bootstrapUrl.origin,
-      "X-Embassy-Request": "1",
-      "Content-Type": "text/plain",
-      "Content-Length": String(Buffer.byteLength(capability, "utf8")),
-    };
-    const session = await requestHttpSmoke(sessionUrl, {
-      method: "POST",
-      headers: sessionHeaders,
-      body: capability,
-    });
-    assert.equal(session.statusCode, 204);
-    const setCookie = session.headers["set-cookie"]?.[0];
-    assert.ok(setCookie);
-    assert.match(setCookie, /; HttpOnly; SameSite=Strict$/u);
-    assert.doesNotMatch(setCookie, /Domain|Expires|Max-Age|Secure/u);
-    const cookie = setCookie.split(";", 1)[0]!;
-
-    const replay = await requestHttpSmoke(sessionUrl, {
-      method: "POST",
-      headers: sessionHeaders,
-      body: capability,
-    });
-    assert.equal(replay.statusCode, 403);
-
-    const streamUrl = new URL("stream", bootstrapUrl);
-    const stream = await openHttpSmokeStream(streamUrl, {
-      Origin: bootstrapUrl.origin,
-      "X-Embassy-Request": "1",
-      Cookie: cookie,
-      "Content-Length": "0",
-    });
+    const streamUrl = new URL("stream", dashboardUrl);
+    const stream = await openHttpSmokeStream(streamUrl, apiHeaders);
     assert.equal(stream.response.statusCode, 200);
     assert.match(stream.firstFrame, /^id: 1\nevent: snapshot\ndata: /u);
     assert.match(stream.firstFrame, /"snapshotRevision":1/u);
-    assert.equal(observerCalls, 1);
+    assert.equal(observerCalls, 3);
 
     await running.close();
     await stream.ended;
     running = undefined;
-    await assert.rejects(stat(runDirectory), /ENOENT/u);
-    assert.deepEqual(await readdir(temporary), []);
+    await assert.rejects(requestHttpSmoke(dashboardUrl));
   } finally {
     await running?.close().catch(() => undefined);
-    await rm(temporary, { recursive: true, force: true });
   }
 });
 
-test("a pre-aborted start creates no server, randomness, file, or observation side effect", async () => {
-  const temporary = path.join(
-    os.tmpdir(),
-    `embassy-live-preabort-${process.pid}-${Date.now()}`,
-  );
-  await mkdir(temporary, { mode: 0o700 });
-  await chmod(temporary, 0o700);
+test("a pre-aborted start creates no server, browser, or observation side effect", async () => {
   const harness = fakeHttpHarness();
   const controller = new AbortController();
   controller.abort();
   let serverCreations = 0;
-  let randomCalls = 0;
+  let openCalls = 0;
   let observerCalls = 0;
-  try {
-    await assert.rejects(
-      startLiveDashboard({
-        privateStateRoot: temporary,
-        actions: NOOP_ACTIONS,
-        signal: controller.signal,
-        observer: {
-          observe: async () => {
-            observerCalls += 1;
-            return { snapshotRevision: 0, snapshot: dashboardFixture() };
+  await assert.rejects(
+    startLiveDashboard({
+      port: TEST_LIVE_DASHBOARD_PORT,
+      actions: NOOP_ACTIONS,
+      signal: controller.signal,
+      observer: {
+        observe: async () => {
+          observerCalls += 1;
+          return { snapshotRevision: 0, snapshot: dashboardFixture() };
+        },
+      },
+      dependencies: {
+        http: {
+          createServer: (listener) => {
+            serverCreations += 1;
+            return harness.factory.createServer(listener);
           },
         },
-        dependencies: {
-          http: {
-            createServer: (listener) => {
-              serverCreations += 1;
-              return harness.factory.createServer(listener);
-            },
-          },
-          random: (size) => {
-            randomCalls += 1;
-            return new Uint8Array(size);
-          },
+        openDashboard: () => {
+          openCalls += 1;
         },
-      }),
-      isLiveDashboardStartupCancelled,
-    );
-    assert.equal(serverCreations, 0);
-    assert.equal(randomCalls, 0);
-    assert.equal(observerCalls, 0);
-    assert.deepEqual(await readdir(temporary), []);
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
+      },
+    }),
+    isLiveDashboardStartupCancelled,
+  );
+  assert.equal(serverCreations, 0);
+  assert.equal(openCalls, 0);
+  assert.equal(observerCalls, 0);
 });
 
-test("abort during a hung bootstrap closes the listener and exact-cleans late completion", async () => {
-  const temporary = path.join(
-    os.tmpdir(),
-    `embassy-live-hung-bootstrap-${process.pid}-${Date.now()}`,
-  );
-  await mkdir(temporary, { mode: 0o700 });
-  await chmod(temporary, 0o700);
+test("abort during a hung browser open closes the listener and cancels startup", async () => {
   const harness = fakeHttpHarness();
   const controller = new AbortController();
-  let randomCall = 0;
   let openerCalls = 0;
   let observerCalls = 0;
   let releaseOpen = (): void => {};
   let markOpenStarted = (): void => {};
-  let markLateCleanup = (): void => {};
   const openGate = new Promise<void>((resolve) => {
     releaseOpen = resolve;
   });
   const openStarted = new Promise<void>((resolve) => {
     markOpenStarted = resolve;
   });
-  const lateCleanup = new Promise<void>((resolve) => {
-    markLateCleanup = resolve;
-  });
-  const fileSystem: LiveDashboardFileSystem = {
-    ...defaultLiveDashboardFileSystem,
-    open: async (pathname, flags, mode) => {
-      markOpenStarted();
-      await openGate;
-      return await defaultLiveDashboardFileSystem.open(pathname, flags, mode);
-    },
-    rmdir: async (pathname) => {
-      await defaultLiveDashboardFileSystem.rmdir(pathname);
-      markLateCleanup();
-    },
-  };
   try {
     const starting = startLiveDashboard({
-      privateStateRoot: temporary,
+      port: TEST_LIVE_DASHBOARD_PORT,
       actions: NOOP_ACTIONS,
       locale: "zh-CN",
       signal: controller.signal,
@@ -1005,17 +869,18 @@ test("abort during a hung bootstrap closes the listener and exact-cleans late co
         },
       },
       dependencies: {
-        fileSystem,
         http: harness.factory,
-        random: (size) => new Uint8Array(size).fill(++randomCall),
-        openBootstrap: () => {
+        openDashboard: async (url) => {
           openerCalls += 1;
+          assert.equal(url, TEST_LIVE_DASHBOARD_URL);
+          markOpenStarted();
+          await openGate;
         },
       },
     });
     await openStarted;
     assert.equal(harness.server.closed, false);
-    const startupResponse = {
+    const rootResponse = {
       headersSent: false,
       writableEnded: false,
       statusCode: 0,
@@ -1036,15 +901,16 @@ test("abort during a hung bootstrap closes the listener and exact-cleans late co
       },
     };
     harness.dispatch(
-      {} as IncomingMessage,
-      startupResponse as unknown as ServerResponse,
+      {
+        method: "GET",
+        url: "/",
+        rawHeaders: ["Host", `127.0.0.1:${TEST_LIVE_DASHBOARD_PORT}`],
+      } as IncomingMessage,
+      rootResponse as unknown as ServerResponse,
     );
-    assert.equal(startupResponse.statusCode, 503);
-    assert.equal(startupResponse.body, "面板正在启动。\n");
-    assert.equal(
-      startupResponse.headers["Content-Length"],
-      String(Buffer.byteLength(startupResponse.body, "utf8")),
-    );
+    assert.equal(rootResponse.statusCode, 200);
+    assert.match(rootResponse.body, /<html lang="zh-CN"/u);
+    assert.match(rootResponse.body, /id="root"/u);
     controller.abort();
     const outcome = await Promise.race([
       starting.then(
@@ -1058,27 +924,67 @@ test("abort during a hung bootstrap closes the listener and exact-cleans late co
     ]);
     assert.equal(outcome, "cancelled");
     assert.equal(harness.server.closed, true);
-    assert.equal(openerCalls, 0);
+    assert.equal(openerCalls, 1);
     assert.equal(observerCalls, 0);
-
-    releaseOpen();
-    await lateCleanup;
-    assert.deepEqual(await readdir(temporary), []);
   } finally {
     releaseOpen();
-    await rm(temporary, { recursive: true, force: true });
   }
 });
 
-test("post-bind verification rejects every non-IPv4-loopback address", async () => {
+test("invalid requested ports are rejected before listen", async () => {
+  for (const port of [-1, 65_536, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const harness = fakeHttpHarness();
+    await assert.rejects(
+      bindLiveDashboardServer(harness.server, port),
+      /LIVE_DASHBOARD_PORT_INVALID/u,
+    );
+    assert.equal(harness.server.listenOptions, undefined);
+    assert.equal(harness.server.closed, false);
+  }
+});
+
+test("an occupied requested port is surfaced as an actionable bind rejection", async () => {
+  const addressInUse = Object.assign(new Error("listen EADDRINUSE"), {
+    code: "EADDRINUSE",
+  });
+  const harness = fakeHttpHarness(
+    undefined,
+    { listenError: addressInUse },
+  );
+  await assert.rejects(
+    bindLiveDashboardServer(harness.server, TEST_LIVE_DASHBOARD_PORT),
+    (error: unknown) =>
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "LIVE_DASHBOARD_PORT_IN_USE" &&
+      error instanceof Error &&
+      new RegExp(
+        `port ${TEST_LIVE_DASHBOARD_PORT}.*--port <n>`,
+        "u",
+      ).test(error.message),
+  );
+  assert.equal(harness.server.closed, false);
+});
+
+test("post-bind verification rejects non-loopback and wrong-port bindings", async () => {
   for (const address of [
-    { address: "::1", family: "IPv6", port: 48123 },
-    { address: "0.0.0.0", family: "IPv4", port: 48123 },
+    { address: "::1", family: "IPv6", port: TEST_LIVE_DASHBOARD_PORT },
+    {
+      address: "0.0.0.0",
+      family: "IPv4",
+      port: TEST_LIVE_DASHBOARD_PORT,
+    },
     { address: "127.0.0.1", family: "IPv4", port: 0 },
+    {
+      address: "127.0.0.1",
+      family: "IPv4",
+      port: TEST_LIVE_DASHBOARD_PORT + 1,
+    },
   ]) {
     const harness = fakeHttpHarness(address);
     await assert.rejects(
-      bindLiveDashboardServer(harness.server),
+      bindLiveDashboardServer(harness.server, TEST_LIVE_DASHBOARD_PORT),
       /LIVE_DASHBOARD_BIND_NOT_IPV4_LOOPBACK/u,
     );
     assert.equal(harness.server.closed, true);

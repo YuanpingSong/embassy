@@ -106,11 +106,11 @@ Embassy 会在实际写入提供方之前，为双向路由消息添加一个由
 
 ### 实时查看
 
-`embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断）。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
+`embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断），默认地址为 `http://127.0.0.1:41961/`。如需为本次启动选择另一个稳定端口，请运行 `embassy dashboard --live --port <n>`，其中整数范围为 1024 到 65535。当前台组件运行时，多个窗口和浏览器可以使用同一个 URL；若端口已被占用，启动会明确失败并提示使用 `--port`，不会回退到其他端口。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
 
 实时仪表盘也可以在明确确认后移除孤立的 Codex 注册，但仅限代理已经证明该注册陈旧且其所属端点代际已失效的情况。当前、仅离线或代际状态不明确的注册绝不能通过此恢复操作移除。
 
-代理还会以 mode 0600 发布静态快照 `gateway-dashboard.html` 与 `gateway-dashboard.zh-CN.html`。实时仪表盘的变更操作必须携带同源 `X-Embassy-Request` 哨兵头。
+代理还会以 mode 0600 发布静态快照 `gateway-dashboard.html` 与 `gateway-dashboard.zh-CN.html`。实时仪表盘没有登录、令牌、Cookie 或逐浏览器会话：它假定这是一台可信的单用户机器；能够访问或伪造 loopback 的本地软件可以读取仪表盘并调用其有限操作。服务器仍会对每个请求要求精确的 Host 头，并对每个 POST 要求精确的 Origin 与 `X-Embassy-Request`；它不发送 CORS 头，也不接受 `OPTIONS`。
 
 ## 工作原理
 
@@ -164,7 +164,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `serve` | 操作员 | 启动前台代理和仪表盘 |
 | `health` / `status` | 操作员 | 检查存活状态并查看脱敏快照 |
 | `refresh-dashboard` | 操作员 | 重新生成两个静态仪表盘文件 |
-| `dashboard --live [--lang en\|zh-CN]` | 操作员 | 启动带有限路由同意操作的实时仪表盘组件；需要 `embassy serve` 正在运行 |
+| `dashboard --live [--lang en\|zh-CN] [--port <n>]` | 操作员 | 启动带有限路由同意操作的实时仪表盘组件；需要 `embassy serve` 正在运行 |
 | `delivery-status` | 任一提供方 | 使用 `embassy delivery-status --token dlv_<token>` 读取单条投递跟踪器 |
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
 | `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；例如，`embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
@@ -176,7 +176,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 
 ## 一分钟了解安全性
 
-- **仅限本地套接字。** `embassy serve` 仅监听私有 Unix 域套接字，不发起任何提供商 API 调用。可选启用的 `embassy dashboard --live` 组件是一个独立进程，也是 Embassy 能创建的唯一监听器，绑定到 `127.0.0.1` 上的临时端口。
+- **本地代理，稳定的 loopback 仪表盘。** `embassy serve` 仅监听私有 Unix 域套接字，不发起任何提供商 API 调用。可选启用的 `embassy dashboard --live` 组件是一个独立进程，也是 Embassy 能创建的唯一监听器；它精确绑定 `127.0.0.1`，默认使用稳定端口 `41961`（也可为本次启动传入 `--port <n>`）。它是在可信单用户机器上有意不设身份认证的本地 HTTP；Host、Origin 与哨兵检查约束浏览器来源的请求，但不认证本地进程或 OS 用户。
 - **同 UID 隔离，而非身份认证。** 调用者身份继承自本地进程环境。路由所有权和生成号检查能减少误操作，但不是对已以你的 OS 用户身份运行的代码的防御。
 - **来源标记是提示，不是签名。** Embassy 在提供方写入边界生成跨会话来源封装，让接收模型能够区分代理路由消息及其已验证发送方别名；这不是密码学证明，也不会把不可信正文变成可信指令。
 - **原生权限保持原生。** Embassy 不发送任何 Codex 审批或沙盒覆盖，也不应答任何审批请求。`crossSessionInbound` 仍是 Claude 自身的控制机制；Embassy 无法覆盖它。

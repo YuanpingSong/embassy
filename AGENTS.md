@@ -30,19 +30,23 @@ live sends routine. Never enable a real provider message in CI.
 - Keep progress updates concise and outcome-oriented. Spend effort on working
   code, focused evidence, and user-visible value rather than elaborate planning
   artifacts.
-- Close every PM-initiated task delivered through Embassy with one reply on
-  that task's originating conversation when it is ready, blocked, or complete.
-  A durable dead-drop update complements that reply; it does not replace it.
-  If the reply fails, do not guess or retry—record the exact failure in the
-  dead-drop instead.
+- Use Embassy as the exclusive PM coordination channel. Close every
+  PM-initiated task with one reply on its originating conversation when it is
+  ready, blocked, or complete. Do not add new coordination entries to legacy
+  dead-drop files or create another out-of-band channel; treat existing files
+  as read-only archives. If Embassy cannot accept a reply, report the exact
+  failure to the user in the current task and stop unless the sender explicitly
+  authorizes a bounded retry.
 
 ## Product invariants
 
 - Keep the shipped v1 launcher macOS-only, foreground, same-machine, and
   local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP.
   The only network listener is the separately invoked, foreground
-  `embassy dashboard --live` companion: exact IPv4 loopback, OS-assigned
-  ephemeral port, authenticated, read-only, and closed with its command.
+  `embassy dashboard --live` companion: exact IPv4 loopback, one configured
+  stable port, and closed with its command. Its plain loopback URL assumes a
+  trusted single-user machine; preserve exact Host checks on every request and
+  exact Origin plus the sentinel header on every POST.
 - Keep the control plane on one private Unix-domain socket inside the
   controller-owned mode-0700 state directory. Controller files are mode 0600.
 - A Codex task self-registers using its inherited `CODEX_THREAD_ID` and a
@@ -91,8 +95,8 @@ live sends routine. Never enable a real provider message in CI.
   with no JavaScript, external assets, storage, telemetry, mutation endpoint,
   or network listener.
 - The opt-in live companion may render that same bounded public model with
-  local JavaScript and the reviewed select-Claude, unselect-Claude, and
-  refresh-discovery actions. It must have no provider or generic control
+  local JavaScript and the reviewed pair, unpair, stale-registration removal,
+  and refresh-discovery actions. It must have no provider or generic control
   method, additional mutation, external asset, storage, service worker,
   telemetry, or non-loopback listener.
 - Never read, print, copy, accept, persist, or forward credentials, OAuth

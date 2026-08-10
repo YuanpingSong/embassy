@@ -1,7 +1,7 @@
 # Configuration and compatibility
 
-Embassy is configured through environment variables read at `embassy serve`
-start. This document collects every variable, the compatibility contract with
+Embassy is configured through environment variables read when each command
+starts. This document collects every variable, the compatibility contract with
 Claude Code and the Codex App Server, managed-binary resolution rules, and
 the addressing model. There is no configuration file; all values are env vars
 or CLI flags.
@@ -17,6 +17,14 @@ or CLI flags.
 | `EMBASSY_COMPAT_POLICY` | `observed` | `observed` admits an unknown same-major provider build only after its bounded schema probe passes; `strict` admits only the release's certified version inventory |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global `STEER:` kill switch; set exactly `0` to treat every body as an ordinary queued message |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
+
+The live dashboard is available directly at `http://127.0.0.1:41961/` while
+its foreground companion runs. Its port is a per-invocation CLI choice, not an
+environment setting: pass `--port <n>` with an integer from 1024 through 65535
+to `embassy dashboard --live` when another stable port is needed. Several
+windows or browsers may use that URL. A port collision fails with
+`LIVE_DASHBOARD_PORT_IN_USE`, points to `--port`, and never falls back to an
+ephemeral or alternate port.
 
 ## Advanced bounds
 

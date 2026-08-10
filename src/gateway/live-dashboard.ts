@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
@@ -6,11 +5,6 @@ import {
   type DashboardLocale,
 } from "./dashboard-copy.js";
 import { renderLiveDashboardAssets } from "./live-dashboard-assets.js";
-import {
-  createLiveDashboardBootstrap,
-  type LiveDashboardFileSystem,
-  type LiveDashboardRandomBytes,
-} from "./live-dashboard-bootstrap.js";
 import {
   createLiveDashboardRequestHandler,
   type LiveDashboardActionExecutor,
@@ -29,15 +23,13 @@ import {
 } from "./live-dashboard-stream.js";
 
 export type LiveDashboardDependencies = Readonly<{
-  random?: LiveDashboardRandomBytes;
-  fileSystem?: LiveDashboardFileSystem;
   http?: LiveDashboardHttpFactory;
   clock?: LiveDashboardClock;
-  openBootstrap?: (bootstrapPath: string) => Promise<void> | void;
+  openDashboard?: (url: string) => Promise<void> | void;
 }>;
 
 export type StartLiveDashboardOptions = Readonly<{
-  privateStateRoot: string;
+  port: number;
   observer: LiveDashboardObserver;
   actions: LiveDashboardActionExecutor;
   locale?: DashboardLocale;
@@ -47,7 +39,7 @@ export type StartLiveDashboardOptions = Readonly<{
 
 export type RunningLiveDashboard = Readonly<{
   address: LiveDashboardServerAddress;
-  bootstrapPath: string;
+  url: string;
   close(): Promise<void>;
 }>;
 
@@ -120,22 +112,6 @@ async function awaitStartupStep<T>(
   });
 }
 
-function randomBase64Url(
-  size: number,
-  random: LiveDashboardRandomBytes,
-): string {
-  const value = Buffer.from(random(size)).toString("base64url");
-  const expectedLength = size === 16 ? 22 : size === 32 ? 43 : undefined;
-  if (
-    expectedLength === undefined ||
-    value.length !== expectedLength ||
-    !/^[A-Za-z0-9_-]+$/u.test(value)
-  ) {
-    throw new Error("LIVE_DASHBOARD_RANDOM_SOURCE_INVALID");
-  }
-  return value;
-}
-
 function notReadyHandler(
   lang: DashboardLocale,
 ): (request: IncomingMessage, response: ServerResponse) => void {
@@ -159,11 +135,8 @@ export async function startLiveDashboard(
 ): Promise<RunningLiveDashboard> {
   throwIfStartupCancelled(options.signal);
   const dependencies = options.dependencies ?? {};
-  const random = dependencies.random ?? randomBytes;
   const http = dependencies.http ?? defaultLiveDashboardHttpFactory;
   const locale = options.locale ?? "en";
-  const instancePath = `/${randomBase64Url(16, random)}`;
-  const sessionSecret = randomBase64Url(32, random);
   const assets = renderLiveDashboardAssets(locale);
   const hub = createLiveDashboardStreamHub({
     observer: options.observer,
@@ -177,36 +150,16 @@ export async function startLiveDashboard(
   let bound:
     | Awaited<ReturnType<typeof bindLiveDashboardServer>>
     | undefined;
-  let bootstrap:
-    | Awaited<ReturnType<typeof createLiveDashboardBootstrap>>
-    | undefined;
+  let url: string | undefined;
   try {
-    bound = await bindLiveDashboardServer(server, options.signal);
+    bound = await bindLiveDashboardServer(server, options.port, options.signal);
     throwIfStartupCancelled(options.signal);
     const expectedHost = `${bound.address.host}:${bound.address.port}`;
     const expectedOrigin = `http://${expectedHost}`;
-    const bootstrapOperation = createLiveDashboardBootstrap({
-      privateStateRoot: options.privateStateRoot,
-      bootstrapTargetWithoutFragment: `${expectedOrigin}${instancePath}/bootstrap`,
-      lang: locale,
-      random,
-      ...(dependencies.fileSystem === undefined
-        ? {}
-        : { fileSystem: dependencies.fileSystem }),
-    });
-    bootstrap = await awaitStartupStep(
-      bootstrapOperation,
-      options.signal,
-      async (lateBootstrap) => await lateBootstrap.close(),
-    );
-    throwIfStartupCancelled(options.signal);
+    url = `${expectedOrigin}/`;
     activeHandler = createLiveDashboardRequestHandler({
-      instancePath,
       expectedHost,
       expectedOrigin,
-      capability: bootstrap.capability,
-      sessionSecret,
-      cookieName: "embassy_live",
       lang: locale,
       assets,
       hub,
@@ -215,9 +168,9 @@ export async function startLiveDashboard(
         ? {}
         : { now: dependencies.clock.now }),
     });
-    if (dependencies.openBootstrap !== undefined) {
+    if (dependencies.openDashboard !== undefined) {
       await awaitStartupStep(
-        Promise.resolve(dependencies.openBootstrap(bootstrap.bootstrapPath)),
+        Promise.resolve(dependencies.openDashboard(url)),
         options.signal,
       );
     }
@@ -225,7 +178,6 @@ export async function startLiveDashboard(
   } catch (error) {
     hub.shutdown();
     await bound?.close().catch(() => undefined);
-    await bootstrap?.close().catch(() => undefined);
     if (options.signal?.aborted === true) {
       throw new LiveDashboardStartupCancelledError();
     }
@@ -244,11 +196,6 @@ export async function startLiveDashboard(
       } catch (error) {
         closeError = error;
       }
-      try {
-        await bootstrap.close();
-      } catch (error) {
-        closeError ??= error;
-      }
       if (closeError !== undefined) throw closeError;
     })();
     return closeInFlight;
@@ -265,7 +212,7 @@ export async function startLiveDashboard(
 
   return {
     address: bound.address,
-    bootstrapPath: bootstrap.bootstrapPath,
+    url,
     close,
   };
 }

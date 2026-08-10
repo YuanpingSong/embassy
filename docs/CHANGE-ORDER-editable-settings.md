@@ -60,4 +60,7 @@ treatment — designed then, not now.)
 An operator whose messages keep expiring should get from the symptom to a
 fixed deadline in two clicks without reading documentation. No setting
 edit ever happens without a stated consequence, and none is reachable from
-outside the authenticated session.
+outside the foreground loopback companion. Every request keeps its exact Host
+check, and every POST keeps the exact Origin plus `X-Embassy-Request` boundary;
+under the trusted single-user-machine posture these checks constrain browser
+origins but do not authenticate local software.

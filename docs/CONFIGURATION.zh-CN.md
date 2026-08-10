@@ -1,6 +1,6 @@
 # 配置与兼容性
 
-Embassy 通过 `embassy serve` 启动时读取的环境变量进行配置。本文档汇集了所有变量、与 Claude Code 和 Codex App Server 的兼容性约定、托管二进制文件解析规则，以及寻址模型。没有配置文件；所有值均为环境变量或 CLI 标志。
+Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇集了所有变量、与 Claude Code 和 Codex App Server 的兼容性约定、托管二进制文件解析规则，以及寻址模型。没有配置文件；所有值均为环境变量或 CLI 标志。
 
 ---
 
@@ -13,6 +13,8 @@ Embassy 通过 `embassy serve` 启动时读取的环境变量进行配置。本�
 | `EMBASSY_COMPAT_POLICY` | `observed` | `observed` 仅在有界结构探测通过后接纳未知的同主版本提供方；`strict` 只接纳本版本的已认证版本清单 |
 | `EMBASSY_STEERING_ENABLED` | `1` | 全局 `STEER:` 停用开关；精确设为 `0` 后，所有正文都按普通排队消息处理 |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
+
+当前台实时仪表盘组件运行时，可直接通过 `http://127.0.0.1:41961/` 访问。端口是单次命令的 CLI 选择，而不是环境设置；如需另一个稳定端口，请向 `embassy dashboard --live` 传入 `--port <n>`，其中整数范围为 1024 到 65535。多个窗口或浏览器可以使用同一个 URL。端口冲突会以 `LIVE_DASHBOARD_PORT_IN_USE` 失败并提示使用 `--port`；Embassy 绝不会回退到临时或其他端口。
 
 ## 高级边界
 

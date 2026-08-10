@@ -17,12 +17,8 @@ import type {
   LiveDashboardStreamWriter,
 } from "../src/gateway/live-dashboard-stream.js";
 
-const INSTANCE_PATH = "/instance_0123456789abcdef";
-const HOST = "127.0.0.1:43127";
+const HOST = "127.0.0.1:41961";
 const ORIGIN = `http://${HOST}`;
-const COOKIE_NAME = "embassy_live";
-const CAPABILITY = Buffer.alloc(32, 0x31).toString("base64url");
-const SESSION_SECRET = Buffer.alloc(32, 0x73).toString("base64url");
 
 const DEFAULT_CONTENT_SECURITY_POLICY =
   "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -44,7 +40,8 @@ const ASSETS: LiveDashboardHttpAssets = Object.freeze({
 });
 
 type AssetRoute = Readonly<{
-  leaf: string;
+  label: string;
+  path: string;
   body: string;
   contentType: string;
   contentSecurityPolicy: string;
@@ -52,37 +49,43 @@ type AssetRoute = Readonly<{
 
 const ASSET_ROUTES: readonly AssetRoute[] = Object.freeze([
   {
-    leaf: "bootstrap",
+    label: "shell",
+    path: "/",
     body: ASSETS.shellHtml,
     contentType: "text/html; charset=utf-8",
     contentSecurityPolicy: SHELL_CONTENT_SECURITY_POLICY,
   },
   {
-    leaf: "app.css",
+    label: "app.css",
+    path: "/app.css",
     body: ASSETS.styleSheet,
     contentType: "text/css; charset=utf-8",
     contentSecurityPolicy: DEFAULT_CONTENT_SECURITY_POLICY,
   },
   {
-    leaf: "react.js",
+    label: "react.js",
+    path: "/react.js",
     body: ASSETS.vendorReactJavaScript,
     contentType: JAVASCRIPT_CONTENT_TYPE,
     contentSecurityPolicy: DEFAULT_CONTENT_SECURITY_POLICY,
   },
   {
-    leaf: "react-dom.js",
+    label: "react-dom.js",
+    path: "/react-dom.js",
     body: ASSETS.vendorReactDomJavaScript,
     contentType: JAVASCRIPT_CONTENT_TYPE,
     contentSecurityPolicy: DEFAULT_CONTENT_SECURITY_POLICY,
   },
   {
-    leaf: "client.js",
+    label: "client.js",
+    path: "/client.js",
     body: ASSETS.clientJavaScript,
     contentType: JAVASCRIPT_CONTENT_TYPE,
     contentSecurityPolicy: DEFAULT_CONTENT_SECURITY_POLICY,
   },
   {
-    leaf: "app.js",
+    label: "app.js",
+    path: "/app.js",
     body: ASSETS.appJavaScript,
     contentType: JAVASCRIPT_CONTENT_TYPE,
     contentSecurityPolicy: DEFAULT_CONTENT_SECURITY_POLICY,
@@ -174,12 +177,8 @@ function createHandler(
   lang: DashboardLocale = "en",
 ): LiveDashboardRequestHandler {
   return createLiveDashboardRequestHandler({
-    instancePath: INSTANCE_PATH,
     expectedHost: HOST,
     expectedOrigin: ORIGIN,
-    capability: CAPABILITY,
-    sessionSecret: SESSION_SECRET,
-    cookieName: COOKIE_NAME,
     lang,
     assets,
     hub: new SyntheticHub(),
@@ -263,61 +262,61 @@ test("serves every live dashboard asset route with exact framing and security he
   for (const route of ASSET_ROUTES) {
     const response = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${route.leaf}`,
+      target: route.path,
       rawHeaders: navigationHeaders(),
     });
-    assert.equal(response.statusCode, 200, route.leaf);
-    assert.equal(response.bodyText(), route.body, route.leaf);
-    assert.equal(response.headers["Content-Type"], route.contentType, route.leaf);
+    assert.equal(response.statusCode, 200, route.label);
+    assert.equal(response.bodyText(), route.body, route.label);
+    assert.equal(response.headers["Content-Type"], route.contentType, route.label);
     assert.equal(
       response.headers["Content-Length"],
       String(Buffer.byteLength(route.body, "utf8")),
-      route.leaf,
+      route.label,
     );
     assert.equal(
       response.bodyBytes(),
       Buffer.byteLength(route.body, "utf8"),
-      route.leaf,
+      route.label,
     );
-    assert.equal(response.writableEnded, true, route.leaf);
-    assertSecurityHeaders(response, route.contentSecurityPolicy, route.leaf);
+    assert.equal(response.writableEnded, true, route.label);
+    assertSecurityHeaders(response, route.contentSecurityPolicy, route.label);
   }
 });
 
-test("keeps the widened shell CSP exclusive to the bootstrap document", async () => {
+test("keeps the widened shell CSP exclusive to the root document", async () => {
   const handler = createHandler();
 
-  const bootstrap = await invoke(handler, {
+  const shell = await invoke(handler, {
     method: "GET",
-    target: `${INSTANCE_PATH}/bootstrap`,
+    target: "/",
     rawHeaders: navigationHeaders(),
   });
   assert.equal(
-    bootstrap.headers["Content-Security-Policy"],
+    shell.headers["Content-Security-Policy"],
     SHELL_CONTENT_SECURITY_POLICY,
   );
 
-  for (const route of ASSET_ROUTES.filter((entry) => entry.leaf !== "bootstrap")) {
+  for (const route of ASSET_ROUTES.filter((entry) => entry.label !== "shell")) {
     const response = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${route.leaf}`,
+      target: route.path,
       rawHeaders: navigationHeaders(),
     });
     const policy = response.headers["Content-Security-Policy"] ?? "";
-    assert.equal(policy, DEFAULT_CONTENT_SECURITY_POLICY, route.leaf);
+    assert.equal(policy, DEFAULT_CONTENT_SECURITY_POLICY, route.label);
     for (const directive of ["script-src", "style-src", "connect-src"]) {
       assert.equal(
         policy.includes(directive),
         false,
-        `${route.leaf} must not widen ${directive}`,
+        `${route.label} must not widen ${directive}`,
       );
     }
   }
 
-  // The authenticated data routes keep the default policy too.
+  // The same-origin data routes keep the default policy too.
   const snapshot = await invoke(handler, {
     method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
+    target: "/snapshot",
     rawHeaders: [
       "Host",
       HOST,
@@ -325,8 +324,6 @@ test("keeps the widened shell CSP exclusive to the bootstrap document", async ()
       ORIGIN,
       "X-Embassy-Request",
       "1",
-      "Cookie",
-      `${COOKIE_NAME}=${SESSION_SECRET}`,
     ],
   });
   assert.equal(snapshot.statusCode, 200);
@@ -343,7 +340,7 @@ test("rejects every non-GET method on the asset routes with 405", async () => {
     for (const method of ["POST", "OPTIONS", "HEAD", "PUT", "DELETE", "PATCH"]) {
       const response = await invoke(handler, {
         method,
-        target: `${INSTANCE_PATH}/${route.leaf}`,
+        target: route.path,
         rawHeaders: navigationHeaders([
           "Origin",
           ORIGIN,
@@ -354,17 +351,17 @@ test("rejects every non-GET method on the asset routes with 405", async () => {
       assert.equal(
         response.statusCode,
         405,
-        `${method} ${route.leaf} must be method-not-allowed`,
+        `${method} ${route.label} must be method-not-allowed`,
       );
       assert.equal(
         response.bodyText().includes(route.body),
         false,
-        `${method} ${route.leaf} must not leak the asset`,
+        `${method} ${route.label} must not leak the asset`,
       );
       assertSecurityHeaders(
         response,
         DEFAULT_CONTENT_SECURITY_POLICY,
-        `${method} ${route.leaf}`,
+        `${method} ${route.label}`,
       );
     }
   }
@@ -376,43 +373,43 @@ test("rejects cross-origin, unknown, and malformed asset targets", async () => {
   for (const route of ASSET_ROUTES) {
     const wrongHost = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${route.leaf}`,
-      rawHeaders: ["Host", "localhost:43127"],
+      target: route.path,
+      rawHeaders: ["Host", "localhost:41961"],
     });
-    assert.equal(wrongHost.statusCode, 403, `${route.leaf} wrong Host`);
+    assert.equal(wrongHost.statusCode, 403, `${route.label} wrong Host`);
     assert.equal(wrongHost.bodyText().includes(route.body), false);
     assertSecurityHeaders(
       wrongHost,
       DEFAULT_CONTENT_SECURITY_POLICY,
-      `${route.leaf} wrong Host`,
+      `${route.label} wrong Host`,
     );
 
     const crossOrigin = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${route.leaf}`,
-      rawHeaders: navigationHeaders(["Origin", "http://localhost:43127"]),
+      target: route.path,
+      rawHeaders: navigationHeaders(["Origin", "http://localhost:41961"]),
     });
-    assert.equal(crossOrigin.statusCode, 403, `${route.leaf} foreign Origin`);
+    assert.equal(crossOrigin.statusCode, 403, `${route.label} foreign Origin`);
 
     const duplicateHost = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${route.leaf}`,
+      target: route.path,
       rawHeaders: ["Host", HOST, "Host", HOST],
     });
-    assert.equal(duplicateHost.statusCode, 400, `${route.leaf} duplicate Host`);
+    assert.equal(duplicateHost.statusCode, 400, `${route.label} duplicate Host`);
   }
 
   for (const target of [
-    `${INSTANCE_PATH}/react.js/`,
-    `${INSTANCE_PATH}/react.js?v=1`,
-    `${INSTANCE_PATH}/react-dom.js.map`,
-    `${INSTANCE_PATH}/app.js.map`,
-    `${INSTANCE_PATH}/App.js`,
-    `${INSTANCE_PATH}/vendor/react.js`,
-    `${INSTANCE_PATH}/live-dashboard-app/app.js`,
-    `${INSTANCE_PATH}/favicon.ico`,
-    "/react.js",
-    "/app.js",
+    "/react.js/",
+    "/react.js?v=1",
+    "/react-dom.js.map",
+    "/app.js.map",
+    "/App.js",
+    "/vendor/react.js",
+    "/live-dashboard-app/app.js",
+    "/favicon.ico",
+    "/bootstrap",
+    "/instance_deadbeef/react.js",
   ]) {
     const response = await invoke(handler, {
       method: "GET",
@@ -424,8 +421,8 @@ test("rejects cross-origin, unknown, and malformed asset targets", async () => {
   }
 
   for (const target of [
-    `${INSTANCE_PATH}/app.js#fragment`,
-    `//${INSTANCE_PATH}/app.js`,
+    "/app.js#fragment",
+    "//app.js",
   ]) {
     const response = await invoke(handler, {
       method: "GET",
@@ -453,21 +450,21 @@ test("serves the rendered shell and bundles byte-for-byte in both locales", asyn
     );
     const handler = createHandler(assets, locale);
     const fixtures: ReadonlyArray<readonly [string, string, string]> = [
-      ["bootstrap", assets.shellHtml, "text/html; charset=utf-8"],
-      ["app.css", assets.styleSheet, "text/css; charset=utf-8"],
-      ["react.js", assets.vendorReactJavaScript, JAVASCRIPT_CONTENT_TYPE],
-      ["react-dom.js", assets.vendorReactDomJavaScript, JAVASCRIPT_CONTENT_TYPE],
-      ["client.js", assets.clientJavaScript, JAVASCRIPT_CONTENT_TYPE],
-      ["app.js", assets.appJavaScript, JAVASCRIPT_CONTENT_TYPE],
+      ["/", assets.shellHtml, "text/html; charset=utf-8"],
+      ["/app.css", assets.styleSheet, "text/css; charset=utf-8"],
+      ["/react.js", assets.vendorReactJavaScript, JAVASCRIPT_CONTENT_TYPE],
+      ["/react-dom.js", assets.vendorReactDomJavaScript, JAVASCRIPT_CONTENT_TYPE],
+      ["/client.js", assets.clientJavaScript, JAVASCRIPT_CONTENT_TYPE],
+      ["/app.js", assets.appJavaScript, JAVASCRIPT_CONTENT_TYPE],
     ];
 
-    for (const [leaf, body, contentType] of fixtures) {
+    for (const [target, body, contentType] of fixtures) {
       const response = await invoke(handler, {
         method: "GET",
-        target: `${INSTANCE_PATH}/${leaf}`,
+        target,
         rawHeaders: navigationHeaders(),
       });
-      const label = `${locale} ${leaf}`;
+      const label = `${locale} ${target}`;
       assert.equal(response.statusCode, 200, label);
       assert.equal(response.headers["Content-Type"], contentType, label);
       assert.equal(
@@ -493,8 +490,8 @@ test("renders a shell of relative hrefs, ordered classic scripts, and no inline 
     assert.ok(shell.includes("<noscript>"), label);
     assert.ok(shell.includes('<link rel="stylesheet" href="app.css">'), label);
 
-    // Relative hrefs only: the instance path must never appear in the HTML.
-    assert.equal(shell.includes(INSTANCE_PATH), false, `${label} instance path`);
+    // Relative hrefs only: the legacy instance-scoped path must never appear.
+    assert.equal(shell.includes("/instance_"), false, `${label} legacy path`);
     for (const forbidden of [
       "http://",
       "https://",
@@ -549,7 +546,7 @@ test("every asset the shell references resolves to a served route", async () => 
   for (const reference of references) {
     const response = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${reference}`,
+      target: `/${reference}`,
       rawHeaders: navigationHeaders(),
     });
     assert.equal(response.statusCode, 200, `${reference} must resolve`);

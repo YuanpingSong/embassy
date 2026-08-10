@@ -32,12 +32,15 @@ const OPEN_ENVIRONMENT = Object.freeze({
   LC_ALL: "C",
 });
 
+export const DEFAULT_LIVE_DASHBOARD_PORT = 41_961;
+
 type GatewaySignal = "SIGINT" | "SIGTERM";
 
 export type LiveDashboardReadyResult = Readonly<{
   status: "ready";
   mode: "live";
   locale: DashboardLocale;
+  url: string;
 }>;
 
 export type LiveDashboardCommandOutcome = Readonly<{
@@ -47,6 +50,8 @@ export type LiveDashboardCommandOutcome = Readonly<{
 export type LiveDashboardCommandOptions = Readonly<{
   env?: NodeJS.ProcessEnv;
   locale: DashboardLocale;
+  /** Explicit CLI-selected port; omitted direct callers receive the default. */
+  port?: number;
   signal?: AbortSignal;
   onReady: (result: LiveDashboardReadyResult) => void | Promise<void>;
   loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig;
@@ -319,13 +324,13 @@ export function createGatewayLiveDashboardActions(
   };
 }
 
-async function openPrivateBootstrap(
-  bootstrapPath: string,
+async function openLiveDashboard(
+  url: string,
   executeOpen: OpenExecutor,
   signal: AbortSignal,
 ): Promise<void> {
   try {
-    await executeOpen(OPEN_EXECUTABLE, [bootstrapPath], {
+    await executeOpen(OPEN_EXECUTABLE, [url], {
       cwd: "/",
       env: OPEN_ENVIRONMENT,
       shell: false,
@@ -354,7 +359,7 @@ function ownLateStartup(outcome: Promise<StartupOutcome>): void {
  * Run the opt-in live dashboard in the foreground until interrupted.
  *
  * The controller remains the only source of state. This command exposes one
- * observer plus three closed, authenticated actions; it has no provider API
+ * observer plus four closed actions; it has no provider API
  * or generic control-plane escape hatch.
  */
 export async function runLiveDashboardCommand(
@@ -394,7 +399,7 @@ export async function runLiveDashboardCommand(
     );
     if (!latch.isStopped()) {
       const startup = startDashboard({
-        privateStateRoot: config.stateDir,
+        port: options.port ?? DEFAULT_LIVE_DASHBOARD_PORT,
         observer: createGatewayLiveDashboardObserver(
           config.controlSocketPath,
           sendRequest,
@@ -406,12 +411,12 @@ export async function runLiveDashboardCommand(
         locale: options.locale,
         signal: latch.signal,
         dependencies: {
-          openBootstrap: async (bootstrapPath) => {
+          openDashboard: async (url) => {
             if (latch?.isStopped() !== false) {
               throw new Error("LIVE_DASHBOARD_START_CANCELLED");
             }
-            await openPrivateBootstrap(
-              bootstrapPath,
+            await openLiveDashboard(
+              url,
               executeOpen,
               latch.signal,
             );
@@ -450,6 +455,7 @@ export async function runLiveDashboardCommand(
             status: "ready",
             mode: "live",
             locale: options.locale,
+            url: running.url,
           });
           await latch.wait;
         }

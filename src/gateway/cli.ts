@@ -44,6 +44,7 @@ import {
   type DashboardLocale,
 } from "./locale.js";
 import {
+  DEFAULT_LIVE_DASHBOARD_PORT,
   runLiveDashboardCommand,
   type LiveDashboardCommandOutcome,
   type LiveDashboardCommandOptions,
@@ -473,7 +474,19 @@ function parseServeInboundMode(args: readonly string[]): "paired" | "open" {
   return "open";
 }
 
-function validateLiveDashboardArgs(args: readonly string[]): void {
+function parseLiveDashboardPort(value: string | true | undefined): number {
+  if (value === undefined) return DEFAULT_LIVE_DASHBOARD_PORT;
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  return port;
+}
+
+function parseLiveDashboardArgs(args: readonly string[]): number {
   if (args.length === 0) {
     throw new CliFault(
       "INVALID_ARGUMENTS",
@@ -481,9 +494,10 @@ function validateLiveDashboardArgs(args: readonly string[]): void {
       "hint.dashboardLiveRequired",
     );
   }
-  const options = parseOptions(args, [], ["live"]);
-  assertExactOptionCount(options, 1);
+  const options = parseOptions(args, ["port"], ["live"]);
+  assertExactOptionCount(options, 1, 2);
   if (options.live !== true) throw new CliFault("INVALID_ARGUMENTS");
+  return parseLiveDashboardPort(options.port);
 }
 
 async function buildRequest(
@@ -983,6 +997,7 @@ export async function runGatewayCli(
   let locale = fallbackCliLocale(argv.slice(1), env);
   let serverReadyEmitted = false;
   let liveDashboardReadyEmitted = false;
+  let liveDashboardPort: number | undefined;
 
   try {
     const common = resolveCommonCliOptions(argv.slice(1), env);
@@ -1026,10 +1041,12 @@ export async function runGatewayCli(
       return gatewayCliExitCodes.ok;
     }
     if (command === "dashboard") {
-      validateLiveDashboardArgs(common.args);
+      const port = parseLiveDashboardArgs(common.args);
+      liveDashboardPort = port;
       const outcome = await runLiveDashboard({
         env,
         locale,
+        port,
         ...(dependencies.liveDashboardSignal === undefined
           ? {}
           : { signal: dependencies.liveDashboardSignal }),
@@ -1182,6 +1199,11 @@ export async function runGatewayCli(
         retryable: ambiguous ? false : error.recoverable,
         kind: ambiguous ? "ambiguous" : "unavailable",
       });
+      if (error.code === "CONTROL_INVALID_RESPONSE") {
+        stderr.write(
+          `[embassy] ${getCliCopy(locale)["hint.controlInvalidResponse"]}\n`,
+        );
+      }
       return ambiguous
         ? gatewayCliExitCodes.ambiguous
         : gatewayCliExitCodes.unavailable;
@@ -1214,6 +1236,18 @@ export async function runGatewayCli(
               ? "unavailable"
               : "input",
       });
+      if (
+        error.code === "LIVE_DASHBOARD_PORT_IN_USE" &&
+        liveDashboardPort !== undefined
+      ) {
+        const hint = getCliCopy(locale)["hint.dashboardPortInUse"].replace(
+          "{port}",
+          String(liveDashboardPort),
+        );
+        stderr.write(
+          `[embassy] ${hint}\n`,
+        );
+      }
       return error.recoverable
         ? gatewayCliExitCodes.unavailable
         : gatewayCliExitCodes.invalidInput;

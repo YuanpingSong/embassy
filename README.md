@@ -120,11 +120,18 @@ arbitrary same-user code and all message text remain untrusted input.
 
 ### See it live
 
-`embassy dashboard --live` opens a five-tab streaming view in the browser (overview, deliveries, routes, activity, diagnostics). See [Dashboard](docs/DASHBOARD.md) for details.
+`embassy dashboard --live` opens a five-tab streaming view in the browser
+(overview, deliveries, routes, activity, diagnostics) at
+`http://127.0.0.1:41961/` by default. To choose another stable port for that
+invocation, run `embassy dashboard --live --port <n>` with an integer from 1024
+through 65535. Multiple windows and browsers can use the same URL while the
+foreground companion runs. If the port is occupied, startup fails explicitly,
+points to `--port`, and never falls back to another port. See
+[Dashboard](docs/DASHBOARD.md) for details.
 
 The live dashboard can also remove an orphaned Codex registration after an explicit confirmation, but only when the broker proves that the registration is stale and its owning endpoint generation is dead. A current, merely offline, or ambiguous generation is never removable through this recovery action.
 
-The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`. Live dashboard mutations require the same-origin `X-Embassy-Request` sentinel.
+The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`. The live dashboard has no login, token, cookie, or per-browser session: it assumes a trusted single-user machine, and local software that can reach or spoof loopback can read it and invoke its bounded actions. The server still requires the exact Host header on every request and the exact Origin plus `X-Embassy-Request` on every POST; it sends no CORS headers and does not accept `OPTIONS`.
 
 ## How it works
 
@@ -182,7 +189,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `serve` | operator | Start the foreground broker and dashboard |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
 | `refresh-dashboard` | operator | Regenerate both static dashboard files |
-| `dashboard --live [--lang en\|zh-CN]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
+| `dashboard --live [--lang en\|zh-CN] [--port <n>]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; for example, `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
@@ -194,7 +201,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 
 ## Safety in one minute
 
-- **Local sockets only.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. The opt-in `embassy dashboard --live` companion is a separate process and the only listener Embassy can create, bound to `127.0.0.1` on an ephemeral port.
+- **Local broker, stable loopback dashboard.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. The opt-in `embassy dashboard --live` companion is a separate process and the only listener Embassy can create, bound to exact `127.0.0.1` on stable port `41961` by default (or the per-invocation `--port <n>`). It is deliberately unauthenticated local HTTP for a trusted single-user machine; Host, Origin, and sentinel checks constrain browser-origin requests but do not authenticate local processes or OS users.
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and generation checks reduce mistakes, but are not a defense against code already running as your OS user.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.

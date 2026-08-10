@@ -62,7 +62,6 @@ const GATEWAY_RUNTIME_MODULES = [
   "instance-lease",
   "live-dashboard",
   "live-dashboard-assets",
-  "live-dashboard-bootstrap",
   "live-dashboard-command",
   "live-dashboard-http",
   "live-dashboard-protocol",

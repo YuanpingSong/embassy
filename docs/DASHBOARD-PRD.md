@@ -1,9 +1,9 @@
 # Embassy Dashboard — Product Requirements (Web App)
 
-Owner: PM. Status: the five-tab web app and its four bounded route actions
-have shipped; editable settings, registration handshake, and §6b ambitious
-scope remain requirements gated on broker work plus the standing threat-model
-review. Pair this with the companion design MD for
+Owner: PM. Status: the five-tab web app, bounded retained-body display, and its
+four bounded route actions have shipped; editable settings, registration
+handshake, and the remaining §6b ambitious scope are gated on broker work plus
+the standing threat-model review. Pair this with the companion design MD for
 visual tokens; this document is the product truth. The static mode-0600 file
 remains the inert offline floor and is out of scope here.
 
@@ -26,12 +26,19 @@ answer the ambient question in under 3 seconds and to begin a forensic trace
 in one click.
 
 Security posture is inherited from the shipped live contract and is
-non-negotiable: loopback-only, one-use token bootstrap; metadata only —
-**message bodies never appear anywhere, ever**. The app is read-MOSTLY: its
+non-negotiable: exact IPv4 loopback on stable port `41961` by default (or the
+per-invocation `--port <n>`), with a direct root URL that supports multiple
+windows and browsers. There is no authentication ceremony: no token, fragment,
+cookie, per-browser session, random instance path, or bootstrap file. The
+product assumes a trusted single-user machine because local software that can
+reach or spoof loopback can read the live view, including bounded retained
+bodies, and invoke its bounded actions. The static dashboard remains
+metadata-only. The app is read-MOSTLY: its
 sole mutations are exact pair, unpair, discovery refresh, and broker-guarded
 stale-Codex-registration removal actions, shipped behind their standing threat-model review,
-carried over the authenticated session (exact-Origin + sentinel-header
-POSTs per the live contract). Never register/send/reply/approve/interrupt
+carried over exact-Origin + sentinel-header POSTs per the live contract. The
+server checks exact Host on every request, sends no CORS headers, and rejects
+`OPTIONS`. Never register/send/reply/approve/interrupt
 from a browser, ever.
 
 ## 3. The operator's questions → the IA
@@ -89,8 +96,8 @@ Five tabs, one question each:
   the browser.
   Requirements: each action shows a one-line consequence before confirming
   (including the stale-and-dead-generation guard for recovery);
-  actions ride the authenticated session with exact-Origin + sentinel
-checks, are rate-limited, and every invocation lands in the Activity
+  actions use exact-Origin + sentinel checks, are rate-limited, and every
+  invocation lands in the Activity
 ledger with an operator-action marker. Automatic endpoint refresh also lands
 in that ledger, distinctly marked automatic rather than operator. Failures surface the same safe
   codes the CLI would print. **Registration is a flow, not a button**: identity must be inherited
@@ -119,7 +126,7 @@ in that ledger, distinctly marked automatic rather than operator. Failures surfa
 
 - **Progressive disclosure everywhere**: chip → row → detail pane. No screen
   shows raw JSON by default; every detail pane offers it behind "raw".
-- **Live by stream**: views update via the authenticated snapshot stream;
+- **Live by stream**: views update via the same-origin snapshot stream;
   every screen carries "as of <time>" and degrades gracefully to manual
   refresh when the stream drops (visible reconnect state, never a stale
   page pretending to be live).
@@ -152,14 +159,8 @@ not copy suggestions.
   steering is explicitly IN scope. Approvals stay native to each agent.
 - No remote access, accounts, cloud, or telemetry — ambition stays local.
 
-## 6b. Ambitious scope (user-directed; each item gates on broker work +
-threat-model review)
-
-- **Message content, opt-in**: the broker gains a bounded operator-review
-  retention window (last N bodies, off by default, size-capped, disclosed in
-  SECURITY). The Deliveries timeline then shows what was said, not just
-  when; previews truncate, full body behind disclosure. When retention is
-  off, the UI says so honestly instead of pretending there is nothing.
+## 6b. Remaining ambitious scope (user-directed; each item gates on broker
+work + threat-model review)
 - **Full consent management including registration**: select/unselect
   (already specified in 3.3), steering kill-switch state, and
   **dashboard-initiated registration** — designed as a two-sided handshake

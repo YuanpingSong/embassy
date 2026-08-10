@@ -121,17 +121,72 @@ test("public locales document provenance framing and recipient continuation", as
 
   assert.doesNotMatch(englishReadme, /raw anonymous body/i);
   assert.doesNotMatch(englishReadme, /recipient currently receives no/i);
-  for (const document of [
-    englishReadme,
-    chineseReadme,
-    englishDelivery,
-    chineseDelivery,
-    englishConfiguration,
-    chineseConfiguration,
-    englishSite,
-    chineseSite,
+  const hopPolicyPaths = [
+    "README.md",
+    "README.zh-CN.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "docs/DELIVERY.md",
+    "docs/DELIVERY.zh-CN.md",
+    "docs/CONFIGURATION.md",
+    "docs/CONFIGURATION.zh-CN.md",
+    "docs/GATEWAY-ARCHITECTURE.md",
+    "docs/SITE-PRD.md",
+    "site/index.html",
+    "site/zh-CN/index.html",
+  ] as const;
+  const hopPolicyDocuments = await Promise.all(
+    hopPolicyPaths.map(readPublicFile),
+  );
+  for (const [index, document] of hopPolicyDocuments.entries()) {
+    const label = hopPolicyPaths[index] ?? "unknown";
+    assert.doesNotMatch(
+      document,
+      /EMBASSY_MAX_HOPS|HOP_LIMIT_EXCEEDED|conversations? (?:are|is) hop[- ]bounded|hop[- ]bounded conversations?|跳数/iu,
+      label,
+    );
+  }
+});
+
+test("current dashboard docs use the stable direct-loopback contract", async () => {
+  const paths = [
+    "README.md",
+    "README.zh-CN.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "docs/DASHBOARD.md",
+    "docs/DASHBOARD.zh-CN.md",
+    "docs/CONFIGURATION.md",
+    "docs/CONFIGURATION.zh-CN.md",
+    "docs/GATEWAY-ARCHITECTURE.md",
+    "docs/THREAT-MODEL-dashboard-mutations.md",
+    "docs/DASHBOARD-PRD.md",
+    "skills/embassy-peer/SKILL.md",
+    "site/index.html",
+    "site/zh-CN/index.html",
+  ] as const;
+  const documents = await Promise.all(paths.map(readPublicFile));
+
+  for (const [index, document] of documents.entries()) {
+    const label = paths[index] ?? "unknown";
+    assert.ok(document.includes("41961"), `${label}: stable default port`);
+    assert.ok(document.includes("--port"), `${label}: CLI port override`);
+    assert.doesNotMatch(document, /EMBASSY_DASHBOARD_PORT/, label);
+    assert.doesNotMatch(
+      document,
+      /ephemeral port|OS-assigned port|URL-fragment token|session cookie|bootstrap\.html|one-use (?:256-bit )?(?:URL-fragment )?(?:token|capability)|authenticated (?:HTTP listener|listener|live dashboard|session|snapshot stream|fetch|POST)/i,
+      label,
+    );
+  }
+
+  for (const path of [
+    "README.zh-CN.md",
+    "docs/DASHBOARD.zh-CN.md",
+    "docs/CONFIGURATION.zh-CN.md",
+    "site/zh-CN/index.html",
   ]) {
-    assert.doesNotMatch(document, /EMBASSY_MAX_HOPS|HOP_LIMIT_EXCEEDED/);
+    const document = await readPublicFile(path);
+    assert.doesNotMatch(document, /临时端口|一次性.{0,12}令牌|会话 Cookie/u, path);
   }
 });
 
