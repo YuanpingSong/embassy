@@ -259,7 +259,9 @@ jobs:
         shell: bash
         run: |
           version="${TAG#v}"
-          tarball="release-bundle/agent-embassy-${version}.tgz"
+          # Leading ./ keeps npm from parsing the path as a github:owner/repo
+          # shorthand (EALLOWGIT on newer npm).
+          tarball="./release-bundle/agent-embassy-${version}.tgz"
           test -f "$tarball"
           if npm view "agent-embassy@${version}" version > /dev/null 2>&1; then
             echo "agent-embassy@${version} already published — skipping"
