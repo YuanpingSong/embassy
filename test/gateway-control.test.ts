@@ -1789,6 +1789,8 @@ test("client bounds time and output and rejects malformed responses", async () =
     (error: unknown) =>
       error instanceof GatewayControlTransportError &&
       error.code === "CONTROL_INVALID_RESPONSE" &&
+      error.message ===
+        "The gateway returned an invalid control response. Restart the broker, then retry." &&
       !error.message.includes(THREAD_ID),
   );
   await closeTrackedServer(malformed.server, malformed.connections);

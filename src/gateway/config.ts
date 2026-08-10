@@ -45,7 +45,6 @@ export type GatewayConfig = {
 
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const MAX_CONFIGURED_STATE_BUDGET = 7 * 1024 * 1024;
-
 function boundedInteger(
   name: string,
   value: string | undefined,

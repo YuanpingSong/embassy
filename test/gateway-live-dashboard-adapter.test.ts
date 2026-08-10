@@ -376,13 +376,13 @@ function loadBundle(): LoadedBundle {
     },
   };
   const locationStub = {
-    href: "http://127.0.0.1:43127/instance_0123456789abcdef/bootstrap",
-    origin: "http://127.0.0.1:43127",
+    href: "http://127.0.0.1:41961/#ignored-legacy-fragment",
+    origin: "http://127.0.0.1:41961",
     protocol: "http:",
-    host: "127.0.0.1:43127",
-    pathname: "/instance_0123456789abcdef/bootstrap",
+    host: "127.0.0.1:41961",
+    pathname: "/",
     search: "",
-    hash: "",
+    hash: "#ignored-legacy-fragment",
   };
   const historyStub = { replaceState: () => undefined };
   const reactStub = createReactStub();
@@ -570,7 +570,7 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
   }
 });
 
-test("browser action protocol posts one closed action then reads a fresh snapshot", async () => {
+test("root browser protocol ignores fragments and uses cookie-free API posts", async () => {
   const calls: Array<Readonly<{ input: string; init: RequestInit }>> = [];
   const events: unknown[] = [];
   const snapshotEvent = {
@@ -613,9 +613,10 @@ test("browser action protocol posts one closed action then reads a fresh snapsho
   }
 
   assert.equal(calls.length, 2);
-  assert.equal(calls[0]?.input, "/instance_0123456789abcdef/action");
+  assert.equal(calls.some((call) => call.input.endsWith("/session")), false);
+  assert.equal(calls[0]?.input, "/action");
   assert.equal(calls[0]?.init.method, "POST");
-  assert.equal(calls[0]?.init.credentials, "same-origin");
+  assert.equal(calls[0]?.init.credentials, "omit");
   assert.deepEqual(plain(calls[0]?.init.headers), {
     "X-Embassy-Request": "1",
     "Content-Type": "application/json",
@@ -627,8 +628,9 @@ test("browser action protocol posts one closed action then reads a fresh snapsho
       alias: "codex-orphan@this-mac",
     }),
   );
-  assert.equal(calls[1]?.input, "/instance_0123456789abcdef/snapshot");
+  assert.equal(calls[1]?.input, "/snapshot");
   assert.equal(calls[1]?.init.method, "POST");
+  assert.equal(calls[1]?.init.credentials, "omit");
   assert.deepEqual(plain(calls[1]?.init.headers), {
     "X-Embassy-Request": "1",
   });

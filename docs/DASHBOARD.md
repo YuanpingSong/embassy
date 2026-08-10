@@ -1,9 +1,9 @@
 # Dashboards
 
-Embassy ships two dashboard surfaces — a static file pair and a live streaming
-companion — that present gateway metadata without exposing message content.
+Embassy ships two dashboard surfaces: a metadata-only static file pair and a
+live streaming companion that may also show bounded retained message bodies.
 This document covers both: the static snapshot model and the live companion's
-tabs, access controls, bounded actions, and security caveat.
+tabs, request controls, bounded actions, and security caveat.
 
 ---
 
@@ -26,20 +26,42 @@ embassy dashboard --live
 ```
 
 `embassy dashboard --live` starts a separate foreground companion process that
-presents gateway metadata in a five-tab browser view (overview, deliveries,
-routes, activity, diagnostics), streaming the same data the static dashboard
-snapshots. It
-reaches the broker over the same private control socket every other command
-uses, so it reports the gateway as unavailable when nothing is serving. It
-binds `127.0.0.1` on an ephemeral port; the companion is not part of
-`embassy serve`, which remains socket-only with no TCP or HTTP listener.
+uses a five-tab browser view (overview, deliveries, routes, activity,
+diagnostics) to stream broker state, including bounded retained bodies in
+delivery detail. It reaches the broker over the same private control socket
+every other command uses, so it reports the gateway as unavailable when
+nothing is serving. The companion is not part of `embassy serve`, which
+remains socket-only with no TCP or HTTP listener.
 
-Access bootstraps through a one-use 256-bit URL-fragment token exchanged for a
-path-scoped `HttpOnly` `SameSite=Strict` session cookie. The exact Host header is checked on every request; navigation GETs permit a
-missing Origin and carry no sentinel, while non-navigation POSTs require the
-exact Origin plus the X-Embassy-Request sentinel. There are no CORS headers, no
-generic control or provider routes, no server-side storage, no telemetry, and
-no external assets. The only mutation route accepts exact pair, unpair,
+The companion binds exact `127.0.0.1` on stable port `41961` by default and is
+available directly at `http://127.0.0.1:41961/`. To choose another stable port
+for one invocation, pass `--port <n>` with an integer from 1024 through 65535:
+
+```bash
+embassy dashboard --live --port 41962
+```
+
+The command auto-opens a browser and its ready result prints the same
+bookmarkable dashboard URL. Up to four concurrent live views—across windows,
+tabs, or browsers—can use that URL while the foreground process runs; a fifth
+stream is refused until one closes. If the port is already occupied, startup fails with
+`LIVE_DASHBOARD_PORT_IN_USE`, tells the operator to choose another with
+`--port`, and does not select an ephemeral or alternate port.
+
+There is no fragment capability, cookie, login, per-browser session, or
+bootstrap file. The intended posture is one operator and software already
+trusted under that operator's macOS UID. The HTTP listener deliberately does
+not authenticate a process or OS user, so this remains a trusted
+single-user-machine assumption rather than a same-UID enforcement mechanism.
+Any local software that can reach or spoof loopback can read the live view,
+including retained bodies, and submit its bounded actions.
+
+The exact Host header is checked on every request. Navigation GETs may omit
+Origin, but every POST requires the exact Origin plus
+`X-Embassy-Request: 1`. `OPTIONS` is not accepted and no CORS headers are sent.
+These checks constrain browser cross-origin requests; they do not authenticate
+local software. There are no generic control or provider routes, telemetry, or
+external assets. The only mutation route accepts exact pair, unpair,
 refresh-discovery, and stale-Codex-registration-removal actions, requires an
 explicit in-page confirmation, rejects bodies over 1 KiB, and is limited to
 six actions per minute. Removal names only a public `codex-*` alias; the broker
@@ -49,7 +71,7 @@ browser client keeps only a display-preference key
 (active tab and language) in `localStorage`.
 The browser cannot create or live-unregister tasks, send, reply, approve,
 interrupt, change settings, or invoke arbitrary broker/provider methods. It receives a sanitized
-metadata snapshot via authenticated `fetch`; after each bounded action it reads
+snapshot via same-origin `fetch`; after each bounded action it reads
 a fresh snapshot. A snapshot observation may settle already-due
 lifecycle deliveries before projecting state.
 
@@ -64,8 +86,10 @@ An optional `--lang en|zh-CN` flag selects the display language. It belongs to
 the live companion only; the static pair is always written in both languages
 and switched by the in-page link.
 
-**Caveat.** Any process running as your OS user — including root and browser
-extensions with local filesystem access — can read what the browser can read.
+**Caveat.** The loopback listener does not identify the caller's process or
+UID. Run it only on a trusted single-user machine: local processes, other local
+users, root, and browser extensions able to reach or spoof loopback may read
+and act on everything the live dashboard exposes.
 
 The static `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html` files
 remain the inert offline floor: mode 0600, no script, no network.

@@ -1931,7 +1931,8 @@ function controlTransportError(
     CONTROL_CONNECT_FAILED: "The gateway control socket could not be reached.",
     CONTROL_TIMEOUT: "The gateway control request timed out.",
     CONTROL_RESPONSE_TOO_LARGE: "The gateway control response exceeds the client limit.",
-    CONTROL_INVALID_RESPONSE: "The gateway returned an invalid control response.",
+    CONTROL_INVALID_RESPONSE:
+      "The gateway returned an invalid control response. Restart the broker, then retry.",
     CONTROL_CONNECTION_CLOSED: "The gateway closed before returning a control response.",
     CONTROL_OUTCOME_AMBIGUOUS:
       "The gateway may have applied the control mutation before the response was lost; do not retry automatically.",

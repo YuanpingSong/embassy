@@ -16,7 +16,8 @@ Commands:
   compat-check           Run bounded no-traffic compatibility probes
   compat-certify         Run bounded live wire certification [--codex ALIAS] [--with-turn]
   refresh-dashboard      Publish both static dashboard files
-  dashboard --live       Open live status and bounded route consent
+  dashboard --live [--port <n>]
+                         Open live status and bounded route consent
   register-codex         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task
   select-claude          Select a discovered Claude session
@@ -31,11 +32,16 @@ Commands:
 
 Options:
   --lang en|zh-CN        Localize user-facing text
+  --port <n>             Live dashboard port, 1024–65535 (default 41961)
   --version, -v          Print the version
   --help, -h             Show this help
 `,
   "hint.dashboardLiveRequired":
     "dashboard requires --live; static files are published by serve and refresh-dashboard.",
+  "hint.dashboardPortInUse":
+    "live dashboard port {port} is already in use; close the holding process or choose another with --port <n>.",
+  "hint.controlInvalidResponse":
+    "restart the broker, then retry.",
   "error.input": "request rejected.",
   "error.decision": "gateway rejected the request.",
   "error.unavailable": "gateway unavailable.",

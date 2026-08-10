@@ -9,6 +9,7 @@ import {
 } from "../src/gateway/cli.js";
 import { GatewayControlTransportError } from "../src/gateway/control.js";
 import {
+  DEFAULT_LIVE_DASHBOARD_PORT,
   createGatewayLiveDashboardActions,
   createGatewayLiveDashboardObserver,
   runLiveDashboardCommand,
@@ -21,7 +22,8 @@ const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CLAUDE_SOCKET_PATH = "/tmp/cc-socks/private-identity.sock";
 const STATE_DIR = "/private/embassy-state";
 const CONTROL_SOCKET_PATH = `${STATE_DIR}/control.sock`;
-const BOOTSTRAP_PATH = `${STATE_DIR}/live-dashboard-private.html`;
+const DASHBOARD_PORT = 53_421;
+const DASHBOARD_URL = `http://127.0.0.1:${DASHBOARD_PORT}/`;
 
 type Capture = Readonly<{
   chunks: string[];
@@ -110,21 +112,36 @@ function cliHarness(
 
 test("dashboard --live preserves its closed grammar and uses common locale precedence", async () => {
   const valid = [
-    { argv: ["dashboard", "--live"], env: {}, expected: "en" },
+    {
+      argv: ["dashboard", "--live"],
+      env: {},
+      expected: "en",
+      port: DEFAULT_LIVE_DASHBOARD_PORT,
+    },
     {
       argv: ["dashboard", "--live"],
       env: { EMBASSY_LOCALE: "zh-CN" },
       expected: "zh-CN",
+      port: DEFAULT_LIVE_DASHBOARD_PORT,
     },
     {
       argv: ["dashboard", "--live", "--lang", "en"],
       env: { EMBASSY_LOCALE: "zh-CN" },
       expected: "en",
+      port: DEFAULT_LIVE_DASHBOARD_PORT,
     },
     {
-      argv: ["dashboard", "--lang", "zh-CN", "--live"],
+      argv: [
+        "dashboard",
+        "--port",
+        "48123",
+        "--lang",
+        "zh-CN",
+        "--live",
+      ],
       env: { EMBASSY_LOCALE: "unsupported" },
       expected: "zh-CN",
+      port: 48_123,
     },
   ] as const;
 
@@ -132,6 +149,7 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
     const calls: string[] = [];
     const harness = cliHarness(async (options) => {
       calls.push(options.locale);
+      assert.equal(options.port, current.port);
       await options.onReady({
         status: "ready",
         mode: "live",
@@ -169,6 +187,12 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
     ["dashboard", "--live", "--lang", "EN"],
     ["dashboard", "--live", "--lang"],
     ["dashboard", "--live", "--unknown"],
+    ["dashboard", "--live", "--port"],
+    ["dashboard", "--live", "--port", "1023"],
+    ["dashboard", "--live", "--port", "65536"],
+    ["dashboard", "--live", "--port", "1.5"],
+    ["dashboard", "--live", "--port", "+48123"],
+    ["dashboard", "--live", "--port", "48123", "--port", "48124"],
     ["dashboard", "live"],
   ];
   for (const argv of invalid) {
@@ -253,7 +277,7 @@ test("live dashboard ready output is one safe result with no private launch mate
   assert.equal(harness.stderr.chunks.join(""), "");
 });
 
-test("live command validates private state, opens one scrubbed bootstrap path, and waits for signal", async () => {
+test("live command validates private state, opens one scrubbed stable URL, and waits for signal", async () => {
   const events: string[] = [];
   const listeners = new Map<string, () => void>();
   let startOptions: StartLiveDashboardOptions | undefined;
@@ -274,6 +298,7 @@ test("live command validates private state, opens one scrubbed bootstrap path, a
         SECRET_SENTINEL: "must-not-reach-open",
       },
       locale: "zh-CN",
+      port: DASHBOARD_PORT,
       loadConfig: (env) => {
         events.push("load");
         observedConfigEnvironment = env;
@@ -324,7 +349,7 @@ test("live command validates private state, opens one scrubbed bootstrap path, a
       executeOpen: async (executable, args, options) => {
         events.push("open");
         assert.equal(executable, "/usr/bin/open");
-        assert.deepEqual(args, [BOOTSTRAP_PATH]);
+        assert.deepEqual(args, [DASHBOARD_URL]);
         const { signal, ...fixedOptions } = options;
         assert.equal(signal.aborted, false);
         assert.deepEqual(fixedOptions, {
@@ -342,13 +367,13 @@ test("live command validates private state, opens one scrubbed bootstrap path, a
       startDashboard: async (options) => {
         events.push("start");
         startOptions = options;
-        assert.equal(options.privateStateRoot, STATE_DIR);
+        assert.equal(options.port, DASHBOARD_PORT);
         assert.equal(options.locale, "zh-CN");
         assert.equal(options.signal?.aborted, false);
-        await options.dependencies?.openBootstrap?.(BOOTSTRAP_PATH);
+        await options.dependencies?.openDashboard?.(DASHBOARD_URL);
         return {
-          address: { host: "127.0.0.1", port: 53_421 },
-          bootstrapPath: BOOTSTRAP_PATH,
+          address: { host: "127.0.0.1", port: DASHBOARD_PORT },
+          url: DASHBOARD_URL,
           close: async () => {
             events.push("close");
           },
@@ -790,9 +815,13 @@ test("a cancelled startup fences a late open and closes any late-owned dashboard
         openCalls += 1;
       },
       startDashboard: async (options) => {
+        assert.equal(DEFAULT_LIVE_DASHBOARD_PORT, 41_961);
+        assert.equal(options.port, DEFAULT_LIVE_DASHBOARD_PORT);
         enteredResolve?.();
         await startGate;
-        await options.dependencies?.openBootstrap?.(BOOTSTRAP_PATH);
+        await options.dependencies?.openDashboard?.(
+          `http://127.0.0.1:${DEFAULT_LIVE_DASHBOARD_PORT}/`,
+        );
         throw new Error("cancelled startup must not return a dashboard");
       },
     },
@@ -809,13 +838,13 @@ test("a cancelled startup fences a late open and closes any late-owned dashboard
   let resolveLate:
     | ((dashboard: {
         address: { host: "127.0.0.1"; port: number };
-        bootstrapPath: string;
+        url: string;
         close(): Promise<void>;
       }) => void)
     | undefined;
   const lateStart = new Promise<{
     address: { host: "127.0.0.1"; port: number };
-    bootstrapPath: string;
+    url: string;
     close(): Promise<void>;
   }>((resolve) => {
     resolveLate = resolve;
@@ -859,8 +888,8 @@ test("a cancelled startup fences a late open and closes any late-owned dashboard
   lateListeners.get("SIGTERM")?.();
   await lateRun;
   resolveLate?.({
-    address: { host: "127.0.0.1", port: 53_422 },
-    bootstrapPath: BOOTSTRAP_PATH,
+    address: { host: "127.0.0.1", port: DASHBOARD_PORT },
+    url: DASHBOARD_URL,
     close: async () => {
       lateClosed += 1;
     },
@@ -918,7 +947,9 @@ test("live command cleans signal ownership after pre-ready open failure", async 
           throw new Error("private launch detail");
         },
         startDashboard: async (options) => {
-          await options.dependencies?.openBootstrap?.(BOOTSTRAP_PATH);
+          await options.dependencies?.openDashboard?.(
+            `http://127.0.0.1:${DEFAULT_LIVE_DASHBOARD_PORT}/`,
+          );
           throw new Error("unreachable");
         },
       },
@@ -957,6 +988,17 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
       code: gatewayCliExitCodes.unavailable,
       safeCode: "LIVE_DASHBOARD_OPEN_FAILED",
       stderr: "[embassy] gateway unavailable.\n",
+    },
+    {
+      error: new BridgeError(
+        "LIVE_DASHBOARD_PORT_IN_USE",
+        "private bind detail",
+        true,
+      ),
+      code: gatewayCliExitCodes.unavailable,
+      safeCode: "LIVE_DASHBOARD_PORT_IN_USE",
+      stderr:
+        "[embassy] gateway unavailable.\n[embassy] close the process holding the live dashboard port, or choose another with --port <n>.\n",
     },
     {
       error: new Error("private startup detail"),

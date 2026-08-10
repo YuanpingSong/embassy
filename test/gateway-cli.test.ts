@@ -301,9 +301,12 @@ test("bare invocation and help flags print localized usage without side effects"
       },
     });
     assert.equal(exitCode, gatewayCliExitCodes.ok);
-    assert.match(stdout.chunks.join(""), current.expected);
-    assert.match(stdout.chunks.join(""), /refresh-dashboard/);
-    assert.match(stdout.chunks.join(""), /wait-delivery/);
+    const help = stdout.chunks.join("");
+    assert.match(help, current.expected);
+    assert.match(help, /refresh-dashboard/);
+    assert.match(help, /wait-delivery/);
+    assert.match(help, /dashboard --live \[--port <n>\]/);
+    assert.match(help, /--port <n>.*1024.*65535.*41961/);
     assert.equal(stderr.chunks.join(""), "");
   }
 });
@@ -1087,6 +1090,56 @@ test("all five stderr categories localize without changing stdout protocol", asy
         assert.equal(stdout.chunks.join(""), englishStdout, scenario.kind);
       }
     }
+  }
+});
+
+test("invalid live-upgrade control responses name the broker restart recovery", async () => {
+  const expected = {
+    en: "[embassy] gateway unavailable.\n[embassy] restart the broker, then retry.\n",
+    "zh-CN":
+      "[embassy] 网关不可用。\n[embassy] 请重启 Embassy 网关进程，然后重试。\n",
+  } as const;
+
+  for (const locale of ["en", "zh-CN"] as const) {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(["health", "--lang", locale], {
+      env: {},
+      stdout,
+      stderr,
+      loadConfig: () => ({
+        stateDir: "/private/fake-state",
+        controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"],
+        stallNoticeMs: 30_000,
+        steeringEnabled: true,
+        inboundMode: "paired",
+        limits: {} as never,
+      }),
+      validateControlSocket: async () => undefined,
+      sendRequest: async () => {
+        throw new GatewayControlTransportError(
+          "CONTROL_INVALID_RESPONSE",
+          "private skew detail",
+        );
+      },
+    });
+
+    assert.equal(code, gatewayCliExitCodes.unavailable);
+    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+      ok: false,
+      command: "health",
+      error: {
+        code: "CONTROL_INVALID_RESPONSE",
+        ambiguous: false,
+        retryable: true,
+      },
+    });
+    assert.equal(stderr.chunks.join(""), expected[locale]);
+    assert.doesNotMatch(
+      `${stdout.chunks.join("")} ${stderr.chunks.join("")}`,
+      /private skew detail/,
+    );
   }
 });
 

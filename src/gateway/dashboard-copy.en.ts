@@ -420,8 +420,6 @@ export const dashboardCopyEn = {
   "live.diagnostics.title": "Diagnostics",
   "live.metric.revision": "Stream revision",
   "live.stream.reset": "Source restarted; view resynchronized.",
-  "live.bootstrap.title": "Open Embassy live dashboard",
-  "live.bootstrap.open": "Open Embassy live dashboard",
   "live.http.badRequest": "Bad request.",
   "live.http.forbidden": "Forbidden.",
   "live.http.notFound": "Not found.",

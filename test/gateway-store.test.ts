@@ -290,6 +290,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.equal(config.steeringEnabled, true);
   assert.equal(config.deliveryNotices, "merged");
   assert.equal(config.compatibilityPolicy, "observed");
+  assert.equal(Object.hasOwn(config, "dashboardPort"), false);
   assert.equal(config.limits.messageDeadlineMs, 14_400_000);
   assert.equal(config.stallNoticeMs, 120_000);
   assert.equal(config.limits.maxMessageBytes, 16_384);

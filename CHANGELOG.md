@@ -6,9 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `embassy dashboard --live` now uses the stable direct URL `http://127.0.0.1:41961/` by default, with a per-invocation `--port <n>` override accepting 1024–65535. Multiple windows and browsers can use the same companion; a port collision fails explicitly, points to `--port`, and never falls back.
+
 ### Removed
 
 - Conversation hop accounting and `EMBASSY_MAX_HOPS`; caller identity, conversation membership, route policy, deadlines, rate limits, and bounded queues remain the delivery safeguards.
+- The live dashboard's one-use fragment token, cookie/session exchange, random instance path, and bootstrap file.
+
+### Security
+
+- The live dashboard now states its simpler trust boundary directly: it has no local-process or UID authentication and assumes a trusted single-user machine. Exact Host checks remain on every request; exact Origin plus `X-Embassy-Request` remain mandatory on every POST; `OPTIONS` and CORS remain disabled. These request guards constrain browser origins, not local software that can reach or spoof loopback.
 
 ## [1.2.0] - 2026-08-10
 

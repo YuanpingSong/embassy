@@ -385,8 +385,6 @@ export const dashboardCopyZhCn = {
   "live.diagnostics.title": "诊断",
   "live.metric.revision": "流版本",
   "live.stream.reset": "来源已重启；视图已重新同步。",
-  "live.bootstrap.title": "打开 Embassy 实时面板",
-  "live.bootstrap.open": "打开 Embassy 实时面板",
   "live.http.badRequest": "请求无效。",
   "live.http.forbidden": "禁止访问。",
   "live.http.notFound": "未找到。",

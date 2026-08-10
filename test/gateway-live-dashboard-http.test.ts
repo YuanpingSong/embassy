@@ -19,12 +19,8 @@ import type {
   LiveDashboardStreamWriter,
 } from "../src/gateway/live-dashboard-stream.js";
 
-const INSTANCE_PATH = "/instance_0123456789abcdef";
-const HOST = "127.0.0.1:43127";
+const HOST = "127.0.0.1:41961";
 const ORIGIN = `http://${HOST}`;
-const COOKIE_NAME = "embassy_live";
-const CAPABILITY = Buffer.alloc(32, 0x31).toString("base64url");
-const SESSION_SECRET = Buffer.alloc(32, 0x73).toString("base64url");
 const ASSETS = Object.freeze({
   shellHtml: "<!doctype html><title>Embassy live</title>",
   clientJavaScript: "globalThis.embassyLive = true;",
@@ -144,12 +140,8 @@ function createHandler(
   now?: () => number,
 ): LiveDashboardRequestHandler {
   return createLiveDashboardRequestHandler({
-    instancePath: INSTANCE_PATH,
     expectedHost: HOST,
     expectedOrigin: ORIGIN,
-    capability: CAPABILITY,
-    sessionSecret: SESSION_SECRET,
-    cookieName: COOKIE_NAME,
     lang,
     assets: ASSETS,
     hub,
@@ -178,16 +170,8 @@ function postHeaders(
   ];
 }
 
-function authenticatedHeaders(additions: readonly string[] = []): string[] {
-  return postHeaders([
-    "Cookie",
-    `${COOKIE_NAME}=${SESSION_SECRET}`,
-    ...additions,
-  ]);
-}
-
 function actionHeaders(body: string): string[] {
-  return authenticatedHeaders([
+  return postHeaders([
     "Content-Type",
     "application/json",
     "Content-Length",
@@ -229,18 +213,27 @@ function assertSecurityHeaders(response: SyntheticResponse): void {
   assert.equal(response.headers["Access-Control-Allow-Credentials"], undefined);
 }
 
+function assertNoSetCookie(response: SyntheticResponse): void {
+  assert.equal(
+    Object.keys(response.headers).some(
+      (name) => name.toLowerCase() === "set-cookie",
+    ),
+    false,
+  );
+}
+
 test("serves only the three inert same-origin assets with security headers", async () => {
   const handler = createHandler();
   const fixtures = [
-    ["bootstrap", ASSETS.shellHtml, "text/html; charset=utf-8"],
-    ["client.js", ASSETS.clientJavaScript, "text/javascript; charset=utf-8"],
-    ["app.css", ASSETS.styleSheet, "text/css; charset=utf-8"],
+    ["/", ASSETS.shellHtml, "text/html; charset=utf-8"],
+    ["/client.js", ASSETS.clientJavaScript, "text/javascript; charset=utf-8"],
+    ["/app.css", ASSETS.styleSheet, "text/css; charset=utf-8"],
   ] as const;
 
-  for (const [leaf, body, contentType] of fixtures) {
+  for (const [target, body, contentType] of fixtures) {
     const response = await invoke(handler, {
       method: "GET",
-      target: `${INSTANCE_PATH}/${leaf}`,
+      target,
       rawHeaders: navigationHeaders(),
     });
     assert.equal(response.statusCode, 200);
@@ -251,15 +244,15 @@ test("serves only the three inert same-origin assets with security headers", asy
 
   const shell = await invoke(handler, {
     method: "GET",
-    target: `${INSTANCE_PATH}/bootstrap`,
+    target: "/",
     rawHeaders: navigationHeaders(),
   });
   assert.match(shell.headers["Content-Security-Policy"] ?? "", /connect-src 'self'/u);
 
   for (const target of [
-    `${INSTANCE_PATH}/bootstrap?debug=1`,
-    `${INSTANCE_PATH}/missing`,
-    `${INSTANCE_PATH}/`,
+    "/?debug=1",
+    "/missing",
+    "/bootstrap",
   ]) {
     const response = await invoke(handler, {
       method: "GET",
@@ -286,7 +279,7 @@ test("localizes every human HTTP fallback without changing status or security he
       "请求无效。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "GET",
-        target: `${INSTANCE_PATH}/bootstrap`,
+        target: "/",
         rawHeaders: ["Host", HOST, "Host", HOST],
       }),
     ],
@@ -295,7 +288,7 @@ test("localizes every human HTTP fallback without changing status or security he
       "禁止访问。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "POST",
-        target: `${INSTANCE_PATH}/snapshot`,
+        target: "/snapshot",
         rawHeaders: ["Host", HOST, "Origin", ORIGIN],
       }),
     ],
@@ -304,7 +297,7 @@ test("localizes every human HTTP fallback without changing status or security he
       "未找到。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "GET",
-        target: `${INSTANCE_PATH}/missing`,
+        target: "/missing",
         rawHeaders: navigationHeaders(),
       }),
     ],
@@ -313,7 +306,7 @@ test("localizes every human HTTP fallback without changing status or security he
       "不允许使用此方法。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "OPTIONS",
-        target: `${INSTANCE_PATH}/snapshot`,
+        target: "/snapshot",
         rawHeaders: postHeaders(),
       }),
     ],
@@ -322,12 +315,12 @@ test("localizes every human HTTP fallback without changing status or security he
       "请求正文过大。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "POST",
-        target: `${INSTANCE_PATH}/session`,
+        target: "/action",
         rawHeaders: postHeaders([
           "Content-Type",
-          "text/plain",
+          "application/json",
           "Content-Length",
-          String(LIVE_DASHBOARD_LIMITS.maximumSessionBodyBytes + 1),
+          String(LIVE_DASHBOARD_LIMITS.maximumActionBodyBytes + 1),
         ]),
       }),
     ],
@@ -345,10 +338,10 @@ test("localizes every human HTTP fallback without changing status or security he
       "不支持此媒体类型。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "POST",
-        target: `${INSTANCE_PATH}/session`,
+        target: "/action",
         rawHeaders: postHeaders([
           "Content-Type",
-          "application/json",
+          "text/plain",
           "Content-Length",
           "0",
         ]),
@@ -364,8 +357,8 @@ test("localizes every human HTTP fallback without changing status or security he
         ),
         {
           method: "POST",
-          target: `${INSTANCE_PATH}/stream`,
-          rawHeaders: authenticatedHeaders(),
+          target: "/stream",
+          rawHeaders: postHeaders(),
         },
       ),
     ],
@@ -374,7 +367,7 @@ test("localizes every human HTTP fallback without changing status or security he
       "请求头过大。\n",
       invoke(createHandler(undefined, "zh-CN"), {
         method: "GET",
-        target: `${INSTANCE_PATH}/bootstrap`,
+        target: "/",
         rawHeaders: [
           "Host",
           HOST,
@@ -388,8 +381,8 @@ test("localizes every human HTTP fallback without changing status or security he
       "面板快照不可用。\n",
       invoke(createHandler(new SyntheticHub(null), "zh-CN"), {
         method: "POST",
-        target: `${INSTANCE_PATH}/snapshot`,
-        rawHeaders: authenticatedHeaders(),
+        target: "/snapshot",
+        rawHeaders: postHeaders(),
       }),
     ],
     [
@@ -397,8 +390,8 @@ test("localizes every human HTTP fallback without changing status or security he
       "请求失败。\n",
       invoke(createHandler(new FailingHub(), "zh-CN"), {
         method: "POST",
-        target: `${INSTANCE_PATH}/snapshot`,
-        rawHeaders: authenticatedHeaders(),
+        target: "/snapshot",
+        rawHeaders: postHeaders(),
       }),
     ],
   ];
@@ -415,94 +408,42 @@ test("localizes every human HTTP fallback without changing status or security he
   }
 });
 
-test("exchanges the fragment capability exactly once for a scoped session cookie", async () => {
+test("rejects bodies on empty-post API routes", async () => {
   const handler = createHandler();
-  const wrong = "x".repeat(CAPABILITY.length);
-  const sessionHeaders = (
-    body: string,
-    contentType = "text/plain",
-  ): string[] =>
-    postHeaders([
-      "Content-Type",
-      contentType,
-      "Content-Length",
-      String(Buffer.byteLength(body)),
-    ]);
-
-  const rejected = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/session`,
-    rawHeaders: sessionHeaders(wrong),
-    body: wrong,
-  });
-  assert.equal(rejected.statusCode, 403);
-
-  const accepted = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/session`,
-    rawHeaders: sessionHeaders(CAPABILITY, "text/plain;charset=UTF-8"),
-    body: CAPABILITY,
-  });
-  assert.equal(accepted.statusCode, 204);
-  assert.equal(accepted.bodyText(), "");
-  assert.equal(
-    accepted.headers["Set-Cookie"],
-    `${COOKIE_NAME}=${SESSION_SECRET}; Path=${INSTANCE_PATH}/; HttpOnly; SameSite=Strict`,
-  );
-  assertSecurityHeaders(accepted);
-
-  const replayed = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/session`,
-    rawHeaders: sessionHeaders(CAPABILITY),
-    body: CAPABILITY,
-  });
-  assert.equal(replayed.statusCode, 403);
-});
-
-test("enforces body framing and the bounded text capability protocol", async () => {
-  const handler = createHandler();
-
-  const wrongMediaType = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/session`,
-    rawHeaders: postHeaders([
-      "Content-Type",
-      "application/json",
-      "Content-Length",
-      "2",
-    ]),
-    body: "{}",
-  });
-  assert.equal(wrongMediaType.statusCode, 415);
-
-  const tooLarge = "z".repeat(
-    LIVE_DASHBOARD_LIMITS.maximumSessionBodyBytes + 1,
-  );
-  const oversized = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/session`,
-    rawHeaders: postHeaders([
-      "Content-Type",
-      "text/plain",
-      "Content-Length",
-      String(Buffer.byteLength(tooLarge)),
-    ]),
-    body: tooLarge,
-  });
-  assert.equal(oversized.statusCode, 413);
 
   const bodyOnSnapshot = await invoke(handler, {
     method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
-    rawHeaders: authenticatedHeaders(["Content-Length", "1"]),
+    target: "/snapshot",
+    rawHeaders: postHeaders(["Content-Length", "1"]),
     body: "x",
   });
   assert.equal(bodyOnSnapshot.statusCode, 400);
   assertSecurityHeaders(bodyOnSnapshot);
 });
 
-test("action route forwards only the four exact authenticated verbs", async () => {
+test("requires exact Host, Origin, and request marker on every API route", async () => {
+  const handler = createHandler();
+  const rejectedHeaders = [
+    ["Origin", ORIGIN, "X-Embassy-Request", "1"],
+    ["Host", HOST, "X-Embassy-Request", "1"],
+    ["Host", HOST, "Origin", ORIGIN],
+    ["Host", HOST, "Origin", ORIGIN, "X-Embassy-Request", "0"],
+  ] as const;
+
+  for (const target of ["/snapshot", "/stream", "/action"] as const) {
+    for (const rawHeaders of rejectedHeaders) {
+      const response = await invoke(handler, {
+        method: "POST",
+        target,
+        rawHeaders: [...rawHeaders],
+      });
+      assert.equal(response.statusCode, 403, target);
+      assertSecurityHeaders(response);
+    }
+  }
+});
+
+test("action route forwards only the four exact verbs", async () => {
   const actions = new SyntheticActions();
   const handler = createHandler(undefined, "en", actions);
   const fixtures: LiveDashboardAction[] = [
@@ -527,7 +468,7 @@ test("action route forwards only the four exact authenticated verbs", async () =
     const body = JSON.stringify(action);
     const response = await invoke(handler, {
       method: "POST",
-      target: `${INSTANCE_PATH}/action`,
+      target: "/action",
       rawHeaders: actionHeaders(body),
       body,
     });
@@ -546,7 +487,7 @@ test("action route forwards only the four exact authenticated verbs", async () =
     createHandler(undefined, "en", refused),
     {
       method: "POST",
-      target: `${INSTANCE_PATH}/action`,
+      target: "/action",
       rawHeaders: actionHeaders(refusedBody),
       body: refusedBody,
     },
@@ -558,7 +499,7 @@ test("action route forwards only the four exact authenticated verbs", async () =
   });
 });
 
-test("action route rejects malformed or unauthenticated requests before broker contact", async () => {
+test("action route rejects malformed or cross-origin requests before broker contact", async () => {
   const actions = new SyntheticActions();
   const handler = createHandler(undefined, "en", actions);
   const validBody = JSON.stringify({ action: "refresh_dashboard" });
@@ -601,19 +542,23 @@ test("action route rejects malformed or unauthenticated requests before broker c
     },
     {
       method: "POST",
-      headers: postHeaders([
+      headers: [
+        "Origin",
+        ORIGIN,
+        "X-Embassy-Request",
+        "1",
         "Content-Type",
         "application/json",
         "Content-Length",
         String(Buffer.byteLength(validBody)),
-      ]),
+      ],
       body: validBody,
       status: 403,
     },
     {
       method: "POST",
       headers: actionHeaders(validBody).map((value, index) =>
-        index === 1 ? "localhost:43127" : value,
+        index === 1 ? "localhost:41961" : value,
       ),
       body: validBody,
       status: 403,
@@ -621,14 +566,14 @@ test("action route rejects malformed or unauthenticated requests before broker c
     {
       method: "POST",
       headers: actionHeaders(validBody).map((value, index) =>
-        index === 3 ? "http://localhost:43127" : value,
+        index === 3 ? "http://localhost:41961" : value,
       ),
       body: validBody,
       status: 403,
     },
     {
       method: "POST",
-      headers: authenticatedHeaders([
+      headers: postHeaders([
         "Content-Type",
         "text/plain",
         "Content-Length",
@@ -639,7 +584,7 @@ test("action route rejects malformed or unauthenticated requests before broker c
     },
     {
       method: "POST",
-      headers: authenticatedHeaders([
+      headers: postHeaders([
         "Content-Type",
         "application/json",
         "Content-Length",
@@ -677,7 +622,7 @@ test("action route rejects malformed or unauthenticated requests before broker c
     },
     {
       method: "POST",
-      headers: authenticatedHeaders(["Content-Type", "application/json"]),
+      headers: postHeaders(["Content-Type", "application/json"]),
       body: validBody,
       status: 400,
     },
@@ -702,7 +647,7 @@ test("action route rejects malformed or unauthenticated requests before broker c
   for (const fixture of cases) {
     const response = await invoke(handler, {
       method: fixture.method,
-      target: `${INSTANCE_PATH}/action`,
+      target: "/action",
       rawHeaders: fixture.headers,
       ...(fixture.body === undefined ? {} : { body: fixture.body }),
     });
@@ -720,7 +665,7 @@ test("action rate limit rejects the seventh request and refills linearly", async
   const invokeAction = async (): Promise<SyntheticResponse> =>
     await invoke(handler, {
       method: "POST",
-      target: `${INSTANCE_PATH}/action`,
+      target: "/action",
       rawHeaders: actionHeaders(body),
       body,
     });
@@ -765,7 +710,7 @@ test("action failures are normalized without leaking broker or exception detail"
       createHandler(undefined, "en", executor),
       {
         method: "POST",
-        target: `${INSTANCE_PATH}/action`,
+        target: "/action",
         rawHeaders: actionHeaders(body),
         body,
       },
@@ -785,12 +730,12 @@ test("delegates duplicate, forwarding, origin, and method rejection to strict va
   const cases = [
     {
       method: "POST",
-      headers: postHeaders([], "localhost:43127"),
+      headers: postHeaders([], "localhost:41961"),
       expected: 403,
     },
     {
       method: "POST",
-      headers: postHeaders([], HOST, "http://localhost:43127"),
+      headers: postHeaders([], HOST, "http://localhost:41961"),
       expected: 403,
     },
     {
@@ -818,50 +763,71 @@ test("delegates duplicate, forwarding, origin, and method rejection to strict va
   for (const fixture of cases) {
     const response = await invoke(handler, {
       method: fixture.method,
-      target: `${INSTANCE_PATH}/snapshot`,
+      target: "/snapshot",
       rawHeaders: [...fixture.headers],
     });
     assert.equal(response.statusCode, fixture.expected);
     assertSecurityHeaders(response);
   }
 
-  const duplicateCookie = await invoke(handler, {
+  const duplicateRequestMarker = await invoke(handler, {
     method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
-    rawHeaders: authenticatedHeaders([
-      "Cookie",
-      `${COOKIE_NAME}=${SESSION_SECRET}`,
-    ]),
+    target: "/snapshot",
+    rawHeaders: [...postHeaders(), "X-Embassy-Request", "1"],
   });
-  assert.equal(duplicateCookie.statusCode, 400);
+  assert.equal(duplicateRequestMarker.statusCode, 400);
 });
 
-test("requires the exact session cookie and performs a one-shot safe refresh", async () => {
+test("allows two independent windows to use every API without cookies", async () => {
+  const hub = new SyntheticHub();
+  const actions = new SyntheticActions();
+  const handler = createHandler(hub, "en", actions);
+  const actionBody = JSON.stringify({ action: "refresh_dashboard" });
+
+  const openWindow = async (): Promise<readonly SyntheticResponse[]> => {
+    const shell = await invoke(handler, {
+      method: "GET",
+      target: "/",
+      rawHeaders: navigationHeaders(),
+    });
+    const snapshot = await invoke(handler, {
+      method: "POST",
+      target: "/snapshot",
+      rawHeaders: postHeaders(),
+    });
+    const action = await invoke(handler, {
+      method: "POST",
+      target: "/action",
+      rawHeaders: actionHeaders(actionBody),
+      body: actionBody,
+    });
+    const stream = await invoke(handler, {
+      method: "POST",
+      target: "/stream",
+      rawHeaders: postHeaders(),
+    });
+    return [shell, snapshot, action, stream];
+  };
+
+  const firstWindow = await openWindow();
+  const secondWindow = await openWindow();
+  for (const [index, response] of [...firstWindow, ...secondWindow].entries()) {
+    assert.equal(response.statusCode, 200, `response ${index + 1}`);
+    assertNoSetCookie(response);
+    assertSecurityHeaders(response);
+  }
+  assert.equal(hub.refreshCalled, 2);
+  assert.equal(hub.addCalled, 2);
+  assert.equal(actions.calls.length, 2);
+});
+
+test("performs a one-shot safe refresh without browser credentials", async () => {
   const hub = new SyntheticHub();
   const handler = createHandler(hub);
-  const missing = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
-    rawHeaders: postHeaders(),
-  });
-  assert.equal(missing.statusCode, 403);
-  assert.equal(hub.refreshCalled, 0);
-
-  const wrong = await invoke(handler, {
-    method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
-    rawHeaders: postHeaders([
-      "Cookie",
-      `${COOKIE_NAME}=${Buffer.alloc(32, 0x72).toString("base64url")}`,
-    ]),
-  });
-  assert.equal(wrong.statusCode, 403);
-  assert.equal(hub.refreshCalled, 0);
-
   const accepted = await invoke(handler, {
     method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
-    rawHeaders: authenticatedHeaders(),
+    target: "/snapshot",
+    rawHeaders: postHeaders(),
   });
   assert.equal(accepted.statusCode, 200);
   assert.equal(hub.refreshCalled, 1);
@@ -875,20 +841,20 @@ test("requires the exact session cookie and performs a one-shot safe refresh", a
   const unavailableHandler = createHandler(new SyntheticHub(null));
   const unavailable = await invoke(unavailableHandler, {
     method: "POST",
-    target: `${INSTANCE_PATH}/snapshot`,
-    rawHeaders: authenticatedHeaders(),
+    target: "/snapshot",
+    rawHeaders: postHeaders(),
   });
   assert.equal(unavailable.statusCode, 503);
   assert.doesNotMatch(unavailable.bodyText(), /observer|exception|stack/iu);
 });
 
-test("attaches an authenticated SSE adapter and rejects a fifth stream", async () => {
+test("attaches a same-origin SSE adapter and rejects a fifth stream", async () => {
   const hub = new SyntheticHub();
   const handler = createHandler(hub);
   const response = await invoke(handler, {
     method: "POST",
-    target: `${INSTANCE_PATH}/stream`,
-    rawHeaders: authenticatedHeaders(),
+    target: "/stream",
+    rawHeaders: postHeaders(),
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.writableEnded, false);
@@ -923,24 +889,20 @@ test("attaches an authenticated SSE adapter and rejects a fifth stream", async (
   );
   const full = await invoke(createHandler(fullHub), {
     method: "POST",
-    target: `${INSTANCE_PATH}/stream`,
-    rawHeaders: authenticatedHeaders(),
+    target: "/stream",
+    rawHeaders: postHeaders(),
   });
   assert.equal(full.statusCode, 429);
   assert.equal(fullHub.addCalled, 0);
   assertSecurityHeaders(full);
 });
 
-test("rejects invalid construction secrets and non-loopback origins", () => {
+test("rejects non-loopback and mismatched origins", () => {
   assert.throws(
     () =>
       createLiveDashboardRequestHandler({
-        instancePath: INSTANCE_PATH,
-        expectedHost: "localhost:43127",
-        expectedOrigin: "http://localhost:43127",
-        capability: CAPABILITY,
-        sessionSecret: SESSION_SECRET,
-        cookieName: COOKIE_NAME,
+        expectedHost: "localhost:41961",
+        expectedOrigin: "http://localhost:41961",
         lang: "en",
         assets: ASSETS,
         hub: new SyntheticHub(),
@@ -951,17 +913,13 @@ test("rejects invalid construction secrets and non-loopback origins", () => {
   assert.throws(
     () =>
       createLiveDashboardRequestHandler({
-        instancePath: INSTANCE_PATH,
         expectedHost: HOST,
-        expectedOrigin: ORIGIN,
-        capability: "not-a-capability",
-        sessionSecret: SESSION_SECRET,
-        cookieName: COOKIE_NAME,
+        expectedOrigin: "http://127.0.0.1:43128",
         lang: "en",
         assets: ASSETS,
         hub: new SyntheticHub(),
         actions: new SyntheticActions(),
       }),
-    /LIVE_DASHBOARD_CAPABILITY_INVALID/u,
+    /LIVE_DASHBOARD_ORIGIN_INVALID/u,
   );
 });

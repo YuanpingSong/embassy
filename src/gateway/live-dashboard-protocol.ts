@@ -1,11 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
-
 export const LIVE_DASHBOARD_LIMITS = Object.freeze({
   maximumHeaderBytes: 8 * 1024,
   maximumRequestTargetBytes: 2 * 1024,
   maximumConnections: 16,
   maximumStreams: 4,
-  maximumSessionBodyBytes: 256,
   maximumActionBodyBytes: 1_024,
   maximumActionsPerMinute: 6,
   pollIntervalMs: 1_000,
@@ -18,8 +15,7 @@ export const LIVE_DASHBOARD_LIMITS = Object.freeze({
 
 export type LiveDashboardRequestKind =
   | "navigation"
-  | "session"
-  | "authenticated";
+  | "api";
 
 export type LiveDashboardRequestMetadata = Readonly<{
   method: string | undefined;
@@ -176,55 +172,4 @@ export function liveDashboardSecurityHeaders(
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
   });
-}
-
-export function readSingleCookie(
-  cookieHeader: string | undefined,
-  cookieName: string,
-): string | undefined {
-  if (
-    cookieHeader === undefined ||
-    cookieHeader.length > LIVE_DASHBOARD_LIMITS.maximumHeaderBytes ||
-    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(cookieName)
-  ) {
-    return undefined;
-  }
-  let found: string | undefined;
-  for (const field of cookieHeader.split(";")) {
-    const separator = field.indexOf("=");
-    if (separator < 1) continue;
-    const name = field.slice(0, separator).trim();
-    if (name !== cookieName) continue;
-    if (found !== undefined) return undefined;
-    const value = field.slice(separator + 1).trim();
-    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(value)) return undefined;
-    found = value;
-  }
-  return found;
-}
-
-export function equalSecret(
-  supplied: string | undefined,
-  expected: string | undefined,
-): boolean {
-  if (supplied === undefined || expected === undefined) return false;
-  const suppliedBytes = Buffer.from(supplied, "utf8");
-  const expectedBytes = Buffer.from(expected, "utf8");
-  if (suppliedBytes.length !== expectedBytes.length) return false;
-  return timingSafeEqual(suppliedBytes, expectedBytes);
-}
-
-export function sessionCookieHeader(
-  cookieName: string,
-  value: string,
-  instancePath: string,
-): string {
-  if (
-    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(cookieName) ||
-    !/^[A-Za-z0-9_-]{43,64}$/u.test(value) ||
-    !/^\/[A-Za-z0-9_-]{16,128}$/u.test(instancePath)
-  ) {
-    throw new Error("INVALID_LIVE_DASHBOARD_COOKIE");
-  }
-  return `${cookieName}=${value}; Path=${instancePath}/; HttpOnly; SameSite=Strict`;
 }

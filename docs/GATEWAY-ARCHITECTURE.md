@@ -40,8 +40,8 @@ Embassy uses one private same-user Unix-domain control socket for its thin
 clients and generates a private static dashboard page in each supported
 language. `embassy serve` does not add a TCP listener, HTTP server, or public
 API. The opt-in `embassy dashboard --live` companion is a separate foreground
-process that binds an authenticated listener with four bounded route actions
-on `127.0.0.1`; it is
+process that binds an unauthenticated stable-port listener with four bounded
+route actions on exact `127.0.0.1`; it is
 described under [Live dashboard companion](#live-dashboard-companion).
 
 ### Why this uses the new feature, but is not skill-only
@@ -156,7 +156,7 @@ The status below is intentionally narrower than the target architecture.
 | Neutral gateway types, metadata store, route fencing, bounded queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention (CO #36) |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
-| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the loopback listener, capability-to-cookie exchange, projection, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
+| Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the stable loopback listener, direct multi-browser access, projection, request guards, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter pinned to 2.1.226 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224–2.1.226 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
 | Exact Claude 2.1.226 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
 | Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
@@ -757,31 +757,31 @@ connector, peer, route, message, or alert rows are truncated.
 
 ### Live dashboard companion
 
-`embassy dashboard --live` is the opt-in browser view of the same projection.
+`embassy dashboard --live` is the opt-in browser view of broker state,
+including bounded retained bodies in delivery detail; the static dashboard's
+public projection remains metadata-only.
 It is a separate foreground process, not a mode of `embassy serve`: it holds no
 provider capability, owns no registry record, and reaches the broker over the
 same private control socket every other client command uses, so it reports the
 gateway as unavailable when nothing is serving.
 
-- **Bind.** One `http.createServer` listener on `127.0.0.1` with an ephemeral
-  port, under a random per-run instance path. No other interface is bound and
-  no port is fixed or advertised.
-- **Bootstrap.** Startup mints one 256-bit (32-byte) capability, base64url
-  encoded, carried only in the URL fragment. The bootstrap URL is written to a
-  mode-0600 `bootstrap.html` inside a fresh mode-0700 `live-<random>` run
-  directory under the private state root, opened `wx` and identity-checked, and
-  both file and directory are removed when the companion exits.
-- **Exchange.** The capability is single-use. It is exchanged once for a
-  path-scoped `HttpOnly` `SameSite=Strict` session cookie; the fragment never
-  reaches the server as part of a request line.
+- **Bind.** One `http.createServer` listener binds exact `127.0.0.1` on stable
+  port `41961` by default, or the integer from the per-invocation `--port <n>`
+  option in the closed range 1024 through 65535. The direct root URL is
+  `http://127.0.0.1:<port>/`. A collision fails with
+  `LIVE_DASHBOARD_PORT_IN_USE` and directs the operator to `--port`; there is no
+  ephemeral-port fallback. No other interface is bound.
+- **Access.** The root URL is usable concurrently from multiple windows, tabs,
+  and browsers. There is no capability token, URL fragment, cookie, browser
+  session, random instance path, or bootstrap file.
 - **Request checks.** The exact Host header is validated on every request.
-  Navigation GETs may omit Origin and carry no sentinel; non-navigation POSTs
-  require the exact Origin plus `X-Embassy-Request`. There are no CORS headers,
-  no cross-origin reads, and no routes outside the instance path.
+  Navigation GETs may omit Origin; every POST requires the exact Origin plus
+  `X-Embassy-Request: 1`. `OPTIONS` is not accepted, there are no CORS headers,
+  and cross-origin reads are unavailable.
 - **Projection and actions.** The companion observes through
   `observe_snapshot`. Its only mutations are exact two-endpoint `pair`,
   `unpair`, `refresh_dashboard`, and `remove_stale_codex_registration`
-  control calls behind one closed authenticated `/action` route. The recovery
+  control calls behind one closed `/action` route. The recovery
   action carries only a canonical public `codex-*` alias and is accepted only
   after the broker revalidates that the route is stale and its endpoint
   generation is dead; native task and generation IDs never enter the browser
@@ -796,9 +796,11 @@ gateway as unavailable when nothing is serving.
   fresh observation. An observation may
   settle already-due lifecycle deliveries before projecting, which is a broker
   timer effect, not additional browser authority.
-- **Containment.** Authentication scopes the browser, not the machine. Any
-  process running as the same OS user — including root and browser extensions
-  with local filesystem access — can read what the browser can read.
+- **Containment.** The loopback server deliberately performs no local-process
+  or UID authentication. It assumes a trusted single-user machine: any local
+  software that can reach or spoof loopback can read the live view and invoke
+  the bounded actions. Host, Origin, and sentinel checks constrain ambient
+  browser-origin requests; they do not authenticate local software.
 
 `--lang en|zh-CN` selects the companion's display language. It has no effect on
 the static pair, which is always written in both languages.

@@ -1,13 +1,13 @@
 ---
 name: embassy-peer
-description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for native inbound messaging, list available peers, open the local dashboard, pair with and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
+description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for native inbound messaging, list available peers, refresh the operator's static dashboard, pair with and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
 ---
 
 # Embassy Peer Gateway
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. `pair` and `unpair` carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the authenticated live dashboard creates or removes an edge without attestation.
+Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. `pair` and `unpair` carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the operator-facing live dashboard creates or removes an edge without that task attestation.
 
 If `CALLER_IDENTITY_CONFLICT` reports that both agent identities were inherited, explain that the Codex App Server daemon may have been started inside an agent session. Tell the operator to run `codex app-server daemon restart` from a normal terminal. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
 
@@ -207,4 +207,15 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.
 
 
-Agents do not use the live dashboard; it is an operator-facing browser surface whose only mutations are explicitly confirmed two-endpoint pair, unpair, and refresh-discovery actions. It has no registration, send, reply, approval, interruption, settings, or generic provider authority. Agent-facing paths remain `embassy status` for a sanitized snapshot and the static `gateway-dashboard.html` for offline metadata. A status snapshot observation may settle already-due lifecycle deliveries before projecting state.
+Agents do not use the live dashboard. It is an operator-facing browser surface
+on exact `127.0.0.1`, using stable port `41961` by default or the
+per-invocation `--port <n>`. It deliberately has no login, token, cookie, browser
+session, or local-process/UID authentication and assumes a trusted single-user
+machine; local software that can reach or spoof loopback can use it. Its only
+mutations are explicitly confirmed two-endpoint pair, unpair,
+refresh-discovery, and broker-guarded stale-registration-removal actions. It
+has no registration creation, live unregistration, send, reply, approval,
+interruption, settings, or generic provider authority. Agent-facing paths
+remain `embassy status` for a sanitized snapshot and the static
+`gateway-dashboard.html` for offline metadata. A status snapshot observation
+may settle already-due lifecycle deliveries before projecting state.

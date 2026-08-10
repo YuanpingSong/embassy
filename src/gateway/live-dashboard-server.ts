@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { BridgeError } from "../errors.js";
 import { LIVE_DASHBOARD_LIMITS } from "./live-dashboard-protocol.js";
 
 export type LiveDashboardServerAddress = Readonly<{
@@ -21,7 +22,7 @@ export type LiveDashboardHttpServer = {
   listen(
     options: Readonly<{
       host: "127.0.0.1";
-      port: 0;
+      port: number;
       exclusive: true;
     }>,
   ): void;
@@ -103,14 +104,35 @@ export type BoundLiveDashboardServer = Readonly<{
   close(): Promise<void>;
 }>;
 
+function normalizedBindError(error: Error, port: number): Error {
+  if (
+    "code" in error &&
+    (error as Error & Readonly<{ code?: unknown }>).code === "EADDRINUSE"
+  ) {
+    return new BridgeError(
+      "LIVE_DASHBOARD_PORT_IN_USE",
+      `Live dashboard port ${port} is already in use. Close the holding process or choose another with --port <n>.`,
+      true,
+    );
+  }
+  return error;
+}
+
 export async function bindLiveDashboardServer(
   server: LiveDashboardHttpServer,
+  port: number,
   signal?: AbortSignal,
 ): Promise<BoundLiveDashboardServer> {
   server.maxConnections = LIVE_DASHBOARD_LIMITS.maximumConnections;
   server.headersTimeout = LIVE_DASHBOARD_LIMITS.headersTimeoutMs;
   server.requestTimeout = LIVE_DASHBOARD_LIMITS.requestTimeoutMs;
   server.keepAliveTimeout = LIVE_DASHBOARD_LIMITS.keepAliveTimeoutMs;
+
+  // Port 0 is retained only as a test-owned real-listener seam. Production
+  // configuration accepts 1024..65535 and always requests a stable port.
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+    throw new Error("LIVE_DASHBOARD_PORT_INVALID");
+  }
 
   if (signal?.aborted === true) {
     throw new Error("LIVE_DASHBOARD_BIND_ABORTED");
@@ -132,7 +154,7 @@ export async function bindLiveDashboardServer(
       if (settled) return;
       settled = true;
       cleanup();
-      reject(error);
+      reject(normalizedBindError(error, port));
     };
     const onAbort = (): void => {
       if (settled) return;
@@ -152,7 +174,7 @@ export async function bindLiveDashboardServer(
     try {
       server.listen({
         host: "127.0.0.1",
-        port: 0,
+        port,
         exclusive: true,
       });
     } catch (error) {
@@ -165,7 +187,10 @@ export async function bindLiveDashboardServer(
   });
 
   const address = server.address();
-  if (!isIpv4LoopbackAddress(address)) {
+  if (
+    !isIpv4LoopbackAddress(address) ||
+    (port !== 0 && address.port !== port)
+  ) {
     await closeServer(server).catch(() => undefined);
     throw new Error("LIVE_DASHBOARD_BIND_NOT_IPV4_LOOPBACK");
   }

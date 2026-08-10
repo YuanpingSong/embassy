@@ -92,13 +92,17 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
 `embassy serve` may use one private same-user control UDS and publish two inert,
 metadata-only static dashboard files. It must not listen on TCP or HTTP. The
 only reviewed exception is the separately invoked foreground
-`embassy dashboard --live` companion, which binds an authenticated OS-assigned
-port on exact IPv4 loopback and exposes only the reviewed select-Claude,
-unselect-Claude, and refresh-discovery mutations, never a provider or generic
-control method. Do not
-add a wildcard/remote listener, external assets, storage, service workers,
-telemetry, or additional mutation endpoints. Keep the public v1 launcher foreground,
-macOS-only, and local-host-only.
+`embassy dashboard --live` companion, which binds exact IPv4 loopback on stable
+port `41961` by default or the validated per-invocation `--port <n>`. It has no
+local-process or UID authentication and therefore assumes a trusted
+single-user machine; exact Host on every request and exact Origin plus
+`X-Embassy-Request` on every POST constrain browser origins, not local
+software. Preserve the direct root URL, multi-window/browser access, collision
+failure with no fallback port, no CORS/`OPTIONS`, and only the reviewed pair,
+unpair, refresh-discovery, and stale-registration-removal mutations—never a
+provider or generic control method. Do not add a wildcard/remote listener,
+external assets, service workers, telemetry, or additional mutation endpoints.
+Keep the public v1 launcher foreground, macOS-only, and local-host-only.
 
 ## Live validation
 

@@ -16,7 +16,8 @@ export const cliCopyZhCn = {
   compat-check           运行有限且不发送消息的兼容性探测
   compat-certify         运行有界在线链路认证 [--codex 别名] [--with-turn]
   refresh-dashboard      发布两份静态仪表盘文件
-  dashboard --live       打开实时状态与有限路由同意操作
+  dashboard --live [--port <n>]
+                         打开实时状态与有限路由同意操作
   register-codex         注册或继任 Codex 任务
   unregister-codex       注销当前 Codex 任务
   select-claude          选择已发现的 Claude 会话
@@ -31,11 +32,16 @@ export const cliCopyZhCn = {
 
 选项：
   --lang en|zh-CN        本地化面向用户的文本
+  --port <n>             实时仪表盘端口，1024–65535（默认 41961）
   --version, -v          输出版本
   --help, -h             显示此帮助
 `,
   "hint.dashboardLiveRequired":
     "dashboard 需要 --live；静态文件由 serve 和 refresh-dashboard 发布。",
+  "hint.dashboardPortInUse":
+    "实时仪表盘端口 {port} 已被占用；请关闭占用进程，或使用 --port <n> 选择其他端口。",
+  "hint.controlInvalidResponse":
+    "请重启 Embassy 网关进程，然后重试。",
   "error.input": "请求被拒绝。",
   "error.decision": "网关拒绝了该请求。",
   "error.unavailable": "网关不可用。",

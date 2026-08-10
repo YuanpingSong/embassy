@@ -352,8 +352,6 @@ export const dashboardCopyKeys = [
   "live.diagnostics.title",
   "live.metric.revision",
   "live.stream.reset",
-  "live.bootstrap.title",
-  "live.bootstrap.open",
   "live.http.badRequest",
   "live.http.forbidden",
   "live.http.notFound",
