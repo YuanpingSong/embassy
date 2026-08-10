@@ -11,6 +11,12 @@ tabs, request controls, bounded actions, and security caveat.
 
 Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of connector health, available and selected Claude peers, the registered Codex route, recent delivery states, queue depth, latency, and safe alerts.
 
+Interpret queue and delivery by direction. Codex-bound ordinary work can wait
+for the task to become idle. Claude-bound work does not wait for Claude idle:
+after routing and pre-write checks it enters Claude's native mailbox
+immediately, and `transport_written` settles that direction as `delivered`.
+The mailbox boundary does not mean Claude read or consumed the body.
+
 Every publish writes the language pair — `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html` — side by side in the state directory, and each page carries an in-page link to the other. That link is the only way to switch the static language; `--lang` is a flag of the live companion, not of `refresh-dashboard`.
 
 A static page is a point-in-time snapshot and never refreshes itself. Run `embassy refresh-dashboard` and reload to see newer state, or run `embassy dashboard --live` for a streaming view.

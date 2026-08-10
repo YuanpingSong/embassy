@@ -104,8 +104,10 @@ truth, real dashboard proof, quickstart/security.
 
 ## Dashboard information architecture
 
-1. **Exchange board** — Claude selection ↔ queue/pouch ↔ Codex registration;
-   broker readiness and the next action inline.
+1. **Exchange board** — Claude selection ↔ direction-specific transit ↔ Codex
+   registration; the Codex-bound edge exposes its busy queue, while the
+   Claude-bound edge exposes immediate native-mailbox delivery without an idle
+   gate; broker readiness and the next action inline.
 2. **Needs attention** — ordered, actionable, hidden when empty.
 3. **In transit** — queue count, oldest wait, and explicit stall state from the
    bounded public snapshot.

@@ -84,6 +84,11 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /normal terminal/);
   assert.match(skill, /codex app-server daemon restart/);
   assert.match(skill, /wrong principal/);
+  assert.match(skill, /Direction determines timing/);
+  assert.match(skill, /Claude-bound send or correlated reply writes immediately/);
+  assert.match(skill, /transport_written` is the terminal `delivered` boundary/);
+  assert.match(skill, /Codex-bound ordinary work remains idle\/turn-boundary gated/);
+  assert.doesNotMatch(skill, /wait for Claude to become idle before (?:writing|sending)/i);
 
   assert.doesNotMatch(skill, /~\/.claude|\/tmp\/cc-socks|\.claude\/sessions/);
   assert.doesNotMatch(

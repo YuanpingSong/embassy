@@ -450,10 +450,9 @@ function guidanceFor(
   }
 }
 
-function queuedRecipientIsUnobserved(route: DashboardRouteRow): boolean {
+function recipientIsUnobserved(route: DashboardRouteRow): boolean {
   return (
     route.provider === "claude" &&
-    route.queueDepth > 0 &&
     (route.safeErrorCode === "CLAUDE_PEER_NOT_OBSERVED" ||
       route.safeErrorCode === "PEER_NOT_OBSERVED")
   );
@@ -930,7 +929,22 @@ export function buildDashboardViewModel(
     );
   const attentionCandidates: DashboardAttentionItem[] = [...explicitAlerts];
   for (const route of allRoutes) {
-    if (!queuedRecipientIsUnobserved(route)) continue;
+    const writes = messages.groups.filter(
+      ({ direction, targetAlias, state, timestamp }) =>
+        direction === "codex_to_claude" &&
+        targetAlias === route.alias && state === "delivered" &&
+        timestamp !== undefined,
+    );
+    // Groups arrive newest-first. The oldest unconsumed write owns the notice:
+    // a fresh write to the same recipient is not evidence that an hours-old one
+    // was ever read.
+    const write = writes[writes.length - 1];
+    if (
+      generatedAt === undefined || write?.timestamp === undefined ||
+      !recipientIsUnobserved(route) ||
+      Date.parse(generatedAt) - Date.parse(write.timestamp) <
+        120_000
+    ) continue;
     const item: DashboardAttentionItem = {
       kind: "route",
       code: route.safeErrorCode,
@@ -945,7 +959,6 @@ export function buildDashboardViewModel(
       (candidate) =>
         candidate.provider === item.provider &&
         candidate.alias === item.alias &&
-        candidate.host === item.host &&
         (candidate.code === "CLAUDE_PEER_NOT_OBSERVED" ||
           candidate.code === "PEER_NOT_OBSERVED"),
     );

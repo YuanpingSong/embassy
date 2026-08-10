@@ -297,14 +297,19 @@ test("non-ready routes surface one bounded derived attention item without invent
   assert.equal(html.includes("QUEUE_STALLED"), false);
 });
 
-test("queued mail to an exactly unobserved recipient surfaces one attention item without inferring from busy", () => {
+test("an aged Claude mailbox write surfaces one notice only while its exact recipient is unobserved", () => {
   const snapshot = dashboardFixture();
   snapshot.routes[0] = {
     ...snapshot.routes[0]!,
-    queueDepth: 1,
-    oldestQueuedAt: "2026-08-08T11:59:30.000Z",
+    queueDepth: 0,
+    lastSeenAt: "2026-08-08T11:56:59.000Z",
     safeErrorCode: "CLAUDE_PEER_NOT_OBSERVED",
   };
+  const mailboxWrite = snapshot.messages.find(
+    (message) => message.messageIdSuffix === "c0ffee",
+  )!;
+  mailboxWrite.state = "delivered";
+  mailboxWrite.timestamp = "2026-08-08T11:57:00.000Z";
   snapshot.alerts = [
     {
       code: "CLAUDE_PEER_NOT_OBSERVED",
@@ -312,7 +317,6 @@ test("queued mail to an exactly unobserved recipient surfaces one attention item
       timestamp: "2026-08-08T11:59:57.000Z",
       provider: "claude",
       alias: "claude-advisor@this-mac",
-      host: "this-mac",
     },
   ];
 
@@ -322,7 +326,7 @@ test("queued mail to an exactly unobserved recipient surfaces one attention item
     kind: "route",
     code: "CLAUDE_PEER_NOT_OBSERVED",
     severity: "warning",
-    timestamp: "2026-08-08T11:59:58.000Z",
+    timestamp: "2026-08-08T11:56:59.000Z",
     provider: "claude",
     alias: "claude-advisor@this-mac",
     host: "this-mac",
@@ -332,13 +336,42 @@ test("queued mail to an exactly unobserved recipient surfaces one attention item
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
   assert.match(
     en,
-    /Recipient session appears to be waiting on interactive input in its own window; check it there\./,
+    /Embassy wrote the message to the recipient mailbox, and the recipient session is currently not observed\./,
   );
-  assert.match(zh, /接收方会话似乎正在自己的窗口中等待交互式输入；请前往该窗口查看。/);
+  assert.match(zh, /Embassy 已将消息写入接收方消息邮箱，且当前未观察到接收方会话。/);
+  assert.equal(en.includes("waiting on interactive input"), false);
+  const hasMailboxNotice = () =>
+    buildDashboardViewModel(snapshot).attention.some(
+      ({ guidance }) => guidance === "recipient_waiting_input",
+    );
 
   snapshot.alerts = [];
+  mailboxWrite.timestamp = "2026-08-08T11:50:00.000Z";
+  snapshot.messages.push({
+    ...mailboxWrite,
+    messageIdSuffix: "d00dad",
+    timestamp: "2026-08-08T11:59:30.000Z",
+  });
+  // A 30-second-old write to the same recipient is not evidence that the
+  // ten-minute-old one was ever read: the oldest write still owns the notice.
+  assert.equal(hasMailboxNotice(), true);
+  snapshot.messages.pop();
+  mailboxWrite.timestamp = "2026-08-08T11:57:00.000Z";
+
+  snapshot.routes[0]!.lastSeenAt = "2026-08-08T11:59:00.000Z";
   delete snapshot.routes[0]!.safeErrorCode;
   assert.equal(buildDashboardViewModel(snapshot).attention.length, 0);
+
+  snapshot.routes[0]!.safeErrorCode = "CLAUDE_PEER_NOT_OBSERVED";
+  mailboxWrite.timestamp = "2026-08-08T11:58:01.000Z";
+  assert.equal(hasMailboxNotice(), false);
+  mailboxWrite.timestamp = "invalid";
+  assert.equal(hasMailboxNotice(), false);
+
+  mailboxWrite.timestamp = "2026-08-08T11:57:00.000Z";
+  mailboxWrite.targetAlias = "codex-reviewer@this-mac";
+  snapshot.routes[1]!.safeErrorCode = "PEER_NOT_OBSERVED";
+  assert.equal(hasMailboxNotice(), false);
 });
 
 test("restart guidance warns about abandoning memory-only bodies", () => {

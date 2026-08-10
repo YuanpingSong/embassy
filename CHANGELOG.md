@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - `embassy dashboard --live` now uses the stable direct URL `http://127.0.0.1:41961/` by default, with a per-invocation `--port <n>` override accepting 1024–65535. Multiple windows and browsers can use the same companion; a port collision fails explicitly, points to `--port`, and never falls back.
+- Claude-bound bodies are written to the recipient's native mailbox immediately after routing and pre-write checks, instead of waiting for an observed-idle gate that a busy Claude session could hold indefinitely. The receipt says exactly that: `delivered` toward Claude means the mailbox write completed, not that a model read or consumed the body.
+- A Claude route that stops appearing in discovery is no longer auto-invalidated; only an actual discovery collision invalidates a selected route. Queued mail stays addressed to its session, and a write to a dead session socket fails fast with its exact safe code.
 
 ### Removed
 

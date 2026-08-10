@@ -144,7 +144,7 @@ The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html`
         │                                             │
         ▼                                             ▼
   ┌──────────────────── Embassy ─────────────────────────────┐
-  │ explicit routes │ queue while busy │ receipts │ dashboard │
+  │ explicit routes │ Codex busy queue │ receipts │ dashboard │
   └───────────────────────────────────────────────────────────┘
 ```
 
@@ -152,7 +152,7 @@ Embassy publishes each registered Codex task into Claude Code's live-session reg
 
 A pair is one explicit permission edge between one Claude session and one Codex task — and pairs are many-to-many: one Claude session may hold edges to several Codex tasks, and one Codex task to several Claude sessions (bounded at 128 pairs by default). Every edge is created explicitly, with `pair` or the one-task `select-claude` shorthand; nothing is ever implied. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out that restores any-session inbound.
 
-Messages queue while the Codex task is busy and start an ordinary turn when it goes idle. In the Claude-to-Codex direction only, a body with an exact leading `STEER:` prefix may enter the active turn at the App Server's next tool-call boundary; if that boundary is unavailable, the message returns to the normal queue.
+Delivery timing is directional. Once routing and pre-write checks pass, every Claude-bound body is written immediately to Claude's native mailbox regardless of its observed busy or idle state. `transport_written` records that mailbox write and is the Claude-bound terminal `delivered` boundary; it does not mean Claude read or consumed the body. Codex-bound ordinary bodies instead queue while the task is busy and start a turn when it goes idle. In the Claude-to-Codex direction only, a body with an exact leading `STEER:` prefix may enter the active turn at the App Server's next tool-call boundary; if that boundary is unavailable, the message returns to the normal queue.
 
 Immediately before the provider write, Embassy gives every routed body one
 broker-owned cross-session marker containing the verified sender alias and a
@@ -160,7 +160,7 @@ recipient reply hint. The full conversation token travels only in the
 initiator's accepted result and the recipient's transient message payload; it
 never enters the dashboard, public snapshot, journal, receipt, or log.
 
-Every settled message produces a receipt. `delivered` means terminal provider evidence was observed — toward Codex, the App Server accepted the turn; toward Claude, the message was released into the session's native queue. Neither means the model read or acted on it. `unconfirmed` and `ambiguous` mean evidence is missing; they are terminal states and never auto-retried. See [Delivery](docs/DELIVERY.md) for the full semantics.
+Every settled message produces a receipt. `delivered` means the direction's terminal provider boundary was observed — toward Codex, the App Server accepted the turn; toward Claude, the native mailbox write completed. Neither means the model read or acted on it. `unconfirmed` and `ambiguous` mean the required evidence is missing; they are terminal states and never auto-retried. See [Delivery](docs/DELIVERY.md) for the full semantics.
 
 ## The vocabulary
 
@@ -214,7 +214,7 @@ See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting
 
 ## What Embassy is not
 
-- **Not an orchestrator.** It does not spawn agents or manage their work. It starts one turn per routed message and drains its queue when the task goes idle.
+- **Not an orchestrator.** It does not spawn agents or manage their work. Codex-bound ordinary messages start one turn apiece as the task becomes idle; Claude-bound messages enter Claude's mailbox without waiting for idle.
 - **Not a hosted service.** Personal, same-machine, same-OS-account software.
 - **Not a permission bypass — but it is a new path.** Neither agent gains a tool it did not already have, and Embassy grants, relaxes, and answers nothing. It does, however, connect two products that previously could not exchange text at all. That path is the product; treat it with the respect you would give any new input channel.
 - **Not official.** Not affiliated with or endorsed by Anthropic or OpenAI.

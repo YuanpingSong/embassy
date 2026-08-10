@@ -42,11 +42,11 @@
 <span class="spark" style="left:72%;top:80px;width:3px;height:3px"></span>
 <span class="spark" style="left:85%;top:150px;width:2px;height:2px"></span>
 <div class="who l"><b>claude-main</b>asks a question mid-flow</div>
-<div class="who r"><b>codex-embassy</b>replies at its next turn boundary</div>
+<div class="who r"><b>codex-embassy</b>turn-boundary start; reply → Claude mailbox</div>
 <div class="arch"><div class="flag"></div></div>
 <div class="env ask"></div>
 <div class="env reply"></div>
-<div class="receipt"><span class="tok">dlv_9f3kAqTrM8…</span> · <span class="st s1">queued</span> <span class="st s2">→ dispatching → transport_written</span> <span class="st s3 delivered">→ delivered (1.2s)</span></div>
+<div class="receipt"><span class="tok">dlv_9f3kAqTrM8…</span> · Claude→Codex · <span class="st s1">queued</span> <span class="st s2">→ dispatching → transport_written</span> <span class="st s3 delivered">→ delivered (1.2s)</span></div>
 <div class="convchip">conv_a71xB4Nc… returned to sender — reply with the token, only the token-holder can</div>
 <div class="ground"></div>
 </div>
@@ -59,7 +59,7 @@
 <p class="lede">If you run both agents, you already know them.</p>
 <div class="cols3">
 <div><span class="k">Mid-flow</span><h3>Your agent has a question</h3><p>Claude hits a decision Codex already made. Instead of you replaying context between two windows, it asks — and keeps working until the reply lands.</p></div>
-<div><span class="k">Away from desk</span><h3>The reply routes without you</h3><p>Answers arrive at turn boundaries, queued honestly. Nothing interrupts a generation; nothing needs you watching a terminal.</p></div>
+<div><span class="k">Away from desk</span><h3>The reply routes without you</h3><p>Codex-bound questions wait honestly for an idle turn boundary. Answers back to Claude enter its mailbox immediately, even while Claude is busy. Nothing needs you watching a terminal.</p></div>
 <div><span class="k">No plugins</span><h3>Nothing to install inside the agents</h3><p>Claude needs no Embassy commands at all — its native ListAgents and SendMessage discover and message registered peers. The Codex task runs one CLI command to register. That's the whole footprint.</p></div>
 </div>
 </div>
@@ -86,16 +86,16 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <h2>The register doesn't flatter you</h2>
 <p class="lede">Every claim below means exactly what it says — that's the product.</p>
 <div class="truths">
-<div><b>delivered ≠ read</b><p>Delivered means the receiver's runtime accepted the message. Nothing implies it was read, understood, or acted on.</p></div>
-<div><b>queues never interrupt</b><p>Messages wait for a turn boundary. Interrupting a generation mid-thought is undefined behavior for an agent, so Embassy never does it. A message waiting on a busy peer shows as held — progress, never success.</p></div>
+<div><b>delivered ≠ read</b><p>Toward Codex, delivered means App Server accepted the turn. Toward Claude, it means the native mailbox write completed. Neither implies the body was read, understood, or acted on.</p></div>
+<div><b>direction determines timing</b><p>Codex-bound messages wait for idle or the exact STEER next-tool boundary; a Codex wait may show as held — progress, not success — and Embassy never interrupts mid-generation. Claude-bound messages enter Claude's mailbox immediately regardless of busy or idle. transport_written is that direction's delivered boundary, not evidence of reading.</p></div>
 <div><b>restarts stop dropping mail</b><p>Queued mail survives a broker restart and re-sends exactly once when its route returns. In-flight-at-crash settles ambiguous — never silently lost, never double-sent.</p></div>
 <div><b>unknown versions fail closed</b><p>The broker validates exact reviewed versions automatically at startup and checks every replacement App Server generation before re-anchoring a route. No best-effort delivery crosses a protocol gap.</p></div>
 <div><b>no broker network listener</b><p><code style="font-size:13px">embassy serve</code> binds nothing. The opt-in companion is the sole loopback listener — exact 127.0.0.1, stable port 41961 by default or per-invocation <code style="font-size:13px">--port</code>, direct multi-browser access, and deliberately no authentication on a trusted single-user machine.</p></div>
 <div><b>a routed message is a new input path</b><p>Treat anything that arrives as untrusted input to its receiver — the same discipline you'd apply to any tool result.</p></div>
 </div>
 <div class="states">
-<details class="d"><summary>delivered</summary><p>The receiver's runtime accepted the message. The only fully successful terminal state besides a confirmed reply.</p></details>
-<details class="u"><summary>unconfirmed</summary><p>The transport write happened but no settlement signal arrived. Not a failure; not a success. It stays unconfirmed rather than guessing.</p></details>
+<details class="d"><summary>delivered</summary><p>The direction's provider boundary was crossed: App Server accepted a Codex-bound turn, or Claude's native mailbox accepted a Claude-bound write. Neither means read.</p></details>
+<details class="u"><summary>unconfirmed</summary><p>Embassy could not confirm the direction's delivery boundary. Not a failure; not a success. It stays unconfirmed rather than guessing.</p></details>
 <details class="a"><summary>ambiguous</summary><p>Conflicting signals about settlement. Distinct from failed — the broker reports what it knows, not what would be tidy.</p></details>
 <details class="e"><summary>expired</summary><p>The message deadline elapsed before settlement. Terminal, and visible in the ledger with the deadline that killed it.</p></details>
 </div>

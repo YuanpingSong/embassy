@@ -98,13 +98,6 @@ const NATIVE_HELD_THRESHOLD_MS = 1_000;
 const RUNTIME_ACTIVITY_CAPACITY = 256;
 const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
-const CLAUDE_CLEAN_PREWRITE_ROUTE_CODES = new Set([
-  "CLAUDE_PEER_TARGET_UNKNOWN",
-  "CLAUDE_PEER_TARGET_STALE",
-  "CLAUDE_PEER_TARGET_CHANGED",
-  "CLAUDE_PEER_WORKSPACE_UNATTESTED",
-]);
-
 function progressWatchActivity(
   text: string,
   conversationId: string,
@@ -698,8 +691,6 @@ export class GatewayService {
   private readonly activeDispatchByTarget = new Map<string, string>();
   private readonly scheduledDispatchTargets = new Set<string>();
   private readonly dispatchRunnerTargets = new Set<string>();
-  /** Claude sends that proved no write wait for exact provider-idle evidence. */
-  private readonly claudePrewriteIdleWaitTargets = new Set<string>();
   private readonly heldRedispatchTimers = new Map<
     string,
     GatewayServiceTimer
@@ -1041,7 +1032,6 @@ export class GatewayService {
         this.activeDispatchByTarget.clear();
         this.scheduledDispatchTargets.clear();
         this.dispatchRunnerTargets.clear();
-        this.claudePrewriteIdleWaitTargets.clear();
         for (const timer of this.heldRedispatchTimers.values()) {
           this.timers.clearTimeout(timer);
         }
@@ -4036,18 +4026,26 @@ export class GatewayService {
       {
         peer: GatewayAdapterDiscovery;
         adapter: GatewayProviderAdapter;
-        safeErrorCode?: "PEER_ALIAS_COLLISION" | "PEER_SESSION_COLLISION" | "PEER_DISCOVERY_INCOMPLETE";
+        safeErrorCode?: "PEER_ALIAS_COLLISION" | "PEER_SESSION_COLLISION" | "PEER_DISCOVERY_INCOMPLETE" | "PEER_NOT_OBSERVED";
       }
     >();
+    const collisionByRouteHandle = new Map<string, "PEER_ALIAS_COLLISION" | "PEER_SESSION_COLLISION" | "PEER_NOT_OBSERVED">();
     const discoveredCandidates: Candidate[] = [];
     const observedSelected = new Set<string>();
     for (const adapter of this.adapters.filter(
       (item) => item.identity.provider === "claude",
     )) {
-      const discovered = (await adapter.discoverClaudePeers?.()) ?? {
+      let discovered: GatewayAdapterDiscoverySnapshot = {
         peers: [],
         complete: false,
       };
+      try {
+        discovered = (await adapter.discoverClaudePeers?.()) ?? discovered;
+      } catch {
+        // Registry observation is dashboard evidence, not Claude mailbox
+        // authority. The provider still revalidates the exact target before
+        // any write.
+      }
       const grouped = new Map<string, GatewayAdapterDiscovery[]>();
       const byHandle = new Map<string, GatewayAdapterDiscovery[]>();
       for (const peer of discovered.peers) {
@@ -4068,6 +4066,7 @@ export class GatewayService {
         const peer = matches[0];
         if (peer === undefined) continue;
         if (matches.length !== 1) {
+          for (const match of matches) collisionByRouteHandle.set(match.routeHandle, "PEER_ALIAS_COLLISION");
           rowsByAlias.set(alias, {
             peer,
             adapter,
@@ -4084,6 +4083,7 @@ export class GatewayService {
           continue;
         }
         if ((byHandle.get(peer.routeHandle)?.length ?? 0) !== 1) {
+          collisionByRouteHandle.set(peer.routeHandle, "PEER_SESSION_COLLISION");
           rowsByAlias.set(alias, {
             peer,
             adapter,
@@ -4114,6 +4114,8 @@ export class GatewayService {
             collision !== undefined &&
               bindingKey(collision) !== bindingKey(existing[1])
           ) {
+            collisionByRouteHandle.set(routeHandle, "PEER_ALIAS_COLLISION");
+            collisionByRouteHandle.set(collision.routeHandle, "PEER_ALIAS_COLLISION");
             rowsByAlias.set(alias, {
               peer: candidate,
               adapter,
@@ -4126,10 +4128,17 @@ export class GatewayService {
         this.candidates.set(alias, candidate);
       } catch (error) {
         if (!(error instanceof BridgeError)) throw error;
+        // Only a real alias collision may wear that receipt; every other
+        // rename failure is an unobserved peer, not a name conflict.
+        const safeErrorCode =
+          error.code === "ROUTE_ALIAS_COLLISION"
+            ? "PEER_ALIAS_COLLISION"
+            : "PEER_NOT_OBSERVED";
+        collisionByRouteHandle.set(routeHandle, safeErrorCode);
         rowsByAlias.set(alias, {
           peer: candidate,
           adapter,
-          safeErrorCode: "PEER_ALIAS_COLLISION",
+          safeErrorCode,
         });
       }
     }
@@ -4211,6 +4220,8 @@ export class GatewayService {
       ) {
         continue;
       }
+      const discoveryError = collisionByRouteHandle.get(binding.routeHandle);
+      if (discoveryError === undefined) continue;
       const inspection = await this.store.inspectPrivateRoute(alias);
       if (
         inspection !== undefined &&
@@ -4221,11 +4232,11 @@ export class GatewayService {
         const inFlightSettlements =
           await this.planRouteInFlightSettlementsLocked(alias, {
             unwrittenOutcome: "failed",
-            safeErrorCode: "PEER_NOT_OBSERVED",
+            safeErrorCode: discoveryError,
           });
         const settlements = await this.store.invalidateRoute(
           binding,
-          "PEER_NOT_OBSERVED",
+          discoveryError,
           inFlightSettlements,
         );
         for (const settlement of settlements) {
@@ -4511,6 +4522,13 @@ export class GatewayService {
   ): Promise<{ alias: string; discoveryChanged: boolean }> {
     const discoveryChanged = await this.refreshClaudeDiscovery();
     try {
+      const selected = [...this.routeBindings.entries()].find(
+        ([alias, binding]) =>
+          binding.provider === "claude" &&
+          (alias === selector ||
+            binding.routeHandle.toLowerCase() === selector.toLowerCase()),
+      );
+      if (selected !== undefined) return { alias: selected[0], discoveryChanged };
       const candidate = this.claudeCandidate(selector);
       if (candidate === undefined) {
         throw new BridgeError(
@@ -4770,9 +4788,6 @@ export class GatewayService {
     this.routeBindings.set(alias, binding);
     this.routeStates.set(alias, state);
     this.bindingAliases.set(bindingKey(binding), alias);
-    if (binding.provider === "claude" && state === "idle") {
-      this.claudePrewriteIdleWaitTargets.delete(alias);
-    }
   }
 
   private forgetBinding(alias: string): void {
@@ -4788,7 +4803,6 @@ export class GatewayService {
     }
     this.routeBindings.delete(alias);
     this.routeStates.delete(alias);
-    this.claudePrewriteIdleWaitTargets.delete(alias);
     for (const [messageId, continuation] of this.providerTurnContinuations) {
       if (continuation.targetAlias !== alias) continue;
       this.providerTurnContinuations.delete(messageId);
@@ -4933,8 +4947,10 @@ export class GatewayService {
         enqueuedAt: input.enqueuedAt,
         stallAt,
         deadlineAt,
-        // Deferred means the provider proved no write. Permit one bounded
-        // attempt per 500 ms slice until this message's immutable deadline.
+        // Deferred means the provider proved no write. This budgets one
+        // attempt per 500 ms slice of this message's immutable deadline; a
+        // Codex-bound retry spends one slice each, while a Claude-bound retry
+        // backs off exponentially and spends far fewer of them.
         maxCleanPrewriteRetries: Math.max(
           0,
           Math.ceil((deadlineAt - input.enqueuedAt) / 500),
@@ -5836,8 +5852,7 @@ export class GatewayService {
         if (
           !isTerminalDeliveryMachine(tracker.machine) &&
           tracker.machine.dispatchRetryAt !== null &&
-          tracker.machine.dispatchRetryAt <= now &&
-          !this.claudePrewriteIdleWaitTargets.has(tracker.targetAlias)
+          tracker.machine.dispatchRetryAt <= now
         ) {
           if (!this.dispatchRunnerTargets.has(tracker.targetAlias)) {
             this.scheduleDispatch(tracker.targetAlias);
@@ -5941,7 +5956,6 @@ export class GatewayService {
         if (wakeups.deadlineAt !== undefined) consider(wakeups.deadlineAt);
         if (
           wakeups.dispatchRetryAt !== undefined &&
-          !this.claudePrewriteIdleWaitTargets.has(tracker.targetAlias) &&
           !this.scheduledDispatchTargets.has(tracker.targetAlias) &&
           !this.dispatchRunnerTargets.has(tracker.targetAlias)
         ) {
@@ -6557,8 +6571,7 @@ export class GatewayService {
       !this.running ||
       this.closing ||
       this.codexSuccessionDispatchFrozen.has(targetAlias) ||
-      this.codexSuccessionPoisoned.has(targetAlias) ||
-      this.claudePrewriteIdleWaitTargets.has(targetAlias)
+      this.codexSuccessionPoisoned.has(targetAlias)
     ) {
       return;
     }
@@ -6629,8 +6642,8 @@ export class GatewayService {
     if (context.authorization === "selected_route") {
       const routeState = this.routeStates.get(targetAlias);
       const dispatchable =
+        binding.provider === "claude" ||
         routeState === "idle" ||
-        (binding.provider === "claude" && routeState === "busy") ||
         (binding.provider === "codex" &&
           item.steer === true &&
           routeState === "busy");
@@ -6663,8 +6676,8 @@ export class GatewayService {
         return;
       }
       const storedDispatchable =
+        binding.provider === "claude" ||
         inspection?.state === "idle" ||
-        (binding.provider === "claude" && inspection?.state === "busy") ||
         (binding.provider === "codex" &&
           item.steer === true &&
           inspection?.state === "busy");
@@ -6819,10 +6832,19 @@ export class GatewayService {
         result.safeErrorCode,
         "PROVIDER_DISPATCH_DEFERRED",
       );
+      const retryDelayMs = binding.provider === "claude"
+        ? Math.min(500 * 2 ** (tracker.machine.dispatchAttempt - 1), 300_000)
+        : 500;
+      // Only Claude's backoff is clamped inside the deadline, so a long delay
+      // still buys one last attempt. A Codex-bound retry keeps its exact
+      // unclamped slice: a slice past the deadline must settle now, not wait.
+      const retryAt = binding.provider === "claude"
+        ? Math.min(now + retryDelayMs, tracker.deadlineAt - 1)
+        : now + retryDelayMs;
       await this.advanceDeliveryLocked(item.messageId, {
         type: "dispatch_clean_prewrite_failed",
         at: now,
-        retryAt: now + 500,
+        retryAt,
         safeErrorCode: deferredSafeErrorCode,
       });
       tracker.deliverySafeErrorCode = deferredSafeErrorCode;
@@ -6858,19 +6880,14 @@ export class GatewayService {
       }
       if (requeued.status === "requeued") {
         if (context.authorization === "selected_route") {
-          const waitForClaudeIdle =
-            binding.provider === "claude" &&
-            CLAUDE_CLEAN_PREWRITE_ROUTE_CODES.has(deferredSafeErrorCode);
-          if (waitForClaudeIdle) {
-            this.claudePrewriteIdleWaitTargets.add(currentTargetAlias);
-          } else if (!steeringWhileBusy) {
+          if (binding.provider === "codex" && !steeringWhileBusy) {
             this.routeStates.set(currentTargetAlias, "idle");
             await this.store.observeRoute({
               binding,
               state: "idle",
               compatibility: "compatible",
             });
-          } else {
+          } else if (binding.provider === "codex") {
             this.scheduleHeldRedispatch(currentTargetAlias);
           }
           await this.setNativeCodexStatus(currentTargetAlias, "waiting");
@@ -6905,8 +6922,7 @@ export class GatewayService {
     if (
       this.closing ||
       this.codexSuccessionDispatchFrozen.has(targetAlias) ||
-      this.codexSuccessionPoisoned.has(targetAlias) ||
-      this.claudePrewriteIdleWaitTargets.has(targetAlias)
+      this.codexSuccessionPoisoned.has(targetAlias)
     ) {
       return;
     }
@@ -8050,9 +8066,6 @@ export class GatewayService {
     const [alias, binding] = entry;
     const previousState = this.routeStates.get(alias);
     this.routeStates.set(alias, event.state);
-    if (binding.provider === "claude" && event.state === "idle") {
-      this.claudePrewriteIdleWaitTargets.delete(alias);
-    }
     const staleSafeCode =
       binding.provider === "codex"
         ? "CODEX_ROUTE_STALE"

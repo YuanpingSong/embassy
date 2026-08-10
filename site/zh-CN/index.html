@@ -42,11 +42,11 @@
 <span class="spark" style="left:72%;top:80px;width:3px;height:3px"></span>
 <span class="spark" style="left:85%;top:150px;width:2px;height:2px"></span>
 <div class="who l"><b>claude-main</b>工作中途提出问题</div>
-<div class="who r"><b>codex-embassy</b>在下一个回合边界回复</div>
+<div class="who r"><b>codex-embassy</b>回合边界启动；回复直入 Claude 邮箱</div>
 <div class="arch"><div class="flag"></div></div>
 <div class="env ask"></div>
 <div class="env reply"></div>
-<div class="receipt"><span class="tok">dlv_9f3kAqTrM8…</span> · <span class="st s1">queued</span> <span class="st s2">→ dispatching → transport_written</span> <span class="st s3 delivered">→ delivered (1.2s)</span></div>
+<div class="receipt"><span class="tok">dlv_9f3kAqTrM8…</span> · Claude→Codex · <span class="st s1">queued</span> <span class="st s2">→ dispatching → transport_written</span> <span class="st s3 delivered">→ delivered (1.2s)</span></div>
 <div class="convchip">conv_a71xB4Nc… 已返回发送方 — 凭令牌回复，且只有令牌持有者可以回复</div>
 <div class="ground"></div>
 </div>
@@ -59,7 +59,7 @@
 <p class="lede">如果你同时运行这两个智能体，你早已熟悉它们。</p>
 <div class="cols3">
 <div><span class="k">工作中途</span><h3>你的智能体有一个问题</h3><p>Claude 碰到一个 Codex 已经做过的决定。不必你在两个窗口之间来回搬运上下文，它自己去问 — 并在等待回复期间继续工作。</p></div>
-<div><span class="k">人不在桌前</span><h3>回复无需你在场即可送达</h3><p>答案在回合边界到达，诚实排队。不打断任何生成过程；不需要你盯着终端。</p></div>
+<div><span class="k">人不在桌前</span><h3>回复无需你在场即可送达</h3><p>朝向 Codex 的问题会诚实等待任务空闲后的回合边界；返回 Claude 的答案则会立即进入其邮箱，即使 Claude 正繁忙。无需你盯着终端。</p></div>
 <div><span class="k">无需插件</span><h3>智能体内部无需安装任何东西</h3><p>Claude 完全不需要 Embassy 命令 — 其原生 ListAgents 与 SendMessage 即可发现并联系已注册的对端。Codex 任务只需运行一条 CLI 命令完成注册。仅此而已。</p></div>
 </div>
 </div>
@@ -86,16 +86,16 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <h2>这本台账不会奉承你</h2>
 <p class="lede">下面每一条声明的含义与字面完全一致 — 这正是产品本身。</p>
 <div class="truths">
-<div><b>delivered ≠ 已读</b><p>delivered 表示接收方运行时已接受消息。不暗示它被阅读、被理解或被执行。</p></div>
-<div><b>队列绝不打断</b><p>消息等待回合边界。在生成中途打断智能体是未定义行为，所以 Embassy 从不这样做。等待繁忙对端的消息显示为 held — 是进展，绝不是成功。</p></div>
+<div><b>delivered ≠ 已读</b><p>朝向 Codex 时，delivered 表示 App Server 已接受轮次；朝向 Claude 时，它表示原生邮箱写入完成。两者都不暗示正文被阅读、理解或执行。</p></div>
+<div><b>方向决定投递时机</b><p>朝向 Codex 的消息等待空闲，或使用精确 STEER 的下一个工具调用边界；朝向 Codex 的等待可能显示为 held — 是进展而非成功 — 且 Embassy 绝不中途打断生成。朝向 Claude 的消息无论 Claude 繁忙还是空闲，都会立即进入其邮箱。transport_written 就是该方向的 delivered 边界，而非已读证据。</p></div>
 <div><b>重启不再丢邮件</b><p>排队中的邮件在 broker 重启后幸存，并在路由恢复时恰好重发一次。崩溃时在途的消息结算为 ambiguous — 绝不悄然丢失，也绝不重复发送。</p></div>
 <div><b>未知版本即关闭</b><p>broker 会在启动时自动验证精确的已审查版本，并在重新锚定路由前检查每个替代 App Server 代际。不存在跨协议缺口的“尽力投递”。</p></div>
 <div><b>代理无网络监听</b><p><code style="font-size:13px">embassy serve</code> 不绑定任何端口。可选组件是唯一的 loopback 监听者 — 精确 127.0.0.1，默认稳定端口 41961 或单次命令的 <code style="font-size:13px">--port</code>，可从多个浏览器直接访问，并在可信单用户机器上有意不设身份认证。</p></div>
 <div><b>路由消息是一条新的输入路径</b><p>把任何到达的内容当作接收方的不可信输入 — 与对待任何工具结果相同的纪律。</p></div>
 </div>
 <div class="states">
-<details class="d"><summary>delivered</summary><p>接收方运行时已接受消息。除已确认回复外，唯一完全成功的终态。</p></details>
-<details class="u"><summary>unconfirmed</summary><p>传输写入已发生，但未收到结算信号。不是失败；也不是成功。它保持 unconfirmed，而不是去猜。</p></details>
+<details class="d"><summary>delivered</summary><p>该方向的提供方边界已跨越：App Server 接受了朝向 Codex 的轮次，或 Claude 原生邮箱接受了朝向 Claude 的写入。两者都不表示已读。</p></details>
+<details class="u"><summary>unconfirmed</summary><p>Embassy 无法确认该方向的投递边界。不是失败；也不是成功。它保持 unconfirmed，而不是去猜。</p></details>
 <details class="a"><summary>ambiguous</summary><p>关于结算的信号相互矛盾。与 failed 不同 — broker 报告它所知道的，而不是看起来整洁的。</p></details>
 <details class="e"><summary>expired</summary><p>消息期限在结算前已过。终态，并在台账中连同导致它的期限一起可见。</p></details>
 </div>

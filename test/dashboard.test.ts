@@ -191,11 +191,11 @@ test("delivery language preserves delivered, unconfirmed, and ambiguous semantic
     return { ...withoutSafeErrorCode, state: "delivered" as const };
   });
   const releasedEn = renderDashboardHtml(released, { locale: "en" });
-  assert.match(releasedEn, /Claude returned a terminal released receipt/);
-  assert.match(releasedEn, /message entered the recipient queue/);
+  assert.match(releasedEn, /wrote the message to Claude&#39;s native mailbox immediately/);
+  assert.match(releasedEn, /did not wait for the route to become idle/);
   assert.match(releasedEn, /does not mean the model read or acted on it/);
   const releasedZh = renderDashboardHtml(released, { locale: "zh-CN" });
-  assert.match(releasedZh, /Claude 返回了终结 released 回执/);
+  assert.match(releasedZh, /已立即将消息写入 Claude 的原生消息邮箱/);
   assert.match(releasedZh, /不表示模型已经读取或处理该消息/);
 });
 

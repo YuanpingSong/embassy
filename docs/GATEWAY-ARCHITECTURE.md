@@ -278,7 +278,9 @@ The thin skill/CLI exposes the same safe alias list to either provider.
    `cross-session-message` textual frame with bounded sender attribution and a
    first-child reply hint containing the full conversation token, exact aliases,
    and reply command. It then opens a short-lived connection and writes one
-   version-pinned peer frame. A reply request carries the gateway's own
+   version-pinned peer frame immediately, regardless of whether the current
+   Claude registry observation says `idle`, `busy`, or `waiting`. A reply
+   request carries the gateway's own
    anonymous callback UDS as the transport reply address; that path is never
    exposed in the content frame.
 5. It records only normalized delivery metadata. It does not retry an
@@ -286,12 +288,13 @@ The thin skill/CLI exposes the same safe alias list to either provider.
 6. A reply received on the callback listener is correlated in memory and
    routed to the owning explicitly registered Codex task.
 
-A transport write is not proof of successful model completion. The adapter
-distinguishes transport state from any hold/release/denial receipt supported
-by the pinned protocol. `transport_written` and native `held` are adapter/native
-progress signals only, not public `delivery_status` states. The public tracker
-remains `queued` or `stalled` until a terminal state; neither signal proves
-terminal success or permits a retry.
+A Claude-bound peer socket is a native mailbox, not an idle gate. Once the
+pre-write route checks pass, Embassy attempts that mailbox write immediately;
+an observed busy state never queues the body. `transport_written` proves the
+mailbox write and is reduced to terminal `delivered` for this direction. That
+still does not prove Claude read, consumed, or acted on the body. The adapter
+distinguishes this transport boundary from Claude-to-Codex native `held`, which
+is a progress signal only. Neither boundary permits a retry.
 
 ### Claude to Codex
 
@@ -387,10 +390,13 @@ terminally settles accepted work, joins its bounded receipt writes, and only
 then closes provider adapters. This orders `GATEWAY_SHUTDOWN` receipts ahead of
 listener teardown instead of silently dropping late admitted work.
 
-Claude's native peer socket is itself an inbox, so Codex replies may be
-written while the Claude route is busy. The gateway still serializes its own
-writes, but it does not wait for Claude to become idle and thereby deadlock a
-Claude turn that is waiting for the reply.
+Claude's native peer socket is itself a mailbox, so every Claude-bound body,
+including a correlated Codex reply, is written regardless of Claude's observed
+busy or idle state. The gateway still serializes its own writes, but it never
+waits for Claude to become idle and thereby deadlocks a Claude turn that is
+waiting for the reply. This does not change the opposite direction: ordinary
+Codex-bound bodies remain idle-gated, and exact leading `STEER:` bodies keep the
+next-tool-call-boundary rules above.
 
 ### Provenance framing and conversation continuation
 

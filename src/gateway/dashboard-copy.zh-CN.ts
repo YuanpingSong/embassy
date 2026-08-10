@@ -95,11 +95,11 @@ export const dashboardCopyZhCn = {
   "guidance.queueStalled.body": "最早接受的消息已排队超过投递截止时间的一半。",
   "guidance.queueStalled.action":
     "运行 embassy status。不要重发已接受的工作；Embassy 会跟踪到结算或过期。",
-  "guidance.recipientWaitingInput.title": "接收方会话可能需要输入",
+  "guidance.recipientWaitingInput.title": "消息已写入邮箱，但接收方仍未被观察到",
   "guidance.recipientWaitingInput.body":
-    "接收方会话似乎正在自己的窗口中等待交互式输入；请前往该窗口查看。",
+    "Embassy 已将消息写入接收方消息邮箱，且当前未观察到接收方会话。",
   "guidance.recipientWaitingInput.action":
-    "请在接收方会话自己的窗口中处理；不要重发已接受的消息。",
+    "请在接收方会话自己的窗口中查看；不要重发已接受的消息。",
   "guidance.unconfirmed.title": "无法确认投递",
   "guidance.unconfirmed.body":
     "本地传输写入已完成，但该次尝试结算时没有可用的终结原生证据。",
@@ -175,14 +175,14 @@ export const dashboardCopyZhCn = {
   "activity.meaning.delivered":
     "已达到 delivered 终局状态。这不表示模型已经读取或处理该消息。",
   "activity.meaning.delivered.codexToClaude":
-    "Claude 返回了终结 released 回执：消息已进入接收方队列。这不表示模型已经读取或处理该消息。",
+    "Embassy 已立即将消息写入 Claude 的原生消息邮箱，并未等待路由空闲。这不表示模型已经读取或处理该消息。",
   "activity.meaning.delivered.claudeToCodex":
     "Codex App Server 已接受该轮输入。这不表示模型已经完成或处理该输入。",
   "activity.meaning.unconfirmed":
     "传输写入已完成，但终结原生证据不可用。重试前请检查接收方。",
   "activity.meaning.ambiguous": "不确定写入后的结果未知。请勿自动重试。",
   "activity.meaning.other": "这是最新的规范化投递状态。",
-  "activity.meaning.queued": "已接收并在本地队列中等待。是进行中，不代表成功。",
+  "activity.meaning.queued": "正在本地等待提供方写入；仅 Claude 忙碌状态不会导致排队。是进行中，不代表成功。",
   "activity.meaning.dispatching":
     "正在移交给接收端连接器。是进行中，不代表成功。",
   "activity.meaning.transportWritten":
@@ -316,7 +316,7 @@ export const dashboardCopyZhCn = {
   "route.incompatible": "不兼容",
   "route.disabled": "已停用",
   "route.meaning.idle": "已启用、兼容，可以承载消息。",
-  "route.meaning.busy": "正在承载一轮消息；新消息会进入队列。",
+  "route.meaning.busy": "发往 Claude 的消息仍会立即写入原生消息邮箱；发往 Codex 的普通消息会等待路由空闲。",
   "route.meaning.awaitingApproval": "正在等待提供方的原生审批。",
   "route.meaning.stale": "当前没有端点证明；请刷新并恢复该路由。",
   "route.meaning.offline": "该路由的连接器无法访问。",
