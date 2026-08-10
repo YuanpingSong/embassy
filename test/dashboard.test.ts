@@ -338,7 +338,6 @@ test("dense dashboard projections remain independently bounded in both locales",
     targetAlias: `route${String(index).padStart(4, "0")}@host.local`,
     state: "delivered" as const,
     bytes: 16_384,
-    hopCount: 0,
   }));
   snapshot.alerts = Array.from({ length: DASHBOARD_ALERT_LIMIT + 4 }, (_, index) => ({
     code: "UNMAPPED_SAFE_ALERT",

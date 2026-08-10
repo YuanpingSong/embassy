@@ -76,7 +76,7 @@ against other processes running as the same OS user.
   result, and every routed recipient receives it in the broker-owned first
   `embassy-reply-hint`. The token is a transient participant-scoped locator,
   not sufficient authority: `reply` rechecks inherited caller identity,
-  conversation membership, current routing policy, and hop count.
+  conversation membership, and current routing policy.
 
 Every routed message is untrusted input capable of steering the receiving
 agent. Registration and routing control reachability; the provenance marker
@@ -121,7 +121,7 @@ broker.
   solely for `thread/resume.excludeTurns: true`. It adds no general
   experimental method or authority. Missing, malformed, or nonempty returned
   turns fail closed and are never retained.
-- Queues, frames, bodies, callbacks, deadlines, hop counts, deduplication,
+- Queues, frames, bodies, callbacks, deadlines, deduplication,
   rate limits, and transient conversations are bounded. Ambiguous writes are
   never retried automatically.
 - Raw-body classification and accounting happen before framing. In the

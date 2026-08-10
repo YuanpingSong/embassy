@@ -730,7 +730,6 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         "enqueuedAt",
         "deadlineAt",
         "bytes",
-        "hopCount",
       ],
       ["conversationIdSuffix", "body", "pair", "transientTarget", "steer"],
     )
@@ -759,7 +758,6 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         value.body.length > 0 &&
         !value.body.includes("\u0000") &&
         Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
-    isNonNegativeInteger(value.hopCount) &&
     (value.pair === undefined || value.pair === true) &&
     (value.transientTarget === undefined || value.transientTarget === true) &&
     (value.steer === undefined || value.steer === true)
@@ -788,7 +786,6 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
         "targetAlias",
         "state",
         "bytes",
-        "hopCount",
       ],
       ["conversationIdSuffix", "body", "latencyMs", "safeErrorCode", "steer"],
     )
@@ -817,7 +814,6 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
         value.body.length > 0 &&
         !value.body.includes("\u0000") &&
         Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
-    isNonNegativeInteger(value.hopCount) &&
     (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
     (value.steer === undefined || value.steer === true)
@@ -1118,6 +1114,37 @@ function migratePreCodexOrphanRemovalJournal(value: unknown): unknown {
     ...value,
     codexOrphanRemovalSequence: 0,
     codexOrphanRemovalEvents: [],
+  };
+}
+
+/**
+ * v1.2.0 persisted hop counters on queue, in-flight, and event rows. Hop
+ * policy no longer exists; accept only the old bounded shape and discard the
+ * obsolete field before strict current-schema validation and persistence.
+ */
+function migrateLegacyHopCounts(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.queue) ||
+    !Array.isArray(value.inFlight) ||
+    !Array.isArray(value.events)
+  ) {
+    return value;
+  }
+  const strip = (entry: unknown): unknown => {
+    if (!isObject(entry) || !Object.hasOwn(entry, "hopCount")) return entry;
+    if (!isNonNegativeInteger(entry.hopCount) || entry.hopCount > 64) {
+      return entry;
+    }
+    const { hopCount: _legacyHopCount, ...current } = entry;
+    return current;
+  };
+  return {
+    ...value,
+    queue: value.queue.map(strip),
+    inFlight: value.inFlight.map(strip),
+    events: value.events.map(strip),
   };
 }
 
@@ -4112,7 +4139,6 @@ export class GatewayStore {
         state: "dispatching",
         bytes: metadata.bytes,
         body,
-        hopCount: metadata.hopCount,
         ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       });
@@ -4313,7 +4339,6 @@ export class GatewayStore {
         state: "held",
         bytes: metadata.bytes,
         body,
-        hopCount: metadata.hopCount,
         ...(metadata.steer === true ? { steer: true as const } : {}),
         ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
         latencyMs: Math.max(
@@ -4363,7 +4388,6 @@ export class GatewayStore {
         state: progress,
         bytes: metadata.bytes,
         ...(metadata.body === undefined ? {} : { body: metadata.body }),
-        hopCount: metadata.hopCount,
         ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(
           0,
@@ -5208,7 +5232,6 @@ export class GatewayStore {
       | "dedupeKey"
       | "conversationIdSuffix"
       | "deadlineAt"
-      | "hopCount"
       | "steer"
       | "progressWatch"
       | "progressWatchNudge"
@@ -5250,25 +5273,6 @@ export class GatewayStore {
         "The transient message exceeds the configured byte limit.",
       );
     }
-    const hopCount = input.hopCount ?? 0;
-    if (
-      !isNonNegativeInteger(hopCount) ||
-      hopCount > this.config.limits.maxHopCount
-    ) {
-      this.recordRejection(
-        state,
-        sides,
-        bytes,
-        now,
-        "HOP_LIMIT_EXCEEDED",
-        input.steer,
-        input.conversationIdSuffix,
-      );
-      throw new BridgeError(
-        "HOP_LIMIT_EXCEEDED",
-        "The message exceeds the configured gateway hop limit.",
-      );
-    }
     if (
       typeof input.dedupeKey !== "string" ||
       input.dedupeKey.length === 0 ||
@@ -5304,7 +5308,6 @@ export class GatewayStore {
           ? {}
           : { conversationIdSuffix: duplicate.conversationIdSuffix }),
         bytes,
-        hopCount,
         ...(input.steer === true ? { steer: true as const } : {}),
       });
       return {
@@ -5457,7 +5460,6 @@ export class GatewayStore {
       deadlineAt: deadline.toISOString(),
       bytes,
       body: input.body,
-      hopCount,
       ...(sides.pair === true ? { pair: true as const } : {}),
       ...(sides.transientTarget === true
         ? { transientTarget: true as const }
@@ -5510,7 +5512,6 @@ export class GatewayStore {
       state: "queued",
       bytes,
       body: input.body,
-      hopCount,
       ...(input.steer === true ? { steer: true as const } : {}),
     });
     return {
@@ -5602,7 +5603,6 @@ export class GatewayStore {
       targetAlias: sides.targetAlias,
       state: "rejected",
       bytes: Math.max(1, bytes),
-      hopCount: 0,
       safeErrorCode,
       ...(steer === true ? { steer: true as const } : {}),
     });
@@ -6039,7 +6039,6 @@ export class GatewayStore {
       state: deliveryState,
       bytes: metadata.bytes,
       ...(metadata.body === undefined ? {} : { body: metadata.body }),
-      hopCount: metadata.hopCount,
       ...(metadata.steer === true ? { steer: true as const } : {}),
       latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       ...(safeErrorCode ? { safeErrorCode } : {}),
@@ -6778,6 +6777,7 @@ export class GatewayStore {
     parsed = migratePreCompatibilityAttestations(parsed);
     parsed = migratePreCodexEndpointRefreshJournal(parsed);
     parsed = migratePreCodexOrphanRemovalJournal(parsed);
+    parsed = migrateLegacyHopCounts(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

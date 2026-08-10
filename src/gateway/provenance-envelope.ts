@@ -110,7 +110,7 @@ export function composeProvenanceEnvelope(
     `<embassy-reply-hint conversation="${input.conversationId}"` +
     ` reply-as="${input.targetAlias}"${exactSourceAttribute}>` +
     `Reply by running \`${replyCommand}\` with the reply body on stdin. ` +
-    "Route and hop policy are rechecked.</embassy-reply-hint>";
+    "Caller, conversation, and route policy are rechecked.</embassy-reply-hint>";
   const body = neutralizeReservedTags(input.body);
   const envelope =
     `<cross-session-message from-name="${fromName}"${conversationAttribute}>\n` +

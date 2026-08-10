@@ -269,7 +269,7 @@ The thin skill/CLI exposes the same safe alias list to either provider.
    thread identity, source alias, target Claude current name or session UUID,
    and bounded text.
 2. The gateway checks thread ownership, selector state, rate and size limits,
-   deadline, hop count, and dedupe state.
+   deadline, and dedupe state.
 3. It requires the selector to match an explicitly selected live UUID,
    refreshes the UUID's current process/socket coordinates, and revalidates
    the selected Claude peer's canonical workspace access and exact generation
@@ -395,7 +395,7 @@ Claude turn that is waiting for the reply.
 ### Provenance framing and conversation continuation
 
 The broker classifies `STEER:`, `TRACK:`, and `DONE:`, enforces raw-byte body
-limits, deduplicates, accounts hops, and queues before presentation framing.
+limits, deduplicates, and queues before presentation framing.
 The store therefore retains only the raw transient body. A pure composer runs
 at the final semantic provider-write boundary so a clean retry produces the
 same bytes with exactly one authoritative outer wrapper. Compatibility probes,
@@ -416,7 +416,7 @@ broker-owned `cross-session-message` outer element and an
 - In either direction, the first hint carries the full token in `conversation`
   and the exact recipient alias in `reply-as`, followed by an exact stdin-based
   `embassy reply --conversation ... --alias ...` instruction and the statement
-  that route and hop policy are rechecked.
+  that caller, conversation, and route policy are rechecked.
 
 Embassy does not synthesize `from`, `from-session`, `hop-chain`, or `from-mode`
 attributes: those names have provider-native meanings the broker cannot
@@ -435,8 +435,8 @@ beneath the Embassy wrapper.
 
 The full token delivered in the hint lets the recipient call `reply`, but it is
 only a participant-scoped conversation locator. The service still validates
-the inherited caller, current conversation membership, current route policy,
-and hop count. The full token remains confined to the accepted control result
+the inherited caller, current conversation membership, and current route
+policy. The full token remains confined to the accepted control result
 and transient provider payload, and is memory-only: it is never persisted,
 journaled, logged, snapshotted, rendered on a dashboard, placed in a receipt,
 or returned from suffix-only public correlation. Formatter,
@@ -744,7 +744,7 @@ It shows only:
 - available/selected Claude aliases, registered Codex aliases, provider, host,
   compatibility, state, and queue depth;
 - normalized message direction and delivery state, timestamp, latency, byte
-  count, hop count, and a short opaque message-ID suffix; and
+  count, and a short opaque message-ID suffix; and
 - allowlisted alerts such as stale route, protocol mismatch, queue full, or
   ambiguous delivery.
 

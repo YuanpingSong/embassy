@@ -42,7 +42,7 @@ test("composes the exact Codex-bound provenance envelope", () => {
   assert.equal(
     compose(),
     `<cross-session-message from-name="embassy-pm@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias codex-main@this-mac\` with the reply body on stdin. Route and hop policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 Status is green.
 </cross-session-message>`,
   );
@@ -57,7 +57,7 @@ test("composes the exact Claude-bound canonical outer shape", () => {
       body: "PONG",
     }),
     `<cross-session-message from-name="codex-main@this-mac">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="embassy-pm@this-mac">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias embassy-pm@this-mac\` with the reply body on stdin. Route and hop policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="embassy-pm@this-mac">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias embassy-pm@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 PONG
 </cross-session-message>`,
   );

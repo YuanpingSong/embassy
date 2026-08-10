@@ -2684,7 +2684,7 @@ function expectedCodexEnvelope(
     `<cross-session-message from-name="${sourceAlias}" conversation="${SYNTHETIC_CONVERSATION_ID}">\n` +
     `<embassy-reply-hint conversation="${SYNTHETIC_CONVERSATION_ID}" reply-as="${targetAlias}">` +
     `Reply by running \`embassy reply --conversation ${SYNTHETIC_CONVERSATION_ID} --alias ${targetAlias}\` with the reply body on stdin. ` +
-    `Route and hop policy are rechecked.</embassy-reply-hint>\n${body}\n` +
+    `Caller, conversation, and route policy are rechecked.</embassy-reply-hint>\n${body}\n` +
     "</cross-session-message>"
   );
 }

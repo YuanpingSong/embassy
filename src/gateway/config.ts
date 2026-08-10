@@ -257,13 +257,6 @@ export function loadGatewayConfig(
       1_048_576,
     ),
     messageDeadlineMs,
-    maxHopCount: boundedInteger(
-      "EMBASSY_MAX_HOPS",
-      env.EMBASSY_MAX_HOPS,
-      16,
-      0,
-      64,
-    ),
     rateLimitPerRoute: boundedInteger(
       "EMBASSY_RATE_LIMIT",
       env.EMBASSY_RATE_LIMIT,

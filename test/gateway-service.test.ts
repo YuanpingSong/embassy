@@ -5198,7 +5198,8 @@ test("fake end-to-end delivery retains bodies while keeping route and conversati
   assert.equal(
     finalSnapshot.messages.some(
       (event) =>
-        event.direction === "claude_to_codex" && event.hopCount === 1,
+        event.direction === "codex_to_claude" &&
+        event.body === "bounded codex final",
     ),
     true,
   );
@@ -10037,7 +10038,6 @@ test("snapshot observations ignore generatedAt but revision every public semanti
     targetAlias: "codex-main@this-mac",
     state: "queued",
     bytes: 1,
-    hopCount: 0,
   });
   await observe();
   store.current.accounting.accepted += 1;

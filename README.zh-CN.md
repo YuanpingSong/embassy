@@ -102,9 +102,7 @@ Please expand on the migration risk.
 MSG
 ```
 
-Embassy 会在实际写入提供方之前，为双向路由消息添加一个由代理控制的 `<cross-session-message>` 来源封装。封装标出已经验证的发送方别名，其首个 `<embassy-reply-hint>` 元素包含完整对话令牌、接收方自己的精确别名和可直接使用的 `embassy reply` 命令。朝向 Codex 时，外层标记本身还带有 `conversation="conv_..."`；朝向 Claude 时，为符合 Claude Code 的规范解析格式，完整令牌和回复提示位于封装正文中，而不作为外层属性。请使用收到的完整令牌，切勿猜测或重构它。令牌本身不授予路由权限：每次回复仍会重新检查调用方身份、对话参与关系、实时路由和跳数上限。
-
-`EMBASSY_MAX_HOPS` 限制每个对话的跳数，用于阻止失控的回复循环。初始发送为第 0 跳，此后每次路由回复都会递增；默认值 `16` 意味着正常对话不会触及它。超过上限的尝试会被拒绝，并记录为 `HOP_LIMIT_EXCEEDED`。不要重试已耗尽的对话令牌；请开始新对话。可接受范围及其他边界详见[配置](docs/CONFIGURATION.zh-CN.md)。
+Embassy 会在实际写入提供方之前，为双向路由消息添加一个由代理控制的 `<cross-session-message>` 来源封装。封装标出已经验证的发送方别名，其首个 `<embassy-reply-hint>` 元素包含完整对话令牌、接收方自己的精确别名和可直接使用的 `embassy reply` 命令。朝向 Codex 时，外层标记本身还带有 `conversation="conv_..."`；朝向 Claude 时，为符合 Claude Code 的规范解析格式，完整令牌和回复提示位于封装正文中，而不作为外层属性。请使用收到的完整令牌，切勿猜测或重构它。令牌本身不授予路由权限：每次回复仍会重新检查调用方身份、对话参与关系和实时路由。
 
 ### 实时查看
 
@@ -174,7 +172,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `select-claude` / `unselect-claude` | 操作员 | `pair`/`unpair` 的单任务简写：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
 | `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息 |
 | `send-to-codex` | Claude 会话 | 使用继承的原生回复标识发送一条有界消息 |
-| `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话；路由和跳数限制会重新检查 |
+| `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话；调用方、对话参与关系和路由会重新检查 |
 
 ## 一分钟了解安全性
 
