@@ -102,6 +102,7 @@ const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
 export const GATEWAY_MAX_STATE_FILE_BYTES = 8 * 1024 * 1024;
+const DEFAULT_RETAINED_BODY_BYTES = 1 * 1024 * 1024;
 const COMPATIBILITY_ATTESTATION_CAPACITY = 16;
 const ALIAS_PATTERN =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -449,7 +450,7 @@ function isCodexEndpointRefreshJournalEvent(
       "threadId",
       "oldEndpointGeneration",
       "newEndpointGeneration",
-    ]) &&
+    ], ["reason"]) &&
     isPositiveInteger(value.sequence) &&
     isIsoTimestamp(value.timestamp) &&
     typeof value.alias === "string" &&
@@ -461,7 +462,9 @@ function isCodexEndpointRefreshJournalEvent(
     isPrivateToken(value.threadId) &&
     isPrivateToken(value.oldEndpointGeneration) &&
     isPrivateToken(value.newEndpointGeneration) &&
-    value.oldEndpointGeneration !== value.newEndpointGeneration
+    (value.reason === undefined
+      ? value.oldEndpointGeneration !== value.newEndpointGeneration
+      : value.reason === "boot_reactivation")
   );
 }
 
@@ -729,7 +732,7 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         "bytes",
         "hopCount",
       ],
-      ["conversationIdSuffix", "pair", "steer"],
+      ["conversationIdSuffix", "body", "pair", "steer"],
     )
   ) {
     return false;
@@ -751,6 +754,11 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
     isIsoTimestamp(value.enqueuedAt) &&
     isIsoTimestamp(value.deadlineAt) &&
     isPositiveInteger(value.bytes) &&
+    (value.body === undefined ||
+      (typeof value.body === "string" &&
+        value.body.length > 0 &&
+        !value.body.includes("\u0000") &&
+        Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
     isNonNegativeInteger(value.hopCount) &&
     (value.pair === undefined || value.pair === true) &&
     (value.steer === undefined || value.steer === true)
@@ -781,7 +789,7 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
         "bytes",
         "hopCount",
       ],
-      ["conversationIdSuffix", "latencyMs", "safeErrorCode", "steer"],
+      ["conversationIdSuffix", "body", "latencyMs", "safeErrorCode", "steer"],
     )
   ) {
     return false;
@@ -803,6 +811,11 @@ function isEvent(value: unknown): value is NormalizedMessageEvent {
     typeof value.state === "string" &&
     DELIVERY_STATES.has(value.state) &&
     isPositiveInteger(value.bytes) &&
+    (value.body === undefined ||
+      (typeof value.body === "string" &&
+        value.body.length > 0 &&
+        !value.body.includes("\u0000") &&
+        Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
     isNonNegativeInteger(value.hopCount) &&
     (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
@@ -1950,6 +1963,7 @@ export class GatewayStore {
     identity: PrivateEndpointIdentity,
     safeErrorCode = "CONNECTOR_OFFLINE",
     inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
+    options: Readonly<{ preserveQueued?: boolean }> = {},
   ): Promise<TerminalMessageSettlement[]> {
     return await this.mutate(async (state, now) => {
       this.assertAllowedIdentity(identity);
@@ -1994,6 +2008,7 @@ export class GatewayStore {
         now,
         safeErrorCode,
         settlementPlan,
+        options.preserveQueued === true,
       );
     });
   }
@@ -2381,7 +2396,9 @@ export class GatewayStore {
         !ALIAS_PATTERN.test(input.alias) ||
         !ALIAS_PATTERN.test(newAlias) ||
         !isPrivateRouteBinding(input.newBinding) ||
-        !newAlias.endsWith(`@${input.newBinding.hostId}`)
+        !newAlias.endsWith(`@${input.newBinding.hostId}`) ||
+        (input.journalReason !== undefined &&
+          input.journalReason !== "boot_reactivation")
       ) {
         throw new BridgeError(
           "INVALID_ROUTE_REBIND",
@@ -2398,11 +2415,6 @@ export class GatewayStore {
         !route.enabled ||
         route.state !== "stale" ||
         route.compatibility !== "expired" ||
-        route.queueDepth !== 0 ||
-        state.queue.some(
-          (item) =>
-            item.sourceAlias === route.alias || item.targetAlias === route.alias,
-        ) ||
         state.inFlight.some(
           (item) =>
             item.sourceAlias === route.alias || item.targetAlias === route.alias,
@@ -2410,7 +2422,7 @@ export class GatewayStore {
       ) {
         throw new BridgeError(
           "ROUTE_REBIND_NOT_SAFE",
-          "Only an enabled, expired, empty stale route can be rebound.",
+          "Only an enabled, expired stale route without in-flight work can be rebound.",
         );
       }
       if (
@@ -2437,6 +2449,15 @@ export class GatewayStore {
         throw new BridgeError(
           "ROUTE_RESELECTION_REQUIRED",
           "A stale route may rebind only the same provider-native logical identity and ownership lease.",
+        );
+      }
+      if (
+        input.journalReason === "boot_reactivation" &&
+        route.binding.provider !== "codex"
+      ) {
+        throw new BridgeError(
+          "INVALID_ROUTE_REBIND",
+          "Only an exact retained Codex route may record boot reactivation.",
         );
       }
       const connector = state.connectors.find((candidate) =>
@@ -2466,7 +2487,17 @@ export class GatewayStore {
           "The replacement private binding already belongs to another alias.",
         );
       }
+      if (
+        input.journalReason === "boot_reactivation" &&
+        state.codexEndpointRefreshSequence >= Number.MAX_SAFE_INTEGER
+      ) {
+        throw new BridgeError(
+          "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
+          "The bounded Codex endpoint-refresh sequence is exhausted.",
+        );
+      }
       const previousAlias = route.alias;
+      const oldEndpointGeneration = route.binding.endpointGeneration;
       route.binding = { ...input.newBinding };
       route.alias = newAlias;
       route.state = input.state ?? "idle";
@@ -2475,9 +2506,8 @@ export class GatewayStore {
       route.lastSeenAt = now.toISOString();
       delete route.safeErrorCode;
       if (previousAlias !== newAlias) {
-        // Restart recovery has already emptied queue/in-flight state. Keep the
-        // metadata rewrite complete anyway so this mutation stays atomic if a
-        // future caller uses the same primitive after another invalidation.
+        // Retained queued mail follows only the exact re-observed logical
+        // route. In-flight work remains forbidden above.
         for (const item of [...state.queue, ...state.inFlight]) {
           if (item.sourceAlias === previousAlias) item.sourceAlias = newAlias;
           if (item.targetAlias === previousAlias) item.targetAlias = newAlias;
@@ -2492,6 +2522,17 @@ export class GatewayStore {
         }
         renameRateBucket(state, previousAlias, newAlias);
         renamePairAlias(state, previousAlias, newAlias, now);
+      }
+      if (input.journalReason === "boot_reactivation") {
+        this.appendCodexEndpointRefreshEvent(state, {
+          timestamp: now.toISOString(),
+          alias: route.alias,
+          hostId: route.binding.hostId,
+          threadId: route.binding.routeHandle,
+          oldEndpointGeneration,
+          newEndpointGeneration: route.binding.endpointGeneration,
+          reason: "boot_reactivation",
+        });
       }
     });
   }
@@ -2592,15 +2633,9 @@ export class GatewayStore {
           !route.enabled ||
           route.state !== "stale" ||
           route.compatibility !== "expired" ||
-          route.queueDepth !== 0 ||
           !sameEndpoint(route.binding, input.oldEndpoint) ||
           route.binding.routeHandle !== candidate.threadId ||
           route.binding.ownerLease !== candidate.ownerLease ||
-          state.queue.some(
-            (item) =>
-              item.sourceAlias === route.alias ||
-              item.targetAlias === route.alias,
-          ) ||
           state.inFlight.some(
             (item) =>
               item.sourceAlias === route.alias ||
@@ -2609,7 +2644,7 @@ export class GatewayStore {
         ) {
           throw new BridgeError(
             "CODEX_ENDPOINT_REFRESH_NOT_SAFE",
-            "Only an exact enabled, expired, empty stale Codex task on the retired generation may be refreshed.",
+            "Only an exact enabled, expired stale Codex task without in-flight work may be refreshed.",
           );
         }
         const newBinding: PrivateRouteBinding = {
@@ -4050,7 +4085,7 @@ export class GatewayStore {
         (route) => route.alias === metadata.targetAlias,
       );
       if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      const body = this.transientBodies.get(metadata.messageId);
+      const body = this.transientBodies.get(metadata.messageId) ?? metadata.body;
       this.transientBodies.delete(metadata.messageId);
       if (body === undefined) {
         this.finishMetadata(state, metadata, "abandoned", now, "TRANSIENT_BODY_UNAVAILABLE");
@@ -4068,12 +4103,20 @@ export class GatewayStore {
         targetAlias: metadata.targetAlias,
         state: "dispatching",
         bytes: metadata.bytes,
+        body,
         hopCount: metadata.hopCount,
         ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       });
       return { ...metadata, body };
     });
+  }
+
+  /** Controller-private shutdown inventory; full IDs never cross control output. */
+  async inspectQueuedMessageIds(): Promise<string[]> {
+    return this.mutex.run("gateway", async () =>
+      this.requireState().queue.map((item) => item.messageId),
+    );
   }
 
   /**
@@ -4200,9 +4243,16 @@ export class GatewayStore {
   async requeueInFlightMessage(
     messageId: string,
     body: string,
+    safeErrorCode?: string,
   ): Promise<RequeueInFlightMessageResult> {
     return this.mutate(async (state, now) => {
-      if (!MESSAGE_ID_PATTERN.test(messageId) || typeof body !== "string") {
+      if (
+        !MESSAGE_ID_PATTERN.test(messageId) ||
+        typeof body !== "string" ||
+        body.length === 0 ||
+        body.includes("\u0000") ||
+        (safeErrorCode !== undefined && !SAFE_CODE_PATTERN.test(safeErrorCode))
+      ) {
         throw new BridgeError(
           "INVALID_GATEWAY_MESSAGE",
           "Only an exact in-flight message can be returned to the queue.",
@@ -4214,6 +4264,12 @@ export class GatewayStore {
       const metadata = state.inFlight[index];
       if (metadata === undefined || index < 0) {
         return { status: "not_in_flight" };
+      }
+      if (Buffer.byteLength(body, "utf8") !== metadata.bytes) {
+        throw new BridgeError(
+          "INVALID_GATEWAY_MESSAGE",
+          "A requeued message body must exactly match its admitted byte count.",
+        );
       }
       state.inFlight.splice(index, 1);
       if (Date.parse(metadata.deadlineAt) <= now.getTime()) {
@@ -4229,6 +4285,7 @@ export class GatewayStore {
         };
       }
       const { dispatchedAt: _dispatchedAt, ...queuedMetadata } = metadata;
+      queuedMetadata.body = body;
       state.queue.unshift(queuedMetadata);
       this.transientBodies.set(messageId, body);
       state.accounting.queuedBytes += metadata.bytes;
@@ -4247,8 +4304,10 @@ export class GatewayStore {
         targetAlias: metadata.targetAlias,
         state: "held",
         bytes: metadata.bytes,
+        body,
         hopCount: metadata.hopCount,
         ...(metadata.steer === true ? { steer: true as const } : {}),
+        ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
         latencyMs: Math.max(
           0,
           now.getTime() - Date.parse(metadata.enqueuedAt),
@@ -4295,6 +4354,7 @@ export class GatewayStore {
         targetAlias: metadata.targetAlias,
         state: progress,
         bytes: metadata.bytes,
+        ...(metadata.body === undefined ? {} : { body: metadata.body }),
         hopCount: metadata.hopCount,
         ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(
@@ -5388,6 +5448,7 @@ export class GatewayStore {
       enqueuedAt: now.toISOString(),
       deadlineAt: deadline.toISOString(),
       bytes,
+      body: input.body,
       hopCount,
       ...(sides.pair === true ? { pair: true as const } : {}),
       ...(input.steer === true ? { steer: true as const } : {}),
@@ -5437,6 +5498,7 @@ export class GatewayStore {
       targetAlias: sides.targetAlias,
       state: "queued",
       bytes,
+      body: input.body,
       hopCount,
       ...(input.steer === true ? { steer: true as const } : {}),
     });
@@ -5539,10 +5601,55 @@ export class GatewayStore {
     state: GatewayPersistedState,
     event: Omit<NormalizedMessageEvent, "sequence">,
   ): void {
+    if (event.body !== undefined) {
+      for (const retained of state.events) {
+        if (
+          retained.body !== undefined &&
+          retained.messageIdSuffix === event.messageIdSuffix &&
+          retained.direction === event.direction &&
+          retained.sourceAlias === event.sourceAlias &&
+          retained.targetAlias === event.targetAlias &&
+          retained.conversationIdSuffix === event.conversationIdSuffix
+        ) {
+          delete retained.body;
+        }
+      }
+    }
     state.eventSequence += 1;
     state.events.push({ sequence: state.eventSequence, ...event });
     while (state.events.length > this.config.limits.eventCapacity) {
       state.events.shift();
+    }
+    this.pruneRetainedEventBodies(state);
+  }
+
+  private pruneRetainedEventBodies(state: GatewayPersistedState): void {
+    const configured =
+      this.config.limits.maxRetainedBodyBytes ??
+      DEFAULT_RETAINED_BODY_BYTES;
+    if (
+      !Number.isSafeInteger(configured) ||
+      configured < 1 ||
+      configured > GATEWAY_MAX_STATE_FILE_BYTES
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_CONFIGURATION",
+        "The retained message-body byte limit is invalid.",
+      );
+    }
+    let retainedBytes = state.events.reduce(
+      (total, event) =>
+        total +
+        (event.body === undefined
+          ? 0
+          : Buffer.byteLength(event.body, "utf8")),
+      0,
+    );
+    for (const event of state.events) {
+      if (retainedBytes <= configured) break;
+      if (event.body === undefined) continue;
+      retainedBytes -= Buffer.byteLength(event.body, "utf8");
+      delete event.body;
     }
   }
 
@@ -5920,6 +6027,7 @@ export class GatewayStore {
       targetAlias: metadata.targetAlias,
       state: deliveryState,
       bytes: metadata.bytes,
+      ...(metadata.body === undefined ? {} : { body: metadata.body }),
       hopCount: metadata.hopCount,
       ...(metadata.steer === true ? { steer: true as const } : {}),
       latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
@@ -6043,14 +6151,19 @@ export class GatewayStore {
       string,
       RouteInFlightSettlementInput
     >,
+    preserveQueued = false,
   ): TerminalMessageSettlement[] {
     const settlements: TerminalMessageSettlement[] = [];
-    const queued = state.queue.filter((item) =>
-      routeTerminationMatches(state, aliases, item),
-    );
-    state.queue = state.queue.filter(
-      (item) => !routeTerminationMatches(state, aliases, item),
-    );
+    const queued = preserveQueued
+      ? []
+      : state.queue.filter((item) =>
+          routeTerminationMatches(state, aliases, item),
+        );
+    if (!preserveQueued) {
+      state.queue = state.queue.filter(
+        (item) => !routeTerminationMatches(state, aliases, item),
+      );
+    }
     for (const item of queued) {
       this.transientBodies.delete(item.messageId);
       state.accounting.queuedBytes -= item.bytes;
@@ -6173,6 +6286,7 @@ export class GatewayStore {
         now.getTime() - Date.parse(bucket.windowStartedAt) <
         this.config.limits.rateWindowMs,
     );
+    this.pruneRetainedEventBodies(state);
   }
 
   private recoverAfterRestart(now: Date): void {
@@ -6222,15 +6336,37 @@ export class GatewayStore {
       route.safeErrorCode = "REOBSERVATION_REQUIRED";
       route.queueDepth = 0;
     }
+    const retainedQueue: QueuedMessageMetadata[] = [];
+    let retainedQueuedBytes = 0;
+    this.transientBodies.clear();
     for (const item of state.queue) {
-      state.accounting.queuedBytes -= item.bytes;
-      this.finishMetadata(
-        state,
-        item,
-        "abandoned",
-        now,
-        "CONTROLLER_RESTARTED",
+      if (Date.parse(item.deadlineAt) <= now.getTime()) {
+        this.finishMetadata(
+          state,
+          item,
+          "expired",
+          now,
+          "MESSAGE_EXPIRED",
+        );
+        continue;
+      }
+      if (item.body === undefined) {
+        this.finishMetadata(
+          state,
+          item,
+          "abandoned",
+          now,
+          "CONTROLLER_RESTARTED",
+        );
+        continue;
+      }
+      retainedQueue.push(item);
+      retainedQueuedBytes += item.bytes;
+      this.transientBodies.set(item.messageId, item.body);
+      const target = state.routes.find(
+        (route) => route.alias === item.targetAlias,
       );
+      if (target !== undefined) target.queueDepth += 1;
     }
     for (const item of state.inFlight) {
       this.finishMetadata(
@@ -6241,10 +6377,9 @@ export class GatewayStore {
         "CONTROLLER_RESTARTED",
       );
     }
-    state.queue = [];
+    state.queue = retainedQueue;
     state.inFlight = [];
-    state.accounting.queuedBytes = 0;
-    this.transientBodies.clear();
+    state.accounting.queuedBytes = retainedQueuedBytes;
   }
 
   private recoverCodexSuccessionAfterRestart(

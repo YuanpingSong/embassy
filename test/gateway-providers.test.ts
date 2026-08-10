@@ -165,6 +165,7 @@ class FakeClaudePeer {
   rejectedDiscoveryRecords: Record<string, number> = {};
   parseableRejectedDiscoveryRecords = 0;
   asserted: Array<{ routeHandle: string; stateRoot: string }> = [];
+  workspaceAttestationError: Error | undefined;
   closed = false;
   sendMode:
     | "success"
@@ -367,6 +368,9 @@ class FakeClaudePeer {
     stateRoot: string,
   ): Promise<void> {
     this.asserted.push({ routeHandle, stateRoot });
+    if (this.workspaceAttestationError !== undefined) {
+      throw this.workspaceAttestationError;
+    }
   }
 
   async resolveReplyAddress(address: string): Promise<ClaudePeerDescriptor> {
@@ -391,7 +395,7 @@ class FakeClaudePeer {
     this.lastListenerGeneration = options.listener?.generation;
     this.lastReceiptDeadlineAt = options.receiptDeadlineAt;
     if (this.sendMode === "prewrite_failure") {
-      throw new BridgeError("CLAUDE_PEER_TARGET_STALE", "synthetic");
+      throw new BridgeError("CLAUDE_PEER_TARGET_STALE", "synthetic", true);
     }
     await options.onTransportStatus?.({
       messageId: PROVIDER_MESSAGE_ID,
@@ -903,6 +907,10 @@ test("Claude provider frames raw maximum bodies once and rejects provenance mism
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
+  await provider.assertWorkspaceDisjoint(
+    "target-selected",
+    "/synthetic/controller-state",
+  );
   await provider.selectRoute({
     alias: "advisor@this-mac",
     routeHandle: "target-selected",
@@ -1980,8 +1988,102 @@ test("local Claude provider waits for a late exact receipt after post-write ambi
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
-    { state: "failed", safeErrorCode: "CLAUDE_DISPATCH_REJECTED" },
+    { state: "deferred", safeErrorCode: "CLAUDE_PEER_TARGET_STALE" },
   );
+  await provider.close();
+});
+
+test("local Claude provider reattests each selected dispatch and defers clean route gaps before write", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-reviewer@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  await provider.discoverClaudePeers();
+  await provider.assertWorkspaceDisjoint(
+    "target-selected",
+    "/synthetic/controller-state",
+  );
+  await provider.selectRoute({
+    alias: "advisor@this-mac",
+    routeHandle: "target-selected",
+  });
+
+  fake.workspaceAttestationError = new BridgeError(
+    "CLAUDE_PEER_TARGET_UNKNOWN",
+    "synthetic discovery gap",
+    true,
+  );
+  assert.deepEqual(
+    await provider.dispatch({
+      ...claudeProvenance(),
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-route-gap-1",
+      text: "wait for exact route idle",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "deferred", safeErrorCode: "CLAUDE_PEER_TARGET_UNKNOWN" },
+  );
+  assert.equal(fake.sendCalls, 0);
+  assert.deepEqual(observed.routes.at(-1), {
+    endpoint: { ...provider.identity, routeHandle: "target-selected" },
+    state: "busy",
+  });
+
+  fake.workspaceAttestationError = Object.assign(
+    new Error("synthetic private path must not escape"),
+    { code: "ENOENT" },
+  );
+  assert.deepEqual(
+    await provider.dispatch({
+      ...claudeProvenance(),
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-route-gap-path",
+      text: "classify the private filesystem error",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    {
+      state: "failed",
+      safeErrorCode: "CLAUDE_DISPATCH_PREWRITE_PATH_MISSING",
+    },
+  );
+  assert.equal(fake.sendCalls, 0);
+
+  fake.workspaceAttestationError = undefined;
+  assert.deepEqual(
+    await provider.dispatch({
+      ...claudeProvenance(),
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-route-gap-2",
+      text: "retry after route idle",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.sendCalls, 1);
+  assert.deepEqual(fake.asserted.slice(-2), [
+    {
+      routeHandle: "target-selected",
+      stateRoot: "/synthetic/controller-state",
+    },
+    {
+      routeHandle: "target-selected",
+      stateRoot: "/synthetic/controller-state",
+    },
+  ]);
   await provider.close();
 });
 
@@ -2137,6 +2239,10 @@ test("Claude idle discovery overlapping an entire dispatch remains stale until t
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
+  await provider.assertWorkspaceDisjoint(
+    "target-selected",
+    "/synthetic/controller-state",
+  );
   await provider.selectRoute({
     alias: "advisor@this-mac",
     routeHandle: "target-selected",
