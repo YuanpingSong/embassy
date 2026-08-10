@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   spawn,
+  type ChildProcess,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { renameSync } from "node:fs";
@@ -89,6 +90,59 @@ async function createLegacyRoot(
   await writeFile(path.join(root, LEGACY_MARKER), marker, { mode: 0o600 });
   await chmod(path.join(root, LEGACY_MARKER), 0o600);
   return root;
+}
+
+function childIsRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+/** Signal only a live child, and treat an already-dead one as done. */
+function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (!childIsRunning(child)) return;
+  try {
+    child.kill(signal);
+  } catch {
+    // The child exited between the liveness check and the signal.
+  }
+}
+
+/** Resolve true when the child exits within the deadline, false otherwise. */
+function childExitedWithin(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (!childIsRunning(child)) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once("exit", onExit);
+  });
+}
+
+/**
+ * Ask the child to release its lease and report how it actually exited. The
+ * deadlines are generous because a loaded runner only needs more time, and the
+ * escalation exists so a genuinely wedged child fails an assertion instead of
+ * hanging the run.
+ */
+async function terminateChild(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  signalChild(child, "SIGTERM");
+  if (!(await childExitedWithin(child, 10_000))) {
+    signalChild(child, "SIGTERM");
+    if (!(await childExitedWithin(child, 5_000))) {
+      signalChild(child, "SIGKILL");
+      await childExitedWithin(child, 5_000);
+    }
+  }
+  return { code: child.exitCode, signal: child.signalCode };
 }
 
 test(
@@ -289,10 +343,20 @@ test("the fixed owner record excludes a second operating-system process", { skip
       "tsx",
       "--input-type=module",
       "--eval",
+      // The SIGTERM handler is installed before READY is announced. A signal
+      // that lands in the reverse window kills this process by its default
+      // disposition, which loses the lease without the clean release below.
       `import { acquireGatewayInstanceLease } from ${JSON.stringify(sourceUrl)};
        const lease = await acquireGatewayInstanceLease(process.env.EMBASSY_TEST_HOME);
+       process.on("SIGTERM", () => {
+         void lease
+           .close()
+           .catch((error) => {
+             process.stderr.write("lease close failed: " + String(error) + "\\n");
+           })
+           .finally(() => { process.exit(0); });
+       });
        process.stdout.write("READY\\n");
-       process.on("SIGTERM", async () => { await lease.close(); process.exit(0); });
        setInterval(() => undefined, 1000);`,
     ],
     {
@@ -306,30 +370,45 @@ test("the fixed owner record excludes a second operating-system process", { skip
     },
   );
   let stderr = "";
+  let stdout = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
   });
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
   t.after(async () => {
-    if (child.exitCode === null) child.kill("SIGTERM");
+    signalChild(child, "SIGKILL");
+    await childExitedWithin(child, 5_000);
   });
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error(`child lease did not become ready: ${stderr}`)),
-      10_000,
-    );
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      if (!chunk.includes("READY")) return;
-      clearTimeout(timeout);
+    // Spawning tsx and taking a real kernel lease is slow under load, so this
+    // deadline only catches a child that never comes up at all.
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`child lease did not become ready: ${stderr}`));
+    }, 30_000);
+    const onData = (): void => {
+      if (!stdout.includes("READY")) return;
+      cleanup();
       resolve();
-    });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
+    };
+    const onExit = (code: number | null): void => {
+      cleanup();
       reject(
         new Error(`child lease exited early (${String(code)}): ${stderr}`),
       );
-    });
+    };
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      child.stdout.removeListener("data", onData);
+      child.removeListener("exit", onExit);
+    };
+    child.stdout.on("data", onData);
+    child.once("exit", onExit);
+    onData();
   });
 
   await assert.rejects(
@@ -337,17 +416,17 @@ test("the fixed owner record excludes a second operating-system process", { skip
     (error: unknown) =>
       error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE",
   );
-  child.kill("SIGTERM");
-  await new Promise<void>((resolve, reject) => {
-    child.once("exit", (code) => {
-      if (code === 0) resolve();
-      else {
-        reject(
-          new Error(`child lease cleanup failed (${String(code)}): ${stderr}`),
-        );
-      }
-    });
-  });
+  const exit = await terminateChild(child);
+  assert.equal(
+    exit.signal,
+    null,
+    `child lease died from ${String(exit.signal)} instead of releasing: ${stderr}`,
+  );
+  assert.equal(
+    exit.code,
+    0,
+    `child lease cleanup failed (${String(exit.code)}): ${stderr}`,
+  );
   const lease = await acquireGatewayInstanceLease(home);
   await lease.close();
 });
