@@ -358,7 +358,6 @@ export async function runGatewayServer(
       Promise.resolve().then(() =>
         attestClaudeRuntime({
           claudeExecutable,
-          compatibilityPolicy: config.compatibilityPolicy ?? "observed",
         }),
       ),
     );
@@ -373,7 +372,6 @@ export async function runGatewayServer(
     store = createStore(config);
     const codexFactoryOptions: LocalCodexTransportFactoryOptions = {
       appServerVersion: GATEWAY_CODEX_APP_SERVER_VERSION,
-      compatibilityPolicy: config.compatibilityPolicy ?? "observed",
       environment: localCodexProviderEnvironment(env),
       hostId: GATEWAY_LOCAL_HOST_ID,
       writableProtocolAttested: true,
@@ -395,7 +393,6 @@ export async function runGatewayServer(
       factory: createdCodexFactory,
       refreshFactory: async () =>
         await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
-      compatibilityPolicy: config.compatibilityPolicy ?? "observed",
     });
     const createdService = createService({
       config,

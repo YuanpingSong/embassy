@@ -20,13 +20,7 @@ import {
 import net, { type Server, type Socket } from "node:net";
 import path from "node:path";
 import { TextDecoder } from "node:util";
-import {
-  isCompatibilityAttestation,
-  isCompatibilityCertificationReport,
-  isCompatibilityCheckReport,
-  type CompatibilityCertificationReport,
-  type CompatibilityCheckReport,
-} from "./compatibility.js";
+import { isCompatibilityAttestation } from "./compatibility.js";
 import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
@@ -86,8 +80,6 @@ export const gatewayControlMethods = [
   "unpair",
   "list_snapshot",
   "observe_snapshot",
-  "compat_check",
-  "compat_certify",
   "delivery_status",
   "untrack",
   "send_to_claude",
@@ -258,16 +250,6 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
-      method: "compat_check";
-      params: Record<string, never>;
-    }
-  | {
-      protocolVersion: 1;
-      method: "compat_certify";
-      params: { codexAlias?: string; withTurn: boolean };
-    }
-  | {
-      protocolVersion: 1;
       method: "delivery_status";
       params: DeliveryStatusParams;
     }
@@ -315,8 +297,6 @@ type ValidatedGatewayControlRequest =
   | Extract<GatewayControlRequest, { method: "unpair" }>
   | Extract<GatewayControlRequest, { method: "list_snapshot" }>
   | Extract<GatewayControlRequest, { method: "observe_snapshot" }>
-  | Extract<GatewayControlRequest, { method: "compat_check" }>
-  | Extract<GatewayControlRequest, { method: "compat_certify" }>
   | Extract<GatewayControlRequest, { method: "delivery_status" }>
   | Extract<GatewayControlRequest, { method: "untrack" }>
   | {
@@ -419,8 +399,6 @@ type ResultByMethod = {
   unpair: GatewayDecision;
   list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation;
-  compat_check: CompatibilityCheckReport;
-  compat_certify: CompatibilityCertificationReport;
   delivery_status: GatewayDeliveryStatusResult;
   untrack: GatewayDecision;
   send_to_claude: GatewaySendResult;
@@ -452,11 +430,6 @@ export type GatewayControlHandlers = {
   unpair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
-  compatibilityCheck: () => MaybePromise<CompatibilityCheckReport>;
-  compatibilityCertify: (params: Readonly<{
-    codexAlias?: string;
-    withTurn: boolean;
-  }>) => MaybePromise<CompatibilityCertificationReport>;
   deliveryStatus: (
     params: Readonly<DeliveryStatusParams>,
   ) => MaybePromise<GatewayDeliveryStatusResult>;
@@ -723,29 +696,11 @@ function normalizeParams(
     case "health":
     case "list_snapshot":
     case "observe_snapshot":
-    case "compat_check":
     case "refresh_dashboard":
       if (!hasExactKeys(value, [])) {
         throw new ProtocolFault("INVALID_REQUEST");
       }
       return {};
-    case "compat_certify": {
-      if (
-        !hasExactKeys(value, ["withTurn"], ["codexAlias"]) ||
-        typeof value.withTurn !== "boolean" ||
-        (value.codexAlias !== undefined &&
-          (!isAlias(value.codexAlias) ||
-            !value.codexAlias.startsWith("codex-")))
-      ) {
-        throw new ProtocolFault("INVALID_REQUEST");
-      }
-      return {
-        withTurn: value.withTurn,
-        ...(value.codexAlias === undefined
-          ? {}
-          : { codexAlias: value.codexAlias }),
-      };
-    }
     case "delivery_status": {
       if (
         !hasExactKeys(value, ["token"]) ||
@@ -1727,10 +1682,6 @@ function isResultForMethod<M extends GatewayControlMethod>(
       return isGatewaySnapshot(value);
     case "observe_snapshot":
       return isSnapshotObservation(value);
-    case "compat_check":
-      return isCompatibilityCheckReport(value);
-    case "compat_certify":
-      return isCompatibilityCertificationReport(value);
     case "delivery_status":
       return isDeliveryStatusResult(value);
     case "untrack":
@@ -1790,12 +1741,6 @@ async function dispatch(
         break;
       case "observe_snapshot":
         result = await handlers.observeSnapshot();
-        break;
-      case "compat_check":
-        result = await handlers.compatibilityCheck();
-        break;
-      case "compat_certify":
-        result = await handlers.compatibilityCertify(request.params);
         break;
       case "delivery_status":
         result = await handlers.deliveryStatus(request.params);
@@ -1953,7 +1898,6 @@ function isNonIdempotentControlMethod(method: GatewayControlMethod): boolean {
     method === "unselect_claude" ||
     method === "pair" ||
     method === "unpair" ||
-    method === "compat_certify" ||
     method === "send_to_claude" ||
     method === "send_to_codex" ||
     method === "reply"

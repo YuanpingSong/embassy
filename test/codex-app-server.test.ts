@@ -106,12 +106,14 @@ class FakeTransport implements CodexAppServerTransport {
 function fixture(
   handler: SendHandler = () => undefined,
   options: {
+    appServerVersion?: string;
     maxDeadlineMs?: number;
     maxReplyBytes?: number;
     now?: () => Date;
     requestTimeoutMs?: number;
     turnWatchdogMs?: number;
     writesEnabled?: boolean;
+    observedSchemaCandidate?: true;
   } = {},
 ): {
   connect: () => Promise<CodexAppServerConnector>;
@@ -143,9 +145,12 @@ function fixture(
     connect: () =>
       CodexAppServerConnector.connect({
         compatibility: {
-          appServerVersion: "0.147.0",
+          appServerVersion: options.appServerVersion ?? "0.147.0",
           endpointGeneration: ENDPOINT_GENERATION,
           protocol: "app-server-v2-stable",
+          ...(options.observedSchemaCandidate === true
+            ? { observedSchemaCandidate: true as const }
+            : {}),
           steering: STEERING_ATTESTATION,
         },
         onEvent: (event) => events.push(event),
@@ -447,6 +452,19 @@ test("monitor-only connectors can observe but can never start a turn", async () 
   assert.equal(requestMethods(current.transport).includes("turn/start"), false);
 
   await connector.close();
+});
+
+test("an unpinned monitor candidate can never enable writes", async () => {
+  const tested = fixture(undefined, {
+    appServerVersion: "0.148.0",
+    observedSchemaCandidate: true,
+    writesEnabled: true,
+  });
+  await assert.rejects(
+    tested.connect(),
+    (error: unknown) => assertConnectorError(error, "INVALID_CONFIGURATION"),
+  );
+  assert.deepEqual(tested.transport.sent, []);
 });
 
 test("observes and resumes only the exact opted-in thread", async () => {

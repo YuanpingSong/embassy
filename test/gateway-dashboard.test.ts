@@ -8,10 +8,10 @@ import {
 } from "../src/gateway/dashboard-model.js";
 import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
 import {
-  attachCompatibilityCertification,
   certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
+  type CompatibilityProbeResult,
 } from "../src/gateway/compatibility.js";
 
 test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {
@@ -96,54 +96,67 @@ test("activity projection distinguishes automatic endpoint refresh from operator
   assert.match(zh, /操作者[\s\S]*已移除陈旧的 Codex 注册/u);
 });
 
-test("diagnostics project live certification depth, time, and failure truth", () => {
+test("diagnostics reduce compatibility to automatic provider safety rows", () => {
   const snapshot = dashboardFixture();
   snapshot.compatibilityChecks = (["claude", "codex"] as const).map(
-    (surface) =>
-      attachCompatibilityCertification(
-        evaluateCompatibilityAttestation({
-          surface,
-          version: certifiedCompatibilityVersions[surface][0]!,
-          checkedAt: "2026-08-08T11:58:00.000Z",
-          policy: "observed",
-          certifiedVersions: certifiedCompatibilityVersions[surface],
-          probes: compatibilityProbeNames[surface].map((name) => ({
-            name,
-            outcome: "pass" as const,
-          })),
-        }),
-        surface === "claude"
-          ? {
-              depth: "wire",
-              outcome: "fail",
-              certifiedAt: "2026-08-08T11:59:00.000Z",
-              safeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
-            }
-          : {
-              depth: "thread_ops",
-              outcome: "pass",
-              certifiedAt: "2026-08-08T11:59:01.000Z",
-            },
-      ),
+    (surface) => {
+      const probes: CompatibilityProbeResult[] = compatibilityProbeNames[
+        surface
+      ].map((name) => ({
+        name,
+        outcome: "pass" as const,
+      }));
+      if (surface === "claude") {
+        probes[2] = {
+          name: "registry_schema",
+          outcome: "fail",
+          safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+        };
+      }
+      return evaluateCompatibilityAttestation({
+        surface,
+        version: certifiedCompatibilityVersions[surface][0]!,
+        checkedAt: "2026-08-08T11:58:00.000Z",
+        certifiedVersions: certifiedCompatibilityVersions[surface],
+        probes,
+      });
+    },
   );
+  snapshot.alerts = [
+    {
+      code: "COMPATIBILITY_CERTIFICATION_FAILED",
+      severity: "error",
+      timestamp: "2026-08-08T11:59:00.000Z",
+      provider: "claude",
+      host: "this-mac",
+    },
+  ];
   const model = buildDashboardViewModel(snapshot);
   assert.deepEqual(model.compatibilityChecks[0], {
     surface: "claude",
     version: certifiedCompatibilityVersions.claude[0],
-    tier: "certified",
+    tier: "incompatible",
     checkedAt: "2026-08-08T11:58:00.000Z",
-    certificationDepth: "wire",
-    certificationOutcome: "fail",
-    certifiedAt: "2026-08-08T11:59:00.000Z",
-    certificationSafeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
+    failure: "registry_schema",
+    safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
   });
+  assert.equal(
+    model.attention.some(
+      (item) => item.code === "COMPATIBILITY_CERTIFICATION_FAILED",
+    ),
+    false,
+  );
   const en = renderDashboardHtml(snapshot, { locale: "en" });
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /Live certification/);
-  assert.match(en, /fail \/ wire/);
-  assert.match(en, /CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED/);
-  assert.match(zh, /实时认证/);
-  assert.match(zh, /pass \/ thread_ops/);
+  assert.match(en, /Provider compatibility/);
+  assert.match(en, /Automatic provider compatibility status/);
+  assert.match(en, /Failure/);
+  assert.match(en, /CLAUDE_REGISTRY_SCHEMA_REJECTED/);
+  assert.equal(en.includes("Live certification"), false);
+  assert.equal(en.includes("fail / wire"), false);
+  assert.equal(en.includes("COMPATIBILITY_CERTIFICATION_FAILED"), false);
+  assert.match(zh, /提供方兼容性/);
+  assert.equal(zh.includes("实时认证"), false);
 });
 
 test("progress watches project bounded countdowns, attention, and bilingual metadata only", () => {
@@ -282,6 +295,50 @@ test("non-ready routes surface one bounded derived attention item without invent
   assert.match(html, /Do not unregister first/);
   assert.equal(html.includes("Unregister and register"), false);
   assert.equal(html.includes("QUEUE_STALLED"), false);
+});
+
+test("queued mail to an exactly unobserved recipient surfaces one attention item without inferring from busy", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes[0] = {
+    ...snapshot.routes[0]!,
+    queueDepth: 1,
+    oldestQueuedAt: "2026-08-08T11:59:30.000Z",
+    safeErrorCode: "CLAUDE_PEER_NOT_OBSERVED",
+  };
+  snapshot.alerts = [
+    {
+      code: "CLAUDE_PEER_NOT_OBSERVED",
+      severity: "warning",
+      timestamp: "2026-08-08T11:59:57.000Z",
+      provider: "claude",
+      alias: "claude-advisor@this-mac",
+      host: "this-mac",
+    },
+  ];
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.attention.length, 1);
+  assert.deepEqual(model.attention[0], {
+    kind: "route",
+    code: "CLAUDE_PEER_NOT_OBSERVED",
+    severity: "warning",
+    timestamp: "2026-08-08T11:59:58.000Z",
+    provider: "claude",
+    alias: "claude-advisor@this-mac",
+    host: "this-mac",
+    guidance: "recipient_waiting_input",
+  });
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(
+    en,
+    /Recipient session appears to be waiting on interactive input in its own window; check it there\./,
+  );
+  assert.match(zh, /接收方会话似乎正在自己的窗口中等待交互式输入；请前往该窗口查看。/);
+
+  snapshot.alerts = [];
+  delete snapshot.routes[0]!.safeErrorCode;
+  assert.equal(buildDashboardViewModel(snapshot).attention.length, 0);
 });
 
 test("restart guidance warns about abandoning memory-only bodies", () => {

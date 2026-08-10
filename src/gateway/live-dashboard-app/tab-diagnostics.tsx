@@ -169,16 +169,14 @@ namespace Embassy {
               <th scope="col">{t("diagnostics.version")}</th>
               <th scope="col">{t("diagnostics.tier")}</th>
               <th scope="col">{t("diagnostics.checkedAt")}</th>
-              <th scope="col">{t("diagnostics.certification")}</th>
-              <th scope="col">{t("diagnostics.certifiedAt")}</th>
-              <th scope="col">{t("diagnostics.failedProbe")}</th>
+              <th scope="col">{t("diagnostics.failure")}</th>
               <th scope="col">{t("column.issue")}</th>
             </tr>
           </thead>
           <tbody>
             {props.checks.length === 0 ? (
               <tr>
-                <td colSpan={8}>
+                <td colSpan={6}>
                   {t("diagnostics.compatibilityChecks.empty")}
                 </td>
               </tr>
@@ -196,22 +194,10 @@ namespace Embassy {
                     <TimeAgo iso={check.checkedAt} />
                   </td>
                   <td className="cell-mono">
-                    {check.certificationOutcome === undefined
-                      ? DIAGNOSTICS_ABSENT_FIELD
-                      : `${check.certificationOutcome} / ${check.certificationDepth}`}
-                  </td>
-                  <td>
-                    {check.certifiedAt === undefined
-                      ? DIAGNOSTICS_ABSENT_FIELD
-                      : <TimeAgo iso={check.certifiedAt} />}
+                    {check.failure ?? DIAGNOSTICS_ABSENT_FIELD}
                   </td>
                   <td className="cell-mono">
-                    {check.failedProbe ?? DIAGNOSTICS_ABSENT_FIELD}
-                  </td>
-                  <td className="cell-mono">
-                    {check.certificationSafeErrorCode ??
-                      check.safeErrorCode ??
-                      DIAGNOSTICS_ABSENT_FIELD}
+                    {check.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
                   </td>
                 </tr>
               ))
@@ -632,18 +618,17 @@ namespace Embassy {
         <div className="grid-2">
           <section
             className="card"
-            aria-labelledby="compatibility-attestation-title"
+            aria-labelledby="provider-compatibility-title"
           >
             <div className="card__head">
               <h3
                 className="card__title"
-                id="compatibility-attestation-title"
+                id="provider-compatibility-title"
               >
-                {t("app.diag.attestation.title")}
+                {t("app.diag.providerCompatibility.title")}
               </h3>
             </div>
             <DiagnosticsCompatibilityTable checks={data.compatibilityChecks} />
-            <CopyCmd cmd="embassy compat-check" />
           </section>
           <AbsentFeature
             title={t("app.diag.lease.title")}

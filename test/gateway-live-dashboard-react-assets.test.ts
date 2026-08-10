@@ -448,6 +448,46 @@ test("serves the rendered shell and bundles byte-for-byte in both locales", asyn
       assets.styleSheet.includes(".watch-register"),
       `${locale} stylesheet must include the bounded watch register`,
     );
+    assert.ok(
+      assets.appJavaScript.includes("providerCompatibility"),
+      `${locale} app bundle must render automatic provider compatibility`,
+    );
+    assert.equal(
+      assets.appJavaScript.includes("embassy compat-check"),
+      false,
+      `${locale} app bundle must not offer manual compatibility ceremony`,
+    );
+    assert.equal(
+      assets.appJavaScript.includes("diagnostics.certification"),
+      false,
+      `${locale} app bundle must not render live-certification columns`,
+    );
+    assert.ok(
+      assets.clientJavaScript.includes("Provider compatibility"),
+      `${locale} client copy must name automatic provider compatibility in English`,
+    );
+    assert.ok(
+      assets.clientJavaScript.includes("提供方兼容性"),
+      `${locale} client copy must name automatic provider compatibility in Chinese`,
+    );
+    assert.equal(
+      assets.clientJavaScript.includes("Live certification") ||
+        assets.clientJavaScript.includes("实时认证"),
+      false,
+      `${locale} client copy must not promote live certification`,
+    );
+    assert.ok(
+      assets.clientJavaScript.includes(
+        "4 live dashboard windows are already open — close one, then reconnect",
+      ),
+      `${locale} client copy must explain the four-window limit in English`,
+    );
+    assert.ok(
+      assets.clientJavaScript.includes(
+        "已打开 4 个实时面板窗口——请关闭一个，然后重新连接",
+      ),
+      `${locale} client copy must explain the four-window limit in Chinese`,
+    );
     const handler = createHandler(assets, locale);
     const fixtures: ReadonlyArray<readonly [string, string, string]> = [
       ["/", assets.shellHtml, "text/html; charset=utf-8"],

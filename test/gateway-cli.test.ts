@@ -8,7 +8,6 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { BridgeError } from "../src/errors.js";
-import { loadGatewayConfig } from "../src/gateway/config.js";
 import {
   GatewayControlTransportError,
   startGatewayControlServer,
@@ -27,14 +26,6 @@ import {
   gatewayCliExitCodes,
   runGatewayCli,
 } from "../src/gateway/cli.js";
-import {
-  attachCompatibilityCertification,
-  certifiedCompatibilityVersions,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-  type CompatibilityCertificationReport,
-  type CompatibilityCheckReport,
-} from "../src/gateway/compatibility.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
@@ -56,53 +47,6 @@ const CALLER_IDENTITY_CONFLICT_HINT_ZH_CN =
   "[embassy] 同时继承了两种代理身份；Codex App Server 守护进程可能是在代理会话内启动的。请在普通终端中运行：codex app-server daemon restart\n";
 const roots = new Set<string>();
 
-function compatibilityReport(failing = false): CompatibilityCheckReport {
-  const surfaces = (["claude", "codex"] as const).map((surface) =>
-    evaluateCompatibilityAttestation({
-      surface,
-      version: certifiedCompatibilityVersions[surface][0]!,
-      checkedAt: NOW,
-      policy: "observed",
-      certifiedVersions: certifiedCompatibilityVersions[surface],
-      probes: compatibilityProbeNames[surface].map((name, index) =>
-        failing && surface === "claude" && index === 0
-          ? {
-              name,
-              outcome: "fail" as const,
-              safeErrorCode: "CLAUDE_VERSION_DRIFT",
-            }
-          : { name, outcome: "pass" as const },
-      ),
-    }),
-  );
-  return { policy: "observed", compatible: !failing, surfaces };
-}
-
-function certificationReport(
-  failedSurfaces: readonly ("claude" | "codex")[] = [],
-): CompatibilityCertificationReport {
-  const report = compatibilityReport();
-  return {
-    policy: report.policy,
-    certified: failedSurfaces.length === 0,
-    withTurn: false,
-    surfaces: report.surfaces.map((attestation) =>
-      attachCompatibilityCertification(attestation, {
-        depth: attestation.surface === "claude" ? "wire" : "thread_ops",
-        outcome: failedSurfaces.includes(attestation.surface) ? "fail" : "pass",
-        certifiedAt: NOW,
-        ...(failedSurfaces.includes(attestation.surface)
-          ? {
-              safeErrorCode:
-                attestation.surface === "claude"
-                  ? "CLAUDE_CERTIFICATION_WRITE_UNCONFIRMED"
-                  : "CODEX_CERTIFICATION_ROUTE_BUSY",
-            }
-          : {}),
-      }),
-    ),
-  };
-}
 const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
@@ -140,139 +84,6 @@ test("version flags are deterministic and never contact the gateway", async () =
   }
 });
 
-test("compat-check prints bounded surface summaries and exits nonzero on incompatibility", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await runGatewayCli(["compat-check"], {
-    env: {},
-    stdout,
-    stderr,
-    loadConfig: () =>
-      loadGatewayConfig({ EMBASSY_STATE_DIR: "/synthetic/private-state" }),
-    validateControlSocket: async () => undefined,
-    sendRequest: (async () =>
-      ({
-        protocolVersion: 1,
-        ok: true,
-        result: compatibilityReport(true),
-      }) as never) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-  });
-  assert.equal(code, gatewayCliExitCodes.failure);
-  assert.equal((JSON.parse(stdout.chunks.join("")) as { ok: boolean }).ok, true);
-  assert.equal(
-    stderr.chunks.join(""),
-    "[embassy] claude: incompatible (2.1.224) — CLAUDE_VERSION_DRIFT\n" +
-      "[embassy] codex: certified (0.147.0)\n",
-  );
-});
-
-test("compat-certify preserves closed JSON, exact route grammar, and terminal exit truth", async () => {
-  const state = await privateState();
-  const calls: unknown[] = [];
-  const server = await startGatewayControlServer({
-    stateDir: state.stateDir,
-    socketPath: state.socketPath,
-    handlers: {
-      health: () => ({ status: "ok", revision: 1 }),
-      registerCodex: () => ({ accepted: true, code: "ok" }),
-      unregisterCodex: () => ({ accepted: true, code: "ok" }),
-      removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
-      selectClaude: () => ({ accepted: true, code: "ok" }),
-      unselectClaude: () => ({ accepted: true, code: "ok" }),
-      pair: () => ({ accepted: true, code: "ok" }),
-      unpair: () => ({ accepted: true, code: "ok" }),
-      listSnapshot: () => emptySnapshot(),
-      observeSnapshot: () => ({ snapshotRevision: 0, snapshot: emptySnapshot() }),
-      compatibilityCheck: () => compatibilityReport(),
-      compatibilityCertify: (params) => {
-        calls.push(params);
-        return certificationReport();
-      },
-      deliveryStatus: () => ({ found: false }),
-      untrack: () => ({ accepted: true, code: "ok" }),
-      sendToClaude: () => ({ accepted: false, code: "rejected" }),
-      sendToCodex: () => ({ accepted: false, code: "rejected" }),
-      reply: () => ({ accepted: false, code: "rejected" }),
-      refreshDashboard: () => ({ accepted: true, code: "ok", revision: 1 }),
-    },
-  });
-  const passed = await invoke(state.stateDir, [
-    "compat-certify",
-    "--codex",
-    "codex-main@this-mac",
-  ]);
-  assert.equal(passed.code, 0);
-  assert.deepEqual(calls, [
-    { codexAlias: "codex-main@this-mac", withTurn: false },
-  ]);
-  assert.equal(
-    (JSON.parse(passed.stdout) as { result: { certified: boolean } }).result
-      .certified,
-    true,
-  );
-  assert.match(passed.stderr, /claude: pass \(wire\)/);
-  assert.match(passed.stderr, /codex: pass \(thread_ops\)/);
-
-  for (const args of [
-    ["compat-certify", "--with-turn", "extra"],
-    ["compat-certify", "--codex", "claude-main@this-mac"],
-    ["compat-certify", "--unknown"],
-  ]) {
-    const rejected = await invoke(state.stateDir, args);
-    assert.equal(rejected.code, gatewayCliExitCodes.invalidInput);
-  }
-  await server.close();
-});
-
-test("compat-certify waits for bounded live evidence and exits by failed surface", async () => {
-  const cases = [
-    {
-      failed: ["claude"] as const,
-      exitCode: gatewayCliExitCodes.claudeCertificationFailed,
-    },
-    {
-      failed: ["codex"] as const,
-      exitCode: gatewayCliExitCodes.codexCertificationFailed,
-    },
-    {
-      failed: ["claude", "codex"] as const,
-      exitCode: gatewayCliExitCodes.multipleCertificationsFailed,
-    },
-  ];
-  for (const current of cases) {
-    let observedTimeoutMs: number | undefined;
-    const stdout = capture();
-    const stderr = capture();
-    const exitCode = await runGatewayCli(["compat-certify"], {
-      env: {},
-      stdout,
-      stderr,
-      loadConfig: () =>
-        loadGatewayConfig({ EMBASSY_STATE_DIR: "/synthetic/private-state" }),
-      validateControlSocket: async () => undefined,
-      sendRequest: (async (options) => {
-        observedTimeoutMs = options.timeoutMs;
-        return {
-          protocolVersion: 1,
-          ok: true,
-          result: certificationReport(current.failed),
-        } as never;
-      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-    });
-    assert.equal(observedTimeoutMs, 90_000);
-    assert.equal(exitCode, current.exitCode);
-    assert.equal(
-      (JSON.parse(stdout.chunks.join("")) as {
-        result: CompatibilityCertificationReport;
-      }).result.certified,
-      false,
-    );
-    for (const surface of current.failed) {
-      assert.match(stderr.chunks.join(""), new RegExp(`${surface}: fail`));
-    }
-  }
-});
-
 test("bare invocation and help flags print localized usage without side effects", async () => {
   const cases = [
     { argv: [] as string[], env: {}, expected: /Usage:/ },
@@ -307,7 +118,40 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.match(help, /wait-delivery/);
     assert.match(help, /dashboard --live \[--port <n>\]/);
     assert.match(help, /--port <n>.*1024.*65535.*41961/);
+    assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.equal(stderr.chunks.join(""), "");
+  }
+});
+
+test("removed compatibility commands fail before configuration or control work", async () => {
+  for (const command of ["compat-check", "compat-certify"]) {
+    let worked = false;
+    const stdout = capture();
+    const stderr = capture();
+    const exitCode = await runGatewayCli([command], {
+      env: {},
+      stdout,
+      stderr,
+      loadConfig: () => {
+        worked = true;
+        throw new Error("removed commands must not load configuration");
+      },
+      validateControlSocket: async () => {
+        worked = true;
+      },
+      sendRequest: async () => {
+        worked = true;
+        throw new Error("removed commands must not contact the gateway");
+      },
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+    assert.equal(worked, false);
+    assert.equal(
+      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } })
+        .error.code,
+      "UNKNOWN_COMMAND",
+    );
+    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
   }
 });
 
@@ -468,8 +312,6 @@ test("all client commands use one private control socket and expose only normali
       snapshotRevision: 0,
       snapshot: emptySnapshot(),
     }),
-    compatibilityCheck: () => compatibilityReport(),
-    compatibilityCertify: () => certificationReport(),
     deliveryStatus: ({ token }) => {
       deliveryStatuses.push(token);
       return {
@@ -534,7 +376,6 @@ test("all client commands use one private control socket and expose only normali
   }> = [
     { argv: ["health"], env: BOTH_IDENTITIES },
     { argv: ["status"], env: BOTH_IDENTITIES },
-    { argv: ["compat-check"], env: BOTH_IDENTITIES },
     {
       argv: ["delivery-status", "--token", DELIVERY_TOKEN],
       env: BOTH_IDENTITIES,
@@ -677,15 +518,7 @@ test("all client commands use one private control socket and expose only normali
       },
     );
     assert.equal(result.code, gatewayCliExitCodes.ok);
-    if (current.argv[0] === "compat-check") {
-      assert.equal(
-        result.stderr,
-        "[embassy] claude: certified (2.1.224)\n" +
-          "[embassy] codex: certified (0.147.0)\n",
-      );
-    } else {
-      assert.equal(result.stderr, "");
-    }
+    assert.equal(result.stderr, "");
     const parsed = JSON.parse(result.stdout) as {
       ok: boolean;
       command: string;
@@ -1994,8 +1827,6 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         snapshotRevision: 0,
         snapshot: emptySnapshot(),
       }),
-      compatibilityCheck: () => compatibilityReport(),
-      compatibilityCertify: () => certificationReport(),
       deliveryStatus: () => ({ found: false }),
       untrack: () => ({ accepted: true, code: "ok" }),
       sendToClaude: () => ({

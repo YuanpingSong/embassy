@@ -109,6 +109,11 @@ export const dashboardCopyEn = {
     "The oldest accepted message remains queued past half of its delivery deadline.",
   "guidance.queueStalled.action":
     "Run embassy status. Do not resend accepted work; Embassy still tracks it until settlement or expiry.",
+  "guidance.recipientWaitingInput.title": "Recipient session may need input",
+  "guidance.recipientWaitingInput.body":
+    "Recipient session appears to be waiting on interactive input in its own window; check it there.",
+  "guidance.recipientWaitingInput.action":
+    "Check the recipient session in its own window. Do not resend the accepted message.",
   "guidance.unconfirmed.title": "Delivery could not be confirmed",
   "guidance.unconfirmed.body":
     "The local transport write completed, but terminal native evidence was unavailable when the attempt settled.",
@@ -267,17 +272,15 @@ export const dashboardCopyEn = {
   "diagnostics.connectors": "Connectors",
   "diagnostics.connectors.empty": "No connector metadata is available.",
   "diagnostics.connectors.caption": "Local provider connector status",
-  "diagnostics.compatibilityChecks": "Compatibility checks",
-  "diagnostics.compatibilityChecks.empty": "No compatibility check has been recorded.",
-  "diagnostics.compatibilityChecks.caption": "Bounded provider schema attestations",
+  "diagnostics.compatibilityChecks": "Provider compatibility",
+  "diagnostics.compatibilityChecks.empty": "No provider compatibility status is available.",
+  "diagnostics.compatibilityChecks.caption": "Automatic provider compatibility status",
   "diagnostics.version": "Version",
   "diagnostics.tier": "Tier",
   "diagnostics.checkedAt": "Checked",
-  "diagnostics.certification": "Live certification",
-  "diagnostics.certifiedAt": "Certified",
-  "diagnostics.failedProbe": "Failed probe",
-  "compatibilityTier.certified": "Certified",
-  "compatibilityTier.schema_attested": "Schema-attested",
+  "diagnostics.failure": "Failure",
+  "compatibilityTier.certified": "Supported",
+  "compatibilityTier.schema_attested": "Legacy observation",
   "compatibilityTier.incompatible": "Incompatible",
   "diagnostics.protocol": "Protocol",
   "diagnostics.health": "Health",
@@ -404,6 +407,8 @@ export const dashboardCopyEn = {
   "live.connection.connecting": "Connecting…",
   "live.connection.connected": "Stream connected",
   "live.connection.unavailable": "Observer unavailable — retrying",
+  "live.connection.capacity":
+    "4 live dashboard windows are already open — close one, then reconnect",
   "live.connection.disconnected": "Connection ended — use Reconnect",
   "live.connection.fatal": "Dashboard session unavailable",
   "live.connection.paused": "Updates paused",
@@ -427,7 +432,8 @@ export const dashboardCopyEn = {
   "live.http.bodyTooLarge": "Request body too large.",
   "live.http.targetTooLarge": "Request target too large.",
   "live.http.unsupportedMediaType": "Unsupported media type.",
-  "live.http.tooManyStreams": "Too many live streams.",
+  "live.http.tooManyStreams":
+    "4 live dashboard windows are already open. Close one, then reconnect.",
   "live.http.headersTooLarge": "Request headers too large.",
   "live.http.snapshotUnavailable": "Dashboard snapshot unavailable.",
   "live.http.requestFailed": "Request failed.",
@@ -583,9 +589,7 @@ export const dashboardCopyEn = {
   "app.diag.col.compat": "Compatibility",
   "app.diag.versions.rangeAbsent":
     "The supported protocol range is not carried by the live contract, so only the compatibility verdict is shown.",
-  "app.diag.attestation.title": "Attestation",
-  "app.diag.attestation.absent":
-    "Attestation is not carried by the live contract. Read the local posture with the command below.",
+  "app.diag.providerCompatibility.title": "Provider compatibility",
   "app.diag.lease.title": "Lease / instance",
   "app.diag.lease.absent":
     "Lease state is not carried by the live contract. Read the local posture with the command below.",

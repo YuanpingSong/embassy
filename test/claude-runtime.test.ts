@@ -99,31 +99,12 @@ test("runtime attestation invokes only --version with a closed non-secret enviro
   });
 });
 
-test("observed policy attests a same-major official update while strict and major drift fail closed", async (t) => {
+test("runtime rejects every unreviewed Claude version", async (t) => {
   const current = await fixture(t);
-  const observedVersion = "2.2.0";
-  const observed = await attestClaudePeerRuntime(
-    {
-      claudeExecutable: current.executable,
-      compatibilityPolicy: "observed",
-    },
-    {
-      userInfo: () => current.user,
-      runVersion: async () => ({
-        stdout: `${observedVersion} (Claude Code)\n`,
-        stderr: "",
-      }),
-    },
-  );
-  assert.equal(observed.claudeCodeVersion, observedVersion);
-
-  for (const [version, policy] of [
-    [observedVersion, "strict"],
-    ["3.0.0", "observed"],
-  ] as const) {
+  for (const version of ["2.2.0", "3.0.0"] as const) {
     await assert.rejects(
       attestClaudePeerRuntime(
-        { claudeExecutable: current.executable, compatibilityPolicy: policy },
+        { claudeExecutable: current.executable },
         {
           userInfo: () => current.user,
           runVersion: async () => ({
@@ -181,21 +162,16 @@ test("runtime accepts only the exact official same-home pinned launcher symlink"
   const observedTarget = path.join(versionsDir, "2.2.0");
   await writeFile(observedTarget, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   await symlink(observedTarget, current.executable);
-  const observed = await attestClaudePeerRuntime(
-    {
-      claudeExecutable: current.executable,
-      compatibilityPolicy: "observed",
-    },
-    {
-      userInfo: () => current.user,
-      runVersion: async () => ({
-        stdout: "2.2.0 (Claude Code)\n",
-        stderr: "",
-      }),
-    },
+  await assert.rejects(
+    attestClaudePeerRuntime(
+      { claudeExecutable: current.executable },
+      { userInfo: () => current.user },
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_VERSION_DRIFT" &&
+      error.message.includes("2.2.0"),
   );
-  assert.equal(observed.claudeExecutable, observedTarget);
-  assert.equal(observed.claudeCodeVersion, "2.2.0");
 
   await unlink(current.executable);
   const wrongTarget = path.join(versionsDir, "2.1.224");

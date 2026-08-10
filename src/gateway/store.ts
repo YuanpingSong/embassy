@@ -1148,6 +1148,56 @@ function migrateLegacyHopCounts(value: unknown): unknown {
   };
 }
 
+function isLegacyCompatibilityCertification(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const required = ["depth", "outcome", "certifiedAt"] as const;
+  if (!hasOnlyKeys(value, required, ["safeErrorCode"])) return false;
+  if (
+    (value.depth !== "wire" &&
+      value.depth !== "thread_ops" &&
+      value.depth !== "turn") ||
+    (value.outcome !== "pass" && value.outcome !== "fail") ||
+    !isIsoTimestamp(value.certifiedAt) ||
+    new Date(Date.parse(value.certifiedAt)).toISOString() !==
+      value.certifiedAt ||
+    (value.safeErrorCode !== undefined && !isSafeCode(value.safeErrorCode))
+  ) {
+    return false;
+  }
+  return (value.outcome === "pass") === (value.safeErrorCode === undefined);
+}
+
+/**
+ * v1.1-v1.2 compatibility rows could contain manual live-certification
+ * evidence. The ceremony is gone: accept only its exact old shape, discard
+ * it, and retain the automatic bounded probe evidence.
+ */
+function migrateLegacyCompatibilityCertifications(value: unknown): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.compatibilityAttestations)
+  ) {
+    return value;
+  }
+  let changed = false;
+  const compatibilityAttestations = value.compatibilityAttestations.map(
+    (entry) => {
+      if (!isObject(entry) || !Object.hasOwn(entry, "certification")) {
+        return entry;
+      }
+      if (!isLegacyCompatibilityCertification(entry.certification)) {
+        return entry;
+      }
+      const { certification: _legacyCertification, ...current } = entry;
+      if (!isCompatibilityAttestation(current)) return entry;
+      changed = true;
+      return current;
+    },
+  );
+  return changed ? { ...value, compatibilityAttestations } : value;
+}
+
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -6778,6 +6828,7 @@ export class GatewayStore {
     parsed = migratePreCodexEndpointRefreshJournal(parsed);
     parsed = migratePreCodexOrphanRemovalJournal(parsed);
     parsed = migrateLegacyHopCounts(parsed);
+    parsed = migrateLegacyCompatibilityCertifications(parsed);
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

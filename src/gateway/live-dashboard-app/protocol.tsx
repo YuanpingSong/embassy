@@ -189,6 +189,10 @@ namespace Embassy {
       setConnectionState("connecting");
       try {
         const response = await apiFetch("stream", { signal: current.signal });
+        if (response.status === 429) {
+          setConnectionState("capacity");
+          return;
+        }
         if (!response.ok || !response.body) {
           throw new Error("stream");
         }

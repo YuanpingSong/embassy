@@ -633,72 +633,6 @@ test("Claude compatibility check skips isolated invalid registry rows without di
   await provider.close();
 });
 
-test("Claude live certification targets its bounded scratch and accepts confirmed direct wire evidence", async () => {
-  const fake = new FakeClaudePeer();
-  const scratch = {
-    name: "embassy-compat-a1b2c3",
-    sessionId: "22222222-2222-4222-8222-222222222222",
-    closed: false,
-  };
-  fake.peers.push({
-    targetId: scratch.sessionId,
-    alias: scratch.name,
-    kind: "interactive",
-    status: "idle",
-    compatibility: "compatible",
-  });
-  const provider = createLocalClaudeGatewayProvider({
-    runtime: claudeRuntime(),
-    peerFactory: () => fake as never,
-    compatibilityScratchFactory: async () => ({
-      name: scratch.name,
-      sessionId: scratch.sessionId,
-      assertRunning: () => undefined,
-      close: async () => {
-        scratch.closed = true;
-      },
-    }),
-  });
-  await provider.initialize(callbacks().callbacks);
-  const passed = await provider.runCompatibilityCertification({
-    controllerStateRoot: "/synthetic/private-state",
-    withTurn: false,
-  });
-  assert.deepEqual(passed, {
-    depth: "wire",
-    outcome: "pass",
-    certifiedAt: passed.certifiedAt,
-  });
-  assert.deepEqual(fake.lastSend, {
-    targetId: scratch.sessionId,
-    content: "[embassy compat-certify] ignore",
-  });
-  assert.deepEqual(fake.asserted.at(-1), {
-    routeHandle: scratch.sessionId,
-    stateRoot: "/synthetic/private-state",
-  });
-  assert.equal(scratch.closed, true);
-  assert.ok(
-    fake.closedListenerGenerations.some((generation) =>
-      generation.startsWith("compat_listener_"),
-    ),
-  );
-
-  scratch.closed = false;
-  fake.sendMode = "prewrite_failure";
-  const failed = await provider.runCompatibilityCertification({
-    controllerStateRoot: "/synthetic/private-state",
-    withTurn: false,
-  });
-  assert.equal(failed.outcome, "fail");
-  assert.equal(
-    failed.safeErrorCode,
-    "CLAUDE_PEER_TARGET_STALE",
-  );
-  assert.equal(scratch.closed, true);
-  await provider.close();
-});
-
 test("closing during Claude listen fences and closes the late listener", async () => {
   const fake = new FakeClaudePeer();
   let markListenEntered: (() => void) | undefined;
@@ -2521,7 +2455,6 @@ class FakeCodexFactory {
   readonly hostId = "this-mac";
   readonly protocol = "codex-app-server" as const;
   readonly protocolVersion = "0.147.0";
-  readonly compatibilityPolicy = "observed" as const;
   readonly schemaCompatibility = {
     appServerVersion: "0.147.0",
     endpointGeneration: this.endpointGeneration,
@@ -2604,7 +2537,6 @@ function codexProvider(
   factory: FakeCodexFactory,
   options: {
     refreshFactory?: () => Promise<LocalCodexTransportFactory>;
-    compatibilityPolicy?: "observed" | "strict";
     cleanupPollMs?: number;
     cleanupTimeoutMs?: number;
     recoveryInitialMs?: number;
@@ -2621,8 +2553,9 @@ function retargetCodexFactory(
   factory: FakeCodexFactory,
   endpointGeneration: string,
   appServerVersion = "0.147.0",
-  compatibilityPolicy: "observed" | "strict" = "observed",
 ): FakeCodexFactory {
+  const writableReady =
+    factory.writableReady && appServerVersion === "0.147.0";
   const compatibility = {
     appServerVersion,
     endpointGeneration,
@@ -2638,13 +2571,13 @@ function retargetCodexFactory(
   };
   Object.defineProperties(factory, {
     appServerVersion: { configurable: true, value: appServerVersion },
-    compatibilityPolicy: { configurable: true, value: compatibilityPolicy },
     endpointGeneration: { configurable: true, value: endpointGeneration },
     protocolVersion: { configurable: true, value: appServerVersion },
     schemaCompatibility: { configurable: true, value: compatibility },
+    writableReady: { configurable: true, value: writableReady },
     writeCompatibility: {
       configurable: true,
-      value: factory.writableReady ? compatibility : null,
+      value: writableReady ? compatibility : null,
     },
   });
   return factory;
@@ -2711,112 +2644,12 @@ test("Codex compatibility check initializes and lists without touching a thread 
   await provider.close();
 });
 
-test("Codex live certification proves thread ops and starts a turn only when explicitly requested", async () => {
-  const factory = new FakeCodexFactory(THREAD_ID, true);
-  const provider = codexProvider(factory);
-  await provider.initialize(callbacks().callbacks);
-  await provider.selectRoute({
-    alias: "codex-main@this-mac",
-    routeHandle: THREAD_ID,
-  });
-  await delayImmediate();
-  const transport = factory.transports[0]!;
-  const startsBefore = transport.sent.filter(
-    (message) => message.method === "turn/start",
-  ).length;
-  const threadOps = await provider.runCompatibilityCertification({
-    controllerStateRoot: "/synthetic/private-state",
-    routeHandle: THREAD_ID,
-    withTurn: false,
-  });
-  assert.equal(threadOps.outcome, "pass");
-  assert.equal(threadOps.depth, "thread_ops");
-  assert.equal(
-    transport.sent.filter((message) => message.method === "turn/start").length,
-    startsBefore,
+test("a read-only unpinned Codex probe cannot be promoted by an attestation", async () => {
+  const factory = retargetCodexFactory(
+    new FakeCodexFactory(THREAD_ID, true),
+    "local-synthetic-generation-unpinned",
+    "0.148.0",
   );
-  assert.deepEqual(
-    transport.sent.slice(-2).map((message) => message.method),
-    ["thread/loaded/list", "thread/resume"],
-  );
-
-  await delayImmediate();
-  const turnCertification = provider.runCompatibilityCertification({
-    controllerStateRoot: "/synthetic/private-state",
-    routeHandle: THREAD_ID,
-    withTurn: true,
-  });
-  await waitFor(
-    () =>
-      transport.sent.filter((message) => message.method === "turn/start")
-        .length ===
-      startsBefore + 1,
-  );
-  const certificationStart = transport.sent.filter(
-    (message) => message.method === "turn/start",
-  ).at(-1);
-  assert.deepEqual(certificationStart?.params, {
-    input: [{ text: "reply OK", type: "text" }],
-    threadId: THREAD_ID,
-  });
-  assert.deepEqual(
-    await provider.dispatch({
-      ...codexProvenance(),
-      binding: codexBinding(provider),
-      authorization: "selected_route",
-      messageId: "msg_00000000-0000-4000-8000-000000000099",
-      text: "ordinary work waits behind live certification",
-      expectsReply: false,
-      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-    }),
-    { state: "deferred", safeErrorCode: "CODEX_ROUTE_HELD" },
-  );
-  transport.emit({
-    method: "item/completed",
-    params: {
-      item: {
-        id: "item-certification-final",
-        phase: "final_answer",
-        text: "OK",
-        type: "agentMessage",
-      },
-      threadId: THREAD_ID,
-      turnId: "turn-provider-1",
-    },
-  });
-  transport.emit({
-    method: "turn/completed",
-    params: {
-      threadId: THREAD_ID,
-      turn: { id: "turn-provider-1", status: "completed" },
-    },
-  });
-  const turn = await turnCertification;
-  assert.equal(turn.outcome, "pass");
-  assert.equal(turn.depth, "turn");
-  await provider.close();
-});
-
-test("an observed Codex candidate cannot select or write until its bounded probe passes", async () => {
-  const factory = new FakeCodexFactory(THREAD_ID, true);
-  const observedCompatibility = {
-    ...factory.schemaCompatibility,
-    appServerVersion: "0.148.0",
-    observedSchemaCandidate: true as const,
-  };
-  Object.defineProperties(factory, {
-    appServerVersion: { configurable: true, value: "0.148.0" },
-    compatibilityPolicy: { configurable: true, value: "observed" },
-    protocolVersion: { configurable: true, value: "0.148.0" },
-    schemaCompatibility: {
-      configurable: true,
-      value: observedCompatibility,
-    },
-    writeCompatibility: {
-      configurable: true,
-      value: observedCompatibility,
-    },
-  });
   const provider = codexProvider(factory);
   await provider.initialize(callbacks().callbacks);
   await assert.rejects(
@@ -2837,20 +2670,19 @@ test("an observed Codex candidate cannot select or write until its bounded probe
     (error: unknown) =>
       error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
   );
-  provider.acceptCompatibilityAttestation({
-    schemaVersion: 1,
-    surface: "codex",
-    version: "0.148.0",
-    tier: "schema_attested",
-    checkedAt: new Date().toISOString(),
-    probes,
-  });
-  assert.deepEqual(
-    await provider.selectRoute({
-      alias: "codex-main@this-mac",
-      routeHandle: THREAD_ID,
-    }),
-    { routeHandle: THREAD_ID, state: "idle" },
+  assert.throws(
+    () =>
+      provider.acceptCompatibilityAttestation({
+        schemaVersion: 1,
+        surface: "codex",
+        version: "0.148.0",
+        tier: "schema_attested",
+        checkedAt: new Date().toISOString(),
+        probes,
+      }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_COMPATIBILITY_ATTESTATION_MISMATCH",
   );
   await provider.close();
 });
@@ -3439,15 +3271,6 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
     { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
-  );
-  await assert.rejects(
-    provider.runCompatibilityCertification({
-      controllerStateRoot: "/synthetic/controller-state",
-      routeHandle: THREAD_ID,
-      withTurn: true,
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
   );
   await assert.rejects(
     provider.selectRoute({
@@ -4121,16 +3944,13 @@ test("incompatible Codex endpoint drift stays stale and never resumes or writes"
     new FakeCodexFactory([THREAD_ID], true),
     "local-synthetic-generation-1",
     "0.147.0",
-    "strict",
   );
   const driftedFactory = retargetCodexFactory(
     new FakeCodexFactory([THREAD_ID, freshThread], true),
     "local-synthetic-generation-2",
     "0.148.0",
-    "strict",
   );
   const provider = codexProvider(firstFactory, {
-    compatibilityPolicy: "strict",
     recoveryInitialMs: 1_000,
     recoveryMaxMs: 1_000,
     refreshFactory: async () =>
@@ -4195,16 +4015,13 @@ test("incompatible Codex refresh retires every old route and fences late state a
     new FakeCodexFactory([THREAD_ID, secondThread], true),
     "local-synthetic-generation-1",
     "0.147.0",
-    "strict",
   );
   const driftedFactory = retargetCodexFactory(
     new FakeCodexFactory([THREAD_ID, secondThread], true),
     "local-synthetic-generation-2",
     "0.148.0",
-    "strict",
   );
   const provider = codexProvider(firstFactory, {
-    compatibilityPolicy: "strict",
     recoveryInitialMs: 1_000,
     recoveryMaxMs: 1_000,
     refreshFactory: async () =>
@@ -4302,23 +4119,19 @@ test("Codex selection can re-probe and activate a later compatible generation af
     new FakeCodexFactory([THREAD_ID], true),
     "local-synthetic-generation-1",
     "0.147.0",
-    "strict",
   );
   const driftedFactory = retargetCodexFactory(
     new FakeCodexFactory([THREAD_ID, freshThread], true),
     "local-synthetic-generation-2",
     "0.148.0",
-    "strict",
   );
   const recoveredFactory = retargetCodexFactory(
     new FakeCodexFactory([THREAD_ID, freshThread], true),
     "local-synthetic-generation-3",
     "0.147.0",
-    "strict",
   );
   const candidates = [driftedFactory, recoveredFactory];
   const provider = codexProvider(firstFactory, {
-    compatibilityPolicy: "strict",
     recoveryInitialMs: 1_000,
     recoveryMaxMs: 1_000,
     refreshFactory: async () => {

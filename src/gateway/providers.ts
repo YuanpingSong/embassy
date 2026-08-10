@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
@@ -16,18 +16,11 @@ import {
 } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import {
-  startClaudeCompatibilityScratch,
-  type ClaudeCompatibilityScratch,
-  type ClaudeCompatibilityScratchFactory,
-} from "./claude-compatibility-scratch.js";
-import {
   certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
   sharesCompatibilityMajor,
   type CompatibilityAttestation,
-  type CompatibilityCertification,
-  type CompatibilityPolicy,
   type CompatibilityProbeName,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
@@ -88,9 +81,6 @@ const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
 const MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES = 3;
 const COMPATIBILITY_PROBE_THREAD_ID =
   "00000000-0000-7000-8000-000000000000";
-const COMPATIBILITY_TURN_TIMEOUT_MS = 60_000;
-const CLAUDE_CERTIFICATION_TIMEOUT_MS = 10_000;
-const CLAUDE_CERTIFICATION_DISCOVERY_POLL_MS = 100;
 const CLAUDE_CLEAN_PREWRITE_RETRY_CODES = new Set([
   "CLAUDE_PEER_TARGET_UNKNOWN",
   "CLAUDE_PEER_TARGET_STALE",
@@ -170,8 +160,6 @@ export type LocalClaudeGatewayProviderOptions = {
   }>;
   /** Deterministic test seam. Production callers must omit this. */
   peerFactory?: ClaudePeerFactory;
-  /** Deterministic test seam. Production starts one bounded local scratch. */
-  compatibilityScratchFactory?: ClaudeCompatibilityScratchFactory;
 };
 
 type ClaudePending = {
@@ -319,10 +307,8 @@ function validateAttestedClaudeRuntime(
   runtime: AttestedClaudePeerRuntime,
 ): void {
   if (
-    !sharesCompatibilityMajor(
-      runtime.claudeCodeVersion,
-      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-    ) ||
+    runtime.claudeCodeVersion !==
+      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion ||
     [
       runtime.claudeExecutable,
       runtime.sessionsDir,
@@ -374,7 +360,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly now: () => number;
   private readonly selectedStateRoots = new Map<string, string>();
   private readonly nativeHelpers: ClaudeNativeHelperSupervisor | undefined;
-  private readonly compatibilityScratchFactory: ClaudeCompatibilityScratchFactory;
   private readonly discovered = new Map<string, GatewayAdapterDiscovery>();
   private readonly selected = new Map<string, string>();
   /** Exact live same-UID sessions observed through native inbound frames. */
@@ -421,7 +406,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   /** Fences discovery callbacks and monitor restarts across listener rotation. */
   private nativeCodexSuccessionFreeze: string | undefined;
-  private compatibilityCertificationInFlight = false;
   private initialized = false;
   private closed = false;
 
@@ -464,9 +448,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       options.locale ?? "en",
       options.deliveryNotices ?? "merged",
     );
-    this.compatibilityScratchFactory =
-      options.compatibilityScratchFactory ??
-      (() => startClaudeCompatibilityScratch(options.runtime));
     this.nativeHelpers =
       options.nativeHelpers === undefined
         ? undefined
@@ -522,124 +503,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         failedProbe(socket, "CLAUDE_SOCKET_VALIDATION_UNAVAILABLE"),
         passedProbe(protocol),
       ];
-    }
-  }
-
-  async runCompatibilityCertification(input: Readonly<{
-    controllerStateRoot: string;
-    routeHandle?: string;
-    withTurn: boolean;
-  }>): Promise<CompatibilityCertification> {
-    void input.routeHandle;
-    void input.withTurn;
-    const depth = "wire" as const;
-    let scratch: ClaudeCompatibilityScratch | undefined;
-    let listener: ClaudePeerListener | undefined;
-    if (this.compatibilityCertificationInFlight) {
-      return {
-        depth,
-        outcome: "fail",
-        certifiedAt: new Date(this.now()).toISOString(),
-        safeErrorCode: "CLAUDE_CERTIFICATION_BUSY",
-      };
-    }
-    this.compatibilityCertificationInFlight = true;
-    try {
-      this.assertReady();
-      scratch = await this.compatibilityScratchFactory();
-      const deadlineAt = this.now() + CLAUDE_CERTIFICATION_TIMEOUT_MS;
-      let targetId: string | undefined;
-      while (this.now() < deadlineAt) {
-        scratch.assertRunning();
-        const discovery = await this.peer.discover();
-        if (discovery.truncated) {
-          throw new BridgeError(
-            "CLAUDE_CERTIFICATION_DISCOVERY_INCOMPLETE",
-            "The scratch session could not be proven from a complete registry scan.",
-            true,
-          );
-        }
-        const matches = discovery.peers.filter(
-          (peer) =>
-            peer.alias === scratch?.name && peer.targetId === scratch?.sessionId,
-        );
-        if (matches.length > 1) {
-          throw new BridgeError(
-            "CLAUDE_CERTIFICATION_TARGET_COLLISION",
-            "The scratch session identity was not unique.",
-          );
-        }
-        if (matches.length === 1) {
-          targetId = matches[0]?.targetId;
-          break;
-        }
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(
-            resolve,
-            CLAUDE_CERTIFICATION_DISCOVERY_POLL_MS,
-          );
-          timer.unref();
-        });
-      }
-      if (targetId === undefined) {
-        throw new BridgeError(
-          "CLAUDE_CERTIFICATION_TARGET_UNAVAILABLE",
-          "The bounded scratch session did not publish a discoverable peer record.",
-          true,
-        );
-      }
-      await this.peer.assertTargetWorkspaceDisjoint(
-        targetId,
-        input.controllerStateRoot,
-      );
-      listener = await this.peer.listen({
-        onMessage: () => undefined,
-        onReceipt: () => undefined,
-      });
-      const sent = await this.peer.send(
-        targetId,
-        "[embassy compat-certify] ignore",
-        {
-          listener,
-          receiptDeadlineAt: deadlineAt,
-        },
-      );
-      if (
-        sent.transportStatus !== "transport_written" ||
-        sent.receiptStatus !== "pending"
-      ) {
-        throw new BridgeError(
-          "CLAUDE_CERTIFICATION_WRITE_UNCONFIRMED",
-          "The scratch diagnostic frame was not accepted for receipt tracking.",
-          true,
-        );
-      }
-      // A direct `crossSessionInbound: accept` write emits no native
-      // peer_message_status frame. That status family describes the optional
-      // approval lifecycle, not universal delivery acknowledgement. For this
-      // wire-depth certification, the strongest portable evidence is the
-      // confirmed write to the exact, uniquely discovered scratch session.
-      return {
-        depth,
-        outcome: "pass",
-        certifiedAt: new Date(this.now()).toISOString(),
-      };
-    } catch (error) {
-      const observedCode =
-        error instanceof BridgeError && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
-          ? error.code
-          : "CLAUDE_CERTIFICATION_FAILED";
-      return {
-        depth,
-        outcome: "fail",
-        certifiedAt: new Date(this.now()).toISOString(),
-        safeErrorCode: observedCode,
-      };
-    } finally {
-      await listener?.close().catch(() => undefined);
-      await scratch?.close().catch(() => undefined);
-      await this.peer.discover().catch(() => undefined);
-      this.compatibilityCertificationInFlight = false;
     }
   }
 
@@ -2431,8 +2294,6 @@ export type LocalCodexGatewayProviderOptions = {
   factory: LocalCodexTransportFactory;
   /** Re-resolves the exact pinned managed install after its generation moves. */
   refreshFactory?: () => Promise<LocalCodexTransportFactory>;
-  /** Controller policy retained across every endpoint generation. */
-  compatibilityPolicy?: CompatibilityPolicy;
   cleanupPollMs?: number;
   cleanupTimeoutMs?: number;
   recoveryInitialMs?: number;
@@ -2472,11 +2333,6 @@ type CodexEndpointRefreshResult = {
   selectorClaimed: boolean;
 };
 
-type CodexCertificationTurn = {
-  resolve: (result: CodexTransientTurnResult) => void;
-  timer: NodeJS.Timeout;
-};
-
 function validateCodexFactory(factory: LocalCodexTransportFactory): void {
   const schema = factory.schemaCompatibility;
   const write = factory.writeCompatibility;
@@ -2492,7 +2348,8 @@ function validateCodexFactory(factory: LocalCodexTransportFactory): void {
     factory.hostId !== LOCAL_HOST ||
     factory.protocol !== "codex-app-server" ||
     factory.protocolVersion !== factory.appServerVersion ||
-    (!certified && !schemaCandidate) ||
+    (!certified &&
+      (!schemaCandidate || write !== null || factory.writableReady)) ||
     schema.appServerVersion !== factory.appServerVersion ||
     schema.endpointGeneration !== factory.endpointGeneration ||
     schema.protocol !== "app-server-v2-stable" ||
@@ -2554,7 +2411,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly refreshFactory:
     | (() => Promise<LocalCodexTransportFactory>)
     | undefined;
-  private readonly compatibilityPolicy: CompatibilityPolicy;
   private readonly maxCallbacks: number;
   private readonly maxRoutes: number;
   private readonly maxReplyBytes: number;
@@ -2575,8 +2431,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly trackedRoutes = new Set<string>();
   private retiredEndpointGeneration: string | undefined;
   private readonly expectsReply = new Map<string, boolean>();
-  private readonly compatibilityCertifyingRoutes = new Set<string>();
-  private readonly compatibilityTurns = new Map<string, CodexCertificationTurn>();
   private readonly callbackQueue: CodexCallbackEvent[] = [];
   private callbackScheduled = false;
   private callbacks: GatewayAdapterCallbacks | undefined;
@@ -2606,8 +2460,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     validateCodexFactory(options.factory);
     this.factory = options.factory;
     this.refreshFactory = options.refreshFactory;
-    this.compatibilityPolicy =
-      options.compatibilityPolicy ?? options.factory.compatibilityPolicy;
     exactLocalHost(options.factory.hostId);
     this.compatibilityAttested = CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
       options.factory.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
@@ -2687,7 +2539,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     if (
       attestation.surface !== "codex" ||
       attestation.version !== this.factory.appServerVersion ||
-      attestation.tier === "incompatible" ||
+      attestation.tier !== "certified" ||
+      !CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
+        attestation.version as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
+      ) ||
       (this.endpointUnavailable && pending === undefined) ||
       (pending !== undefined &&
         (attestation.checkedAt !== pending.checkedAt ||
@@ -2787,122 +2642,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       } else if (transport !== undefined) {
         await transport.close().catch(() => undefined);
       }
-    }
-  }
-
-  async runCompatibilityCertification(input: Readonly<{
-    controllerStateRoot: string;
-    routeHandle?: string;
-    withTurn: boolean;
-  }>): Promise<CompatibilityCertification> {
-    void input.controllerStateRoot;
-    const certifiedAt = this.now().toISOString();
-    const depth = input.withTurn ? "turn" : "thread_ops";
-    const routeHandle = input.routeHandle;
-    if (routeHandle === undefined || this.compatibilityCertifyingRoutes.has(routeHandle)) {
-      return {
-        depth,
-        outcome: "fail",
-        certifiedAt,
-        safeErrorCode: "CODEX_CERTIFICATION_ROUTE_REQUIRED",
-      };
-    }
-    this.assertReady();
-    const route = this.routes.get(routeHandle);
-    if (route === undefined || !this.observeRouteSuccessionBarrier(routeHandle).clean) {
-      return {
-        depth,
-        outcome: "fail",
-        certifiedAt,
-        safeErrorCode: "CODEX_CERTIFICATION_ROUTE_BUSY",
-      };
-    }
-    this.compatibilityCertifyingRoutes.add(routeHandle);
-    try {
-      const loaded = await route.connector.observeLoadedThread(
-        route.connector.guard(),
-      );
-      if (!loaded.selectedThreadLoaded) {
-        return {
-          depth,
-          outcome: "fail",
-          certifiedAt: this.now().toISOString(),
-          safeErrorCode: "CODEX_CERTIFICATION_THREAD_UNAVAILABLE",
-        };
-      }
-      await route.connector.certifyThreadOperations(route.connector.guard());
-      if (!input.withTurn) {
-        return {
-          depth,
-          outcome: "pass",
-          certifiedAt: this.now().toISOString(),
-        };
-      }
-
-      const messageId = `compat_${randomBytes(12).toString("hex")}`;
-      const result = new Promise<CodexTransientTurnResult>((resolve) => {
-        const timer = setTimeout(() => {
-          this.compatibilityTurns.delete(messageId);
-          resolve({
-            messageId,
-            outcome: "expired",
-            replyCode: "REPLY_UNAVAILABLE",
-            text: null,
-          });
-        }, COMPATIBILITY_TURN_TIMEOUT_MS);
-        timer.unref();
-        this.compatibilityTurns.set(messageId, { resolve, timer });
-      });
-      try {
-        const disposition = await route.connector.submitMessage(
-          route.connector.guard(),
-          {
-            deadlineAt: new Date(
-              this.now().getTime() + COMPATIBILITY_TURN_TIMEOUT_MS,
-            ).toISOString(),
-            messageId,
-            text: "reply OK",
-          },
-        );
-        if (disposition.disposition !== "started") {
-          throw new BridgeError(
-            "CODEX_CERTIFICATION_TURN_NOT_STARTED",
-            "The bounded certification turn did not start on the exact idle route.",
-          );
-        }
-        const settled = await result;
-        if (
-          settled.outcome !== "completed" ||
-          settled.text?.trim() !== "OK"
-        ) {
-          return {
-            depth,
-            outcome: "fail",
-            certifiedAt: this.now().toISOString(),
-            safeErrorCode: "CODEX_CERTIFICATION_TURN_FAILED",
-          };
-        }
-        return {
-          depth,
-          outcome: "pass",
-          certifiedAt: this.now().toISOString(),
-        };
-      } finally {
-        const pending = this.compatibilityTurns.get(messageId);
-        if (pending !== undefined) {
-          clearTimeout(pending.timer);
-          this.compatibilityTurns.delete(messageId);
-        }
-      }
-    } catch {
-      return {
-        depth,
-        outcome: "fail",
-        certifiedAt: this.now().toISOString(),
-        safeErrorCode: "CODEX_CERTIFICATION_FAILED",
-      };
-    } finally {
-      this.compatibilityCertifyingRoutes.delete(routeHandle);
     }
   }
 
@@ -3172,9 +2911,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     ) {
       return { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" };
     }
-    if (this.compatibilityCertifyingRoutes.has(input.binding.routeHandle)) {
-      return { state: "deferred", safeErrorCode: "CODEX_ROUTE_HELD" };
-    }
     if (
       !this.factory.writableReady ||
       this.factory.writeCompatibility === null
@@ -3338,17 +3074,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.closed = true;
     this.closing = false;
     this.callbackQueue.length = 0;
-    for (const [messageId, pending] of this.compatibilityTurns) {
-      clearTimeout(pending.timer);
-      pending.resolve({
-        messageId,
-        outcome: "abandoned",
-        replyCode: "REPLY_UNAVAILABLE",
-        text: null,
-      });
-    }
-    this.compatibilityTurns.clear();
-    this.compatibilityCertifyingRoutes.clear();
     this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
     this.trackedRoutes.clear();
@@ -3865,8 +3590,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         validateCodexFactory(candidate);
         if (
           candidate.hostId !== previous.hostId ||
-          candidate.protocol !== previousFactory.protocol ||
-          candidate.compatibilityPolicy !== this.compatibilityPolicy
+          candidate.protocol !== previousFactory.protocol
         ) {
           throw new BridgeError(
             "CODEX_FACTORY_ATTESTATION_INVALID",
@@ -3896,7 +3620,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
           surface: "codex",
           version: candidate.appServerVersion,
           checkedAt: this.now().toISOString(),
-          policy: this.compatibilityPolicy,
           certifiedVersions: certifiedCompatibilityVersions.codex,
           probes,
         });
@@ -4071,13 +3794,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     endpointGeneration: string,
     result: CodexTransientTurnResult,
   ): void {
-    const certification = this.compatibilityTurns.get(result.messageId);
-    if (certification !== undefined) {
-      clearTimeout(certification.timer);
-      this.compatibilityTurns.delete(result.messageId);
-      certification.resolve(result);
-      return;
-    }
     const wantsReply = this.expectsReply.get(result.messageId) === true;
     this.expectsReply.delete(result.messageId);
     let replyText: string | undefined;

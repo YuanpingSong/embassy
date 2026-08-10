@@ -1,7 +1,6 @@
 import { arePublicAvailablePeerSnapshots } from "./types.js";
 import {
   isCompatibilityAttestation,
-  type CompatibilityCertificationDepth,
   type CompatibilityTier,
   type CompatibilitySurface,
 } from "./compatibility.js";
@@ -70,6 +69,7 @@ export type DashboardAttentionItem = Readonly<{
     | "connector_offline"
     | "route_stale"
     | "queue_stalled"
+    | "recipient_waiting_input"
     | "unconfirmed"
     | "degraded"
     | "codex_succession_busy"
@@ -232,11 +232,7 @@ export type DashboardCompatibilityCheckRow = Readonly<{
   version: string;
   tier: CompatibilityTier;
   checkedAt: string;
-  certificationDepth?: CompatibilityCertificationDepth | undefined;
-  certificationOutcome?: "pass" | "fail" | undefined;
-  certifiedAt?: string | undefined;
-  certificationSafeErrorCode?: string | undefined;
-  failedProbe?: string | undefined;
+  failure?: string | undefined;
   safeErrorCode?: string | undefined;
 }>;
 
@@ -452,6 +448,15 @@ function guidanceFor(
     default:
       return "generic";
   }
+}
+
+function queuedRecipientIsUnobserved(route: DashboardRouteRow): boolean {
+  return (
+    route.provider === "claude" &&
+    route.queueDepth > 0 &&
+    (route.safeErrorCode === "CLAUDE_PEER_NOT_OBSERVED" ||
+      route.safeErrorCode === "PEER_NOT_OBSERVED")
+  );
 }
 
 function queueAge(
@@ -817,29 +822,14 @@ export function buildDashboardViewModel(
       const failed = attestation.probes.find(
         (probe) => probe.outcome === "fail",
       );
+      const issue = safeCode(attestation.safeErrorCode);
       return {
         surface: attestation.surface,
         version: boundedText(attestation.version),
         tier: attestation.tier,
         checkedAt: attestation.checkedAt,
-        ...(attestation.certification === undefined
-          ? {}
-          : {
-              certificationDepth: attestation.certification.depth,
-              certificationOutcome: attestation.certification.outcome,
-              certifiedAt: attestation.certification.certifiedAt,
-              ...(safeCode(attestation.certification.safeErrorCode) === undefined
-                ? {}
-                : {
-                    certificationSafeErrorCode: safeCode(
-                      attestation.certification.safeErrorCode,
-                    ),
-                  }),
-            }),
-        ...(failed === undefined ? {} : { failedProbe: failed.name }),
-        ...(safeCode(attestation.safeErrorCode) === undefined
-          ? {}
-          : { safeErrorCode: safeCode(attestation.safeErrorCode) }),
+        ...(failed === undefined ? {} : { failure: failed.name }),
+        ...(issue === undefined ? {} : { safeErrorCode: issue }),
       };
     })
     .sort((left, right) => compareText(left.surface, right.surface))
@@ -909,6 +899,7 @@ export function buildDashboardViewModel(
           : "none";
 
   const explicitAlerts: DashboardAttentionItem[] = snapshot.alerts
+    .filter((alert) => alert.code !== "COMPATIBILITY_CERTIFICATION_FAILED")
     .map((alert): DashboardAttentionItem => {
       const code = safeCode(alert.code);
       return {
@@ -938,6 +929,29 @@ export function buildDashboardViewModel(
       compareText(right.timestamp ?? "", left.timestamp ?? ""),
     );
   const attentionCandidates: DashboardAttentionItem[] = [...explicitAlerts];
+  for (const route of allRoutes) {
+    if (!queuedRecipientIsUnobserved(route)) continue;
+    const item: DashboardAttentionItem = {
+      kind: "route",
+      code: route.safeErrorCode,
+      severity: "warning",
+      ...(route.lastSeenAt === undefined ? {} : { timestamp: route.lastSeenAt }),
+      provider: route.provider,
+      alias: route.alias,
+      host: route.host,
+      guidance: "recipient_waiting_input",
+    };
+    const existingIndex = attentionCandidates.findIndex(
+      (candidate) =>
+        candidate.provider === item.provider &&
+        candidate.alias === item.alias &&
+        candidate.host === item.host &&
+        (candidate.code === "CLAUDE_PEER_NOT_OBSERVED" ||
+          candidate.code === "PEER_NOT_OBSERVED"),
+    );
+    if (existingIndex === -1) attentionCandidates.push(item);
+    else attentionCandidates[existingIndex] = item;
+  }
   for (const watch of allWatches) {
     if (watch.phase !== "episode" && watch.capability !== "route") continue;
     attentionCandidates.push({

@@ -100,7 +100,6 @@ async function fixture(
     stallNoticeMs: 2_500,
     steeringEnabled: true,
     inboundMode: "paired",
-    compatibilityPolicy: "observed",
     limits: limits(),
   };
   const testClock = clock();
@@ -289,7 +288,7 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.equal(config.inboundMode, "paired");
   assert.equal(config.steeringEnabled, true);
   assert.equal(config.deliveryNotices, "merged");
-  assert.equal(config.compatibilityPolicy, "observed");
+  assert.equal(Object.hasOwn(config, "compatibilityPolicy"), false);
   assert.equal(Object.hasOwn(config, "dashboardPort"), false);
   assert.equal(config.limits.messageDeadlineMs, 14_400_000);
   assert.equal(config.stallNoticeMs, 120_000);
@@ -317,28 +316,23 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
       mode,
     );
   }
-  assert.equal(
-    loadGatewayConfig({
-      EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
-      EMBASSY_COMPAT_POLICY: "strict",
-    }).compatibilityPolicy,
-    "strict",
-  );
+  for (const legacyValue of ["observed", "strict", "warn"] as const) {
+    assert.equal(
+      Object.hasOwn(
+        loadGatewayConfig({
+          EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
+          EMBASSY_COMPAT_POLICY: legacyValue,
+        }),
+        "compatibilityPolicy",
+      ),
+      false,
+    );
+  }
   assert.throws(
     () =>
       loadGatewayConfig({
         EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
         EMBASSY_STEERING_ENABLED: "false",
-      }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_GATEWAY_CONFIGURATION",
-  );
-  assert.throws(
-    () =>
-      loadGatewayConfig({
-        EMBASSY_STATE_DIR: "/tmp/private-gateway-test",
-        EMBASSY_COMPAT_POLICY: "warn",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -4547,7 +4541,6 @@ test("startup staging defers migrations and observations until one explicit comm
     surface: "claude",
     version: "2.1.227",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    policy: "observed",
     certifiedVersions: ["2.1.226"],
     probes: compatibilityProbeNames.claude.map((name) => ({
       name,
@@ -4565,14 +4558,13 @@ test("startup staging defers migrations and observations until one explicit comm
   await staged.close();
 });
 
-test("compatibility attestations are strict, persistent, cached by surface and version, and bounded", async () => {
+test("automatic compatibility evidence is strict, persistent, keyed by surface and version, and bounded", async () => {
   const { store, config } = await fixture();
   await store.initialize();
   const attestation = evaluateCompatibilityAttestation({
     surface: "claude",
     version: "2.1.227",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    policy: "observed",
     certifiedVersions: ["2.1.226"],
     probes: compatibilityProbeNames.claude.map((name) => ({
       name,
@@ -4613,6 +4605,70 @@ test("compatibility attestations are strict, persistent, cached by surface and v
     false,
   );
   await recovered.close();
+});
+
+test("legacy manual certification evidence is stripped while automatic probes survive", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  const attestation = evaluateCompatibilityAttestation({
+    surface: "claude",
+    version: "2.1.226",
+    checkedAt: "2026-08-09T12:00:00.000Z",
+    certifiedVersions: ["2.1.226"],
+    probes: compatibilityProbeNames.claude.map((name) => ({
+      name,
+      outcome: "pass" as const,
+    })),
+  });
+  await store.recordCompatibilityAttestation(attestation);
+  await store.close();
+
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    compatibilityAttestations: Array<Record<string, unknown>>;
+  };
+  assert.ok(legacy.compatibilityAttestations[0]);
+  legacy.compatibilityAttestations[0]!.certification = {
+    depth: "wire",
+    outcome: "pass",
+    certifiedAt: "2026-08-09T12:01:00.000Z",
+  };
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
+
+  const migrated = new GatewayStore(config);
+  await migrated.initialize();
+  assert.deepEqual(await migrated.inspectCompatibilityAttestations(), [
+    attestation,
+  ]);
+  const persisted = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    compatibilityAttestations: Array<Record<string, unknown>>;
+  };
+  assert.equal(
+    Object.hasOwn(persisted.compatibilityAttestations[0] ?? {}, "certification"),
+    false,
+  );
+  await migrated.close();
+
+  assert.ok(persisted.compatibilityAttestations[0]);
+  persisted.compatibilityAttestations[0]!.certification = {
+    depth: "wire",
+    outcome: "pass",
+    certifiedAt: "2026-08-09T12:02:00.000Z",
+    safeErrorCode: "LEGACY_CERTIFICATION_INVALID",
+  };
+  await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
+    mode: 0o600,
+  });
+  await assert.rejects(
+    new GatewayStore(config).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+  );
 });
 
 test("one additive migration adds the orphan-removal journal without changing endpoint-refresh evidence", async () => {

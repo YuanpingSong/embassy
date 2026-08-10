@@ -75,12 +75,14 @@ snapshot via same-origin `fetch`; after each bounded action it reads
 a fresh snapshot. A snapshot observation may settle already-due
 lifecycle deliveries before projecting state.
 
-A compatibility-gated App Server endpoint refresh appears in Activity as an
-automatic event, distinct from operator actions. Diagnostics reports the safe
-compatibility tier when a replacement is incompatible, while a missing or
-duplicate exact task remains stale. The dashboard never exposes the retained
-task ID or either endpoint generation, and endpoint recovery never replays a
-message body.
+An automatically exact-version-and-generation-gated App Server endpoint
+refresh appears in Activity as an automatic event, distinct from operator
+actions. Diagnostics reports a safe version, schema, or generation failure
+code when a replacement is incompatible, while a missing or duplicate exact
+task remains stale. Compatibility remains passive status: the dashboard has no
+compatibility action or override. The dashboard never exposes the
+retained task ID or either endpoint generation, and endpoint recovery never
+replays a message body.
 
 An optional `--lang en|zh-CN` flag selects the display language. It belongs to
 the live companion only; the static pair is always written in both languages

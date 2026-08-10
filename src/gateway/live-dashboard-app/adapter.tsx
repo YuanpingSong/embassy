@@ -230,6 +230,7 @@ namespace Embassy {
     connector_offline: "connectorOffline",
     route_stale: "routeStale",
     queue_stalled: "queueStalled",
+    recipient_waiting_input: "recipientWaitingInput",
     unconfirmed: "unconfirmed",
     degraded: "degraded",
     codex_succession_busy: "codexSuccessionBusy",

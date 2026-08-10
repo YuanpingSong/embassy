@@ -101,8 +101,12 @@ broker.
   only listeners are private Unix-domain sockets. The opt-in
   `embassy dashboard --live` companion is a separate process with its own
   loopback HTTP listener — see "Live companion boundary" below.
-- Provider protocols are version-pinned. Unknown Claude Code peer or Codex App
-  Server versions, schemas, and endpoint generations fail closed.
+- Provider protocols are exact-version-pinned. Provider startup automatically
+  validates the release's reviewed Claude launcher/runtime, Claude peer-version
+  inventory and protocol, and Codex App Server version. Unknown versions or
+  required schemas fail closed. Every replacement Codex endpoint generation
+  starts monitor-only and remains write-fenced until its fresh initialize and
+  exact-task listing checks pass and the controller activates it.
 - Embassy publishes at most one visibly prefixed, process-owned `codex-*`
   record in Claude's registry. It creates one callback socket and removes only
   exact-owned artifacts whose generation still matches during graceful
@@ -149,12 +153,9 @@ kernel lock.
 
 Embassy's provider-facing access is intentionally enumerable:
 
-- read and execute the configured Claude launcher only for bounded exact-version
-  attestation;
+- read and execute the configured Claude launcher only for bounded automatic
+  exact-version validation;
 - read the live Claude session registry and connect validated peer sockets;
-- for an explicit `compat-certify`, start one bounded no-stdin Claude print
-  session in a scrubbed environment, route one marked diagnostic frame only to
-  that scratch session, and terminate it after the receipt deadline;
 - create and later remove its one callback socket and one registry record;
 - resolve the managed Codex installation and attach to the already-running
   local App Server; and
@@ -240,14 +241,14 @@ because this surface intentionally has no such authentication boundary.
 Routine tests use temporary directories, fake peers, and fake App Server
 transports. They do not inspect live provider state or contact a model.
 
-The default `observed` compatibility policy may admit an unknown same-major
-provider version only after the bounded schema probe passes. That evidence
-cannot detect a semantic change that preserves every validated shape. Runtime
-record, frame, response, identity, and deadline checks remain mandatory, and
-operators can use `compat-certify` for explicit on-machine wire evidence after
-an upstream update. `compat-check` creates no message or turn;
-`compat-certify --with-turn` is the only certification form that explicitly
-starts a Codex model turn.
+Compatibility admission is automatic and exact-pinned. Broker/provider startup
+owns the bounded read-only validation of the configured installations, exact
+versions, protocol constants, and required schemas; an unknown same-major build
+is not admitted. These checks do not route a user message or start a model
+turn. A replacement Codex endpoint generation receives its own fresh
+monitor-only initialize and exact-task listing check, while the write gate
+stays closed until controller activation. Runtime record, frame, response,
+identity, generation, and deadline checks remain mandatory after admission.
 
 Passive live discovery, a live provider connection, a native message, and an
 App Server turn are distinct authorization gates. Each requires an explicit

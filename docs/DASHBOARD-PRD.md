@@ -46,8 +46,9 @@ from a browser, ever.
 Five tabs, one question each:
 
 ### 3.1 Overview — "Is everything OK right now?"
-- Status strip: broker health, lease state, both connector healths, version
-  compatibility — as glanceable state chips, not numbers.
+- Status strip: broker health, lease state, both connector healths, and the
+  automatic exact-version compatibility result — as glanceable state chips,
+  not numbers. Compatibility is passive status, never an operator action.
 - The **exchange board**: the two directions rendered as a diagram —
   selected Claude session ↔ queue/pouch ↔ registered Codex task — with live
   state on each node (idle/busy/waiting) and edge (queue depth, oldest age).
@@ -113,8 +114,10 @@ in that ledger, distinctly marked automatic rather than operator. Failures surfa
   absolute on hover.
 
 ### 3.5 Diagnostics — "Is my setup right for my workflow?"
-- Version pins vs detected versions; compatibility state per surface;
-  attestation results; lease/instance detail; state-directory location.
+- Version pins vs detected versions; automatic startup and endpoint-generation
+  validation state per surface; safe failure codes; lease/instance detail;
+  state-directory location. No manual compatibility or override control
+  belongs in the dashboard.
 - Configured limits vs observed pressure, side by side: queue depth vs cap,
   message deadline vs the observed distribution of receiver turn lengths
   (the 5-minute-deadline-vs-hour-long-turns mismatch we hit repeatedly must

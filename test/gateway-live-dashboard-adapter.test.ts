@@ -191,6 +191,7 @@ type EmbassyNamespace = Readonly<{
     onConnectionState: (state: string) => void;
     onNotice?: (kind: string) => void;
   }>): Readonly<{
+    start(): void;
     executeAction(action:
       | Readonly<{
           action: "pair" | "unpair";
@@ -636,6 +637,37 @@ test("root browser protocol ignores fragments and uses cookie-free API posts", a
   });
   assert.equal(calls[1]?.init.body, undefined);
   assert.deepEqual(plain(events), [snapshotEvent]);
+});
+
+test("stream capacity response reports the four-window limit", async () => {
+  const calls: Array<Readonly<{ input: string; init: RequestInit }>> = [];
+  const states: string[] = [];
+  const previousFetch = bundle.context.fetch;
+  bundle.context.fetch = (async (input: string, init: RequestInit) => {
+    calls.push({ input, init });
+    return { ok: false, status: 429 };
+  }) as typeof fetch;
+  try {
+    const protocol = bundle.Embassy.createProtocol({
+      onEvent: () => undefined,
+      onConnectionState: (state) => states.push(state),
+    });
+    protocol.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    bundle.context.fetch = previousFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.input, "/stream");
+  assert.equal(calls[0]?.init.method, "POST");
+  assert.equal(calls[0]?.init.credentials, "omit");
+  assert.deepEqual(states, ["connecting", "capacity"]);
+  assert.equal(bundle.Embassy.connectionChipKind("capacity"), "warning");
+  assert.equal(
+    bundle.Embassy.meaningKeyFor("connection", "capacity"),
+    "live.connection.capacity",
+  );
 });
 
 test("fixtures carry the full DashboardViewModel shape", () => {
@@ -1092,6 +1124,7 @@ test("guidanceCopyKey camelCases every guidance value", () => {
     ["connector_offline", "connectorOffline"],
     ["route_stale", "routeStale"],
     ["queue_stalled", "queueStalled"],
+    ["recipient_waiting_input", "recipientWaitingInput"],
     ["unconfirmed", "unconfirmed"],
     ["degraded", "degraded"],
     ["codex_succession_busy", "codexSuccessionBusy"],
@@ -1576,7 +1609,7 @@ test("diagnosticsProps forwards counters, omissions and queue pressure", () => {
   assert.deepEqual(plain(data.omissions), plain(DEGRADED.omissions));
 });
 
-test("diagnosticsProps forwards bounded provider compatibility attestations", () => {
+test("diagnosticsProps forwards automatic provider compatibility rows", () => {
   const model = mutableClone(DEGRADED);
   model.compatibilityChecks = [
     {
@@ -1590,7 +1623,7 @@ test("diagnosticsProps forwards bounded provider compatibility attestations", ()
       version: "0.148.0",
       tier: "schema_attested",
       checkedAt: "2026-08-09T12:00:01.000Z",
-      failedProbe: "thread/loaded/list",
+      failure: "thread/loaded/list",
       safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",
     },
   ];

@@ -158,7 +158,7 @@ The status below is intentionally narrower than the target architecture.
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the stable loopback listener, direct multi-browser access, projection, request guards, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter pinned to 2.1.226 / peer protocol 1 | **Implemented** and live-tested, including 2.1.224–2.1.226 patch-overlap discovery, print-session discovery, native status frames, cancellation, and accessible-workspace attestation |
-| Exact Claude 2.1.226 binary/runtime attestation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
+| Automatic exact Claude 2.1.226 binary/runtime validation | **Implemented**; executes only bounded `claude --version` with a scrubbed environment and derives but does not open provider roots |
 | Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
@@ -210,13 +210,13 @@ connector positively observes that exact task on the current endpoint
 generation.
 
 An App Server endpoint-generation change is a fenced route transition, not a
-new registration. Embassy stops dispatch through the old connector, creates a
-replacement connector, and runs the existing bounded compatibility probe
-against that replacement. Only a compatible result may proceed to
-`thread/loaded/list`, where every retained private thread ID must occur exactly
-once. The connector resumes that exact task with history excluded, and the
-store atomically re-anchors the same alias, owner lease, and pair edges to the
-new endpoint generation. Each successful re-anchor is recorded in a bounded
+new registration. Embassy stops dispatch through the old connector and creates
+a monitor-only replacement connector. That exact generation must pass a fresh
+automatic initialize and `thread/loaded/list` validation, where every retained
+private thread ID must occur exactly once. The connector resumes that exact
+task with history excluded; only then may the controller activate writes and
+atomically re-anchor the same alias, owner lease, and pair edges to the new
+endpoint generation. Each successful re-anchor is recorded in a bounded
 private journal; neither thread IDs nor endpoint generations enter public
 activity, diagnostics, logs, or CLI output. An incompatible endpoint, a
 missing or duplicate exact task, or an unclean transition leaves the route
@@ -398,8 +398,9 @@ The broker classifies `STEER:`, `TRACK:`, and `DONE:`, enforces raw-byte body
 limits, deduplicates, and queues before presentation framing.
 The store therefore retains only the raw transient body. A pure composer runs
 at the final semantic provider-write boundary so a clean retry produces the
-same bytes with exactly one authoritative outer wrapper. Compatibility probes,
-receipt frames, and diagnostics do not use this path.
+same bytes with exactly one authoritative outer wrapper. Automatic provider
+startup and endpoint-generation validation, receipt frames, and diagnostics do
+not use this path.
 
 Both provider directions use Claude-compatible textual framing with a
 broker-owned `cross-session-message` outer element and an
@@ -572,7 +573,7 @@ The foreground command is:
 embassy serve
 ```
 
-Before provider attestation, listener creation, or App Server attachment, the
+Before provider validation, listener creation, or App Server attachment, the
 launcher acquires one fixed host-wide crash-reclaimable owner lease under the
 verified login home. The lease is independent of `EMBASSY_STATE_DIR`, so two foreground
 controllers cannot be started for the same login account by choosing different
@@ -585,8 +586,8 @@ are not created, imported, or mutated.
 
 It emits one normalized ready line, publishes the private dashboard, and
 holds the process until `SIGINT` or `SIGTERM`, when exact-owned resources are
-closed. Startup attests the pinned local Claude and Codex runtimes and binds
-controller-owned UDS listeners, but does not discover a Claude peer, write a
+closed. Startup automatically validates the exact-pinned local Claude and Codex
+runtimes and binds controller-owned UDS listeners, but does not discover a Claude peer, write a
 provider socket, start a model turn, or contact a remote host. Its ready result
 reports local host `this-mac`, dashboard filename `gateway-dashboard.html`, and
 `codexMode: "native_messaging"` without exposing paths.
@@ -636,11 +637,12 @@ Missing, malformed, or nonempty turns fail closed and are never emitted or
 persisted. The capability does not add an experimental client method or change
 the closed RPC allowlist.
 
-Monitor compatibility and write compatibility are distinct gates. A connector
-may initialize, list, resume, and expose normalized monitor state after its
-schema compatibility is attested while still reporting its write gate as
-unavailable. No Claude-initiated turn can start until exact write compatibility
-and explicit route ownership are established.
+Automatic generation validation and controller write activation are distinct
+gates. A replacement connector may initialize, list, resume, and expose
+normalized monitor state after its exact version and required schemas validate
+while still reporting its write gate as unavailable. No Claude-initiated turn
+can start until the controller activates that exact endpoint generation and
+explicit route ownership is established.
 
 Registration resumes the exact task and establishes reachability. Embassy does
 not read or retain reported working-directory or policy fields. Before
@@ -720,8 +722,9 @@ The one Desktop restart needed for the local shared-App-Server feasibility
 test has already been completed. Building, running synthetic tests, starting
 the gateway, rendering the dashboard, and a future Claude peer-socket test do
 not themselves require another Desktop restart. A provider or Desktop upgrade
-may require a new compatibility probe and, if its attachment mode changes, a
-separately announced controlled restart.
+outside this release's exact pins requires an updated, reviewed Embassy
+adapter and, if its attachment mode changes, a separately announced controlled
+restart.
 
 ## Dashboard
 
@@ -860,14 +863,14 @@ and fake App Server transports.
 
 ### Exact default roots on macOS
 
-The runtime attestation code derives these paths from the current OS user's
+The automatic exact-version validator derives these paths from the current OS user's
 verified home; it does not scan the home directory. These are the reviewed
 boundaries exercised by the live gateway; routine tests substitute synthetic
 paths, peers, and transports:
 
 | Path/capability | Minimum purpose |
 | --- | --- |
-| `~/.local/bin/claude` and derived expected target `~/.local/share/claude/versions/2.1.226` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher attestation succeeded |
+| `~/.local/bin/claude` and derived expected target `~/.local/share/claude/versions/2.1.226` | Stat the owned launcher/path components and read/execute only the resolved pinned target for bounded `--version`; live launcher validation succeeded |
 | `~/.claude/sessions` | Read/enumerate only live registry JSON during the separately authorized passive-discovery gate |
 | `/tmp/cc-socks` | At foreground startup, validate the private directory and create/remove only `/tmp/cc-socks/<gateway-pid>.sock` after inode/generation checks; search/stat genuine peers at passive discovery and connect one validated target only at the separately authorized send gate |
 | `~/.local/state/agent-embassy/.agent-embassy-state` | Validate or establish the exact ownership marker before creating the fixed host lease; an existing non-empty unmarked root is rejected without mutation |
@@ -925,8 +928,9 @@ the preferred least-context setup, but it is not mandatory.
   unregistered and the controller is restarted.
 - No ambiguous mutation is retried automatically.
 - No queued body survives process loss.
-- Version-specific compatibility evidence expires on a provider or Desktop
-  update.
+- A provider or Desktop update outside the release's exact reviewed pins fails
+  closed; retained state never admits an unreviewed version or activates an
+  unvalidated replacement endpoint generation.
 
 ## Validation boundary
 

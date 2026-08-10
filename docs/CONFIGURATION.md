@@ -14,7 +14,6 @@ or CLI flags.
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute and does not relocate the fixed host-wide lease |
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`, resolved to the pinned version target | Absolute Claude Code launcher path; `PATH` is not searched |
-| `EMBASSY_COMPAT_POLICY` | `observed` | `observed` admits an unknown same-major provider build only after its bounded schema probe passes; `strict` admits only the release's certified version inventory |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global `STEER:` kill switch; set exactly `0` to treat every body as an ordinary queued message |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
 
@@ -55,52 +54,17 @@ that decision. Configure it in Claude Code, not in Embassy.
 
 ## Compatibility contract
 
-Embassy speaks two provider surfaces that are not documented as stable third-party APIs. This release's certified inventory is Claude Code 2.1.224–2.1.226 with peer protocol 1, and Codex App Server 0.147.0.
+Embassy speaks two provider surfaces that are not documented as stable third-party APIs. Compatibility is automatic and exact-pinned, not an operator workflow. This release accepts only:
 
-Compatibility has three explicit tiers:
+- the Claude Code 2.1.226 launcher/runtime and peer protocol 1;
+- already-running Claude peer sessions whose explicit reviewed version is 2.1.224, 2.1.225, or 2.1.226 and whose peer protocol is 1; and
+- Codex App Server 0.147.0.
 
-- **certified** — the exact version is in this release's deterministic test inventory;
-- **schema-attested** — under the default `observed` policy, an unknown same-major version passed the bounded startup probe; and
-- **incompatible** — a required probe failed, the major version changed, or `strict` policy rejected a version outside the certified inventory.
+An unknown provider version or peer protocol, a required-schema failure, or an endpoint generation that fails fresh validation closes the affected surface. The broker owns bounded read-only compatibility validation as part of provider startup: it checks the configured launcher or managed installation, exact version, registry/control-socket shape, initialization and listing schemas, and protocol constants. These checks do not route a user message or start a model turn. Runtime parsing remains strict on every record, frame, and response.
 
-The probe validates the launcher or managed installation, registry/control-socket shape, initialization and listing schemas, and protocol constants without sending a message or starting a turn. Its result is cached once per provider version. Runtime validation remains strict on every record, frame, and response. A schema-attested build can still change behavior without changing shape; use live certification after an upstream update when that residual risk matters.
+Every replacement Codex App Server endpoint generation starts monitor-only. Embassy performs a fresh initialize and `thread/loaded/list` check on that generation, then re-anchors a retained route only when its exact private task identity is found once. Writes remain fenced until the controller activates that exact generation. A version or schema mismatch, missing task, duplicate task, or unclean transition leaves the route stale and write-disabled rather than retargeting it.
 
-Run `embassy compat-check` for the bounded non-traffic probe. Run `embassy compat-certify [--codex <alias>]` to add on-machine wire evidence: Embassy creates a short-lived, no-stdin Claude print session, confirms one marked diagnostic frame was written to that exact uniquely discovered scratch session, and then closes it. Direct `crossSessionInbound: accept` writes do not emit Claude's approval-specific native receipt, so wire certification does not claim a release receipt or model read. The chosen idle Codex task is resumed and refreshed without starting a turn. When more than one Codex route is registered, `--codex` is required. Add `--with-turn` only when you explicitly want one minimal Codex model turn (`reply OK`) as deeper evidence. Certification failures retain each surface's safe code and print both surface outcomes: exit `7` means Claude failed, `8` means Codex failed, and `9` means both failed; exit `5` remains reserved for a genuinely ambiguous control transport outcome. Certification evidence is retained with the provider version and shown in Diagnostics; it does not weaken runtime validation.
-
-The managed Codex installation is resolved by exact path and version; a `codex` elsewhere on `PATH` is neither used nor modified. Claude is resolved from `EMBASSY_CLAUDE_BIN` or the official per-user launcher, never by searching `PATH`.
-
-### Keeping up with provider updates
-
-The repository does not install a background job. If you choose to automate checks, keep `embassy serve` separately supervised and use two user-owned LaunchAgents:
-
-1. an update-triggered job whose `ProgramArguments` are the absolute Embassy binary path, `compat-certify`, `--codex`, and one exact registered alias, with `WatchPaths` containing the absolute Claude launcher and Codex app-bundle paths; and
-2. a daily fallback whose `ProgramArguments` are the absolute Embassy binary path and `compat-check`, with a `StartCalendarInterval` of your choosing.
-
-A minimal watched-job core looks like this; replace every placeholder with an absolute local path or alias before loading it:
-
-```xml
-<key>ProgramArguments</key>
-<array>
-  <string>/ABSOLUTE/PATH/TO/embassy</string>
-  <string>compat-certify</string>
-  <string>--codex</string>
-  <string>codex-main@this-mac</string>
-</array>
-<key>WatchPaths</key>
-<array>
-  <string>/ABSOLUTE/HOME/.local/bin/claude</string>
-  <string>/Applications/Codex.app</string>
-</array>
-```
-
-For the daily job, replace `WatchPaths` with:
-
-```xml
-<key>StartCalendarInterval</key>
-<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-```
-
-and use only `compat-check` in `ProgramArguments`. These commands contact the already-running local broker; they do not start it. The watched certification therefore fails safely if the selected route is missing or busy. The recipe intentionally omits `--with-turn`, so it never opts into the Codex model-call depth.
+The managed Codex installation is resolved by exact path and version; a `codex` elsewhere on `PATH` is neither used nor modified. Claude is resolved from `EMBASSY_CLAUDE_BIN` or the official per-user launcher, never by searching `PATH`. Provider updates require an Embassy release that explicitly reviews and pins the new version.
 
 ## Addressing
 
@@ -108,4 +72,4 @@ Claude sessions are addressed by their current `name@host` or by a user-supplied
 
 Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name.
 
-Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. While one broker process remains running, a compatible managed App Server endpoint-generation change can re-anchor the exact loaded task automatically. After `embassy serve` itself restarts, a retained Codex route currently remains stale with `REOBSERVATION_REQUIRED`; recover it by rerunning `embassy register-codex --alias <same-alias>` from that exact Codex task without unregistering first. Never supply or reconstruct its thread ID. If the task no longer exists, the live dashboard can remove the retained registration only after the broker proves it stale on a dead endpoint generation.
+Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Compatible managed App Server generation changes and broker restarts can both re-anchor the exact loaded task automatically; a normal restart needs no manual registration. If boot reactivation cannot find that task exactly once, the route remains stale with `REOBSERVATION_REQUIRED`. Once the task is observable, recover it by rerunning `embassy register-codex --alias <same-alias>` from that exact Codex task without unregistering first. Never supply or reconstruct its thread ID. If the task no longer exists, the live dashboard can remove the retained registration only after the broker proves it stale on a dead endpoint generation.

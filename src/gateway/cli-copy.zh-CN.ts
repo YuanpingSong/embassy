@@ -13,8 +13,6 @@ export const cliCopyZhCn = {
   serve [--inbound open] 在前台运行仅使用套接字的代理（默认配对入站）
   health                 检查代理健康状态
   status                 读取公开状态快照
-  compat-check           运行有限且不发送消息的兼容性探测
-  compat-certify         运行有界在线链路认证 [--codex 别名] [--with-turn]
   refresh-dashboard      发布两份静态仪表盘文件
   dashboard --live [--port <n>]
                          打开实时状态与有限路由同意操作

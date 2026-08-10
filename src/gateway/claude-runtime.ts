@@ -6,11 +6,7 @@ import path from "node:path";
 
 import { BridgeError } from "../errors.js";
 import { CLAUDE_PEER_COMPATIBILITY } from "./claude-peer.js";
-import {
-  isCompatibilityVersion,
-  sharesCompatibilityMajor,
-  type CompatibilityPolicy,
-} from "./compatibility.js";
+import { isCompatibilityVersion } from "./compatibility.js";
 
 const MAX_VERSION_OUTPUT_BYTES = 4_096;
 const VERSION_OUTPUT_PATTERN = /^(\d{1,4}\.\d{1,4}\.\d{1,4}) \(Claude Code\)\r?\n?$/;
@@ -20,7 +16,6 @@ export type ClaudePeerRuntimeOptions = {
   /** Trusted operator configuration; there is no PATH-based lookup. */
   claudeExecutable: string;
   versionTimeoutMs?: number;
-  compatibilityPolicy?: CompatibilityPolicy;
 };
 
 export type AttestedClaudePeerRuntime = {
@@ -254,7 +249,6 @@ async function attestRegularExecutable(
 async function attestExecutablePath(
   configuredExecutable: string,
   user: RuntimeUser,
-  compatibilityPolicy: CompatibilityPolicy,
 ): Promise<ExecutableAttestation> {
   const homeStat = await lstat(user.homedir);
   if (
@@ -344,22 +338,10 @@ async function attestExecutablePath(
         ? targetVersion
         : undefined;
       if (foundVersion !== undefined) {
-        if (
-          compatibilityPolicy === "observed" &&
-          sharesCompatibilityMajor(
-            foundVersion,
-            CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-          )
-        ) {
-          // The version command and executable generation are still verified
-          // below. This only admits a same-major official update for bounded
-          // schema attestation.
-        } else {
         throw new BridgeError(
           "CLAUDE_VERSION_DRIFT",
           `Installed Claude Code is ${foundVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
         );
-        }
       } else {
         throw new BridgeError(
           "UNSAFE_CLAUDE_EXECUTABLE",
@@ -467,11 +449,9 @@ export async function attestClaudePeerRuntime(
     options.claudeExecutable,
     user.homedir,
   );
-  const compatibilityPolicy = options.compatibilityPolicy ?? "strict";
   const before = await attestExecutablePath(
     configuredExecutable,
     user,
-    compatibilityPolicy,
   );
   const executable = before.executable;
   const command: ClaudeVersionCommand = {
@@ -521,14 +501,7 @@ export async function attestClaudePeerRuntime(
       "The Claude launcher target and reported version disagree.",
     );
   }
-  if (
-    reportedVersion !== CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion &&
-    (compatibilityPolicy === "strict" ||
-      !sharesCompatibilityMajor(
-        reportedVersion,
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-      ))
-  ) {
+  if (reportedVersion !== CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion) {
     throw new BridgeError(
       "CLAUDE_VERSION_DRIFT",
       `Installed Claude Code reports ${reportedVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
@@ -537,7 +510,6 @@ export async function attestClaudePeerRuntime(
   const after = await attestExecutablePath(
     configuredExecutable,
     user,
-    compatibilityPolicy,
   );
   if (
     before.executable !== after.executable ||

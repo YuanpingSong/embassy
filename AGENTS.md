@@ -63,8 +63,11 @@ live sends routine. Never enable a real provider message in CI.
 - Publish at most one process-owned `codex-*` registry record per supervised
   advertisement process. Remove only the exact-owned record and callback socket
   during graceful shutdown; never modify another process's artifacts.
-- Keep bodies, prompts, replies, raw provider frames, callback addresses, and
-  socket paths memory-only. Never replay a body after restart.
+- Persist message bodies only in the bounded mode-0600 broker state needed for
+  the private ledger, live dashboard, and queued-delivery recovery. A queued,
+  undispatched body may resume exactly once after restart; never retry an
+  ambiguous write. Keep raw provider frames, callback addresses, socket paths,
+  credentials, provider histories, and tool data memory-only.
 - Closed private route state may retain the Codex thread ID and Claude session
   UUID needed for ownership and re-observation. Native IDs are forbidden from
   public snapshots, normalized events, the dashboard, aliases, logs, errors,

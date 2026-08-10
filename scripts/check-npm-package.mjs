@@ -35,7 +35,6 @@ const PUBLIC_PACKAGE_PATHS = [
 ];
 
 const GATEWAY_RUNTIME_MODULES = [
-  "claude-compatibility-scratch",
   "claude-peer",
   "claude-helper",
   "claude-helper-client",
@@ -97,7 +96,6 @@ export const EXPECTED_NPM_PACKAGE_PATHS = Object.freeze(
 
 const REQUIRED_ESM_IMPORTS = [
   "dist/src/gateway/cli.js",
-  "dist/src/gateway/claude-compatibility-scratch.js",
   "dist/src/gateway/claude-helper.js",
   "dist/src/gateway/claude-helper-client.js",
   "dist/src/gateway/codex-registration-succession.js",
