@@ -6,13 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-10
+
+Deliverability over everything: a message you send arrives, or tells you loudly why it could not.
+
 ### Added
 
 - **Broker-owned provenance envelopes and recipient replies** — every routed body now reaches Codex or Claude inside one deterministic `cross-session-message` textual frame with broker-validated sender attribution. Its first `embassy-reply-hint` carries the full conversation token, the exact recipient alias, and the stdin-based `embassy reply` command, so either participant can continue without reconstructing a token. Codex receives the full token as an outer `conversation` attribute as well; Claude retains its canonical outer shape and receives the token in the hint. Sender aliases over Claude's 64-character display bound use a deterministic hashed label while preserving the exact alias in the hint.
+- **The durable queue** — message bodies persist in the broker's private mode-0600 state under bounded retention. Queued mail survives a broker restart and re-sends exactly once when its route is re-observed; in-flight-at-crash messages settle `ambiguous` — never silently lost, never double-sent. The live dashboard's delivery detail shows each retained body (bounded display), with an honest fallback for deliveries whose body was not retained. Static dashboards remain metadata-only.
+- **Boot reactivation** — after a broker restart, retained Codex routes re-anchor automatically at startup through the same exactly-once `thread/loaded/list` proof, including staged handling when the App Server moved endpoint generations while the broker was down. `register-codex` becomes recovery of last resort; transient replies are never retargeted across a restart.
+- **The deliverability soak** — `npm run soak` drives a seeded, randomized churn of sends through scripted dispatch faults, busy/idle flips, clock jumps, and full restarts, asserting that every accepted message settles exactly once into an explicit terminal outcome with an allowlisted reason.
+
+### Changed
+
+- Message deadlines default to **4 hours** (was 5 minutes; max 24 hours) — agent turns routinely outlive minutes-scale deadlines, and expiry is now rare and explicit rather than routine. Stall notices stay early, within two minutes.
+- Conversation hop budgets exist to stop runaway reply loops, not conversations: the default is **16** (was 2; max 64).
+- Claude-bound dispatch failures carry their exact safe codes, and the broker redispatches bounded retries when the route is observed idle instead of settling terminal on first refusal.
+- Documentation across both languages now states the durable-queue truth: bodies are stored, bounded, and shown; restarts keep queued mail.
+
+### Fixed
+
+- The live dashboard's "Source restarted; view resynchronized" banner appears only on a true source-revision regression; clock-derived field churn no longer masquerades as a restart or triggers a frame broadcast every poll.
 
 ### Security
 
 - The envelope is a structural provenance marker, not XML, a cryptographic signature, or authentication against same-UID code. Broker-reserved opening and closing tag shapes inside the untrusted body are neutralized before delivery; framing happens exactly once at the final provider boundary, and invalid metadata or framed-size overflow fails before any write. The full conversation token remains transient and participant-scoped: reply rechecks caller, conversation membership, route, and hop policy, and the token never enters durable state, journals, logs, receipts, public snapshots, events, or dashboards.
+- Body persistence keeps the same trust boundary the product always had: the OS account. Retained bodies live in the mode-0600 state directory and appear only on the loopback live dashboard; raw provider frames stay memory-only.
 
 ## [1.1.0] - 2026-08-09
 
