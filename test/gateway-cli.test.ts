@@ -2049,7 +2049,7 @@ test("package metadata publishes the client and its runtime dependency", async (
     devDependencies: Record<string, string>;
   };
   assert.equal(packageJson.name, "agent-embassy");
-  assert.equal(packageJson.version, "1.1.0");
+  assert.equal(packageJson.version, "1.2.0");
   assert.equal(packageJson.version, EMBASSY_VERSION);
   assert.deepEqual(packageJson.os, ["darwin"]);
   assert.equal(packageJson.bin.embassy, "dist/src/gateway/cli.js");
