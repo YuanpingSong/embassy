@@ -64,6 +64,7 @@ const SAFE_CODE_ALLOWLIST = new Set([
   "SOAK_CANCELLED",
   "SOAK_AMBIGUOUS",
   "SOAK_DEFER",
+  "PROVIDER_DELIVERY_CANCELLED",
 ]);
 
 function mulberry32(seed: number): () => number {
@@ -470,6 +471,9 @@ test("soak: randomized churn settles every accepted message exactly once", async
   }
   await settleLedger();
   await clock.advanceBy(config.limits.messageDeadlineMs + 10_000);
+  // Observe terminals from the first deadline window before their bounded
+  // status-retention window can elapse during the second clock jump.
+  await settleLedger();
   await clock.advanceBy(config.limits.messageDeadlineMs + 10_000);
   await settleLedger();
 

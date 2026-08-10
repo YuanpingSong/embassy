@@ -2117,6 +2117,30 @@ test("native messages retain queued bodies but abandon transient authority acros
     dedupeKey: "restart-native-reply",
   });
   assert.ok(reply.messageId);
+  const queuedReply = await store.enqueueNativeReply({
+    sourceAlias: "reviewer@this-mac",
+    target: {
+      ...transientClaudePeer,
+      alias: "rotated-native-advisor@this-mac",
+      binding: {
+        ...transientClaudePeer.binding,
+        routeHandle: "00000000-0000-4000-8000-000000000199",
+        ownerLease: "transient-owner-lease-rotated",
+      },
+    },
+    body: "queued native reply has no restart authority",
+    dedupeKey: "restart-queued-native-reply",
+  });
+  assert.ok(queuedReply.messageId);
+  await store.registerRoute({
+    alias: "rotated-native-advisor@this-mac",
+    binding: {
+      ...transientClaudePeer.binding,
+      routeHandle: "00000000-0000-4000-8000-000000000200",
+      ownerLease: "different-session-owner-lease",
+    },
+    registrationMode: "selected_live_peer",
+  });
   await store.dequeueMessage(transientClaudePeer.alias);
   await store.close();
 
@@ -2126,7 +2150,7 @@ test("native messages retain queued bodies but abandon transient authority acros
   });
   await recovered.initialize();
   const snapshot = await recovered.publicSnapshot();
-  assert.equal(snapshot.accounting.abandoned, 0);
+  assert.equal(snapshot.accounting.abandoned, 1);
   assert.equal(snapshot.accounting.ambiguous, 1);
   assert.equal(
     snapshot.accounting.queuedBytes,
@@ -2135,6 +2159,10 @@ test("native messages retain queued bodies but abandon transient authority acros
   assert.equal(
     (await recovered.dequeueMessage("reviewer@this-mac"))?.body,
     "queued native ingress",
+  );
+  assert.equal(
+    await recovered.dequeueMessage("rotated-native-advisor@this-mac"),
+    undefined,
   );
   const persisted = await readFile(recovered.stateFilePath, "utf8");
   assert.equal(persisted.includes(transientClaudePeer.binding.routeHandle), false);
