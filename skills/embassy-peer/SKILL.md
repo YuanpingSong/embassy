@@ -111,6 +111,8 @@ until manual recovery rather than leaving two live registrations.
 
 Embassy also pins the exact identity fail-closed when a retained route cannot fully reactivate or a fresh registration cannot confirm complete rollback. Retry only that exact identity; choose another only after the old route is confirmed unregistered and Embassy is restarted.
 
+While the same `embassy serve` broker remains running, a compatible Codex App Server endpoint-generation change can reattach an exact registered task automatically. A broker restart is different: a retained Codex route currently starts stale with `REOBSERVATION_REQUIRED`. Recover it only from that exact Codex task by rerunning `embassy register-codex --alias <same-alias>`; do not unregister first, supply a thread ID, or replay any prior body.
+
 Unregister from the same Codex task:
 
 ```sh
@@ -159,6 +161,10 @@ GATEWAY_MESSAGE
 The CLI infers the caller from the inherited environment. In a Codex task it uses `CODEX_THREAD_ID`; in Claude Code it uses `CLAUDE_CODE_MESSAGING_SOCKET` transiently. Never echo it or pass it as an argument. If both identities or neither identity are present, stop on the fail-closed result instead of selecting one.
 
 An accepted reply returns its own fresh delivery token under the same rules as a send.
+
+Embassy CLI/queue delivery into Codex currently carries a raw anonymous body. Claude Code's native `SendMessage` may add its own provenance wrapper, but neither inbound presentation exposes the `conv_` token or a reply hint to the recipient. Therefore an inbound recipient cannot discover a conversation token from the message or from a public suffix. Use `embassy reply` only with the exact full token returned to a prior send or explicitly supplied by the user/sender; otherwise stop rather than guessing or reconstructing it.
+
+`EMBASSY_MAX_HOPS` bounds one conversation. The initial send is hop 0 and each routed reply increments it; the default `2` permits hops 0 through 2. A later attempt is rejected with `HOP_LIMIT_EXCEEDED`, though the current CLI may show only generic `rejected`. Never retry an exhausted token. A fresh conversation requires a new, separately authorized send.
 
 ## Check or wait for delivery
 

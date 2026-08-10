@@ -285,7 +285,7 @@ embassy send-to-claude --from codex-reviewer@this-mac --to advisor@this-mac --ex
 Please review the current approach and note the main risk.
 MSG
 
-<span class="c"># continue the thread with the returned token, from either side</span>
+<span class="c"># the initiating side can continue with the token returned by its send</span>
 embassy reply --conversation conv_&lt;token&gt; --alias codex-reviewer@this-mac &lt;&lt;'MSG'
 Please expand on the second call site.
 MSG
