@@ -87,38 +87,41 @@ function normalizeRevision(
   throw new Error("LIVE_DASHBOARD_REVISION_INVALID");
 }
 
+const TIME_DERIVED_KEY = /(?:Ms|At)$/u;
+
+function stripTimeDerived(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripTimeDerived);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(
+      value as Record<string, unknown>,
+    )) {
+      if (TIME_DERIVED_KEY.test(key)) continue;
+      out[key] = stripTimeDerived(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
 function fingerprint(model: DashboardViewModel): string {
-  // Queue ages and generatedAt advance even when the broker's public semantics
-  // have not changed. Excluding only those derived clock fields mirrors the
-  // gateway's process-local snapshot revision contract while retaining a
-  // second, independently normalized restart/reset signal.
-  const semanticModel = {
-    ...model,
-    generatedAt: undefined,
-    exchange: {
-      ...model.exchange,
-      oldestQueueAgeMs: undefined,
-    },
-    transit: {
-      ...model.transit,
-      oldestQueueAgeMs: undefined,
-    },
-    routes: model.routes.map((route) => ({
-      ...route,
-      queueAgeMs: undefined,
-    })),
-  };
+  // Clock-derived fields (`…Ms` durations, `…At` timestamps) advance even when
+  // the broker's public semantics have not changed. Stripping them by key
+  // shape keeps this fingerprint aligned with the gateway's semantic-revision
+  // contract without a hand-mirrored exclusion list — the list drifted from
+  // the view model and produced a false "Source restarted" banner every poll.
   return createHash("sha256")
-    .update(JSON.stringify(semanticModel))
+    .update(JSON.stringify(stripTimeDerived(model)))
     .digest("hex");
 }
 
 function isRevisionReset(
   previous: LiveDashboardSnapshotRevision,
   next: LiveDashboardSnapshotRevision,
-  fingerprintChanged: boolean,
 ): boolean {
-  if (previous === next) return fingerprintChanged;
+  // A reset is a regression of the source revision; observer loss is handled
+  // by the caller. "Same revision, changed content" is a publish signal, never
+  // a restart signal.
   return (
     typeof previous === "number" &&
     typeof next === "number" &&
@@ -228,7 +231,7 @@ export function createLiveDashboardStreamHub(
       const reset =
         observerUnavailable ||
         (previousSourceRevision !== undefined &&
-          isRevisionReset(previousSourceRevision, nextRevision, changed));
+          isRevisionReset(previousSourceRevision, nextRevision));
       const shouldPublish = latest === undefined || changed || reset;
       previousSourceRevision = nextRevision;
       observerUnavailable = false;

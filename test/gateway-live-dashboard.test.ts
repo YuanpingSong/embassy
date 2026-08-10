@@ -413,10 +413,67 @@ test("one central poller starts only with clients and fingerprints same-revision
   await hub.pollNow();
   assert.equal(calls, 2);
   assert.match(writer.frames.at(-1) ?? "", /"streamRevision":2/u);
-  assert.match(writer.frames.at(-1) ?? "", /"reset":true/u);
+  assert.match(writer.frames.at(-1) ?? "", /"reset":false/u);
   writer.disconnect();
   assert.equal(clock.intervalCount(), 0);
   assert.equal(hub.streamCount(), 0);
+});
+
+test("clock-derived field churn never publishes and never signals a reset", async () => {
+  const clock = fakeClock();
+  const first = dashboardFixture();
+  const second = dashboardFixture();
+  second.generatedAt = "2026-08-08T12:00:02.000Z";
+  for (const route of second.routes) {
+    route.lastSeenAt = "2026-08-08T12:00:01.000Z";
+  }
+  const observations: LiveDashboardObservation[] = [
+    { snapshotRevision: 7, snapshot: first },
+    { snapshotRevision: 7, snapshot: second },
+  ];
+  let calls = 0;
+  const hub = createLiveDashboardStreamHub({
+    clock,
+    observer: {
+      observe: async () =>
+        observations[Math.min(calls++, observations.length - 1)]!,
+    },
+  });
+  const writer = fakeWriter();
+  assert.equal(hub.add(writer).ok, true);
+  await hub.pollNow();
+  const framesAfterFirst = writer.frames.length;
+  await hub.pollNow();
+  assert.equal(calls, 2);
+  assert.equal(writer.frames.length, framesAfterFirst);
+  assert.equal(hub.latest()?.streamRevision, 1);
+  assert.equal(hub.latest()?.reset, false);
+  writer.disconnect();
+});
+
+test("a source revision regression is the reset signal", async () => {
+  const clock = fakeClock();
+  const fixture = dashboardFixture();
+  const observations: LiveDashboardObservation[] = [
+    { snapshotRevision: 7, snapshot: fixture },
+    { snapshotRevision: 3, snapshot: fixture },
+  ];
+  let calls = 0;
+  const hub = createLiveDashboardStreamHub({
+    clock,
+    observer: {
+      observe: async () =>
+        observations[Math.min(calls++, observations.length - 1)]!,
+    },
+  });
+  const writer = fakeWriter();
+  assert.equal(hub.add(writer).ok, true);
+  await hub.pollNow();
+  await hub.pollNow();
+  assert.equal(calls, 2);
+  assert.match(writer.frames.at(-1) ?? "", /"streamRevision":2/u);
+  assert.match(writer.frames.at(-1) ?? "", /"reset":true/u);
+  writer.disconnect();
 });
 
 test("manual refresh observes a fresh snapshot with no live stream", async () => {
