@@ -480,11 +480,10 @@ test("supervisor carries only the activated source alias and exact selected targ
         safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE",
       },
     );
+    const { stateRoot: omittedStateRoot, ...withoutStateRoot } = dispatch;
+    assert.equal(omittedStateRoot, "/state");
     assert.deepEqual(
-      await supervisor.dispatch({
-        ...dispatch,
-        targetAlias: "claude-other@this-mac",
-      }),
+      await supervisor.dispatch(withoutStateRoot),
       { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" },
     );
     const commandsBeforeInvalid = clients[0]!.commands.length;
@@ -514,6 +513,19 @@ test("supervisor carries only the activated source alias and exact selected targ
     assert.equal(sent.targetAlias, "claude-first@this-mac");
     assert.equal(sent.conversationId, "conv_0123456789abcdef");
     assert.equal(sent.text, "outbound body");
+
+    assert.deepEqual(
+      await supervisor.dispatch({
+        ...dispatch,
+        selectedAlias: "claude-renamed@this-mac",
+        messageId: "gateway-message-renamed-observation",
+      }),
+      { state: "pending" },
+    );
+    const renamed = clients[0]!.commands.at(-1);
+    assert.equal(renamed?.method, "dispatch");
+    if (renamed?.method !== "dispatch") assert.fail("expected dispatch command");
+    assert.equal(renamed.targetAlias, "claude-first@this-mac");
 
     assert.deepEqual(
       await supervisor.dispatch({

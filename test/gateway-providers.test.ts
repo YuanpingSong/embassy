@@ -828,6 +828,66 @@ test("local Claude provider publishes only canonical interactive names and gener
   assert.equal(fake.closed, true);
 });
 
+test("Claude discovery cannot rename selected mailbox authority", async () => {
+  const fake = new FakeClaudePeer();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+  });
+  await provider.initialize(callbacks().callbacks);
+  await provider.advertiseNativeCodexPeer({
+    alias: "codex-reviewer@this-mac",
+    cwd: SAFE_WORKSPACE,
+  });
+  await provider.discoverClaudePeers();
+  await provider.assertWorkspaceDisjoint(
+    "target-selected",
+    "/synthetic/controller-state",
+  );
+  await provider.selectRoute({
+    alias: "advisor@this-mac",
+    routeHandle: "target-selected",
+  });
+
+  fake.peers[0]!.alias = "partial-rename";
+  fake.truncated = true;
+  assert.equal((await provider.discoverClaudePeers()).complete, false);
+  assert.deepEqual(
+    await provider.dispatch({
+      ...claudeProvenance(),
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-incomplete-discovery",
+      text: "write under the selected exact identity",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.lastSend?.targetId, "target-selected");
+  assert.equal(fake.sendCalls, 1);
+  fake.emitReceipt("released");
+
+  fake.truncated = false;
+  await provider.discoverClaudePeers();
+  assert.deepEqual(
+    await provider.dispatch({
+      ...claudeProvenance(),
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId: "gateway-complete-observation-rename",
+      text: "write under the service-owned conversation coordinate",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.lastSend?.targetId, "target-selected");
+  assert.equal(fake.sendCalls, 2);
+  await provider.close();
+});
+
 test("Claude provider frames raw maximum bodies once and rejects provenance mismatches prewrite", async () => {
   const fake = new FakeClaudePeer();
   const provider = createLocalClaudeGatewayProvider({
@@ -882,10 +942,10 @@ test("Claude provider frames raw maximum bodies once and rejects provenance mism
 
   assert.deepEqual(
     await provider.dispatch({
-      ...claudeProvenance("codex-reviewer@this-mac", "other@this-mac"),
+      ...claudeProvenance(),
       authorization: "selected_route",
-      binding: binding(provider),
-      messageId: "gateway-target-mismatch",
+      binding: { ...binding(provider), routeHandle: "target-unselected" },
+      messageId: "gateway-route-mismatch",
       text: "must not write",
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
@@ -937,20 +997,6 @@ test("an exact live native sender stays outbound-unselected but can receive its 
 
   assert.deepEqual(
     await provider.dispatch({
-      ...claudeProvenance("codex-reviewer@this-mac", "other@this-mac"),
-      authorization: "native_reply",
-      binding: binding(provider),
-      messageId: "gateway-message-native-reply-target-mismatch",
-      text: "must not consume the exact native reply capability",
-      expectsReply: false,
-      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-    }),
-    { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" },
-  );
-  assert.equal(fake.sendCalls, 0);
-
-  assert.deepEqual(
-    await provider.dispatch({
       ...claudeProvenance(),
       authorization: "selected_route",
       binding: binding(provider),
@@ -984,15 +1030,15 @@ test("an exact live native sender stays outbound-unselected but can receive its 
       body: "correlated native reply",
     }),
   );
+  fake.emitReceipt("released");
   assert.deepEqual(observed.routes, []);
 
+  // The stable session UUID addresses the write; the service supplies the
+  // renamed display alias, and the reply still lands with it in provenance.
   fake.peers[0]!.alias = "renamed-advisor";
   assert.deepEqual(
     await provider.dispatch({
-      ...claudeProvenance(
-        "codex-reviewer@this-mac",
-        "renamed-advisor@this-mac",
-      ),
+      ...claudeProvenance("codex-reviewer@this-mac", "renamed-advisor@this-mac"),
       authorization: "native_reply",
       binding: binding(provider),
       messageId: "gateway-message-native-reply-after-rename",
@@ -1007,31 +1053,44 @@ test("an exact live native sender stays outbound-unselected but can receive its 
     fake.lastSend?.content,
     composeProvenanceEnvelope({
       direction: "claude",
-      ...claudeProvenance(
-        "codex-reviewer@this-mac",
-        "renamed-advisor@this-mac",
-      ),
+      ...claudeProvenance("codex-reviewer@this-mac", "renamed-advisor@this-mac"),
       body: "correlated native reply after same-session rename",
     }),
   );
+  fake.emitReceipt("released");
 
   fake.peers.splice(0, 1);
   assert.deepEqual(
     await provider.dispatch({
-      ...claudeProvenance(
-        "codex-reviewer@this-mac",
-        "renamed-advisor@this-mac",
-      ),
+      ...claudeProvenance(),
       authorization: "native_reply",
       binding: binding(provider),
       messageId: "gateway-message-stale-native-reply",
-      text: "must not cross-deliver",
+      text: "reply through the retained ingress capability",
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
-    { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" },
+    { state: "pending" },
   );
-  assert.equal(fake.sendCalls, 2);
+  assert.equal(fake.sendCalls, 3);
+  fake.emitReceipt("released");
+
+  fake.discover = async () => {
+    throw new Error("synthetic registry read failure");
+  };
+  assert.deepEqual(
+    await provider.dispatch({
+      ...claudeProvenance(),
+      authorization: "native_reply",
+      binding: binding(provider),
+      messageId: "gateway-message-native-reply-discovery-failure",
+      text: "reply without a provider observation precondition",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "pending" },
+  );
+  assert.equal(fake.sendCalls, 4);
   await provider.close();
 });
 

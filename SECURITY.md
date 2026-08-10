@@ -72,6 +72,12 @@ against other processes running as the same OS user.
   path; with an approval-requiring policy, the turn may wait for the user.
 - Claude's native `crossSessionInbound` setting controls messages entering a
   Claude session. Embassy cannot override an accept, hold, or refuse decision.
+- Delivery scheduling is asymmetric. After routing and pre-write validation,
+  Claude-bound bodies are written immediately to Claude's native mailbox
+  regardless of an observed busy or idle state; `transport_written` proves the
+  mailbox write and settles that direction as `delivered`, not read or
+  consumed. Codex-bound ordinary bodies remain idle-gated, and only the exact
+  `STEER:` path below can use the active turn's next tool-call boundary.
 - A CLI initiator receives the full conversation token in the accepted control
   result, and every routed recipient receives it in the broker-owned first
   `embassy-reply-hint`. The token is a transient participant-scoped locator,

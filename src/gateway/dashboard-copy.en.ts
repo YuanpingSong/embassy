@@ -109,9 +109,9 @@ export const dashboardCopyEn = {
     "The oldest accepted message remains queued past half of its delivery deadline.",
   "guidance.queueStalled.action":
     "Run embassy status. Do not resend accepted work; Embassy still tracks it until settlement or expiry.",
-  "guidance.recipientWaitingInput.title": "Recipient session may need input",
+  "guidance.recipientWaitingInput.title": "Mailbox reached; recipient remains unobserved",
   "guidance.recipientWaitingInput.body":
-    "Recipient session appears to be waiting on interactive input in its own window; check it there.",
+    "Embassy wrote the message to the recipient mailbox, and the recipient session is currently not observed.",
   "guidance.recipientWaitingInput.action":
     "Check the recipient session in its own window. Do not resend the accepted message.",
   "guidance.unconfirmed.title": "Delivery could not be confirmed",
@@ -195,7 +195,7 @@ export const dashboardCopyEn = {
   "activity.meaning.delivered":
     "Reached its terminal delivered state. This does not mean the model read or acted on it.",
   "activity.meaning.delivered.codexToClaude":
-    "Claude returned a terminal released receipt: the message entered the recipient queue. This does not mean the model read or acted on it.",
+    "Embassy wrote the message to Claude's native mailbox immediately; it did not wait for the route to become idle. This does not mean the model read or acted on it.",
   "activity.meaning.delivered.claudeToCodex":
     "Codex App Server accepted the turn. This does not mean the model completed or acted on it.",
   "activity.meaning.unconfirmed":
@@ -204,7 +204,7 @@ export const dashboardCopyEn = {
     "The outcome is unknown after an uncertain write. Do not retry automatically.",
   "activity.meaning.other": "This is the latest normalized delivery state.",
   "activity.meaning.queued":
-    "Accepted and waiting in the local queue. Progress, not success.",
+    "Waiting locally before a provider write; a busy Claude state alone never causes this. Progress, not success.",
   "activity.meaning.dispatching":
     "Being handed to the receiving connector. Progress, not success.",
   "activity.meaning.transportWritten":
@@ -345,7 +345,7 @@ export const dashboardCopyEn = {
   "route.incompatible": "Incompatible",
   "route.disabled": "Disabled",
   "route.meaning.idle": "Enabled, compatible, and ready to carry messages.",
-  "route.meaning.busy": "Carrying a turn right now; new messages queue.",
+  "route.meaning.busy": "Claude-bound messages still write to the native mailbox immediately; ordinary Codex-bound messages queue for idle.",
   "route.meaning.awaitingApproval":
     "Waiting on the provider's native approval.",
   "route.meaning.stale": "No current endpoint proof; refresh and restore it.",

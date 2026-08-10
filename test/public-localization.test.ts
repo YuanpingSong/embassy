@@ -239,6 +239,83 @@ test("current compatibility docs expose only the automatic exact-pin contract", 
   assert.match(chineseSite, /自动验证精确的已审查版本/u);
 });
 
+test("current public guidance preserves directional delivery timing", async () => {
+  const [
+    englishReadme,
+    chineseReadme,
+    englishDelivery,
+    chineseDelivery,
+    englishDashboard,
+    chineseDashboard,
+    englishSite,
+    chineseSite,
+    skill,
+    architecture,
+  ] = await Promise.all([
+    readPublicFile("README.md"),
+    readPublicFile("README.zh-CN.md"),
+    readPublicFile("docs/DELIVERY.md"),
+    readPublicFile("docs/DELIVERY.zh-CN.md"),
+    readPublicFile("docs/DASHBOARD.md"),
+    readPublicFile("docs/DASHBOARD.zh-CN.md"),
+    readPublicFile("site/index.html"),
+    readPublicFile("site/zh-CN/index.html"),
+    readPublicFile("skills/embassy-peer/SKILL.md"),
+    readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
+  ]);
+
+  for (const [label, document] of [
+    ["README.md", englishReadme],
+    ["docs/DELIVERY.md", englishDelivery],
+    ["docs/DASHBOARD.md", englishDashboard],
+    ["site/index.html", englishSite],
+    ["skills/embassy-peer/SKILL.md", skill],
+    ["docs/GATEWAY-ARCHITECTURE.md", architecture],
+  ] as const) {
+    assert.match(document, /Claude-bound/i, label);
+    assert.match(document, /mailbox/i, label);
+    assert.match(document, /transport_written/i, label);
+    assert.match(document, /delivered/i, label);
+    assert.match(document, /Codex-bound/i, label);
+  }
+
+  for (const [label, document] of [
+    ["README.zh-CN.md", chineseReadme],
+    ["docs/DELIVERY.zh-CN.md", chineseDelivery],
+    ["docs/DASHBOARD.zh-CN.md", chineseDashboard],
+    ["site/zh-CN/index.html", chineseSite],
+  ] as const) {
+    assert.match(document, /朝向 Claude/u, label);
+    assert.match(document, /邮箱/u, label);
+    assert.match(document, /transport_written/i, label);
+    assert.match(document, /delivered/i, label);
+    assert.match(document, /朝向 Codex/u, label);
+  }
+
+  for (const [label, document] of [
+    ["README.md", englishReadme],
+    ["docs/DELIVERY.md", englishDelivery],
+    ["site/index.html", englishSite],
+  ] as const) {
+    assert.doesNotMatch(
+      document,
+      /toward Claude, the message was released into the session's native queue|Answers arrive at turn boundaries, queued honestly|<b>queues never interrupt<\/b>/i,
+      label,
+    );
+  }
+  for (const [label, document] of [
+    ["README.zh-CN.md", chineseReadme],
+    ["docs/DELIVERY.zh-CN.md", chineseDelivery],
+    ["site/zh-CN/index.html", chineseSite],
+  ] as const) {
+    assert.doesNotMatch(
+      document,
+      /朝向 Claude，意味着消息已释放到会话的原生队列|答案在回合边界到达，诚实排队|<b>队列绝不打断<\/b>/u,
+      label,
+    );
+  }
+});
+
 test("marketing pages preserve structure, protocol tokens, and reciprocal locale links", async () => {
   const [english, chinese] = await Promise.all([
     readPublicFile("site/index.html"),

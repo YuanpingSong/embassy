@@ -51,7 +51,10 @@ Five tabs, one question each:
   not numbers. Compatibility is passive status, never an operator action.
 - The **exchange board**: the two directions rendered as a diagram —
   selected Claude session ↔ queue/pouch ↔ registered Codex task — with live
-  state on each node (idle/busy/waiting) and edge (queue depth, oldest age).
+  state on each node (idle/busy/waiting) and direction-specific edges. The
+  Codex-bound edge shows queue depth and oldest age while the task is busy; the
+  Claude-bound edge shows immediate mailbox-write progress regardless of
+  Claude's observed state. It must never imply that busy Claude gates a write.
 - **Needs attention**: ordered, actionable, hidden entirely when empty.
   Every alert pairs state with the exact next CLI command, copyable.
 - Activity pulse: last-hour delivery counts by terminal state (small
@@ -66,7 +69,10 @@ Five tabs, one question each:
   including stall notices fired and diagnostic frames emitted, each with its
   safe code. This is the single most important screen in the product: it is
   the answer to the incident class we lived through (messages silently
-  expiring against long receiver turns).
+  expiring against long Codex receiver turns). The lifecycle must branch by
+  direction: Claude-bound `transport_written` is the terminal `delivered`
+  mailbox-write boundary, not proof of later reading or consumption;
+  Codex-bound ordinary work remains idle/turn-boundary gated.
 - **Conversation grouping**: `conv_` threads render as exchanges (request →
   reply chains), not isolated rows.
 - State vocabulary discipline (carries the honesty brand): progress is never

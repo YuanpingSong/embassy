@@ -1258,9 +1258,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       const stateRoot = this.selectedStateRoots.get(input.binding.routeHandle);
       if (
         input.authorization === "selected_route" &&
-        (selectedAlias === undefined ||
-          selectedAlias !== input.targetAlias ||
-          stateRoot === undefined)
+        (selectedAlias === undefined || stateRoot === undefined)
       ) {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
@@ -1318,30 +1316,19 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
     }
     if (input.authorization === "native_reply") {
-      try {
-        await this.refreshClaudeDiscovery();
-      } catch {
-        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
-      }
       const observedRoute = this.nativeInbound.get(input.binding.routeHandle);
-      const current = this.discovered.get(input.binding.routeHandle);
       if (
         observedRoute === undefined ||
-        observedRoute.listenerGeneration !== activeListener.generation ||
-        current?.alias !== observedRoute.alias
+        observedRoute.listenerGeneration !== activeListener.generation
       ) {
         this.nativeInbound.delete(input.binding.routeHandle);
         return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" };
-      }
-      if (observedRoute.alias !== input.targetAlias) {
-        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
     } else {
       const selectedAlias = this.selected.get(input.binding.routeHandle);
       const stateRoot = this.selectedStateRoots.get(input.binding.routeHandle);
       if (
         selectedAlias === undefined ||
-        selectedAlias !== input.targetAlias ||
         stateRoot === undefined
       ) {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
@@ -1397,8 +1384,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         (this.selectedDispatchEpoch.get(input.binding.routeHandle) ?? 0) + 1,
       );
       // The exact workspace attestation is refreshed before every send. A
-      // clean failure keeps the route busy until a later authoritative idle
-      // observation wakes the one bounded retry.
+      // clean prewrite failure remains retryable within the message deadline;
+      // retry timing does not depend on the model turn's observed state.
       this.selectedObservationDirty.add(input.binding.routeHandle);
       this.emitClaudeRouteObservation(input.binding.routeHandle, "busy");
       try {
@@ -2168,19 +2155,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.discovered.set(peer.targetId, row);
       rows.push(row);
     }
-    for (const [routeHandle, route] of this.nativeInbound) {
-      const current = this.discovered.get(routeHandle);
-      if (current !== undefined) {
-        // The stable session UUID owns native reply authority. A rename only
-        // updates its current public coordinate.
-        this.nativeInbound.set(routeHandle, {
-          alias: current.alias,
-          listenerGeneration: route.listenerGeneration,
-        });
-      } else if (!discovery.truncated) {
-        this.nativeInbound.delete(routeHandle);
-      }
-    }
     for (const [routeHandle, selectedAlias] of this.selected) {
       const row = this.discovered.get(routeHandle);
       if (row === undefined) {
@@ -2191,9 +2165,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           true,
         );
       } else {
-        if (row.alias !== selectedAlias) {
+        if (!discovery.truncated && row.alias !== selectedAlias) {
           // A Claude rename changes only the live name index. The native
-          // session UUID remains the selected logical route.
+          // session UUID remains the selected logical route. An incomplete
+          // scan is display evidence only and cannot rename dispatch authority.
           this.selected.set(routeHandle, row.alias);
         }
         if (

@@ -243,7 +243,6 @@ export class ClaudeNativeHelperSupervisor {
     if (input.authorization === "selected_route") {
       if (
         input.selectedAlias === undefined ||
-        input.selectedAlias !== input.targetAlias ||
         input.stateRoot === undefined
       ) {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };

@@ -8,6 +8,8 @@ Embassy 提供两种仪表盘界面：一对仅包含元数据的静态文件，
 
 在配置的状态目录下打开 `gateway-dashboard.html`。它提供了一个纯元数据视图，包括连接器健康状态、可用和已选择的 Claude 对等方、已注册的 Codex 路由、近期投递状态、队列深度、延迟和安全告警。
 
+请按方向理解队列与投递。朝向 Codex 的普通工作可以等待任务空闲；朝向 Claude 的工作不等待 Claude 空闲：通过路由与写前检查后，它会立即进入 Claude 的原生邮箱，而 `transport_written` 会把该方向结算为 `delivered`。这个邮箱边界不表示 Claude 已读取或消费正文。
+
 每次发布都会在状态目录下并排写入语言对——`gateway-dashboard.html` 和 `gateway-dashboard.zh-CN.html`，且每个页面都包含指向另一个页面的页内链接。该链接是静态版本切换语言的唯一方式；`--lang` 是实时组件的标志，而非 `refresh-dashboard` 的标志。
 
 静态页面是时间点快照，不会自动刷新。运行 `embassy refresh-dashboard` 并重新加载页面以查看最新状态，或运行 `embassy dashboard --live` 获取流式视图。
