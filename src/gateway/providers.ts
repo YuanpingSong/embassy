@@ -91,6 +91,49 @@ const COMPATIBILITY_PROBE_THREAD_ID =
 const COMPATIBILITY_TURN_TIMEOUT_MS = 60_000;
 const CLAUDE_CERTIFICATION_TIMEOUT_MS = 10_000;
 const CLAUDE_CERTIFICATION_DISCOVERY_POLL_MS = 100;
+const CLAUDE_CLEAN_PREWRITE_RETRY_CODES = new Set([
+  "CLAUDE_PEER_TARGET_UNKNOWN",
+  "CLAUDE_PEER_TARGET_STALE",
+  "CLAUDE_PEER_TARGET_CHANGED",
+  "CLAUDE_PEER_WORKSPACE_UNATTESTED",
+]);
+
+function claudeCleanPrewriteResult(
+  error: unknown,
+): GatewayAdapterDispatchResult {
+  if (
+    error instanceof BridgeError &&
+    error.code === "CLAUDE_PEER_MESSAGE_EXPIRED"
+  ) {
+    return { state: "failed", safeErrorCode: "MESSAGE_EXPIRED" };
+  }
+  if (
+    error instanceof BridgeError &&
+    CLAUDE_CLEAN_PREWRITE_RETRY_CODES.has(error.code)
+  ) {
+    return { state: "deferred", safeErrorCode: error.code };
+  }
+  const systemCode =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+      ? error.code
+      : undefined;
+  return {
+    state: "failed",
+    safeErrorCode:
+      error instanceof BridgeError
+        ? error.code
+        : systemCode === "ENOENT"
+          ? "CLAUDE_DISPATCH_PREWRITE_PATH_MISSING"
+          : systemCode === "EACCES" || systemCode === "EPERM"
+            ? "CLAUDE_DISPATCH_PREWRITE_ACCESS_DENIED"
+            : systemCode === "ETIMEDOUT"
+              ? "CLAUDE_DISPATCH_PREWRITE_TIMEOUT"
+              : "CLAUDE_DISPATCH_PREWRITE_FAILED",
+  };
+}
 
 function passedProbe(name: CompatibilityProbeName): CompatibilityProbeResult {
   return { name, outcome: "pass" };
@@ -1432,7 +1475,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
     } else {
       const selectedAlias = this.selected.get(input.binding.routeHandle);
-      if (selectedAlias === undefined || selectedAlias !== input.targetAlias) {
+      const stateRoot = this.selectedStateRoots.get(input.binding.routeHandle);
+      if (
+        selectedAlias === undefined ||
+        selectedAlias !== input.targetAlias ||
+        stateRoot === undefined
+      ) {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
     }
@@ -1476,21 +1524,35 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       throw error;
     }
 
+    if (input.authorization === "selected_route") {
+      const stateRoot = this.selectedStateRoots.get(input.binding.routeHandle);
+      if (stateRoot === undefined) {
+        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+      }
+      this.selectedDispatchEpoch.set(
+        input.binding.routeHandle,
+        (this.selectedDispatchEpoch.get(input.binding.routeHandle) ?? 0) + 1,
+      );
+      // The exact workspace attestation is refreshed before every send. A
+      // clean failure keeps the route busy until a later authoritative idle
+      // observation wakes the one bounded retry.
+      this.selectedObservationDirty.add(input.binding.routeHandle);
+      this.emitClaudeRouteObservation(input.binding.routeHandle, "busy");
+      try {
+        await this.peer.assertTargetWorkspaceDisjoint(
+          input.binding.routeHandle,
+          stateRoot,
+        );
+      } catch (error) {
+        return claudeCleanPrewriteResult(error);
+      }
+    }
+
     this.providerIdByGatewayId.set(input.messageId, "");
     this.pendingTargetByGatewayId.set(
       input.messageId,
       input.binding.routeHandle,
     );
-    if (input.authorization === "selected_route") {
-      this.selectedDispatchEpoch.set(
-        input.binding.routeHandle,
-        (this.selectedDispatchEpoch.get(input.binding.routeHandle) ?? 0) + 1,
-      );
-      // Once a selected-route dispatch begins, keep the route conservatively
-      // busy until a later registry refresh observes authoritative state.
-      this.selectedObservationDirty.add(input.binding.routeHandle);
-      this.emitClaudeRouteObservation(input.binding.routeHandle, "busy");
-    }
     let providerId: string | undefined;
     let trackingFailed = false;
     let terminalDuringSend = false;
@@ -1622,13 +1684,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
       this.providerIdByGatewayId.delete(input.messageId);
       this.pendingTargetByGatewayId.delete(input.messageId);
-      if (
-        error instanceof BridgeError &&
-        error.code === "CLAUDE_PEER_MESSAGE_EXPIRED"
-      ) {
-        return { state: "failed", safeErrorCode: "MESSAGE_EXPIRED" };
-      }
-      return { state: "failed", safeErrorCode: "CLAUDE_DISPATCH_REJECTED" };
+      return claudeCleanPrewriteResult(error);
     }
   }
 

@@ -1601,7 +1601,7 @@ test("Codex succession is route-scoped and preserves unrelated queued work", asy
   await store.close();
 });
 
-test("persistence contains metadata but no body, dedupe key, or public native IDs", async () => {
+test("persistence retains bounded bodies but not dedupe keys or public native IDs", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1615,9 +1615,8 @@ test("persistence contains metadata but no body, dedupe key, or public native ID
   });
   assert.equal(result.accepted, true);
   const persisted = await readFile(store.stateFilePath, "utf8");
-  assert.equal(persisted.includes(body), false);
+  assert.equal(persisted.includes(body), true);
   assert.equal(persisted.includes(dedupeKey), false);
-  assert.equal(persisted.includes("body"), false);
   assert.equal(persisted.includes(codexBinding.routeHandle), true);
   assert.equal((await lstat(store.stateFilePath)).mode & 0o077, 0);
 
@@ -1631,11 +1630,12 @@ test("persistence contains metadata but no body, dedupe key, or public native ID
     claudeBinding.routeHandle,
     claudeBinding.ownerLease,
     claudeBinding.endpointGeneration,
-    body,
     dedupeKey,
   ]) {
     assert.equal(publicBody.includes(secret), false);
   }
+  assert.equal(publicBody.includes(body), true);
+  assert.equal(snapshot.messages.at(-1)?.body, body);
   assert.match(snapshot.messages.at(-1)?.messageIdSuffix ?? "", /^[0-9a-f]{8}$/);
   await store.close();
 });
@@ -1811,7 +1811,7 @@ test("paired native ingress accepts only the exact selected Claude binding", asy
     ],
   );
   const exposed = JSON.stringify(snapshot);
-  assert.equal(exposed.includes("PAIRING_PRIVATE_BODY"), false);
+  assert.equal(exposed.includes("PAIRING_PRIVATE_BODY"), true);
   assert.equal(exposed.includes(otherPeer.binding.routeHandle), false);
   await store.close();
 });
@@ -2067,7 +2067,7 @@ test("a correlated native reply retains transient-target queue semantics and no 
   await store.close();
 });
 
-test("native messages fail closed on peer scope and abandon transient authority across restart", async () => {
+test("native messages retain queued bodies but abandon transient authority across restart", async () => {
   const { store, workspace, config, clock: testClock } = await fixture();
   config.inboundMode = "open";
   await store.initialize();
@@ -2126,10 +2126,16 @@ test("native messages fail closed on peer scope and abandon transient authority 
   });
   await recovered.initialize();
   const snapshot = await recovered.publicSnapshot();
-  assert.equal(snapshot.accounting.abandoned, 1);
+  assert.equal(snapshot.accounting.abandoned, 0);
   assert.equal(snapshot.accounting.ambiguous, 1);
-  assert.equal(snapshot.accounting.queuedBytes, 0);
-  assert.equal(await recovered.dequeueMessage(), undefined);
+  assert.equal(
+    snapshot.accounting.queuedBytes,
+    Buffer.byteLength("queued native ingress"),
+  );
+  assert.equal(
+    (await recovered.dequeueMessage("reviewer@this-mac"))?.body,
+    "queued native ingress",
+  );
   const persisted = await readFile(recovered.stateFilePath, "utf8");
   assert.equal(persisted.includes(transientClaudePeer.binding.routeHandle), false);
   assert.equal(persisted.includes(transientClaudePeer.binding.ownerLease), false);
@@ -2464,6 +2470,103 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
     ).map(({ sourceAlias, count }) => ({ sourceAlias, count })),
     [{ sourceAlias: "mentor@this-mac", count: 2 }],
   );
+});
+
+test("boot reactivation journals an exact same-generation Codex route and preserves queued mail", async () => {
+  const { store, config, clock } = await fixture();
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.observeConnector({
+    identity: endpoint(claudeBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "claude-peer",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "codex-main@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+    state: "busy",
+  });
+  await store.registerRoute({
+    alias: "advisor@this-mac",
+    binding: claudeBinding,
+    registrationMode: "selected_live_peer",
+  });
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "codex-main@this-mac",
+  });
+  await store.enqueueMessage({
+    sourceAlias: "advisor@this-mac",
+    targetAlias: "codex-main@this-mac",
+    body: "queued across a same-generation broker restart",
+    dedupeKey: "boot-reactivation-queue",
+  });
+  await store.close();
+
+  const restarted = new GatewayStore(config, {
+    now: clock.now,
+    randomId: clock.randomId,
+  });
+  await restarted.initialize();
+  await restarted.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await restarted.rebindStaleRoute({
+    alias: "codex-main@this-mac",
+    currentOwnerLease: codexBinding.ownerLease,
+    newBinding: codexBinding,
+    reason: "endpoint_reobserved",
+    journalReason: "boot_reactivation",
+    state: "idle",
+  });
+
+  const snapshot = await restarted.publicSnapshot();
+  assert.equal(
+    snapshot.routes.find(({ alias }) => alias === "codex-main@this-mac")
+      ?.queueDepth,
+    1,
+  );
+  assert.equal(
+    snapshot.messages.some(
+      ({ body, state }) =>
+        body === "queued across a same-generation broker restart" &&
+        state === "queued",
+    ),
+    true,
+  );
+  const persisted = JSON.parse(
+    await readFile(restarted.stateFilePath, "utf8"),
+  ) as {
+    codexEndpointRefreshSequence: number;
+    codexEndpointRefreshEvents: Array<Record<string, unknown>>;
+  };
+  assert.equal(persisted.codexEndpointRefreshSequence, 1);
+  assert.deepEqual(persisted.codexEndpointRefreshEvents, [
+    {
+      sequence: 1,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      alias: "codex-main@this-mac",
+      hostId: "this-mac",
+      threadId: codexBinding.routeHandle,
+      oldEndpointGeneration: codexBinding.endpointGeneration,
+      newEndpointGeneration: codexBinding.endpointGeneration,
+      reason: "boot_reactivation",
+    },
+  ]);
+  await restarted.close();
 });
 
 test("route invalidation atomically applies an exact in-flight terminal plan once", async () => {
@@ -3373,7 +3476,7 @@ test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   await store.close();
 });
 
-test("public route queue age is exact, optional, and metadata-only", async () => {
+test("public route queue age is exact while retained bodies remain bounded", async () => {
   const { store, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -3430,13 +3533,17 @@ test("public route queue age is exact, optional, and metadata-only", async () =>
     firstReviewer.messageId,
     secondReviewer.messageId,
     advisor.messageId,
-    "OLDEST_REVIEWER_BODY_MUST_NOT_ESCAPE",
-    "NEWER_REVIEWER_BODY_MUST_NOT_ESCAPE",
-    "ADVISOR_BODY_MUST_NOT_ESCAPE",
     codexBinding.routeHandle,
     claudeBinding.routeHandle,
   ]) {
     assert.equal(serialized.includes(privateValue), false);
+  }
+  for (const retainedBody of [
+    "OLDEST_REVIEWER_BODY_MUST_NOT_ESCAPE",
+    "NEWER_REVIEWER_BODY_MUST_NOT_ESCAPE",
+    "ADVISOR_BODY_MUST_NOT_ESCAPE",
+  ]) {
+    assert.equal(serialized.includes(retainedBody), true);
   }
 
   assert.equal(await store.cancelQueuedMessage(firstReviewer.messageId), true);
@@ -3460,7 +3567,7 @@ test("public route queue age is exact, optional, and metadata-only", async () =>
   await store.close();
 });
 
-test("conversation correlation stays suffix-only and deadline pressure is retained-evidence bounded", async () => {
+test("conversation correlation stays suffix-only while body and deadline evidence are retained", async () => {
   const { store, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -3508,7 +3615,7 @@ test("conversation correlation stays suffix-only and deadline pressure is retain
     ],
   });
   const serialized = JSON.stringify(snapshot);
-  assert.equal(serialized.includes("SUFFIX_ONLY_BODY_MUST_NOT_ESCAPE"), false);
+  assert.equal(serialized.includes("SUFFIX_ONLY_BODY_MUST_NOT_ESCAPE"), true);
   await assert.rejects(
     store.enqueueMessage({
       sourceAlias: "advisor@this-mac",
@@ -4140,7 +4247,48 @@ test("event and dedupe TTLs prune and the event ring is capped", async () => {
   await store.close();
 });
 
-test("restart stales routes and never replays bodyless queued or ambiguous writes", async () => {
+test("retained event bodies evict oldest payloads without removing lifecycle metadata", async () => {
+  const { store, config } = await fixture();
+  config.limits.maxRetainedBodyBytes = 10;
+  await store.initialize();
+  await observeAndRegister(store);
+
+  const first = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "first-body",
+    dedupeKey: "retained-body-first",
+  });
+  assert.ok(first.messageId);
+  await store.cancelQueuedMessage(first.messageId);
+
+  const second = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "secondbody",
+    dedupeKey: "retained-body-second",
+  });
+  assert.ok(second.messageId);
+  await store.cancelQueuedMessage(second.messageId);
+
+  const snapshot = await store.publicSnapshot();
+  assert.deepEqual(
+    snapshot.messages.map(({ state, body }) => ({ state, body })),
+    [
+      { state: "queued", body: undefined },
+      { state: "cancelled", body: undefined },
+      { state: "queued", body: undefined },
+      { state: "cancelled", body: "secondbody" },
+    ],
+  );
+  const persisted = await readFile(store.stateFilePath, "utf8");
+  assert.equal(persisted.includes("first-body"), false);
+  assert.equal(persisted.includes("secondbody"), true);
+  assert.equal((await lstat(store.stateFilePath)).mode & 0o077, 0);
+  await store.close();
+});
+
+test("restart stales routes, retains queued bodies, and never replays ambiguous writes", async () => {
   const { store, workspace, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -4166,11 +4314,11 @@ test("restart stales routes and never replays bodyless queued or ambiguous write
   });
   await recovered.initialize();
   const snapshot = await recovered.publicSnapshot();
-  assert.equal(snapshot.accounting.abandoned, 1);
+  assert.equal(snapshot.accounting.abandoned, 0);
   assert.equal(snapshot.accounting.ambiguous, 1);
-  assert.equal(snapshot.accounting.queuedBytes, 0);
+  assert.equal(snapshot.accounting.queuedBytes, Buffer.byteLength("still queued"));
   assert.ok(snapshot.routes.every((route) => route.state === "stale"));
-  assert.equal(await recovered.dequeueMessage(), undefined);
+  assert.equal((await recovered.dequeueMessage())?.body, "still queued");
   await assert.rejects(
     recovered.resolveRoute("advisor@this-mac"),
     (error: unknown) =>

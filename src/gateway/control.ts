@@ -1294,7 +1294,7 @@ function isNormalizedMessageEvent(
         "bytes",
         "hopCount",
       ],
-      ["conversationIdSuffix", "latencyMs", "safeErrorCode", "steer"],
+      ["conversationIdSuffix", "body", "latencyMs", "safeErrorCode", "steer"],
     ) &&
     isNonNegativeInteger(value.sequence) &&
     isIsoTimestamp(value.timestamp) &&
@@ -1321,6 +1321,11 @@ function isNormalizedMessageEvent(
       value.state === "abandoned" ||
       value.state === "rejected") &&
     isNonNegativeInteger(value.bytes) &&
+    (value.body === undefined ||
+      (typeof value.body === "string" &&
+        value.body.length > 0 &&
+        !value.body.includes("\u0000") &&
+        Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
     isNonNegativeInteger(value.hopCount) &&
     (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&

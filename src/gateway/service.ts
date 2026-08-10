@@ -88,6 +88,7 @@ import {
   type RouteState,
   type SafeGatewayAlert,
   type TerminalMessageSettlement,
+  type TransientQueuedMessage,
 } from "./types.js";
 
 const PUBLIC_ALIAS =
@@ -104,6 +105,12 @@ const NATIVE_HELD_THRESHOLD_MS = 1_000;
 const RUNTIME_ACTIVITY_CAPACITY = 256;
 const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
+const CLAUDE_CLEAN_PREWRITE_ROUTE_CODES = new Set([
+  "CLAUDE_PEER_TARGET_UNKNOWN",
+  "CLAUDE_PEER_TARGET_STALE",
+  "CLAUDE_PEER_TARGET_CHANGED",
+  "CLAUDE_PEER_WORKSPACE_UNATTESTED",
+]);
 
 function progressWatchActivity(
   text: string,
@@ -421,6 +428,8 @@ type MessageContext = {
   authorization: "selected_route" | "native_reply";
   targetAlias: string;
   deadlineAt: string;
+  /** Rebuilt with a fresh conversation capability for durable queued mail. */
+  recovered?: true;
 };
 
 type DeliveryTerminalState =
@@ -708,6 +717,8 @@ export class GatewayService {
   private readonly activeDispatchByTarget = new Map<string, string>();
   private readonly scheduledDispatchTargets = new Set<string>();
   private readonly dispatchRunnerTargets = new Set<string>();
+  /** Claude sends that proved no write wait for exact provider-idle evidence. */
+  private readonly claudePrewriteIdleWaitTargets = new Set<string>();
   private readonly heldRedispatchTimers = new Map<
     string,
     GatewayServiceTimer
@@ -845,6 +856,7 @@ export class GatewayService {
 
   async start(signal?: AbortSignal): Promise<void> {
     if (this.running || this.closing) return;
+    let bootReactivatedIdleAliases: string[] = [];
     const assertStartActive = (): void => {
       if (signal?.aborted === true || this.closing) {
         throw new BridgeError(
@@ -903,6 +915,8 @@ export class GatewayService {
         }
       }
       await this.recoverCodexSuccessionAfterRestartLocked();
+      bootReactivatedIdleAliases =
+        await this.reactivateRetainedCodexRoutesAfterRestartLocked();
       assertStartActive();
       const control = await startGatewayControlServer({
         stateDir: this.store.rootDir,
@@ -922,6 +936,9 @@ export class GatewayService {
       this.nextDashboardRefreshAt = undefined;
       await this.refreshNextProgressWatchWakeLocked();
       this.scheduleLifecycleWakeLocked();
+      for (const alias of bootReactivatedIdleAliases) {
+        this.scheduleDispatch(alias);
+      }
       await this.publish();
       assertStartActive();
     } catch (error) {
@@ -978,7 +995,11 @@ export class GatewayService {
             "cancelled",
           );
         }
+        const retainedQueuedMessageIds = new Set(
+          await this.store.inspectQueuedMessageIds(),
+        );
         for (const messageId of [...this.messageContexts.keys()]) {
+          if (retainedQueuedMessageIds.has(messageId)) continue;
           const queued = await this.store.settleQueuedMessage({
             messageId,
             state: "cancelled",
@@ -994,6 +1015,7 @@ export class GatewayService {
           });
         }
         for (const tracker of this.deliveryTrackers.values()) {
+          if (retainedQueuedMessageIds.has(tracker.messageId)) continue;
           if (!isTerminalDeliveryMachine(tracker.machine)) {
             await this.advanceDeliveryLocked(tracker.messageId, {
               type: "shutdown",
@@ -1037,6 +1059,7 @@ export class GatewayService {
         this.activeDispatchByTarget.clear();
         this.scheduledDispatchTargets.clear();
         this.dispatchRunnerTargets.clear();
+        this.claudePrewriteIdleWaitTargets.clear();
         for (const timer of this.heldRedispatchTimers.values()) {
           this.timers.clearTimeout(timer);
         }
@@ -2014,6 +2037,7 @@ export class GatewayService {
           identity,
           "CODEX_ENDPOINT_REFRESH_CONFLICT",
           inFlightSettlements,
+          { preserveQueued: true },
         );
         for (const settlement of settlements) {
           await this.applyTerminalSettlementLocked(settlement);
@@ -2189,6 +2213,156 @@ export class GatewayService {
       hostId: authority.journal.new.hostId,
       generation: authority.journal.new.generation,
     }));
+  }
+
+  /**
+   * Rebuild process-owned route and listener authority for retained Codex
+   * registrations during staged startup. The provider's selectRoute performs
+   * the exact loaded/list + history-free resume proof; durable state advances
+   * only after the new native advertisement and status are live.
+   */
+  private async reactivateRetainedCodexRoutesAfterRestartLocked(): Promise<
+    string[]
+  > {
+    const idleAliases: string[] = [];
+    const retained = await this.store.inspectPrivateCodexRoutes();
+    for (const route of retained) {
+      if (
+        !route.enabled ||
+        route.state !== "stale" ||
+        route.compatibility !== "expired" ||
+        this.pendingCodexSuccessionRecovery?.journal.new.alias === route.alias ||
+        this.codexSuccessionPoisoned.has(route.alias)
+      ) {
+        continue;
+      }
+      const codexAdapter = this.adapters.find(
+        (adapter) =>
+          adapter.identity.provider === "codex" &&
+          adapter.identity.hostId === route.binding.hostId,
+      );
+      const claudeAdapter = this.adapters.find(
+        (adapter) =>
+          adapter.identity.provider === "claude" &&
+          adapter.identity.hostId === route.binding.hostId,
+      );
+      if (codexAdapter === undefined || claudeAdapter === undefined) {
+        this.addRuntimeAlert(
+          "CODEX_BOOT_REACTIVATION_SKIPPED",
+          "warning",
+          { provider: "codex", host: route.binding.hostId, alias: route.alias },
+        );
+        continue;
+      }
+      let routeSelected = false;
+      let advertiseAttempted = false;
+      let storeReactivated = false;
+      try {
+        const selected = await codexAdapter.selectRoute({
+          alias: route.alias,
+          routeHandle: route.binding.routeHandle,
+        });
+        routeSelected = true;
+        await this.drainSelectorCallbackSnapshotLocked();
+        if (
+          selected.routeHandle !== route.binding.routeHandle ||
+          selected.endpointRefresh !== undefined
+        ) {
+          throw new BridgeError(
+            "CODEX_BOOT_REACTIVATION_MISMATCH",
+            "The retained Codex task changed during broker startup reactivation.",
+          );
+        }
+        advertiseAttempted = true;
+        const advertise = claudeAdapter.advertiseNativeCodexPeer;
+        if (advertise === undefined) {
+          throw new BridgeError(
+            "CODEX_BOOT_REACTIVATION_UNAVAILABLE",
+            "The retained Codex task cannot rebuild its native advertisement.",
+          );
+        }
+        await advertise.call(claudeAdapter, {
+          alias: route.alias,
+          cwd: this.nativePeerCwd,
+        });
+        await claudeAdapter.updateNativeCodexPeerStatus?.(
+          route.alias,
+          selected.state === "idle"
+            ? "idle"
+            : selected.state === "awaiting_approval"
+              ? "waiting"
+              : "busy",
+        );
+        const listenerGeneration = this.requireCurrentNativeCodexGeneration(
+          claudeAdapter,
+          route.alias,
+        );
+        const binding: PrivateRouteBinding = {
+          ...codexAdapter.identity,
+          routeHandle: route.binding.routeHandle,
+          ownerLease: route.binding.ownerLease,
+        };
+        await this.store.rebindStaleRoute({
+          alias: route.alias,
+          currentOwnerLease: route.binding.ownerLease,
+          newBinding: binding,
+          reason: "endpoint_reobserved",
+          journalReason: "boot_reactivation",
+          state: selected.state,
+        });
+        storeReactivated = true;
+        this.rememberBinding(route.alias, binding, selected.state);
+        this.lockCodexRegistration(
+          {
+            alias: route.alias,
+            threadId: route.binding.routeHandle,
+            hostId: route.binding.hostId,
+            busyPolicy: "queue",
+          },
+          listenerGeneration,
+        );
+        if (
+          this.requireCurrentNativeCodexGeneration(
+            claudeAdapter,
+            route.alias,
+          ) !== listenerGeneration
+        ) {
+          throw new BridgeError(
+            "CODEX_BOOT_REACTIVATION_NATIVE_LISTENER_MISSING",
+            "The retained Codex task's native listener changed during boot reactivation.",
+          );
+        }
+        if (selected.state === "idle") idleAliases.push(route.alias);
+      } catch {
+        let cleanupFailed = false;
+        if (advertiseAttempted) {
+          await claudeAdapter
+            .unadvertiseNativeCodexPeer?.(route.alias)
+            .catch(() => {
+              cleanupFailed = true;
+            });
+        }
+        if (routeSelected) {
+          await codexAdapter
+            .releaseRoute?.(route.binding.routeHandle)
+            .catch(() => {
+              cleanupFailed = true;
+            });
+        }
+        if (cleanupFailed || storeReactivated) {
+          throw new BridgeError(
+            "CODEX_BOOT_REACTIVATION_CLEANUP_FAILED",
+            "A Codex boot reactivation crossed its durable boundary without exact live authority.",
+          );
+        }
+        this.addRuntimeAlert(
+          "CODEX_BOOT_REACTIVATION_SKIPPED",
+          "warning",
+          { provider: "codex", host: route.binding.hostId, alias: route.alias },
+        );
+      }
+    }
+    return idleAliases;
   }
 
   private async completePendingCodexSuccessionRecoveryLocked(
@@ -3527,6 +3701,7 @@ export class GatewayService {
               registered.endpointRefresh.current,
               "CODEX_ENDPOINT_ACTIVATION_FAILED",
               [],
+              { preserveQueued: true },
             );
             this.routeStates.set(params.alias, "stale");
             await this.changed();
@@ -4768,6 +4943,9 @@ export class GatewayService {
     this.routeBindings.set(alias, binding);
     this.routeStates.set(alias, state);
     this.bindingAliases.set(bindingKey(binding), alias);
+    if (binding.provider === "claude" && state === "idle") {
+      this.claudePrewriteIdleWaitTargets.delete(alias);
+    }
   }
 
   private forgetBinding(alias: string): void {
@@ -4783,6 +4961,7 @@ export class GatewayService {
     }
     this.routeBindings.delete(alias);
     this.routeStates.delete(alias);
+    this.claudePrewriteIdleWaitTargets.delete(alias);
     for (const [messageId, continuation] of this.providerTurnContinuations) {
       if (continuation.targetAlias !== alias) continue;
       this.providerTurnContinuations.delete(messageId);
@@ -5833,7 +6012,8 @@ export class GatewayService {
         if (
           !isTerminalDeliveryMachine(tracker.machine) &&
           tracker.machine.dispatchRetryAt !== null &&
-          tracker.machine.dispatchRetryAt <= now
+          tracker.machine.dispatchRetryAt <= now &&
+          !this.claudePrewriteIdleWaitTargets.has(tracker.targetAlias)
         ) {
           if (!this.dispatchRunnerTargets.has(tracker.targetAlias)) {
             this.scheduleDispatch(tracker.targetAlias);
@@ -5937,6 +6117,7 @@ export class GatewayService {
         if (wakeups.deadlineAt !== undefined) consider(wakeups.deadlineAt);
         if (
           wakeups.dispatchRetryAt !== undefined &&
+          !this.claudePrewriteIdleWaitTargets.has(tracker.targetAlias) &&
           !this.scheduledDispatchTargets.has(tracker.targetAlias) &&
           !this.dispatchRunnerTargets.has(tracker.targetAlias)
         ) {
@@ -6535,12 +6716,57 @@ export class GatewayService {
     }
   }
 
+  private restoreQueuedMessageContextLocked(
+    item: TransientQueuedMessage,
+    binding: PrivateRouteBinding,
+  ): MessageContext {
+    this.pruneTransient();
+    const generatedConversationId = createGatewayConversationId();
+    const conversationId =
+      item.conversationIdSuffix === undefined
+        ? generatedConversationId
+        : `${generatedConversationId.slice(0, -8)}${item.conversationIdSuffix}`;
+    const conversation: Conversation = {
+      id: conversationId,
+      sourceAlias: item.sourceAlias,
+      targetAlias: item.targetAlias,
+      expectsReply: false,
+      nextSequence: 1,
+      lastHopCount: item.hopCount,
+      lastActivityAt: this.now().toISOString(),
+      ...(item.pair === true ? { pair: true as const } : {}),
+    };
+    const context: MessageContext = {
+      conversationId,
+      isReply: false,
+      expectsReply: false,
+      hopCount: item.hopCount,
+      sequence: 0,
+      targetBindingKey: bindingKey(binding),
+      authorization: "selected_route",
+      targetAlias: item.targetAlias,
+      deadlineAt: item.deadlineAt,
+      recovered: true,
+    };
+    this.conversations.set(conversationId, conversation);
+    this.messageContexts.set(item.messageId, context);
+    this.armDeliveryTracker({
+      messageId: item.messageId,
+      conversationId,
+      targetAlias: item.targetAlias,
+      enqueuedAt: Date.parse(item.enqueuedAt),
+      deadlineAt: item.deadlineAt,
+    });
+    return context;
+  }
+
   private async dispatchOne(targetAlias: string): Promise<void> {
     if (
       !this.running ||
       this.closing ||
       this.codexSuccessionDispatchFrozen.has(targetAlias) ||
-      this.codexSuccessionPoisoned.has(targetAlias)
+      this.codexSuccessionPoisoned.has(targetAlias) ||
+      this.claudePrewriteIdleWaitTargets.has(targetAlias)
     ) {
       return;
     }
@@ -6567,8 +6793,22 @@ export class GatewayService {
       item = await this.store.dequeueMessage(targetAlias, "any");
     }
     if (item === undefined) return;
-    const context = this.messageContexts.get(item.messageId);
     const selectedBinding = this.routeBindings.get(targetAlias);
+    let context = this.messageContexts.get(item.messageId);
+    if (context === undefined && selectedBinding === undefined) {
+      const result = await this.store.requeueInFlightMessage(
+        item.messageId,
+        item.body,
+      );
+      if (result.status === "settled") {
+        await this.applyTerminalSettlementLocked(result.settlement);
+      }
+      await this.changed();
+      return;
+    }
+    if (context === undefined && selectedBinding !== undefined) {
+      context = this.restoreQueuedMessageContextLocked(item, selectedBinding);
+    }
     const binding = context?.nativeReplyBinding ?? selectedBinding;
     if (context === undefined) {
       const result = await this.store.settleMessage({
@@ -6609,6 +6849,17 @@ export class GatewayService {
           inspection?.state === "stale" ||
           inspection?.safeErrorCode === "CODEX_ROUTE_STALE");
       if (codexRouteStale) {
+        if (context.recovered === true) {
+          const result = await this.store.requeueInFlightMessage(
+            item.messageId,
+            item.body,
+          );
+          if (result.status === "settled") {
+            await this.applyTerminalSettlementLocked(result.settlement);
+          }
+          await this.changed();
+          return;
+        }
         await this.advanceDeliveryLocked(item.messageId, {
           type: "route_terminated",
           at: this.now().getTime(),
@@ -6772,15 +7023,17 @@ export class GatewayService {
       const currentTargetAlias =
         this.bindingAliases.get(bindingKey(binding)) ?? targetAlias;
       const now = this.now().getTime();
+      const deferredSafeErrorCode = safeCode(
+        result.safeErrorCode,
+        "PROVIDER_DISPATCH_DEFERRED",
+      );
       await this.advanceDeliveryLocked(item.messageId, {
         type: "dispatch_clean_prewrite_failed",
         at: now,
         retryAt: now + 500,
-        safeErrorCode: safeCode(
-          result.safeErrorCode,
-          "PROVIDER_DISPATCH_DEFERRED",
-        ),
+        safeErrorCode: deferredSafeErrorCode,
       });
+      tracker.deliverySafeErrorCode = deferredSafeErrorCode;
       const postDeferred = this.deliveryTrackers.get(item.messageId)?.machine;
       if (
         postDeferred === undefined ||
@@ -6804,6 +7057,7 @@ export class GatewayService {
       const requeued = await this.store.requeueInFlightMessage(
         item.messageId,
         item.body,
+        deferredSafeErrorCode,
       );
       if (
         this.activeDispatchByTarget.get(currentTargetAlias) === item.messageId
@@ -6812,7 +7066,12 @@ export class GatewayService {
       }
       if (requeued.status === "requeued") {
         if (context.authorization === "selected_route") {
-          if (!steeringWhileBusy) {
+          const waitForClaudeIdle =
+            binding.provider === "claude" &&
+            CLAUDE_CLEAN_PREWRITE_ROUTE_CODES.has(deferredSafeErrorCode);
+          if (waitForClaudeIdle) {
+            this.claudePrewriteIdleWaitTargets.add(currentTargetAlias);
+          } else if (!steeringWhileBusy) {
             this.routeStates.set(currentTargetAlias, "idle");
             await this.store.observeRoute({
               binding,
@@ -6854,7 +7113,8 @@ export class GatewayService {
     if (
       this.closing ||
       this.codexSuccessionDispatchFrozen.has(targetAlias) ||
-      this.codexSuccessionPoisoned.has(targetAlias)
+      this.codexSuccessionPoisoned.has(targetAlias) ||
+      this.claudePrewriteIdleWaitTargets.has(targetAlias)
     ) {
       return;
     }
@@ -6952,7 +7212,9 @@ export class GatewayService {
             ),
           }
         : event.state === "transport_written"
-        ? { type: "transport_written", observedAt: receivedAt }
+        ? target.provider === "claude"
+          ? { type: "provider_released", observedAt: receivedAt }
+          : { type: "transport_written", observedAt: receivedAt }
         : event.state === "held"
           ? { type: "provider_held", observedAt: receivedAt }
           : event.state === "released" || event.state === "completed"
@@ -7604,6 +7866,7 @@ export class GatewayService {
         event.previous,
         "ENDPOINT_GENERATION_CHANGED",
         inFlightSettlements,
+        { preserveQueued: true },
       );
     } catch (error) {
       const alreadyInvalidatedCompatibleTransition =
@@ -7704,6 +7967,7 @@ export class GatewayService {
               event.current,
               "CODEX_ENDPOINT_ACTIVATION_FAILED",
               [],
+              { preserveQueued: true },
             );
             for (const route of pendingReanchors) {
               this.routeStates.set(route.alias, "stale");
@@ -7961,6 +8225,7 @@ export class GatewayService {
           event.current,
           "CODEX_ENDPOINT_ACTIVATION_FAILED",
           [],
+          { preserveQueued: true },
         );
         for (const route of activatedRoutes) {
           this.routeStates.set(route.alias, "stale");
@@ -8003,6 +8268,9 @@ export class GatewayService {
     const [alias, binding] = entry;
     const previousState = this.routeStates.get(alias);
     this.routeStates.set(alias, event.state);
+    if (binding.provider === "claude" && event.state === "idle") {
+      this.claudePrewriteIdleWaitTargets.delete(alias);
+    }
     const staleSafeCode =
       binding.provider === "codex"
         ? "CODEX_ROUTE_STALE"

@@ -201,7 +201,7 @@ export type ConnectorRecord = {
   safeErrorCode?: string;
 };
 
-/** Metadata persisted for a queued message. Message bodies are never here. */
+/** Metadata persisted for a queued message. Legacy rows may be bodyless. */
 export type QueuedMessageMetadata = {
   messageId: string;
   messageIdSuffix: string;
@@ -213,6 +213,8 @@ export type QueuedMessageMetadata = {
   enqueuedAt: string;
   deadlineAt: string;
   bytes: number;
+  /** Bounded same-user durable payload; absent only on pre-v1.2 rows. */
+  body?: string;
   hopCount: number;
   /** This message was admitted by the exact durable consent edge. */
   pair?: true;
@@ -220,7 +222,7 @@ export type QueuedMessageMetadata = {
   steer?: true;
 };
 
-/** A transient dispatch value. Its body must remain in process memory. */
+/** A dispatch value with the exact persisted body promoted to required. */
 export type TransientQueuedMessage = QueuedMessageMetadata & {
   body: string;
 };
@@ -257,6 +259,8 @@ export type NormalizedMessageEvent = {
   targetAlias: string;
   state: DeliveryState;
   bytes: number;
+  /** Retained payload; oldest values are evicted without removing metadata. */
+  body?: string;
   hopCount: number;
   steer?: true;
   latencyMs?: number;
@@ -291,6 +295,8 @@ export type CodexEndpointRefreshJournalEvent = {
   threadId: string;
   oldEndpointGeneration: string;
   newEndpointGeneration: string;
+  /** Broker-start proof; absent for a live endpoint-generation refresh. */
+  reason?: "boot_reactivation";
 };
 
 export const CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY = 256;
@@ -975,6 +981,8 @@ export type RebindStaleRouteInput = {
     | "endpoint_reobserved"
     | "peer_explicitly_reselected"
     | "peer_identity_reobserved";
+  /** Append exact private boot-recovery evidence in the refresh journal. */
+  journalReason?: "boot_reactivation";
   state?: "idle" | "busy" | "awaiting_approval";
 };
 
@@ -1166,6 +1174,8 @@ export type GatewayStoreLimits = {
   maxInFlightMessages: number;
   maxQueueBytes: number;
   maxMessageBytes: number;
+  /** Bounded historical event-body bytes; omitted configs use 1 MiB. */
+  maxRetainedBodyBytes?: number;
   messageDeadlineMs: number;
   maxHopCount: number;
   rateLimitPerRoute: number;
