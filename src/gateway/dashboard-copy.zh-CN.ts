@@ -460,7 +460,7 @@ export const dashboardCopyZhCn = {
   "app.deliveries.raw": "原始 JSON",
   "app.deliveries.hideRaw": "隐藏原始 JSON",
   "app.deliveries.bodyLabel": "消息正文",
-  "app.deliveries.bodiesNote": "正文从不保留——这里只有元数据。",
+  "app.deliveries.bodiesNote": "此条投递没有保留正文。",
   "app.deliveries.noConv":
     "实时契约不携带会话标识，因此投递按路由对分组，而不是按会话线索分组。",
   "app.deliveries.eventsTruncated": "有 {count} 条较早的状态变化因保留额度被丢弃。",

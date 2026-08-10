@@ -133,6 +133,7 @@ export type DashboardMessageGroup = Readonly<{
   bytes: number;
   safeErrorCode?: string | undefined;
   steer?: true | undefined;
+  body?: string | undefined;
   events: readonly DashboardMessageEvent[];
 }>;
 
@@ -545,6 +546,11 @@ function buildMessageGroups(
           ? {}
           : { safeErrorCode: safeCode(latest.safeErrorCode) }),
         ...(latest.steer === true ? { steer: true as const } : {}),
+        // Bodies are first-class observable data (CO #36); the display copy
+        // is bounded so one 16 KiB message cannot dominate the view model.
+        ...(typeof latest.body === "string" && latest.body.length > 0
+          ? { body: boundedText(latest.body, 4096) }
+          : {}),
         events: allEvents,
       };
     })

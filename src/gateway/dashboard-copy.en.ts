@@ -499,7 +499,7 @@ export const dashboardCopyEn = {
   "app.deliveries.hideRaw": "hide raw",
   "app.deliveries.bodyLabel": "Message body",
   "app.deliveries.bodiesNote":
-    "Bodies are never retained — this is metadata only.",
+    "No body retained for this delivery.",
   "app.deliveries.noConv":
     "The live contract carries no conversation token, so deliveries are grouped by route pair instead of by thread.",
   "app.deliveries.eventsTruncated":

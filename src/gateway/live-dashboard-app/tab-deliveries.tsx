@@ -326,12 +326,17 @@ namespace Embassy {
           ) : null}
         </div>
 
-        {/* Bodies are never retained — one branch, no window, no cap. */}
+        {/* Bodies are observable data (CO #36); the note is the fallback for
+            deliveries whose body was not retained (pre-#36 or evicted). */}
         <div>
           <MonoLabel className="section-label section-label--body">
             {t("app.deliveries.bodyLabel")}
           </MonoLabel>
-          <p className="detail-pane__sub">{t("app.deliveries.bodiesNote")}</p>
+          {group.body === undefined ? (
+            <p className="detail-pane__sub">{t("app.deliveries.bodiesNote")}</p>
+          ) : (
+            <pre className="detail-pane__message-body">{group.body}</pre>
+          )}
         </div>
 
         <div>
