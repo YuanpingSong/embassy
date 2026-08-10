@@ -161,7 +161,7 @@ Four embassy terms name real features:
 
 - **Registration and pairing** are the permission model: a Codex task is explicitly registered, and each pair is one explicit Claude↔Codex edge — only paired ends exchange messages, and many edges can coexist. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
 - **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only dashboard.
-- **The pouch** is transit: bounded bodies, ephemeral inside Embassy, never persisted by it.
+- **The pouch** is transit and the archive: bounded bodies, retained under bounded limits, private to your OS account — sealed against other users, not against you.
 - **Consulates** are the roadmap: the same model extended to Codex tasks on remote hosts over attach-only SSH — designed, and deliberately disabled in v1.
 
 ## For agents
@@ -200,7 +200,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and generation checks reduce mistakes, but are not a defense against code already running as your OS user.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
-- **Bodies never persisted.** Message bodies, prompts, replies, and raw provider frames live only in memory. Metadata-only dashboard files are mode 0600 with no JavaScript.
+- **Bodies stored, bounded, and yours.** Message bodies persist in the broker's private mode-0600 state under bounded retention so the ledger can show you the mail itself; queued mail survives a broker restart and re-sends exactly once. Raw provider frames stay memory-only. The static dashboard files remain metadata-only; the live dashboard shows retained bodies.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.
 

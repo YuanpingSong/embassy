@@ -88,7 +88,7 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <div class="truths">
 <div><b>delivered ≠ 已读</b><p>delivered 表示接收方运行时已接受消息。不暗示它被阅读、被理解或被执行。</p></div>
 <div><b>队列绝不打断</b><p>消息等待回合边界。在生成中途打断智能体是未定义行为，所以 Embassy 从不这样做。等待繁忙对端的消息显示为 held — 是进展，绝不是成功。</p></div>
-<div><b>重启即丢弃消息体 — 设计如此</b><p>broker 保留回执，不保留对话。停止它，未投递的消息体按设计消失。</p></div>
+<div><b>重启不再丢邮件</b><p>排队中的邮件在 broker 重启后幸存，并在路由恢复时恰好重发一次。崩溃时在途的消息结算为 ambiguous — 绝不悄然丢失，也绝不重复发送。</p></div>
 <div><b>未知版本即关闭</b><p>如果一个表面无法证明兼容性，一切停止移动。不存在跨协议缺口的"尽力投递"。</p></div>
 <div><b>无网络监听</b><p><code style="font-size:13px">embassy serve</code> 不绑定任何端口。可选的实时仪表盘是唯一的 loopback 监听者 — 127.0.0.1、临时端口、一次性令牌引导。</p></div>
 <div><b>路由消息是一条新的输入路径</b><p>把任何到达的内容当作接收方的不可信输入 — 与对待任何工具结果相同的纪律。</p></div>
@@ -110,7 +110,7 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <div class="wrap">
 <p class="eyebrow">仪表盘</p>
 <h2>看着大使馆运转</h2>
-<p class="lede">可选的实时仪表盘：broker 健康状态、交换面板、每条投递的生命周期、同意拓扑与诚实的诊断。仅元数据 — 消息正文绝不在此出现。broker 还会写出静态快照 — gateway-dashboard.html 及其 gateway-dashboard.zh-CN.html 孪生页 — 完全不需要服务器。</p>
+<p class="lede">可选的实时仪表盘：broker 健康状态、交换面板、每条投递的生命周期、同意拓扑与诚实的诊断 — 包括有界保留、只属于本机的消息正文。静态快照 — gateway-dashboard.html 及其 gateway-dashboard.zh-CN.html 孪生页 — 保持仅元数据，完全不需要服务器。</p>
 <figure class="dash" style="margin:0">
 <img src="../assets/dashboard.png" alt="Embassy 实时仪表盘总览页：流已连接的状态条、broker 与两个连接器的健康芯片、兼容性芯片，以及在 paired inbound 同意模式下将 embassy-pm@this-mac 与 codex-embassy-main@this-mac 配对的交换面板。">
 <figcaption>真实的仪表盘状态 — 总览页，仅元数据。本次版本落地期间截取自实时伴随程序。</figcaption>
