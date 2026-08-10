@@ -27,7 +27,6 @@ const PUBLIC_PACKAGE_PATHS = [
   "assets/vendor/react/LICENSE",
   "assets/vendor/react/react-dom.production.min.js",
   "assets/vendor/react/react.production.min.js",
-  "docs/DESIGN.md",
   "docs/GATEWAY-ARCHITECTURE.md",
   "package.json",
   "skills/embassy-peer/SKILL.md",
