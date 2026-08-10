@@ -474,6 +474,13 @@ test("soak: randomized churn settles every accepted message exactly once", async
   await settleLedger();
 
   const unsettled = ledger.filter((entry) => entry.settled === undefined);
+  for (const entry of unsettled) {
+    const status = await handlers.deliveryStatus({ token: entry.token });
+    console.error(
+      `soak unsettled: token=${entry.token} epoch=${entry.epoch}/${epoch} ` +
+        `status=${JSON.stringify(status)}`,
+    );
+  }
   assert.deepEqual(
     unsettled.map((entry) => entry.token),
     [],
