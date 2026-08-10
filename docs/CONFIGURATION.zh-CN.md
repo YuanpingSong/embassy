@@ -30,6 +30,8 @@ Embassy 通过 `embassy serve` 启动时读取的环境变量进行配置。本�
 | `EMBASSY_MAX_HOPS` | `2` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
+`EMBASSY_MAX_HOPS` 接受 `0` 到 `16`，并按对话生效。初始发送的跳数为 0，此后每次路由回复加一。因此默认值 `2` 会接纳初始发送以及第 1、2 跳回复。超过配置值的尝试会被拒绝，并以安全代码 `HOP_LIMIT_EXCEEDED` 记录；当前 CLI 可能把这一接纳前拒绝代码折叠为通用结果 `rejected`。不要重试已耗尽的令牌；请通过新的发送开始新对话。该环境变量的变更会在 `embassy serve` 启动时生效。
+
 公开发布的启动器仅接受主机 `this-mac`；远程连接器仍是未来功能。
 
 ## Claude Code 自身的设置：`crossSessionInbound`
@@ -91,4 +93,4 @@ Claude 会话通过其当前的 `name@host` 或用户提供的原生会话 UUID 
 
 名称、旧名称、PID、注册表路径、进程生成号和套接字生成号绝不会成为替代身份键。当两个在线会话共享同一当前名称时，Embassy 拒绝猜测。
 
-Codex 路由使用显式的 `codex-*` 别名和任务继承的线程标识。私有线程 ID 从不被接受为命令行参数，也从不被打印。
+Codex 路由使用显式的 `codex-*` 别名和任务继承的线程标识。私有线程 ID 从不被接受为命令行参数，也从不被打印。同一个代理进程持续运行时，兼容的托管 App Server 端点代际变更可以自动重新锚定精确的已加载任务。`embassy serve` 本身重启后，保留的 Codex 路由目前会以 `REOBSERVATION_REQUIRED` 保持陈旧；请从该精确 Codex 任务内使用同一别名再次运行 `embassy register-codex --alias <同一别名>` 进行恢复，且不要先注销。切勿提供或重构线程 ID。如果该任务已不存在，实时仪表盘只有在代理证明该注册陈旧且所属端点代际已失效后，才能移除该保留注册。

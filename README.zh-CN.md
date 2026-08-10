@@ -63,7 +63,7 @@ embassy register-codex --alias codex-reviewer@this-mac
 
 你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，运行 `unregister-codex`。
 
-如果托管 App Server 之后重启，Embassy 会自动探测新端点；只有替代端点兼容，且 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才会重新附着这个别名。端点不兼容，或精确任务缺失、重复，都会使路由保持陈旧以供诊断；Embassy 绝不会按别名改投其他任务，也不会跨端点代际边界重建或重放消息正文。
+仅在同一个 `embassy serve` 代理持续运行期间，托管 App Server 重启后 Embassy 才会自动探测新端点；只有替代端点兼容，且 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才会重新附着这个别名。端点不兼容，或精确任务缺失、重复，都会使路由保持陈旧以供诊断；Embassy 绝不会按别名改投其他任务，也不会跨端点代际边界重建或重放消息正文。如果 `embassy serve` 本身重启，保留的路由会以 `REOBSERVATION_REQUIRED` 陈旧状态启动；在启动时自动重新激活功能实现之前，必须由同一个 Codex 任务使用同一别名再次运行 `embassy register-codex --alias codex-reviewer@this-mac`，且不要先注销。
 
 ### 3. 选择 Claude 目的地
 
@@ -92,7 +92,7 @@ MSG
 
 ### 5. 后续跟进
 
-任一方都可以继续对话：
+目前只有其 Embassy 发送命令返回了 `conv_` 令牌的一方，才能用 `reply` 继续该对话：
 
 ```bash
 embassy reply \
@@ -101,6 +101,10 @@ embassy reply \
 Please expand on the migration risk.
 MSG
 ```
+
+接收方目前不会获得对话令牌或回复提示。朝向 Codex 时，Embassy CLI/队列投递是匿名原始正文；Claude Code 的原生 `SendMessage` 可能自行添加来源包装，但仍不包含 `conv_` 令牌。因此接收方无法针对该入站消息使用 `embassy reply`。它必须通过 `send-to-claude` 或 `send-to-codex` 开始新对话；切勿猜测或重构令牌。
+
+`EMBASSY_MAX_HOPS` 限制每个对话的跳数。初始发送为第 0 跳，此后每次路由回复都会递增，因此默认值 `2` 允许第 0、1、2 跳。下一次尝试会被拒绝，并记录为 `HOP_LIMIT_EXCEEDED`（当前 CLI 可能只显示通用结果 `rejected`）。不要重试已耗尽的对话令牌；请开始新对话。可接受范围及其他边界详见[配置](docs/CONFIGURATION.zh-CN.md)。
 
 ### 实时查看
 
@@ -168,7 +172,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `select-claude` / `unselect-claude` | 操作员 | `pair`/`unpair` 的单任务简写：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
 | `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息 |
 | `send-to-codex` | Claude 会话 | 使用继承的原生回复标识发送一条有界消息 |
-| `reply` | 任一提供方 | 通过公开令牌继续一个活跃对话 |
+| `reply` | 对话令牌持有方 | 使用该调用方发送时返回的公开令牌继续一个活跃对话 |
 
 ## 一分钟了解安全性
 

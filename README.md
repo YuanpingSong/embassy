@@ -63,7 +63,7 @@ embassy register-codex --alias codex-reviewer@this-mac
 
 You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `unregister-codex`.
 
-If the managed App Server later restarts, Embassy automatically probes the new endpoint and reattaches this alias only when the replacement is compatible and `thread/loaded/list` finds the byte-identical task exactly once. An incompatible endpoint or a missing or duplicate exact task leaves the route stale for diagnosis; Embassy never retargets by alias and never reconstructs or replays a message body across the endpoint-generation boundary.
+While the same `embassy serve` broker remains running, a managed App Server restart makes Embassy probe the new endpoint and reattach this alias only when the replacement is compatible and `thread/loaded/list` finds the byte-identical task exactly once. An incompatible endpoint or a missing or duplicate exact task leaves the route stale for diagnosis; Embassy never retargets by alias and never reconstructs or replays a message body across the endpoint-generation boundary. If `embassy serve` itself restarts, the retained route starts stale with `REOBSERVATION_REQUIRED`; until boot-time reactivation is implemented, the exact Codex task must rerun `embassy register-codex --alias codex-reviewer@this-mac` without unregistering first.
 
 ### 3. Select a Claude destination
 
@@ -92,7 +92,7 @@ You should see a `conv_` conversation token and a `dlv_` delivery token. Because
 
 ### 5. Follow up
 
-Either side can continue the conversation:
+Only the side whose Embassy send returned the `conv_` token can currently continue that conversation with `reply`:
 
 ```bash
 embassy reply \
@@ -101,6 +101,10 @@ embassy reply \
 Please expand on the migration risk.
 MSG
 ```
+
+The recipient currently receives no conversation token or reply hint. In the Codex direction, Embassy CLI/queue delivery is a raw anonymous body; Claude Code's native `SendMessage` may add its own provenance wrapper, but still no `conv_` token. The recipient therefore cannot use `embassy reply` for that inbound message. It must start a fresh conversation with `send-to-claude` or `send-to-codex`; never guess or reconstruct a token.
+
+`EMBASSY_MAX_HOPS` bounds each conversation. The initial send is hop 0 and each routed reply increments the count, so the default `2` permits hops 0, 1, and 2. The next attempt is rejected and recorded as `HOP_LIMIT_EXCEEDED` (the current CLI may surface only the generic result `rejected`). Do not retry an exhausted conversation token; start a fresh conversation. The accepted range and other bounds are documented in [Configuration](docs/CONFIGURATION.md).
 
 ### See it live
 
@@ -168,7 +172,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `select-claude` / `unselect-claude` | operator | One-task shorthand for `pair`/`unpair`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
 | `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session |
 | `send-to-codex` | Claude session | Send one bounded message using the inherited native reply identity |
-| `reply` | either provider | Continue an active conversation by its public token |
+| `reply` | conversation-token holder | Continue an active conversation by the public token returned to that caller's send |
 
 ## Safety in one minute
 

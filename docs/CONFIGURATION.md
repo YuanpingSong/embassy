@@ -34,6 +34,8 @@ These variables retain conservative defaults:
 | `EMBASSY_MAX_HOPS` | `2` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
+`EMBASSY_MAX_HOPS` accepts `0` through `16` and applies per conversation. The initial send has hop count 0; each routed reply adds one. The default `2` therefore admits the initial send and replies at hops 1 and 2. An attempt above the configured value is rejected and recorded with safe code `HOP_LIMIT_EXCEEDED`; the current CLI may collapse that pre-acceptance rejection code to the generic result `rejected`. Do not retry the exhausted token. Start a new conversation with a new send. Changes to this environment variable take effect when `embassy serve` starts.
+
 The public launcher accepts only host `this-mac`; remote connectors remain a future capability.
 
 ## Claude Code's own setting: `crossSessionInbound`
@@ -99,4 +101,4 @@ Claude sessions are addressed by their current `name@host` or by a user-supplied
 
 Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name.
 
-Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed.
+Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. While one broker process remains running, a compatible managed App Server endpoint-generation change can re-anchor the exact loaded task automatically. After `embassy serve` itself restarts, a retained Codex route currently remains stale with `REOBSERVATION_REQUIRED`; recover it by rerunning `embassy register-codex --alias <same-alias>` from that exact Codex task without unregistering first. Never supply or reconstruct its thread ID. If the task no longer exists, the live dashboard can remove the retained registration only after the broker proves it stale on a dead endpoint generation.

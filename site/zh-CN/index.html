@@ -285,7 +285,7 @@ embassy send-to-claude --from codex-reviewer@this-mac --to advisor@this-mac --ex
 Please review the current approach and note the main risk.
 MSG
 
-<span class="c"># 使用返回的令牌继续对话，双方均可发起</span>
+<span class="c"># 发起方可以使用其发送命令返回的令牌继续对话</span>
 embassy reply --conversation conv_&lt;token&gt; --alias codex-reviewer@this-mac &lt;&lt;'MSG'
 Please expand on the second call site.
 MSG
