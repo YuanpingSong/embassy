@@ -30,6 +30,11 @@ live sends routine. Never enable a real provider message in CI.
 - Keep progress updates concise and outcome-oriented. Spend effort on working
   code, focused evidence, and user-visible value rather than elaborate planning
   artifacts.
+- Close every PM-initiated task delivered through Embassy with one reply on
+  that task's originating conversation when it is ready, blocked, or complete.
+  A durable dead-drop update complements that reply; it does not replace it.
+  If the reply fails, do not guess or retry—record the exact failure in the
+  dead-drop instead.
 
 ## Product invariants
 
@@ -81,7 +86,7 @@ live sends routine. Never enable a real provider message in CI.
 - Keep Claude Code and Codex App Server adapters exactly version-pinned and
   fail closed on unknown schema, protocol, endpoint generation, or version.
 - Preserve bounded queues, messages, callbacks, deadlines, deduplication, rate
-  limits, hop counts, and conversation tables. Never retry an ambiguous write.
+  limits, and conversation tables. Never retry an ambiguous write.
 - The dashboard remains an atomically replaced, metadata-only static HTML file
   with no JavaScript, external assets, storage, telemetry, mutation endpoint,
   or network listener.

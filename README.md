@@ -110,15 +110,13 @@ alias and begins with an `<embassy-reply-hint>` containing the full conversation
 token, the recipient's exact alias, and the corresponding `embassy reply`
 command. Use only that delivered full token and alias; never guess one from a
 suffix or substitute the sender's alias. The CLI still rechecks the caller,
-conversation membership, current route policy, and hop limit, so the hint is
+conversation membership, and current route policy, so the hint is
 not a permission bypass.
 
 The frame is a clear provenance marker, not a cryptographic signature or a
 claim that the body is trustworthy. Embassy neutralizes nested occurrences of
 its two reserved framing tags in the untrusted body before provider delivery;
 arbitrary same-user code and all message text remain untrusted input.
-
-`EMBASSY_MAX_HOPS` bounds each conversation against runaway reply loops. The initial send is hop 0 and each routed reply increments the count; the default `16` means a normal conversation never notices it. An attempt past the bound is rejected and recorded as `HOP_LIMIT_EXCEEDED`. Do not retry an exhausted conversation token; start a fresh conversation. The accepted range and other bounds are documented in [Configuration](docs/CONFIGURATION.md).
 
 ### See it live
 

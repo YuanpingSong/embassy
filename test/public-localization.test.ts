@@ -112,7 +112,6 @@ test("public locales document provenance framing and recipient continuation", as
   for (const document of [englishConfiguration, chineseConfiguration]) {
     assert.ok(document.includes("conv_"));
     assert.ok(document.includes("reply"));
-    assert.ok(document.includes("HOP_LIMIT_EXCEEDED"));
   }
 
   for (const page of [englishSite, chineseSite]) {
@@ -122,6 +121,18 @@ test("public locales document provenance framing and recipient continuation", as
 
   assert.doesNotMatch(englishReadme, /raw anonymous body/i);
   assert.doesNotMatch(englishReadme, /recipient currently receives no/i);
+  for (const document of [
+    englishReadme,
+    chineseReadme,
+    englishDelivery,
+    chineseDelivery,
+    englishConfiguration,
+    chineseConfiguration,
+    englishSite,
+    chineseSite,
+  ]) {
+    assert.doesNotMatch(document, /EMBASSY_MAX_HOPS|HOP_LIMIT_EXCEEDED/);
+  }
 });
 
 test("marketing pages preserve structure, protocol tokens, and reciprocal locale links", async () => {

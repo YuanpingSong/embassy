@@ -121,7 +121,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         targetAlias: "codex-reviewer@this-mac",
         state: "queued",
         bytes: 128,
-        hopCount: 0,
       },
       {
         sequence: 2,
@@ -134,7 +133,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         state: "delivered",
         latencyMs: 2_000,
         bytes: 128,
-        hopCount: 0,
       },
       {
         sequence: 3,
@@ -147,7 +145,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         state: "unconfirmed",
         latencyMs: 3_000,
         bytes: 96,
-        hopCount: 0,
         safeErrorCode: "CLAUDE_RECEIPT_UNCONFIRMED",
       },
       {
@@ -161,7 +158,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         state: "ambiguous",
         latencyMs: 4_000,
         bytes: 64,
-        hopCount: 0,
         safeErrorCode: "CLAUDE_WRITE_AMBIGUOUS",
       },
     ],

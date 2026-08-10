@@ -1292,7 +1292,6 @@ function isNormalizedMessageEvent(
         "targetAlias",
         "state",
         "bytes",
-        "hopCount",
       ],
       ["conversationIdSuffix", "body", "latencyMs", "safeErrorCode", "steer"],
     ) &&
@@ -1326,7 +1325,6 @@ function isNormalizedMessageEvent(
         value.body.length > 0 &&
         !value.body.includes("\u0000") &&
         Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
-    isNonNegativeInteger(value.hopCount) &&
     (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
     (value.steer === undefined || value.steer === true)

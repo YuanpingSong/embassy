@@ -101,7 +101,8 @@ test("skill consumes the broker-owned provenance marker without treating it as a
   assert.match(skill, /recipient's exact alias in `reply-as`/);
   assert.match(skill, /reply-as` alias, never the sender alias/);
   assert.match(skill, /transient participant-scoped locator/);
-  assert.match(skill, /current route policy, and hop count/);
+  assert.match(skill, /conversation membership, and current route policy/);
+  assert.doesNotMatch(skill, /EMBASSY_MAX_HOPS|HOP_LIMIT_EXCEEDED/);
   assert.match(skill, /not general XML, a cryptographic signature/);
   assert.match(skill, /stop rather than guessing from a public suffix/);
   assert.doesNotMatch(skill, /raw anonymous body/i);

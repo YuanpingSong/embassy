@@ -217,7 +217,6 @@ function snapshot(): GatewaySnapshot {
         targetAlias: "claude-one@build-mac",
         state: "transport_written",
         bytes: 12,
-        hopCount: 0,
         latencyMs: 4,
       },
       {
@@ -229,7 +228,6 @@ function snapshot(): GatewaySnapshot {
         targetAlias: "codex-main@this-mac",
         state: "held",
         bytes: 8,
-        hopCount: 0,
       },
       {
         sequence: 3,
@@ -240,7 +238,6 @@ function snapshot(): GatewaySnapshot {
         targetAlias: "claude-one@build-mac",
         state: "unconfirmed",
         bytes: 14,
-        hopCount: 0,
         safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
       },
     ],

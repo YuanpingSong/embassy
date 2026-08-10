@@ -13,7 +13,7 @@ Embassy.
 
 - **Acceptance is not completion.** Initial CLI acceptance returns a conversation token and a delivery token. Successful destination or App Server acceptance settles as `delivered`: toward Codex that is the App Server accepting the turn, toward Claude it is release into the session's native queue — not read, not completed.
 
-- **Recipients get provenance and a reply path.** Immediately before the provider write, Embassy puts every routed body inside one broker-owned `<cross-session-message>` textual frame. Its first element is an `<embassy-reply-hint>` with the full conversation token, the recipient's exact alias, and the corresponding `embassy reply` command. A recipient may continue with that exact token, but caller identity, conversation membership, current route policy, and hop count are rechecked at reply time.
+- **Recipients get provenance and a reply path.** Immediately before the provider write, Embassy puts every routed body inside one broker-owned `<cross-session-message>` textual frame. Its first element is an `<embassy-reply-hint>` with the full conversation token, the recipient's exact alias, and the corresponding `embassy reply` command. A recipient may continue with that exact token, but caller identity, conversation membership, and current route policy are rechecked at reply time.
 
 - **Evidence has three shapes.** `delivered` means terminal provider evidence was observed. `unconfirmed` means the transport write completed but no terminal native evidence arrived. `ambiguous` means the write outcome itself is unknown. All three are terminal, and neither `unconfirmed` nor `ambiguous` is a retry authorization — inspect the recipient instead, because a resend can duplicate the message.
 
@@ -22,7 +22,7 @@ Embassy.
 
 - **Retries are conservative.** Messages that have not been dispatched remain queued while their route is busy or temporarily unavailable. Re-running `register-codex` replaces a closed or faulted App Server connector and wakes held work when the recovered route is idle. An explicit clean adapter deferral can return the same body to the queue. A confirmed delivery failure settles; an ambiguous write is never retried automatically.
 
-- **Bounded by design.** Bodies, queues, rate windows, deduplication tables, deadlines, hop counts, and transient conversations all have fixed limits.
+- **Bounded by design.** Bodies, queues, rate windows, deduplication tables, deadlines, and transient conversations all have fixed limits.
 
 - **Progress watches are independent evidence.** An opt-in watch may outlive an opener that expired before delivery, so a worker can remain unaware of the original assignment even while thread activity keeps the watch healthy. Owners should check the opener's `delivery-status` separately before assuming the assignment text arrived.
 
@@ -32,8 +32,8 @@ Accepted messages are tracked toward terminal delivery while the broker and prov
 
 ## Provenance framing and recipient replies
 
-The store, queue, classification, deduplication, rate limiting, hop accounting,
-and 16 KiB acceptance limit all operate on the raw body. At the last provider
+The store, queue, classification, deduplication, rate limiting, and 16 KiB
+acceptance limit all operate on the raw body. At the last provider
 boundary, Embassy deterministically composes exactly one authoritative textual
 frame:
 
@@ -46,13 +46,13 @@ frame:
   attribute is not part of its canonical parser.
 - In both directions, the first `embassy-reply-hint` carries `conversation`,
   `reply-as`, and the exact stdin-based reply command. `reply-as` is the
-  recipient's alias, never the sender's. The hint states that route and hop
-  policy are rechecked.
+  recipient's alias, never the sender's. The hint states that caller,
+  conversation, and route policy are rechecked.
 
 The full `conv_` conversation token is a transient participant-scoped locator,
 not enough authority by itself. The recipient can use the delivered full token, while the
 broker still validates inherited caller identity, current conversation
-membership, current route policy, and hop count. Never reconstruct a token from
+membership, and current route policy. Never reconstruct a token from
 the suffix exposed by metadata-only views.
 
 This is Claude-compatible textual framing, not general XML, a cryptographic

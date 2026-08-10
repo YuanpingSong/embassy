@@ -215,7 +215,6 @@ export type QueuedMessageMetadata = {
   bytes: number;
   /** Bounded same-user durable payload; absent only on pre-v1.2 rows. */
   body?: string;
-  hopCount: number;
   /** This message was admitted by the exact durable consent edge. */
   pair?: true;
   /** Target authority was transient and must never be reconstructed after restart. */
@@ -263,7 +262,6 @@ export type NormalizedMessageEvent = {
   bytes: number;
   /** Retained payload; oldest values are evicted without removing metadata. */
   body?: string;
-  hopCount: number;
   steer?: true;
   latencyMs?: number;
   safeErrorCode?: string;
@@ -1042,7 +1040,6 @@ export type EnqueueMessageInput = {
   /** Last eight opaque characters of the controller-owned conversation ID. */
   conversationIdSuffix?: string;
   deadlineAt?: string;
-  hopCount?: number;
   steer?: true;
   /**
    * Controller-derived watch intent committed in the same mutation as the
@@ -1179,7 +1176,6 @@ export type GatewayStoreLimits = {
   /** Bounded historical event-body bytes; omitted configs use 1 MiB. */
   maxRetainedBodyBytes?: number;
   messageDeadlineMs: number;
-  maxHopCount: number;
   rateLimitPerRoute: number;
   rateWindowMs: number;
 };

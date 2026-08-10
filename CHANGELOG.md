@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- Conversation hop accounting and `EMBASSY_MAX_HOPS`; caller identity, conversation membership, route policy, deadlines, rate limits, and bounded queues remain the delivery safeguards.
+
 ## [1.2.0] - 2026-08-10
 
 Deliverability over everything: a message you send arrives, or tells you loudly why it could not.

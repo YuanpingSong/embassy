@@ -73,7 +73,6 @@ function limits(): GatewayConfig["limits"] {
     maxQueueBytes: 1_024,
     maxMessageBytes: 256,
     messageDeadlineMs: 5_000,
-    maxHopCount: 2,
     rateLimitPerRoute: 20,
     rateWindowMs: 1_000,
   };
@@ -293,7 +292,6 @@ test("gateway configuration is local, bounded, and fail-closed", () => {
   assert.equal(config.compatibilityPolicy, "observed");
   assert.equal(config.limits.messageDeadlineMs, 14_400_000);
   assert.equal(config.stallNoticeMs, 120_000);
-  assert.equal(config.limits.maxHopCount, 16);
   assert.equal(config.limits.maxMessageBytes, 16_384);
 
   const configuredDeadline = loadGatewayConfig({
@@ -2313,7 +2311,6 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       targetAlias: alias("p", index % 256),
       state: "transport_written",
       bytes: maximum,
-      hopCount: maximum,
       latencyMs: maximum,
       safeErrorCode: `M${"X".repeat(59)}${(index % 10_000)
         .toString()
@@ -4353,6 +4350,90 @@ test("restart stales routes, retains queued bodies, and never replays ambiguous 
       error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
   );
   await recovered.close();
+});
+
+test("legacy persisted hop counters are ignored and removed", async () => {
+  const { store, config, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  const dispatched = await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "legacy in flight",
+    dedupeKey: "legacy-hop-in-flight",
+  });
+  assert.ok(dispatched.messageId);
+  await store.dequeueMessage();
+  await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "legacy queued",
+    dedupeKey: "legacy-hop-queued",
+  });
+  await store.close();
+
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    queue: Array<Record<string, unknown>>;
+    inFlight: Array<Record<string, unknown>>;
+    events: Array<Record<string, unknown>>;
+  };
+  for (const row of [...legacy.queue, ...legacy.inFlight, ...legacy.events]) {
+    row.hopCount = 16;
+  }
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
+
+  const recovered = new GatewayStore(config, {
+    now: testClock.now,
+    randomId: testClock.randomId,
+  });
+  await recovered.initialize();
+  const snapshot = await recovered.publicSnapshot();
+  assert.ok(snapshot.messages.every((event) => !("hopCount" in event)));
+  const persisted = JSON.parse(
+    await readFile(recovered.stateFilePath, "utf8"),
+  ) as {
+    queue: Array<Record<string, unknown>>;
+    inFlight: Array<Record<string, unknown>>;
+    events: Array<Record<string, unknown>>;
+  };
+  assert.ok(
+    [...persisted.queue, ...persisted.inFlight, ...persisted.events].every(
+      (row) => !("hopCount" in row),
+    ),
+  );
+  await recovered.close();
+});
+
+test("malformed legacy hop counters remain corrupt", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  await store.enqueueMessage({
+    sourceAlias: "reviewer@this-mac",
+    targetAlias: "advisor@this-mac",
+    body: "legacy malformed hop",
+    dedupeKey: "legacy-malformed-hop",
+  });
+  await store.close();
+
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as { queue: Array<Record<string, unknown>> };
+  assert.ok(legacy.queue[0]);
+  legacy.queue[0]!.hopCount = -1;
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
+
+  await assert.rejects(
+    new GatewayStore(config).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+  );
 });
 
 test("one narrow migration adds zeroed unconfirmed counters to old dogfood state", async () => {

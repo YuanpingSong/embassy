@@ -449,7 +449,6 @@ test("unpaired sender refusal is neutral and explains the pairing boundary", () 
     targetAlias: "codex-reviewer@this-mac",
     state: "rejected",
     bytes: 42,
-    hopCount: 0,
     safeErrorCode: "SENDER_NOT_PAIRED",
   });
 
@@ -531,7 +530,6 @@ test("message lifecycles group by direction and route, not suffix alone", () => 
     state: "failed",
     latencyMs: 500,
     bytes: 42,
-    hopCount: 0,
     safeErrorCode: "DELIVERY_FAILED",
   });
   const model = buildDashboardViewModel(snapshot);
@@ -575,7 +573,6 @@ test("72 evidence events disclose 12 omitted rows under the global budget", () =
         ? ("delivered" as const)
         : ("dispatching" as const),
       bytes: 42,
-      hopCount: 0,
     }),
   );
   const model = buildDashboardViewModel(snapshot);
@@ -604,7 +601,6 @@ test("51 active groups are counted before the 50-group display slice", () => {
       targetAlias: "codex-reviewer@this-mac",
       state: "queued" as const,
       bytes: 42,
-      hopCount: 0,
     }),
   );
   snapshot.truncation.messages = 7;

@@ -411,7 +411,6 @@ type Conversation = {
   targetAlias: string;
   expectsReply: boolean;
   nextSequence: number;
-  lastHopCount: number;
   lastActivityAt: string;
   /** Conversation authority originated from one exact durable pair. */
   pair?: true;
@@ -419,9 +418,7 @@ type Conversation = {
 
 type MessageContext = {
   conversationId: string;
-  isReply: boolean;
   expectsReply: boolean;
-  hopCount: number;
   sequence: number;
   targetBindingKey: string;
   nativeReplyBinding?: PrivateRouteBinding;
@@ -497,7 +494,6 @@ type NativeIngressCapability = {
 type PendingClaudeReply = {
   conversationId: string;
   bindingKey: string;
-  hopCount: number;
   deadlineAt: string;
   tainted: boolean;
 };
@@ -6000,13 +5996,10 @@ export class GatewayService {
           action.workerAlias,
           text,
           false,
-          false,
           {
             existingConversationId: action.conversationId,
-            requestedHopCount: 0,
             exposeDeliveryToken: false,
             skipProgressWatchActivity: true,
-            preserveConversationHop: true,
             progressWatchNudge: {
               conversationId: action.conversationId,
               nudgeNumber: action.nudgeNumber,
@@ -6271,7 +6264,6 @@ export class GatewayService {
           resolved.alias,
           params.text,
           params.expectsReply,
-          false,
           params.trackIdleMinutes === undefined
             ? {}
             : { trackIdleMinutes: params.trackIdleMinutes },
@@ -6298,7 +6290,6 @@ export class GatewayService {
             params.toAlias,
             params.text,
             steer ? false : params.expectsReply,
-            false,
             {
               ...(steer ? { steer: true as const } : {}),
               ...(params.trackIdleMinutes === undefined
@@ -6331,7 +6322,6 @@ export class GatewayService {
                 conversation,
                 from,
                 params.text,
-                conversation.lastHopCount + 1,
                 true,
                 params.trackIdleMinutes,
               )
@@ -6340,10 +6330,8 @@ export class GatewayService {
                 to,
                 params.text,
                 false,
-                true,
                 {
                   existingConversationId: conversation.id,
-                  requestedHopCount: conversation.lastHopCount + 1,
                   ...(params.trackIdleMinutes === undefined
                     ? {}
                     : { trackIdleMinutes: params.trackIdleMinutes }),
@@ -6361,10 +6349,8 @@ export class GatewayService {
     targetAlias: string,
     text: string,
     expectsReply: boolean,
-    isReply: boolean,
     options: {
       existingConversationId?: string;
-      requestedHopCount?: number;
       exposeDeliveryToken?: boolean;
       steer?: true;
       trackIdleMinutes?: number;
@@ -6373,7 +6359,6 @@ export class GatewayService {
         conversationId: string;
         nudgeNumber: 1 | 2;
       };
-      preserveConversationHop?: true;
     } = {},
   ): Promise<EnqueuedMessageResult> {
     if (
@@ -6405,12 +6390,8 @@ export class GatewayService {
       targetAlias,
       expectsReply,
       nextSequence: 0,
-      lastHopCount: 0,
       lastActivityAt: this.now().toISOString(),
     };
-    const hopCount =
-      options.requestedHopCount ??
-      (isReply ? conversation.lastHopCount + 1 : 0);
     const sequence = conversation.nextSequence;
     const enqueuedAt = this.now().getTime();
     const deliveryToken = (options.exposeDeliveryToken ?? true)
@@ -6425,7 +6406,6 @@ export class GatewayService {
       body: text,
       dedupeKey: `${conversationId}:${sequence}`,
       conversationIdSuffix: conversationId.slice(-8),
-      hopCount,
       deadlineAt,
       ...(options.steer === true ? { steer: true as const } : {}),
       ...(options.skipProgressWatchActivity === true
@@ -6449,15 +6429,10 @@ export class GatewayService {
     this.conversations.set(conversationId, conversation);
     if (queued.pair === true) conversation.pair = true;
     conversation.nextSequence += 1;
-    if (options.preserveConversationHop !== true) {
-      conversation.lastHopCount = hopCount;
-    }
     conversation.lastActivityAt = this.now().toISOString();
     this.messageContexts.set(queued.messageId, {
       conversationId,
-      isReply,
       expectsReply,
-      hopCount,
       sequence,
       targetBindingKey: bindingKey(target),
       authorization: "selected_route",
@@ -6476,7 +6451,6 @@ export class GatewayService {
       this.pendingClaudeReplies.set(bindingKey(target), {
         conversationId,
         bindingKey: bindingKey(target),
-        hopCount,
         deadlineAt,
         tainted: false,
       });
@@ -6495,7 +6469,6 @@ export class GatewayService {
     conversation: Conversation,
     sourceAlias: string,
     text: string,
-    requestedHopCount: number,
     exposeDeliveryToken = true,
     trackIdleMinutes?: number,
   ): Promise<EnqueuedMessageResult> {
@@ -6532,7 +6505,6 @@ export class GatewayService {
       body: text,
       dedupeKey: `${conversation.id}:${sequence}`,
       conversationIdSuffix: conversation.id.slice(-8),
-      hopCount: requestedHopCount,
       deadlineAt,
       ...(conversation.pair === true ? { pair: true as const } : {}),
       progressWatch: progressWatchActivity(
@@ -6549,13 +6521,10 @@ export class GatewayService {
       );
     }
     conversation.nextSequence += 1;
-    conversation.lastHopCount = requestedHopCount;
     conversation.lastActivityAt = this.now().toISOString();
     this.messageContexts.set(queued.messageId, {
       conversationId: conversation.id,
-      isReply: true,
       expectsReply: false,
-      hopCount: requestedHopCount,
       sequence,
       targetBindingKey: bindingKey(capability.binding),
       nativeReplyBinding: { ...capability.binding },
@@ -6592,7 +6561,6 @@ export class GatewayService {
     conversation: Conversation,
     sourceBinding: PrivateRouteBinding,
     text: string,
-    requestedHopCount: number,
   ): Promise<void> {
     const target = await this.store.resolveRoute(conversation.sourceAlias);
     if (
@@ -6619,7 +6587,6 @@ export class GatewayService {
       body: text,
       dedupeKey: `${conversation.id}:${sequence}`,
       conversationIdSuffix: conversation.id.slice(-8),
-      hopCount: requestedHopCount,
       deadlineAt,
       authorizedPairTeardownReply: true,
       progressWatch: progressWatchActivity(
@@ -6635,16 +6602,13 @@ export class GatewayService {
       );
     }
     conversation.nextSequence += 1;
-    conversation.lastHopCount = requestedHopCount;
     conversation.lastActivityAt = this.now().toISOString();
     // The old edge has already been removed. Retain only this already-observed
     // reply attempt; the conversation no longer grants pair reply authority.
     delete conversation.pair;
     this.messageContexts.set(queued.messageId, {
       conversationId: conversation.id,
-      isReply: true,
       expectsReply: false,
-      hopCount: requestedHopCount,
       sequence,
       targetBindingKey: bindingKey(target),
       authorization: "selected_route",
@@ -6776,15 +6740,12 @@ export class GatewayService {
       targetAlias: item.targetAlias,
       expectsReply: false,
       nextSequence: 1,
-      lastHopCount: item.hopCount,
       lastActivityAt: this.now().toISOString(),
       ...(item.pair === true ? { pair: true as const } : {}),
     };
     const context: MessageContext = {
       conversationId,
-      isReply: false,
       expectsReply: false,
-      hopCount: item.hopCount,
       sequence: 0,
       targetBindingKey: bindingKey(binding),
       authorization: "selected_route",
@@ -7418,7 +7379,6 @@ export class GatewayService {
             conversation,
             conversation.targetAlias,
             replyText,
-            context.hopCount + 1,
             false,
           );
         } else {
@@ -7443,7 +7403,6 @@ export class GatewayService {
               conversation,
               sourceBinding,
               replyText,
-              context.hopCount + 1,
             );
           } else {
             await this.enqueue(
@@ -7451,10 +7410,8 @@ export class GatewayService {
               conversation.sourceAlias,
               replyText,
               false,
-              true,
               {
                 existingConversationId: conversation.id,
-                requestedHopCount: context.hopCount + 1,
                 exposeDeliveryToken: false,
               },
             );
@@ -7529,10 +7486,8 @@ export class GatewayService {
       conversation.sourceAlias,
       event.text,
       false,
-      true,
       {
         existingConversationId: conversation.id,
-        requestedHopCount: pending.hopCount + 1,
         exposeDeliveryToken: false,
       },
     );
@@ -7602,7 +7557,6 @@ export class GatewayService {
         body: event.text,
         dedupeKey: `${conversationId}:0`,
         conversationIdSuffix: conversationId.slice(-8),
-        hopCount: 0,
         deadlineAt,
         ...(steer ? { steer: true as const } : {}),
         progressWatch: progressWatchActivity(
@@ -7629,16 +7583,13 @@ export class GatewayService {
         targetAlias: event.targetAlias,
         expectsReply: !steer,
         nextSequence: 1,
-        lastHopCount: 0,
         lastActivityAt: this.now().toISOString(),
         ...(queued.pair === true ? { pair: true as const } : {}),
       };
       this.conversations.set(conversationId, conversation);
       this.messageContexts.set(queued.messageId, {
         conversationId,
-        isReply: false,
         expectsReply: !steer,
-        hopCount: 0,
         sequence: 0,
         targetBindingKey: bindingKey(target),
         authorization: "selected_route",
