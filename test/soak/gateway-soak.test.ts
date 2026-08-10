@@ -82,10 +82,10 @@ class ManualClock {
   #jobs = new Map<number, { dueAt: number; callback: () => void }>();
   #nextHandle = 1;
   now = (): Date => new Date(this.nowMs);
-  setTimeout = (callback: () => void, ms: number): unknown => {
+  setTimeout = (callback: () => void, ms: number): NodeJS.Timeout => {
     const handle = this.#nextHandle++;
     this.#jobs.set(handle, { dueAt: this.nowMs + ms, callback });
-    return { handle, unref: () => undefined };
+    return { handle, unref: () => undefined } as unknown as NodeJS.Timeout;
   };
   clearTimeout = (handle: unknown): void => {
     if (
@@ -146,7 +146,14 @@ class SoakProvider implements GatewayProviderAdapter {
   });
 
   runCompatibilityProbes = async (): Promise<
-    ReadonlyArray<{ name: string; outcome: "pass" }>
+    ReadonlyArray<
+      Readonly<{
+        name: (typeof compatibilityProbeNames)[
+          "codex" | "claude"
+        ][number];
+        outcome: "pass";
+      }>
+    >
   > =>
     compatibilityProbeNames[this.identity.provider].map((name) => ({
       name,
