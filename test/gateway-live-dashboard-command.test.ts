@@ -150,10 +150,12 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
     const harness = cliHarness(async (options) => {
       calls.push(options.locale);
       assert.equal(options.port, current.port);
+      const url = `http://127.0.0.1:${current.port}/`;
       await options.onReady({
         status: "ready",
         mode: "live",
         locale: options.locale,
+        url,
       });
     }, {
       LANG: "zh_CN.UTF-8",
@@ -173,6 +175,7 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
         status: "ready",
         mode: "live",
         locale: current.expected,
+        url: `http://127.0.0.1:${current.port}/`,
       },
     });
     assert.equal(harness.stderr.chunks.join(""), "");
@@ -245,12 +248,14 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
   );
 });
 
-test("live dashboard ready output is one safe result with no private launch material", async () => {
+test("live dashboard ready output exposes its public URL and no private launch material", async () => {
   const harness = cliHarness(async (options) => {
+    const url = `http://127.0.0.1:${options.port}/`;
     await options.onReady({
       status: "ready",
       mode: "live",
       locale: options.locale,
+      url,
     });
   }, {
     CODEX_THREAD_ID: THREAD_ID,
@@ -268,11 +273,17 @@ test("live dashboard ready output is one safe result with no private launch mate
   assert.deepEqual(JSON.parse(output), {
     ok: true,
     command: "dashboard",
-    result: { status: "ready", mode: "live", locale: "zh-CN" },
+    result: {
+      status: "ready",
+      mode: "live",
+      locale: "zh-CN",
+      url: "http://127.0.0.1:41961/",
+    },
   });
+  assert.match(output, /http:\/\/127\.0\.0\.1:41961\//u);
   assert.doesNotMatch(
     output,
-    /127\.0\.0\.1|[Pp]ort|bootstrap|control\.sock|capability|revision|cc-socks|00000000/,
+    /bootstrap|control\.sock|capability|revision|cc-socks|00000000/,
   );
   assert.equal(harness.stderr.chunks.join(""), "");
 });
@@ -332,6 +343,7 @@ test("live command validates private state, opens one scrubbed stable URL, and w
           status: "ready",
           mode: "live",
           locale: "zh-CN",
+          url: DASHBOARD_URL,
         });
         readyResolve?.();
       },
@@ -971,6 +983,7 @@ test("live command cleans signal ownership after pre-ready open failure", async 
 test("CLI normalizes live failures before ready and emits no second JSON after ready", async () => {
   const preReadyCases = [
     {
+      argv: ["dashboard", "--live"],
       error: new GatewayControlTransportError(
         "CONTROL_CONNECT_FAILED",
         "private socket path",
@@ -980,6 +993,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
       stderr: "[embassy] gateway unavailable.\n",
     },
     {
+      argv: ["dashboard", "--live"],
       error: new BridgeError(
         "LIVE_DASHBOARD_OPEN_FAILED",
         "private open detail",
@@ -990,6 +1004,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
       stderr: "[embassy] gateway unavailable.\n",
     },
     {
+      argv: ["dashboard", "--live", "--port", "53421"],
       error: new BridgeError(
         "LIVE_DASHBOARD_PORT_IN_USE",
         "private bind detail",
@@ -998,9 +1013,29 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
       code: gatewayCliExitCodes.unavailable,
       safeCode: "LIVE_DASHBOARD_PORT_IN_USE",
       stderr:
-        "[embassy] gateway unavailable.\n[embassy] close the process holding the live dashboard port, or choose another with --port <n>.\n",
+        "[embassy] gateway unavailable.\n[embassy] live dashboard port 53421 is already in use; close the holding process or choose another with --port <n>.\n",
     },
     {
+      argv: [
+        "dashboard",
+        "--live",
+        "--port",
+        "48123",
+        "--lang",
+        "zh-CN",
+      ],
+      error: new BridgeError(
+        "LIVE_DASHBOARD_PORT_IN_USE",
+        "private bind detail",
+        true,
+      ),
+      code: gatewayCliExitCodes.unavailable,
+      safeCode: "LIVE_DASHBOARD_PORT_IN_USE",
+      stderr:
+        "[embassy] 网关不可用。\n[embassy] 实时仪表盘端口 48123 已被占用；请关闭占用进程，或使用 --port <n> 选择其他端口。\n",
+    },
+    {
+      argv: ["dashboard", "--live"],
       error: new Error("private startup detail"),
       code: gatewayCliExitCodes.failure,
       safeCode: "INTERNAL_ERROR",
@@ -1013,7 +1048,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
       throw current.error;
     });
     const code = await runGatewayCli(
-      ["dashboard", "--live"],
+      current.argv,
       harness.dependencies,
     );
     assert.equal(code, current.code);
@@ -1049,6 +1084,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
       status: "ready",
       mode: "live",
       locale: options.locale,
+      url: `http://127.0.0.1:${options.port}/`,
     });
     throw new Error("private cleanup detail");
   });
@@ -1072,6 +1108,7 @@ test("duplicate live ready callbacks cannot append protocol output", async () =>
       status: "ready" as const,
       mode: "live" as const,
       locale: options.locale,
+      url: `http://127.0.0.1:${options.port}/`,
     };
     await options.onReady(result);
     await options.onReady(result);
