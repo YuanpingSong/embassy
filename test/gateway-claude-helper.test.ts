@@ -23,6 +23,10 @@ import type {
   ClaudeNativeHelperCommand,
   ClaudeNativeHelperResult,
 } from "../src/gateway/claude-helper-protocol.js";
+import {
+  assertClaudeNativeHelperIpcSize,
+  isClaudeNativeHelperParentMessage,
+} from "../src/gateway/claude-helper-protocol.js";
 import type {
   GatewayAdapterCallbacks,
   GatewayAdapterDelivery,
@@ -286,8 +290,11 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       diagnosticCode: "PAIR_ACCEPTED",
     });
 
+    const deadlineAt = new Date(Date.now() + 30_000).toISOString();
     const dispatched = await supervisor.dispatch({
       sourceAlias: "codex-first@this-mac",
+      targetAlias: "claude-first@this-mac",
+      conversationId: "conv_0123456789abcdef",
       selectedAlias: "claude-first@this-mac",
       stateRoot: "/state",
       binding: {
@@ -301,10 +308,28 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       messageId: "gateway-message-first",
       text: "outbound body",
       expectsReply: false,
-      deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+      deadlineAt,
     });
     assert.deepEqual(dispatched, { state: "pending" });
     assert.equal(deliveries.at(-1)?.state, "transport_written");
+    assert.deepEqual(clients[0]!.commands.at(-1), {
+      method: "dispatch",
+      binding: {
+        provider: "claude",
+        hostId: "this-mac",
+        routeHandle: "00000000-0000-7000-8000-000000000111",
+        ownerLease: "lease-first",
+        endpointGeneration: "claude_generation",
+      },
+      authorization: "selected_route",
+      messageId: "gateway-message-first",
+      sourceAlias: "codex-first@this-mac",
+      targetAlias: "claude-first@this-mac",
+      conversationId: "conv_0123456789abcdef",
+      text: "outbound body",
+      expectsReply: false,
+      deadlineAt,
+    });
 
     clients[0]!.crash();
     assert.equal(supervisor.size, 1);
@@ -320,6 +345,200 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       alias: "codex-second@this-mac",
       status: "busy",
     });
+  } finally {
+    await supervisor.close();
+  }
+});
+
+test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
+  const command = {
+    method: "dispatch",
+    binding: {
+      provider: "claude",
+      hostId: "this-mac",
+      routeHandle: "00000000-0000-7000-8000-000000000111",
+      ownerLease: "lease-first",
+      endpointGeneration: "claude_generation",
+    },
+    authorization: "selected_route",
+    messageId: "gateway-message-first",
+    sourceAlias: "codex-first@this-mac",
+    targetAlias: "claude-first@this-mac",
+    conversationId: "conv_0123456789abcdef",
+    text: "x".repeat(16 * 1024),
+    expectsReply: false,
+    deadlineAt: "2030-01-01T00:00:00.000Z",
+  } as const;
+  const parent = {
+    protocolVersion: 1,
+    type: "request",
+    requestId: "request_0123456789",
+    command,
+  } as const;
+  assert.equal(isClaudeNativeHelperParentMessage(parent), true);
+  const escapedMaximum = {
+    ...parent,
+    command: { ...command, text: "\u0001".repeat(16 * 1024) },
+  };
+  assert.equal(isClaudeNativeHelperParentMessage(escapedMaximum), true);
+  assert.doesNotThrow(() => assertClaudeNativeHelperIpcSize(escapedMaximum));
+
+  for (const invalid of [
+    { ...command, sourceAlias: "claude-first@this-mac" },
+    { ...command, targetAlias: "not an alias" },
+    { ...command, conversationId: "conv_short" },
+    { ...command, text: "x".repeat(16 * 1024 + 1) },
+    { ...command, unexpected: true },
+  ]) {
+    assert.equal(
+      isClaudeNativeHelperParentMessage({ ...parent, command: invalid }),
+      false,
+    );
+  }
+  const { conversationId: _omitted, ...missingConversation } = command;
+  assert.equal(
+    isClaudeNativeHelperParentMessage({
+      ...parent,
+      command: missingConversation,
+    }),
+    false,
+  );
+});
+
+test("supervisor carries only the activated source alias and exact selected target", async () => {
+  const clients: FakeHelperClient[] = [];
+  const supervisor = new ClaudeNativeHelperSupervisor({
+    identity: {
+      provider: "claude",
+      hostId: "this-mac",
+      endpointGeneration: "claude_generation",
+    },
+    runtime: {
+      claudeExecutable: "/usr/bin/false",
+      claudeCodeVersion: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      sessionsDir: "/tmp/sessions",
+      socketDir: "/tmp/sockets",
+    },
+    locale: "en",
+    deliveryNotices: "merged",
+    maxPendingMessages: 8,
+    maxHelpers: 1,
+    callbacks: () => undefined,
+    factory: async (options) => {
+      const client = new FakeHelperClient(options, 1);
+      clients.push(client);
+      return client;
+    },
+  });
+  const binding = {
+    provider: "claude",
+    hostId: "this-mac",
+    routeHandle: "00000000-0000-7000-8000-000000000111",
+    ownerLease: "lease-first",
+    endpointGeneration: "claude_generation",
+  } as const;
+  try {
+    await supervisor.advertise({
+      alias: "codex-old@this-mac",
+      cwd: "/workspace/old",
+    });
+    await supervisor.prepareGeneration({
+      alias: "codex-new@this-mac",
+      cwd: "/workspace/new",
+      generation: "helper_generation_next",
+      currentGeneration: "helper_generation_1",
+    });
+    assert.equal(
+      await supervisor.publishPrepared({
+        currentGeneration: "helper_generation_1",
+        preparedGeneration: "helper_generation_next",
+      }),
+      "published",
+    );
+    await supervisor.activatePrepared("helper_generation_next");
+
+    const dispatch = {
+      sourceAlias: "codex-new@this-mac",
+      targetAlias: "claude-first@this-mac",
+      conversationId: "conv_0123456789abcdef",
+      selectedAlias: "claude-first@this-mac",
+      stateRoot: "/state",
+      binding,
+      authorization: "selected_route",
+      messageId: "gateway-message-next",
+      text: "outbound body",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    } as const;
+    assert.deepEqual(
+      await supervisor.dispatch({
+        ...dispatch,
+        sourceAlias: "codex-old@this-mac",
+      }),
+      {
+        state: "failed",
+        safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE",
+      },
+    );
+    assert.deepEqual(
+      await supervisor.dispatch({
+        ...dispatch,
+        targetAlias: "claude-other@this-mac",
+      }),
+      { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" },
+    );
+    const commandsBeforeInvalid = clients[0]!.commands.length;
+    assert.deepEqual(
+      await supervisor.dispatch({
+        ...dispatch,
+        conversationId: "conv_short",
+      }),
+      { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" },
+    );
+    assert.deepEqual(
+      await supervisor.dispatch({
+        ...dispatch,
+        text: "x".repeat(16 * 1024 + 1),
+      }),
+      {
+        state: "failed",
+        safeErrorCode: "PROVENANCE_ENVELOPE_TOO_LARGE",
+      },
+    );
+    assert.equal(clients[0]!.commands.length, commandsBeforeInvalid);
+    assert.deepEqual(await supervisor.dispatch(dispatch), { state: "pending" });
+    const sent = clients[0]!.commands.at(-1);
+    assert.equal(sent?.method, "dispatch");
+    if (sent?.method !== "dispatch") assert.fail("expected dispatch command");
+    assert.equal(sent.sourceAlias, "codex-new@this-mac");
+    assert.equal(sent.targetAlias, "claude-first@this-mac");
+    assert.equal(sent.conversationId, "conv_0123456789abcdef");
+    assert.equal(sent.text, "outbound body");
+
+    assert.deepEqual(
+      await supervisor.dispatch({
+        sourceAlias: dispatch.sourceAlias,
+        targetAlias: dispatch.targetAlias,
+        conversationId: dispatch.conversationId,
+        binding,
+        authorization: "native_reply",
+        messageId: "gateway-native-reply-next",
+        text: "native reply body",
+        expectsReply: false,
+        deadlineAt: dispatch.deadlineAt,
+      }),
+      { state: "pending" },
+    );
+    const nativeReply = clients[0]!.commands.at(-1);
+    assert.equal(nativeReply?.method, "dispatch");
+    if (nativeReply?.method !== "dispatch") {
+      assert.fail("expected native reply dispatch command");
+    }
+    assert.equal(nativeReply.authorization, "native_reply");
+    assert.equal(nativeReply.sourceAlias, "codex-new@this-mac");
+    assert.equal(nativeReply.targetAlias, "claude-first@this-mac");
+    assert.equal(nativeReply.conversationId, "conv_0123456789abcdef");
+    assert.equal(nativeReply.text, "native reply body");
   } finally {
     await supervisor.close();
   }

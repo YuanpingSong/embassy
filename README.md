@@ -92,7 +92,9 @@ You should see a `conv_` conversation token and a `dlv_` delivery token. Because
 
 ### 5. Follow up
 
-Only the side whose Embassy send returned the `conv_` token can currently continue that conversation with `reply`:
+Either participant can continue the conversation with `reply`. The initiating
+CLI receives the full `conv_` token in its accepted result; the recipient gets
+the same token and an exact reply command in the broker-owned message marker:
 
 ```bash
 embassy reply \
@@ -102,7 +104,19 @@ Please expand on the migration risk.
 MSG
 ```
 
-The recipient currently receives no conversation token or reply hint. In the Codex direction, Embassy CLI/queue delivery is a raw anonymous body; Claude Code's native `SendMessage` may add its own provenance wrapper, but still no `conv_` token. The recipient therefore cannot use `embassy reply` for that inbound message. It must start a fresh conversation with `send-to-claude` or `send-to-codex`; never guess or reconstruct a token.
+Every routed body reaches either product inside one broker-owned
+`<cross-session-message>` textual frame. It identifies the verified sender
+alias and begins with an `<embassy-reply-hint>` containing the full conversation
+token, the recipient's exact alias, and the corresponding `embassy reply`
+command. Use only that delivered full token and alias; never guess one from a
+suffix or substitute the sender's alias. The CLI still rechecks the caller,
+conversation membership, current route policy, and hop limit, so the hint is
+not a permission bypass.
+
+The frame is a clear provenance marker, not a cryptographic signature or a
+claim that the body is trustworthy. Embassy neutralizes nested occurrences of
+its two reserved framing tags in the untrusted body before provider delivery;
+arbitrary same-user code and all message text remain untrusted input.
 
 `EMBASSY_MAX_HOPS` bounds each conversation. The initial send is hop 0 and each routed reply increments the count, so the default `2` permits hops 0, 1, and 2. The next attempt is rejected and recorded as `HOP_LIMIT_EXCEEDED` (the current CLI may surface only the generic result `rejected`). Do not retry an exhausted conversation token; start a fresh conversation. The accepted range and other bounds are documented in [Configuration](docs/CONFIGURATION.md).
 
@@ -132,6 +146,12 @@ Embassy publishes each registered Codex task into Claude Code's live-session reg
 A pair is one explicit permission edge between one Claude session and one Codex task — and pairs are many-to-many: one Claude session may hold edges to several Codex tasks, and one Codex task to several Claude sessions (bounded at 128 pairs by default). Every edge is created explicitly, with `pair` or the one-task `select-claude` shorthand; nothing is ever implied. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out that restores any-session inbound.
 
 Messages queue while the Codex task is busy and start an ordinary turn when it goes idle. In the Claude-to-Codex direction only, a body with an exact leading `STEER:` prefix may enter the active turn at the App Server's next tool-call boundary; if that boundary is unavailable, the message returns to the normal queue.
+
+Immediately before the provider write, Embassy gives every routed body one
+broker-owned cross-session marker containing the verified sender alias and a
+recipient reply hint. The full conversation token travels only in the
+initiator's accepted result and the recipient's transient message payload; it
+never enters the dashboard, public snapshot, journal, receipt, or log.
 
 Every settled message produces a receipt. `delivered` means terminal provider evidence was observed — toward Codex, the App Server accepted the turn; toward Claude, the message was released into the session's native queue. Neither means the model read or acted on it. `unconfirmed` and `ambiguous` mean evidence is missing; they are terminal states and never auto-retried. See [Delivery](docs/DELIVERY.md) for the full semantics.
 
@@ -172,13 +192,14 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `select-claude` / `unselect-claude` | operator | One-task shorthand for `pair`/`unpair`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
 | `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session |
 | `send-to-codex` | Claude session | Send one bounded message using the inherited native reply identity |
-| `reply` | conversation-token holder | Continue an active conversation by the public token returned to that caller's send |
+| `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint |
 
 ## Safety in one minute
 
 - **Local sockets only.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. The opt-in `embassy dashboard --live` companion is a separate process and the only listener Embassy can create, bound to `127.0.0.1` on an ephemeral port.
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and generation checks reduce mistakes, but are not a defense against code already running as your OS user.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
+- **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
 - **Bodies never persisted.** Message bodies, prompts, replies, and raw provider frames live only in memory. Metadata-only dashboard files are mode 0600 with no JavaScript.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.

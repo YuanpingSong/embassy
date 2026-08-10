@@ -164,6 +164,7 @@ The status below is intentionally narrower than the target architecture.
 | Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
 | Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
 | Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque memory-only correlation handles, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
+| Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
@@ -273,9 +274,13 @@ The thin skill/CLI exposes the same safe alias list to either provider.
    refreshes the UUID's current process/socket coordinates, and revalidates
    the selected Claude peer's canonical workspace access and exact generation
    before every send.
-4. It opens a short-lived connection and writes one version-pinned peer frame.
-   In the designed write-enabled mode, a reply request carries the gateway's
-   own anonymous callback UDS as the reply address.
+4. Immediately before the native write, it composes one broker-owned canonical
+   `cross-session-message` textual frame with bounded sender attribution and a
+   first-child reply hint containing the full conversation token, exact aliases,
+   and reply command. It then opens a short-lived connection and writes one
+   version-pinned peer frame. A reply request carries the gateway's own
+   anonymous callback UDS as the transport reply address; that path is never
+   exposed in the content frame.
 5. It records only normalized delivery metadata. It does not retry an
    ambiguous write automatically.
 6. A reply received on the callback listener is correlated in memory and
@@ -318,7 +323,9 @@ final reply.
    not supply policy overrides.
 6. App Server status notifications atomically refresh the advertised native
    peer record to `idle`, `busy`, or `waiting`.
-7. If the task is idle, the owning connector starts one dedicated turn.
+7. Immediately before `turn/start` or `turn/steer`, the owning connector wraps
+   the raw body once in Embassy's authoritative Codex-bound
+   `cross-session-message` frame. If the task is idle, the connector starts one dedicated turn.
    Ordinary messages received while it is active or awaiting approval queue
    internally. An exact leading `STEER:` body in this direction is marked as a
    steering message. If the connector has a positively observed active turn
@@ -384,6 +391,57 @@ Claude's native peer socket is itself an inbox, so Codex replies may be
 written while the Claude route is busy. The gateway still serializes its own
 writes, but it does not wait for Claude to become idle and thereby deadlock a
 Claude turn that is waiting for the reply.
+
+### Provenance framing and conversation continuation
+
+The broker classifies `STEER:`, `TRACK:`, and `DONE:`, enforces raw-byte body
+limits, deduplicates, accounts hops, and queues before presentation framing.
+The store therefore retains only the raw transient body. A pure composer runs
+at the final semantic provider-write boundary so a clean retry produces the
+same bytes with exactly one authoritative outer wrapper. Compatibility probes,
+receipt frames, and diagnostics do not use this path.
+
+Both provider directions use Claude-compatible textual framing with a
+broker-owned `cross-session-message` outer element and an
+`embassy-reply-hint` as the first body element:
+
+- Codex-bound content uses the exact validated source alias as `from-name` and
+  the full conversation token as the outer `conversation` attribute.
+- Claude-bound content uses only Claude Code's canonical bounded `from-name`
+  attribute. For a source alias over 64 characters, the display label is a
+  deterministic 47-character prefix, `~`, and 16 hexadecimal SHA-256
+  characters. The hint carries the exact source as `from-alias`. The outer
+  Claude wrapper intentionally omits `conversation`, which its pinned parser
+  does not accept.
+- In either direction, the first hint carries the full token in `conversation`
+  and the exact recipient alias in `reply-as`, followed by an exact stdin-based
+  `embassy reply --conversation ... --alias ...` instruction and the statement
+  that route and hop policy are rechecked.
+
+Embassy does not synthesize `from`, `from-session`, `hop-chain`, or `from-mode`
+attributes: those names have provider-native meanings the broker cannot
+truthfully claim. Native socket addresses, Codex thread IDs, Claude session
+UUIDs, endpoint generations, and route handles never enter the content frame.
+
+The outer structure and hint come only from validated broker metadata. Before
+composition, the untrusted body case-insensitively neutralizes boundary-shaped
+opening or closing occurrences of `cross-session-message` and
+`embassy-reply-hint` by inserting `\` immediately after the leading `<`.
+Everything else remains raw text. This is not general XML, cryptographic
+authentication, or proof that the message content is trustworthy; it is a
+consistent structural provenance marker at the model input boundary. A native
+Claude wrapper already present in an inbound body is untrusted nested text
+beneath the Embassy wrapper.
+
+The full token delivered in the hint lets the recipient call `reply`, but it is
+only a participant-scoped conversation locator. The service still validates
+the inherited caller, current conversation membership, current route policy,
+and hop count. The full token remains confined to the accepted control result
+and transient provider payload, and is memory-only: it is never persisted,
+journaled, logged, snapshotted, rendered on a dashboard, placed in a receipt,
+or returned from suffix-only public correlation. Formatter,
+provenance-metadata, and framed-size failures are clean pre-write terminal
+failures; they can never become ambiguous writes or replay authorizations.
 
 The gateway exposes `turn/steer` only through an exact leading `STEER:` body in
 the Claude-to-Codex direction. The global `EMBASSY_STEERING_ENABLED` switch is

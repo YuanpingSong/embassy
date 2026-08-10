@@ -70,6 +70,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "live-dashboard-stream",
   "locale",
   "progress-watch-machine",
+  "provenance-envelope",
   "providers",
   "server",
   "service",

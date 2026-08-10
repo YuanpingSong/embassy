@@ -67,6 +67,10 @@ const TERMINAL_DELIVERY_STATES = new Set([
   "failed",
   "cancelled",
 ]);
+const PUBLIC_ALIAS =
+  /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
+const CONVERSATION_ID = /^conv_[A-Za-z0-9_-]{16,64}$/;
+const MAX_RAW_BODY_BYTES = 16 * 1024;
 
 function fault(code: string, recoverable = false): BridgeError {
   return new BridgeError(
@@ -203,6 +207,8 @@ export class ClaudeNativeHelperSupervisor {
 
   async dispatch(input: Readonly<{
     sourceAlias: string;
+    targetAlias: string;
+    conversationId: string;
     selectedAlias?: string;
     stateRoot?: string;
     binding: PrivateRouteBinding;
@@ -212,12 +218,34 @@ export class ClaudeNativeHelperSupervisor {
     expectsReply: boolean;
     deadlineAt: string;
   }>): Promise<GatewayAdapterDispatchResult> {
+    if (
+      typeof input.sourceAlias !== "string" ||
+      !PUBLIC_ALIAS.test(input.sourceAlias) ||
+      !input.sourceAlias.startsWith("codex-") ||
+      typeof input.targetAlias !== "string" ||
+      !PUBLIC_ALIAS.test(input.targetAlias) ||
+      typeof input.conversationId !== "string" ||
+      !CONVERSATION_ID.test(input.conversationId) ||
+      typeof input.text !== "string"
+    ) {
+      return { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" };
+    }
+    if (Buffer.byteLength(input.text, "utf8") > MAX_RAW_BODY_BYTES) {
+      return {
+        state: "failed",
+        safeErrorCode: "PROVENANCE_ENVELOPE_TOO_LARGE",
+      };
+    }
     const helper = this.#helpersByAlias.get(input.sourceAlias);
     if (helper === undefined || helper.closing) {
       return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE" };
     }
     if (input.authorization === "selected_route") {
-      if (input.selectedAlias === undefined || input.stateRoot === undefined) {
+      if (
+        input.selectedAlias === undefined ||
+        input.selectedAlias !== input.targetAlias ||
+        input.stateRoot === undefined
+      ) {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
       const authority = `${input.selectedAlias}\0${input.stateRoot}`;
@@ -244,6 +272,9 @@ export class ClaudeNativeHelperSupervisor {
           binding: input.binding,
           authorization: input.authorization,
           messageId: input.messageId,
+          sourceAlias: helper.activeAlias,
+          targetAlias: input.targetAlias,
+          conversationId: input.conversationId,
           text: input.text,
           expectsReply: input.expectsReply,
           deadlineAt: input.deadlineAt,

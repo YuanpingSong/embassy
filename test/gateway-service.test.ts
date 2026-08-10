@@ -28,6 +28,7 @@ import {
   type GatewayAdapterDelivery,
   type GatewayAdapterDiscovery,
   type GatewayAdapterDiscoverySnapshot,
+  type GatewayAdapterDispatchInput,
   type GatewayAdapterDispatchResult,
   type GatewayAdapterEndpointRefresh,
   type GatewayAdapterRouteObservationState,
@@ -314,15 +315,7 @@ class FakeProvider implements GatewayProviderAdapter {
   selectedEndpointRefresh: GatewayAdapterEndpointRefresh | undefined;
   acceptedCompatibilityAttestations: CompatibilityAttestation[] = [];
   acceptCompatibilityAttestationBefore: (() => void) | undefined;
-  dispatches: Array<{
-    binding: PrivateRouteBinding;
-    authorization: "selected_route" | "native_reply";
-    messageId: string;
-    text: string;
-    expectsReply: boolean;
-    deadlineAt: string;
-    steer?: true;
-  }> = [];
+  dispatches: GatewayAdapterDispatchInput[] = [];
   attested: string[] = [];
   selectedRoutes: Array<{ alias: string; routeHandle: string }> = [];
   selectRouteBeforeReturn: (() => void) | undefined;
@@ -535,15 +528,9 @@ class FakeProvider implements GatewayProviderAdapter {
     return { routeHandle: "claude_target_1" };
   }
 
-  async dispatch(input: {
-    binding: PrivateRouteBinding;
-    authorization: "selected_route" | "native_reply";
-    messageId: string;
-    text: string;
-    expectsReply: boolean;
-    deadlineAt: string;
-    steer?: true;
-  }): Promise<GatewayAdapterDispatchResult> {
+  async dispatch(
+    input: GatewayAdapterDispatchInput,
+  ): Promise<GatewayAdapterDispatchResult> {
     this.dispatches.push({ ...input, binding: { ...input.binding } });
     if (this.synchronousDispatchDelivery !== undefined) {
       this.callbacks?.onDelivery({
@@ -1016,6 +1003,20 @@ function toCodex(replyAddress: string): ValidatedSendToCodexParams {
     text: SECRET,
     replyAddress,
     expectsReply: true,
+  };
+}
+
+function dispatchProvenance(input: GatewayAdapterDispatchInput): {
+  sourceAlias: string;
+  targetAlias: string;
+  conversationId: string;
+  text: string;
+} {
+  return {
+    sourceAlias: input.sourceAlias,
+    targetAlias: input.targetAlias,
+    conversationId: input.conversationId,
+    text: input.text,
   };
 }
 
@@ -4709,11 +4710,18 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
 
   const accepted = await handlers.sendToClaude(toClaude());
   assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
   // The mutation handler returns before any provider call is attempted.
   assert.equal(claude.dispatches.length, 0);
   await waitFor(() => claude.dispatches.length === 1);
   assert.equal(claude.dispatches.length, 1);
   assert.equal(claude.dispatches[0]?.text, SECRET);
+  assert.deepEqual(dispatchProvenance(claude.dispatches[0]!), {
+    sourceAlias: "codex-main@this-mac",
+    targetAlias: "claude-one@this-mac",
+    conversationId: accepted.conversationId,
+    text: SECRET,
+  });
 
   const second = await handlers.sendToClaude(toClaude("second body"));
   assert.deepEqual(second, { accepted: false, code: "busy" });
@@ -4752,6 +4760,12 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
   assert.equal(codex.dispatches[0]?.text, "synthetic reply");
   const replyDispatch = codex.dispatches[0];
   assert.ok(replyDispatch);
+  assert.deepEqual(dispatchProvenance(replyDispatch), {
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    conversationId: accepted.conversationId,
+    text: "synthetic reply",
+  });
   codex.emitDelivery({
     messageId: replyDispatch.messageId,
     state: "completed",
@@ -4790,9 +4804,16 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
     toCodex("uds:/synthetic/claude.sock"),
   );
   assert.equal(fromClaude.accepted, true);
+  if (!fromClaude.accepted) return;
   await waitFor(() => codex.dispatches.length === 2);
   const codexTurn = codex.dispatches[1];
   assert.ok(codexTurn);
+  assert.deepEqual(dispatchProvenance(codexTurn), {
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    conversationId: fromClaude.conversationId,
+    text: SECRET,
+  });
   codex.emitDelivery({
     messageId: codexTurn.messageId,
     state: "completed",
@@ -4802,6 +4823,12 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
   const codexReply = claude.dispatches[2];
   assert.ok(codexReply);
   assert.equal(codexReply.text, "bounded codex final");
+  assert.deepEqual(dispatchProvenance(codexReply), {
+    sourceAlias: "codex-main@this-mac",
+    targetAlias: "claude-one@this-mac",
+    conversationId: fromClaude.conversationId,
+    text: "bounded codex final",
+  });
   assert.equal(codexReply.expectsReply, false);
   assert.equal(Number.isFinite(Date.parse(codexReply.deadlineAt)), true);
   claude.emitDelivery({ messageId: codexReply.messageId, state: "released" });
@@ -4826,6 +4853,8 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
     "late reply probe",
     "must be ignored after deadline",
     "bounded codex final",
+    accepted.conversationId,
+    fromClaude.conversationId,
   ]) {
     assert.equal(stateText.includes(forbidden), false);
   }
@@ -4837,6 +4866,8 @@ test("fake end-to-end selection, dispatch, correlation, and reply authority stay
     "late reply probe",
     "must be ignored after deadline",
     "bounded codex final",
+    accepted.conversationId,
+    fromClaude.conversationId,
     "claude_target_1",
     THREAD_ID,
   ]) {
@@ -6185,6 +6216,7 @@ test("transient Codex dispatch failures return to held queue and retry", async (
     toCodex("uds:/synthetic/claude.sock"),
   );
   assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
   await waitFor(() => codex.dispatches.length >= 1);
   await new Promise((resolve) => setTimeout(resolve, 750));
   const snapshot = await handlers.listSnapshot();
@@ -6193,6 +6225,20 @@ test("transient Codex dispatch failures return to held queue and retry", async (
     2,
     JSON.stringify(snapshot.routes, null, 2),
   );
+  assert.deepEqual(codex.dispatches.map(dispatchProvenance), [
+    {
+      sourceAlias: "claude-one@this-mac",
+      targetAlias: "codex-main@this-mac",
+      conversationId: accepted.conversationId,
+      text: SECRET,
+    },
+    {
+      sourceAlias: "claude-one@this-mac",
+      targetAlias: "codex-main@this-mac",
+      conversationId: accepted.conversationId,
+      text: SECRET,
+    },
+  ]);
   assert.equal(
     snapshot.messages.some(
       (event) =>
@@ -6550,9 +6596,16 @@ test("Claude control ingress classifies only the exact leading STEER prefix", as
     text: "STEER: classify this exact leading prefix",
   });
   assert.equal(exact.accepted, true);
+  if (!exact.accepted) return;
   await waitFor(() => codex.dispatches.length === 1);
   assert.equal(codex.dispatches[0]?.steer, true);
   assert.equal(codex.dispatches[0]?.expectsReply, false);
+  assert.deepEqual(dispatchProvenance(codex.dispatches[0]!), {
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    conversationId: exact.conversationId,
+    text: "STEER: classify this exact leading prefix",
+  });
 
   const inexact = await handlers.sendToCodex({
     ...toCodex("uds:/synthetic/claude.sock"),
@@ -6581,8 +6634,15 @@ test("Claude control ingress classifies only the exact leading STEER prefix", as
     toClaude("STEER: the reverse direction remains ordinary"),
   );
   assert.equal(reverse.accepted, true);
+  if (!reverse.accepted) return;
   await waitFor(() => claude.dispatches.length === 1);
   assert.equal(claude.dispatches[0]?.steer, undefined);
+  assert.deepEqual(dispatchProvenance(claude.dispatches[0]!), {
+    sourceAlias: "codex-main@this-mac",
+    targetAlias: "claude-one@this-mac",
+    conversationId: reverse.conversationId,
+    text: "STEER: the reverse direction remains ordinary",
+  });
 });
 
 test("a steering dispatch does not replace the active ordinary turn owner", async (t) => {
@@ -7123,10 +7183,24 @@ test("open inbound accepts an exact unselected native Claude peer and returns on
 
   await waitFor(() => codex.dispatches.length === 1);
   await waitFor(() => claude.dispatches.length === 1);
+  const nativeConversationId = codex.dispatches[0]!.conversationId;
+  assert.match(nativeConversationId, /^conv_[A-Za-z0-9_-]{16,64}$/);
+  assert.deepEqual(dispatchProvenance(codex.dispatches[0]!), {
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    conversationId: nativeConversationId,
+    text: "unselected native ingress",
+  });
   assert.equal(codex.dispatches[0]?.authorization, "selected_route");
   assert.equal(claude.dispatches[0]?.authorization, "native_reply");
   assert.equal(claude.dispatches[0]?.binding.routeHandle, "claude_target_1");
   assert.equal(claude.dispatches[0]?.text, "correlated reply only");
+  assert.deepEqual(dispatchProvenance(claude.dispatches[0]!), {
+    sourceAlias: "codex-main@this-mac",
+    targetAlias: "claude-one@this-mac",
+    conversationId: nativeConversationId,
+    text: "correlated reply only",
+  });
   assert.deepEqual(claude.nativeInboundStatuses, [
     { receiptHandle: "receipt-unselected-native", status: "delivered" },
   ]);
@@ -7145,6 +7219,22 @@ test("open inbound accepts an exact unselected native Claude peer and returns on
     [{ alias: "claude-one@this-mac", selected: false }],
   );
   assert.equal(snapshot.inboundMode, "open");
+  assert.equal(JSON.stringify(snapshot).includes(nativeConversationId), false);
+  assert.equal(
+    (await readFile(service.store.stateFilePath, "utf8")).includes(
+      nativeConversationId,
+    ),
+    false,
+  );
+  assert.equal(
+    (
+      await readFile(
+        path.join(stateDir, "gateway-dashboard.html"),
+        "utf8",
+      )
+    ).includes(nativeConversationId),
+    false,
+  );
 });
 
 test("paired inbound terminally refuses an unselected native sender and accepts it after selection", async (t) => {
@@ -8281,6 +8371,12 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
   assert.equal(opened.accepted, true);
   if (!opened.accepted) return;
   await waitFor(() => claude.dispatches.length === 1);
+  assert.deepEqual(dispatchProvenance(claude.dispatches[0]!), {
+    sourceAlias: "codex-main@this-mac",
+    targetAlias: "claude-one@this-mac",
+    conversationId: opened.conversationId,
+    text: "TRACK: keep this long-running exchange visible",
+  });
   assert.equal((await store.inspectProgressWatches())[0]?.ownerAlias, "codex-main@this-mac");
 
   const workerHint = await handlers.reply({
@@ -8294,6 +8390,12 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
   });
   assert.equal(workerHint.accepted, true, JSON.stringify(workerHint));
   await waitFor(() => codex.dispatches.length === 1);
+  assert.deepEqual(dispatchProvenance(codex.dispatches[0]!), {
+    sourceAlias: "claude-one@this-mac",
+    targetAlias: "codex-main@this-mac",
+    conversationId: opened.conversationId,
+    text: "DONE: worker reports the result is ready",
+  });
   assert.notEqual(
     (await store.inspectProgressWatches())[0]?.workerReportedCompleteAt,
     undefined,

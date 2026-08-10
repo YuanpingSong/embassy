@@ -89,3 +89,21 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.doesNotMatch(skill, /--(?:target-id|session-id|pid|socket(?:-path)?)\b/);
   assert.doesNotMatch(skill, /(?:echo|printf)[^\n]*(?:CODEX_THREAD_ID|CLAUDE_CODE_MESSAGING_SOCKET)/);
 });
+
+test("skill consumes the broker-owned provenance marker without treating it as authority", async () => {
+  const skill = await readSkill();
+
+  assert.match(skill, /single outer `<cross-session-message/);
+  assert.match(skill, /first `<embassy-reply-hint>`/);
+  assert.match(skill, /validated `from-name`/);
+  assert.match(skill, /exact source alias in `from-alias`/);
+  assert.match(skill, /full `conv_` token in `conversation`/);
+  assert.match(skill, /recipient's exact alias in `reply-as`/);
+  assert.match(skill, /reply-as` alias, never the sender alias/);
+  assert.match(skill, /transient participant-scoped locator/);
+  assert.match(skill, /current route policy, and hop count/);
+  assert.match(skill, /not general XML, a cryptographic signature/);
+  assert.match(skill, /stop rather than guessing from a public suffix/);
+  assert.doesNotMatch(skill, /raw anonymous body/i);
+  assert.doesNotMatch(skill, /recipient cannot discover a conversation token/i);
+});

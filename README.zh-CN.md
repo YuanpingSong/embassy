@@ -92,7 +92,7 @@ MSG
 
 ### 5. 后续跟进
 
-目前只有其 Embassy 发送命令返回了 `conv_` 令牌的一方，才能用 `reply` 继续该对话：
+任何持有完整 `conv_` 令牌的对话参与方都可以用 `reply` 继续仍然有效的对话。初始发送方从 Embassy 命令结果中获得令牌；接收方则从入站消息的来源封装中获得同一个完整令牌和回复提示：
 
 ```bash
 embassy reply \
@@ -102,7 +102,7 @@ Please expand on the migration risk.
 MSG
 ```
 
-接收方目前不会获得对话令牌或回复提示。朝向 Codex 时，Embassy CLI/队列投递是匿名原始正文；Claude Code 的原生 `SendMessage` 可能自行添加来源包装，但仍不包含 `conv_` 令牌。因此接收方无法针对该入站消息使用 `embassy reply`。它必须通过 `send-to-claude` 或 `send-to-codex` 开始新对话；切勿猜测或重构令牌。
+Embassy 会在实际写入提供方之前，为双向路由消息添加一个由代理控制的 `<cross-session-message>` 来源封装。封装标出已经验证的发送方别名，其首个 `<embassy-reply-hint>` 元素包含完整对话令牌、接收方自己的精确别名和可直接使用的 `embassy reply` 命令。朝向 Codex 时，外层标记本身还带有 `conversation="conv_..."`；朝向 Claude 时，为符合 Claude Code 的规范解析格式，完整令牌和回复提示位于封装正文中，而不作为外层属性。请使用收到的完整令牌，切勿猜测或重构它。令牌本身不授予路由权限：每次回复仍会重新检查调用方身份、对话参与关系、实时路由和跳数上限。
 
 `EMBASSY_MAX_HOPS` 限制每个对话的跳数。初始发送为第 0 跳，此后每次路由回复都会递增，因此默认值 `2` 允许第 0、1、2 跳。下一次尝试会被拒绝，并记录为 `HOP_LIMIT_EXCEEDED`（当前 CLI 可能只显示通用结果 `rejected`）。不要重试已耗尽的对话令牌；请开始新对话。可接受范围及其他边界详见[配置](docs/CONFIGURATION.zh-CN.md)。
 
@@ -132,6 +132,8 @@ Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份
 配对是一个 Claude 会话与一个 Codex 任务之间的单一显式权限边，而配对关系是多对多的：一个 Claude 会话可以与多个 Codex 任务建立边，一个 Codex 任务也可以与多个 Claude 会话建立边（默认上限 128 个配对）。每条边都通过 `pair` 或单任务简写 `select-claude` 显式创建；一切都不会被隐式推断。没有边时，发送方以 `SENDER_NOT_PAIRED` 终局结算。`embassy serve --inbound open` 是显式的退出选项，可恢复任意会话入站。
 
 消息在 Codex 任务忙碌时排队，并在任务空闲后启动普通轮次。仅在 Claude→Codex 方向，正文以精确 `STEER:` 开头的消息可以在 App Server 的下一个工具调用边界进入当前轮次；若该边界不可用，消息会回到普通队列。
+
+每条被路由的消息在接收方看到时都位于 Embassy 生成的跨会话来源封装中，其中包含已验证的发送方别名、完整 `conv_` 令牌和面向该接收方的回复提示。来源封装是模型可见的结构性提示，并非密码学身份认证；消息正文始终应被视为不可信输入。
 
 每条已结算的消息都会产生回执。`delivered` 表示观测到了终端提供方证据——朝向 Codex，意味着 App Server 接受了该轮次；朝向 Claude，意味着消息已释放到会话的原生队列。两者都不意味着模型已读取或执行。`unconfirmed` 和 `ambiguous` 表示证据缺失；它们是终态，从不自动重试。完整语义详见[投递](docs/DELIVERY.zh-CN.md)。
 
@@ -172,14 +174,15 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `select-claude` / `unselect-claude` | 操作员 | `pair`/`unpair` 的单任务简写：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
 | `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息 |
 | `send-to-codex` | Claude 会话 | 使用继承的原生回复标识发送一条有界消息 |
-| `reply` | 对话令牌持有方 | 使用该调用方发送时返回的公开令牌继续一个活跃对话 |
+| `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话；路由和跳数限制会重新检查 |
 
 ## 一分钟了解安全性
 
 - **仅限本地套接字。** `embassy serve` 仅监听私有 Unix 域套接字，不发起任何提供商 API 调用。可选启用的 `embassy dashboard --live` 组件是一个独立进程，也是 Embassy 能创建的唯一监听器，绑定到 `127.0.0.1` 上的临时端口。
 - **同 UID 隔离，而非身份认证。** 调用者身份继承自本地进程环境。路由所有权和生成号检查能减少误操作，但不是对已以你的 OS 用户身份运行的代码的防御。
+- **来源标记是提示，不是签名。** Embassy 在提供方写入边界生成跨会话来源封装，让接收模型能够区分代理路由消息及其已验证发送方别名；这不是密码学证明，也不会把不可信正文变成可信指令。
 - **原生权限保持原生。** Embassy 不发送任何 Codex 审批或沙盒覆盖，也不应答任何审批请求。`crossSessionInbound` 仍是 Claude 自身的控制机制；Embassy 无法覆盖它。
-- **消息体从不持久化。** 消息体、提示词、回复和原始提供方帧仅存在于内存中。仅含元数据的仪表盘文件为 mode 0600，不含 JavaScript。
+- **消息体从不持久化。** 消息体、提示词、回复、来源封装中的完整对话令牌和原始提供方帧仅存在于内存中；它们不会进入日志、事件、回执、持久化状态或仪表盘。仅含元数据的仪表盘文件为 mode 0600，不含 JavaScript。
 
 完整的安全边界和漏洞报告流程请参见 [SECURITY.md](SECURITY.md)。
 

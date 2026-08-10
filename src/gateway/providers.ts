@@ -51,6 +51,7 @@ import {
 } from "./claude-helper-supervisor.js";
 import type { ClaudeNativeHelperFactory } from "./claude-helper-client.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
+import { composeProvenanceEnvelope } from "./provenance-envelope.js";
 import type {
   GatewayAdapterCallbacks,
   GatewayAdapterDelivery,
@@ -58,6 +59,7 @@ import type {
   GatewayAdapterDiscoverySnapshot,
   GatewayAdapterDispatchResult,
   GatewayAdapterEndpointRefresh,
+  GatewayAdapterDispatchInput,
   GatewayAdapterRouteState,
   GatewayAdapterRouteObservationState,
   GatewayAdapterStart,
@@ -1327,7 +1329,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   }
 
   async dispatch(input: {
-    sourceAlias?: string;
+    sourceAlias: string;
+    targetAlias: string;
+    conversationId: string;
     binding: PrivateRouteBinding;
     authorization: "selected_route" | "native_reply";
     messageId: string;
@@ -1348,7 +1352,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       const stateRoot = this.selectedStateRoots.get(input.binding.routeHandle);
       if (
         input.authorization === "selected_route" &&
-        (selectedAlias === undefined || stateRoot === undefined)
+        (selectedAlias === undefined ||
+          selectedAlias !== input.targetAlias ||
+          stateRoot === undefined)
       ) {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
@@ -1421,7 +1427,16 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         this.nativeInbound.delete(input.binding.routeHandle);
         return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_REPLY_STALE" };
       }
-    } else if (this.selected.get(input.binding.routeHandle) === undefined) {
+      if (observedRoute.alias !== input.targetAlias) {
+        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+      }
+    } else {
+      const selectedAlias = this.selected.get(input.binding.routeHandle);
+      if (selectedAlias === undefined || selectedAlias !== input.targetAlias) {
+        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+      }
+    }
+    if (activeListener.registration?.alias !== input.sourceAlias) {
       return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
     }
     if (
@@ -1440,6 +1455,25 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.providerIdByGatewayId.has(input.messageId)
     ) {
       return { state: "failed", safeErrorCode: "CLAUDE_RECEIPT_CAPACITY" };
+    }
+    let content: string;
+    try {
+      content = composeProvenanceEnvelope({
+        direction: "claude",
+        sourceAlias: input.sourceAlias,
+        targetAlias: input.targetAlias,
+        conversationId: input.conversationId,
+        body: input.text,
+      });
+    } catch (error) {
+      if (
+        error instanceof BridgeError &&
+        (error.code === "PROVENANCE_ENVELOPE_INVALID" ||
+          error.code === "PROVENANCE_ENVELOPE_TOO_LARGE")
+      ) {
+        return { state: "failed", safeErrorCode: error.code };
+      }
+      throw error;
     }
 
     this.providerIdByGatewayId.set(input.messageId, "");
@@ -1517,7 +1551,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     try {
       const result = await this.peer.send(
         input.binding.routeHandle,
-        input.text,
+        content,
         {
           listener: activeListener.listener,
           receiptDeadlineAt: deadline,
@@ -2474,6 +2508,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly recoveryMaxMs: number;
   private readonly now: () => Date;
   private readonly routes = new Map<string, CodexRoute>();
+  /** Exact public alias authority retained across internal route recovery. */
+  private readonly routeAliases = new Map<string, string>();
   private readonly routeCreations = new Map<string, Promise<CodexRoute>>();
   private readonly routeReleases = new Map<string, Promise<void>>();
   private readonly routeRecoveryAttempts = new Map<string, number>();
@@ -2864,6 +2900,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         "The Codex task identifier is outside the exact provider boundary.",
       );
     }
+    const retainedAlias = this.routeAliases.get(input.routeHandle);
+    if (retainedAlias !== undefined && retainedAlias !== input.alias) {
+      throw new BridgeError(
+        "CODEX_ALIAS_MISMATCH",
+        "The Codex route is already bound to another exact public alias.",
+      );
+    }
     this.cancelRouteRecovery(input.routeHandle);
     let refreshResult: CodexEndpointRefreshResult | undefined;
     let selectorRefreshReserved = false;
@@ -2976,6 +3019,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.trackedRoutes.add(input.routeHandle);
+    this.routeAliases.set(input.routeHandle, input.alias);
     if (refreshResult === undefined) {
       this.queueRouteObservation(route, observation);
     }
@@ -3047,15 +3091,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     };
   }
 
-  async dispatch(input: {
-    binding: PrivateRouteBinding;
-    authorization: "selected_route" | "native_reply";
-    messageId: string;
-    text: string;
-    expectsReply: boolean;
-    deadlineAt: string;
-    steer?: true;
-  }): Promise<GatewayAdapterDispatchResult> {
+  async dispatch(
+    input: GatewayAdapterDispatchInput,
+  ): Promise<GatewayAdapterDispatchResult> {
     if (
       !this.initialized ||
       this.closing ||
@@ -3071,6 +3109,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const route = this.routes.get(input.binding.routeHandle);
     if (
       route === undefined ||
+      this.routeAliases.get(input.binding.routeHandle) !== input.targetAlias ||
       this.routeReleases.has(input.binding.routeHandle) ||
       route.endpointGeneration !== input.binding.endpointGeneration ||
       route.endpointGeneration !== this.factory.endpointGeneration
@@ -3096,13 +3135,31 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     if (this.expectsReply.has(input.messageId)) {
       return { state: "failed", safeErrorCode: "CODEX_MESSAGE_DUPLICATE" };
     }
+    let content: string;
+    try {
+      content = composeProvenanceEnvelope({
+        direction: "codex",
+        sourceAlias: input.sourceAlias,
+        targetAlias: input.targetAlias,
+        conversationId: input.conversationId,
+        body: input.text,
+      });
+    } catch (error) {
+      const safeErrorCode =
+        error instanceof BridgeError &&
+        (error.code === "PROVENANCE_ENVELOPE_INVALID" ||
+          error.code === "PROVENANCE_ENVELOPE_TOO_LARGE")
+          ? error.code
+          : "PROVENANCE_ENVELOPE_INVALID";
+      return { state: "failed", safeErrorCode };
+    }
     this.expectsReply.set(input.messageId, input.expectsReply);
     try {
       const disposition = await route.connector.submitMessage(guard, {
         deadlineAt: input.deadlineAt,
         messageId: input.messageId,
         ...(input.steer === true ? { steer: true as const } : {}),
-        text: input.text,
+        text: content,
       });
       if (disposition.disposition === "deferred") {
         this.expectsReply.delete(input.messageId);
@@ -3160,6 +3217,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       );
     }
     await this.releaseRouteInternal(routeHandle);
+    this.routeAliases.delete(routeHandle);
   }
 
   private async releaseRouteInternal(routeHandle: string): Promise<void> {
@@ -3238,6 +3296,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
     this.trackedRoutes.clear();
+    this.routeAliases.clear();
     this.expectsReply.clear();
     this.callbacks = undefined;
   }
