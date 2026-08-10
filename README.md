@@ -118,7 +118,7 @@ claim that the body is trustworthy. Embassy neutralizes nested occurrences of
 its two reserved framing tags in the untrusted body before provider delivery;
 arbitrary same-user code and all message text remain untrusted input.
 
-`EMBASSY_MAX_HOPS` bounds each conversation. The initial send is hop 0 and each routed reply increments the count, so the default `2` permits hops 0, 1, and 2. The next attempt is rejected and recorded as `HOP_LIMIT_EXCEEDED` (the current CLI may surface only the generic result `rejected`). Do not retry an exhausted conversation token; start a fresh conversation. The accepted range and other bounds are documented in [Configuration](docs/CONFIGURATION.md).
+`EMBASSY_MAX_HOPS` bounds each conversation against runaway reply loops. The initial send is hop 0 and each routed reply increments the count; the default `16` means a normal conversation never notices it. An attempt past the bound is rejected and recorded as `HOP_LIMIT_EXCEEDED`. Do not retry an exhausted conversation token; start a fresh conversation. The accepted range and other bounds are documented in [Configuration](docs/CONFIGURATION.md).
 
 ### See it live
 

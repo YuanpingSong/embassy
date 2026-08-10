@@ -26,11 +26,11 @@ Embassy 通过 `embassy serve` 启动时读取的环境变量进行配置。本�
 | `EMBASSY_MAX_QUEUE_MESSAGES` / `EMBASSY_MAX_QUEUE_PER_ROUTE` | `100` / `20` |
 | `EMBASSY_MAX_IN_FLIGHT` | `16` |
 | `EMBASSY_MAX_QUEUE_BYTES` / `EMBASSY_MAX_MESSAGE_BYTES` | `1048576` / `16384` |
-| `EMBASSY_MESSAGE_DEADLINE_MS` | `300000` |
-| `EMBASSY_MAX_HOPS` | `2` |
+| `EMBASSY_MESSAGE_DEADLINE_MS` | `14400000` |
+| `EMBASSY_MAX_HOPS` | `16` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
-`EMBASSY_MAX_HOPS` 接受 `0` 到 `16`，并按对话生效。初始发送的跳数为 0，此后每次路由回复加一。因此默认值 `2` 会接纳初始发送以及第 1、2 跳回复。超过配置值的尝试会被拒绝，并以安全代码 `HOP_LIMIT_EXCEEDED` 记录；当前 CLI 可能把这一接纳前拒绝代码折叠为通用结果 `rejected`。不要重试已耗尽的令牌；请通过新的发送开始新对话。该环境变量的变更会在 `embassy serve` 启动时生效。
+`EMBASSY_MAX_HOPS` 接受 `0` 到 `64`，并按对话生效。初始发送的跳数为 0，此后每次路由回复加一。默认值 `16` 为正常对话留出充足空间；该上限只为阻止失控的回复循环而存在。超过配置值的尝试会被拒绝，并以安全代码 `HOP_LIMIT_EXCEEDED` 记录；当前 CLI 可能把这一接纳前拒绝代码折叠为通用结果 `rejected`。不要重试已耗尽的令牌；请通过新的发送开始新对话。该环境变量的变更会在 `embassy serve` 启动时生效。
 
 初始发送方从 CLI 结果获得完整 `conv_` 令牌，接收方则从入站消息的来源封装和回复提示中获得同一个令牌。令牌是内存中的参与方范围定位符，不是权限凭据：每次 `reply` 都会重新检查调用方身份、参与关系、实时路由和当前跳数。代理重启后令牌不再存在；已达到跳数上限、路由失效或身份转交后，也不得重试或重构旧令牌。
 
