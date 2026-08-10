@@ -322,8 +322,13 @@ async function registerAndSelect(
 
 test("soak: randomized churn settles every accepted message exactly once", async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "soak-")));
+  let service: GatewayService | undefined;
   t.after(async () => {
-    await rm(root, { recursive: true, force: true });
+    try {
+      await service?.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
   const stateDir = path.join(root, "state");
   const config = soakConfig(stateDir);
@@ -332,7 +337,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
 
   let claude = new SoakProvider("claude");
   let codex = new SoakProvider("codex");
-  let service = new GatewayService({
+  service = new GatewayService({
     config,
     adapters: [claude, codex],
     now: clock.now,
@@ -538,5 +543,4 @@ test("soak: randomized churn settles every accepted message exactly once", async
       `enqueueRejections=${tallies.acceptedRejections} outcomes=${JSON.stringify(summary)} ` +
       `bodiesInSnapshot=${snapshotCarriesBodies} bodiesInState=${stateCarriesBodies}`,
   );
-  await service.close();
 });

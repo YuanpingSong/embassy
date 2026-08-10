@@ -2,13 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  attachCompatibilityCertification,
   compatibilityCacheKey,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
-  isCompatibilityCertification,
-  isCompatibilityCertificationReport,
   type CompatibilityProbeResult,
   type CompatibilitySurface,
 } from "../src/gateway/compatibility.js";
@@ -20,7 +17,7 @@ function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {
   }));
 }
 
-test("compatibility tiers distinguish certified, observed, strict, and major drift", () => {
+test("compatibility admission accepts only the exact certified inventory", () => {
   const base = {
     surface: "claude" as const,
     checkedAt: "2026-08-09T12:00:00.000Z",
@@ -30,91 +27,20 @@ test("compatibility tiers distinguish certified, observed, strict, and major dri
   const certified = evaluateCompatibilityAttestation({
     ...base,
     version: "2.1.226",
-    policy: "observed",
   });
   assert.equal(certified.tier, "certified");
   assert.equal(certified.safeErrorCode, undefined);
   assert.equal(isCompatibilityAttestation(certified), true);
 
-  const observed = evaluateCompatibilityAttestation({
-    ...base,
-    version: "2.2.0",
-    policy: "observed",
-  });
-  assert.equal(observed.tier, "schema_attested");
-  assert.equal(compatibilityCacheKey(observed), "claude\0" + "2.2.0");
-
-  for (const [version, policy] of [
-    ["2.2.0", "strict"],
-    ["3.0.0", "observed"],
-  ] as const) {
+  for (const version of ["2.2.0", "3.0.0"] as const) {
     const result = evaluateCompatibilityAttestation({
       ...base,
       version,
-      policy,
     });
     assert.equal(result.tier, "incompatible");
     assert.equal(result.safeErrorCode, "CLAUDE_VERSION_DRIFT");
+    assert.equal(compatibilityCacheKey(result), `claude\0${version}`);
   }
-});
-
-test("compatibility certification is closed, depth-scoped, and outcome-consistent", () => {
-  const checkedAt = "2026-08-09T12:00:00.000Z";
-  const surfaces = (["claude", "codex"] as const).map((surface) =>
-    attachCompatibilityCertification(
-      evaluateCompatibilityAttestation({
-        surface,
-        version: surface === "claude" ? "2.1.226" : "0.147.0",
-        checkedAt,
-        policy: "observed",
-        certifiedVersions: [surface === "claude" ? "2.1.226" : "0.147.0"],
-        probes: passing(surface),
-      }),
-      {
-        depth: surface === "claude" ? "wire" : "thread_ops",
-        outcome: "pass",
-        certifiedAt: checkedAt,
-      },
-    ),
-  );
-  const report = {
-    policy: "observed" as const,
-    certified: true,
-    withTurn: false,
-    surfaces,
-  };
-  assert.equal(isCompatibilityCertificationReport(report), true);
-  assert.equal(
-    isCompatibilityCertification({
-      depth: "wire",
-      outcome: "fail",
-      certifiedAt: checkedAt,
-    }),
-    false,
-  );
-  assert.equal(
-    isCompatibilityCertificationReport({ ...report, withTurn: true }),
-    false,
-  );
-  assert.equal(
-    isCompatibilityCertificationReport({ ...report, certified: false }),
-    false,
-  );
-  const failed = attachCompatibilityCertification(surfaces[0]!, {
-    depth: "wire",
-    outcome: "fail",
-    certifiedAt: checkedAt,
-    safeErrorCode: "CLAUDE_CERTIFICATION_FAILED",
-  });
-  assert.equal(isCompatibilityAttestation(failed), true);
-  assert.equal(
-    isCompatibilityCertificationReport({
-      ...report,
-      certified: false,
-      surfaces: [failed, surfaces[1]],
-    }),
-    true,
-  );
 });
 
 test("one failed bounded probe fails closed and malformed evidence is rejected", () => {
@@ -128,7 +54,6 @@ test("one failed bounded probe fails closed and malformed evidence is rejected",
     surface: "codex",
     version: "0.148.0",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    policy: "observed",
     certifiedVersions: ["0.147.0"],
     probes,
   });
@@ -145,7 +70,6 @@ test("one failed bounded probe fails closed and malformed evidence is rejected",
         surface: "codex",
         version: "0.148.0",
         checkedAt: "2026-08-09T12:00:00.000Z",
-        policy: "observed",
         certifiedVersions: ["0.147.0"],
         probes: passing("codex").slice(1),
       }),
@@ -155,7 +79,6 @@ test("one failed bounded probe fails closed and malformed evidence is rejected",
     surface: "codex",
     version: "1.0.0",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    policy: "observed",
     certifiedVersions: ["0.147.0"],
     probes: passing("codex"),
   });

@@ -59,7 +59,7 @@ export type CodexEndpointCompatibilityAttestation = {
   appServerVersion: string;
   endpointGeneration: string;
   protocol: "app-server-v2-stable";
-  /** Set only by the local managed-runtime gate for an observed same-major candidate. */
+  /** Internal marker for a read-only replacement probe; it never enables writes. */
   observedSchemaCandidate?: true;
   steering: {
     method: "turn/steer";
@@ -716,6 +716,14 @@ export class CodexAppServerConnector {
     if (typeof options.writesEnabled !== "boolean") {
       throw new CodexConnectorError("INVALID_CONFIGURATION");
     }
+    if (
+      options.writesEnabled &&
+      !CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
+        options.compatibility.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
+      )
+    ) {
+      throw new CodexConnectorError("INVALID_CONFIGURATION");
+    }
     this.writesEnabled = options.writesEnabled;
     this.transport = options.transport;
     this.clientInfo = validateClientInfo(
@@ -912,60 +920,6 @@ export class CodexAppServerConnector {
       if (writeBlockCode !== null) {
         this.emit("route_write_blocked", { errorCode: writeBlockCode });
       }
-    } catch (error) {
-      const normalized = this.normalizeError(error, true);
-      if (normalized.ambiguous && this.connection === "ready") {
-        this.setRouteStatus("uncertain");
-      }
-      this.handleActionError(normalized);
-      throw normalized;
-    } finally {
-      this.finishRequest("thread/resume");
-    }
-    return this.observation();
-  }
-
-  /**
-   * Revalidate the exact selected thread/resume schema without creating a
-   * turn. Unlike initial route setup, certification is permitted while the
-   * route is already idle; every other state remains fail-closed.
-   */
-  async certifyThreadOperations(
-    guard: CodexRouteGuard,
-  ): Promise<CodexConnectorObservation> {
-    this.assertGuard(guard);
-    this.assertReady();
-    this.assertNoRequest();
-    if (!this.selectedThreadObserved) {
-      throw new CodexConnectorError("THREAD_NOT_OBSERVED");
-    }
-    if (this.routeStatus !== "idle") {
-      throw new CodexConnectorError("ROUTE_BUSY");
-    }
-    const statusEpoch = this.statusEpoch;
-    this.beginRequest("thread/resume");
-    try {
-      const result = await this.request("thread/resume", {
-        excludeTurns: true,
-        threadId: this.route.threadId,
-      });
-      if (
-        !isRecord(result) ||
-        !isRecord(result.thread) ||
-        result.thread.id !== this.route.threadId ||
-        !Array.isArray(result.thread.turns) ||
-        result.thread.turns.length !== 0
-      ) {
-        throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
-      }
-      if (this.statusEpoch === statusEpoch) {
-        const status = parseRouteStatus(result.thread.status);
-        if (status !== "idle") {
-          throw new CodexConnectorError("RESULT_SCHEMA_MISMATCH", true);
-        }
-        this.setRouteStatus(status);
-      }
-      this.emit("thread_resumed");
     } catch (error) {
       const normalized = this.normalizeError(error, true);
       if (normalized.ambiguous && this.connection === "ready") {

@@ -135,6 +135,7 @@ namespace Embassy {
     connecting: "progress",
     paused: "inert",
     unavailable: "warning",
+    capacity: "warning",
     disconnected: "warning",
     stopped: "warning",
   };

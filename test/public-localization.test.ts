@@ -190,6 +190,55 @@ test("current dashboard docs use the stable direct-loopback contract", async () 
   }
 });
 
+test("current compatibility docs expose only the automatic exact-pin contract", async () => {
+  const currentPaths = [
+    "README.md",
+    "README.zh-CN.md",
+    "SECURITY.md",
+    "docs/CONFIGURATION.md",
+    "docs/CONFIGURATION.zh-CN.md",
+    "docs/DASHBOARD.md",
+    "docs/DASHBOARD.zh-CN.md",
+    "docs/DASHBOARD-PRD.md",
+    "docs/GATEWAY-ARCHITECTURE.md",
+    "docs/SITE-PRD.md",
+    "site/index.html",
+    "site/zh-CN/index.html",
+    "skills/embassy-peer/SKILL.md",
+  ] as const;
+  const documents = await Promise.all(currentPaths.map(readPublicFile));
+
+  for (const [index, document] of documents.entries()) {
+    const label = currentPaths[index] ?? "unknown";
+    assert.doesNotMatch(
+      document,
+      /EMBASSY_COMPAT_POLICY|embassy compat-(?:check|certify)\b|--with-turn\b|schema-attested|LaunchAgent|live certification|on-machine certification|在线认证|实时认证|线缆认证/iu,
+      label,
+    );
+  }
+
+  const [englishConfiguration, chineseConfiguration, skill, englishSite, chineseSite] =
+    await Promise.all([
+      readPublicFile("docs/CONFIGURATION.md"),
+      readPublicFile("docs/CONFIGURATION.zh-CN.md"),
+      readPublicFile("skills/embassy-peer/SKILL.md"),
+      readPublicFile("site/index.html"),
+      readPublicFile("site/zh-CN/index.html"),
+    ]);
+
+  for (const document of [englishConfiguration, chineseConfiguration]) {
+    assert.ok(document.includes("2.1.226"));
+    assert.ok(document.includes("0.147.0"));
+    assert.ok(document.includes("thread/loaded/list"));
+  }
+  assert.match(englishConfiguration, /automatic and exact-pinned/i);
+  assert.match(chineseConfiguration, /自动且精确固定版本/u);
+  assert.match(skill, /Compatibility is automatic, exact-version-pinned/);
+  assert.match(skill, /replacement generation starts monitor-only/);
+  assert.match(englishSite, /validates exact reviewed versions automatically/);
+  assert.match(chineseSite, /自动验证精确的已审查版本/u);
+});
+
 test("marketing pages preserve structure, protocol tokens, and reciprocal locale links", async () => {
   const [english, chinese] = await Promise.all([
     readPublicFile("site/index.html"),

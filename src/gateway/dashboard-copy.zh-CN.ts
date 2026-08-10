@@ -95,6 +95,11 @@ export const dashboardCopyZhCn = {
   "guidance.queueStalled.body": "最早接受的消息已排队超过投递截止时间的一半。",
   "guidance.queueStalled.action":
     "运行 embassy status。不要重发已接受的工作；Embassy 会跟踪到结算或过期。",
+  "guidance.recipientWaitingInput.title": "接收方会话可能需要输入",
+  "guidance.recipientWaitingInput.body":
+    "接收方会话似乎正在自己的窗口中等待交互式输入；请前往该窗口查看。",
+  "guidance.recipientWaitingInput.action":
+    "请在接收方会话自己的窗口中处理；不要重发已接受的消息。",
   "guidance.unconfirmed.title": "无法确认投递",
   "guidance.unconfirmed.body":
     "本地传输写入已完成，但该次尝试结算时没有可用的终结原生证据。",
@@ -239,17 +244,15 @@ export const dashboardCopyZhCn = {
   "diagnostics.connectors": "连接器",
   "diagnostics.connectors.empty": "没有连接器元数据。",
   "diagnostics.connectors.caption": "本地提供方连接器状态",
-  "diagnostics.compatibilityChecks": "兼容性检查",
-  "diagnostics.compatibilityChecks.empty": "尚未记录兼容性检查。",
-  "diagnostics.compatibilityChecks.caption": "有限提供方架构证明",
+  "diagnostics.compatibilityChecks": "提供方兼容性",
+  "diagnostics.compatibilityChecks.empty": "暂无提供方兼容性状态。",
+  "diagnostics.compatibilityChecks.caption": "自动提供方兼容性状态",
   "diagnostics.version": "版本",
   "diagnostics.tier": "层级",
   "diagnostics.checkedAt": "检查时间",
-  "diagnostics.certification": "实时认证",
-  "diagnostics.certifiedAt": "认证时间",
-  "diagnostics.failedProbe": "失败探测",
-  "compatibilityTier.certified": "已认证",
-  "compatibilityTier.schema_attested": "架构已证明",
+  "diagnostics.failure": "失败项",
+  "compatibilityTier.certified": "受支持",
+  "compatibilityTier.schema_attested": "旧版观察",
   "compatibilityTier.incompatible": "不兼容",
   "diagnostics.protocol": "协议",
   "diagnostics.health": "健康状态",
@@ -369,6 +372,8 @@ export const dashboardCopyZhCn = {
   "live.connection.connecting": "正在连接…",
   "live.connection.connected": "数据流已连接",
   "live.connection.unavailable": "观察器不可用 — 正在重试",
+  "live.connection.capacity":
+    "已打开 4 个实时面板窗口——请关闭一个，然后重新连接",
   "live.connection.disconnected": "连接已断开 — 请点击“重新连接”",
   "live.connection.fatal": "面板会话不可用",
   "live.connection.paused": "更新已暂停",
@@ -392,7 +397,8 @@ export const dashboardCopyZhCn = {
   "live.http.bodyTooLarge": "请求正文过大。",
   "live.http.targetTooLarge": "请求目标过长。",
   "live.http.unsupportedMediaType": "不支持此媒体类型。",
-  "live.http.tooManyStreams": "实时流数量过多。",
+  "live.http.tooManyStreams":
+    "已打开 4 个实时面板窗口。请关闭一个，然后重新连接。",
   "live.http.headersTooLarge": "请求头过大。",
   "live.http.snapshotUnavailable": "面板快照不可用。",
   "live.http.requestFailed": "请求失败。",
@@ -541,9 +547,7 @@ export const dashboardCopyZhCn = {
   "app.diag.col.compat": "兼容性",
   "app.diag.versions.rangeAbsent":
     "实时契约不携带受支持的协议范围，因此这里只显示兼容性判定。",
-  "app.diag.attestation.title": "证明",
-  "app.diag.attestation.absent":
-    "实时契约不携带证明信息。请用下面的命令查看本地状态。",
+  "app.diag.providerCompatibility.title": "提供方兼容性",
   "app.diag.lease.title": "租约 / 实例",
   "app.diag.lease.absent": "实时契约不携带租约状态。请用下面的命令查看本地状态。",
   "app.diag.limits": "限制与压力",

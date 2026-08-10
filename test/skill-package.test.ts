@@ -75,6 +75,8 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /old name stops resolving immediately/);
   assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
+  assert.match(skill, /Compatibility is automatic, exact-version-pinned/);
+  assert.match(skill, /replacement generation starts monitor-only/);
   assert.match(skill, /default paired mode/);
   assert.match(skill, /SENDER_NOT_PAIRED/);
   assert.match(skill, /serve --inbound open/);
@@ -84,6 +86,10 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /wrong principal/);
 
   assert.doesNotMatch(skill, /~\/.claude|\/tmp\/cc-socks|\.claude\/sessions/);
+  assert.doesNotMatch(
+    skill,
+    /EMBASSY_COMPAT_POLICY|embassy compat-(?:check|certify)\b|--with-turn\b|schema-attested|LaunchAgent|live certification|on-machine certification/i,
+  );
   assert.doesNotMatch(skill, /\b(?:printenv|set)\b/);
   assert.doesNotMatch(skill, /\bclaude\s+(?:-p|--print)\b/);
   assert.doesNotMatch(skill, /--(?:target-id|session-id|pid|socket(?:-path)?)\b/);

@@ -38,14 +38,6 @@ import {
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
 import { projectGatewayPublicSnapshot } from "../src/gateway/types.js";
-import {
-  attachCompatibilityCertification,
-  certifiedCompatibilityVersions,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-  type CompatibilityCertificationReport,
-  type CompatibilityCheckReport,
-} from "../src/gateway/compatibility.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
@@ -284,8 +276,6 @@ function handlers(
     unpair: () => ({ accepted: true, code: "ok" }),
     listSnapshot: () => snapshot(),
     observeSnapshot: () => ({ snapshotRevision: 3, snapshot: snapshot() }),
-    compatibilityCheck: () => compatibilityReport(),
-    compatibilityCertify: () => compatibilityCertificationReport(),
     deliveryStatus: () => ({
       found: true,
       state: "delivered",
@@ -318,39 +308,6 @@ function handlers(
       revision: 8,
     }),
     ...overrides,
-  };
-}
-
-function compatibilityReport(): CompatibilityCheckReport {
-  const surfaces = (["claude", "codex"] as const).map((surface) =>
-    evaluateCompatibilityAttestation({
-      surface,
-      version: certifiedCompatibilityVersions[surface][0]!,
-      checkedAt: NOW,
-      policy: "observed",
-      certifiedVersions: certifiedCompatibilityVersions[surface],
-      probes: compatibilityProbeNames[surface].map((name) => ({
-        name,
-        outcome: "pass" as const,
-      })),
-    }),
-  );
-  return { policy: "observed", compatible: true, surfaces };
-}
-
-function compatibilityCertificationReport(): CompatibilityCertificationReport {
-  const report = compatibilityReport();
-  return {
-    policy: report.policy,
-    certified: true,
-    withTurn: false,
-    surfaces: report.surfaces.map((attestation) =>
-      attachCompatibilityCertification(attestation, {
-        depth: attestation.surface === "claude" ? "wire" : "thread_ops",
-        outcome: "pass",
-        certifiedAt: NOW,
-      }),
-    ),
   };
 }
 
@@ -789,8 +746,6 @@ test("only exposes queue-mode lifecycle methods", () => {
     "unpair",
     "list_snapshot",
     "observe_snapshot",
-    "compat_check",
-    "compat_certify",
     "delivery_status",
     "untrack",
     "send_to_claude",
@@ -976,7 +931,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["delivery_status", { token: "dlv_too-short" }],
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     ["observe_snapshot", { extra: true }],
-    ["compat_check", { extra: true }],
     ["remove_stale_codex_registration", { alias: "claude@this-mac" }],
     ["remove_stale_codex_registration", { alias: "codex-main" }],
     [
@@ -1024,6 +978,12 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     await rawRequest(socketPath, wireRequest("steer", {})),
     "UNKNOWN_METHOD",
   );
+  for (const removedMethod of ["compat_check", "compat_certify"]) {
+    assertWireError(
+      await rawRequest(socketPath, wireRequest(removedMethod, {})),
+      "UNKNOWN_METHOD",
+    );
+  }
   assertWireError(
     await rawRequest(
       socketPath,
@@ -1496,98 +1456,6 @@ test("observe_snapshot carries a maximally projected snapshot under the control 
     projected.truncation.messages,
   );
   await server.close();
-});
-
-test("compat_check accepts only the exact bounded report schema", async () => {
-  const { stateDir, socketPath } = await privateState();
-  const server = await startGatewayControlServer({
-    stateDir,
-    socketPath,
-    handlers: handlers(),
-  });
-  const accepted = await rawRequest(
-    socketPath,
-    wireRequest("compat_check", {}),
-  );
-  assert.equal(accepted.ok, true);
-  assert.deepEqual(accepted.result, compatibilityReport());
-  await server.close();
-
-  const invalidState = await privateState();
-  const invalidServer = await startGatewayControlServer({
-    stateDir: invalidState.stateDir,
-    socketPath: invalidState.socketPath,
-    handlers: handlers({
-      compatibilityCheck: () => ({
-        ...compatibilityReport(),
-        compatible: false,
-      }),
-    }),
-  });
-  const rejected = await rawRequest(
-    invalidState.socketPath,
-    wireRequest("compat_check", {}),
-  );
-  assertWireError(rejected, "INVALID_HANDLER_RESPONSE");
-  await invalidServer.close();
-});
-
-test("compat_certify accepts only one exact route choice and closed evidence", async () => {
-  const { stateDir, socketPath } = await privateState();
-  const observed: unknown[] = [];
-  const server = await startGatewayControlServer({
-    stateDir,
-    socketPath,
-    handlers: handlers({
-      compatibilityCertify: (params) => {
-        observed.push(params);
-        return compatibilityCertificationReport();
-      },
-    }),
-  });
-  const accepted = await rawRequest(
-    socketPath,
-    wireRequest("compat_certify", {
-      codexAlias: "codex-main@this-mac",
-      withTurn: false,
-    }),
-  );
-  assert.equal(accepted.ok, true);
-  assert.deepEqual(observed, [
-    { codexAlias: "codex-main@this-mac", withTurn: false },
-  ]);
-  for (const params of [
-    {},
-    { withTurn: false, extra: true },
-    { codexAlias: "claude-main@this-mac", withTurn: false },
-    { withTurn: "false" },
-  ]) {
-    assertWireError(
-      await rawRequest(socketPath, wireRequest("compat_certify", params)),
-      "INVALID_REQUEST",
-    );
-  }
-  await server.close();
-
-  const invalidState = await privateState();
-  const invalidServer = await startGatewayControlServer({
-    stateDir: invalidState.stateDir,
-    socketPath: invalidState.socketPath,
-    handlers: handlers({
-      compatibilityCertify: () => ({
-        ...compatibilityCertificationReport(),
-        certified: false,
-      }),
-    }),
-  });
-  assertWireError(
-    await rawRequest(
-      invalidState.socketPath,
-      wireRequest("compat_certify", { withTurn: false }),
-    ),
-    "INVALID_HANDLER_RESPONSE",
-  );
-  await invalidServer.close();
 });
 
 test("caps concurrent same-user control connections with a normalized busy response", async () => {

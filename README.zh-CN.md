@@ -34,6 +34,8 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。请在普通终端中运行守护进程命令，切勿在代理会话内运行：Codex 任务会继承守护进程的环境，因此在 Claude Code 会话内启动的守护进程会把该会话的身份泄漏到每个任务中，注册将以 `CALLER_IDENTITY_CONFLICT` 关闭失败——请在普通终端执行 `codex app-server daemon restart` 修复。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
 
+提供方兼容性无需操作员执行额外步骤。`embassy serve` 会自动验证本发布版精确固定的 Claude 与 Codex 版本，并在遇到未知版本或必需协议结构时关闭失败。
+
 > **已知限制：** 仅当 Desktop 使用托管独立 App Server 时，Embassy 才能访问 Codex 任务。在该模式下，任务目前无法连接 Desktop 内置的应用内浏览器（`@Browser` 可加载但无法附着）。将 Desktop 切换回其默认的私有 App Server 会立即恢复内置浏览器——但会使这些任务对 Embassy 不可达。目前未发现其他能力回退，但这并非穷尽的能力对比测试。
 
 ### 1. 启动 Embassy
@@ -63,7 +65,7 @@ embassy register-codex --alias codex-reviewer@this-mac
 
 你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，运行 `unregister-codex`。
 
-仅在同一个 `embassy serve` 代理持续运行期间，托管 App Server 重启后 Embassy 才会自动探测新端点；只有替代端点兼容，且 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才会重新附着这个别名。端点不兼容，或精确任务缺失、重复，都会使路由保持陈旧以供诊断；Embassy 绝不会按别名改投其他任务，也不会跨端点代际边界重建或重放消息正文。如果 `embassy serve` 本身重启，保留的路由会以 `REOBSERVATION_REQUIRED` 陈旧状态启动；在启动时自动重新激活功能实现之前，必须由同一个 Codex 任务使用同一别名再次运行 `embassy register-codex --alias codex-reviewer@this-mac`，且不要先注销。
+托管 App Server 端点代际变更与 `embassy serve` 重启都会使用精确任务重新激活。每个替代端点都从仅监控状态开始；只有重新初始化并通过 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才能重新锚定别名，而且在激活这个精确代际前写入始终保持封锁。因此，正常的代理重启不需要手动重新注册。端点不兼容，或精确任务缺失、重复，都会使路由以 `REOBSERVATION_REQUIRED` 保持陈旧；该任务恢复可观察后，请从精确任务内再次运行 `embassy register-codex --alias codex-reviewer@this-mac`，且不要先注销。Embassy 绝不会按别名改投其他任务，也不会重放写入结果不明确的正文。
 
 ### 3. 选择 Claude 目的地
 
@@ -178,6 +180,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 
 - **本地代理，稳定的 loopback 仪表盘。** `embassy serve` 仅监听私有 Unix 域套接字，不发起任何提供商 API 调用。可选启用的 `embassy dashboard --live` 组件是一个独立进程，也是 Embassy 能创建的唯一监听器；它精确绑定 `127.0.0.1`，默认使用稳定端口 `41961`（也可为本次启动传入 `--port <n>`）。它是在可信单用户机器上有意不设身份认证的本地 HTTP；Host、Origin 与哨兵检查约束浏览器来源的请求，但不认证本地进程或 OS 用户。
 - **同 UID 隔离，而非身份认证。** 调用者身份继承自本地进程环境。路由所有权和生成号检查能减少误操作，但不是对已以你的 OS 用户身份运行的代码的防御。
+- **兼容性检查自动执行并精确固定版本。** 代理/提供方启动只验证本发布版已审查的版本和协议结构。每个替代 App Server 端点代际都必须先通过新的仅监控检查才能重新锚定路由；未知版本与结构异常的代际保持禁止写入。
 - **来源标记是提示，不是签名。** Embassy 在提供方写入边界生成跨会话来源封装，让接收模型能够区分代理路由消息及其已验证发送方别名；这不是密码学证明，也不会把不可信正文变成可信指令。
 - **原生权限保持原生。** Embassy 不发送任何 Codex 审批或沙盒覆盖，也不应答任何审批请求。`crossSessionInbound` 仍是 Claude 自身的控制机制；Embassy 无法覆盖它。
 - **消息体有界保存，属于你。** 消息体以有界保留策略持久化在 broker 的私有 mode-0600 状态中，让台账能够展示邮件本身；排队中的邮件在 broker 重启后幸存并恰好重发一次。原始提供方帧仍仅存于内存。静态仪表盘文件保持仅元数据；实时仪表盘展示保留的正文。

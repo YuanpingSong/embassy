@@ -215,10 +215,8 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
 
   assert.deepEqual(claudeOptions, {
     claudeExecutable: SYNTHETIC_LAUNCHER,
-    compatibilityPolicy: "observed",
   });
   assert.equal(codexFactoryOptions?.appServerVersion, "0.147.0");
-  assert.equal(codexFactoryOptions?.compatibilityPolicy, "observed");
   assert.equal(codexFactoryOptions?.hostId, "this-mac");
   assert.equal(codexFactoryOptions?.writableProtocolAttested, true);
   assert.deepEqual(codexFactoryOptions?.environment, {
@@ -233,10 +231,8 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
   assert.deepEqual(Object.keys(codexProviderOptions ?? {}), [
     "factory",
     "refreshFactory",
-    "compatibilityPolicy",
   ]);
   assert.equal(typeof codexProviderOptions?.refreshFactory, "function");
-  assert.equal(codexProviderOptions?.compatibilityPolicy, "observed");
   assert.equal(serviceOptions?.store, store);
   assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
@@ -267,11 +263,10 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
   assert.equal(signals.listenerCount(), 0);
 });
 
-test("strict assembly keeps exact startup resolution and uses the refresh-only candidate resolver after startup", async () => {
+test("assembly keeps exact startup resolution and uses the refresh-only candidate resolver after startup", async () => {
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
     EMBASSY_STATE_DIR: "/synthetic/controller-state",
-    EMBASSY_COMPAT_POLICY: "strict",
   };
   const config = loadGatewayConfig(env);
   const abort = new AbortController();
@@ -283,7 +278,6 @@ test("strict assembly keeps exact startup resolution and uses the refresh-only c
   let providerOptions:
     | {
         refreshFactory?: () => Promise<LocalCodexTransportFactory>;
-        compatibilityPolicy?: string;
       }
     | undefined;
 
@@ -303,13 +297,11 @@ test("strict assembly keeps exact startup resolution and uses the refresh-only c
       createStore: () => new GatewayStore(config),
       createCodexFactory: async (options) => {
         startupCalls += 1;
-        assert.equal(options.compatibilityPolicy, "strict");
         return initial;
       },
       createCodexRefreshCandidateFactory: async (options) => {
         candidateCalls += 1;
         assert.equal(options.appServerVersion, "0.147.0");
-        assert.equal(options.compatibilityPolicy, "strict");
         assert.equal(options.writableProtocolAttested, true);
         return candidate;
       },
@@ -321,7 +313,6 @@ test("strict assembly keeps exact startup resolution and uses the refresh-only c
         start: async () => {
           assert.equal(startupCalls, 1);
           assert.equal(candidateCalls, 0);
-          assert.equal(providerOptions?.compatibilityPolicy, "strict");
           const refreshFactory = providerOptions?.refreshFactory;
           assert.notEqual(refreshFactory, undefined);
           assert.strictEqual(await refreshFactory!(), candidate);

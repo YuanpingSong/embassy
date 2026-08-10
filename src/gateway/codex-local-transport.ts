@@ -22,10 +22,7 @@ import {
   type SocketCompatibleDuplex,
   type WebSocketDuplexTransportOptions,
 } from "./codex-app-server.js";
-import {
-  sharesCompatibilityMajor,
-  type CompatibilityPolicy,
-} from "./compatibility.js";
+import { sharesCompatibilityMajor } from "./compatibility.js";
 
 const APP_SERVER_CONTROL_DIRECTORY = "app-server-control";
 const APP_SERVER_CONTROL_SOCKET = "app-server-control.sock";
@@ -78,7 +75,6 @@ export type ManagedCodexRuntimeTarget = {
 export type LocalCodexTransportFactoryOptions = {
   /** Reviewed installed App Server schema/version. Never inferred from stdout. */
   appServerVersion: string;
-  compatibilityPolicy?: CompatibilityPolicy;
   environment?: NodeJS.ProcessEnv;
   gracefulExitMs?: number;
   hostId?: string;
@@ -145,7 +141,6 @@ export type LocalCodexWriteCompatibilityAttestation =
 
 export type LocalCodexTransportFactory = {
   readonly appServerVersion: string;
-  readonly compatibilityPolicy: CompatibilityPolicy;
   /** Exact reviewed monitor schema; this does not authorize a turn write. */
   readonly schemaCompatibility: LocalCodexSchemaCompatibilityAttestation;
   /** Null until the separate writable notification/fanout gate is attested. */
@@ -234,7 +229,7 @@ function managedCodexTargetTriple(
   return undefined;
 }
 
-async function resolveObservedManagedLocalCodexInstallation(
+async function resolveRefreshCandidateManagedLocalCodexInstallation(
   home: string,
   certifiedVersion: string,
   runtimeTarget: ManagedCodexRuntimeTarget,
@@ -257,7 +252,10 @@ async function resolveObservedManagedLocalCodexInstallation(
     targetTriple !== undefined && releaseLeaf.endsWith(`-${targetTriple}`)
       ? releaseLeaf.slice(0, -1 - targetTriple.length)
       : releaseLeaf;
-  if (!sharesCompatibilityMajor(certifiedVersion, observedVersion)) {
+  if (
+    !VERSION_PATTERN.test(observedVersion) ||
+    !sharesCompatibilityMajor(certifiedVersion, observedVersion)
+  ) {
     throw new LocalCodexTransportError("APP_SERVER_VERSION_MISMATCH");
   }
   return await resolveManagedLocalCodexInstallation(
@@ -677,7 +675,6 @@ class Factory implements LocalCodexTransportFactory {
   readonly writeCompatibility: LocalCodexWriteCompatibilityAttestation | null;
   readonly endpointGeneration: string;
   readonly appServerVersion: string;
-  readonly compatibilityPolicy: CompatibilityPolicy;
   readonly hostId: string;
   readonly writableReady: boolean;
   private closed = false;
@@ -699,10 +696,13 @@ class Factory implements LocalCodexTransportFactory {
   ) {
     this.endpointGeneration = installation.endpointGeneration;
     this.appServerVersion = installation.appServerVersion;
-    this.compatibilityPolicy = options.compatibilityPolicy ?? "strict";
     this.protocolVersion = installation.appServerVersion;
     this.hostId = options.hostId ?? "this-mac";
-    this.writableReady = options.writableProtocolAttested === true;
+    this.writableReady =
+      options.writableProtocolAttested === true &&
+      CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
+        this.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
+      );
     const compatibility = {
       appServerVersion: this.appServerVersion,
       endpointGeneration: this.endpointGeneration,
@@ -875,14 +875,13 @@ async function createLocalCodexTransportFactoryForResolution(
     );
   } catch (error) {
     if (
-      (resolution !== "refresh_candidate" &&
-        options.compatibilityPolicy !== "observed") ||
+      resolution !== "refresh_candidate" ||
       !(error instanceof LocalCodexTransportError) ||
       error.code !== "APP_SERVER_VERSION_MISMATCH"
     ) {
       throw error;
     }
-    installation = await resolveObservedManagedLocalCodexInstallation(
+    installation = await resolveRefreshCandidateManagedLocalCodexInstallation(
       home,
       options.appServerVersion,
       runtimeTarget,
@@ -929,9 +928,7 @@ async function createLocalCodexTransportFactoryForResolution(
 }
 
 /**
- * Resolve the startup factory under the configured admission policy. Strict
- * startup remains pinned to the exact reviewed build; observed startup may
- * inspect a same-major schema candidate before the provider admits it.
+ * Resolve the startup factory at the exact reviewed build.
  */
 export async function createLocalCodexTransportFactory(
   options: LocalCodexTransportFactoryOptions,
@@ -946,10 +943,9 @@ export async function createLocalCodexTransportFactory(
 
 /**
  * Resolve only a replacement endpoint candidate after an already-admitted
- * factory reports a generation change. This narrow path may inspect the
- * currently installed same-major numeric build even under strict policy so
- * the provider can run its four read-only probes and record an incompatible
- * attestation. It does not relax normal startup admission or provider writes.
+ * factory reports a generation change. This narrow path may describe the
+ * currently installed numeric build so the provider can record an incompatible
+ * transition. It never relaxes startup admission or provider writes.
  */
 export async function createLocalCodexRefreshCandidateTransportFactory(
   options: LocalCodexTransportFactoryOptions,

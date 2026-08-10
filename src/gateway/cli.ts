@@ -54,10 +54,6 @@ import {
   type GatewayServerOptions,
 } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
-import {
-  isCompatibilityCertificationReport,
-  isCompatibilityCheckReport,
-} from "./compatibility.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -72,8 +68,6 @@ export const gatewayCliCommands = [
   "serve",
   "health",
   "status",
-  "compat-check",
-  "compat-certify",
   "delivery-status",
   "wait-delivery",
   "untrack",
@@ -99,12 +93,7 @@ export const gatewayCliExitCodes = Object.freeze({
   unavailable: 4,
   ambiguous: 5,
   failure: 6,
-  claudeCertificationFailed: 7,
-  codexCertificationFailed: 8,
-  multipleCertificationsFailed: 9,
 } as const);
-
-const COMPAT_CERTIFY_CONTROL_TIMEOUT_MS = 90_000;
 
 type Writable = {
   write(chunk: string): unknown;
@@ -522,28 +511,6 @@ async function buildRequest(
         method: "list_snapshot",
         params: emptyParams(args),
       };
-    case "compat-check":
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "compat_check",
-        params: emptyParams(args),
-      };
-    case "compat-certify": {
-      const options = parseOptions(args, ["codex"], ["with-turn"]);
-      assertExactOptionCount(options, 0, 2);
-      const codexAlias =
-        options.codex === undefined
-          ? undefined
-          : requireCodexAlias(options, "codex");
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "compat_certify",
-        params: {
-          withTurn: options["with-turn"] === true,
-          ...(codexAlias === undefined ? {} : { codexAlias }),
-        },
-      };
-    }
     case "delivery-status":
     case "wait-delivery": {
       const options = parseOptions(args, ["token"]);
@@ -1112,9 +1079,6 @@ export async function runGatewayCli(
       response = await sendRequest({
         socketPath: config.controlSocketPath,
         request,
-        ...(command === "compat-certify"
-          ? { timeoutMs: COMPAT_CERTIFY_CONTROL_TIMEOUT_MS }
-          : {}),
       });
     }
     if (!response.ok) {
@@ -1131,46 +1095,6 @@ export async function runGatewayCli(
         result: response.result,
       }),
     );
-    if (command === "compat-check" && isCompatibilityCheckReport(response.result)) {
-      for (const surface of response.result.surfaces) {
-        stderr.write(
-          `[embassy] ${surface.surface}: ${surface.tier} (${surface.version})${
-            surface.safeErrorCode === undefined
-              ? ""
-              : ` — ${surface.safeErrorCode}`
-          }\n`,
-        );
-      }
-      return response.result.compatible
-        ? gatewayCliExitCodes.ok
-        : gatewayCliExitCodes.failure;
-    }
-    if (
-      command === "compat-certify" &&
-      isCompatibilityCertificationReport(response.result)
-    ) {
-      for (const surface of response.result.surfaces) {
-        const certification = surface.certification;
-        if (certification === undefined) continue;
-        stderr.write(
-          `[embassy] ${surface.surface}: ${certification.outcome} (${certification.depth})${
-            certification.safeErrorCode === undefined
-              ? ""
-              : ` — ${certification.safeErrorCode}`
-          }\n`,
-        );
-      }
-      if (response.result.certified) return gatewayCliExitCodes.ok;
-      const failedSurfaces = response.result.surfaces.filter(
-        (surface) => surface.certification?.outcome === "fail",
-      );
-      if (failedSurfaces.length > 1) {
-        return gatewayCliExitCodes.multipleCertificationsFailed;
-      }
-      return failedSurfaces[0]?.surface === "claude"
-        ? gatewayCliExitCodes.claudeCertificationFailed
-        : gatewayCliExitCodes.codexCertificationFailed;
-    }
     const exitCode =
       waitedDeliveryResponse === undefined
         ? responseExitCode(response)

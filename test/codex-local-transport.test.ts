@@ -290,70 +290,36 @@ test("managed installation pins release binary and already-running private socke
   }
 });
 
-test("observed policy admits only a same-major managed Codex candidate", async () => {
-  const observed = await installationFixture("0.148.0");
-  try {
-    await assert.rejects(
-      createLocalCodexTransportFactory(
-        {
-          appServerVersion: VERSION,
-          compatibilityPolicy: "strict",
-          environment: { HOME: observed.home },
-          writableProtocolAttested: true,
-        },
-        { loginHome: () => observed.home },
-      ),
-      (error: unknown) =>
-        error instanceof LocalCodexTransportError &&
-        error.code === "APP_SERVER_VERSION_MISMATCH",
-    );
-    const factory = await createLocalCodexTransportFactory(
-      {
-        appServerVersion: VERSION,
-        compatibilityPolicy: "observed",
-        environment: { HOME: observed.home },
-        writableProtocolAttested: true,
-      },
-      { loginHome: () => observed.home },
-    );
-    assert.equal(factory.appServerVersion, "0.148.0");
-    assert.equal(factory.compatibilityPolicy, "observed");
-    assert.equal(factory.schemaCompatibility.observedSchemaCandidate, true);
-    assert.deepEqual(factory.writeCompatibility, factory.schemaCompatibility);
-    await factory.close();
-  } finally {
-    await observed.close();
-  }
-
-  const major = await installationFixture("1.0.0");
-  try {
-    await assert.rejects(
-      createLocalCodexTransportFactory(
-        {
-          appServerVersion: VERSION,
-          compatibilityPolicy: "observed",
-          environment: { HOME: major.home },
-          writableProtocolAttested: true,
-        },
-        { loginHome: () => major.home },
-      ),
-      (error: unknown) =>
-        error instanceof LocalCodexTransportError &&
-        error.code === "APP_SERVER_VERSION_MISMATCH",
-    );
-  } finally {
-    await major.close();
+test("startup admits only the exact managed Codex version", async () => {
+  for (const version of ["0.148.0", "1.0.0"] as const) {
+    const installation = await installationFixture(version);
+    try {
+      await assert.rejects(
+        createLocalCodexTransportFactory(
+          {
+            appServerVersion: VERSION,
+            environment: { HOME: installation.home },
+            writableProtocolAttested: true,
+          },
+          { loginHome: () => installation.home },
+        ),
+        (error: unknown) =>
+          error instanceof LocalCodexTransportError &&
+          error.code === "APP_SERVER_VERSION_MISMATCH",
+      );
+    } finally {
+      await installation.close();
+    }
   }
 });
 
-test("strict refresh candidate resolution inspects same-major drift without relaxing startup", async () => {
+test("refresh candidate resolution inspects same-major drift without relaxing exact startup", async () => {
   const drifted = await installationFixture("0.148.0");
   try {
     await assert.rejects(
       createLocalCodexTransportFactory(
         {
           appServerVersion: VERSION,
-          compatibilityPolicy: "strict",
           environment: { HOME: drifted.home },
           writableProtocolAttested: true,
         },
@@ -368,7 +334,6 @@ test("strict refresh candidate resolution inspects same-major drift without rela
     const candidate = await createLocalCodexRefreshCandidateTransportFactory(
       {
         appServerVersion: VERSION,
-        compatibilityPolicy: "strict",
         environment: { HOME: drifted.home },
         writableProtocolAttested: true,
       },
@@ -382,7 +347,6 @@ test("strict refresh candidate resolution inspects same-major drift without rela
     );
     assert.equal(candidate.appServerVersion, "0.148.0");
     assert.equal(candidate.protocolVersion, "0.148.0");
-    assert.equal(candidate.compatibilityPolicy, "strict");
     assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
     assert.equal(spawnCalls, 0);
     await candidate.close();
@@ -399,7 +363,6 @@ test("refresh candidate resolution rejects a major jump and non-numeric build", 
         createLocalCodexRefreshCandidateTransportFactory(
           {
             appServerVersion: VERSION,
-            compatibilityPolicy: "strict",
             environment: { HOME: drifted.home },
             writableProtocolAttested: true,
           },

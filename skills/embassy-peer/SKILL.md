@@ -31,6 +31,8 @@ embassy health
 
 If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
+Compatibility is automatic, exact-version-pinned broker state. Startup validates the release's reviewed Claude and Codex versions and required protocol shapes; there is no separate agent or operator compatibility action. If an unknown version or required shape fails closed, report the safe result and stop rather than probing the provider, sending a test message, or trying to override the gate.
+
 List the public snapshot:
 
 ```sh
@@ -111,7 +113,7 @@ until manual recovery rather than leaving two live registrations.
 
 Embassy also pins the exact identity fail-closed when a retained route cannot fully reactivate or a fresh registration cannot confirm complete rollback. Retry only that exact identity; choose another only after the old route is confirmed unregistered and Embassy is restarted.
 
-While the same `embassy serve` broker remains running, a compatible Codex App Server endpoint-generation change can reattach an exact registered task automatically. A broker restart is different: a retained Codex route currently starts stale with `REOBSERVATION_REQUIRED`. Recover it only from that exact Codex task by rerunning `embassy register-codex --alias <same-alias>`; do not unregister first, supply a thread ID, or replay any prior body.
+A compatible Codex App Server generation change or broker restart can reattach an exact registered task automatically. Each replacement generation starts monitor-only and must pass a fresh initialize plus exact `thread/loaded/list` observation before re-anchoring; provider writes remain fenced until the controller activates that exact generation. A normal broker restart therefore needs no manual registration. If boot reactivation cannot find the task exactly once, the route remains stale with `REOBSERVATION_REQUIRED`; once the task is observable, recover it only from that exact Codex task by rerunning `embassy register-codex --alias <same-alias>`. Do not unregister first, supply a thread ID, or replay any ambiguously written body.
 
 Unregister from the same Codex task:
 

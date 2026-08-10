@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Conversation hop accounting and `EMBASSY_MAX_HOPS`; caller identity, conversation membership, route policy, deadlines, rate limits, and bounded queues remain the delivery safeguards.
 - The live dashboard's one-use fragment token, cookie/session exchange, random instance path, and bootstrap file.
+- The operator compatibility workflow: `EMBASSY_COMPAT_POLICY`, tiered same-major admission, persisted certification evidence, `compat-check`, `compat-certify`, `--with-turn`, and the related LaunchAgent recipes. Compatibility is now automatic and exact-pinned at provider startup, with a fresh monitor-only check for each replacement Codex endpoint generation before writes can activate.
 
 ### Security
 

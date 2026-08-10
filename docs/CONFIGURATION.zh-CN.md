@@ -10,7 +10,6 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`，当 `XDG_STATE_HOME` 未设置时为 `$HOME/.local/state/agent-embassy` | 私有状态、控制套接字和仪表盘；覆盖值必须为绝对路径，且不会迁移固定的主机级租约 |
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`，解析到固定版本目标 | Claude Code 启动器的绝对路径；不搜索 `PATH` |
-| `EMBASSY_COMPAT_POLICY` | `observed` | `observed` 仅在有界结构探测通过后接纳未知的同主版本提供方；`strict` 只接纳本版本的已认证版本清单 |
 | `EMBASSY_STEERING_ENABLED` | `1` | 全局 `STEER:` 停用开关；精确设为 `0` 后，所有正文都按普通排队消息处理 |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
 
@@ -41,52 +40,17 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 
 ## 兼容性约定
 
-Embassy 使用两个未被记录为稳定第三方 API 的提供方接口。本版本的已认证清单为 Claude Code 2.1.224–2.1.226（对等协议 1）以及 Codex App Server 0.147.0。
+Embassy 使用两个未被记录为稳定第三方 API 的提供方接口。兼容性检查是自动且精确固定版本的机制，不是操作员工作流。本版本只接纳：
 
-兼容性分为三个明确层级：
+- Claude Code 2.1.226 启动器/运行时与对等协议 1；
+- 已经运行、明确版本为 2.1.224、2.1.225 或 2.1.226，且使用对等协议 1 的已审查 Claude 对等会话；以及
+- Codex App Server 0.147.0。
 
-- **已认证（certified）**：精确版本位于本版本的确定性测试清单中；
-- **结构已验证（schema-attested）**：在默认 `observed` 策略下，未知的同主版本通过了有界启动探测；
-- **不兼容（incompatible）**：必需探测失败、主版本变化，或 `strict` 策略拒绝了认证清单外的版本。
+未知的提供方版本或对等协议、必需结构验证失败，或未通过新一轮验证的端点代际，都会使受影响的表面关闭。代理在提供方启动过程中自行执行有界的只读兼容性验证：检查配置的启动器或托管安装、精确版本、注册表/控制套接字结构、初始化与列表响应结构，以及协议常量。这些检查不会路由用户消息，也不会启动模型回合。运行时仍会严格解析每条记录、帧和响应。
 
-探测会验证启动器或托管安装、注册表/控制套接字结构、初始化与列表响应结构，以及协议常量；它不会发送消息或启动回合。结果按提供方版本缓存一次。运行时仍会严格验证每条记录、帧和响应。结构已验证的版本仍可能在结构不变的情况下改变语义；上游更新后若这一剩余风险很重要，请执行在线认证。
+每个替代 Codex App Server 端点代际都从仅监控状态开始。Embassy 会在该代际上重新执行初始化和 `thread/loaded/list` 检查，只有精确的私有任务身份恰好出现一次时才重新锚定保留路由。在控制器激活这个精确代际之前，写入始终保持封锁。版本或结构不匹配、任务缺失、任务重复或转换不干净，都会让路由保持陈旧且禁止写入，而不是改投其他任务。
 
-运行 `embassy compat-check` 执行不产生流量的有界探测。运行 `embassy compat-certify [--codex <alias>]` 增加本机线缆级证据：Embassy 创建一个短寿命、无标准输入的 Claude 打印会话，确认一条带标记的诊断帧已写入该精确且唯一发现的临时会话，随后关闭会话。直接的 `crossSessionInbound: accept` 写入不会产生 Claude 专用于审批流程的原生回执，因此线缆认证不声称获得了释放回执，也不声称模型已读取。所选空闲 Codex 任务只执行恢复与刷新，不启动回合。注册多个 Codex 路由时必须提供 `--codex`。仅当你明确希望用一个最小 Codex 模型回合（`reply OK`）取得更深证据时，才添加 `--with-turn`。认证失败会保留每个表面的安全代码并打印两个表面的结果：退出码 `7` 表示 Claude 失败，`8` 表示 Codex 失败，`9` 表示两者均失败；退出码 `5` 仅保留给真正不明确的控制传输结果。认证证据与提供方版本一同保留并显示在“诊断”中；它不会放宽运行时验证。
-
-托管的 Codex 安装通过精确路径和版本解析；`PATH` 上其他位置的 `codex` 不会被使用或修改。Claude 从 `EMBASSY_CLAUDE_BIN` 或官方的用户级启动器解析，从不搜索 `PATH`。
-
-### 跟进提供方更新
-
-仓库不会安装后台任务。如果你选择自动检查，请单独监管 `embassy serve`，并使用两个由当前用户拥有的 LaunchAgent：
-
-1. 更新触发任务：`ProgramArguments` 依次为 Embassy 二进制文件绝对路径、`compat-certify`、`--codex` 和一个精确的已注册别名；`WatchPaths` 包含 Claude 启动器与 Codex 应用包的绝对路径；
-2. 每日兜底任务：`ProgramArguments` 为 Embassy 二进制文件绝对路径与 `compat-check`，并按需设置 `StartCalendarInterval`。
-
-受监视任务的最小核心如下；加载前请把所有占位符替换为本机绝对路径或别名：
-
-```xml
-<key>ProgramArguments</key>
-<array>
-  <string>/ABSOLUTE/PATH/TO/embassy</string>
-  <string>compat-certify</string>
-  <string>--codex</string>
-  <string>codex-main@this-mac</string>
-</array>
-<key>WatchPaths</key>
-<array>
-  <string>/ABSOLUTE/HOME/.local/bin/claude</string>
-  <string>/Applications/Codex.app</string>
-</array>
-```
-
-每日任务将 `WatchPaths` 替换为：
-
-```xml
-<key>StartCalendarInterval</key>
-<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-```
-
-并在 `ProgramArguments` 中只使用 `compat-check`。这些命令会联系已经运行的本地代理，而不会启动它。因此，如果所选路由不存在或正忙，受监视认证会安全失败。该方案刻意省略 `--with-turn`，不会选择进入 Codex 模型调用深度。
+托管的 Codex 安装通过精确路径和版本解析；`PATH` 上其他位置的 `codex` 不会被使用或修改。Claude 从 `EMBASSY_CLAUDE_BIN` 或官方的用户级启动器解析，从不搜索 `PATH`。提供方升级后，必须等待明确审查并固定新版本的 Embassy 发布版。
 
 ## 寻址
 
@@ -94,4 +58,4 @@ Claude 会话通过其当前的 `name@host` 或用户提供的原生会话 UUID 
 
 名称、旧名称、PID、注册表路径、进程生成号和套接字生成号绝不会成为替代身份键。当两个在线会话共享同一当前名称时，Embassy 拒绝猜测。
 
-Codex 路由使用显式的 `codex-*` 别名和任务继承的线程标识。私有线程 ID 从不被接受为命令行参数，也从不被打印。同一个代理进程持续运行时，兼容的托管 App Server 端点代际变更可以自动重新锚定精确的已加载任务。`embassy serve` 本身重启后，保留的 Codex 路由目前会以 `REOBSERVATION_REQUIRED` 保持陈旧；请从该精确 Codex 任务内使用同一别名再次运行 `embassy register-codex --alias <同一别名>` 进行恢复，且不要先注销。切勿提供或重构线程 ID。如果该任务已不存在，实时仪表盘只有在代理证明该注册陈旧且所属端点代际已失效后，才能移除该保留注册。
+Codex 路由使用显式的 `codex-*` 别名和任务继承的线程标识。私有线程 ID 从不被接受为命令行参数，也从不被打印。兼容的托管 App Server 端点代际变更与代理重启都能自动重新锚定精确的已加载任务；正常重启不需要手动重新注册。如果启动时重新激活无法恰好一次找到该任务，路由会以 `REOBSERVATION_REQUIRED` 保持陈旧。该任务恢复可观察后，请从精确 Codex 任务内使用同一别名再次运行 `embassy register-codex --alias <同一别名>`，且不要先注销。切勿提供或重构线程 ID。如果该任务已不存在，实时仪表盘只有在代理证明该注册陈旧且所属端点代际已失效后，才能移除该保留注册。

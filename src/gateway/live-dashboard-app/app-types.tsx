@@ -12,6 +12,7 @@ namespace Embassy {
     | "connected"
     | "paused"
     | "unavailable"
+    | "capacity"
     | "disconnected"
     | "stopped";
 
@@ -155,6 +156,7 @@ namespace Embassy {
     | "connector_offline"
     | "route_stale"
     | "queue_stalled"
+    | "recipient_waiting_input"
     | "unconfirmed"
     | "degraded"
     | "codex_succession_busy"
@@ -345,18 +347,13 @@ namespace Embassy {
     | "certified"
     | "schema_attested"
     | "incompatible";
-  export type CompatibilityCertificationDepth = "wire" | "thread_ops" | "turn";
 
   export type DashboardCompatibilityCheckRow = Readonly<{
     surface: CompatibilitySurface;
     version: string;
     tier: CompatibilityTier;
     checkedAt: string;
-    certificationDepth?: CompatibilityCertificationDepth | undefined;
-    certificationOutcome?: "pass" | "fail" | undefined;
-    certifiedAt?: string | undefined;
-    certificationSafeErrorCode?: string | undefined;
-    failedProbe?: string | undefined;
+    failure?: string | undefined;
     safeErrorCode?: string | undefined;
   }>;
 

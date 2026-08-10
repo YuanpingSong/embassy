@@ -349,7 +349,7 @@ test("localizes every human HTTP fallback without changing status or security he
     ],
     [
       429,
-      "实时流数量过多。\n",
+      "已打开 4 个实时面板窗口。请关闭一个，然后重新连接。\n",
       invoke(
         createHandler(
           new SyntheticHub(LATEST, LIVE_DASHBOARD_LIMITS.maximumStreams),
@@ -893,6 +893,10 @@ test("attaches a same-origin SSE adapter and rejects a fifth stream", async () =
     rawHeaders: postHeaders(),
   });
   assert.equal(full.statusCode, 429);
+  assert.equal(
+    full.bodyText(),
+    "4 live dashboard windows are already open. Close one, then reconnect.\n",
+  );
   assert.equal(fullHub.addCalled, 0);
   assertSecurityHeaders(full);
 });

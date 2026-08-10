@@ -48,7 +48,6 @@ import { BridgeError } from "../src/errors.js";
 import {
   compatibilityProbeNames,
   type CompatibilityAttestation,
-  type CompatibilityCertification,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceObservation,
 } from "../src/gateway/compatibility.js";
@@ -324,13 +323,7 @@ class FakeProvider implements GatewayProviderAdapter {
   selectedRouteHandleOverride: string | undefined;
   closed = false;
   compatibilityProbeCalls = 0;
-  compatibilityCertificationCalls: Array<{
-    controllerStateRoot: string;
-    routeHandle?: string;
-    withTurn: boolean;
-  }> = [];
   compatibilityVersion: string | undefined;
-  compatibilityCertificationResult: CompatibilityCertification | undefined;
   compatibilitySurface?: () => CompatibilitySurfaceObservation;
   runCompatibilityProbes?: () => Promise<readonly CompatibilityProbeResult[]>;
   closeError: Error | undefined;
@@ -444,23 +437,6 @@ class FakeProvider implements GatewayProviderAdapter {
         name,
         outcome: "pass" as const,
       }));
-    };
-  }
-
-  async runCompatibilityCertification(input: Readonly<{
-    controllerStateRoot: string;
-    routeHandle?: string;
-    withTurn: boolean;
-  }>): Promise<CompatibilityCertification> {
-    this.compatibilityCertificationCalls.push({ ...input });
-    return this.compatibilityCertificationResult ?? {
-      depth: this.identity.provider === "claude"
-        ? "wire"
-        : input.withTurn
-          ? "turn"
-          : "thread_ops",
-      outcome: "pass",
-      certifiedAt: "2026-08-09T12:00:00.000Z",
     };
   }
 
@@ -1056,69 +1032,83 @@ async function discoverAndRegisterCodexOnly(
   });
 }
 
-test("compatibility probes are cached once per surface and version and strict mode rejects drift", async () => {
-  const observedFixture = await fixture();
-  const observedConfig = loadGatewayConfig({
-    EMBASSY_STATE_DIR: observedFixture.stateDir,
+test("automatic compatibility probes run fresh on every startup and reject version drift", async () => {
+  const compatibleFixture = await fixture();
+  const compatibleConfig = loadGatewayConfig({
+    EMBASSY_STATE_DIR: compatibleFixture.stateDir,
     EMBASSY_HOSTS: "this-mac",
-    EMBASSY_COMPAT_POLICY: "observed",
   });
-  const makeObservedProviders = () => {
+  const makeCompatibleProviders = () => {
     const claude = new FakeProvider("claude");
     const codex = new FakeProvider("codex");
-    claude.enableCompatibility("2.1.227");
-    codex.enableCompatibility("0.148.0");
+    claude.enableCompatibility("2.1.226");
+    codex.enableCompatibility("0.147.0");
     return { claude, codex };
   };
 
-  const firstProviders = makeObservedProviders();
+  const firstProviders = makeCompatibleProviders();
   const first = new GatewayService({
-    config: observedConfig,
+    config: compatibleConfig,
     adapters: [firstProviders.claude, firstProviders.codex],
   });
   await first.start();
-  const firstReport = await first.handlers().compatibilityCheck();
-  assert.equal(firstReport.compatible, true);
+  const firstSnapshot = await first.handlers().listSnapshot();
   assert.deepEqual(
-    firstReport.surfaces.map((surface) => surface.tier),
-    ["schema_attested", "schema_attested"],
+    firstSnapshot.compatibilityChecks?.map((surface) => surface.tier),
+    ["certified", "certified"],
   );
   assert.equal(firstProviders.claude.compatibilityProbeCalls, 1);
   assert.equal(firstProviders.codex.compatibilityProbeCalls, 1);
   assert.equal((await first.store.inspectCompatibilityAttestations()).length, 2);
   await first.close();
 
-  const restartedProviders = makeObservedProviders();
+  const restartedProviders = makeCompatibleProviders();
   const restarted = new GatewayService({
-    config: observedConfig,
+    config: compatibleConfig,
     adapters: [restartedProviders.claude, restartedProviders.codex],
   });
-  await restarted.start();
-  assert.equal(restartedProviders.claude.compatibilityProbeCalls, 0);
-  assert.equal(restartedProviders.codex.compatibilityProbeCalls, 0);
-  await restarted.close();
-  await rm(observedFixture.root, { recursive: true, force: true });
+  restartedProviders.claude.runCompatibilityProbes = async () => {
+    restartedProviders.claude.compatibilityProbeCalls += 1;
+    return compatibilityProbeNames.claude.map((name) =>
+      name === "registry_schema"
+        ? {
+            name,
+            outcome: "fail" as const,
+            safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+          }
+        : { name, outcome: "pass" as const },
+    );
+  };
+  await assert.rejects(
+    restarted.start(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_REGISTRY_SCHEMA_REJECTED",
+  );
+  assert.equal(restartedProviders.claude.compatibilityProbeCalls, 1);
+  assert.equal(restartedProviders.codex.compatibilityProbeCalls, 1);
+  await restarted.close().catch(() => undefined);
+  await rm(compatibleFixture.root, { recursive: true, force: true });
 
-  const strictFixture = await fixture();
-  const strictClaude = new FakeProvider("claude");
-  const strictCodex = new FakeProvider("codex");
-  strictClaude.enableCompatibility("2.1.227");
-  strictCodex.enableCompatibility("0.147.0");
-  const strict = new GatewayService({
+  const driftFixture = await fixture();
+  const driftClaude = new FakeProvider("claude");
+  const driftCodex = new FakeProvider("codex");
+  driftClaude.enableCompatibility("2.1.227");
+  driftCodex.enableCompatibility("0.147.0");
+  const drifted = new GatewayService({
     config: loadGatewayConfig({
-      EMBASSY_STATE_DIR: strictFixture.stateDir,
+      EMBASSY_STATE_DIR: driftFixture.stateDir,
       EMBASSY_HOSTS: "this-mac",
-      EMBASSY_COMPAT_POLICY: "strict",
     }),
-    adapters: [strictClaude, strictCodex],
+    adapters: [driftClaude, driftCodex],
   });
   await assert.rejects(
-    strict.start(),
+    drifted.start(),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "CLAUDE_VERSION_DRIFT",
   );
-  await strict.close().catch(() => undefined);
-  await rm(strictFixture.root, { recursive: true, force: true });
+  await drifted.close().catch(() => undefined);
+  await rm(driftFixture.root, { recursive: true, force: true });
 });
 
 test("failed startup compatibility admission leaves the prior durable schema byte-exact", async () => {
@@ -1170,123 +1160,6 @@ test("failed startup compatibility admission leaves the prior durable schema byt
   assert.deepEqual(await recovered.inspectCompatibilityAttestations(), []);
   await recovered.close();
   await rm(current.root, { recursive: true, force: true });
-});
-
-test("live compatibility certification binds one exact Codex route and rejects version races", async () => {
-  const { root, stateDir, workspace } = await fixture();
-  const claude = new FakeProvider("claude");
-  const codex = new FakeProvider("codex");
-  claude.enableCompatibility("2.1.226");
-  codex.enableCompatibility("0.147.0");
-  const service = new GatewayService({
-    config: loadGatewayConfig({
-      EMBASSY_STATE_DIR: stateDir,
-      EMBASSY_HOSTS: "this-mac",
-      EMBASSY_CODEX_WORKSPACE: workspace,
-    }),
-    adapters: [claude, codex],
-  });
-  try {
-    await service.start();
-    await service.handlers().registerCodex(codexRegistration());
-    const report = await service.handlers().compatibilityCertify({
-      codexAlias: "codex-main@this-mac",
-      withTurn: false,
-    });
-    assert.equal(report.certified, true);
-    assert.deepEqual(
-      report.surfaces.map((surface) => surface.certification?.depth),
-      ["wire", "thread_ops"],
-    );
-    assert.equal(claude.compatibilityCertificationCalls[0]?.routeHandle, undefined);
-    assert.equal(
-      codex.compatibilityCertificationCalls[0]?.routeHandle,
-      THREAD_ID,
-    );
-
-    claude.compatibilityCertificationResult = {
-      depth: "wire",
-      outcome: "fail",
-      certifiedAt: "2026-08-09T12:00:30.000Z",
-      safeErrorCode: "CLAUDE_CERTIFICATION_RECEIPT_UNCONFIRMED",
-    };
-    const failed = await service.handlers().compatibilityCertify({
-      codexAlias: "codex-main@this-mac",
-      withTurn: false,
-    });
-    assert.equal(failed.certified, false);
-    const snapshot = await service.handlers().listSnapshot();
-    assert.equal(
-      snapshot.alerts.some(
-        (alert) =>
-          alert.code === "COMPATIBILITY_CERTIFICATION_FAILED" &&
-          alert.provider === "claude",
-      ),
-      true,
-    );
-    claude.compatibilityCertificationResult = undefined;
-
-    claude.runCompatibilityCertification = async (input) => {
-      claude.compatibilityCertificationCalls.push({ ...input });
-      claude.compatibilityVersion = "2.1.227";
-      return {
-        depth: "wire",
-        outcome: "pass",
-        certifiedAt: "2026-08-09T12:01:00.000Z",
-      };
-    };
-    const raced = await service.handlers().compatibilityCertify({
-      codexAlias: "codex-main@this-mac",
-      withTurn: false,
-    });
-    assert.equal(raced.certified, false);
-    assert.equal(
-      raced.surfaces[0]?.certification?.safeErrorCode,
-      "CLAUDE_CERTIFICATION_VERSION_CHANGED",
-    );
-
-    claude.compatibilityVersion = "2.1.226";
-    let markCodexCertificationEntered: (() => void) | undefined;
-    let releaseCodexCertification: (() => void) | undefined;
-    const codexCertificationEntered = new Promise<void>((resolve) => {
-      markCodexCertificationEntered = resolve;
-    });
-    const codexCertificationMayFinish = new Promise<void>((resolve) => {
-      releaseCodexCertification = resolve;
-    });
-    codex.runCompatibilityCertification = async (input) => {
-      codex.compatibilityCertificationCalls.push({ ...input });
-      markCodexCertificationEntered?.();
-      await codexCertificationMayFinish;
-      return {
-        depth: "thread_ops",
-        outcome: "pass",
-        certifiedAt: "2026-08-09T12:02:00.000Z",
-      };
-    };
-    const routeRace = service.handlers().compatibilityCertify({
-      codexAlias: "codex-main@this-mac",
-      withTurn: false,
-    });
-    await codexCertificationEntered;
-    assert.deepEqual(
-      await service.handlers().unregisterCodex({
-        alias: "codex-main@this-mac",
-        threadId: THREAD_ID,
-      }),
-      { accepted: true, code: "ok" },
-    );
-    releaseCodexCertification?.();
-    const routeRaced = await routeRace;
-    assert.equal(routeRaced.certified, false);
-    assert.equal(
-      routeRaced.surfaces[1]?.certification?.safeErrorCode,
-      "CODEX_CERTIFICATION_ROUTE_CHANGED",
-    );
-  } finally {
-    await service.close();
-    await rm(root, { recursive: true, force: true });
-  }
 });
 
 test("aborted startup cannot become active after an in-flight adapter initialization resumes", async () => {
