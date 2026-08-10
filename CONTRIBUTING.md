@@ -124,3 +124,17 @@ macOS caps socket paths at ~104 bytes — keep `TMPDIR` short (CI pins
 `TMPDIR=/tmp`; do the same locally if the transport tests hang). On Linux,
 the darwin-only lease and peer-generation tests skip explicitly (the host
 lease spawns macOS's `/usr/bin/lockf`); macOS runs the full suite.
+
+## Design honesty rules
+
+These outlive any visual era and bind every surface — dashboards, CLI copy,
+site, docs, in both languages:
+
+- Progress is never green. Only a terminal success state may look like one.
+- `delivered` means the write completed; `released` is not read; nothing may
+  imply a model consumed, understood, or acted on a message.
+- Refusals are not failures: a fail-closed refusal renders as policy, not as
+  breakage.
+- The brand accent is never a state color, and state colors are never
+  decoration.
+- Every alert pairs its state with the exact next command, copyable.
