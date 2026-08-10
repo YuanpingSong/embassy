@@ -195,6 +195,7 @@ namespace Embassy {
     bytes: number;
     safeErrorCode?: string | undefined;
     steer?: true | undefined;
+    body?: string | undefined;
     events: readonly DashboardMessageEvent[];
   }>;
 
