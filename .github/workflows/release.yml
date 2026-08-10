@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)publish to npm (e.g. v1.2.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -198,5 +204,62 @@ jobs:
             "$tarball" \
             "$checksum"
 
-      # npm publishing is deliberately not automated. It remains a separate,
-      # explicit maintainer action using this exact verified tag and tarball.
+  # Publishes the GitHub Release's own checksummed tarball to npm via trusted
+  # publishing (tokenless OIDC) with a provenance attestation — the registry
+  # artifact stays byte-identical to the tag's verified build. One-time setup
+  # on npmjs.com: package agent-embassy → Settings → Trusted Publishers →
+  # GitHub Actions → repository YuanpingSong/embassy, workflow release.yml.
+  # workflow_dispatch republishes an existing tag (idempotent: skips versions
+  # already on the registry).
+  publish:
+    name: Publish to npm (trusted publishing)
+    needs: release
+    if: ${{ always() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write # OIDC for npm trusted publishing + provenance
+
+    steps:
+      - name: Set up Node.js
+        # NOTE: no registry-url here — setup-node's registry-url writes an
+        # .npmrc with a token placeholder, and a configured-but-empty token
+        # makes npm SKIP the trusted-publishing OIDC exchange
+        # (unauthenticated PUT → masked 404).
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Use an npm that supports trusted publishing
+        # Tokenless OIDC requires npm >= 11.5; Node 22's bundled npm 10.x
+        # signs provenance but then publishes unauthenticated, which the
+        # registry rejects as a masked 404.
+        run: |
+          npm install --global npm@latest --ignore-scripts
+          npm --version
+
+      - name: Download the release's verified tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agent-embassy-*.tgz*' --dir release-bundle
+          cd release-bundle
+          sha256sum -c ./*.sha256
+
+      - name: Publish the exact verified artifact
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          tarball="release-bundle/agent-embassy-${version}.tgz"
+          test -f "$tarball"
+          if npm view "agent-embassy@${version}" version > /dev/null 2>&1; then
+            echo "agent-embassy@${version} already published — skipping"
+          else
+            npm publish "$tarball" --provenance --access public
+          fi
