@@ -163,11 +163,13 @@ export function loadGatewayConfig(
   const messageDeadlineMs = boundedInteger(
     "EMBASSY_MESSAGE_DEADLINE_MS",
     env.EMBASSY_MESSAGE_DEADLINE_MS,
-    300_000,
+    14_400_000,
     1_000,
-    3_600_000,
+    86_400_000,
   );
-  const stallNoticeMs = Math.floor(messageDeadlineMs / 2);
+  // Stall visibility must not scale with the (now hours-long) deadline: an
+  // operator still wants to know within two minutes that a message is waiting.
+  const stallNoticeMs = Math.min(Math.floor(messageDeadlineMs / 2), 120_000);
 
   const limits: GatewayStoreLimits = {
     maxRoutes: boundedInteger(
@@ -258,9 +260,9 @@ export function loadGatewayConfig(
     maxHopCount: boundedInteger(
       "EMBASSY_MAX_HOPS",
       env.EMBASSY_MAX_HOPS,
-      2,
-      0,
       16,
+      0,
+      64,
     ),
     rateLimitPerRoute: boundedInteger(
       "EMBASSY_RATE_LIMIT",

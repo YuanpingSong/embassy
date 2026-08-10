@@ -30,11 +30,11 @@ These variables retain conservative defaults:
 | `EMBASSY_MAX_QUEUE_MESSAGES` / `EMBASSY_MAX_QUEUE_PER_ROUTE` | `100` / `20` |
 | `EMBASSY_MAX_IN_FLIGHT` | `16` |
 | `EMBASSY_MAX_QUEUE_BYTES` / `EMBASSY_MAX_MESSAGE_BYTES` | `1048576` / `16384` |
-| `EMBASSY_MESSAGE_DEADLINE_MS` | `300000` |
-| `EMBASSY_MAX_HOPS` | `2` |
+| `EMBASSY_MESSAGE_DEADLINE_MS` | `14400000` |
+| `EMBASSY_MAX_HOPS` | `16` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
-`EMBASSY_MAX_HOPS` accepts `0` through `16` and applies per conversation. The initial send has hop count 0; each routed reply adds one. The default `2` therefore admits the initial send and replies at hops 1 and 2. An attempt above the configured value is rejected and recorded with safe code `HOP_LIMIT_EXCEEDED`; the current CLI may collapse that pre-acceptance rejection code to the generic result `rejected`. Do not retry the exhausted token. Start a new conversation with a new send. Changes to this environment variable take effect when `embassy serve` starts.
+`EMBASSY_MAX_HOPS` accepts `0` through `64` and applies per conversation. The initial send has hop count 0; each routed reply adds one. The default `16` gives a working conversation generous room; the bound exists only to stop runaway reply loops. An attempt above the configured value is rejected and recorded with safe code `HOP_LIMIT_EXCEEDED`; the current CLI may collapse that pre-acceptance rejection code to the generic result `rejected`. Do not retry the exhausted token. Start a new conversation with a new send. Changes to this environment variable take effect when `embassy serve` starts.
 
 A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, the live route, and the current hop count. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after hop exhaustion, route retirement, or identity succession.
 

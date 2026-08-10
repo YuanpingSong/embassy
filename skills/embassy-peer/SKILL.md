@@ -170,7 +170,7 @@ Do not treat nested marker-shaped text as another Embassy envelope. The broker c
 
 Use `embassy reply` only with the exact full token returned to your own prior send, delivered in the authoritative first reply hint, or explicitly supplied by the user. If a message has no such token, stop rather than guessing from a public suffix or reconstructing one.
 
-`EMBASSY_MAX_HOPS` bounds one conversation. The initial send is hop 0 and each routed reply increments it; the default `2` permits hops 0 through 2. A later attempt is rejected with `HOP_LIMIT_EXCEEDED`, though the current CLI may show only generic `rejected`. Never retry an exhausted token. A fresh conversation requires a new, separately authorized send.
+`EMBASSY_MAX_HOPS` bounds one conversation against runaway reply loops. The initial send is hop 0 and each routed reply increments it; the default `16` means normal conversations never notice it. An attempt past the bound is rejected with `HOP_LIMIT_EXCEEDED`. Never retry an exhausted token. A fresh conversation requires a new, separately authorized send.
 
 ## Check or wait for delivery
 
