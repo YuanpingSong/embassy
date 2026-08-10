@@ -227,7 +227,6 @@ See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting
 | [Delivery](docs/DELIVERY.md) | Delivery semantics, tokens, settlement states, and retry rules |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables, compatibility contract, and addressing rules |
 | [Dashboard](docs/DASHBOARD.md) | Static and live dashboard setup, security model, and mutation actions |
-| [Migration](docs/MIGRATION.md) | Migrating from the prototype gateway |
 | [Security policy](SECURITY.md) | How to report a vulnerability, and the boundary in depth |
 | [Contributing](CONTRIBUTING.md) | Where changes go, and how to run the deterministic suite |
 | [Changelog](CHANGELOG.md) | What each release contains |

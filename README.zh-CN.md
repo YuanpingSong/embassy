@@ -202,7 +202,6 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | [投递](docs/DELIVERY.zh-CN.md) | 投递语义、令牌、结算状态与重试规则 |
 | [配置](docs/CONFIGURATION.zh-CN.md) | 环境变量、兼容性约定与寻址规则 |
 | [仪表盘](docs/DASHBOARD.zh-CN.md) | 静态与实时仪表盘设置、安全模型与变更操作 |
-| [迁移](docs/MIGRATION.zh-CN.md) | 从原型网关迁移 |
 | [安全策略](SECURITY.md) | 如何报告漏洞，以及详细的安全边界 |
 | [贡献指南](CONTRIBUTING.md) | 变更的归属位置，以及如何运行确定性测试套件 |
 | [变更日志](CHANGELOG.md) | 每个版本包含的内容 |
