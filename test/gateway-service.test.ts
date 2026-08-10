@@ -1773,6 +1773,158 @@ test("broker restart reactivates an exact Codex task and wakes its durable queue
   assert.equal(publicText.includes("codex_boot_generation_g2"), false);
 });
 
+test("boot reactivation completes a compatible daemon-generation change in flight", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const first = new GatewayService({
+    config,
+    adapters: [
+      new FakeProvider("claude"),
+      new FakeProvider("codex", "codex_boot_churn_g1", "0.147.0"),
+    ],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.close();
+
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex", "codex_boot_churn_g2", "0.147.0");
+  const previous = { ...codex.identity };
+  const current = {
+    ...codex.identity,
+    endpointGeneration: "codex_boot_churn_g3",
+  };
+  codex.selectedEndpointRefresh = {
+    outcome: "compatible",
+    previous,
+    current,
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [],
+  };
+  codex.selectRouteBeforeReturn = () => {
+    codex.identity.endpointGeneration = current.endpointGeneration;
+  };
+  second = new GatewayService({ config, adapters: [claude, codex] });
+  await second.start();
+
+  const route = await second.store.inspectPrivateRoute(
+    "codex-main@this-mac",
+  );
+  assert.equal(route?.binding.endpointGeneration, current.endpointGeneration);
+  assert.equal(route?.state, "idle");
+  assert.equal(route?.compatibility, "compatible");
+  assert.deepEqual(claude.nativeCodexAdvertisements, [
+    "codex-main@this-mac",
+  ]);
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 1);
+  assert.deepEqual(codex.releasedRoutes, []);
+  const persisted = JSON.parse(
+    await readFile(second.store.stateFilePath, "utf8"),
+  ) as {
+    codexEndpointRefreshEvents: Array<{
+      oldEndpointGeneration: string;
+      newEndpointGeneration: string;
+      reason?: string;
+    }>;
+  };
+  assert.deepEqual(
+    persisted.codexEndpointRefreshEvents.map(
+      ({ oldEndpointGeneration, newEndpointGeneration, reason }) => ({
+        oldEndpointGeneration,
+        newEndpointGeneration,
+        reason,
+      }),
+    ),
+    [
+      {
+        oldEndpointGeneration: "codex_boot_churn_g1",
+        newEndpointGeneration: "codex_boot_churn_g3",
+        reason: "boot_reactivation",
+      },
+    ],
+  );
+});
+
+test("boot endpoint refresh aborts when native activation fails after staging", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstCodex = new FakeProvider(
+    "codex",
+    "codex_boot_activation_failure_g1",
+    "0.147.0",
+  );
+  const first = new GatewayService({
+    config,
+    adapters: [new FakeProvider("claude"), firstCodex],
+  });
+  let second: GatewayService | undefined;
+  t.after(async () => {
+    await second?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.close();
+
+  const claude = new FakeProvider("claude");
+  claude.nativeCodexAdvertisementFailures.push({
+    error: new Error("synthetic boot advertisement failure"),
+    afterWrite: false,
+  });
+  const codex = new FakeProvider(
+    "codex",
+    "codex_boot_activation_failure_g2",
+    "0.147.0",
+  );
+  codex.selectedEndpointRefresh = {
+    outcome: "compatible",
+    previous: { ...firstCodex.identity },
+    current: { ...codex.identity },
+    attestation: compatibleCodexAttestation(codex.protocolVersion),
+    routes: [],
+  };
+  second = new GatewayService({ config, adapters: [claude, codex] });
+  await assert.rejects(
+    second.start(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_BOOT_REACTIVATION_CLEANUP_FAILED",
+  );
+  assert.equal(codex.acceptedCompatibilityAttestations.length, 0);
+  assert.deepEqual(codex.releasedRoutes, [THREAD_ID]);
+  assert.deepEqual(claude.nativeCodexUnadvertisements, [
+    "codex-main@this-mac",
+  ]);
+  const persisted = JSON.parse(
+    await readFile(first.store.stateFilePath, "utf8"),
+  ) as {
+    routes: Array<{
+      alias: string;
+      binding: { endpointGeneration: string };
+    }>;
+    codexEndpointRefreshEvents: unknown[];
+  };
+  assert.equal(
+    persisted.routes.find(({ alias }) => alias === "codex-main@this-mac")
+      ?.binding.endpointGeneration,
+    firstCodex.identity.endpointGeneration,
+  );
+  assert.deepEqual(persisted.codexEndpointRefreshEvents, []);
+});
+
 test("a retained Codex route permits a distinct registered task after restart", async (t) => {
   const { root, stateDir } = await fixture();
   const config = loadGatewayConfig({
@@ -2804,6 +2956,12 @@ test("selector refresh registration failures remain stale and retry to one final
         attestation: compatibleCodexAttestation(codex.protocolVersion),
         routes: [],
       };
+      codex.selectRouteFailures.push(
+        new BridgeError(
+          "CODEX_THREAD_NOT_OBSERVED",
+          "Synthetic retained task is absent during boot recovery.",
+        ),
+      );
       if (failurePoint === "advertise_after_write") {
         claude.nativeCodexAdvertisementFailures.push({
           error: new Error("synthetic advertise outcome unknown"),
@@ -2896,6 +3054,12 @@ test("selector refresh retains a coalesced retry across deferred activation fail
     routes: [{ routeHandle: THREAD_ID, state: "idle" }],
   };
   codex.selectedEndpointRefresh = refresh;
+  codex.selectRouteFailures.push(
+    new BridgeError(
+      "CODEX_THREAD_NOT_OBSERVED",
+      "Synthetic retained task is absent during boot recovery.",
+    ),
+  );
   const second = new GatewayService({ config, store, adapters: [claude, codex] });
   await second.start();
   t.after(async () => {

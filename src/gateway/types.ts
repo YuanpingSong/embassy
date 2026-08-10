@@ -218,6 +218,8 @@ export type QueuedMessageMetadata = {
   hopCount: number;
   /** This message was admitted by the exact durable consent edge. */
   pair?: true;
+  /** Target authority was transient and must never be reconstructed after restart. */
+  transientTarget?: true;
   /** Exact Claude-to-Codex `STEER:` classification; absence means ordinary. */
   steer?: true;
 };

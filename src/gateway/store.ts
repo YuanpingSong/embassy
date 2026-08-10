@@ -732,7 +732,7 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         "bytes",
         "hopCount",
       ],
-      ["conversationIdSuffix", "body", "pair", "steer"],
+      ["conversationIdSuffix", "body", "pair", "transientTarget", "steer"],
     )
   ) {
     return false;
@@ -761,6 +761,7 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
     isNonNegativeInteger(value.hopCount) &&
     (value.pair === undefined || value.pair === true) &&
+    (value.transientTarget === undefined || value.transientTarget === true) &&
     (value.steer === undefined || value.steer === true)
   );
 }
@@ -1784,6 +1785,7 @@ type ResolvedEnqueueSides = {
   targetAlias: string;
   direction: "codex_to_claude" | "claude_to_codex";
   pair?: true;
+  transientTarget?: true;
   sourceRoute?: GatewayRouteRecord;
   targetRoute?: GatewayRouteRecord;
 };
@@ -2089,7 +2091,9 @@ export class GatewayStore {
         registeredAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastSeenAt: now.toISOString(),
-        queueDepth: 0,
+        queueDepth: state.queue.filter(
+          (item) => item.targetAlias === input.alias,
+        ).length,
         counters: emptyCounters(),
       });
     });
@@ -2268,7 +2272,9 @@ export class GatewayStore {
           registeredAt: now.toISOString(),
           updatedAt: now.toISOString(),
           lastSeenAt: now.toISOString(),
-          queueDepth: 0,
+          queueDepth: state.queue.filter(
+            (item) => item.targetAlias === replacement.alias,
+          ).length,
           counters: emptyCounters(),
         });
       }
@@ -4042,7 +4048,9 @@ export class GatewayStore {
         targetAlias: input.target.alias,
         direction: "codex_to_claude",
         sourceRoute: source,
-        ...(input.pair === true ? { pair: true as const } : {}),
+        ...(input.pair === true
+          ? { pair: true as const }
+          : { transientTarget: true as const }),
       });
     });
   }
@@ -5451,6 +5459,9 @@ export class GatewayStore {
       body: input.body,
       hopCount,
       ...(sides.pair === true ? { pair: true as const } : {}),
+      ...(sides.transientTarget === true
+        ? { transientTarget: true as const }
+        : {}),
       ...(input.steer === true ? { steer: true as const } : {}),
     };
     state.queue.push(metadata);
@@ -6351,6 +6362,22 @@ export class GatewayStore {
         continue;
       }
       if (item.body === undefined) {
+        this.finishMetadata(
+          state,
+          item,
+          "abandoned",
+          now,
+          "CONTROLLER_RESTARTED",
+        );
+        continue;
+      }
+      // A correlated native reply admitted through a transient Claude
+      // capability cannot regain its exact UUID/generation after restart,
+      // even when another session later claims the same public alias.
+      if (
+        item.transientTarget === true ||
+        !state.routes.some((route) => route.alias === item.targetAlias)
+      ) {
         this.finishMetadata(
           state,
           item,

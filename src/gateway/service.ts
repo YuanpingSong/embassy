@@ -2257,6 +2257,7 @@ export class GatewayService {
       let routeSelected = false;
       let advertiseAttempted = false;
       let storeReactivated = false;
+      let deferredEndpointRefresh = false;
       try {
         const selected = await codexAdapter.selectRoute({
           alias: route.alias,
@@ -2264,14 +2265,44 @@ export class GatewayService {
         });
         routeSelected = true;
         await this.drainSelectorCallbackSnapshotLocked();
-        if (
-          selected.routeHandle !== route.binding.routeHandle ||
-          selected.endpointRefresh !== undefined
-        ) {
+        if (selected.routeHandle !== route.binding.routeHandle) {
           throw new BridgeError(
             "CODEX_BOOT_REACTIVATION_MISMATCH",
             "The retained Codex task changed during broker startup reactivation.",
           );
+        }
+        if (selected.endpointRefresh !== undefined) {
+          deferredEndpointRefresh = await this.onCodexEndpointRefresh(
+            codexAdapter,
+            selected.endpointRefresh,
+            {
+              deferActivation: true,
+              deferredRoute: {
+                alias: route.alias,
+                threadId: route.binding.routeHandle,
+                state: selected.state,
+              },
+            },
+          );
+          if (!deferredEndpointRefresh) {
+            throw new BridgeError(
+              "CODEX_BOOT_REACTIVATION_MISMATCH",
+              "The retained Codex task could not stage a compatible endpoint refresh during startup.",
+            );
+          }
+        }
+        const binding: PrivateRouteBinding = {
+          ...codexAdapter.identity,
+          routeHandle: route.binding.routeHandle,
+          ownerLease: route.binding.ownerLease,
+        };
+        if (deferredEndpointRefresh) {
+          const afterStaging = await this.store.inspectPrivateRoute(route.alias);
+          storeReactivated =
+            afterStaging !== undefined &&
+            afterStaging.enabled &&
+            afterStaging.compatibility === "compatible" &&
+            bindingKey(afterStaging.binding) === bindingKey(binding);
         }
         advertiseAttempted = true;
         const advertise = claudeAdapter.advertiseNativeCodexPeer;
@@ -2297,20 +2328,17 @@ export class GatewayService {
           claudeAdapter,
           route.alias,
         );
-        const binding: PrivateRouteBinding = {
-          ...codexAdapter.identity,
-          routeHandle: route.binding.routeHandle,
-          ownerLease: route.binding.ownerLease,
-        };
-        await this.store.rebindStaleRoute({
-          alias: route.alias,
-          currentOwnerLease: route.binding.ownerLease,
-          newBinding: binding,
-          reason: "endpoint_reobserved",
-          journalReason: "boot_reactivation",
-          state: selected.state,
-        });
-        storeReactivated = true;
+        if (!storeReactivated) {
+          await this.store.rebindStaleRoute({
+            alias: route.alias,
+            currentOwnerLease: route.binding.ownerLease,
+            newBinding: binding,
+            reason: "endpoint_reobserved",
+            journalReason: "boot_reactivation",
+            state: selected.state,
+          });
+          storeReactivated = true;
+        }
         this.rememberBinding(route.alias, binding, selected.state);
         this.lockCodexRegistration(
           {
@@ -2321,6 +2349,22 @@ export class GatewayService {
           },
           listenerGeneration,
         );
+        if (
+          deferredEndpointRefresh &&
+          selected.endpointRefresh !== undefined
+        ) {
+          await this.onCodexEndpointRefresh(
+            codexAdapter,
+            selected.endpointRefresh,
+            {
+              requiredRoute: {
+                alias: route.alias,
+                threadId: route.binding.routeHandle,
+                state: selected.state,
+              },
+            },
+          );
+        }
         if (
           this.requireCurrentNativeCodexGeneration(
             claudeAdapter,
@@ -2349,7 +2393,7 @@ export class GatewayService {
               cleanupFailed = true;
             });
         }
-        if (cleanupFailed || storeReactivated) {
+        if (cleanupFailed || storeReactivated || deferredEndpointRefresh) {
           throw new BridgeError(
             "CODEX_BOOT_REACTIVATION_CLEANUP_FAILED",
             "A Codex boot reactivation crossed its durable boundary without exact live authority.",
