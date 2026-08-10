@@ -61,7 +61,8 @@
     "pretest": "npm run build",
     "start": "node dist/src/gateway/cli.js serve",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json --noEmit",
+    "soak": "tsx --test test/soak/gateway-soak.test.ts"
   },
   "engines": {
     "node": ">=20"
