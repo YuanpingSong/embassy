@@ -766,7 +766,6 @@ button:not(:disabled):hover { opacity: .92; }
   align-items: baseline;
   flex-wrap: wrap;
   border: 1px solid var(--hairline);
-  border-left-width: 3px;
   border-radius: var(--radius-sm);
   padding: 12px 16px;
   font-size: 13px;
@@ -775,17 +774,14 @@ button:not(:disabled):hover { opacity: .92; }
 }
 .notice[data-tone="info"] {
   border-color: var(--border-light);
-  border-left-color: var(--action-blue);
   background: var(--pale-blue);
 }
 .notice[data-tone="warning"] {
   border-color: var(--coral-soft);
-  border-left-color: var(--coral);
   background: var(--coral-wash-soft);
 }
 .notice[data-tone="error"] {
   border-color: var(--coral-soft);
-  border-left-color: var(--error);
   background: var(--error-tint);
 }
 .notice__label {
@@ -1167,7 +1163,7 @@ button:not(:disabled):hover { opacity: .92; }
   border: 1px solid var(--hairline);
   background: var(--surface-card);
 }
-.watch-card[data-phase="episode"] { border-left: 3px solid var(--coral); }
+.watch-card[data-phase="episode"] { border-color: var(--coral-soft); background: var(--coral-wash-soft); }
 .watch-card__head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 .watch-card > strong { display: block; margin-top: 10px; overflow-wrap: anywhere; }
 .watch-card__facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 0; }
