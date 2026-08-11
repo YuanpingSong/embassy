@@ -222,31 +222,9 @@ namespace Embassy {
     return `${group.direction}|${group.sourceAlias}|${group.targetAlias}|${suffix}`;
   }
 
-  const GUIDANCE_COPY_KEYS = {
-    reobserve_claude: "reobserveClaude",
-    reobserve_codex: "reobserveCodex",
-    codex_reactivation_required: "codexReactivationRequired",
-    consent_edge_unavailable: "consentEdgeUnavailable",
-    claude_not_observed: "claudeNotObserved",
-    codex_stale: "codexStale",
-    connector_offline: "connectorOffline",
-    route_stale: "routeStale",
-    queue_stalled: "queueStalled",
-    recipient_waiting_input: "recipientWaitingInput",
-    unconfirmed: "unconfirmed",
-    degraded: "degraded",
-    codex_succession_busy: "codexSuccessionBusy",
-    codex_succession_recovery: "codexSuccessionRecovery",
-    progress_watch: "progressWatch",
-    registry_empty: "registryEmpty",
-    registry_rejected: "registryRejected",
-    provider_incompatible: "providerIncompatible",
-    generic: "generic",
-  } as const satisfies Record<DashboardAttentionGuidance, string>;
-
   /** camelCase segment for `guidance.<key>.{title,body,action}` copy keys. */
   export function guidanceCopyKey(guidance: DashboardAttentionGuidance): string {
-    return GUIDANCE_COPY_KEYS[guidance];
+    return window.EMBASSY_BOOT.semantics.guidanceCopyKeys[guidance];
   }
 
   /**
@@ -254,27 +232,16 @@ namespace Embassy {
    * placeholders stay angle-bracketed when the scope is unknown.
    */
   export function attentionCommand(item: DashboardAttentionItem): string {
-    switch (item.guidance) {
-      case "reobserve_claude":
-      case "claude_not_observed":
-        return `embassy select-claude --alias ${item.alias ?? "<alias>"}`;
-      case "reobserve_codex":
-      case "codex_stale":
-      case "codex_reactivation_required":
-        return `embassy register-codex --alias ${item.alias ?? "<alias>"}`;
-      case "consent_edge_unavailable":
-        return "embassy refresh-dashboard";
-      case "registry_empty":
-      case "provider_incompatible":
-        return "embassy refresh-dashboard";
-      case "registry_rejected":
-        return "embassy status";
-      case "codex_succession_busy":
-      case "codex_succession_recovery":
-        return `embassy register-codex --alias <new> --succeeds ${item.alias ?? "<old>"}`;
-      default:
-        return "embassy status";
-    }
+    const semantics = window.EMBASSY_BOOT.semantics;
+    const fallbacks = semantics.attentionCommandFallbacks as Readonly<
+      Partial<Record<DashboardAttentionGuidance, string>>
+    >;
+    return semantics.attentionCommands[
+      item.guidance
+    ].replaceAll(
+      "{alias}",
+      item.alias ?? fallbacks[item.guidance] ?? "<alias>",
+    );
   }
 
   /** Attention items decorated with copy key + teaching command, server order kept. */
@@ -329,15 +296,7 @@ namespace Embassy {
         codexConnector: worstConnectorHealth(model, "codex"),
         compatibility: worstCompatibility(model),
       },
-      exchange: {
-        ...model.exchange,
-        codex: {
-          ...model.exchange.codex,
-          monitorOnly: model.routes.filter(
-            (route) => route.provider === "codex" && isMonitorOnly(route),
-          ).length,
-        },
-      },
+      exchange: model.exchange,
       queueClaudeToCodex: queueSplit(model, "codex", nowMs),
       queueCodexToClaude: queueSplit(model, "claude", nowMs),
       graph: model.graph,

@@ -265,8 +265,8 @@ namespace Embassy {
                   {t(
                     deliveryMeaningKey(
                       event.state,
-                      event.safeErrorCode,
                       props.group.direction,
+                      event.safeErrorCode,
                     ),
                   )}
                 </div>

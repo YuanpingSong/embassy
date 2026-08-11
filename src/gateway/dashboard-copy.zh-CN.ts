@@ -60,6 +60,8 @@ export const dashboardCopyZhCn = {
     "在 Codex 任务内运行 embassy register-codex --alias codex-<name>@<host>。",
   "next.restoreCodex":
     "在该 Codex 任务内重新运行 embassy register-codex --alias <alias>。",
+  "next.reviewCompatibility":
+    "运行 embassy refresh-dashboard，然后查看“提供方兼容性”；发现或注册无法解除此写入围栏。",
   "attention.eyebrow": "需要处理",
   "attention.title": "发送前请先解决",
   "attention.count": "{count} 项",

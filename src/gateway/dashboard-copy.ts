@@ -60,6 +60,7 @@ export const dashboardCopyKeys = [
   "next.repairClaude",
   "next.registerCodex",
   "next.restoreCodex",
+  "next.reviewCompatibility",
   "attention.eyebrow",
   "attention.title",
   "attention.count",

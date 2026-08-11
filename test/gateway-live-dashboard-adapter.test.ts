@@ -20,12 +20,11 @@ import { fileURLToPath } from "node:url";
 import { Script, createContext } from "node:vm";
 
 import {
+  DASHBOARD_SEMANTICS,
   buildDashboardViewModel,
   type DashboardActivityEventRow,
   type DashboardAttentionItem,
   type DashboardMessageGroup,
-  type DashboardOmissions,
-  type DashboardPeerRow,
   type DashboardRouteRow,
   type DashboardViewModel,
 } from "../src/gateway/dashboard-model.js";
@@ -34,222 +33,9 @@ import type {
   ConnectorHealth,
   DeliveryState,
   GatewayProvider,
-  MessageDirection,
 } from "../src/gateway/types.js";
+import type { EmbassyNamespace } from "../src/gateway/live-dashboard-app/app-types.js";
 import { dashboardFixture } from "./dashboard-fixture.js";
-
-// ---------------------------------------------------------------------------
-// The adapter surface under test (mirrors app-types.tsx / adapter.tsx)
-// ---------------------------------------------------------------------------
-
-type QueueSummary = Readonly<{
-  depth: number;
-  depthIsLowerBound: boolean;
-  oldestQueuedAt: string | undefined;
-  oldestAgeMs: number | undefined;
-}>;
-
-type PulseBar = Readonly<{ state: DeliveryState; count: number }>;
-
-type PulseData = Readonly<{
-  bars: readonly PulseBar[];
-  total: number;
-  isLowerBound: boolean;
-}>;
-
-type AttentionView = Readonly<{
-  item: DashboardAttentionItem;
-  guidanceKey: string;
-  command: string;
-}>;
-
-type StatusStripData = Readonly<{
-  broker: ConnectorHealth;
-  claudeConnector: ConnectorHealth | undefined;
-  codexConnector: ConnectorHealth | undefined;
-  compatibility: CompatibilityState | undefined;
-}>;
-
-type OverviewData = Readonly<{
-  generatedAt: string | undefined;
-  inboundMode: "paired" | "open";
-  overall: DashboardViewModel["overall"];
-  statusStrip: StatusStripData;
-  exchange: DashboardViewModel["exchange"];
-  queueClaudeToCodex: QueueSummary;
-  queueCodexToClaude: QueueSummary;
-  graph: DashboardViewModel["graph"];
-  degradedPairCopyKey:
-    | "app.overview.degradedEdge"
-    | "app.overview.degradedEdges"
-    | undefined;
-  attention: readonly AttentionView[];
-  attentionOmitted: number;
-  pulse: PulseData;
-}>;
-
-type DeliveryGroupView = Readonly<{
-  key: string;
-  group: DashboardMessageGroup;
-  routePair: string;
-  eventsTruncated: boolean;
-}>;
-
-type CodexRouteView = Readonly<{
-  route: DashboardRouteRow;
-  monitorOnly: boolean;
-  oldestAgeMs: number | undefined;
-}>;
-
-type SuccessionView = Readonly<{
-  item: DashboardAttentionItem;
-  guidanceKey: "codexSuccessionBusy" | "codexSuccessionRecovery";
-  command: string;
-}>;
-
-type RoutesData = Readonly<{
-  inboundMode: "paired" | "open";
-  peers: readonly DashboardPeerRow[];
-  peersOmitted: number;
-  codexRoutes: readonly CodexRouteView[];
-  routesOmitted: number;
-  pairs: DashboardViewModel["pairs"];
-  pairsOmitted: number;
-  graph: DashboardViewModel["graph"];
-  successions: readonly SuccessionView[];
-}>;
-
-type ActivityRow =
-  | Readonly<{
-      kind: "delivery";
-      timestamp: string | undefined;
-      group: DashboardMessageGroup;
-    }>
-  | Readonly<{
-      kind: "alert";
-      timestamp: string;
-      item: DashboardAttentionItem;
-      guidanceKey: string;
-    }>
-  | Readonly<{
-      kind: "operation";
-      timestamp: string;
-      event: DashboardActivityEventRow;
-    }>;
-
-type DiagnosticsData = Readonly<{
-  connectors: DashboardViewModel["connectors"];
-  connectorsOmitted: number;
-  compatibilityChecks: DashboardViewModel["compatibilityChecks"];
-  expiredCount: number;
-  queuedMessages: number;
-  queueCountIsLowerBound: boolean;
-  accounting: DashboardViewModel["accounting"];
-  omissions: DashboardOmissions;
-  deadlinePressure: DashboardViewModel["deadlinePressure"];
-}>;
-
-type EmbassyAdapter = Readonly<{
-  overviewProps(model: DashboardViewModel, nowMs: number): OverviewData;
-  deliveriesGroups(model: DashboardViewModel): readonly DeliveryGroupView[];
-  routesProps(model: DashboardViewModel, nowMs: number): RoutesData;
-  activityRows(model: DashboardViewModel): readonly ActivityRow[];
-  diagnosticsProps(model: DashboardViewModel): DiagnosticsData;
-  queueSplit(
-    model: DashboardViewModel,
-    targetProvider: GatewayProvider,
-    nowMs: number,
-  ): QueueSummary;
-  routeOldestAgeMs(route: DashboardRouteRow, nowMs: number): number | undefined;
-  pulse(model: DashboardViewModel): PulseData;
-  worstConnectorHealth(
-    model: DashboardViewModel,
-    provider: GatewayProvider,
-  ): ConnectorHealth | undefined;
-  worstCompatibility(model: DashboardViewModel): CompatibilityState | undefined;
-  extractSuccessions(model: DashboardViewModel): readonly SuccessionView[];
-  isMonitorOnly(route: DashboardRouteRow): boolean;
-  hasLifecycleTruncation(group: DashboardMessageGroup): boolean;
-  deliveriesTruncated(model: DashboardViewModel): boolean;
-  deliveryGroupKey(group: DashboardMessageGroup): string;
-  guidanceCopyKey(guidance: DashboardAttentionItem["guidance"]): string;
-  attentionCommand(item: DashboardAttentionItem): string;
-  attentionViews(model: DashboardViewModel): readonly AttentionView[];
-  isTerminalDeliveryState(state: DeliveryState): boolean;
-  parseTimestampMs(iso: string | undefined): number | undefined;
-}>;
-
-type ChipDomain =
-  | "delivery"
-  | "route"
-  | "peer"
-  | "health"
-  | "compatibility"
-  | "overall"
-  | "party"
-  | "severity"
-  | "connection";
-
-type EmbassyNamespace = Readonly<{
-  adapter: EmbassyAdapter;
-  createProtocol(options: Readonly<{
-    onEvent: (event: unknown) => void;
-    onConnectionState: (state: string) => void;
-    onNotice?: (kind: string) => void;
-  }>): Readonly<{
-    start(): void;
-    executeAction(action:
-      | Readonly<{
-          action: "pair" | "unpair";
-          claudeAlias: string;
-          codexAlias: string;
-        }>
-      | Readonly<{
-          action: "remove_stale_codex_registration";
-          alias: string;
-        }>
-      | Readonly<{ action: "refresh_dashboard" }>,
-    ): Promise<Readonly<{ ok: boolean; code: string }>>;
-  }>;
-  TERMINAL_DELIVERY_STATES: readonly DeliveryState[];
-  PULSE_WINDOW_MS: number;
-  chipKindFor(
-    state: string,
-    direction?: MessageDirection,
-    safeErrorCode?: string,
-  ): string;
-  chipKindByDomain(
-    domain: ChipDomain,
-    state: string,
-    direction?: MessageDirection,
-  ): string;
-  routeChipKind(state: string): string;
-  peerChipKind(state: string): string;
-  healthChipKind(state: string): string;
-  compatibilityChipKind(state: string): string;
-  overallChipKind(state: string): string;
-  partyChipKind(state: string): string;
-  severityChipKind(state: string): string;
-  connectionChipKind(state: string): string;
-  deliveryMeaningKey(
-    state: string,
-    safeErrorCode?: string,
-    direction?: MessageDirection,
-  ): string;
-  meaningKeyFor(
-    domain: ChipDomain,
-    state: string,
-    safeErrorCode?: string,
-    direction?: MessageDirection,
-  ): string;
-  camelCaseToken(token: string): string;
-  canRequestStaleCodexRegistrationRemoval(
-    route: DashboardRouteRow,
-  ): boolean;
-  activityAuthority(
-    event: DashboardActivityEventRow,
-  ): "operator" | "automatic";
-}>;
 
 // ---------------------------------------------------------------------------
 // Bundle evaluation in node:vm
@@ -406,6 +192,7 @@ function loadBundle(): LoadedBundle {
     EMBASSY_BOOT: Object.freeze({
       locale: "en",
       copy: Object.freeze({ en: {}, "zh-CN": {} }),
+      semantics: DASHBOARD_SEMANTICS,
     }),
     setTimeout: () => 0,
     clearTimeout: () => undefined,
@@ -1055,6 +842,22 @@ test("monitor-only is driven by CODEX_WRITES_DISABLED", () => {
   );
 });
 
+test("real monitor-only model stays non-ready in the live overview", () => {
+  const snapshot = dashboardFixture();
+  const codex = snapshot.routes.find((route) => route.provider === "codex");
+  assert.ok(codex);
+  codex.safeErrorCode = "CODEX_WRITES_DISABLED";
+  const model = buildDashboardViewModel(snapshot);
+  const overview = adapter.overviewProps(model, GENERATED_MS);
+  assert.equal(overview.overall, "attention");
+  assert.equal(overview.exchange.codex.status, "attention");
+  assert.equal(overview.exchange.codex.ready, 0);
+  assert.equal(overview.exchange.codex.monitorOnly, 1);
+  assert.equal(overview.exchange.codex.nextAction, "review_compatibility");
+  assert.equal(overview.graph.readyPairCount, 0);
+  assert.equal(overview.degradedPairCopyKey, "app.overview.degradedEdge");
+});
+
 test("stale-registration recovery is offered only on stale Codex rows", () => {
   const staleCodex = DEGRADED.routes.find(
     (route) => route.provider === "codex" && route.state === "stale",
@@ -1248,6 +1051,27 @@ test("attention commands fall back to angle-bracket placeholders without an alia
   assert.equal(
     adapter.attentionCommand({ ...anonymous, guidance: "generic" }),
     "embassy status",
+  );
+});
+
+test("live stalled-queue attention renders queue depth only when evidence carries it", () => {
+  const stalled: DashboardAttentionItem = {
+    kind: "alert",
+    code: "QUEUE_STALLED",
+    severity: "warning",
+    guidance: "queue_stalled",
+    queueDepth: 1_234,
+  };
+  const t = (key: string): string =>
+    key === "app.routes.queueDepth" ? "Queue depth" : key;
+  assert.equal(
+    bundle.Embassy.attentionQueueDepthLine(stalled, t, "en"),
+    "Queue depth: 1,234",
+  );
+  const { queueDepth: _queueDepth, ...withoutDepth } = stalled;
+  assert.equal(
+    bundle.Embassy.attentionQueueDepthLine(withoutDepth, t, "en"),
+    undefined,
   );
 });
 
@@ -1508,7 +1332,7 @@ test("held is progress, duplicate is inert, rejected is warning", () => {
     "activity.meaning.rejected",
   );
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("rejected", "SENDER_NOT_PAIRED"),
+    bundle.Embassy.deliveryMeaningKey("rejected", undefined, "SENDER_NOT_PAIRED"),
     "activity.meaning.senderNotPaired",
   );
 });
@@ -1547,23 +1371,23 @@ test("unknown tokens fall back loudly, never to inert", () => {
 
 test("abandoned annotation is selected by safeErrorCode (H4)", () => {
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("abandoned", "CONTROLLER_RESTARTED"),
+    bundle.Embassy.deliveryMeaningKey("abandoned", undefined, "CONTROLLER_RESTARTED"),
     "activity.meaning.abandoned.controllerRestarted",
   );
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("abandoned", "TRANSIENT_BODY_UNAVAILABLE"),
+    bundle.Embassy.deliveryMeaningKey("abandoned", undefined, "TRANSIENT_BODY_UNAVAILABLE"),
     "activity.meaning.abandoned.transientBody",
   );
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("abandoned", "ROUTE_UNREGISTERED"),
+    bundle.Embassy.deliveryMeaningKey("abandoned", undefined, "ROUTE_UNREGISTERED"),
     "activity.meaning.abandoned.routeTerminated",
   );
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("abandoned", "MESSAGE_EXPIRED"),
+    bundle.Embassy.deliveryMeaningKey("abandoned", undefined, "MESSAGE_EXPIRED"),
     "activity.meaning.abandoned.routeTerminated",
   );
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("abandoned", "SOMETHING_ELSE"),
+    bundle.Embassy.deliveryMeaningKey("abandoned", undefined, "SOMETHING_ELSE"),
     "activity.meaning.abandoned.generic",
   );
   assert.equal(
@@ -1578,8 +1402,8 @@ test("abandoned annotation is selected by safeErrorCode (H4)", () => {
   assert.equal(
     bundle.Embassy.deliveryMeaningKey(
       group.state,
-      group.safeErrorCode,
       group.direction,
+      group.safeErrorCode,
     ),
     "activity.meaning.abandoned.controllerRestarted",
   );
@@ -1589,11 +1413,11 @@ test("abandoned annotation is selected by safeErrorCode (H4)", () => {
 
 test("delivered hover meaning localizes by direction, other states do not", () => {
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("delivered", undefined, "codex_to_claude"),
+    bundle.Embassy.deliveryMeaningKey("delivered", "codex_to_claude"),
     "activity.meaning.delivered.codexToClaude",
   );
   assert.equal(
-    bundle.Embassy.deliveryMeaningKey("delivered", undefined, "claude_to_codex"),
+    bundle.Embassy.deliveryMeaningKey("delivered", "claude_to_codex"),
     "activity.meaning.delivered.claudeToCodex",
   );
   assert.equal(

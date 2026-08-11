@@ -43,6 +43,7 @@ export type DashboardNextAction =
   | "repair_claude_inventory"
   | "register_codex"
   | "restore_codex"
+  | "review_compatibility"
   | "none";
 
 export type DashboardExchangeParty = Readonly<{
@@ -53,6 +54,7 @@ export type DashboardExchangeParty = Readonly<{
   selectable?: number | undefined;
   countIsLowerBound: boolean;
   primaryAlias?: string | undefined;
+  monitorOnly?: number | undefined;
   nextAction: DashboardNextAction;
 }>;
 
@@ -141,9 +143,11 @@ export type DashboardMessageGroup = Readonly<{
   bytes: number;
   safeErrorCode?: string | undefined;
   steer?: true | undefined;
-  body?: string | undefined;
   events: readonly DashboardMessageEvent[];
 }>;
+
+export type LiveDashboardMessageGroup = DashboardMessageGroup &
+  Readonly<{ body?: string | undefined }>;
 
 export type DashboardActivityEventRow = Readonly<{
   sequence: number;
@@ -313,6 +317,317 @@ export type DashboardViewModel = Readonly<{
   omissions: DashboardOmissions;
 }>;
 
+export type LiveDashboardViewModel = Omit<DashboardViewModel, "activity"> &
+  Readonly<{ activity: readonly LiveDashboardMessageGroup[] }>;
+
+export type DashboardChipKind =
+  | "positive"
+  | "qualified"
+  | "active"
+  | "progress"
+  | "warning"
+  | "indeterminate"
+  | "failure"
+  | "inert"
+  | "unknown";
+
+export type DashboardSemanticDomain =
+  | "delivery"
+  | "route"
+  | "peer"
+  | "health"
+  | "compatibility"
+  | "overall"
+  | "party"
+  | "severity"
+  | "connection";
+
+type DashboardPresentation = Readonly<{
+  tone: DashboardTone;
+  chip: DashboardChipKind;
+}>;
+
+const presentation = <T extends string>(
+  values: Readonly<Record<T, DashboardPresentation>>,
+): Readonly<Record<T, DashboardPresentation>> => values;
+
+const statePresentation = {
+  delivery: presentation<DeliveryState>({
+    queued: { tone: "info", chip: "progress" },
+    duplicate: { tone: "quiet", chip: "inert" },
+    dispatching: { tone: "info", chip: "progress" },
+    transport_written: { tone: "info", chip: "progress" },
+    held: { tone: "warning", chip: "progress" },
+    delivered: { tone: "good", chip: "positive" },
+    unconfirmed: { tone: "warning", chip: "indeterminate" },
+    failed: { tone: "danger", chip: "failure" },
+    ambiguous: { tone: "warning", chip: "indeterminate" },
+    expired: { tone: "danger", chip: "failure" },
+    cancelled: { tone: "danger", chip: "inert" },
+    abandoned: { tone: "danger", chip: "inert" },
+    rejected: { tone: "danger", chip: "warning" },
+  }),
+  route: presentation<RouteState>({
+    stale: { tone: "danger", chip: "failure" },
+    idle: { tone: "good", chip: "progress" },
+    busy: { tone: "info", chip: "active" },
+    awaiting_approval: { tone: "warning", chip: "warning" },
+    offline: { tone: "danger", chip: "failure" },
+    incompatible: { tone: "danger", chip: "failure" },
+    disabled: { tone: "quiet", chip: "inert" },
+  }),
+  peer: presentation<PublicAvailablePeerState>({
+    idle: { tone: "good", chip: "progress" },
+    busy: { tone: "info", chip: "active" },
+    awaiting_approval: { tone: "warning", chip: "warning" },
+    offline: { tone: "danger", chip: "inert" },
+    incompatible: { tone: "danger", chip: "failure" },
+  }),
+  health: presentation<ConnectorHealth>({
+    healthy: { tone: "good", chip: "positive" },
+    connecting: { tone: "info", chip: "progress" },
+    degraded: { tone: "warning", chip: "warning" },
+    offline: { tone: "danger", chip: "failure" },
+    incompatible: { tone: "danger", chip: "failure" },
+  }),
+  compatibility: presentation<CompatibilityState>({
+    compatible: { tone: "good", chip: "positive" },
+    unknown: { tone: "quiet", chip: "inert" },
+    expired: { tone: "warning", chip: "warning" },
+    incompatible: { tone: "danger", chip: "failure" },
+  }),
+  overall: presentation<DashboardViewModel["overall"]>({
+    ready: { tone: "good", chip: "positive" },
+    setup: { tone: "info", chip: "progress" },
+    attention: { tone: "danger", chip: "failure" },
+  }),
+  party: presentation<DashboardExchangeParty["status"]>({
+    ready: { tone: "good", chip: "positive" },
+    busy: { tone: "info", chip: "active" },
+    waiting: { tone: "warning", chip: "warning" },
+    missing: { tone: "quiet", chip: "inert" },
+    attention: { tone: "danger", chip: "failure" },
+  }),
+  severity: presentation<AlertSeverity>({
+    info: { tone: "info", chip: "active" },
+    warning: { tone: "warning", chip: "warning" },
+    error: { tone: "danger", chip: "failure" },
+  }),
+  connection: presentation({
+    connected: { tone: "good", chip: "positive" },
+    connecting: { tone: "info", chip: "progress" },
+    paused: { tone: "quiet", chip: "inert" },
+    unavailable: { tone: "warning", chip: "warning" },
+    capacity: { tone: "warning", chip: "warning" },
+    disconnected: { tone: "warning", chip: "warning" },
+    stopped: { tone: "warning", chip: "warning" },
+  }),
+} as const;
+
+const guidanceCopyKeys = {
+  reobserve_claude: "reobserveClaude",
+  reobserve_codex: "reobserveCodex",
+  codex_reactivation_required: "codexReactivationRequired",
+  consent_edge_unavailable: "consentEdgeUnavailable",
+  claude_not_observed: "claudeNotObserved",
+  codex_stale: "codexStale",
+  connector_offline: "connectorOffline",
+  route_stale: "routeStale",
+  queue_stalled: "queueStalled",
+  recipient_waiting_input: "recipientWaitingInput",
+  unconfirmed: "unconfirmed",
+  degraded: "degraded",
+  codex_succession_busy: "codexSuccessionBusy",
+  codex_succession_recovery: "codexSuccessionRecovery",
+  progress_watch: "progressWatch",
+  registry_empty: "registryEmpty",
+  registry_rejected: "registryRejected",
+  provider_incompatible: "providerIncompatible",
+  generic: "generic",
+} as const satisfies Record<DashboardAttentionItem["guidance"], string>;
+
+const nextActionCopyKeys = {
+  discover_claude: "next.discoverClaude",
+  select_claude: "next.selectClaude",
+  pair_routes: "next.pairRoutes",
+  restore_claude: "next.restoreClaude",
+  repair_claude_inventory: "next.repairClaude",
+  register_codex: "next.registerCodex",
+  restore_codex: "next.restoreCodex",
+  review_compatibility: "next.reviewCompatibility",
+  none: "next.none",
+} as const satisfies Record<DashboardNextAction, string>;
+
+const attentionCommands = {
+  reobserve_claude: "embassy select-claude --alias {alias}",
+  reobserve_codex: "embassy register-codex --alias {alias}",
+  codex_reactivation_required: "embassy register-codex --alias {alias}",
+  consent_edge_unavailable: "embassy refresh-dashboard",
+  claude_not_observed: "embassy select-claude --alias {alias}",
+  codex_stale: "embassy register-codex --alias {alias}",
+  connector_offline: "embassy status",
+  route_stale: "embassy status",
+  queue_stalled: "embassy status",
+  recipient_waiting_input: "embassy status",
+  unconfirmed: "embassy status",
+  degraded: "embassy status",
+  codex_succession_busy:
+    "embassy register-codex --alias <new> --succeeds {alias}",
+  codex_succession_recovery:
+    "embassy register-codex --alias <new> --succeeds {alias}",
+  progress_watch: "embassy status",
+  registry_empty: "embassy refresh-dashboard",
+  registry_rejected: "embassy status",
+  provider_incompatible: "embassy refresh-dashboard",
+  generic: "embassy status",
+} as const satisfies Record<DashboardAttentionItem["guidance"], string>;
+
+const deliveryMeaningKeys = {
+  queued: "activity.meaning.queued",
+  duplicate: "activity.meaning.duplicate",
+  dispatching: "activity.meaning.dispatching",
+  transport_written: "activity.meaning.transportWritten",
+  held: "activity.meaning.held",
+  delivered: "activity.meaning.delivered",
+  unconfirmed: "activity.meaning.unconfirmed",
+  failed: "activity.meaning.failed",
+  ambiguous: "activity.meaning.ambiguous",
+  expired: "activity.meaning.expired",
+  cancelled: "activity.meaning.cancelled",
+  abandoned: "activity.meaning.abandoned.generic",
+  rejected: "activity.meaning.rejected",
+} as const satisfies Record<DeliveryState, string>;
+
+/** JSON-safe semantics embedded once in the live dashboard boot payload. */
+export const DASHBOARD_SEMANTICS = Object.freeze({
+  statePresentation,
+  deliveryChipByDirection: {
+    delivered: { codex_to_claude: "qualified" },
+  },
+  deliveryChipBySafeErrorCode: {
+    rejected: { SENDER_NOT_PAIRED: "inert" },
+  },
+  deliveryToneBySafeErrorCode: {
+    rejected: { SENDER_NOT_PAIRED: "quiet" },
+  },
+  guidanceCopyKeys,
+  nextActionCopyKeys,
+  attentionCommands,
+  attentionCommandFallbacks: {
+    codex_succession_busy: "<old>",
+    codex_succession_recovery: "<old>",
+  },
+  deliveryMeaningKeys,
+  deliveryMeaningByDirection: {
+    codex_to_claude: "activity.meaning.delivered.codexToClaude",
+    claude_to_codex: "activity.meaning.delivered.claudeToCodex",
+  },
+  deliveryMeaningBySafeErrorCode: {
+    SENDER_NOT_PAIRED: "activity.meaning.senderNotPaired",
+    CONTROLLER_RESTARTED: "activity.meaning.abandoned.controllerRestarted",
+    TRANSIENT_BODY_UNAVAILABLE: "activity.meaning.abandoned.transientBody",
+    ROUTE_UNREGISTERED: "activity.meaning.abandoned.routeTerminated",
+    MESSAGE_EXPIRED: "activity.meaning.abandoned.routeTerminated",
+  },
+} as const);
+
+export type DashboardSemantics = typeof DASHBOARD_SEMANTICS;
+
+function semanticPresentation(
+  domain: DashboardSemanticDomain,
+  state: string,
+): DashboardPresentation | undefined {
+  const table = DASHBOARD_SEMANTICS.statePresentation[domain] as Readonly<
+    Record<string, DashboardPresentation>
+  >;
+  return Object.prototype.hasOwnProperty.call(table, state)
+    ? table[state]
+    : undefined;
+}
+
+export function dashboardChipKind(
+  domain: DashboardSemanticDomain,
+  state: string,
+  direction?: MessageDirection,
+  safeErrorCode?: string,
+): DashboardChipKind {
+  if (domain === "delivery") {
+    const byCode = DASHBOARD_SEMANTICS.deliveryChipBySafeErrorCode as Readonly<
+      Record<string, Readonly<Record<string, DashboardChipKind>>>
+    >;
+    const byDirection = DASHBOARD_SEMANTICS.deliveryChipByDirection as Readonly<
+      Record<string, Readonly<Record<string, DashboardChipKind>>>
+    >;
+    if (safeErrorCode !== undefined) {
+      const override = byCode[state]?.[safeErrorCode];
+      if (override !== undefined) return override;
+    }
+    if (direction !== undefined) {
+      const override = byDirection[state]?.[direction];
+      if (override !== undefined) return override;
+    }
+  }
+  return semanticPresentation(domain, state)?.chip ?? "unknown";
+}
+
+export function dashboardTone(
+  domain: DashboardSemanticDomain,
+  state: string,
+  safeErrorCode?: string,
+): DashboardTone {
+  if (domain === "delivery" && safeErrorCode !== undefined) {
+    const byCode = DASHBOARD_SEMANTICS.deliveryToneBySafeErrorCode as Readonly<
+      Record<string, Readonly<Record<string, DashboardTone>>>
+    >;
+    const override = byCode[state]?.[safeErrorCode];
+    if (override !== undefined) return override;
+  }
+  return semanticPresentation(domain, state)?.tone ?? "danger";
+}
+
+export function deliveryMeaningKey(
+  state: string,
+  direction?: MessageDirection,
+  safeErrorCode?: string,
+): string {
+  if (state === "rejected" && safeErrorCode === "SENDER_NOT_PAIRED") {
+    return DASHBOARD_SEMANTICS.deliveryMeaningBySafeErrorCode.SENDER_NOT_PAIRED;
+  }
+  if (state === "delivered" && direction !== undefined) {
+    return DASHBOARD_SEMANTICS.deliveryMeaningByDirection[direction];
+  }
+  if (state === "abandoned" && safeErrorCode !== undefined) {
+    const byCode = DASHBOARD_SEMANTICS.deliveryMeaningBySafeErrorCode as Readonly<
+      Record<string, string>
+    >;
+    return byCode[safeErrorCode] ?? deliveryMeaningKeys.abandoned;
+  }
+  const byState = DASHBOARD_SEMANTICS.deliveryMeaningKeys as Readonly<
+    Record<string, string>
+  >;
+  return byState[state] ?? "activity.meaning.other";
+}
+
+export function guidanceCopyKey(
+  guidance: DashboardAttentionItem["guidance"],
+): string {
+  return DASHBOARD_SEMANTICS.guidanceCopyKeys[guidance];
+}
+
+export function nextActionCopyKey(action: DashboardNextAction): string {
+  return DASHBOARD_SEMANTICS.nextActionCopyKeys[action];
+}
+
+export function attentionCommand(item: DashboardAttentionItem): string {
+  const fallbacks = DASHBOARD_SEMANTICS.attentionCommandFallbacks as Readonly<
+    Partial<Record<DashboardAttentionItem["guidance"], string>>
+  >;
+  return DASHBOARD_SEMANTICS.attentionCommands[item.guidance].replaceAll(
+    "{alias}",
+    item.alias ?? fallbacks[item.guidance] ?? "<alias>",
+  );
+}
+
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SAFE_PROTOCOL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+:/-]{0,47}$/;
 const OPAQUE_SUFFIX_PATTERN = /^[a-f0-9]{6,12}$/i;
@@ -377,9 +692,22 @@ function normalizedCounters(counters: Partial<RouteCounters> | undefined): Route
   };
 }
 
+export function buildDashboardViewModel(
+  snapshot: GatewayPublicSnapshot,
+): DashboardViewModel {
+  return buildProjectedDashboardViewModel(snapshot, false);
+}
+
+export function buildLiveDashboardViewModel(
+  snapshot: GatewayPublicSnapshot,
+): LiveDashboardViewModel {
+  return buildProjectedDashboardViewModel(snapshot, true);
+}
+
 function routeIsReady(route: DashboardRouteRow): boolean {
   return (
     route.enabled &&
+    route.safeErrorCode !== "CODEX_WRITES_DISABLED" &&
     route.compatibility === "compatible" &&
     (route.state === "idle" || route.state === "busy")
   );
@@ -576,8 +904,9 @@ function messageKey(message: GatewayPublicSnapshot["messages"][number]): string 
 
 function buildMessageGroups(
   messages: GatewayPublicSnapshot["messages"],
+  includeBodies: boolean,
 ): {
-  groups: DashboardMessageGroup[];
+  groups: LiveDashboardMessageGroup[];
   omittedGroups: number;
   omittedEvents: number;
   activeGroups: number;
@@ -590,7 +919,7 @@ function buildMessageGroups(
     else events.push(message);
   }
   const all = [...grouped.values()]
-    .map((events): DashboardMessageGroup => {
+    .map((events): LiveDashboardMessageGroup => {
       const ordered = [...events].sort((left, right) => {
         const byTime = compareText(
           normalizedTimestamp(left.timestamp) ?? "",
@@ -647,7 +976,8 @@ function buildMessageGroups(
         ...(latest.steer === true ? { steer: true as const } : {}),
         // Bodies are first-class observable data (CO #36); the display copy
         // is bounded so one 16 KiB message cannot dominate the view model.
-        ...(typeof latest.body === "string" && latest.body.length > 0
+        ...(includeBodies &&
+        typeof latest.body === "string" && latest.body.length > 0
           ? { body: boundedText(latest.body, 4096) }
           : {}),
         events: allEvents,
@@ -661,7 +991,7 @@ function buildMessageGroups(
   let omittedEvents = 0;
   const displayedGroups = all.slice(0, DASHBOARD_MODEL_LIMITS.messages);
   const visibleGroups = displayedGroups.map(
-    (group, index): DashboardMessageGroup => {
+    (group, index): LiveDashboardMessageGroup => {
       const groupsAfterThis = displayedGroups.length - index - 1;
       const availableForThis = Math.max(1, eventBudget - groupsAfterThis);
       const retained = Math.min(availableForThis, group.events.length);
@@ -685,14 +1015,26 @@ function buildMessageGroups(
   };
 }
 
-export function buildDashboardViewModel(
+function buildProjectedDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
-): DashboardViewModel {
+  includeBodies: boolean,
+): LiveDashboardViewModel {
   const generatedAt = normalizedTimestamp(snapshot.generatedAt);
   const inboundMode = snapshot.inboundMode === "open" ? "open" : "paired";
   const validPeers = arePublicAvailablePeerSnapshots(snapshot.availablePeers)
     ? snapshot.availablePeers
     : [];
+  const quarantinedProviders = new Set<GatewayProvider>([
+    ...snapshot.connectors
+      .filter((connector) => connector.compatibility === "incompatible")
+      .map((connector) => connector.provider),
+    ...(Array.isArray(snapshot.compatibilityChecks)
+      ? snapshot.compatibilityChecks
+          .filter(isPublicCompatibilityCheckSnapshot)
+          .filter((check) => check.tier === "incompatible")
+          .map((check) => check.surface)
+      : []),
+  ]);
   const peers = validPeers
     .map(
       (peer): DashboardPeerRow => ({
@@ -789,7 +1131,11 @@ export function buildDashboardViewModel(
         codexAlias,
         host: boundedText(pair.host),
         state:
-          bothPresent && routeIsReady(claudeRoute) && routeIsReady(codexRoute)
+          bothPresent &&
+          !quarantinedProviders.has("claude") &&
+          !quarantinedProviders.has("codex") &&
+          routeIsReady(claudeRoute) &&
+          routeIsReady(codexRoute)
             ? "ready"
             : bothPresent
               ? "degraded"
@@ -941,7 +1287,7 @@ export function buildDashboardViewModel(
     .sort((left, right) => compareText(left.surface, right.surface))
     .slice(0, 2);
 
-  const messages = buildMessageGroups(snapshot.messages);
+  const messages = buildMessageGroups(snapshot.messages, includeBodies);
   const queuedMessages = allRoutes.reduce(
     (total, route) => boundedAdd(total, route.queueDepth),
     0,
@@ -959,16 +1305,21 @@ export function buildDashboardViewModel(
 
   const claudeRoutes = allRoutes.filter((route) => route.provider === "claude");
   const codexRoutes = allRoutes.filter((route) => route.provider === "codex");
-  const readyClaude = claudeRoutes.filter(routeIsReady).length;
-  const readyCodex = codexRoutes.filter(routeIsReady).length;
+  const monitorOnlyCodexRoutes = codexRoutes.filter(
+    (route) => route.safeErrorCode === "CODEX_WRITES_DISABLED",
+  );
+  const routeIsExchangeReady = (route: DashboardRouteRow): boolean =>
+    !quarantinedProviders.has(route.provider) && routeIsReady(route);
+  const readyClaude = claudeRoutes.filter(routeIsExchangeReady).length;
+  const readyCodex = codexRoutes.filter(routeIsExchangeReady).length;
   const readyPairs = allPairs.filter((pair) => pair.state === "ready");
   const pairedClaude = new Set(allPairs.map((pair) => pair.claudeAlias));
   const pairedCodex = new Set(allPairs.map((pair) => pair.codexAlias));
   const readyPairedClaude = claudeRoutes.some(
-    (route) => routeIsReady(route) && pairedClaude.has(route.alias),
+    (route) => routeIsExchangeReady(route) && pairedClaude.has(route.alias),
   );
   const readyPairedCodex = codexRoutes.some(
-    (route) => routeIsReady(route) && pairedCodex.has(route.alias),
+    (route) => routeIsExchangeReady(route) && pairedCodex.has(route.alias),
   );
   const pairCountIsLowerBound =
     (normalizedInteger(snapshot.truncation.pairs) ?? 0) > 0;
@@ -978,21 +1329,25 @@ export function buildDashboardViewModel(
     readyPairCount: readyPairs.length,
     pairCountIsLowerBound,
     unpairedReadyClaude: claudeRoutes.filter(
-      (route) => routeIsReady(route) && !pairedClaude.has(route.alias),
+      (route) => routeIsExchangeReady(route) && !pairedClaude.has(route.alias),
     ).length,
     unpairedReadyCodex: codexRoutes.filter(
-      (route) => routeIsReady(route) && !pairedCodex.has(route.alias),
+      (route) => routeIsExchangeReady(route) && !pairedCodex.has(route.alias),
     ).length,
   };
   const selectedPeers = validPeers.filter(
     (peer) => peer.selected && peerIsSelectable(peer),
   );
   const selectablePeers = validPeers.filter(peerIsSelectable);
-  const selectedClaudeCount = Math.max(selectedPeers.length, readyClaude);
+  const selectedClaudeCount = quarantinedProviders.has("claude")
+    ? 0
+    : Math.max(selectedPeers.length, readyClaude);
   const claudeStatus = partyStatus(claudeRoutes, readyClaude);
   const codexStatus = partyStatus(codexRoutes, readyCodex);
   const claudeNextAction: DashboardNextAction =
-    selectedClaudeCount > 0 &&
+    quarantinedProviders.has("claude")
+      ? "review_compatibility"
+      : selectedClaudeCount > 0 &&
     (readyPairedClaude || (pairCountIsLowerBound && readyClaude > 0))
       ? "none"
       : readyClaude > 0
@@ -1007,7 +1362,9 @@ export function buildDashboardViewModel(
               ? "restore_claude"
               : "repair_claude_inventory";
   const codexNextAction: DashboardNextAction =
-    readyPairedCodex || (pairCountIsLowerBound && readyCodex > 0)
+    quarantinedProviders.has("codex") || monitorOnlyCodexRoutes.length > 0
+      ? "review_compatibility"
+      : readyPairedCodex || (pairCountIsLowerBound && readyCodex > 0)
       ? "none"
       : readyCodex > 0
         ? "pair_routes"
@@ -1054,7 +1411,11 @@ export function buildDashboardViewModel(
             route.queueDepth > 0
               ? { queueDepth: route.queueDepth }
               : {}),
-          guidance: guidanceFor(code, alert.provider),
+          guidance:
+            alert.provider !== undefined &&
+            quarantinedProviders.has(alert.provider)
+              ? "provider_incompatible"
+              : guidanceFor(code, alert.provider),
         };
       }),
     allRoutes,
@@ -1140,7 +1501,9 @@ export function buildDashboardViewModel(
   );
   for (const route of allRoutes) {
     if (
-      routeIsReady(route)
+      routeIsReady(route) ||
+      quarantinedProviders.has(route.provider) ||
+      route.safeErrorCode === "CODEX_WRITES_DISABLED"
     ) {
       continue;
     }
@@ -1191,7 +1554,8 @@ export function buildDashboardViewModel(
       guidance:
         connector.health === "offline"
           ? "connector_offline"
-          : connector.safeErrorCode === "CLAUDE_PEER_VERSION_UNSUPPORTED" ||
+          : quarantinedProviders.has(connector.provider) ||
+              connector.safeErrorCode === "CLAUDE_PEER_VERSION_UNSUPPORTED" ||
               connector.safeErrorCode === "CLAUDE_VERSION_UNPARSEABLE" ||
               connector.safeErrorCode === "CLAUDE_VERSION_CHECK_FAILED" ||
               connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_CONFLICT" ||
@@ -1250,6 +1614,7 @@ export function buildDashboardViewModel(
     (snapshot.health === "degraded" ||
       snapshot.health === "offline" ||
       snapshot.health === "incompatible") &&
+    !(snapshot.health === "degraded" && quarantinedProviders.size > 0) &&
     !attentionCandidates.some((item) => item.kind === "broker")
   ) {
     attentionCandidates.push({
@@ -1346,6 +1711,9 @@ export function buildDashboardViewModel(
         status: codexStatus,
         total: codexRoutes.length,
         ready: readyCodex,
+        ...(monitorOnlyCodexRoutes.length === 0
+          ? {}
+          : { monitorOnly: monitorOnlyCodexRoutes.length }),
         countIsLowerBound:
           (normalizedInteger(snapshot.truncation.routes) ?? 0) > 0,
         ...(codexRoutes[0]?.alias === undefined
