@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 
 import {
-  buildDashboardViewModel,
-  type DashboardViewModel,
+  buildLiveDashboardViewModel,
+  type LiveDashboardViewModel,
 } from "./dashboard-model.js";
 import { LIVE_DASHBOARD_LIMITS } from "./live-dashboard-protocol.js";
 import type { GatewayPublicSnapshot } from "./types.js";
@@ -41,7 +41,7 @@ export type LiveDashboardStreamEvent = Readonly<{
   streamRevision: number;
   snapshotRevision: LiveDashboardSnapshotRevision;
   reset: boolean;
-  model: DashboardViewModel;
+  model: LiveDashboardViewModel;
 }>;
 
 type StreamState = {
@@ -104,7 +104,7 @@ function stripTimeDerived(value: unknown): unknown {
   return value;
 }
 
-function fingerprint(model: DashboardViewModel): string {
+function fingerprint(model: LiveDashboardViewModel): string {
   // Clock-derived fields (`…Ms` durations, `…At` timestamps) advance even when
   // the broker's public semantics have not changed. Stripping them by key
   // shape keeps this fingerprint aligned with the gateway's semantic-revision
@@ -225,7 +225,7 @@ export function createLiveDashboardStreamHub(
       const observed = await options.observer.observe();
       if (stopped) return undefined;
       const nextRevision = normalizeRevision(observed.snapshotRevision);
-      const model = buildDashboardViewModel(observed.snapshot);
+      const model = buildLiveDashboardViewModel(observed.snapshot);
       const nextFingerprint = fingerprint(model);
       const changed = latest?.fingerprint !== nextFingerprint;
       const reset =

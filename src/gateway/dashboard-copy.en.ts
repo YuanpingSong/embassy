@@ -65,6 +65,8 @@ export const dashboardCopyEn = {
     "Inside the Codex task, run embassy register-codex --alias codex-<name>@<host>.",
   "next.restoreCodex":
     "Re-run embassy register-codex --alias <alias> inside that exact Codex task.",
+  "next.reviewCompatibility":
+    "Run embassy refresh-dashboard, then review Provider compatibility; discovery or registration cannot remove this write fence.",
   "attention.eyebrow": "Needs attention",
   "attention.title": "Resolve before sending",
   "attention.count": "{count} active",

@@ -18,6 +18,10 @@ import {
 import {
   buildDashboardViewModel,
   DASHBOARD_MODEL_LIMITS,
+  dashboardTone,
+  deliveryMeaningKey,
+  guidanceCopyKey,
+  nextActionCopyKey,
   type DashboardAttentionItem,
   type DashboardExchangeParty,
   type DashboardMessageGroup,
@@ -194,66 +198,34 @@ function renderTimestampAtSnapshot(
 }
 
 function toneForOverall(overall: DashboardViewModel["overall"]): DashboardTone {
-  return overall === "ready" ? "good" : overall === "attention" ? "danger" : "info";
+  return dashboardTone("overall", overall);
 }
 
 function toneForParty(status: DashboardExchangeParty["status"]): DashboardTone {
-  if (status === "ready") return "good";
-  if (status === "busy") return "info";
-  if (status === "waiting") return "warning";
-  if (status === "attention") return "danger";
-  return "quiet";
+  return dashboardTone("party", status);
 }
 
 function toneForHealth(health: ConnectorHealth): DashboardTone {
-  if (health === "healthy") return "good";
-  if (health === "connecting") return "info";
-  if (health === "degraded") return "warning";
-  return "danger";
+  return dashboardTone("health", health);
 }
 
 function toneForCompatibility(compatibility: CompatibilityState): DashboardTone {
-  if (compatibility === "compatible") return "good";
-  if (compatibility === "unknown") return "quiet";
-  if (compatibility === "expired") return "warning";
-  return "danger";
+  return dashboardTone("compatibility", compatibility);
 }
 
 function toneForRoute(state: RouteState): DashboardTone {
-  if (state === "idle") return "good";
-  if (state === "busy") return "info";
-  if (state === "awaiting_approval") return "warning";
-  if (state === "disabled") return "quiet";
-  return "danger";
+  return dashboardTone("route", state);
 }
 
 function toneForPeer(state: PublicAvailablePeerState): DashboardTone {
-  if (state === "idle") return "good";
-  if (state === "busy") return "info";
-  if (state === "awaiting_approval") return "warning";
-  return "danger";
+  return dashboardTone("peer", state);
 }
 
 function toneForDelivery(
   state: DeliveryState,
   safeErrorCode?: string,
 ): DashboardTone {
-  if (state === "rejected" && safeErrorCode === "SENDER_NOT_PAIRED") {
-    return "quiet";
-  }
-  if (state === "delivered") return "good";
-  if (
-    state === "queued" ||
-    state === "dispatching" ||
-    state === "transport_written"
-  ) {
-    return "info";
-  }
-  if (state === "held" || state === "unconfirmed" || state === "ambiguous") {
-    return "warning";
-  }
-  if (state === "duplicate") return "quiet";
-  return "danger";
+  return dashboardTone("delivery", state, safeErrorCode);
 }
 
 function statusPill(label: string, tone: DashboardTone): string {
@@ -292,23 +264,7 @@ function nextActionLabel(
   context: RenderContext,
   action: DashboardExchangeParty["nextAction"],
 ): string {
-  const key: DashboardCopyKey =
-    action === "discover_claude"
-      ? "next.discoverClaude"
-      : action === "select_claude"
-        ? "next.selectClaude"
-      : action === "pair_routes"
-        ? "next.pairRoutes"
-      : action === "restore_claude"
-        ? "next.restoreClaude"
-        : action === "repair_claude_inventory"
-          ? "next.repairClaude"
-          : action === "register_codex"
-            ? "next.registerCodex"
-            : action === "restore_codex"
-              ? "next.restoreCodex"
-              : "next.none";
-  return t(context, key);
+  return t(context, nextActionCopyKey(action) as DashboardCopyKey);
 }
 
 function renderParty(context: RenderContext, party: DashboardExchangeParty): string {
@@ -325,8 +281,9 @@ function renderParty(context: RenderContext, party: DashboardExchangeParty): str
       <div><h3>${t(context, isClaude ? "exchange.claude.title" : "exchange.codex.title")}</h3><p>${t(context, isClaude ? "exchange.claude.note" : "exchange.codex.note")}</p></div>
       ${statusPill(partyStatusLabel(context, party.status), toneForParty(party.status))}
     </div>
-    <p class="party-count">${t(context, isClaude ? "exchange.count.claude" : "exchange.count.codex", { ready, selectable, total })}</p>
+    <p class="party-count">${t(context, isClaude ? "exchange.count.claude" : "app.overview.count.codex", { ready, selectable, total, monitorOnly: party.monitorOnly ?? 0 })}</p>
     ${party.primaryAlias === undefined ? "" : `<p class="party-alias">${escapeDashboardHtml(party.primaryAlias)}</p>`}
+    ${party.monitorOnly === undefined ? "" : `<p class="cell-note">${t(context, "app.routes.monitorOnlyReason")}</p>`}
     <p class="next-action"><strong>${t(context, "next.label")}:</strong> ${nextActionLabel(context, party.nextAction)}</p>
   </article>`;
 }
@@ -458,50 +415,16 @@ function severityLabel(context: RenderContext, severity: DashboardAttentionItem[
 }
 
 function alertTone(severity: DashboardAttentionItem["severity"]): DashboardTone {
-  return severity === "error" ? "danger" : severity === "warning" ? "warning" : "info";
+  return dashboardTone("severity", severity);
 }
 
 function guidanceKeys(guidance: DashboardAttentionItem["guidance"]): readonly [DashboardCopyKey, DashboardCopyKey, DashboardCopyKey] {
-  switch (guidance) {
-    case "reobserve_claude":
-      return ["guidance.reobserveClaude.title", "guidance.reobserveClaude.body", "guidance.reobserveClaude.action"];
-    case "reobserve_codex":
-      return ["guidance.reobserveCodex.title", "guidance.reobserveCodex.body", "guidance.reobserveCodex.action"];
-    case "codex_reactivation_required":
-      return ["guidance.codexReactivationRequired.title", "guidance.codexReactivationRequired.body", "guidance.codexReactivationRequired.action"];
-    case "consent_edge_unavailable":
-      return ["guidance.consentEdgeUnavailable.title", "guidance.consentEdgeUnavailable.body", "guidance.consentEdgeUnavailable.action"];
-    case "claude_not_observed":
-      return ["guidance.claudeNotObserved.title", "guidance.claudeNotObserved.body", "guidance.claudeNotObserved.action"];
-    case "codex_stale":
-      return ["guidance.codexStale.title", "guidance.codexStale.body", "guidance.codexStale.action"];
-    case "connector_offline":
-      return ["guidance.connectorOffline.title", "guidance.connectorOffline.body", "guidance.connectorOffline.action"];
-    case "route_stale":
-      return ["guidance.routeStale.title", "guidance.routeStale.body", "guidance.routeStale.action"];
-    case "queue_stalled":
-      return ["guidance.queueStalled.title", "guidance.queueStalled.body", "guidance.queueStalled.action"];
-    case "recipient_waiting_input":
-      return ["guidance.recipientWaitingInput.title", "guidance.recipientWaitingInput.body", "guidance.recipientWaitingInput.action"];
-    case "unconfirmed":
-      return ["guidance.unconfirmed.title", "guidance.unconfirmed.body", "guidance.unconfirmed.action"];
-    case "degraded":
-      return ["guidance.degraded.title", "guidance.degraded.body", "guidance.degraded.action"];
-    case "codex_succession_busy":
-      return ["guidance.codexSuccessionBusy.title", "guidance.codexSuccessionBusy.body", "guidance.codexSuccessionBusy.action"];
-    case "codex_succession_recovery":
-      return ["guidance.codexSuccessionRecovery.title", "guidance.codexSuccessionRecovery.body", "guidance.codexSuccessionRecovery.action"];
-    case "progress_watch":
-      return ["guidance.progressWatch.title", "guidance.progressWatch.body", "guidance.progressWatch.action"];
-    case "registry_empty":
-      return ["guidance.registryEmpty.title", "guidance.registryEmpty.body", "guidance.registryEmpty.action"];
-    case "registry_rejected":
-      return ["guidance.registryRejected.title", "guidance.registryRejected.body", "guidance.registryRejected.action"];
-    case "provider_incompatible":
-      return ["guidance.providerIncompatible.title", "guidance.providerIncompatible.body", "guidance.providerIncompatible.action"];
-    default:
-      return ["guidance.generic.title", "guidance.generic.body", "guidance.generic.action"];
-  }
+  const segment = guidanceCopyKey(guidance);
+  return [
+    `guidance.${segment}.title` as DashboardCopyKey,
+    `guidance.${segment}.body` as DashboardCopyKey,
+    `guidance.${segment}.action` as DashboardCopyKey,
+  ];
 }
 
 function renderAttention(context: RenderContext): string {
@@ -566,24 +489,6 @@ function deliveryLabelKey(state: DeliveryState): DashboardCopyKey {
   }
 }
 
-function deliveryMeaningKey(
-  state: DeliveryState,
-  direction: DashboardMessageGroup["direction"],
-  safeErrorCode?: string,
-): DashboardCopyKey {
-  if (state === "rejected" && safeErrorCode === "SENDER_NOT_PAIRED") {
-    return "activity.meaning.senderNotPaired";
-  }
-  if (state === "delivered") {
-    return direction === "codex_to_claude"
-      ? "activity.meaning.delivered.codexToClaude"
-      : "activity.meaning.delivered.claudeToCodex";
-  }
-  if (state === "unconfirmed") return "activity.meaning.unconfirmed";
-  if (state === "ambiguous") return "activity.meaning.ambiguous";
-  return "activity.meaning.other";
-}
-
 function renderMessageHistory(context: RenderContext, message: DashboardMessageGroup): string {
   if (message.events.length <= 1) {
     return `<span class="quiet">${t(context, "activity.history.one")}</span>`;
@@ -604,7 +509,7 @@ function renderActivity(context: RenderContext): string {
             <td data-label="${t(context, "activity.column.updated")}">${renderTimestampAtSnapshot(context, message.timestamp)}</td>
             <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${t(context, message.direction === "claude_to_codex" ? "direction.claudeToCodex" : "direction.codexToClaude")}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
             <td data-label="${t(context, "activity.column.id")}"><code>…${message.messageIdSuffix ?? "—"}</code>${message.conversationIdSuffix === undefined ? "" : `<span class="cell-note"><code>conv …${escapeDashboardHtml(message.conversationIdSuffix)}</code></span>`}</td>
-            <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state, message.safeErrorCode))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction, message.safeErrorCode))}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
+            <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state, message.safeErrorCode))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction, message.safeErrorCode) as DashboardCopyKey)}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
             <td data-label="${t(context, "activity.column.elapsed")}" class="numeric">${formatDuration(message.latencyMs)}</td>
             <td data-label="${t(context, "activity.column.size")}" class="numeric">${formatBytes(message.bytes)}</td>
             <td data-label="${t(context, "activity.column.history")}">${renderMessageHistory(context, message)}</td>

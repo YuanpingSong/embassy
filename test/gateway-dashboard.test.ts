@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import {
   buildDashboardViewModel,
+  buildLiveDashboardViewModel,
   DASHBOARD_MODEL_LIMITS,
 } from "../src/gateway/dashboard-model.js";
 import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
@@ -14,6 +15,23 @@ import {
   type CompatibilityProbeResult,
 } from "../src/gateway/compatibility.js";
 import { projectPublicCompatibilityCheck } from "../src/gateway/types.js";
+
+test("static projection never materializes message bodies while live projection does", () => {
+  const snapshot = dashboardFixture();
+  snapshot.messages = snapshot.messages.map((message) => ({
+    ...message,
+    body: "STATIC_BODY_SENTINEL",
+  }));
+
+  const staticModel = buildDashboardViewModel(snapshot);
+  const liveModel = buildLiveDashboardViewModel(snapshot);
+  assert.equal(staticModel.activity.some((group) => "body" in group), false);
+  assert.equal(
+    liveModel.activity.some((group) => group.body === "STATIC_BODY_SENTINEL"),
+    true,
+  );
+  assert.equal(renderDashboardHtml(snapshot).includes("STATIC_BODY_SENTINEL"), false);
+});
 
 test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {
   const snapshot = dashboardFixture();
@@ -222,13 +240,128 @@ test("unsupported provider majors name bounded evidence while the broker stays u
     ),
     true,
   );
+  assert.equal(model.exchange.claude.nextAction, "review_compatibility");
+  assert.equal(model.exchange.claude.ready, 0);
+  assert.equal(model.pairs[0]?.state, "degraded");
   const en = renderDashboardHtml(snapshot, { locale: "en" });
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
   assert.match(en, /Provider build is write-fenced/);
   assert.match(en, /3\.0\.0[\s\S]*2\.1\.227[\s\S]*>2</u);
   assert.equal(en.includes("embassy health"), false);
+  assert.equal(en.includes("Start or keep a Claude Code session running"), false);
+  assert.equal(en.includes("Refresh discovery"), false);
+  assert.equal(en.includes("Restart only when"), false);
   assert.match(zh, /提供方构建已禁止写入/);
   assert.match(zh, /3\.0\.0[\s\S]*2\.1\.227/u);
+});
+
+test("monitor-only Codex is non-ready everywhere without registration retry advice", () => {
+  const snapshot = dashboardFixture();
+  const codexRoute = snapshot.routes.find((route) => route.provider === "codex");
+  assert.ok(codexRoute);
+  codexRoute.safeErrorCode = "CODEX_WRITES_DISABLED";
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.overall, "attention");
+  assert.equal(model.exchange.codex.status, "attention");
+  assert.equal(model.exchange.codex.ready, 0);
+  assert.equal(model.exchange.codex.monitorOnly, 1);
+  assert.equal(model.exchange.codex.nextAction, "review_compatibility");
+  assert.equal(model.graph.readyPairCount, 0);
+  assert.equal(model.pairs[0]?.state, "degraded");
+  assert.equal(
+    model.attention.some((item) => item.guidance === "route_stale"),
+    false,
+  );
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, />Needs attention</);
+  assert.match(en, /1 monitor-only/);
+  assert.match(en, /Monitor only — writes are disabled/);
+  assert.match(en, /discovery or registration cannot remove this write fence/);
+  assert.equal(en.includes("Re-run embassy register-codex"), false);
+  assert.match(zh, />需要处理</);
+  assert.match(zh, /仅监控 1/);
+  assert.match(zh, /仅监控——此路由因 CODEX_WRITES_DISABLED 而停用写入/);
+  assert.equal(zh.includes("重新运行 embassy register-codex"), false);
+});
+
+test("provider quarantine owns recovery and suppresses normal-route noise", () => {
+  const snapshot = dashboardFixture();
+  snapshot.health = "degraded";
+  const claudeConnector = snapshot.connectors.find(
+    (connector) => connector.provider === "claude",
+  );
+  const claudeRoute = snapshot.routes.find((route) => route.provider === "claude");
+  assert.ok(claudeConnector);
+  assert.ok(claudeRoute);
+  claudeConnector.health = "degraded";
+  claudeConnector.compatibility = "incompatible";
+  claudeConnector.safeErrorCode = "CLAUDE_MESSAGING_SOCKET_SCHEMA_REJECTED";
+  claudeRoute.enabled = false;
+  claudeRoute.state = "incompatible";
+  claudeRoute.compatibility = "incompatible";
+  claudeRoute.safeErrorCode = "CLAUDE_MESSAGING_SOCKET_SCHEMA_REJECTED";
+  snapshot.availablePeers = [];
+  snapshot.alerts = [{
+    code: "CLAUDE_MESSAGING_SOCKET_SCHEMA_REJECTED",
+    severity: "warning",
+    timestamp: "2026-08-08T11:58:00.000Z",
+    provider: "claude",
+    host: "this-mac",
+  }];
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.exchange.claude.status, "attention");
+  assert.equal(model.exchange.claude.ready, 0);
+  assert.equal(model.exchange.claude.nextAction, "review_compatibility");
+  assert.equal(model.pairs[0]?.state, "degraded");
+  assert.deepEqual(
+    model.attention.map((item) => item.guidance),
+    ["provider_incompatible"],
+  );
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  assert.match(en, /Provider build is write-fenced/);
+  assert.equal(en.includes("Start or keep a Claude Code session running"), false);
+  assert.equal(en.includes("Refresh discovery"), false);
+  assert.equal(en.includes("Restart only when"), false);
+
+  const codexConnector = snapshot.connectors.find(
+    (connector) => connector.provider === "codex",
+  );
+  const codexRoute = snapshot.routes.find((route) => route.provider === "codex");
+  assert.ok(codexConnector);
+  assert.ok(codexRoute);
+  codexConnector.health = "degraded";
+  codexConnector.compatibility = "incompatible";
+  codexConnector.safeErrorCode = "CODEX_INITIALIZE_SCHEMA_REJECTED";
+  codexRoute.enabled = false;
+  codexRoute.state = "incompatible";
+  codexRoute.compatibility = "incompatible";
+  codexRoute.safeErrorCode = "CODEX_INITIALIZE_SCHEMA_REJECTED";
+  snapshot.alerts.push({
+    code: "CODEX_INITIALIZE_SCHEMA_REJECTED",
+    severity: "warning",
+    timestamp: "2026-08-08T11:58:01.000Z",
+    provider: "codex",
+    host: "this-mac",
+  });
+
+  const both = buildDashboardViewModel(snapshot);
+  assert.equal(both.overall, "attention");
+  assert.equal(both.exchange.claude.status, "attention");
+  assert.equal(both.exchange.codex.status, "attention");
+  assert.equal(both.graph.readyPairCount, 0);
+  assert.equal(
+    both.attention.filter((item) => item.guidance === "provider_incompatible")
+      .length,
+    2,
+  );
+  assert.equal(
+    both.attention.some((item) => item.guidance === "degraded"),
+    false,
+  );
 });
 
 test("registry evidence stays connector-scoped and raises one honest warning", () => {

@@ -6,6 +6,7 @@ import {
   getDashboardCopy,
   type DashboardLocale,
 } from "./dashboard-copy.js";
+import { DASHBOARD_SEMANTICS } from "./dashboard-model.js";
 
 export type LiveDashboardAssets = Readonly<{
   shellHtml: string;
@@ -80,7 +81,7 @@ function client(locale: DashboardLocale): string {
     "zh-CN": getDashboardCopy("zh-CN"),
   };
   return `"use strict";
-window.EMBASSY_BOOT=Object.freeze({locale:${JSON.stringify(locale)},copy:Object.freeze({en:Object.freeze(${JSON.stringify(copies.en)}),"zh-CN":Object.freeze(${JSON.stringify(copies["zh-CN"])})})});
+window.EMBASSY_BOOT=Object.freeze({locale:${JSON.stringify(locale)},copy:Object.freeze({en:Object.freeze(${JSON.stringify(copies.en)}),"zh-CN":Object.freeze(${JSON.stringify(copies["zh-CN"])})}),semantics:Object.freeze(${JSON.stringify(DASHBOARD_SEMANTICS)})});
 `;
 }
 

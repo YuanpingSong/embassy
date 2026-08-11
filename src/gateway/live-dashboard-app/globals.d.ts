@@ -9,12 +9,3 @@ declare namespace ReactDOM {
   }
   function createRoot(container: Element): Root;
 }
-
-interface Window {
-  EMBASSY_BOOT: {
-    readonly locale: "en" | "zh-CN";
-    readonly copy: Readonly<
-      Record<"en" | "zh-CN", Readonly<Record<string, string>>>
-    >;
-  };
-}

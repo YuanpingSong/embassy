@@ -22,17 +22,6 @@ namespace Embassy {
    */
   const QUEUE_DEPTH_COMMAND = "EMBASSY_MAX_QUEUE_MESSAGES=<n> embassy serve";
 
-  const NEXT_ACTION_COPY_KEYS: Readonly<Record<DashboardNextAction, string>> = {
-    discover_claude: "next.discoverClaude",
-    select_claude: "next.selectClaude",
-    pair_routes: "next.pairRoutes",
-    restore_claude: "next.restoreClaude",
-    repair_claude_inventory: "next.repairClaude",
-    register_codex: "next.registerCodex",
-    restore_codex: "next.restoreCodex",
-    none: "next.none",
-  };
-
   /**
    * Lower-bound badge (`app.lowerBound`): the short form is the visible chip,
    * the full sentence is what assistive tech and the tooltip get.
@@ -236,12 +225,24 @@ namespace Embassy {
     return parts;
   }
 
+  export function attentionQueueDepthLine(
+    item: DashboardAttentionItem,
+    t: Translate,
+    locale: Locale,
+  ): string | undefined {
+    return item.queueDepth === undefined
+      ? undefined
+      : `${t("app.routes.queueDepth")}: ${item.queueDepth.toLocaleString(locale)}`;
+  }
+
   function AttentionItem(
     props: Readonly<{ view: AttentionView }>,
   ): React.ReactElement {
     const t = useT();
+    const [locale] = useLocale();
     const { item, guidanceKey, command } = props.view;
     const scope = attentionScopeParts(item, t).join(" · ");
+    const queueDepthLine = attentionQueueDepthLine(item, t, locale);
     return (
       <div className="attention-item">
         <div className="attention-item__head">
@@ -261,6 +262,9 @@ namespace Embassy {
             alias: item.alias ?? "<alias>",
           })}
         </p>
+        {queueDepthLine === undefined ? null : (
+          <p className="attention-item__body">{queueDepthLine}</p>
+        )}
         {scope === "" ? null : (
           <div className="attention-item__scope">
             {`${t("attention.scope")}: ${scope}`}
@@ -336,7 +340,9 @@ namespace Embassy {
     ): string | null =>
       action === "none"
         ? null
-        : `${t("next.label")} · ${who}: ${t(NEXT_ACTION_COPY_KEYS[action])}`;
+        : `${t("next.label")} · ${who}: ${t(
+            window.EMBASSY_BOOT.semantics.nextActionCopyKeys[action],
+          )}`;
     const boardNotes: readonly string[] = [
       !openInbound && !hasPair && showEdges
         ? `${t("app.overview.noPair.title")} — ${t("app.overview.noPair.body")}`
