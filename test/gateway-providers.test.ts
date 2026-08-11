@@ -535,8 +535,8 @@ async function waitFor(
 
 function claudeRuntime(): AttestedClaudePeerRuntime {
   return {
-    claudeExecutable: "/synthetic/home/.local/share/claude/versions/2.1.226",
-    claudeCodeVersion: "2.1.226",
+    claudeExecutable: "/synthetic/home/.local/share/claude/versions/2.1.227",
+    claudeCodeVersion: "2.1.227",
     sessionsDir: "/synthetic/home/.claude/sessions",
     socketDir: "/synthetic/tmp/cc-socks",
   };
@@ -579,7 +579,7 @@ test("Claude compatibility check skips isolated invalid registry rows without di
   });
   assert.deepEqual(provider.compatibilitySurface(), {
     surface: "claude",
-    version: "2.1.226",
+    version: "2.1.227",
   });
   assert.deepEqual(
     (await provider.runCompatibilityProbes()).map((probe) => probe.name),

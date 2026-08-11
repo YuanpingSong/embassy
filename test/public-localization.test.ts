@@ -223,7 +223,7 @@ test("current compatibility docs expose only the automatic exact-pin contract", 
     ]);
 
   for (const document of [englishConfiguration, chineseConfiguration]) {
-    assert.ok(document.includes("2.1.226"));
+    assert.ok(document.includes("2.1.227"));
     assert.ok(document.includes("0.147.0"));
     assert.ok(document.includes("thread/loaded/list"));
   }

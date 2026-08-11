@@ -32,7 +32,7 @@ import { sharesCompatibilityMajor } from "./compatibility.js";
  * registry and NDJSON formats are not a stable public integration contract.
  */
 export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({
-  claudeCodeVersion: "2.1.226",
+  claudeCodeVersion: "2.1.227",
   peerProtocol: 1,
   messageVersion: 1,
 });
@@ -42,6 +42,7 @@ export const CLAUDE_PEER_COMPATIBLE_SESSION_VERSIONS = Object.freeze([
   "2.1.224",
   "2.1.225",
   "2.1.226",
+  "2.1.227",
 ] as const);
 
 const UUID_PATTERN =

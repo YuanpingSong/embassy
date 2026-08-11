@@ -61,10 +61,10 @@ body:
     attributes:
       label: Claude Code version
       description: >-
-        Embassy v1 is pinned to Claude Code 2.1.225 (2.1.224 sessions
+        Embassy v1 is pinned to Claude Code 2.1.227 (2.1.224-2.1.226 sessions
         already running stay discoverable). Note if you are on a different
         version.
-      placeholder: "2.1.225"
+      placeholder: "2.1.227"
     validations:
       required: true
 

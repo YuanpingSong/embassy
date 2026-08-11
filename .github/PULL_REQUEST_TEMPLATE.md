@@ -20,7 +20,7 @@
 - [ ] No message body, prompt, reply, raw provider frame, or socket path is
       persisted (bodies stay memory-only; only closed route-binding metadata
       may persist)
-- [ ] No version pin widened or made configurable (Claude Code 2.1.225 / peer
+- [ ] No version pin widened or made configurable (Claude Code 2.1.227 / peer
       protocol 1, Codex App Server 0.147.0) without explicit security review
 - [ ] Codex-to-Claude sends still require explicit Claude selection; inbound
       Claude reachability never creates an outbound selection

@@ -5,7 +5,7 @@ export type CompatibilitySurface = (typeof compatibilitySurfaces)[number];
 
 /** Exact upstream builds exercised by this release's deterministic suite. */
 export const certifiedCompatibilityVersions = Object.freeze({
-  claude: Object.freeze(["2.1.224", "2.1.225", "2.1.226"]),
+  claude: Object.freeze(["2.1.224", "2.1.225", "2.1.226", "2.1.227"]),
   codex: Object.freeze(["0.147.0"]),
 } satisfies Readonly<Record<CompatibilitySurface, readonly string[]>>);
 

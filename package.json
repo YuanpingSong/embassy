@@ -1,6 +1,6 @@
 {
   "name": "agent-embassy",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "A local gateway for bidirectional messaging between Claude Code sessions and Codex tasks.",
   "license": "MIT",
   "repository": {

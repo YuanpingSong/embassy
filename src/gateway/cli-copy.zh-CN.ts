@@ -54,5 +54,5 @@ export const cliCopyZhCn = {
   "error.deliveryTimeout":
     "该投递尚未结算；网关仍在运行。请稍后使用 embassy delivery-status 再次查询。",
   "error.versionDrift":
-    "已安装的 Claude Code 版本高于此 Embassy 构建支持的版本。请更新 Embassy（npm update -g agent-embassy），然后运行 embassy health。",
+    "已安装的 Claude Code 不是此 Embassy 构建支持的确切版本。请运行 npm update -g agent-embassy，然后运行 embassy health。若 Embassy 已是最新，则表示尚无已发布的 Embassy 支持你的 Claude Code：请等待下一个版本，或改用此构建在前置要求中列出的 Claude Code 版本。",
 } as const satisfies CliCopy;

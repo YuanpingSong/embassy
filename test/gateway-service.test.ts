@@ -1093,7 +1093,7 @@ test("automatic compatibility probes run fresh on every startup and reject versi
   const driftFixture = await fixture();
   const driftClaude = new FakeProvider("claude");
   const driftCodex = new FakeProvider("codex");
-  driftClaude.enableCompatibility("2.1.227");
+  driftClaude.enableCompatibility("2.1.228");
   driftCodex.enableCompatibility("0.147.0");
   const drifted = new GatewayService({
     config: loadGatewayConfig({

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-11
+
+### Changed
+
+- Claude Code compatibility pin moved to **2.1.227** / peer protocol 1. Claude Code 2.1.227 auto-updated onto supported machines and the exact-version launcher gate stopped `embassy serve` from starting at all. The upgrade was verified before the pin moved, not assumed: a live 2.1.227 registry record carries the same closed field set and `peerProtocol: 1`, publishes the same `/tmp/cc-socks/<pid>.sock` 0600 socket under a 0700 directory, and the 2.1.227 build's registry writer/reader, newline-delimited JSON framing, user-frame acceptance, and `peer_message_status` frame shape are unchanged from 2.1.226 apart from minifier renames. Still-running 2.1.224–2.1.226 sessions remain discoverable during the patch-upgrade overlap.
+
+### Fixed
+
+- The Claude version-drift message no longer promises that updating Embassy will fix the problem. `npm update -g agent-embassy` does nothing when no published Embassy supports the installed Claude Code yet — the exact case a maintainer hits first — so the copy now names both outcomes, tells the operator how to tell them apart, and stops asserting the installed build is "newer" when the pin is an exact match in either direction. Both locales.
+
 ## [1.4.0] - 2026-08-11
 
 ### Fixed
