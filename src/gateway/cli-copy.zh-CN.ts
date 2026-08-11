@@ -39,7 +39,7 @@ export const cliCopyZhCn = {
   "hint.dashboardPortInUse":
     "实时仪表盘端口 {port} 已被占用；请关闭占用进程，或使用 --port <n> 选择其他端口。",
   "hint.controlInvalidResponse":
-    "请重启 Embassy 网关进程，然后重试。",
+    "客户端与网关进程的版本可能不一致；请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。",
   "error.input": "请求被拒绝。",
   "error.decision": "网关拒绝了该请求。",
   "error.unavailable": "网关不可用。",
