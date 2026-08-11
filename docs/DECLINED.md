@@ -24,3 +24,9 @@ means addressing its reason, not ignoring it.
 - **Cross-layer launcher-banner provenance policy** — Deferred from CO #39
   because a parser-only patch would have been false; the honest fix spans
   server/provider classification.
+- **Claude endpoint-generation deleted-as-churn via constant sentinel** — Kept
+  the constant sentinel rather than adding schema surgery because the added
+  complexity failed the complexity test.
+- **Native stall-notice prose kept one hop from the remedy** — The native
+  notice states when queued mail arrives and points onward; the dashboard owns
+  the full remedy prose.

@@ -995,6 +995,24 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
   });
   await assert.rejects(
     store.enqueueMessage({
+      sourceAlias: "advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      body: "TRACK: worker cannot change the original options",
+      dedupeKey: "reject-worker-watch-options",
+      progressWatch: {
+        conversationId: "conv_watchsingular0001",
+        actorAlias: "advisor@this-mac",
+        openIdleMs: 120_000,
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "PROGRESS_WATCH_OWNER_REQUIRED" &&
+      error.message ===
+        "Tracking options persist from the original TRACK; a repeated TRACK from the exact owner refreshes activity without changing them.",
+  );
+  await assert.rejects(
+    store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
     targetAlias: "reviewer@this-mac",
       body: "counterparty cannot replace the active pair watch",

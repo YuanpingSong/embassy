@@ -951,7 +951,7 @@ test("an aged Claude mailbox write surfaces one notice only while its exact reci
   assert.equal(hasMailboxNotice(), false);
 });
 
-test("restart guidance warns about abandoning memory-only bodies", () => {
+test("restart guidance preserves queued mail and isolates in-flight ambiguity", () => {
   const snapshot = dashboardFixture();
   snapshot.alerts = [
     {
@@ -963,11 +963,9 @@ test("restart guidance warns about abandoning memory-only bodies", () => {
     },
   ];
   const html = renderDashboardHtml(snapshot);
-  assert.match(
-    html,
-    /Restart only when queued messages and active deliveries are both zero/,
-  );
-  assert.match(html, /restarting abandons memory-only message bodies/);
+  assert.match(html, /queued mail survives and resumes exactly once/);
+  assert.match(html, /only a write in flight at the crash settles ambiguous/);
+  assert.doesNotMatch(html, /restarting abandons memory-only message bodies/);
 });
 
 test("Codex succession alerts distinguish a busy boundary from manual recovery", () => {
