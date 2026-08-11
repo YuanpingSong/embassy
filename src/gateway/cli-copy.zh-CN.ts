@@ -27,6 +27,7 @@ export const cliCopyZhCn = {
   reply                  使用会话令牌回复
   delivery-status        读取投递令牌状态
   wait-delivery          等待终结投递状态
+  untrack                关闭一个活跃的进度监视
 
 选项：
   --lang en|zh-CN        本地化面向用户的文本

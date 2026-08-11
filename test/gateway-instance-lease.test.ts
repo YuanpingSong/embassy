@@ -37,14 +37,6 @@ const HOST_LOCK = path.join(
 const HOST_ROOT = path.dirname(HOST_LOCK);
 const HOST_MARKER = ".agent-embassy-state";
 const HOST_MARKER_CONTENT = "agent-embassy-state-v1\n";
-const LEGACY_ROOT = path.join(
-  ".local",
-  "state",
-  "claude-agent-bridge",
-  "gateway",
-);
-const LEGACY_MARKER = ".claude-codex-gateway-state";
-const LEGACY_LOCK = ".gateway-controller.lock";
 
 async function homeFixture(t: TestContext): Promise<string> {
   const temporary = await realpath(os.tmpdir());
@@ -78,18 +70,6 @@ async function assertPersistentHostLock(home: string): Promise<void> {
   const info = await lstat(path.join(home, HOST_LOCK));
   assert.equal(info.isFile(), true);
   assert.equal(info.mode & 0o777, 0o600);
-}
-
-async function createLegacyRoot(
-  home: string,
-  marker = "claude-codex-local-gateway-state-v1\n",
-): Promise<string> {
-  const root = path.join(home, LEGACY_ROOT);
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  await chmod(root, 0o700);
-  await writeFile(path.join(root, LEGACY_MARKER), marker, { mode: 0o600 });
-  await chmod(path.join(root, LEGACY_MARKER), 0o600);
-  return root;
 }
 
 function childIsRunning(child: ChildProcess): boolean {
@@ -444,101 +424,6 @@ test("host lease preparation rejects a symlinked state ancestor before creating 
   );
   assert.deepEqual(await readdir(external), []);
 });
-
-test(
-  "a live exact legacy controller blocks Embassy and releases the new host lease",
-  { skip: process.platform !== "darwin" },
-  async (t) => {
-    const home = await homeFixture(t);
-    const legacy = await createLegacyRoot(home);
-    const existing = lockRecord(
-      process.pid,
-      "11111111-1111-4111-8111-111111111111",
-    );
-    await writeFile(path.join(legacy, LEGACY_LOCK), existing, { mode: 0o600 });
-
-    await assert.rejects(
-      acquireGatewayInstanceLease(home),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "GATEWAY_INSTANCE_IN_USE",
-    );
-    assert.equal(
-      await readFile(path.join(legacy, LEGACY_LOCK), "utf8"),
-      existing,
-    );
-    await assertPersistentHostLock(home);
-  },
-);
-
-test(
-  "a dead legacy lock is preserved and blocks automatic migration",
-  { skip: process.platform !== "darwin" },
-  async (t) => {
-    const home = await homeFixture(t);
-    const legacy = await createLegacyRoot(home);
-    const existing = lockRecord(
-      2_147_483_000,
-      "22222222-2222-4222-8222-222222222222",
-    );
-    await writeFile(path.join(legacy, LEGACY_LOCK), existing, { mode: 0o600 });
-
-    await assert.rejects(
-      acquireGatewayInstanceLease(home),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "GATEWAY_INSTANCE_IN_USE",
-    );
-    assert.equal(
-      await readFile(path.join(legacy, LEGACY_LOCK), "utf8"),
-      existing,
-    );
-    await assertPersistentHostLock(home);
-  },
-);
-
-test(
-  "a missing legacy root is not created",
-  { skip: process.platform !== "darwin" },
-  async (t) => {
-    const home = await homeFixture(t);
-    const lease = await acquireGatewayInstanceLease(home);
-    await lease.close();
-    await assert.rejects(lstat(path.join(home, LEGACY_ROOT)), { code: "ENOENT" });
-  },
-);
-
-test(
-  "unsafe and unrecognized legacy roots are left untouched",
-  { skip: process.platform !== "darwin" },
-  async (t) => {
-    const unsafeHome = await homeFixture(t);
-    const unsafeRoot = await createLegacyRoot(unsafeHome);
-    await chmod(unsafeRoot, 0o755);
-    const unsafeLease = await acquireGatewayInstanceLease(unsafeHome);
-    await unsafeLease.close();
-    assert.equal((await lstat(unsafeRoot)).mode & 0o777, 0o755);
-    await assert.rejects(lstat(path.join(unsafeRoot, LEGACY_LOCK)), {
-      code: "ENOENT",
-    });
-
-    const unknownHome = await homeFixture(t);
-    const unknownRoot = await createLegacyRoot(unknownHome, "not-our-state\n");
-    const before = await readFile(
-      path.join(unknownRoot, LEGACY_MARKER),
-      "utf8",
-    );
-    const unknownLease = await acquireGatewayInstanceLease(unknownHome);
-    await unknownLease.close();
-    assert.equal(
-      await readFile(path.join(unknownRoot, LEGACY_MARKER), "utf8"),
-      before,
-    );
-    await assert.rejects(lstat(path.join(unknownRoot, LEGACY_LOCK)), {
-      code: "ENOENT",
-    });
-  },
-);
 
 test(
   "shutdown releases only its exact lease and preserves path replacements",

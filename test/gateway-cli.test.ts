@@ -116,6 +116,7 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.match(help, current.expected);
     assert.match(help, /refresh-dashboard/);
     assert.match(help, /wait-delivery/);
+    assert.match(help, /untrack/);
     assert.match(help, /dashboard --live \[--port <n>\]/);
     assert.match(help, /--port <n>.*1024.*65535.*41961/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
@@ -1937,11 +1938,7 @@ test("package metadata publishes the client and its runtime dependency", async (
   assert.equal(packageJson.version, "1.3.0");
   assert.equal(packageJson.version, EMBASSY_VERSION);
   assert.deepEqual(packageJson.os, ["darwin"]);
-  assert.equal(packageJson.bin.embassy, "dist/src/gateway/cli.js");
-  assert.equal(
-    packageJson.bin["claude-codex-gateway"],
-    "dist/src/gateway/cli.js",
-  );
+  assert.deepEqual(packageJson.bin, { embassy: "dist/src/gateway/cli.js" });
   assert.equal(packageJson.scripts.embassy, "node dist/src/gateway/cli.js");
   assert.match(packageJson.scripts.build ?? "", /npm run clean/);
   assert.ok(packageJson.files.includes("skills/embassy-peer"));

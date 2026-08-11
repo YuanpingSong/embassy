@@ -571,8 +571,8 @@ The live dashboard companion calls `observe_snapshot` for every read; its
 mutation route additionally calls `pair`, `unpair`,
 `remove_stale_codex_registration`, and `refresh_dashboard`, and nothing else.
 
-The installed binary is `embassy` (`claude-codex-gateway` is a one-release
-deprecated alias). Its seventeen implemented commands are
+The installed binary is `embassy`, and it is the only installed binary. Its
+seventeen implemented commands are
 `serve`, `health`, `status`, `delivery-status`, `wait-delivery`, `untrack`,
 `refresh-dashboard`, `dashboard`, `register-codex`, `unregister-codex`,
 `select-claude`, `unselect-claude`, `pair`, `unpair`, `send-to-claude`,
@@ -630,12 +630,8 @@ Before provider validation, listener creation, or App Server attachment, the
 launcher acquires one fixed host-wide crash-reclaimable owner lease under the
 verified login home. The lease is independent of `EMBASSY_STATE_DIR`, so two foreground
 controllers cannot be started for the same login account by choosing different
-state roots. During the one-release prototype transition, a recognized exact
-legacy default root is also controller-locked while Embassy runs. Any
-pre-existing legacy lock blocks startup as `GATEWAY_INSTANCE_IN_USE` and is
-preserved; the operator may remove that exact stale lock only after confirming
-no prototype process remains. Missing, unsafe, or unrecognized legacy roots
-are not created, imported, or mutated.
+state roots. It is the only instance lock Embassy takes: the pre-rename
+prototype state root is no longer read, locked, or mutated.
 
 It emits one normalized ready line, publishes the private dashboard, and
 holds the process until `SIGINT` or `SIGTERM`, when exact-owned resources are
@@ -967,7 +963,6 @@ paths, peers, and transports:
 | `/usr/bin/lockf` and `/bin/cat` | Hold one fixed, non-waiting macOS advisory lease for the foreground controller; the helper receives no shell text, provider data, or model-supplied argument |
 | `/usr/bin/open` | Executed only by the opt-in `embassy dashboard --live` companion, to open the loopback dashboard URL in the operator's browser; no shell, a scrubbed fixed environment, and a bounded timeout and output cap |
 | `~/.local/state/agent-embassy/.gateway-host.lock` | Fixed per-login kernel-held lease acquired before provider setup; it remains here even when `EMBASSY_STATE_DIR` is overridden. Its bounded PID/token record is exact-cleanup metadata, not a path-only stale-lock authority; a crash releases the kernel lock and the next foreground process may acquire the existing file |
-| `~/.local/state/claude-agent-bridge/gateway/.claude-codex-gateway-state` and `.gateway-controller.lock` | For one release, bounded-read the exact legacy ownership marker and lock record; create and hold the lock only when absent, preserve any pre-existing lock, and read no other legacy state or message data |
 | `~/.local/state/agent-embassy` (or explicit `EMBASSY_STATE_DIR`) | Default controller-owned store, control UDS, state lock, and static dashboard; an explicit absolute configuration may replace only these state surfaces |
 | `~/.codex/packages/standalone` and `~/.codex/app-server-control/app-server-control.sock` | Resolve the pinned managed Codex binary and attach to the already-running private local App Server; never bootstrap or unlink it |
 

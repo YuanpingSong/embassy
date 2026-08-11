@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- The deprecated `claude-codex-gateway` binary alias. v1.0.0 shipped it for exactly one release to carry the rename; four releases on, `embassy` is the single installed command, and it is the only name the README, the architecture doc, the bundled skill, and every error hint have ever printed. Anyone still typing the old name gets an honest "command not found" instead of a silent second spelling.
+- The legacy prototype state-root compatibility read. v1.0.0 also promised one release of bounded-reading the exact pre-rename ownership marker under `~/.local/state/claude-agent-bridge/gateway` and holding that root's controller lock, so an unpublished prototype could not advertise a second Codex peer beside v1. Embassy no longer reads, creates, locks, or mutates anything under that path. The failure mode it covered — two foreground brokers for one login account — is fully held by the fixed kernel-held host lease at `~/.local/state/agent-embassy/.gateway-host.lock`, which is acquired before provider setup, is independent of `EMBASSY_STATE_DIR`, and is reclaimed automatically when a holder crashes. A prototype state directory left on disk is now inert and can simply be deleted.
+
+### Fixed
+
+- `embassy --help` lists `untrack` in both locales. The command has been real and documented since v1.0.0, but was missing from the usage text, so the one way to close a progress watch from the CLI was undiscoverable from the CLI.
+
 ## [1.3.0] - 2026-08-10
 
 ### Added
