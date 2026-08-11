@@ -298,11 +298,8 @@ namespace Embassy {
     conversationIdSuffix: string;
     ownerAlias: string;
     workerAlias: string;
-    phase: "quiet" | "episode";
-    capability: "conversation" | "route";
     lastActivityAt: string;
     nextActionAt: string;
-    idleMs: number;
     idleForMs: number;
     dueInMs: number;
     nudgeCount: 0 | 1 | 2;
@@ -314,19 +311,18 @@ namespace Embassy {
     conversationIdSuffix: string;
     ownerAlias: string;
     workerAlias: string;
-    kind:
-      | "opened"
-      | "nudge"
-      | "worker_reported_complete"
-      | "capability_degraded"
-      | "conversation_rebound"
-      | "replaced"
+    kind: "opened" | "replaced" | "settled";
+    actor: "owner" | "worker" | "operator" | "gateway" | "unknown";
+    reason?:
       | "done"
-      | "unresponsive"
-      | "endpoint_retired"
+      | "untracked"
+      | "idle_timeout"
       | "pair_removed"
-      | "disabled";
-    nudgeNumber?: 1 | 2 | undefined;
+      | "endpoint_retired"
+      | "tracking_disabled"
+      | "legacy_upgrade"
+      | "legacy_done"
+      | undefined;
   }>;
 
   export type DashboardGraphFacts = Readonly<{

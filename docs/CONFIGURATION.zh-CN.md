@@ -12,7 +12,7 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`，解析到当前已验证的版本目标 | Claude Code 启动器的绝对路径；不搜索 `PATH` |
 | `EMBASSY_STEERING_ENABLED` | `1` | 全局 Claude→Codex `STEER:` 停用开关；精确设为 `0` 后，所有 Claude→Codex 正文都按朝向 Codex 的普通排队消息处理；朝向 Claude 的邮箱写入时机不受影响 |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
-| `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes`、`untrack` 以及 `TRACK:`/`DONE:` 正文前缀都会被拒绝。取值只能是 `1` 或 `0`，其他值均为配置错误 |
+| `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes` 与 `TRACK:` 开启请求会被拒绝，已有监视会在重启时结算。没有活跃监视时，`DONE:` 不产生作用；`untrack` 不会因开关而被特别拒绝，而是返回 `NOT_FOUND`。取值只能是 `1` 或 `0`，其他值均为配置错误 |
 | `EMBASSY_LOCALE` | `en` | CLI 输出语言，精确取值 `en` 或 `zh-CN`。`--lang` 标志会覆盖当次调用；未设置或为空表示 `en`，其他任何取值都是参数错误 |
 | `EMBASSY_HOSTS` | `this-mac` | 以逗号分隔的 1 到 32 个唯一小写主机别名。**v1 启动器只接受单个精确值 `this-mac`**：任何其他列表——包括包含 `this-mac` 的更长列表——都会让 `embassy serve` 以 `GATEWAY_REMOTE_PROVIDER_DISABLED` 关闭失败。该变量是为推迟的远程领事馆功能预留的，目前没有可用的设置 |
 

@@ -1,6 +1,6 @@
 import type {
+  ProgressWatch,
   ProgressWatchJournalEvent,
-  ProgressWatchMachine,
 } from "./progress-watch-machine.js";
 import {
   certifiedCompatibilityVersions,
@@ -335,7 +335,7 @@ export type GatewayPersistedState = {
   rateBuckets: RateBucket[];
   accounting: GatewayAccounting;
   watchSequence: number;
-  progressWatches: ProgressWatchMachine[];
+  progressWatches: ProgressWatch[];
   progressWatchEvents: ProgressWatchJournalEvent[];
   /** Bounded, body-free probe evidence keyed by provider surface and version. */
   compatibilityAttestations: CompatibilityAttestation[];
@@ -705,11 +705,8 @@ export type PublicProgressWatchSnapshot = {
   conversationIdSuffix: string;
   ownerAlias: string;
   workerAlias: string;
-  phase: "quiet" | "episode";
-  capability: "conversation" | "route";
   lastActivityAt: string;
   nextActionAt: string;
-  idleMs: number;
   nudgeCount: 0 | 1 | 2;
 };
 
@@ -719,19 +716,17 @@ export type PublicProgressWatchEventSnapshot = {
   conversationIdSuffix: string;
   ownerAlias: string;
   workerAlias: string;
-  kind:
-    | "opened"
-    | "replaced"
-    | "nudge"
-    | "worker_reported_complete"
-    | "capability_degraded"
-    | "conversation_rebound"
+  kind: "opened" | "replaced" | "settled";
+  actor: "owner" | "worker" | "operator" | "gateway" | "unknown";
+  reason?:
     | "done"
-    | "unresponsive"
+    | "untracked"
+    | "idle_timeout"
     | "pair_removed"
     | "endpoint_retired"
-    | "disabled";
-  nudgeNumber?: 1 | 2;
+    | "tracking_disabled"
+    | "legacy_upgrade"
+    | "legacy_done";
 };
 
 export type GatewayPublicSnapshot = {

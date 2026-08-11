@@ -26,6 +26,7 @@ import {
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
 } from "../src/gateway/compatibility.js";
+import type { ProgressWatch } from "../src/gateway/progress-watch-machine.js";
 import type {
   GatewayStoreDependencies,
   PrivateRouteBinding,
@@ -230,6 +231,27 @@ async function armProgressWatch(
   assert.equal(accepted.accepted, true);
   assert.ok(accepted.messageId);
   assert.equal(await store.cancelQueuedMessage(accepted.messageId), true);
+}
+
+async function inspectProgressWatches(
+  store: GatewayStore,
+): Promise<ProgressWatch[]> {
+  return (
+    JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+      progressWatches: ProgressWatch[];
+    }
+  ).progressWatches;
+}
+
+function v14ProgressWatch(watch: ProgressWatch): Record<string, unknown> {
+  return {
+    ...watch,
+    createdAt: watch.lastActivityAt,
+    updatedAt: watch.lastActivityAt,
+    phase: watch.nudgeCount === 0 ? "quiet" : "episode",
+    capability: "conversation",
+    degradedNoticeSent: false,
+  };
 }
 
 async function observeAndRegisterCodexOnly(store: GatewayStore): Promise<void> {
@@ -806,18 +828,15 @@ test("progress watches persist exact edge authority and advance completion-ended
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
-  assert.equal((await store.inspectProgressWatches())[0]?.phase, "quiet");
+  assert.equal((await inspectProgressWatches(store))[0]?.nudgeCount, 0);
   const publicOpened = await store.publicSnapshot();
   assert.deepEqual(publicOpened.progressWatches, [
     {
       conversationIdSuffix: "ijklmnop",
       ownerAlias: "reviewer@this-mac",
       workerAlias: "advisor@this-mac",
-      phase: "quiet",
-      capability: "conversation",
       lastActivityAt: testClock.now().toISOString(),
       nextActionAt: new Date(testClock.now().getTime() + 60_000).toISOString(),
-      idleMs: 60_000,
       nudgeCount: 0,
     },
   ]);
@@ -835,14 +854,13 @@ test("progress watches persist exact edge authority and advance completion-ended
   const due = await store.advanceDueProgressWatches();
   assert.deepEqual(due, [
     {
-      type: "send_nudge",
       conversationId: "conv_abcdefghijklmnop",
       ownerAlias: "reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       nudgeNumber: 1,
     },
   ]);
-  assert.equal((await store.inspectProgressWatches())[0]?.phase, "quiet");
+  assert.equal((await inspectProgressWatches(store))[0]?.nudgeCount, 0);
   assert.equal(
     (
       await store.enqueueMessage({
@@ -858,17 +876,7 @@ test("progress watches persist exact edge authority and advance completion-ended
     ).accepted,
     true,
   );
-  assert.equal((await store.inspectProgressWatches())[0]?.phase, "episode");
-  await assert.rejects(
-    store.settleProgressWatch({
-      conversationId: "conv_abcdefghijklmnop",
-      outcome: "done",
-      ownerAlias: "advisor@this-mac",
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "PROGRESS_WATCH_OWNER_REQUIRED",
-  );
+  assert.equal((await inspectProgressWatches(store))[0]?.nudgeCount, 1);
   assert.equal(
     (
       await store.enqueueMessage({
@@ -885,17 +893,25 @@ test("progress watches persist exact edge authority and advance completion-ended
     ).accepted,
     true,
   );
-  assert.deepEqual(await store.inspectProgressWatches(), []);
+  assert.deepEqual(await inspectProgressWatches(store), []);
 
   const persisted = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
   ) as {
     progressWatchEvents: Array<{ kind: string; conversationId: string }>;
   };
-  assert.deepEqual(
-    persisted.progressWatchEvents.map((event) => event.kind),
-    ["nudge", "worker_reported_complete"],
-  );
+  assert.deepEqual(persisted.progressWatchEvents, [
+    {
+      sequence: 2,
+      timestamp: "2026-08-07T12:01:00.000Z",
+      conversationId: "conv_abcdefghijklmnop",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "settled",
+      actor: "worker",
+      reason: "done",
+    },
+  ]);
   assert.equal(
     JSON.stringify(await store.publicSnapshot()).includes(
       "conv_abcdefghijklmnop",
@@ -904,7 +920,7 @@ test("progress watches persist exact edge authority and advance completion-ended
   );
   assert.deepEqual(
     (await store.publicSnapshot()).progressWatchEvents?.map((event) => event.kind),
-    ["nudge", "worker_reported_complete"],
+    ["settled"],
   );
   await store.close();
 });
@@ -950,13 +966,17 @@ test("owner and worker completion retain distinct terminal history", async () =>
 
   assert.deepEqual(
     (await store.publicSnapshot()).progressWatchEvents?.map(
-      (event) => event.kind,
+      (event) => ({
+        kind: event.kind,
+        actor: event.actor,
+        reason: event.reason,
+      }),
     ),
     [
-      "opened",
-      "worker_reported_complete",
-      "opened",
-      "done",
+      { kind: "opened", actor: "owner", reason: undefined },
+      { kind: "settled", actor: "worker", reason: "done" },
+      { kind: "opened", actor: "owner", reason: undefined },
+      { kind: "settled", actor: "owner", reason: "done" },
     ],
   );
   await store.close();
@@ -991,7 +1011,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
       error.message.includes("untrack"),
   );
   assert.deepEqual(
-    (await store.inspectProgressWatches()).map((watch) => watch.conversationId),
+    (await inspectProgressWatches(store)).map((watch) => watch.conversationId),
     ["conv_watchsingular0001"],
   );
   assert.deepEqual(
@@ -1010,7 +1030,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     idleMs: 120_000,
   });
   assert.deepEqual(
-    (await store.inspectProgressWatches()).map((watch) => ({
+    (await inspectProgressWatches(store)).map((watch) => ({
       conversationId: watch.conversationId,
       ownerAlias: watch.ownerAlias,
       idleMs: watch.idleMs,
@@ -1045,7 +1065,6 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     [
       { conversationId: "conv_watchsingular0001", kind: "opened" },
       { conversationId: "conv_watchsingular0001", kind: "replaced" },
-      { conversationId: "conv_watchsingular0002", kind: "opened" },
     ],
   );
   await store.registerRoute({
@@ -1074,7 +1093,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
       error.code === "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
   );
   assert.deepEqual(
-    (await store.inspectProgressWatches()).map(
+    (await inspectProgressWatches(store)).map(
       (watch) => watch.conversationId,
     ),
     ["conv_watchsingular0002"],
@@ -1084,7 +1103,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     claudeAlias: "advisor@this-mac",
     codexAlias: "reviewer@this-mac",
   });
-  assert.deepEqual(await store.inspectProgressWatches(), []);
+  assert.deepEqual(await inspectProgressWatches(store), []);
   persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
     progressWatchEvents: Array<{
       conversationId: string;
@@ -1092,13 +1111,83 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     }>;
   };
   assert.deepEqual(persisted.progressWatchEvents.at(-1), {
-    sequence: 4,
+    sequence: 3,
     timestamp: "2026-08-07T12:00:00.000Z",
     conversationId: "conv_watchsingular0002",
     ownerAlias: "reviewer@this-mac",
     workerAlias: "advisor@this-mac",
-    kind: "pair_removed",
+    kind: "settled",
+    actor: "operator",
+    reason: "pair_removed",
   });
+  await store.close();
+});
+
+test("a retained Claude selection rename keeps its exact watch and immutable history", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  await armProgressWatch(store, {
+    conversationId: "conv_selection_rename1",
+    ownerAlias: "reviewer@this-mac",
+    workerAlias: "advisor@this-mac",
+    idleMs: 60_000,
+  });
+  const replacementBinding: PrivateRouteBinding = {
+    ...claudeBinding,
+    endpointGeneration: "claude-generation-0002",
+  };
+  await store.markConnectorOffline(
+    endpoint(claudeBinding),
+    "ENDPOINT_GENERATION_CHANGED",
+  );
+  await store.observeConnector({
+    identity: endpoint(replacementBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "claude-peer",
+    protocolVersion: "1",
+  });
+  await store.replaceClaudeSelection({
+    replacement: {
+      alias: "renamed-advisor@this-mac",
+      binding: replacementBinding,
+      registrationMode: "selected_live_peer",
+    },
+  });
+
+  assert.deepEqual(
+    (await inspectProgressWatches(store)).map((watch) => ({
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      workerLease: watch.workerLease,
+    })),
+    [
+      {
+        ownerAlias: "reviewer@this-mac",
+        workerAlias: "renamed-advisor@this-mac",
+        workerLease: claudeBinding.ownerLease,
+      },
+    ],
+  );
+  assert.deepEqual(await store.inspectPairs(), [
+    {
+      claudeAlias: "renamed-advisor@this-mac",
+      codexAlias: "reviewer@this-mac",
+    },
+  ]);
+  assert.deepEqual(
+    (await store.publicSnapshot()).progressWatchEvents?.at(-1),
+    {
+      sequence: 1,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationIdSuffix: "_rename1",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "opened",
+      actor: "owner",
+    },
+  );
   await store.close();
 });
 
@@ -1120,11 +1209,11 @@ test("a progress watch cannot arm while its durable pair is unobserved", async (
     (error: unknown) =>
       error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
   );
-  assert.deepEqual(await recovered.inspectProgressWatches(), []);
+  assert.deepEqual(await inspectProgressWatches(recovered), []);
   await recovered.close();
 });
 
-test("legacy duplicate watches on one pair retain only the latest arming", async () => {
+test("a malformed legacy duplicate cannot be laundered by migration", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1155,53 +1244,17 @@ test("legacy duplicate watches on one pair retain only the latest arming", async
   });
   testClock.advance(2);
 
-  const recovered = new GatewayStore(config, { now: testClock.now });
-  await recovered.initialize();
-  assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map(
-      (watch) => watch.conversationId,
-    ),
-    ["conv_legacywatchnew01"],
+  const durable = `${JSON.stringify(legacy)}\n`;
+  await writeFile(store.stateFilePath, durable, { mode: 0o600 });
+  await assert.rejects(
+    new GatewayStore(config, { now: testClock.now }).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
   );
-  const migrated = JSON.parse(
-    await readFile(recovered.stateFilePath, "utf8"),
-  ) as {
-    progressWatches: Array<{ conversationId: string }>;
-    progressWatchEvents: Array<{
-      conversationId: string;
-      kind: string;
-    }>;
-  };
-  assert.deepEqual(
-    migrated.progressWatches.map((watch) => watch.conversationId),
-    ["conv_legacywatchnew01"],
-  );
-  assert.deepEqual(
-    migrated.progressWatchEvents.map(({ conversationId, kind }) => ({
-      conversationId,
-      kind,
-    })),
-    [
-      { conversationId: "conv_legacywatchold01", kind: "opened" },
-      { conversationId: "conv_legacywatchold01", kind: "replaced" },
-      {
-        conversationId: "conv_legacywatchnew01",
-        kind: "capability_degraded",
-      },
-    ],
-  );
-  await recovered.close();
-
-  const loadedAgain = new GatewayStore(config, { now: testClock.now });
-  await loadedAgain.initialize();
-  const idempotent = JSON.parse(
-    await readFile(loadedAgain.stateFilePath, "utf8"),
-  ) as { progressWatchEvents: Array<{ conversationId: string; kind: string }> };
-  assert.deepEqual(idempotent.progressWatchEvents, migrated.progressWatchEvents);
-  await loadedAgain.close();
+  assert.equal(await readFile(store.stateFilePath, "utf8"), durable);
 });
 
-test("legacy worker completion settles once into actor-specific history", async () => {
+test("the removed pre-v1.4 worker flag remains corrupt", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1225,28 +1278,14 @@ test("legacy worker completion settles once into actor-specific history", async 
   });
   testClock.advance(2);
 
-  const recovered = new GatewayStore(config, { now: testClock.now });
-  await recovered.initialize();
-  assert.deepEqual(await recovered.inspectProgressWatches(), []);
-  const migrated = JSON.parse(
-    await readFile(recovered.stateFilePath, "utf8"),
-  ) as { progressWatchEvents: Array<{ kind: string }> };
-  assert.deepEqual(
-    migrated.progressWatchEvents.map((event) => event.kind),
-    ["opened", "worker_reported_complete"],
+  await assert.rejects(
+    new GatewayStore(config, { now: testClock.now }).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
   );
-  await recovered.close();
-
-  const loadedAgain = new GatewayStore(config, { now: testClock.now });
-  await loadedAgain.initialize();
-  const idempotent = JSON.parse(
-    await readFile(loadedAgain.stateFilePath, "utf8"),
-  ) as { progressWatchEvents: Array<{ kind: string }> };
-  assert.deepEqual(idempotent.progressWatchEvents, migrated.progressWatchEvents);
-  await loadedAgain.close();
 });
 
-test("restart journal exhaustion fails exactly and leaves state repeatable", async () => {
+test("v1.4 migration rebases an exhausted journal and settles live watches once", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1258,26 +1297,308 @@ test("restart journal exhaustion fails exactly and leaves state repeatable", asy
   });
   await store.close();
 
-  const exhausted = JSON.parse(
+  const legacy = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
-  ) as { watchSequence: number };
-  exhausted.watchSequence = Number.MAX_SAFE_INTEGER;
-  const durable = `${JSON.stringify(exhausted)}\n`;
-  await writeFile(store.stateFilePath, durable, { mode: 0o600 });
+  ) as {
+    watchSequence: number;
+    progressWatches: ProgressWatch[];
+    progressWatchEvents: unknown[];
+  };
+  const watch = legacy.progressWatches[0]!;
+  legacy.watchSequence = Number.MAX_SAFE_INTEGER;
+  legacy.progressWatches = [
+    v14ProgressWatch(watch) as unknown as ProgressWatch,
+  ];
+  legacy.progressWatchEvents = [
+    ...Array.from({ length: 6 }, (_, index) => ({
+      sequence: Number.MAX_SAFE_INTEGER - 10 + index,
+      timestamp: watch.lastActivityAt,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind: "activity",
+    })),
+    {
+      sequence: Number.MAX_SAFE_INTEGER - 4,
+      timestamp: watch.lastActivityAt,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind: "opened",
+    },
+    {
+      sequence: Number.MAX_SAFE_INTEGER - 3,
+      timestamp: watch.lastActivityAt,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind: "activity",
+    },
+    {
+      sequence: Number.MAX_SAFE_INTEGER - 2,
+      timestamp: watch.lastActivityAt,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind: "done",
+    },
+    {
+      sequence: Number.MAX_SAFE_INTEGER - 1,
+      timestamp: watch.lastActivityAt,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind: "worker_reported_complete",
+    },
+    {
+      sequence: Number.MAX_SAFE_INTEGER,
+      timestamp: watch.lastActivityAt,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind: "replaced",
+    },
+  ];
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const recovered = new GatewayStore(config, { now: testClock.now });
-    await assert.rejects(
-      recovered.initialize(),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "PROGRESS_WATCH_SEQUENCE_EXHAUSTED",
-    );
-    assert.equal(await readFile(store.stateFilePath, "utf8"), durable);
-  }
+  const reducedCapacityConfig = {
+    ...config,
+    limits: { ...config.limits, eventCapacity: 10 },
+  };
+  const recovered = new GatewayStore(reducedCapacityConfig, {
+    now: testClock.now,
+  });
+  await recovered.initialize();
+  assert.deepEqual(await inspectProgressWatches(recovered), []);
+  const migrated = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    watchSequence: number;
+    progressWatchEvents: unknown[];
+  };
+  assert.equal(migrated.watchSequence, 5);
+  assert.deepEqual(migrated.progressWatchEvents, [
+    {
+      sequence: 1,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationId: "conv_restartsequence_max",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "opened",
+      actor: "owner",
+    },
+    {
+      sequence: 2,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationId: "conv_restartsequence_max",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "settled",
+      actor: "unknown",
+      reason: "legacy_done",
+    },
+    {
+      sequence: 3,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationId: "conv_restartsequence_max",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "settled",
+      actor: "worker",
+      reason: "done",
+    },
+    {
+      sequence: 4,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationId: "conv_restartsequence_max",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "replaced",
+      actor: "unknown",
+    },
+    {
+      sequence: 5,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationId: "conv_restartsequence_max",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "settled",
+      actor: "gateway",
+      reason: "legacy_upgrade",
+    },
+  ]);
+  await recovered.close();
+
+  const loadedAgain = new GatewayStore(reducedCapacityConfig, {
+    now: testClock.now,
+  });
+  await loadedAgain.initialize();
+  assert.deepEqual(
+    (JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+      progressWatchEvents: unknown[];
+    }).progressWatchEvents,
+    migrated.progressWatchEvents,
+  );
+  await loadedAgain.close();
 });
 
-test("a persisted watch without its exact pair fails strict state validation", async () => {
+test("v1.4 migration keeps every live-watch settlement above a lower configured history depth", async () => {
+  const { store, config, clock: testClock } = await fixture();
+  config.limits.maxRoutes = 24;
+  config.limits.maxWatches = 12;
+  config.limits.eventCapacity = 32;
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  await store.observeConnector({
+    identity: endpoint(claudeBinding),
+    health: "healthy",
+    compatibility: "compatible",
+    protocol: "claude-peer",
+    protocolVersion: "1",
+  });
+
+  const conversations: string[] = [];
+  for (let index = 0; index < 12; index += 1) {
+    const suffix = index.toString().padStart(2, "0");
+    const ownerAlias = `reviewer-${suffix}@this-mac`;
+    const workerAlias = `advisor-${suffix}@this-mac`;
+    const conversationId = `conv_capacity_watch_${suffix}`;
+    conversations.push(conversationId);
+    await store.registerRoute({
+      alias: ownerAlias,
+      binding: {
+        ...codexBinding,
+        routeHandle: `codex-thread-private-${suffix}`,
+        ownerLease: `codex-owner-lease-${suffix}`,
+      },
+      registrationMode: "explicit_opt_in",
+    });
+    await store.registerRoute({
+      alias: workerAlias,
+      binding: {
+        ...claudeBinding,
+        routeHandle: `claude-session-private-${suffix}`,
+        ownerLease: `claude-owner-lease-${suffix}`,
+      },
+      registrationMode: "selected_live_peer",
+    });
+    await store.pairRoutes({
+      claudeAlias: workerAlias,
+      codexAlias: ownerAlias,
+    });
+    await armProgressWatch(store, {
+      conversationId,
+      ownerAlias,
+      workerAlias,
+      idleMs: 60_000,
+    });
+  }
+  await store.close();
+
+  const legacy = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    watchSequence: number;
+    progressWatches: ProgressWatch[];
+    progressWatchEvents: unknown[];
+  };
+  legacy.progressWatches = legacy.progressWatches.map(
+    (watch) => v14ProgressWatch(watch) as unknown as ProgressWatch,
+  );
+  legacy.progressWatchEvents = legacy.progressWatches.map((watch, index) => ({
+    sequence: index + 1,
+    timestamp: watch.lastActivityAt,
+    conversationId: watch.conversationId,
+    ownerAlias: watch.ownerAlias,
+    workerAlias: watch.workerAlias,
+    kind: "opened",
+  }));
+  legacy.watchSequence = legacy.progressWatchEvents.length;
+  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
+    mode: 0o600,
+  });
+
+  const reducedCapacityConfig = {
+    ...config,
+    limits: { ...config.limits, eventCapacity: 10 },
+  };
+  const recovered = new GatewayStore(reducedCapacityConfig, {
+    now: testClock.now,
+  });
+  await recovered.initialize();
+  const migrated = JSON.parse(
+    await readFile(store.stateFilePath, "utf8"),
+  ) as {
+    watchSequence: number;
+    progressWatchEvents: Array<{
+      sequence: number;
+      conversationId: string;
+      kind: string;
+      actor: string;
+      reason?: string;
+    }>;
+  };
+  assert.equal(migrated.watchSequence, 24);
+  assert.deepEqual(
+    migrated.progressWatchEvents.slice(0, 12).map(
+      ({ sequence, conversationId, kind, actor }) => ({
+        sequence,
+        conversationId,
+        kind,
+        actor,
+      }),
+    ),
+    conversations.map((conversationId, index) => ({
+      sequence: index + 1,
+      conversationId,
+      kind: "opened",
+      actor: "owner",
+    })),
+  );
+  assert.deepEqual(
+    migrated.progressWatchEvents.slice(12).map(
+      ({ sequence, conversationId, kind, actor, reason }) => ({
+        sequence,
+        conversationId,
+        kind,
+        actor,
+        reason,
+      }),
+    ),
+    conversations.map((conversationId, index) => ({
+      sequence: index + 13,
+      conversationId,
+      kind: "settled",
+      actor: "gateway",
+      reason: "legacy_upgrade",
+    })),
+  );
+  await recovered.close();
+
+  const loadedAgain = new GatewayStore(reducedCapacityConfig, {
+    now: testClock.now,
+  });
+  await loadedAgain.initialize();
+  assert.deepEqual(
+    (
+      JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+        progressWatchEvents: unknown[];
+      }
+    ).progressWatchEvents,
+    migrated.progressWatchEvents,
+  );
+  await loadedAgain.close();
+});
+
+test("a v1.4 watch without its exact pair cannot be laundered by migration", async () => {
   const { store, config } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1291,7 +1612,10 @@ test("a persisted watch without its exact pair fails strict state validation", a
 
   const corrupt = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
-  ) as { pairs: unknown[] };
+  ) as { pairs: unknown[]; progressWatches: ProgressWatch[] };
+  corrupt.progressWatches = corrupt.progressWatches.map(
+    (watch) => v14ProgressWatch(watch) as unknown as ProgressWatch,
+  );
   corrupt.pairs = [];
   await writeFile(store.stateFilePath, `${JSON.stringify(corrupt)}\n`, {
     mode: 0o600,
@@ -1303,7 +1627,55 @@ test("a persisted watch without its exact pair fails strict state validation", a
   );
 });
 
-test("watch journal exhaustion cannot partly replace a watch or unpair its edge", async () => {
+test("malformed v1.4 journal vocabulary cannot be laundered by migration", async () => {
+  for (const corruptTransition of [
+    { kind: "invented_transition" },
+    { kind: "opened", nudgeNumber: 1 },
+  ] as const) {
+    const { store, config } = await fixture();
+    await store.initialize();
+    await observeAndRegister(store);
+    await armProgressWatch(store, {
+      conversationId: "conv_malformedjournal1",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      idleMs: 60_000,
+    });
+    await store.close();
+
+    const corrupt = JSON.parse(
+      await readFile(store.stateFilePath, "utf8"),
+    ) as {
+      progressWatches: ProgressWatch[];
+      progressWatchEvents: unknown[];
+    };
+    const watch = corrupt.progressWatches[0]!;
+    corrupt.progressWatches = [
+      v14ProgressWatch(watch) as unknown as ProgressWatch,
+    ];
+    corrupt.progressWatchEvents = [
+      {
+        sequence: 1,
+        timestamp: watch.lastActivityAt,
+        conversationId: watch.conversationId,
+        ownerAlias: watch.ownerAlias,
+        workerAlias: watch.workerAlias,
+        ...corruptTransition,
+      },
+    ];
+    const durable = `${JSON.stringify(corrupt)}\n`;
+    await writeFile(store.stateFilePath, durable, { mode: 0o600 });
+
+    await assert.rejects(
+      new GatewayStore(config).initialize(),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+    );
+    assert.equal(await readFile(store.stateFilePath, "utf8"), durable);
+  }
+});
+
+test("the single watch-journal guard rejects a whole close batch atomically", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1313,98 +1685,63 @@ test("watch journal exhaustion cannot partly replace a watch or unpair its edge"
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
-  const queuedOne = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "first pair-owned message",
-    dedupeKey: "watch-exhaustion-message-1",
+  await store.registerRoute({
+    alias: "other-reviewer@this-mac",
+    binding: independentCodexBinding,
+    registrationMode: "explicit_opt_in",
   });
-  const queuedTwo = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "second pair-owned message",
-    dedupeKey: "watch-exhaustion-message-2",
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "other-reviewer@this-mac",
   });
-  assert.equal(queuedOne.accepted, true);
-  assert.equal(queuedTwo.accepted, true);
+  await armProgressWatch(store, {
+    conversationId: "conv_exhaustedwatch02",
+    ownerAlias: "other-reviewer@this-mac",
+    workerAlias: "advisor@this-mac",
+    idleMs: 60_000,
+  });
   await store.close();
 
-  const nearExhausted = JSON.parse(
+  const exhausted = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
   ) as { watchSequence: number };
-  nearExhausted.watchSequence = Number.MAX_SAFE_INTEGER - 1;
-  await writeFile(store.stateFilePath, `${JSON.stringify(nearExhausted)}\n`, {
+  exhausted.watchSequence = Number.MAX_SAFE_INTEGER - 1;
+  await writeFile(store.stateFilePath, `${JSON.stringify(exhausted)}\n`, {
     mode: 0o600,
   });
 
   const recovered = new GatewayStore(config, { now: testClock.now });
   await recovered.initialize();
-  await observeAndRegister(recovered);
-  const inFlight = await recovered.dequeueMessage("advisor@this-mac");
-  assert.ok(inFlight);
   await assert.rejects(
-    armProgressWatch(recovered, {
-      conversationId: "conv_exhaustedwatch02",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      idleMs: 60_000,
-    }),
+    recovered.unregisterRoute(
+      "advisor@this-mac",
+      claudeBinding.ownerLease,
+    ),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "PROGRESS_WATCH_SEQUENCE_EXHAUSTED",
   );
   assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map(
+    (await inspectProgressWatches(recovered)).map(
       (watch) => watch.conversationId,
     ),
-    ["conv_exhaustedwatch01"],
-  );
-  await assert.rejects(
-    recovered.unpairRoutes({
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "reviewer@this-mac",
-      inFlightSettlements: [
-        {
-          messageId: inFlight.messageId,
-          state: "failed",
-          safeErrorCode: "PAIR_REMOVED",
-        },
-      ],
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "PROGRESS_WATCH_SEQUENCE_EXHAUSTED",
+    ["conv_exhaustedwatch01", "conv_exhaustedwatch02"],
   );
   assert.deepEqual(await recovered.inspectPairs(), [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "other-reviewer@this-mac",
+    },
     {
       claudeAlias: "advisor@this-mac",
       codexAlias: "reviewer@this-mac",
     },
   ]);
-  assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map(
-      (watch) => watch.conversationId,
-    ),
-    ["conv_exhaustedwatch01"],
-  );
-  const unchanged = JSON.parse(
-    await readFile(recovered.stateFilePath, "utf8"),
-  ) as {
-    queue: Array<{ messageId: string }>;
-    inFlight: Array<{ messageId: string }>;
-  };
-  assert.deepEqual(
-    unchanged.queue.map((item) => item.messageId),
-    [queuedTwo.messageId],
-  );
-  assert.deepEqual(
-    unchanged.inFlight.map((item) => item.messageId),
-    [inFlight.messageId],
-  );
+  assert.ok(await recovered.inspectPrivateRoute("advisor@this-mac"));
   await recovered.close();
 });
 
-test("a route watch binds only to its first fresh owner conversation", async () => {
+test("restart preserves an exact dispatch watch until tracking is disabled", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
@@ -1423,205 +1760,161 @@ test("a route watch binds only to its first fresh owner conversation", async () 
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
+  const before = await inspectProgressWatches(store);
   await store.close();
 
   const recovered = new GatewayStore(config, { now: testClock.now });
   await recovered.initialize();
-  await observeAndRegister(recovered);
-  await recovered.registerRoute({
-    alias: "other-reviewer@this-mac",
-    binding: independentCodexBinding,
-    registrationMode: "explicit_opt_in",
-  });
-  await recovered.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "other-reviewer@this-mac",
-  });
-  assert.equal(
-    (await recovered.inspectProgressWatches())[0]?.capability,
-    "route",
-  );
-
-  const adjacent = await recovered.enqueueMessage({
-    sourceAlias: "advisor@this-mac",
-    targetAlias: "other-reviewer@this-mac",
-    body: "DONE: adjacent pair must not close the watch",
-    dedupeKey: "regenerated-watch-adjacent",
-    progressWatch: {
-      conversationId: "conv_regenerated_adjacent",
-      actorAlias: "advisor@this-mac",
-      completionSignal: true,
-    },
-  });
-  assert.equal(adjacent.accepted, true);
-  assert.ok(adjacent.messageId);
-  assert.equal(await recovered.cancelQueuedMessage(adjacent.messageId), true);
+  assert.deepEqual(await inspectProgressWatches(recovered), before);
   assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map(
-      (watch) => watch.conversationId,
-    ),
-    ["conv_pre_restart_watch"],
-  );
-
-  const unrelatedWorkerDone = await recovered.enqueueMessage({
-    sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
-    body: "DONE: unrelated worker reply must not bind the watch",
-    dedupeKey: "regenerated-watch-unrelated-worker",
-    progressWatch: {
-      conversationId: "conv_regenerated_unrelated",
-      actorAlias: "advisor@this-mac",
-      completionSignal: true,
-    },
-  });
-  assert.equal(unrelatedWorkerDone.accepted, true);
-  assert.ok(unrelatedWorkerDone.messageId);
-  assert.equal(
-    await recovered.cancelQueuedMessage(unrelatedWorkerDone.messageId),
-    true,
+    await recovered.resolveProgressWatchDispatch({
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: "advisor@this-mac",
+      conversationId: "conv_pre_restart_watch",
+    }),
+    { conversationId: "conv_pre_restart_watch", markerActive: true },
   );
   assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map((watch) => ({
-      conversationId: watch.conversationId,
-      capability: watch.capability,
-    })),
-    [
-      {
-        conversationId: "conv_pre_restart_watch",
-        capability: "route",
-      },
-    ],
-  );
-
-  const unrelatedOwnerDone = await recovered.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "DONE: unrelated owner completion must not bind the watch",
-    dedupeKey: "regenerated-watch-unrelated-owner",
-    progressWatch: {
-      conversationId: "conv_regenerated_owner_done",
-      actorAlias: "reviewer@this-mac",
-      completionSignal: true,
-    },
-  });
-  assert.equal(unrelatedOwnerDone.accepted, true);
-  assert.ok(unrelatedOwnerDone.messageId);
-  assert.equal(
-    await recovered.cancelQueuedMessage(unrelatedOwnerDone.messageId),
-    true,
+    await recovered.resolveProgressWatchDispatch({
+      sourceAlias: "advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      conversationId: "conv_pre_restart_watch",
+    }),
+    { conversationId: "conv_pre_restart_watch", markerActive: false },
   );
   assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map((watch) => ({
-      conversationId: watch.conversationId,
-      capability: watch.capability,
-    })),
-    [
-      {
-        conversationId: "conv_pre_restart_watch",
-        capability: "route",
-      },
-    ],
-  );
-
-  const ownerActivity = await recovered.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "fresh owner assignment binds the restarted watch",
-    dedupeKey: "regenerated-watch-owner-bind",
-    progressWatch: {
-      conversationId: "conv_regenerated_exact",
-      actorAlias: "reviewer@this-mac",
-    },
-  });
-  assert.equal(ownerActivity.accepted, true);
-  assert.ok(ownerActivity.messageId);
-  assert.equal(
-    await recovered.cancelQueuedMessage(ownerActivity.messageId),
-    true,
+    await recovered.resolveProgressWatchDispatch({
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: "advisor@this-mac",
+      recoveredConversationIdSuffix: "rt_watch",
+    }),
+    { conversationId: "conv_pre_restart_watch", markerActive: true },
   );
   assert.deepEqual(
-    (await recovered.inspectProgressWatches()).map((watch) => ({
-      conversationId: watch.conversationId,
-      capability: watch.capability,
-    })),
-    [
-      {
-        conversationId: "conv_regenerated_exact",
-        capability: "conversation",
-      },
-    ],
+    await recovered.resolveProgressWatchDispatch({
+      sourceAlias: "advisor@this-mac",
+      targetAlias: "reviewer@this-mac",
+      recoveredConversationIdSuffix: "rt_watch",
+    }),
+    { conversationId: "conv_pre_restart_watch", markerActive: false },
   );
-  assert.deepEqual(
-    (await recovered.publicSnapshot()).progressWatchEvents?.at(-1),
+  for (const lookup of [
     {
-      sequence: 3,
+      sourceAlias: "other-reviewer@this-mac",
+      targetAlias: "advisor@this-mac",
+      recoveredConversationIdSuffix: "rt_watch",
+    },
+    {
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: "advisor@this-mac",
+      recoveredConversationIdSuffix: "notwatch",
+    },
+  ] as const) {
+    assert.deepEqual(await recovered.resolveProgressWatchDispatch(lookup), {
+      markerActive: false,
+    });
+  }
+
+  await recovered.close();
+  config.trackingEnabled = false;
+  const disabled = new GatewayStore(config, { now: testClock.now });
+  await disabled.initialize();
+  assert.deepEqual(await inspectProgressWatches(disabled), []);
+  assert.deepEqual(
+    (await disabled.publicSnapshot()).progressWatchEvents?.at(-1),
+    {
+      sequence: 2,
       timestamp: "2026-08-07T12:00:00.000Z",
-      conversationIdSuffix: "ed_exact",
+      conversationIdSuffix: "rt_watch",
       ownerAlias: "reviewer@this-mac",
       workerAlias: "advisor@this-mac",
-      kind: "conversation_rebound",
+      kind: "settled",
+      actor: "gateway",
+      reason: "tracking_disabled",
     },
   );
-
-  const exactWorkerDone = await recovered.enqueueMessage({
-    sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
-    body: "DONE: exact regenerated conversation closes the watch",
-    dedupeKey: "regenerated-watch-exact-worker",
-    progressWatch: {
-      conversationId: "conv_regenerated_exact",
-      actorAlias: "advisor@this-mac",
-      completionSignal: true,
-    },
-  });
-  assert.equal(exactWorkerDone.accepted, true);
-  assert.deepEqual(await recovered.inspectProgressWatches(), []);
-  const persisted = JSON.parse(
-    await readFile(recovered.stateFilePath, "utf8"),
-  ) as {
-    progressWatchEvents: Array<{ conversationId: string; kind: string }>;
-  };
-  assert.deepEqual(persisted.progressWatchEvents.at(-1), {
-    sequence: 4,
-    timestamp: "2026-08-07T12:00:00.000Z",
-    conversationId: "conv_regenerated_exact",
-    ownerAlias: "reviewer@this-mac",
-    workerAlias: "advisor@this-mac",
-    kind: "worker_reported_complete",
-  });
-  await recovered.close();
+  await disabled.close();
 });
 
-test("progress watches degrade honestly on restart and retire with one edge", async () => {
-  const { store, config, clock: testClock } = await fixture();
+test("explicit untrack closes once with operator attribution", async () => {
+  const { store } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
   await armProgressWatch(store, {
-    conversationId: "conv_qrstuvwxyzABCDEF",
-    ownerAlias: "advisor@this-mac",
-    workerAlias: "reviewer@this-mac",
+    conversationId: "conv_operator_untrack1",
+    ownerAlias: "reviewer@this-mac",
+    workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
-  await store.close();
 
-  const recovered = new GatewayStore(config, { now: testClock.now });
-  await recovered.initialize();
-  const [watch] = await recovered.inspectProgressWatches();
-  assert.equal(watch?.capability, "route");
-  assert.equal(watch?.degradedNoticeSent, true);
-  await recovered.unpairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
-  });
-  assert.deepEqual(await recovered.inspectProgressWatches(), []);
-  const persisted = JSON.parse(
-    await readFile(recovered.stateFilePath, "utf8"),
-  ) as { progressWatchEvents: Array<{ kind: string }> };
+  assert.equal(await store.endProgressWatch("conv_operator_untrack1"), true);
+  assert.equal(await store.endProgressWatch("conv_operator_untrack1"), false);
+  assert.deepEqual(await inspectProgressWatches(store), []);
   assert.deepEqual(
-    persisted.progressWatchEvents.map((event) => event.kind),
-    ["opened", "capability_degraded", "pair_removed"],
+    (await store.publicSnapshot()).progressWatchEvents?.at(-1),
+    {
+      sequence: 2,
+      timestamp: "2026-08-07T12:00:00.000Z",
+      conversationIdSuffix: "untrack1",
+      ownerAlias: "reviewer@this-mac",
+      workerAlias: "advisor@this-mac",
+      kind: "settled",
+      actor: "operator",
+      reason: "untracked",
+    },
   );
-  await recovered.close();
+  await store.close();
+});
+
+test("stale nudge work cannot shorten a freshly reset idle window", async () => {
+  const { store, clock: testClock } = await fixture();
+  await store.initialize();
+  await observeAndRegister(store);
+  await armProgressWatch(store, {
+    conversationId: "conv_stale_nudge_work",
+    ownerAlias: "reviewer@this-mac",
+    workerAlias: "advisor@this-mac",
+    idleMs: 60_000,
+  });
+  testClock.advance(60_000);
+  const [staleAction] = await store.advanceDueProgressWatches();
+  assert.equal(staleAction?.nudgeNumber, 1);
+  assert.equal(
+    await store.touchProgressWatchesForAlias("advisor@this-mac"),
+    1,
+  );
+  const resetNextActionAt = new Date(
+    testClock.now().getTime() + 60_000,
+  ).toISOString();
+  assert.equal(
+    (await inspectProgressWatches(store))[0]?.nextActionAt,
+    resetNextActionAt,
+  );
+
+  await assert.rejects(
+    store.enqueueMessage({
+      sourceAlias: "reviewer@this-mac",
+      targetAlias: "advisor@this-mac",
+      body: "stale controller nudge",
+      dedupeKey: "stale-controller-nudge",
+      progressWatchNudge: {
+        conversationId: "conv_stale_nudge_work",
+        nudgeNumber: 1,
+      },
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "PROGRESS_WATCH_NUDGE_NOT_DUE",
+  );
+  assert.equal(
+    await store.deferProgressWatchNudge("conv_stale_nudge_work", 1),
+    false,
+  );
+  assert.equal(
+    (await inspectProgressWatches(store))[0]?.nextActionAt,
+    resetNextActionAt,
+  );
+  await store.close();
 });
 
 test("Codex succession journals and atomically activates one exact new route", async () => {
@@ -3839,13 +4132,17 @@ test("Codex orphan removal requires dead-generation proof and preserves the rest
     (await store.inspectPrivateRoute("codex-kept@this-mac"))?.state,
     "stale",
   );
-  assert.deepEqual(await store.inspectProgressWatches(), []);
+  assert.deepEqual(await inspectProgressWatches(store), []);
   const persisted = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
   ) as {
     dedupe: Array<{ sourceAlias: string; targetAlias: string }>;
     rateBuckets: Array<{ sourceAlias: string }>;
-    progressWatchEvents: Array<{ kind: string }>;
+    progressWatchEvents: Array<{
+      kind: string;
+      actor?: string;
+      reason?: string;
+    }>;
     codexOrphanRemovalSequence: number;
     codexOrphanRemovalEvents: Array<Record<string, unknown>>;
   };
@@ -3875,10 +4172,16 @@ test("Codex orphan removal requires dead-generation proof and preserves the rest
     ),
     true,
   );
-  assert.equal(
-    persisted.progressWatchEvents.at(-1)?.kind,
-    "endpoint_retired",
-  );
+  assert.deepEqual(persisted.progressWatchEvents.at(-1), {
+    sequence: 2,
+    timestamp: "2026-08-07T12:00:00.000Z",
+    conversationId: "conv_orphanwatch00001",
+    ownerAlias: "advisor@this-mac",
+    workerAlias: "codex-orphan@this-mac",
+    kind: "settled",
+    actor: "gateway",
+    reason: "endpoint_retired",
+  });
   assert.equal(persisted.codexOrphanRemovalSequence, 1);
   assert.deepEqual(persisted.codexOrphanRemovalEvents, [
     {

@@ -196,7 +196,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `send-to-codex` | Claude 会话 | 标志与正文输入方式相同，使用继承的原生回复标识 |
 | `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话：`--conversation conv_<token> --alias <你的别名>`，正文从标准输入读取，可选 `--track [--idle-minutes <n>]`；调用方、对话参与关系和路由会重新检查 |
 
-`--track` 会为该对话开启一个进度监视；`--idle-minutes <n>` 设置被监视线程在监视报告停滞前可以空闲多久（1–1440，默认 5，未加 `--track` 时会被拒绝）。用 `untrack` 关闭监视，或在回复正文开头使用 `DONE:` 关闭。详见[投递](docs/DELIVERY.zh-CN.md)。
+`--track` 会为该对话开启一个进度监视；`--idle-minutes <n>` 设置有界活跃提醒的空闲间隔（1–1440，默认 5，未加 `--track` 时会被拒绝）。如果监视最终超时，Embassy 只在监视历史中记录该结算，不会发出运行时停滞告警。用 `untrack` 关闭监视，或在回复正文开头使用 `DONE:` 关闭。详见[投递](docs/DELIVERY.zh-CN.md)。
 
 ## 一分钟了解安全性
 

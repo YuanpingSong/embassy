@@ -428,16 +428,31 @@ namespace Embassy {
     Record<DashboardProgressWatchEventRow["kind"], string>
   > = {
     opened: "watches.event.opened",
-    nudge: "watches.event.nudge",
-    worker_reported_complete: "watches.event.workerReportedComplete",
-    capability_degraded: "watches.event.capabilityDegraded",
-    conversation_rebound: "watches.event.conversationRebound",
     replaced: "watches.event.replaced",
-    done: "watches.event.done",
-    unresponsive: "watches.event.unresponsive",
-    endpoint_retired: "watches.event.endpointRetired",
-    pair_removed: "watches.event.pairRemoved",
-    disabled: "watches.event.disabled",
+    settled: "watches.event.settled",
+  };
+
+  const WATCH_ACTOR_COPY_KEYS: Readonly<
+    Record<DashboardProgressWatchEventRow["actor"], string>
+  > = {
+    owner: "watches.actor.owner",
+    worker: "watches.actor.worker",
+    operator: "watches.actor.operator",
+    gateway: "watches.actor.gateway",
+    unknown: "watches.actor.unknown",
+  };
+
+  const WATCH_REASON_COPY_KEYS: Readonly<
+    Record<NonNullable<DashboardProgressWatchEventRow["reason"]>, string>
+  > = {
+    done: "watches.reason.done",
+    untracked: "watches.reason.untracked",
+    idle_timeout: "watches.reason.idleTimeout",
+    pair_removed: "watches.reason.pairRemoved",
+    endpoint_retired: "watches.reason.endpointRetired",
+    tracking_disabled: "watches.reason.trackingDisabled",
+    legacy_upgrade: "watches.reason.legacyUpgrade",
+    legacy_done: "watches.reason.legacyDone",
   };
 
   function ProgressWatchRegister(
@@ -467,32 +482,16 @@ namespace Embassy {
             {props.watches.map((watch) => (
               <article
                 className="watch-card"
-                data-phase={watch.phase}
                 key={`${watch.ownerAlias}|${watch.workerAlias}|${watch.conversationIdSuffix}`}
               >
                 <div className="watch-card__head">
                   <code>…{watch.conversationIdSuffix}</code>
-                  <StateChip
-                    domain="severity"
-                    state={watch.phase === "episode" ? "warning" : "info"}
-                    label={t(
-                      watch.phase === "episode"
-                        ? "watches.phase.episode"
-                        : "watches.phase.quiet",
-                    )}
-                    note={t(
-                      watch.phase === "episode"
-                        ? "watches.phase.episode"
-                        : "watches.phase.quiet",
-                    )}
-                  />
                 </div>
                 <strong>{watch.ownerAlias} → {watch.workerAlias}</strong>
                 <dl className="watch-card__facts">
                   <div><dt>{t("watches.column.quietFor")}</dt><dd><TimeAgo iso={watch.lastActivityAt} /></dd></div>
                   <div><dt>{t("watches.column.nextAction")}</dt><dd><TimeAgo iso={watch.nextActionAt} /></dd></div>
                   <div><dt>{t("watches.column.nudges")}</dt><dd>{fmtCount(locale, watch.nudgeCount)}</dd></div>
-                  <div><dt>{t("watches.column.capability")}</dt><dd>{t(watch.capability === "route" ? "watches.capability.route" : "watches.capability.conversation")}</dd></div>
                 </dl>
               </article>
             ))}
@@ -504,8 +503,11 @@ namespace Embassy {
             <ol>
               {props.events.map((event) => (
                 <li key={event.sequence}>
-                  <TimeAgo iso={event.timestamp} /> · <code>…{event.conversationIdSuffix}</code> · {t(WATCH_EVENT_COPY_KEYS[event.kind])}
-                  {event.nudgeNumber === undefined ? "" : ` #${event.nudgeNumber}`}
+                  <TimeAgo iso={event.timestamp} /> · <code>…{event.conversationIdSuffix}</code> · {t(WATCH_ACTOR_COPY_KEYS[event.actor])}
+                  {event.actor === "owner" ? <> <code>{event.ownerAlias}</code></> : null}
+                  {event.actor === "worker" ? <> <code>{event.workerAlias}</code></> : null}
+                  {" · "}{t(WATCH_EVENT_COPY_KEYS[event.kind])}
+                  {event.reason === undefined ? "" : ` · ${t(WATCH_REASON_COPY_KEYS[event.reason])}`}
                 </li>
               ))}
             </ol>

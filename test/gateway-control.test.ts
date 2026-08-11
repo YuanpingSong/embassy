@@ -172,11 +172,8 @@ function snapshot(): GatewaySnapshot {
         conversationIdSuffix: "AbCd_123",
         ownerAlias: "codex-main@this-mac",
         workerAlias: "claude-one@build-mac",
-        phase: "quiet",
-        capability: "conversation",
         lastActivityAt: NOW,
         nextActionAt: NOW,
-        idleMs: 300_000,
         nudgeCount: 0,
       },
     ],
@@ -188,6 +185,7 @@ function snapshot(): GatewaySnapshot {
         ownerAlias: "codex-main@this-mac",
         workerAlias: "claude-one@build-mac",
         kind: "opened",
+        actor: "owner",
       },
       {
         sequence: 2,
@@ -196,6 +194,7 @@ function snapshot(): GatewaySnapshot {
         ownerAlias: "codex-main@this-mac",
         workerAlias: "claude-one@build-mac",
         kind: "replaced",
+        actor: "unknown",
       },
       {
         sequence: 3,
@@ -203,7 +202,9 @@ function snapshot(): GatewaySnapshot {
         conversationIdSuffix: "CdEf_345",
         ownerAlias: "codex-main@this-mac",
         workerAlias: "claude-one@build-mac",
-        kind: "conversation_rebound",
+        kind: "settled",
+        actor: "worker",
+        reason: "done",
       },
       {
         sequence: 4,
@@ -211,7 +212,39 @@ function snapshot(): GatewaySnapshot {
         conversationIdSuffix: "CdEf_345",
         ownerAlias: "codex-main@this-mac",
         workerAlias: "claude-one@build-mac",
-        kind: "pair_removed",
+        kind: "settled",
+        actor: "operator",
+        reason: "pair_removed",
+      },
+      {
+        sequence: 5,
+        timestamp: NOW,
+        conversationIdSuffix: "DeFg_456",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "settled",
+        actor: "operator",
+        reason: "endpoint_retired",
+      },
+      {
+        sequence: 6,
+        timestamp: NOW,
+        conversationIdSuffix: "EfGh_567",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "settled",
+        actor: "unknown",
+        reason: "legacy_done",
+      },
+      {
+        sequence: 7,
+        timestamp: NOW,
+        conversationIdSuffix: "FgHi_678",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "settled",
+        actor: "owner",
+        reason: "done",
       },
     ],
     activityEvents: [
@@ -1353,6 +1386,23 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   const watch = invalidWatch.progressWatches?.[0];
   assert.ok(watch);
   watch.conversationIdSuffix = "conv_SECRET";
+  const invalidWatchActor = snapshot();
+  const openedWatchEvent = invalidWatchActor.progressWatchEvents?.[0];
+  assert.ok(openedWatchEvent);
+  openedWatchEvent.actor = "worker";
+  const invalidWatchSettlement = snapshot();
+  const settledWatchEvent = invalidWatchSettlement.progressWatchEvents?.find(
+    (event) => event.kind === "settled",
+  );
+  assert.ok(settledWatchEvent);
+  delete settledWatchEvent.reason;
+  const invalidWatchSettlementActor = snapshot();
+  const pairRemovedWatchEvent =
+    invalidWatchSettlementActor.progressWatchEvents?.find(
+      (event) => event.reason === "pair_removed",
+    );
+  assert.ok(pairRemovedWatchEvent);
+  pairRemovedWatchEvent.actor = "gateway";
   const invalidActivity = snapshot();
   const activity = invalidActivity.activityEvents?.[0];
   assert.ok(activity);
@@ -1420,6 +1470,9 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidCount,
     inconsistentQueueAge,
     invalidWatch,
+    invalidWatchActor,
+    invalidWatchSettlement,
+    invalidWatchSettlementActor,
     invalidActivity,
     invalidActivityKindAction,
     invalidAutomaticAuthority,

@@ -90,11 +90,8 @@ export type DashboardProgressWatchRow = Readonly<{
   conversationIdSuffix: string;
   ownerAlias: string;
   workerAlias: string;
-  phase: "quiet" | "episode";
-  capability: "conversation" | "route";
   lastActivityAt: string;
   nextActionAt: string;
-  idleMs: number;
   idleForMs: number;
   dueInMs: number;
   nudgeCount: 0 | 1 | 2;
@@ -106,19 +103,18 @@ export type DashboardProgressWatchEventRow = Readonly<{
   conversationIdSuffix: string;
   ownerAlias: string;
   workerAlias: string;
-  kind:
-    | "opened"
-    | "nudge"
-    | "worker_reported_complete"
-    | "capability_degraded"
-    | "conversation_rebound"
-    | "replaced"
+  kind: "opened" | "replaced" | "settled";
+  actor: "owner" | "worker" | "operator" | "gateway" | "unknown";
+  reason?:
     | "done"
-    | "unresponsive"
-    | "endpoint_retired"
+    | "untracked"
+    | "idle_timeout"
     | "pair_removed"
-    | "disabled";
-  nudgeNumber?: 1 | 2 | undefined;
+    | "endpoint_retired"
+    | "tracking_disabled"
+    | "legacy_upgrade"
+    | "legacy_done"
+    | undefined;
 }>;
 
 export type DashboardMessageEvent = Readonly<{
@@ -821,10 +817,10 @@ export function buildDashboardViewModel(
       ) {
         return [];
       }
-      const idleMs = normalizedInteger(watch.idleMs);
       if (
-        idleMs === undefined ||
-        (watch.nudgeCount !== 0 && watch.nudgeCount !== 1 && watch.nudgeCount !== 2)
+        watch.nudgeCount !== 0 &&
+        watch.nudgeCount !== 1 &&
+        watch.nudgeCount !== 2
       ) {
         return [];
       }
@@ -833,11 +829,8 @@ export function buildDashboardViewModel(
           conversationIdSuffix: watch.conversationIdSuffix,
           ownerAlias: boundedText(watch.ownerAlias),
           workerAlias: boundedText(watch.workerAlias),
-          phase: watch.phase,
-          capability: watch.capability,
           lastActivityAt,
           nextActionAt,
-          idleMs,
           idleForMs: Math.max(0, generatedAtMs - Date.parse(lastActivityAt)),
           dueInMs: Math.max(0, Date.parse(nextActionAt) - generatedAtMs),
           nudgeCount: watch.nudgeCount,
@@ -871,9 +864,8 @@ export function buildDashboardViewModel(
           ownerAlias: boundedText(event.ownerAlias),
           workerAlias: boundedText(event.workerAlias),
           kind: event.kind,
-          ...(event.nudgeNumber === undefined
-            ? {}
-            : { nudgeNumber: event.nudgeNumber }),
+          actor: event.actor,
+          ...(event.reason === undefined ? {} : { reason: event.reason }),
         },
       ];
     })
@@ -1115,13 +1107,10 @@ export function buildDashboardViewModel(
     else attentionCandidates[existingIndex] = item;
   }
   for (const watch of allWatches) {
-    if (watch.phase !== "episode" && watch.capability !== "route") continue;
+    if (watch.nudgeCount === 0) continue;
     attentionCandidates.push({
       kind: "watch",
-      code:
-        watch.capability === "route"
-          ? "PROGRESS_WATCH_CAPABILITY_DEGRADED"
-          : "PROGRESS_WATCH_QUIET",
+      code: "PROGRESS_WATCH_QUIET",
       severity: "warning",
       timestamp: watch.lastActivityAt,
       alias: watch.workerAlias,

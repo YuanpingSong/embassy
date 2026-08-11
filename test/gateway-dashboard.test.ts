@@ -353,11 +353,8 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       conversationIdSuffix: "AbCd_123",
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
-      phase: "episode",
-      capability: "conversation",
       lastActivityAt: "2026-08-08T11:55:00.000Z",
       nextActionAt: "2026-08-08T12:05:00.000Z",
-      idleMs: 300_000,
       nudgeCount: 1,
     },
   ];
@@ -368,7 +365,9 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       conversationIdSuffix: "MnOp_345",
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
-      kind: "conversation_rebound",
+      kind: "settled",
+      actor: "unknown",
+      reason: "legacy_done",
     },
     {
       sequence: 11,
@@ -376,7 +375,9 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       conversationIdSuffix: "KlMn_012",
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
-      kind: "done",
+      kind: "settled",
+      actor: "owner",
+      reason: "done",
     },
     {
       sequence: 10,
@@ -384,7 +385,9 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       conversationIdSuffix: "IjKl_901",
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
-      kind: "worker_reported_complete",
+      kind: "settled",
+      actor: "worker",
+      reason: "done",
     },
     {
       sequence: 9,
@@ -392,7 +395,9 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       conversationIdSuffix: "GhIj_789",
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
-      kind: "pair_removed",
+      kind: "settled",
+      actor: "operator",
+      reason: "pair_removed",
     },
     {
       sequence: 8,
@@ -401,6 +406,7 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
       kind: "replaced",
+      actor: "owner",
     },
     {
       sequence: 7,
@@ -408,8 +414,8 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       conversationIdSuffix: "AbCd_123",
       ownerAlias: "claude-advisor@this-mac",
       workerAlias: "codex-reviewer@this-mac",
-      kind: "nudge",
-      nudgeNumber: 1,
+      kind: "opened",
+      actor: "owner",
     },
   ];
   const model = buildDashboardViewModel(snapshot);
@@ -417,27 +423,31 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
     conversationIdSuffix: "AbCd_123",
     ownerAlias: "claude-advisor@this-mac",
     workerAlias: "codex-reviewer@this-mac",
-    phase: "episode",
-    capability: "conversation",
     lastActivityAt: "2026-08-08T11:55:00.000Z",
     nextActionAt: "2026-08-08T12:05:00.000Z",
-    idleMs: 300_000,
     nudgeCount: 1,
     idleForMs: 300_000,
     dueInMs: 300_000,
   });
   assert.deepEqual(
-    model.watchEvents.map((event) => event.kind),
+    model.watchEvents.map(({ kind, actor, reason }) => ({
+      kind,
+      actor,
+      reason,
+    })),
     [
-      "conversation_rebound",
-      "done",
-      "worker_reported_complete",
-      "pair_removed",
-      "replaced",
-      "nudge",
+      { kind: "settled", actor: "unknown", reason: "legacy_done" },
+      { kind: "settled", actor: "owner", reason: "done" },
+      { kind: "settled", actor: "worker", reason: "done" },
+      { kind: "settled", actor: "operator", reason: "pair_removed" },
+      { kind: "replaced", actor: "owner", reason: undefined },
+      { kind: "opened", actor: "owner", reason: undefined },
     ],
   );
-  assert.equal(model.attention.some((item) => item.guidance === "progress_watch"), true);
+  assert.equal(
+    model.attention.find((item) => item.guidance === "progress_watch")?.code,
+    "PROGRESS_WATCH_QUIET",
+  );
 
   const en = renderDashboardHtml(snapshot, { locale: "en" });
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
@@ -445,6 +455,9 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
   assert.match(en, /either participant reports exact DONE:/);
   assert.equal(en.includes("owner confirmation is still required"), false);
   assert.equal(en.includes("Owner-ended watches only"), false);
+  assert.equal(en.includes("data-watch-phase"), false);
+  assert.equal(en.includes("Quiet episode"), false);
+  assert.equal(en.includes("Conversation anchored"), false);
   assert.match(en, /…AbCd_123/);
   assert.match(zh, /活跃进度监视/);
   assert.match(zh, /任一参与方报告精确的 DONE:/);
@@ -453,6 +466,14 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
     assert.equal(en.includes(secret), false);
     assert.equal(zh.includes(secret), false);
   }
+
+  snapshot.progressWatches[0]!.nudgeCount = 0;
+  assert.equal(
+    buildDashboardViewModel(snapshot).attention.some(
+      (item) => item.guidance === "progress_watch",
+    ),
+    false,
+  );
 });
 
 test("view model derives deterministic route and global queue ages from generatedAt", () => {

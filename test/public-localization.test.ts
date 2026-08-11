@@ -76,6 +76,32 @@ test("Simplified Chinese README preserves the complete executable contract", asy
   assert.equal(chinese.includes("```markdown"), false);
 });
 
+test("progress-watch docs state disabled and idle-timeout behavior exactly", async () => {
+  const [englishConfig, chineseConfig, architecture, englishReadme, chineseReadme] =
+    await Promise.all([
+      readPublicFile("docs/CONFIGURATION.md"),
+      readPublicFile("docs/CONFIGURATION.zh-CN.md"),
+      readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
+      readPublicFile("README.md"),
+      readPublicFile("README.zh-CN.md"),
+    ]);
+
+  assert.match(englishConfig, /TRACK:` open attempts/);
+  assert.match(englishConfig, /`DONE:` is inert/);
+  assert.match(englishConfig, /`untrack` is not specially rejected.*`NOT_FOUND`/);
+  assert.match(chineseConfig, /`TRACK:` 开启请求会被拒绝/);
+  assert.match(chineseConfig, /`DONE:` 不产生作用/);
+  assert.match(chineseConfig, /`untrack` 不会因开关而被特别拒绝.*`NOT_FOUND`/);
+  for (const document of [architecture, englishReadme]) {
+    assert.doesNotMatch(document, /watch reports a stall/);
+    assert.match(document, /watch history/);
+    assert.match(document, /no runtime stall alert/);
+  }
+  assert.doesNotMatch(chineseReadme, /监视报告停滞/);
+  assert.match(chineseReadme, /只在监视历史中记录该结算/);
+  assert.match(chineseReadme, /不会发出运行时停滞告警/);
+});
+
 test("public locales document provenance framing and recipient continuation", async () => {
   const [
     englishReadme,

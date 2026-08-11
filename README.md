@@ -222,8 +222,9 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin, optional `--track [--idle-minutes <n>]` |
 
 `--track` opens a progress watch over the conversation; `--idle-minutes <n>`
-sets how long the watched thread may idle before the watch reports a stall
-(1–1440, default 5, rejected without `--track`). Close a watch with `untrack`,
+sets the idle interval for bounded liveness nudges (1–1440, default 5, rejected
+without `--track`). If the watch ultimately times out, Embassy records it only
+in watch history and emits no runtime stall alert. Close a watch with `untrack`,
 or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 
 ## Safety in one minute

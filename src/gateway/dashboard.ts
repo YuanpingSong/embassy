@@ -642,23 +642,21 @@ function renderActivity(context: RenderContext): string {
 
 function renderProgressWatches(context: RenderContext): string {
   const rows = context.model.watches.length === 0
-    ? `<tr class="empty-row"><td colspan="7">${t(context, "watches.empty")}</td></tr>`
+    ? `<tr class="empty-row"><td colspan="5">${t(context, "watches.empty")}</td></tr>`
     : context.model.watches
         .map(
-          (watch) => `<tr data-dashboard-row="progress-watch" data-watch-phase="${watch.phase}">
+          (watch) => `<tr data-dashboard-row="progress-watch">
             <th scope="row" data-label="${t(context, "watches.column.conversation")}"><code>…${escapeDashboardHtml(watch.conversationIdSuffix)}</code></th>
             <td data-label="${t(context, "watches.column.parties")}" class="route-cell"><strong>${escapeDashboardHtml(watch.ownerAlias)} → ${escapeDashboardHtml(watch.workerAlias)}</strong></td>
-            <td data-label="${t(context, "watches.column.phase")}">${statusPill(t(context, watch.phase === "episode" ? "watches.phase.episode" : "watches.phase.quiet"), watch.phase === "episode" ? "warning" : "quiet")}</td>
             <td data-label="${t(context, "watches.column.quietFor")}" class="numeric">${formatDuration(watch.idleForMs)}</td>
             <td data-label="${t(context, "watches.column.nextAction")}" class="numeric">${formatDuration(watch.dueInMs)}</td>
             <td data-label="${t(context, "watches.column.nudges")}" class="numeric">${formatInteger(watch.nudgeCount)}</td>
-            <td data-label="${t(context, "watches.column.capability")}">${statusPill(t(context, watch.capability === "route" ? "watches.capability.route" : "watches.capability.conversation"), watch.capability === "route" ? "warning" : "info")}</td>
           </tr>`,
         )
         .join("");
   return `<section class="section" aria-labelledby="watches-title">
     <div class="section-heading"><div><p class="eyebrow">${t(context, "watches.eyebrow")}</p><h2 id="watches-title">${t(context, "watches.title")}</h2></div><p>${t(context, "watches.note")}</p></div>
-    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="watches-title"><table class="responsive-table"><caption>${t(context, "watches.note")}</caption><thead><tr><th>${t(context, "watches.column.conversation")}</th><th>${t(context, "watches.column.parties")}</th><th>${t(context, "watches.column.phase")}</th><th class="numeric">${t(context, "watches.column.quietFor")}</th><th class="numeric">${t(context, "watches.column.nextAction")}</th><th class="numeric">${t(context, "watches.column.nudges")}</th><th>${t(context, "watches.column.capability")}</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="watches-title"><table class="responsive-table"><caption>${t(context, "watches.note")}</caption><thead><tr><th>${t(context, "watches.column.conversation")}</th><th>${t(context, "watches.column.parties")}</th><th class="numeric">${t(context, "watches.column.quietFor")}</th><th class="numeric">${t(context, "watches.column.nextAction")}</th><th class="numeric">${t(context, "watches.column.nudges")}</th></tr></thead><tbody>${rows}</tbody></table></div>
   </section>`;
 }
 

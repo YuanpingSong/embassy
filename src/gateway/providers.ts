@@ -1608,18 +1608,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     active.inboundQuiesced = true;
   }
 
-  async dispatch(input: {
-    sourceAlias: string;
-    targetAlias: string;
-    conversationId: string;
-    binding: PrivateRouteBinding;
-    authorization: "selected_route" | "native_reply";
-    messageId: string;
-    text: string;
-    expectsReply: boolean;
-    deadlineAt: string;
-    progressWatchActive?: true;
-  }): Promise<GatewayAdapterDispatchResult> {
+  async dispatch(
+    input: GatewayAdapterDispatchInput,
+  ): Promise<GatewayAdapterDispatchResult> {
     if (this.compatibilityBlocked) {
       return {
         state: "failed",
