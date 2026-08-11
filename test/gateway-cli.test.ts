@@ -926,11 +926,12 @@ test("all five stderr categories localize without changing stdout protocol", asy
   }
 });
 
-test("invalid live-upgrade control responses name the broker restart recovery", async () => {
+test("invalid live-upgrade control responses name version skew and client recovery", async () => {
   const expected = {
-    en: "[embassy] gateway unavailable.\n[embassy] restart the broker, then retry.\n",
+    en:
+      "[embassy] gateway unavailable.\n[embassy] client/broker version skew is likely; rebuild or repoint this client to the broker's Embassy installation, then retry.\n",
     "zh-CN":
-      "[embassy] 网关不可用。\n[embassy] 请重启 Embassy 网关进程，然后重试。\n",
+      "[embassy] 网关不可用。\n[embassy] 客户端与网关进程的版本可能不一致；请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。\n",
   } as const;
 
   for (const locale of ["en", "zh-CN"] as const) {

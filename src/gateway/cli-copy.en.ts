@@ -39,7 +39,7 @@ Options:
   "hint.dashboardPortInUse":
     "live dashboard port {port} is already in use; close the holding process or choose another with --port <n>.",
   "hint.controlInvalidResponse":
-    "restart the broker, then retry.",
+    "client/broker version skew is likely; rebuild or repoint this client to the broker's Embassy installation, then retry.",
   "error.input": "request rejected.",
   "error.decision": "gateway rejected the request.",
   "error.unavailable": "gateway unavailable.",
