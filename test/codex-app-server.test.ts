@@ -1353,6 +1353,91 @@ test("steers only an exact observed active turn without interrupting it", async 
   await connector.close();
 });
 
+test("an item boundary reveals a pre-attach active turn for steering", async () => {
+  const current = fixture((message, fake) => {
+    if (message.method === "thread/resume") {
+      fake.respond(message, {
+        thread: { id: THREAD_ID, status: { type: "active" }, turns: [] },
+      });
+    } else if (message.method === "turn/steer") {
+      const params = message.params as { expectedTurnId?: unknown };
+      fake.respond(message, { turnId: params.expectedTurnId });
+    }
+  });
+  const connector = await current.connect();
+  await observeRoute(connector);
+  await connector.resumeThread(connector.guard());
+
+  assert.equal(connector.observation().routeStatus, "active");
+  assert.equal(connector.observation().hasActiveTurn, false);
+  assert.deepEqual(
+    await connector.submitMessage(connector.guard(), {
+      deadlineAt: futureDeadline(),
+      messageId: "message-steer-before-item-boundary",
+      steer: true,
+      text: "STEER: wait for the first observed boundary",
+    }),
+    { disposition: "deferred", observation: connector.observation() },
+  );
+  assert.equal(
+    current.transport.sent.some((message) => message.method === "turn/steer"),
+    false,
+  );
+
+  current.transport.emit({
+    method: "item/completed",
+    params: {
+      completedAtMs: 1,
+      item: {
+        output: "PRIVATE_ITEM_OUTPUT_MUST_NOT_BE_RETAINED",
+        type: "commandExecution",
+      },
+      threadId: THREAD_ID,
+      turnId: "turn-active-before-attach",
+    },
+  });
+
+  assert.equal(connector.observation().hasActiveTurn, true);
+  assert.equal(
+    current.events.some(
+      (event) =>
+        event.kind === "turn_started" && event.hasActiveTurn === true,
+    ),
+    true,
+  );
+  assert.equal(
+    JSON.stringify(current.events).includes(
+      "PRIVATE_ITEM_OUTPUT_MUST_NOT_BE_RETAINED",
+    ),
+    false,
+  );
+  const result = await connector.submitMessage(connector.guard(), {
+    deadlineAt: futureDeadline(),
+    messageId: "message-steer-before-item-boundary",
+    steer: true,
+    text: "STEER: wait for the first observed boundary",
+  });
+  assert.equal(result.disposition, "steered");
+  const steer = current.transport.sent.find(
+    (message) => message.method === "turn/steer",
+  );
+  assert.deepEqual(steer?.params, {
+    expectedTurnId: "turn-active-before-attach",
+    input: [
+      { text: "STEER: wait for the first observed boundary", type: "text" },
+    ],
+    threadId: THREAD_ID,
+  });
+  assert.equal(
+    current.transport.sent.some(
+      (message) => message.method === "turn/interrupt",
+    ),
+    false,
+  );
+
+  await connector.close();
+});
+
 test("an idle steering message starts an ordinary turn without invoking turn/steer", async () => {
   const current = fixture((message, fake) => {
     if (message.method === "thread/resume") {
