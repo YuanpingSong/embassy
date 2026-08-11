@@ -96,6 +96,7 @@ export const dashboardCopyKeys = [
   "guidance.queueStalled.title",
   "guidance.queueStalled.body",
   "guidance.queueStalled.action",
+  "guidance.queueStalled.busy",
   "guidance.recipientWaitingInput.title",
   "guidance.recipientWaitingInput.body",
   "guidance.recipientWaitingInput.action",

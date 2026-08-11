@@ -119,6 +119,8 @@ export const dashboardCopyEn = {
     "The oldest accepted message remains queued past half of its delivery deadline.",
   "guidance.queueStalled.action":
     "Run embassy status. Do not resend accepted work; Embassy still tracks it until settlement or expiry.",
+  "guidance.queueStalled.busy":
+    "This Codex-bound queue reaches the recipient only after its current turn ends. If you control that recipient, end the turn.",
   "guidance.recipientWaitingInput.title": "Mailbox reached; recipient remains unobserved",
   "guidance.recipientWaitingInput.body":
     "Embassy wrote the message to the recipient mailbox, and the recipient session is currently not observed.",

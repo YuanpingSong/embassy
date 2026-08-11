@@ -527,6 +527,12 @@ test("malformed, future, and empty-route queue timestamps never leak or become i
 
 test("QUEUE_STALLED is rendered only from a provided normalized alert", () => {
   const snapshot = dashboardFixture();
+  const route = snapshot.routes.find(
+    ({ alias }) => alias === "codex-reviewer@this-mac",
+  );
+  assert.ok(route);
+  route.state = "busy";
+  route.queueDepth = 2;
   snapshot.alerts = [{
     code: "QUEUE_STALLED",
     severity: "warning",
@@ -536,13 +542,36 @@ test("QUEUE_STALLED is rendered only from a provided normalized alert", () => {
     alias: "codex-reviewer@this-mac",
     body: "ALERT_BODY_SECRET",
   } as (typeof snapshot.alerts)[number]];
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(
+    model.attention.find(({ code }) => code === "QUEUE_STALLED")?.queueDepth,
+    2,
+  );
   const html = renderDashboardHtml(snapshot);
   assert.equal((html.match(/QUEUE_STALLED/g) ?? []).length, 1);
   assert.match(html, /Queued delivery is stalled/);
-  assert.match(html, /past half of its delivery deadline/);
-  assert.match(html, /Do not resend accepted work/);
+  assert.match(html, /Codex-bound queue/);
+  assert.match(html, /current turn ends/);
+  assert.match(html, /Queued messages:<\/strong> 2/);
   assert.equal(html.includes("ALERT_BODY_SECRET"), false);
   assert.match(html, /id="attention-title"/);
+
+  route.state = "idle";
+  const idleModel = buildDashboardViewModel(snapshot);
+  assert.equal(
+    idleModel.attention.find(({ code }) => code === "QUEUE_STALLED")?.queueDepth,
+    undefined,
+  );
+  assert.equal(renderDashboardHtml(snapshot).includes("current turn ends"), false);
+
+  route.state = "busy";
+  snapshot.alerts[0]!.provider = "claude";
+  assert.equal(
+    buildDashboardViewModel(snapshot).attention.find(
+      ({ code }) => code === "QUEUE_STALLED",
+    )?.queueDepth,
+    undefined,
+  );
 });
 
 test("a durable pair stays visible and degraded when its Codex route needs re-observation", () => {

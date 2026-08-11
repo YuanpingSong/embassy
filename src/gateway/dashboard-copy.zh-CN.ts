@@ -105,6 +105,8 @@ export const dashboardCopyZhCn = {
   "guidance.queueStalled.body": "最早接受的消息已排队超过投递截止时间的一半。",
   "guidance.queueStalled.action":
     "运行 embassy status。不要重发已接受的工作；Embassy 会跟踪到结算或过期。",
+  "guidance.queueStalled.busy":
+    "该 Codex 方向队列只有在接收方当前轮次结束后才会到达。如果您控制该接收方，请结束该轮次。",
   "guidance.recipientWaitingInput.title": "消息已写入邮箱，但接收方仍未被观察到",
   "guidance.recipientWaitingInput.body":
     "Embassy 已将消息写入接收方消息邮箱，且当前未观察到接收方会话。",
