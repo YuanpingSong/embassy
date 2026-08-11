@@ -6,15 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-11
+
+### Fixed
+
+- A `STEER:` message can now reach a turn that began before Embassy attached to the task. `turn/steer` requires the exact active turn ID, and the connector only learned one by witnessing that turn start — so a route registered mid-turn, which is precisely the session-recovery case, deferred every steering message until the turn ended on its own. The connector now adopts the exact turn ID from an `item/completed` frame when the resumed route is active, unowned, and has no observed turn, retaining no item content and never interrupting. A message deferred this way retries on the ordinary cadence and enters the turn at the next tool-call boundary.
+- A degraded or unavailable pair renders as a pair with a reason instead of disappearing. The dashboard previously reported that no consent edge existed while durable state held one whose Codex route had gone stale, and an endpoint on a degraded edge was counted as unpaired. Byte-budget truncation is reported as edges omitted rather than edges absent.
+- `REOBSERVATION_REQUIRED` and `CODEX_BOOT_REACTIVATION_SKIPPED` are presented as the single condition they describe, worded to what the broker can prove — the saved route has no current live endpoint proof — with the exact recovery command attached and the evidence of the attempted re-anchor retained. A disabled route no longer claims it will re-anchor on its own.
+- `CONTROL_INVALID_RESPONSE` names client/broker version skew as the likely cause and rebuilding or repointing the client as the fix, rather than directing the operator to restart a healthy broker.
+- `embassy --help` lists `untrack` in both locales. The command has been real and documented since v1.0.0, but was missing from the usage text, so the one way to close a progress watch from the CLI was undiscoverable from the CLI.
+- Progress supervision now keeps at most one active watch on an exact consent edge, lets either the worker or owner close that watch with `DONE:`, and refuses a counterparty `TRACK:` replacement with explicit `untrack` guidance. When an older state contains duplicate watches for one edge, upgrade settles the superseded watches deterministically and records each settlement in history.
+- The security policy, contributor guide, and architecture reference claimed message bodies were memory-only and discarded on restart. That stopped being true when v1.2 made the queue durable: queued and recently delivered bodies are retained under bounded caps in the mode-0600 state file, which is what lets queued mail survive a restart and re-send exactly once. Denying it understated what software running as the same OS user can read.
+
 ### Removed
 
 - The deprecated `claude-codex-gateway` binary alias. v1.0.0 shipped it for exactly one release to carry the rename; four releases on, `embassy` is the single installed command, and it is the only name the README, the architecture doc, the bundled skill, and every error hint have ever printed. Anyone still typing the old name gets an honest "command not found" instead of a silent second spelling.
 - The legacy prototype state-root compatibility read. v1.0.0 also promised one release of bounded-reading the exact pre-rename ownership marker under `~/.local/state/claude-agent-bridge/gateway` and holding that root's controller lock, so an unpublished prototype could not advertise a second Codex peer beside v1. Embassy no longer reads, creates, locks, or mutates anything under that path. The failure mode it covered — two foreground brokers for one login account — is fully held by the fixed kernel-held host lease at `~/.local/state/agent-embassy/.gateway-host.lock`, which is acquired before provider setup, is independent of `EMBASSY_STATE_DIR`, and is reclaimed automatically when a holder crashes. A prototype state directory left on disk is now inert and can simply be deleted.
-
-### Fixed
-
-- `embassy --help` lists `untrack` in both locales. The command has been real and documented since v1.0.0, but was missing from the usage text, so the one way to close a progress watch from the CLI was undiscoverable from the CLI.
-- Progress supervision now keeps at most one active watch on an exact consent edge, lets either the worker or owner close that watch with `DONE:`, and refuses a counterparty `TRACK:` replacement with explicit `untrack` guidance. When an older state contains duplicate watches for one edge, upgrade settles the superseded watches deterministically and records each settlement in history.
 
 ## [1.3.0] - 2026-08-10
 
