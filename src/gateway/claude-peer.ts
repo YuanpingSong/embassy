@@ -24,7 +24,10 @@ import {
 } from "./codex-registration-generation.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
-import { sharesCompatibilityMajor } from "./compatibility.js";
+import {
+  isCompatibilityVersionEvidence,
+  sharesCompatibilityMajor,
+} from "./compatibility.js";
 
 /**
  * This adapter intentionally pins the inspected, implementation-specific
@@ -36,14 +39,7 @@ export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({
   peerProtocol: 1,
   messageVersion: 1,
 });
-
-/** Live peer records may outlive a same-protocol Claude Code upgrade. */
-export const CLAUDE_PEER_COMPATIBLE_SESSION_VERSIONS = Object.freeze([
-  "2.1.224",
-  "2.1.225",
-  "2.1.226",
-  "2.1.227",
-] as const);
+const EMBASSY_ADVERTISEMENT_VERSION = 1;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -123,7 +119,7 @@ export type ClaudePeerDiscovery = {
   truncated: boolean;
   /** Bounded registry entries examined, including safely skipped records. */
   entriesScanned: number;
-  /** Records whose closed wire schema parsed before later liveness checks. */
+  /** Records whose required known fields parsed before later liveness checks. */
   parseableRecords: number;
 };
 
@@ -221,7 +217,7 @@ export type ClaudePeerConnect = (socketPath: string) => Socket;
 export type ClaudePeerAdapterOptions = {
   sessionsDir: string;
   socketDir: string;
-  /** Exact version attested by the trusted launcher, never user input. */
+  /** Bounded version evidence attested by the trusted launcher, never user input. */
   attestedClaudeCodeVersion: string;
   /** Locale for bounded user-visible gateway notices written to Claude. */
   locale?: DashboardLocale;
@@ -241,6 +237,8 @@ export type ClaudePeerAdapterOptions = {
 
 /** Dependency seams for deterministic tests; never populate from config. */
 export type ClaudePeerAdapterTestOverrides = {
+  /** Deterministic owner-mismatch seam; production always uses process.getuid(). */
+  expectedUid?: number;
   processInspector?: ClaudeProcessInspector;
   connect?: ClaudePeerConnect;
   now?: () => number;
@@ -258,6 +256,7 @@ export type ClaudePeerAdapterTestOverrides = {
   registryPublicationHook?: (
     stage: "before_rename" | "after_rename",
   ) => void | Promise<void>;
+  postBindHook?: (socketPath: string) => void | Promise<void>;
 };
 
 export type ClaudePeerRegistryPublicationOutcome =
@@ -321,6 +320,7 @@ type ParsedRegistryRecord = {
   messagingSocketPath: string;
   name: string;
   status: ClaudePeerStatus;
+  embassyAdvertisement: boolean;
 };
 
 type TargetBinding = {
@@ -599,8 +599,31 @@ function parseRegistryRecord(
     "name",
     "updatedAt",
   ] as const;
-  const optional = ["nameSource", "status", "statusUpdatedAt"] as const;
-  if (!hasExactKeys(value, required, optional)) return undefined;
+  if (!required.every((key) => Object.hasOwn(value, key))) return undefined;
+  const embassyAdvertisement =
+    value.embassyAdvertisementVersion === EMBASSY_ADVERTISEMENT_VERSION &&
+    isCompatibilityVersionEvidence(value.version) &&
+    typeof value.name === "string" &&
+    value.name.startsWith("codex-") &&
+    ALIAS_PATTERN.test(value.name) &&
+    value.kind === "interactive" &&
+    value.entrypoint === "cli" &&
+    value.peerProtocol === CLAUDE_PEER_COMPATIBILITY.peerProtocol &&
+    value.status !== undefined &&
+    value.statusUpdatedAt !== undefined;
+  if (
+    value.embassyAdvertisementVersion !== undefined &&
+    !embassyAdvertisement
+  ) {
+    return undefined;
+  }
+  const versionCompatible =
+    typeof value.version === "string" &&
+    (embassyAdvertisement ||
+      sharesCompatibilityMajor(
+        value.version,
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      ));
 
   if (value.pid !== expectedPid) return undefined;
   if (
@@ -627,11 +650,7 @@ function parseRegistryRecord(
     !isBoundedString(value.procStart, 256) ||
     value.procStart.length === 0 ||
     value.procStart.includes("\0") ||
-    typeof value.version !== "string" ||
-    !sharesCompatibilityMajor(
-      value.version,
-      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-    ) ||
+    !versionCompatible ||
     !isBoundedString(value.entrypoint, 64) ||
     !/^[A-Za-z0-9._-]+$/.test(value.entrypoint) ||
     (value.nameSource !== undefined &&
@@ -683,6 +702,7 @@ function parseRegistryRecord(
     // while the model turn is active. Treat that live process conservatively
     // as busy.
     status: (value.status ?? "busy") as ClaudePeerStatus,
+    embassyAdvertisement,
   };
 }
 
@@ -934,6 +954,7 @@ export class ClaudePeerAdapter {
   readonly #registryPublicationHook:
     | ((stage: "before_rename" | "after_rename") => void | Promise<void>)
     | undefined;
+  readonly #postBindHook: ClaudePeerAdapterTestOverrides["postBindHook"];
   readonly #targets = new Map<string, TargetBinding>();
   readonly #workspacePolicies = new Map<string, WorkspacePolicy>();
   readonly #listeners = new Set<ClaudePeerListener>();
@@ -949,6 +970,7 @@ export class ClaudePeerAdapter {
       );
     }
     if (
+      options.attestedClaudeCodeVersion !== "unknown" &&
       !sharesCompatibilityMajor(
         options.attestedClaudeCodeVersion,
         CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
@@ -956,7 +978,7 @@ export class ClaudePeerAdapter {
     ) {
       throw new BridgeError(
         "CLAUDE_PEER_VERSION_UNSUPPORTED",
-        `Claude peer compatibility is pinned to Claude Code ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}.`,
+        "Claude peer transport does not support this Claude Code major.",
       );
     }
     if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
@@ -985,7 +1007,7 @@ export class ClaudePeerAdapter {
       options.socketDir,
       "socketDir",
     );
-    this.#expectedUid = process.getuid();
+    this.#expectedUid = testing.expectedUid ?? process.getuid();
     if (!Number.isSafeInteger(this.#expectedUid) || this.#expectedUid < 0) {
       throw new BridgeError(
         "INVALID_PEER_UID",
@@ -1084,14 +1106,30 @@ export class ClaudePeerAdapter {
       ].map((root) => assertAbsoluteConfiguredPath(root, "tempRoot")),
     );
     this.#registryPublicationHook = testing.registryPublicationHook;
+    this.#postBindHook = testing.postBindHook;
   }
 
-  async #validatePrivateDirectory(directory: string): Promise<void> {
+  async #validateRealDirectory(directory: string): Promise<void> {
     const stat = await lstat(directory);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new BridgeError(
         "UNSAFE_PEER_DIRECTORY",
         "The Claude peer directory is not an accessible real directory.",
+      );
+    }
+  }
+
+  async #validateSessionsDirectory(): Promise<void> {
+    const stat = await lstat(this.#sessionsDir);
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isDirectory() ||
+      stat.uid !== this.#expectedUid ||
+      exactMode(stat.mode) !== 0o700
+    ) {
+      throw new BridgeError(
+        "UNSAFE_PEER_DIRECTORY",
+        "The Claude sessions directory failed its exact owner and mode policy.",
       );
     }
   }
@@ -1205,6 +1243,11 @@ export class ClaudePeerAdapter {
         "Registry schema is incompatible.",
       );
     }
+    // Embassy advertisements are addressable by Claude, never Claude delivery
+    // targets or evidence that a Claude record parsed.
+    if (record.embassyAdvertisement || expectedPid === process.pid) {
+      throw new BridgeError("SELF_TARGET", "The gateway cannot target itself.");
+    }
     onParsed?.();
     const processIdentity = await this.#inspectProcess(expectedPid);
     if (processIdentity === undefined) {
@@ -1215,9 +1258,6 @@ export class ClaudePeerAdapter {
         "PID_OWNER_MISMATCH",
         "Registry process owner is unsafe.",
       );
-    }
-    if (expectedPid === process.pid) {
-      throw new BridgeError("SELF_TARGET", "The gateway cannot target itself.");
     }
     const socketGeneration = await this.#validateSocket(
       record.messagingSocketPath,
@@ -1240,8 +1280,8 @@ export class ClaudePeerAdapter {
 
   async discover(): Promise<ClaudePeerDiscovery> {
     await Promise.all([
-      this.#validatePrivateDirectory(this.#sessionsDir),
-      this.#validatePrivateDirectory(this.#socketDir),
+      this.#validateSessionsDirectory(),
+      this.#validateRealDirectory(this.#socketDir),
     ]);
     const previousTargets = [...this.#targets.values()];
     const nextTargets = new Map<string, TargetBinding>();
@@ -1324,6 +1364,7 @@ export class ClaudePeerAdapter {
           error instanceof BridgeError
             ? (error.code as ClaudePeerRejectionCode)
             : "REGISTRY_RACED";
+        if (code === "SELF_TARGET") continue;
         if (
           (claudePeerRejectionCodes as readonly string[]).includes(code)
         ) {
@@ -1351,8 +1392,8 @@ export class ClaudePeerAdapter {
 
   async #revalidateBinding(binding: TargetBinding): Promise<TargetBinding> {
     await Promise.all([
-      this.#validatePrivateDirectory(this.#sessionsDir),
-      this.#validatePrivateDirectory(this.#socketDir),
+      this.#validateSessionsDirectory(),
+      this.#validateRealDirectory(this.#socketDir),
     ]);
     if (binding.expiresAt < this.#now()) {
       this.#targets.delete(binding.targetId);
@@ -1579,8 +1620,8 @@ export class ClaudePeerAdapter {
 
   async #resolveReplyAddress(address: string): Promise<TargetBinding> {
     await Promise.all([
-      this.#validatePrivateDirectory(this.#sessionsDir),
-      this.#validatePrivateDirectory(this.#socketDir),
+      this.#validateSessionsDirectory(),
+      this.#validateRealDirectory(this.#socketDir),
     ]);
     if (!address.startsWith("uds:")) {
       throw new BridgeError(
@@ -1635,8 +1676,8 @@ export class ClaudePeerAdapter {
    */
   async resolveReplyAddress(address: string): Promise<ClaudePeerDescriptor> {
     await Promise.all([
-      this.#validatePrivateDirectory(this.#sessionsDir),
-      this.#validatePrivateDirectory(this.#socketDir),
+      this.#validateSessionsDirectory(),
+      this.#validateRealDirectory(this.#socketDir),
     ]);
     const binding = await this.#resolveReplyAddress(address);
     return {
@@ -1653,8 +1694,8 @@ export class ClaudePeerAdapter {
     preparedGeneration?: string,
   ): Promise<ClaudePeerListener> {
     await Promise.all([
-      this.#validatePrivateDirectory(this.#sessionsDir),
-      this.#validatePrivateDirectory(this.#socketDir),
+      this.#validateSessionsDirectory(),
+      this.#validateRealDirectory(this.#socketDir),
     ]);
     const generation = preparedGeneration ?? this.#createGeneration();
     if (!isCodexRegistrationGeneration(generation)) {
@@ -1724,6 +1765,7 @@ export class ClaudePeerAdapter {
       ...(this.#registryPublicationHook === undefined
         ? {}
         : { registryPublicationHook: this.#registryPublicationHook }),
+      postBindHook: this.#postBindHook,
       onClosed: () => this.#listeners.delete(listener),
     });
     this.#listeners.add(listener);
@@ -2032,10 +2074,12 @@ type ListenerCreateOptions = {
   registryPublicationHook?: (
     stage: "before_rename" | "after_rename",
   ) => void | Promise<void>;
+  postBindHook: ClaudePeerAdapterTestOverrides["postBindHook"];
   onClosed: () => void;
 };
 
 type AdvertisedCodexRegistryRecord = {
+  embassyAdvertisementVersion: 1;
   pid: number;
   sessionId: string;
   cwd: string;
@@ -2230,6 +2274,7 @@ export class ClaudePeerListener {
           "The gateway callback socket did not satisfy its ownership policy.",
         );
       }
+      await options.postBindHook?.(socketPath);
       const sessions = await lstat(options.sessionsDir);
       if (
         sessions.isSymbolicLink() ||
@@ -2266,10 +2311,30 @@ export class ClaudePeerListener {
           // net.Server.close(), which deletes by pathname.
         }
       }
+      let closeConfirmed = false;
       if (stillOwned) {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-      } else {
+        try {
+          await new Promise<void>((resolve, reject) =>
+            server.close((closeError) =>
+              closeError === undefined ? resolve() : reject(closeError),
+            ),
+          );
+          try {
+            await lstat(socketPath);
+          } catch (closeError) {
+            closeConfirmed =
+              (closeError as NodeJS.ErrnoException).code === "ENOENT";
+          }
+        } catch {
+          // An unconfirmed close cannot safely downgrade a callback failure.
+        }
+      }
+      if (!closeConfirmed) {
         server.unref();
+        throw new BridgeError(
+          "CLAUDE_PEER_CALLBACK_UNSAFE",
+          "The newly bound callback socket could not be safely closed.",
+        );
       }
       throw error;
     }
@@ -2302,6 +2367,7 @@ export class ClaudePeerListener {
     record: AdvertisedCodexRegistryRecord,
   ): boolean {
     return (
+      record.embassyAdvertisementVersion === EMBASSY_ADVERTISEMENT_VERSION &&
       record.pid === process.pid &&
       UUID_PATTERN.test(record.sessionId) &&
       record.messagingSocketPath === this.#socketPath &&
@@ -2554,6 +2620,7 @@ export class ClaudePeerListener {
     }
     const now = Date.now();
     return {
+      embassyAdvertisementVersion: EMBASSY_ADVERTISEMENT_VERSION,
       pid: process.pid,
       sessionId,
       cwd,

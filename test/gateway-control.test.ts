@@ -37,7 +37,15 @@ import {
   type ValidatedSendToClaudeParams,
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
-import { projectGatewayPublicSnapshot } from "../src/gateway/types.js";
+import {
+  projectGatewayPublicSnapshot,
+  projectPublicCompatibilityCheck,
+} from "../src/gateway/types.js";
+import {
+  certifiedCompatibilityVersions,
+  compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
+} from "../src/gateway/compatibility.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
@@ -108,6 +116,15 @@ function snapshot(): GatewaySnapshot {
         protocol: "claude-peer",
         protocolVersion: "1",
         lastSeenAt: NOW,
+        registry: {
+          entriesScanned: 3,
+          parseableRecords: 2,
+          parseableRecordSeenSinceBoot: true,
+          rejected: [
+            { safeErrorCode: "REGISTRY_INVALID_SCHEMA", count: 1 },
+          ],
+          rejectedCodesOmitted: 0,
+        },
       },
     ],
     availablePeers: [
@@ -283,6 +300,21 @@ function snapshot(): GatewaySnapshot {
       alerts: 0,
     },
   };
+}
+
+function publicClaudeCompatibilityCheck() {
+  return projectPublicCompatibilityCheck(
+    evaluateCompatibilityAttestation({
+      surface: "claude",
+      version: "2.1.228",
+      checkedAt: NOW,
+      certifiedVersions: certifiedCompatibilityVersions.claude,
+      probes: compatibilityProbeNames.claude.map((name) => ({
+        name,
+        outcome: "pass" as const,
+      })),
+    }),
+  );
 }
 
 function handlers(
@@ -1346,6 +1378,31 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   const invalidDeadline = snapshot();
   assert.ok(invalidDeadline.deadlinePressure);
   invalidDeadline.deadlinePressure.expiredEvents = 2;
+  const invalidRegistry = snapshot();
+  const registry = invalidRegistry.connectors.find(
+    (connector) => connector.provider === "claude",
+  )?.registry;
+  assert.ok(registry);
+  registry.parseableRecords = 4;
+  const duplicateRegistryCodes = snapshot();
+  const duplicateRegistry = duplicateRegistryCodes.connectors.find(
+    (connector) => connector.provider === "claude",
+  )?.registry;
+  assert.ok(duplicateRegistry);
+  duplicateRegistry.rejected.push({
+    safeErrorCode: "REGISTRY_INVALID_SCHEMA",
+    count: 2,
+  });
+  const registryOnCodex = snapshot();
+  const codexConnector = registryOnCodex.connectors.find(
+    (connector) => connector.provider === "codex",
+  );
+  assert.ok(codexConnector);
+  const sourceRegistry = registryOnCodex.connectors.find(
+    (connector) => connector.provider === "claude",
+  )?.registry;
+  assert.ok(sourceRegistry);
+  codexConnector.registry = structuredClone(sourceRegistry);
   const unprojected = snapshot();
   const baseEvent = unprojected.messages[0];
   assert.ok(baseEvent);
@@ -1368,6 +1425,9 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidAutomaticAuthority,
     invalidRecoveryAuthority,
     invalidDeadline,
+    invalidRegistry,
+    duplicateRegistryCodes,
+    registryOnCodex,
     unprojected,
   ];
   const attempts = candidates.length;
@@ -1380,6 +1440,85 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   });
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const response = await rawRequest(
+      socketPath,
+      wireRequest("list_snapshot", {}),
+    );
+    assertWireError(response, "INVALID_HANDLER_RESPONSE");
+  }
+  await server.close();
+});
+
+test("list_snapshot carries an exact public compatibility comparison", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const canonical = snapshot();
+  canonical.compatibilityChecks = [publicClaudeCompatibilityCheck()];
+  const missingReference = structuredClone(canonical);
+  delete (
+    missingReference.compatibilityChecks![0] as {
+      testedVersion?: string;
+    }
+  ).testedVersion;
+  const wrongTestedVersion = structuredClone(canonical);
+  (
+    wrongTestedVersion.compatibilityChecks![0] as {
+      testedVersion: string;
+    }
+  ).testedVersion = "2.1.226";
+  const wrongReference = structuredClone(canonical);
+  (
+    wrongReference.compatibilityChecks![0] as {
+      supportedMajor: string;
+    }
+  ).supportedMajor = "3";
+  const widenedReference = structuredClone(canonical);
+  (
+    widenedReference.compatibilityChecks![0] as unknown as Record<
+      string,
+      unknown
+    >
+  ).extra = true;
+  const candidates = [
+    canonical,
+    missingReference,
+    wrongTestedVersion,
+    wrongReference,
+    widenedReference,
+  ];
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      listSnapshot: () => candidates.shift() as GatewaySnapshot,
+    }),
+  });
+
+  const accepted = await rawRequest(
+    socketPath,
+    wireRequest("list_snapshot", {}),
+  );
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(
+    (
+      accepted as {
+        result: GatewaySnapshot;
+      }
+    ).result.compatibilityChecks?.map(
+      ({ version, testedVersion, supportedMajor }) => ({
+        version,
+        testedVersion,
+        supportedMajor,
+      }),
+    ),
+    [
+      {
+        version: "2.1.228",
+        testedVersion: "2.1.227",
+        supportedMajor: "2",
+      },
+    ],
+  );
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     const response = await rawRequest(
       socketPath,
       wireRequest("list_snapshot", {}),

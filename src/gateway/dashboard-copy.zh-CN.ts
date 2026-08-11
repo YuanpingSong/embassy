@@ -118,6 +118,11 @@ export const dashboardCopyZhCn = {
   "guidance.degraded.body": "Embassy 保留了一条规范化的兼容性或连接器警告。",
   "guidance.degraded.action":
     "运行 embassy status。仅当排队消息和活跃投递均为零时才能重启；重启会放弃仅存于内存的消息正文。",
+  "guidance.providerIncompatible.title": "提供方构建已禁止写入",
+  "guidance.providerIncompatible.body":
+    "Embassy 保持代理和另一提供方继续运行。“提供方兼容性”会列出有界版本证据、本次发布测试过的构建及受支持的主版本。",
+  "guidance.providerIncompatible.action":
+    "运行 embassy refresh-dashboard，然后查看“提供方兼容性”。若主版本不受支持，请安装支持它的 Embassy 版本；在此期间，本代理会继续运行。",
   "guidance.generic.title": "Embassy 报告了规范化警告",
   "guidance.generic.body": "面板没有为此安全代码映射自动修复方案。",
   "guidance.generic.action": "检查 embassy status。绝不要自动重试结果不确定的投递。",
@@ -136,6 +141,16 @@ export const dashboardCopyZhCn = {
     "Embassy 正在监视这项以完成为终止条件的对话，并观察到安静阶段或已降级为仅路由证据。",
   "guidance.progressWatch.action":
     "请检查工作方路由和最近的监视历史。任一参与方都可用精确的 DONE: 结束监视；所有者也可运行 embassy untrack --conversation <token>。",
+  "guidance.registryEmpty.title": "Claude 注册表尚未提供可解析记录",
+  "guidance.registryEmpty.body":
+    "自本次代理启动以来，尚未观察到必需字段可解析的 Claude 注册表记录。如果 Claude 正在运行，其注册表布局可能已经改变。",
+  "guidance.registryEmpty.action":
+    "运行 embassy refresh-dashboard。如果 Claude 正在运行且此状态仍存在，请在 embassy status 中查看“注册表观察”。",
+  "guidance.registryRejected.title": "Claude 注册表扫描报告了问题",
+  "guidance.registryRejected.body":
+    "最近一次有界扫描无法读取注册表，或拒绝了一条或多条记录。其他记录（如有）将继续接受正常验证。",
+  "guidance.registryRejected.action":
+    "运行 embassy status，并查看“注册表观察”中的各安全代码计数。",
   "transit.eyebrow": "传输中",
   "transit.title": "队列状态",
   "transit.queued": "排队消息",
@@ -261,12 +276,24 @@ export const dashboardCopyZhCn = {
   "diagnostics.compatibilityChecks.empty": "暂无提供方兼容性状态。",
   "diagnostics.compatibilityChecks.caption": "自动提供方兼容性状态",
   "diagnostics.version": "版本",
+  "diagnostics.testedVersion": "本次发布测试版本",
+  "diagnostics.supportedMajor": "受支持主版本",
   "diagnostics.tier": "层级",
   "diagnostics.checkedAt": "检查时间",
   "diagnostics.failure": "失败项",
   "compatibilityTier.certified": "受支持",
-  "compatibilityTier.schema_attested": "旧版观察",
+  "compatibilityTier.schema_attested": "实时架构探测通过；本次发布未测试此构建",
   "compatibilityTier.incompatible": "不兼容",
+  "diagnostics.registry.title": "注册表观察",
+  "diagnostics.registry.entriesScanned": "已扫描条目",
+  "diagnostics.registry.parseableRecords": "必需字段可解析的记录",
+  "diagnostics.registry.rejected": "按安全代码统计的已拒绝记录",
+  "diagnostics.registry.rejectedNone": "无",
+  "diagnostics.registry.rejectedCodesOmitted": "另有 {count} 个拒绝代码被省略",
+  "diagnostics.registry.state.parseableRecordObserved": "已观察到可解析的必需字段",
+  "diagnostics.registry.state.emptySinceBoot": "自代理启动以来为空",
+  "diagnostics.registry.state.noParseableRecordSinceBoot":
+    "自代理启动以来没有可解析记录",
   "diagnostics.protocol": "协议",
   "diagnostics.health": "健康状态",
   "diagnostics.accounting": "计数快照",
@@ -312,15 +339,17 @@ export const dashboardCopyZhCn = {
   "health.meaning.connecting": "正在建立本地连接。",
   "health.meaning.degraded": "已连接，但保留了警告。",
   "health.meaning.offline": "在本机上无法访问。",
-  "health.meaning.incompatible": "版本握手失败。",
+  "health.meaning.incompatible":
+    "缺少必需的兼容性证据或证据未通过；请查看“提供方兼容性”。",
   "compatibility.unknown": "未知",
   "compatibility.compatible": "兼容",
   "compatibility.incompatible": "不兼容",
   "compatibility.expired": "兼容性观察已失效",
-  "compatibility.meaning.compatible": "已按固定的版本范围校验通过。",
+  "compatibility.meaning.compatible": "必需的兼容性证据已通过。",
   "compatibility.meaning.unknown": "尚未校验。",
   "compatibility.meaning.expired": "校验已失效；请重新观察。",
-  "compatibility.meaning.incompatible": "超出受支持的版本范围。",
+  "compatibility.meaning.incompatible":
+    "缺少必需的兼容性证据或证据未通过；请查看“提供方兼容性”。",
   "route.stale": "已过时",
   "route.idle": "空闲",
   "route.busy": "忙碌",
@@ -566,7 +595,7 @@ export const dashboardCopyZhCn = {
   "app.diag.col.version": "版本",
   "app.diag.col.compat": "兼容性",
   "app.diag.versions.rangeAbsent":
-    "实时契约不携带受支持的协议范围，因此这里只显示兼容性判定。",
+    "连接器行显示已观察到的协议标记。下方的“提供方兼容性”会显示已观察版本、本次发布测试的构建、受支持主版本和探测结果。",
   "app.diag.providerCompatibility.title": "提供方兼容性",
   "app.diag.lease.title": "租约 / 实例",
   "app.diag.lease.absent": "实时契约不携带租约状态。请用下面的命令查看本地状态。",

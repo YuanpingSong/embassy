@@ -6,6 +6,7 @@ import {
   CLAUDE_PEER_COMPATIBILITY,
   ClaudePeerAdapter,
   type ClaudePeerDescriptor,
+  type ClaudePeerDiscovery,
   type ClaudePeerInboundMessage,
   type ClaudePeerInboundProgress,
   type ClaudePeerListener,
@@ -19,7 +20,10 @@ import {
   certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
+  isCompatibilityAttestation,
+  isCompatibilityVersion,
   sharesCompatibilityMajor,
+  UNKNOWN_COMPATIBILITY_VERSION,
   type CompatibilityAttestation,
   type CompatibilityProbeName,
   type CompatibilityProbeResult,
@@ -55,6 +59,7 @@ import type {
   GatewayAdapterDispatchInput,
   GatewayAdapterRouteState,
   GatewayAdapterRouteObservationState,
+  GatewayAdapterRegistryObservation,
   GatewayAdapterStart,
   GatewayProviderAdapter,
 } from "./service.js";
@@ -87,6 +92,30 @@ const CLAUDE_CLEAN_PREWRITE_RETRY_CODES = new Set([
   "CLAUDE_PEER_TARGET_CHANGED",
   "CLAUDE_PEER_WORKSPACE_UNATTESTED",
 ]);
+const CODEX_TRUST_FAILURE_CODES = new Set([
+  "HOME_INVALID",
+  "MANAGED_CODEX_INVALID",
+  "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
+  "APP_SERVER_VERSION_MISMATCH",
+  "ENDPOINT_GENERATION_CHANGED",
+  "CLEANUP_FAILED",
+  "FACTORY_CLOSED",
+  "INVALID_CONFIGURATION",
+  "CODEX_ROUTE_CLEANUP_FAILED",
+  "CODEX_PROVIDER_CLEANUP_FAILED",
+  "CODEX_PROVIDER_CLEANUP_AMBIGUOUS",
+  "CODEX_PROVIDER_CLEANUP_TIMEOUT",
+]);
+
+function isCodexTrustFailure(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    CODEX_TRUST_FAILURE_CODES.has(error.code)
+  );
+}
 
 function claudeCleanPrewriteResult(
   error: unknown,
@@ -145,6 +174,8 @@ type ClaudePeerFactory = (
 export type LocalClaudeGatewayProviderOptions = {
   /** Exact result of attestClaudePeerRuntime; paths are never rediscovered. */
   runtime: AttestedClaudePeerRuntime;
+  /** OS-attested launcher version used only for compatibility classification. */
+  compatibilityVersion?: string;
   hostId?: "this-mac";
   /** Locale for bounded notices written into native Claude sessions. */
   locale?: DashboardLocale;
@@ -306,9 +337,37 @@ function invokeCallback(operation: () => void): void {
 function validateAttestedClaudeRuntime(
   runtime: AttestedClaudePeerRuntime,
 ): void {
+  if (runtime.versionEvidenceFailure !== undefined) {
+    throw new BridgeError(
+      runtime.versionEvidenceFailure,
+      "The local Claude provider requires bounded, internally consistent runtime version evidence.",
+    );
+  }
+  const majorEvidence =
+    runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
+      ? runtime.launcherVersionEvidence
+      : runtime.claudeCodeVersion;
   if (
-    runtime.claudeCodeVersion !==
-      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion ||
+    majorEvidence === undefined ||
+    !sharesCompatibilityMajor(
+      majorEvidence,
+      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+    )
+  ) {
+    throw new BridgeError(
+      majorEvidence === undefined
+        ? "CLAUDE_VERSION_UNPARSEABLE"
+        : "CLAUDE_PEER_VERSION_UNSUPPORTED",
+      "The local Claude provider requires a positively observed supported runtime major.",
+    );
+  }
+  validateClaudeRuntimePathEvidence(runtime);
+}
+
+function validateClaudeRuntimePathEvidence(
+  runtime: AttestedClaudePeerRuntime,
+): void {
+  if (
     [
       runtime.claudeExecutable,
       runtime.sessionsDir,
@@ -322,7 +381,7 @@ function validateAttestedClaudeRuntime(
   ) {
     throw new BridgeError(
       "CLAUDE_RUNTIME_ATTESTATION_INVALID",
-      "The local Claude provider requires exact pinned runtime evidence.",
+      "The local Claude provider requires bounded absolute runtime evidence.",
     );
   }
 }
@@ -346,6 +405,238 @@ function claudeRouteState(
   peer: ClaudePeerDescriptor,
 ): GatewayAdapterRouteState {
   return peer.status === "idle" ? "idle" : "busy";
+}
+
+function claudeRegistryObservation(
+  discovery: Pick<
+    ClaudePeerDiscovery,
+    "entriesScanned" | "parseableRecords" | "rejected"
+  >,
+): GatewayAdapterRegistryObservation {
+  const rejected = Object.entries(discovery.rejected)
+    .filter(
+      (entry): entry is [string, number] =>
+        Number.isSafeInteger(entry[1]) && entry[1] > 0,
+    )
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([safeErrorCode, count]) =>
+      Object.freeze({ safeErrorCode, count }),
+    );
+  return Object.freeze({
+    entriesScanned: discovery.entriesScanned,
+    parseableRecords: discovery.parseableRecords,
+    rejected: Object.freeze(rejected),
+  });
+}
+
+function unavailableClaudeRegistryObservation(): GatewayAdapterRegistryObservation {
+  return Object.freeze({
+    entriesScanned: 0,
+    parseableRecords: 0,
+    rejected: Object.freeze([
+      Object.freeze({
+        safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE",
+        count: 1,
+      }),
+    ]),
+  });
+}
+
+function isClaudeRegistryAvailabilityError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  return (
+    error.code === "ENOENT" ||
+    error.code === "EACCES" ||
+    error.code === "EPERM" ||
+    error.code === "UNSAFE_PEER_DIRECTORY"
+  );
+}
+
+export type IncompatibleGatewayProviderOptions = Readonly<{
+  identity: PrivateEndpointIdentity;
+  version: string;
+  probes: readonly CompatibilityProbeResult[];
+  safeErrorCode: string;
+}>;
+
+/**
+ * A bounded observation-only surface for an installed provider generation
+ * whose protocol cannot be used safely. It deliberately performs no provider
+ * discovery, listener construction, route selection, or message write.
+ */
+export class IncompatibleGatewayProvider implements GatewayProviderAdapter {
+  readonly identity: PrivateEndpointIdentity;
+  readonly protocol = "not-attested";
+  readonly protocolVersion = "unknown";
+
+  private readonly version: string;
+  private readonly probes: readonly CompatibilityProbeResult[];
+  private readonly safeErrorCode: string;
+  private initialized = false;
+  private closed = false;
+
+  constructor(options: IncompatibleGatewayProviderOptions) {
+    const attestation = evaluateCompatibilityAttestation({
+      surface: options.identity.provider,
+      version: options.version,
+      checkedAt: "2000-01-01T00:00:00.000Z",
+      certifiedVersions: certifiedCompatibilityVersions[options.identity.provider],
+      probes: options.probes,
+    });
+    if (
+      attestation.tier !== "incompatible" ||
+      attestation.safeErrorCode !== options.safeErrorCode
+    ) {
+      throw new BridgeError(
+        "INCOMPATIBLE_PROVIDER_EVIDENCE_INVALID",
+        "A disabled provider requires exact bounded incompatibility evidence.",
+      );
+    }
+    exactLocalHost(options.identity.hostId);
+    this.identity = Object.freeze({ ...options.identity });
+    this.version = options.version;
+    this.probes = Object.freeze(options.probes.map((probe) => Object.freeze({ ...probe })));
+    this.safeErrorCode = options.safeErrorCode;
+  }
+
+  compatibilitySurface(): CompatibilitySurfaceObservation {
+    return { surface: this.identity.provider, version: this.version };
+  }
+
+  async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
+    return this.probes;
+  }
+
+  acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
+    if (
+      !isCompatibilityAttestation(attestation) ||
+      attestation.surface !== this.identity.provider ||
+      attestation.version !== this.version ||
+      attestation.tier !== "incompatible" ||
+      attestation.safeErrorCode !== this.safeErrorCode ||
+      attestation.probes.length !== this.probes.length ||
+      attestation.probes.some(
+        (probe, index) =>
+          probe.name !== this.probes[index]?.name ||
+          probe.outcome !== this.probes[index]?.outcome ||
+          probe.safeErrorCode !== this.probes[index]?.safeErrorCode,
+      )
+    ) {
+      throw new BridgeError(
+        "INCOMPATIBLE_PROVIDER_ATTESTATION_MISMATCH",
+        "The compatibility attestation does not match this disabled provider surface.",
+      );
+    }
+  }
+
+  async initialize(
+    _callbacks: GatewayAdapterCallbacks,
+  ): Promise<GatewayAdapterStart> {
+    if (this.closed || this.initialized) {
+      throw new BridgeError(
+        "INCOMPATIBLE_PROVIDER_UNAVAILABLE",
+        "The disabled provider surface cannot be initialized again.",
+      );
+    }
+    this.initialized = true;
+    return {
+      health: "degraded",
+      compatibility: "incompatible",
+      safeErrorCode: this.safeErrorCode,
+    };
+  }
+
+  async discoverClaudePeers(): Promise<GatewayAdapterDiscoverySnapshot> {
+    throw this.unavailable();
+  }
+
+  async selectRoute(_input: {
+    alias: string;
+    routeHandle: string;
+  }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }> {
+    throw this.unavailable();
+  }
+
+  async assertWorkspaceDisjoint(
+    _routeHandle: string,
+    _stateRoot: string,
+  ): Promise<void> {
+    throw this.unavailable();
+  }
+
+  async resolveReplyAddress(
+    _address: string,
+  ): Promise<{ routeHandle: string }> {
+    throw this.unavailable();
+  }
+
+  async advertiseNativeCodexPeer(_input: {
+    alias: string;
+    cwd: string;
+  }): Promise<void> {
+    throw this.unavailable();
+  }
+
+  async dispatch(
+    _input: GatewayAdapterDispatchInput,
+  ): Promise<GatewayAdapterDispatchResult> {
+    throw this.unavailable();
+  }
+
+  async releaseRoute(_routeHandle: string): Promise<void> {}
+
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+
+  private unavailable(): BridgeError {
+    return new BridgeError(
+      this.safeErrorCode,
+      "This provider surface is observation-only because its compatibility boundary did not pass.",
+    );
+  }
+}
+
+export function createIncompatibleClaudeGatewayProvider(options: Readonly<{
+  runtime: AttestedClaudePeerRuntime;
+  version: string;
+  safeErrorCode: string;
+}>): IncompatibleGatewayProvider {
+  validateClaudeRuntimePathEvidence(options.runtime);
+  const [launcher, version, ...unobserved] = compatibilityProbeNames.claude;
+  return new IncompatibleGatewayProvider({
+    identity: {
+      provider: "claude",
+      hostId: LOCAL_HOST,
+      endpointGeneration: claudeEndpointGeneration(options.runtime),
+    },
+    version: options.version,
+    probes: [
+      passedProbe(launcher),
+      failedProbe(version, options.safeErrorCode),
+      ...unobserved.map((name) => failedProbe(name, options.safeErrorCode)),
+    ],
+    safeErrorCode: options.safeErrorCode,
+  });
+}
+
+export function createIncompatibleCodexGatewayProvider(options: Readonly<{
+  identity: PrivateEndpointIdentity;
+  version: string;
+  safeErrorCode: string;
+}>): IncompatibleGatewayProvider {
+  const [installation, ...unobserved] = compatibilityProbeNames.codex;
+  return new IncompatibleGatewayProvider({
+    identity: options.identity,
+    version: options.version,
+    probes: [
+      passedProbe(installation),
+      ...unobserved.map((name) => failedProbe(name, options.safeErrorCode)),
+    ],
+    safeErrorCode: options.safeErrorCode,
+  });
 }
 
 export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
@@ -390,6 +681,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private discoveryInFlight:
     | Promise<GatewayAdapterDiscoverySnapshot>
     | undefined;
+  private registryObservation: GatewayAdapterRegistryObservation | undefined;
   private monitorTimer: NodeJS.Timeout | undefined;
   /** Invocation-ordered registry mutations; the tail itself never rejects. */
   private nativeCodexRegistrationTail: Promise<void> = Promise.resolve();
@@ -406,11 +698,34 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   /** Fences discovery callbacks and monitor restarts across listener rotation. */
   private nativeCodexSuccessionFreeze: string | undefined;
+  /** A completed failed probe set fences every authority-bearing operation. */
+  private compatibilityBlocked = false;
+  private compatibilityFailureCode: string | undefined;
   private initialized = false;
   private closed = false;
 
   constructor(options: LocalClaudeGatewayProviderOptions) {
     validateAttestedClaudeRuntime(options.runtime);
+    const compatibilityVersion =
+      options.compatibilityVersion ??
+      (options.runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
+        ? options.runtime.launcherVersionEvidence
+        : options.runtime.claudeCodeVersion);
+    if (
+      compatibilityVersion === undefined ||
+      !isCompatibilityVersion(compatibilityVersion) ||
+      (compatibilityVersion !== options.runtime.claudeCodeVersion &&
+        !(
+          options.runtime.claudeCodeVersion ===
+            UNKNOWN_COMPATIBILITY_VERSION &&
+          options.runtime.launcherVersionEvidence === compatibilityVersion
+        ))
+    ) {
+      throw new BridgeError(
+        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
+        "Claude compatibility classification requires exact bounded launcher evidence.",
+      );
+    }
     if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
       throw new BridgeError(
         "DASHBOARD_LOCALE_UNSUPPORTED",
@@ -423,7 +738,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       hostId,
       endpointGeneration: claudeEndpointGeneration(options.runtime),
     };
-    this.runtimeVersion = options.runtime.claudeCodeVersion;
+    this.runtimeVersion = compatibilityVersion;
     this.maxPending = positiveBounded(
       options.maxPendingMessages,
       MAX_CLAUDE_PENDING,
@@ -435,6 +750,15 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       30_000,
     );
     this.now = options.now ?? Date.now;
+    const protocolRuntime: AttestedClaudePeerRuntime = {
+      claudeExecutable: options.runtime.claudeExecutable,
+      claudeCodeVersion:
+        options.runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
+          ? options.runtime.launcherVersionEvidence!
+          : options.runtime.claudeCodeVersion,
+      sessionsDir: options.runtime.sessionsDir,
+      socketDir: options.runtime.socketDir,
+    };
     this.peer = (options.peerFactory ??
       ((runtime, locale, deliveryNotices) =>
         new ClaudePeerAdapter({
@@ -444,7 +768,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
           locale,
           deliveryNotices,
         })))(
-      options.runtime,
+      protocolRuntime,
       options.locale ?? "en",
       options.deliveryNotices ?? "merged",
     );
@@ -453,7 +777,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         ? undefined
         : new ClaudeNativeHelperSupervisor({
             identity: this.identity,
-            runtime: options.runtime,
+            runtime: protocolRuntime,
             locale: options.locale ?? "en",
             deliveryNotices: options.deliveryNotices ?? "merged",
             maxPendingMessages: this.maxPending,
@@ -462,7 +786,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
               256,
               128,
             ),
-            callbacks: () => this.callbacks,
+            callbacks: () =>
+              this.compatibilityBlocked ? undefined : this.callbacks,
             ...(options.nativeHelpers.factory === undefined
               ? {}
               : { factory: options.nativeHelpers.factory }),
@@ -478,31 +803,51 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       compatibilityProbeNames.claude;
     try {
       const discovery = await this.peer.discover();
-      // Runtime discovery is deliberately per-record fail-safe: malformed,
-      // dead, unsafe, or non-routable records are omitted rather than allowed
-      // to poison the whole registry. Startup compatibility must use the same
-      // boundary. Fail only when the bounded scan itself is incomplete, or a
-      // nonempty registry contains no record with a parseable closed schema.
-      const registryUnusable =
-        discovery.truncated ||
-        (discovery.entriesScanned > 0 && discovery.parseableRecords === 0);
+      this.registryObservation = claudeRegistryObservation(discovery);
       return [
         passedProbe(launcher),
         passedProbe(version),
-        registryUnusable
-          ? failedProbe(registry, "CLAUDE_REGISTRY_SCHEMA_REJECTED")
-          : passedProbe(registry),
+        passedProbe(registry),
         passedProbe(socket),
         passedProbe(protocol),
       ];
-    } catch {
+    } catch (error) {
+      if (!isClaudeRegistryAvailabilityError(error)) throw error;
+      this.registryObservation = unavailableClaudeRegistryObservation();
+      // A missing or unreadable registry is provider-local incompatibility:
+      // keep the broker and the other surface alive, but fence this provider
+      // before listener construction can turn the same missing path into a
+      // broker-wide startup failure.
       return [
         passedProbe(launcher),
         passedProbe(version),
         failedProbe(registry, "CLAUDE_REGISTRY_UNAVAILABLE"),
-        failedProbe(socket, "CLAUDE_SOCKET_VALIDATION_UNAVAILABLE"),
+        failedProbe(socket, "CLAUDE_REGISTRY_UNAVAILABLE"),
         passedProbe(protocol),
       ];
+    }
+  }
+
+  latestRegistryObservation(): GatewayAdapterRegistryObservation | undefined {
+    return this.registryObservation;
+  }
+
+  acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
+    if (
+      !isCompatibilityAttestation(attestation) ||
+      attestation.surface !== "claude" ||
+      attestation.version !== this.runtimeVersion
+    ) {
+      throw new BridgeError(
+        "CLAUDE_COMPATIBILITY_ATTESTATION_MISMATCH",
+        "The Claude compatibility attestation does not match this runtime.",
+      );
+    }
+    this.compatibilityBlocked = attestation.tier === "incompatible";
+    this.compatibilityFailureCode = attestation.safeErrorCode;
+    if (this.compatibilityBlocked) {
+      if (this.monitorTimer !== undefined) clearTimeout(this.monitorTimer);
+      this.monitorTimer = undefined;
     }
   }
 
@@ -522,6 +867,15 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.callbacks = callbacks;
+    if (this.compatibilityBlocked) {
+      this.initialized = true;
+      return {
+        health: "degraded",
+        compatibility: "incompatible",
+        safeErrorCode:
+          this.compatibilityFailureCode ?? "CLAUDE_COMPATIBILITY_CHECK_FAILED",
+      };
+    }
     if (this.nativeHelpers !== undefined) {
       this.initialized = true;
       return { health: "healthy", compatibility: "compatible" };
@@ -563,8 +917,28 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       this.activeNativeCodexListener = listenerGeneration;
       this.initialized = true;
       return { health: "healthy", compatibility: "compatible" };
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof BridgeError &&
+        error.code === "UNSAFE_PEER_DIRECTORY"
+      ) {
+        this.compatibilityBlocked = true;
+        this.compatibilityFailureCode = "CLAUDE_REGISTRY_UNAVAILABLE";
+        this.registryObservation = unavailableClaudeRegistryObservation();
+        this.initialized = true;
+        return {
+          health: "degraded",
+          compatibility: "incompatible",
+          safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE",
+        };
+      }
       this.callbacks = undefined;
+      if (
+        error instanceof BridgeError &&
+        error.code === "CLAUDE_PEER_CALLBACK_UNSAFE"
+      ) {
+        throw error;
+      }
       throw new BridgeError(
         "CLAUDE_CALLBACK_UNAVAILABLE",
         "The private Claude callback listener could not be established.",
@@ -1246,6 +1620,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     deadlineAt: string;
     progressWatchActive?: true;
   }): Promise<GatewayAdapterDispatchResult> {
+    if (this.compatibilityBlocked) {
+      return {
+        state: "failed",
+        safeErrorCode:
+          this.compatibilityFailureCode ?? "CLAUDE_COMPATIBILITY_CHECK_FAILED",
+      };
+    }
     if (this.nativeHelpers !== undefined) {
       if (
         input.sourceAlias === undefined ||
@@ -1595,7 +1976,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   }
 
   private assertReady(): void {
-    if (!this.initialized || this.closed) {
+    if (!this.initialized || this.closed || this.compatibilityBlocked) {
       throw new BridgeError(
         "CLAUDE_PROVIDER_UNAVAILABLE",
         "The local Claude provider is not available.",
@@ -1712,6 +2093,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
     };
     if (
+      this.compatibilityBlocked ||
       this.closed ||
       listenerGeneration.listener.closed ||
       !this.ownsNativeCodexListener(listenerGeneration)
@@ -2136,14 +2518,21 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       );
     }
     const pendingAtStart = new Set(this.pendingTargetByGatewayId.values());
-    const discovery = await this.peer.discover();
+    let discovery: ClaudePeerDiscovery;
+    try {
+      discovery = await this.peer.discover();
+    } catch (error) {
+      this.registryObservation = unavailableClaudeRegistryObservation();
+      throw error;
+    }
+    const registry = claudeRegistryObservation(discovery);
+    this.registryObservation = registry;
     this.discovered.clear();
     const rows: GatewayAdapterDiscovery[] = [];
     for (const peer of discovery.peers) {
       if (
         peer.kind !== "interactive" ||
-        !NATIVE_CLAUDE_NAME.test(peer.alias) ||
-        peer.alias.startsWith("codex-")
+        !NATIVE_CLAUDE_NAME.test(peer.alias)
       ) {
         continue;
       }
@@ -2190,7 +2579,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         this.emitClaudeRouteObservation(routeHandle, row.state, undefined, true);
       }
     }
-    return { peers: rows, complete: !discovery.truncated };
+    return { peers: rows, complete: !discovery.truncated, registry };
   }
 
   private emitClaudeRouteObservation(
@@ -2271,7 +2660,7 @@ export function createLocalClaudeGatewayProvider(
 
 export type LocalCodexGatewayProviderOptions = {
   factory: LocalCodexTransportFactory;
-  /** Re-resolves the exact pinned managed install after its generation moves. */
+  /** Re-resolves the managed install after its generation moves. */
   refreshFactory?: () => Promise<LocalCodexTransportFactory>;
   cleanupPollMs?: number;
   cleanupTimeoutMs?: number;
@@ -2312,9 +2701,30 @@ type CodexEndpointRefreshResult = {
   selectorClaimed: boolean;
 };
 
-function validateCodexFactory(factory: LocalCodexTransportFactory): void {
+function codexVersionFailureCode(version: string): string | undefined {
+  if (version === UNKNOWN_COMPATIBILITY_VERSION) {
+    return "CODEX_APP_SERVER_VERSION_UNPARSEABLE";
+  }
+  if (!isCompatibilityVersion(version)) {
+    throw new BridgeError(
+      "CODEX_FACTORY_ATTESTATION_INVALID",
+      "The local Codex factory version evidence is malformed.",
+    );
+  }
+  return CODEX_APP_SERVER_WRITABLE_VERSIONS.some((certifiedVersion) =>
+    sharesCompatibilityMajor(certifiedVersion, version),
+  )
+    ? undefined
+    : "CODEX_APP_SERVER_VERSION_UNSUPPORTED";
+}
+
+function validateCodexFactory(
+  factory: LocalCodexTransportFactory,
+  options: { allowUnsupportedVersion?: boolean } = {},
+): void {
   const schema = factory.schemaCompatibility;
   const write = factory.writeCompatibility;
+  const versionFailure = codexVersionFailureCode(factory.appServerVersion);
   const certified = CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
     factory.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
   );
@@ -2323,28 +2733,37 @@ function validateCodexFactory(factory: LocalCodexTransportFactory): void {
     CODEX_APP_SERVER_WRITABLE_VERSIONS.some((version) =>
       sharesCompatibilityMajor(version, factory.appServerVersion),
     );
+  const unsupportedVersionInvalid =
+    versionFailure !== undefined &&
+    (options.allowUnsupportedVersion !== true ||
+      write !== null ||
+      factory.writableReady);
+  const supportedSchemaInvalid =
+    versionFailure === undefined &&
+    ((!certified &&
+      (!schemaCandidate || write !== null || factory.writableReady)) ||
+      schema.protocol !== "app-server-v2-stable" ||
+      schema.steering?.method !== "turn/steer" ||
+      schema.steering.requestSchema !== "expected-turn-id-text-v1" ||
+      schema.steering.deliveryBoundary !== "next-tool-call-boundary" ||
+      (write !== null &&
+        (write.appServerVersion !== schema.appServerVersion ||
+          write.endpointGeneration !== schema.endpointGeneration ||
+          write.protocol !== schema.protocol ||
+          write.observedSchemaCandidate !== schema.observedSchemaCandidate ||
+          write.steering?.method !== schema.steering.method ||
+          write.steering.requestSchema !== schema.steering.requestSchema ||
+          write.steering.deliveryBoundary !==
+            schema.steering.deliveryBoundary)) ||
+      factory.writableReady !== (write !== null));
   if (
     factory.hostId !== LOCAL_HOST ||
     factory.protocol !== "codex-app-server" ||
     factory.protocolVersion !== factory.appServerVersion ||
-    (!certified &&
-      (!schemaCandidate || write !== null || factory.writableReady)) ||
     schema.appServerVersion !== factory.appServerVersion ||
     schema.endpointGeneration !== factory.endpointGeneration ||
-    schema.protocol !== "app-server-v2-stable" ||
-    schema.steering?.method !== "turn/steer" ||
-    schema.steering.requestSchema !== "expected-turn-id-text-v1" ||
-    schema.steering.deliveryBoundary !== "next-tool-call-boundary" ||
-    (write !== null &&
-      (write.appServerVersion !== schema.appServerVersion ||
-        write.endpointGeneration !== schema.endpointGeneration ||
-        write.protocol !== schema.protocol ||
-        write.observedSchemaCandidate !== schema.observedSchemaCandidate ||
-        write.steering?.method !== schema.steering.method ||
-        write.steering.requestSchema !== schema.steering.requestSchema ||
-        write.steering.deliveryBoundary !==
-          schema.steering.deliveryBoundary)) ||
-    factory.writableReady !== (write !== null)
+    unsupportedVersionInvalid ||
+    supportedSchemaInvalid
   ) {
     throw new BridgeError(
       "CODEX_FACTORY_ATTESTATION_INVALID",
@@ -2426,6 +2845,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private endpointActivationRetryTimer: NodeJS.Timeout | undefined;
   private callbackDrainFrozen = false;
   private compatibilityAttested: boolean;
+  private compatibilityFailureCode: string | undefined;
   private endpointUnavailable = false;
   private pendingEndpointAttestation: CompatibilityAttestation | undefined;
   private pendingEndpointRefreshEvent:
@@ -2515,25 +2935,54 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
     const pending = this.pendingEndpointAttestation;
+    const pendingMatches =
+      pending === undefined ||
+      (attestation.checkedAt === pending.checkedAt &&
+        attestation.tier === pending.tier &&
+        attestation.safeErrorCode === pending.safeErrorCode &&
+        attestation.probes.length === pending.probes.length &&
+        attestation.probes.every(
+          (probe, index) =>
+            probe.name === pending.probes[index]?.name &&
+            probe.outcome === pending.probes[index]?.outcome &&
+            probe.safeErrorCode === pending.probes[index]?.safeErrorCode,
+        ));
     if (
+      !isCompatibilityAttestation(attestation) ||
       attestation.surface !== "codex" ||
       attestation.version !== this.factory.appServerVersion ||
-      attestation.tier !== "certified" ||
-      !CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
+      !pendingMatches
+    ) {
+      throw new BridgeError(
+        "CODEX_COMPATIBILITY_ATTESTATION_MISMATCH",
+        "The Codex compatibility attestation does not match this endpoint.",
+      );
+    }
+    if (attestation.tier === "incompatible") {
+      this.pendingEndpointAttestation = undefined;
+      this.pendingEndpointRefreshEvent = undefined;
+      this.clearEndpointActivationRetry();
+      this.compatibilityAttested = false;
+      this.endpointUnavailable = true;
+      this.compatibilityFailureCode =
+        attestation.safeErrorCode ?? "CODEX_COMPATIBILITY_CHECK_FAILED";
+      return;
+    }
+    const writableCertified =
+      attestation.tier === "certified" &&
+      CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
         attestation.version as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
-      ) ||
+      ) &&
+      this.factory.writableReady &&
+      this.factory.writeCompatibility !== null;
+    const schemaObserved =
+      attestation.tier === "schema_attested" &&
+      !this.factory.writableReady &&
+      this.factory.writeCompatibility === null;
+    if (
+      (!writableCertified && !schemaObserved) ||
       (this.endpointUnavailable && pending === undefined) ||
-      (pending !== undefined &&
-        (attestation.checkedAt !== pending.checkedAt ||
-          attestation.tier !== pending.tier ||
-          attestation.safeErrorCode !== pending.safeErrorCode ||
-          attestation.probes.length !== pending.probes.length ||
-          attestation.probes.some(
-            (probe, index) =>
-              probe.name !== pending.probes[index]?.name ||
-              probe.outcome !== pending.probes[index]?.outcome ||
-              probe.safeErrorCode !== pending.probes[index]?.safeErrorCode,
-          )))
+      !pendingMatches
     ) {
       throw new BridgeError(
         "CODEX_COMPATIBILITY_ATTESTATION_MISMATCH",
@@ -2543,8 +2992,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
     this.clearEndpointActivationRetry();
-    this.compatibilityAttested = true;
-    this.endpointUnavailable = false;
+    this.compatibilityAttested = writableCertified;
+    this.endpointUnavailable = !writableCertified;
+    this.compatibilityFailureCode = undefined;
   }
 
   async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
@@ -2586,22 +3036,29 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     } catch (error) {
       if (this.isEndpointGenerationChanged(error)) throw error;
       if (stage === "transport") {
-        const controlFailure =
+        const availabilityFailure =
           error instanceof LocalCodexTransportError &&
           [
+            "MANAGED_CODEX_UNAVAILABLE",
             "LOCAL_APP_SERVER_NOT_RUNNING",
-            "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
+            "SPAWN_FAILED",
+            "SPAWN_TIMEOUT",
+            "PROXY_STDERR_LIMIT",
             "TRANSPORT_CONNECT_FAILED",
           ].includes(error.code);
+        if (!availabilityFailure) throw error;
+        const installationUnavailable =
+          error instanceof LocalCodexTransportError &&
+          error.code === "MANAGED_CODEX_UNAVAILABLE";
         return [
-          controlFailure
-            ? passedProbe(installation)
-            : failedProbe(installation, "CODEX_INSTALLATION_INVALID"),
+          installationUnavailable
+            ? failedProbe(installation, "CODEX_INSTALLATION_INVALID")
+            : passedProbe(installation),
           failedProbe(
             control,
-            controlFailure
-              ? "CODEX_CONTROL_SOCKET_UNAVAILABLE"
-              : "CODEX_COMPAT_PROBE_BLOCKED",
+            installationUnavailable
+              ? "CODEX_COMPAT_PROBE_BLOCKED"
+              : "CODEX_CONTROL_SOCKET_UNAVAILABLE",
           ),
           failedProbe(initialize, "CODEX_COMPAT_PROBE_BLOCKED"),
           failedProbe(threadList, "CODEX_COMPAT_PROBE_BLOCKED"),
@@ -2617,9 +3074,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       ];
     } finally {
       if (connector !== undefined) {
-        await connector.close().catch(() => undefined);
+        await connector.close();
       } else if (transport !== undefined) {
-        await transport.close().catch(() => undefined);
+        await transport.close();
       }
     }
   }
@@ -2635,6 +3092,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     this.callbacks = callbacks;
     this.initialized = true;
+    if (this.compatibilityFailureCode !== undefined) {
+      return {
+        health: "degraded",
+        compatibility: "incompatible",
+        safeErrorCode: this.compatibilityFailureCode,
+      };
+    }
     return this.factory.writeCompatibility === null
       ? {
           health: "degraded",
@@ -3218,12 +3682,24 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       }
       return route;
     } catch (error) {
+      let cleanupFailure: unknown;
       if (connector !== undefined) {
-        await connector.close().catch(() => undefined);
+        await connector.close().catch((closeError) => {
+          cleanupFailure = closeError;
+        });
       } else if (transport !== undefined) {
-        await transport.close().catch(() => undefined);
+        await transport.close().catch((closeError) => {
+          cleanupFailure = closeError;
+        });
       }
-      if (this.isEndpointGenerationChanged(error)) throw error;
+      if (cleanupFailure !== undefined) {
+        if (isCodexTrustFailure(cleanupFailure)) throw cleanupFailure;
+        throw new BridgeError(
+          "CODEX_ROUTE_CLEANUP_FAILED",
+          "Codex route setup could not prove exact provider-process cleanup.",
+        );
+      }
+      if (isCodexTrustFailure(error)) throw error;
       if (error instanceof BridgeError) throw error;
       if (error instanceof CodexConnectorError) {
         throw new BridgeError(
@@ -3476,14 +3952,14 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         return undefined;
       }
 
-      this.factory = candidate;
-      candidate = undefined;
-      this.retiredEndpointGeneration = undefined;
-      this.compatibilityAttested = false;
-      this.endpointUnavailable = true;
-      this.pendingEndpointAttestation = attestation;
+      const replacementFactory = candidate;
       const refreshedRoutes: Array<{
         routeHandle: string;
+        state: GatewayAdapterRouteState;
+      }> = [];
+      const stagedRoutes: Array<{
+        routeHandle: string;
+        route: CodexRoute;
         state: GatewayAdapterRouteState;
       }> = [];
       for (const routeHandle of [...this.trackedRoutes]) {
@@ -3491,7 +3967,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         try {
           const route = await this.createRoute(
             routeHandle,
-            this.factory,
+            replacementFactory,
             false,
           );
           if (this.closing || this.closed) {
@@ -3506,15 +3982,32 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
               "The exact Codex task was stale on the replacement endpoint.",
             );
           }
-          this.routes.set(routeHandle, route);
-          this.routesRequiringRecovery.delete(routeHandle);
-          this.routeRecoveryAttempts.delete(routeHandle);
-          refreshedRoutes.push({ routeHandle, state });
-        } catch {
+          stagedRoutes.push({ routeHandle, route, state });
+        } catch (error) {
           this.routesRequiringRecovery.add(routeHandle);
+          if (isCodexTrustFailure(error)) throw error;
         }
       }
-      if (this.closing || this.closed) return undefined;
+      if (this.closing || this.closed) {
+        await replacementFactory.close();
+        candidate = undefined;
+        return undefined;
+      }
+      this.factory = replacementFactory;
+      candidate = undefined;
+      this.retiredEndpointGeneration = undefined;
+      this.compatibilityAttested = false;
+      this.endpointUnavailable = true;
+      this.pendingEndpointAttestation = attestation;
+      for (const staged of stagedRoutes) {
+        this.routes.set(staged.routeHandle, staged.route);
+        this.routesRequiringRecovery.delete(staged.routeHandle);
+        this.routeRecoveryAttempts.delete(staged.routeHandle);
+        refreshedRoutes.push({
+          routeHandle: staged.routeHandle,
+          state: staged.state,
+        });
+      }
       const result: CodexEndpointRefreshResult = {
         event: {
           outcome: "compatible",
@@ -3541,7 +4034,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       return result;
     } catch (error) {
       if (candidate !== undefined && candidate !== previousFactory) {
-        await candidate.close().catch(() => undefined);
+        await candidate.close();
       }
       throw error;
     } finally {
@@ -3569,7 +4062,12 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       let candidate: LocalCodexTransportFactory | undefined;
       try {
         candidate = await refreshFactory();
-        validateCodexFactory(candidate);
+        const versionFailure = codexVersionFailureCode(
+          candidate.appServerVersion,
+        );
+        validateCodexFactory(candidate, {
+          allowUnsupportedVersion: versionFailure !== undefined,
+        });
         if (
           candidate.hostId !== previous.hostId ||
           candidate.protocol !== previousFactory.protocol
@@ -3585,6 +4083,17 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         ) {
           if (candidate !== previousFactory) await candidate.close();
           candidate = undefined;
+          if (
+            this.endpointUnavailable &&
+            this.compatibilityFailureCode === undefined &&
+            !this.factory.writableReady &&
+            this.factory.writeCompatibility === null
+          ) {
+            throw new BridgeError(
+              "CODEX_MONITOR_ONLY",
+              "This Codex App Server remains monitor-only until a write-attested generation is available.",
+            );
+          }
           if (attempt + 1 < MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES) {
             continue;
           }
@@ -3595,9 +4104,17 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
           );
         }
 
-        // Endpoint generations never inherit cached compatibility. Every
-        // candidate independently proves all four read-only wire probes.
-        const probes = await this.runCompatibilityProbesFor(candidate);
+        // Endpoint generations never inherit cached compatibility. A version
+        // outside the tested major is classified from OS-attested factory
+        // evidence alone; no connector or transport may touch that protocol.
+        const probes =
+          versionFailure === undefined
+            ? await this.runCompatibilityProbesFor(candidate)
+            : compatibilityProbeNames.codex.map((name, index) =>
+                index === 0
+                  ? passedProbe(name)
+                  : failedProbe(name, versionFailure),
+              );
         const attestation = evaluateCompatibilityAttestation({
           surface: "codex",
           version: candidate.appServerVersion,

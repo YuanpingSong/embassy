@@ -22,6 +22,7 @@ import {
   GatewayStore,
 } from "../src/gateway/store.js";
 import {
+  certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
 } from "../src/gateway/compatibility.js";
@@ -5247,9 +5248,9 @@ test("startup staging defers migrations and observations until one explicit comm
   await staged.initialize({ deferPersistence: true });
   const attestation = evaluateCompatibilityAttestation({
     surface: "claude",
-    version: "2.1.227",
+    version: "2.1.228",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["2.1.226"],
+    certifiedVersions: certifiedCompatibilityVersions.claude,
     probes: compatibilityProbeNames.claude.map((name) => ({
       name,
       outcome: "pass" as const,
@@ -5271,9 +5272,9 @@ test("automatic compatibility evidence is strict, persistent, keyed by surface a
   await store.initialize();
   const attestation = evaluateCompatibilityAttestation({
     surface: "claude",
-    version: "2.1.227",
+    version: "2.1.228",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["2.1.226"],
+    certifiedVersions: certifiedCompatibilityVersions.claude,
     probes: compatibilityProbeNames.claude.map((name) => ({
       name,
       outcome: "pass" as const,
@@ -5281,7 +5282,7 @@ test("automatic compatibility evidence is strict, persistent, keyed by surface a
   });
   await store.recordCompatibilityAttestation(attestation);
   assert.deepEqual(
-    await store.inspectCompatibilityAttestation("claude", "2.1.227"),
+    await store.inspectCompatibilityAttestation("claude", "2.1.228"),
     attestation,
   );
   await store.recordCompatibilityAttestation({
@@ -5304,15 +5305,110 @@ test("automatic compatibility evidence is strict, persistent, keyed by surface a
   await recovered.initialize();
   assert.equal(
     (
-      await recovered.inspectCompatibilityAttestation("claude", "2.1.227")
+      await recovered.inspectCompatibilityAttestation("claude", "2.1.228")
     )?.checkedAt,
     "2026-08-09T12:01:00.000Z",
   );
   assert.equal(
-    JSON.stringify(await recovered.publicSnapshot()).includes("2.1.227"),
+    JSON.stringify(await recovered.publicSnapshot()).includes("2.1.228"),
     false,
   );
   await recovered.close();
+});
+
+test("persisted compatibility tiers survive release inventory changes while malformed evidence fails closed", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  const passingProbes = compatibilityProbeNames.claude.map((name) => ({
+    name,
+    outcome: "pass" as const,
+  }));
+  const decertifiedLater = evaluateCompatibilityAttestation({
+    surface: "claude",
+    version: "2.1.226",
+    checkedAt: "2026-08-09T12:00:00.000Z",
+    certifiedVersions: ["2.1.226"],
+    probes: passingProbes,
+  });
+  const certifiedLater = evaluateCompatibilityAttestation({
+    surface: "claude",
+    version: "2.1.227",
+    checkedAt: "2026-08-09T12:01:00.000Z",
+    certifiedVersions: ["2.1.226"],
+    probes: passingProbes,
+  });
+  for (const releaseRelative of [decertifiedLater, certifiedLater]) {
+    await assert.rejects(
+      store.recordCompatibilityAttestation(releaseRelative),
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "COMPAT_ATTESTATION_INVALID",
+    );
+  }
+  await store.close();
+  const historicalCertified = {
+    ...decertifiedLater,
+    probes: decertifiedLater.probes.map((probe, index) =>
+      index === 0 ? { ...probe, name: "launcher_v0" } : probe,
+    ),
+  };
+  const persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+    compatibilityAttestations: Array<Record<string, unknown>>;
+  };
+  persisted.compatibilityAttestations = [historicalCertified, certifiedLater];
+  await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
+    mode: 0o600,
+  });
+
+  const recovered = new GatewayStore(config);
+  await recovered.initialize();
+  assert.deepEqual(
+    await recovered.inspectCompatibilityAttestations(),
+    [historicalCertified, certifiedLater],
+  );
+  await recovered.close();
+  const recoveredBytes = await readFile(store.stateFilePath, "utf8");
+  const idempotent = new GatewayStore(config);
+  await idempotent.initialize();
+  await idempotent.close();
+  assert.equal(await readFile(store.stateFilePath, "utf8"), recoveredBytes);
+
+  for (const variant of ["failed", "unknown", "malformed"] as const) {
+    const current = await fixture();
+    await current.store.initialize();
+    await current.store.close();
+    const invalid = JSON.parse(
+      await readFile(current.store.stateFilePath, "utf8"),
+    ) as { compatibilityAttestations: Array<Record<string, unknown>> };
+    const row = JSON.parse(JSON.stringify(decertifiedLater)) as Record<
+      string,
+      unknown
+    >;
+    invalid.compatibilityAttestations = [row];
+    if (variant === "failed") {
+      const probes = row.probes as Array<Record<string, unknown>>;
+      probes[0] = {
+        name: "launcher",
+        outcome: "fail",
+        safeErrorCode: "CLAUDE_LAUNCHER_INVALID",
+      };
+    } else if (variant === "unknown") {
+      row.version = "unknown";
+    } else {
+      row.checkedAt = "not-a-timestamp";
+    }
+    await writeFile(
+      current.store.stateFilePath,
+      `${JSON.stringify(invalid)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      new GatewayStore(current.config).initialize(),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+      variant,
+    );
+  }
 });
 
 test("legacy manual certification evidence is stripped while automatic probes survive", async () => {
@@ -5322,7 +5418,7 @@ test("legacy manual certification evidence is stripped while automatic probes su
     surface: "claude",
     version: "2.1.226",
     checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["2.1.226"],
+    certifiedVersions: ["2.1.227"],
     probes: compatibilityProbeNames.claude.map((name) => ({
       name,
       outcome: "pass" as const,
@@ -5337,6 +5433,7 @@ test("legacy manual certification evidence is stripped while automatic probes su
     compatibilityAttestations: Array<Record<string, unknown>>;
   };
   assert.ok(legacy.compatibilityAttestations[0]);
+  legacy.compatibilityAttestations[0]!.tier = "certified";
   legacy.compatibilityAttestations[0]!.certification = {
     depth: "wire",
     outcome: "pass",

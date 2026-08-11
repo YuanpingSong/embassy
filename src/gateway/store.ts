@@ -19,6 +19,7 @@ import { isCodexRegistrationGeneration } from "./codex-registration-generation.j
 import {
   compatibilityCacheKey,
   isCompatibilityAttestation,
+  isPersistedCompatibilityAttestation,
   type CompatibilityAttestation,
   type CompatibilitySurface,
 } from "./compatibility.js";
@@ -1200,8 +1201,9 @@ function isLegacyCompatibilityCertification(value: unknown): boolean {
 
 /**
  * v1.1-v1.2 compatibility rows could contain manual live-certification
- * evidence. The ceremony is gone: accept only its exact old shape, discard
- * it, and retain the automatic bounded probe evidence.
+ * evidence. Discard only an exact old certification, retain the automatic
+ * bounded probes as schema-attested evidence, and leave malformed rows
+ * untouched for strict state validation to reject.
  */
 function migrateLegacyCompatibilityCertifications(value: unknown): unknown {
   if (
@@ -1214,16 +1216,21 @@ function migrateLegacyCompatibilityCertifications(value: unknown): unknown {
   let changed = false;
   const compatibilityAttestations = value.compatibilityAttestations.map(
     (entry) => {
-      if (!isObject(entry) || !Object.hasOwn(entry, "certification")) {
-        return entry;
+      let candidate = entry;
+      if (
+        isObject(entry) &&
+        Object.hasOwn(entry, "certification") &&
+        isLegacyCompatibilityCertification(entry.certification)
+      ) {
+        const { certification: _legacyCertification, ...current } = entry;
+        candidate =
+          current.tier === "certified"
+            ? { ...current, tier: "schema_attested" }
+            : current;
       }
-      if (!isLegacyCompatibilityCertification(entry.certification)) {
-        return entry;
-      }
-      const { certification: _legacyCertification, ...current } = entry;
-      if (!isCompatibilityAttestation(current)) return entry;
-      changed = true;
-      return current;
+      if (!isPersistedCompatibilityAttestation(candidate)) return entry;
+      if (candidate !== entry) changed = true;
+      return candidate;
     },
   );
   return changed ? { ...value, compatibilityAttestations } : value;
@@ -1396,7 +1403,9 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     !Array.isArray(value.compatibilityAttestations) ||
     value.compatibilityAttestations.length >
       COMPATIBILITY_ATTESTATION_CAPACITY ||
-    !value.compatibilityAttestations.every(isCompatibilityAttestation) ||
+    !value.compatibilityAttestations.every(
+      isPersistedCompatibilityAttestation,
+    ) ||
     !Array.isArray(value.codexEndpointRefreshEvents) ||
     value.codexEndpointRefreshEvents.length >
       CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY ||
@@ -6782,11 +6791,8 @@ export class GatewayStore {
 
   private aggregateHealth(
     connectors: readonly PublicConnectorSnapshot[],
-  ): "offline" | "connecting" | "healthy" | "degraded" | "incompatible" {
+  ): "offline" | "connecting" | "healthy" | "degraded" {
     if (connectors.length === 0) return "offline";
-    if (connectors.some((connector) => connector.health === "incompatible")) {
-      return "incompatible";
-    }
     if (connectors.some((connector) => connector.health === "degraded")) {
       return "degraded";
     }

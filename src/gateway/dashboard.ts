@@ -493,6 +493,12 @@ function guidanceKeys(guidance: DashboardAttentionItem["guidance"]): readonly [D
       return ["guidance.codexSuccessionRecovery.title", "guidance.codexSuccessionRecovery.body", "guidance.codexSuccessionRecovery.action"];
     case "progress_watch":
       return ["guidance.progressWatch.title", "guidance.progressWatch.body", "guidance.progressWatch.action"];
+    case "registry_empty":
+      return ["guidance.registryEmpty.title", "guidance.registryEmpty.body", "guidance.registryEmpty.action"];
+    case "registry_rejected":
+      return ["guidance.registryRejected.title", "guidance.registryRejected.body", "guidance.registryRejected.action"];
+    case "provider_incompatible":
+      return ["guidance.providerIncompatible.title", "guidance.providerIncompatible.body", "guidance.providerIncompatible.action"];
     default:
       return ["guidance.generic.title", "guidance.generic.body", "guidance.generic.action"];
   }
@@ -713,18 +719,39 @@ function renderSessions(context: RenderContext): string {
 
 function renderDiagnostics(context: RenderContext): string {
   const compatibilityRows = context.model.compatibilityChecks.length === 0
-    ? `<tr class="empty-row"><td colspan="6">${t(context, "diagnostics.compatibilityChecks.empty")}</td></tr>`
+    ? `<tr class="empty-row"><td colspan="8">${t(context, "diagnostics.compatibilityChecks.empty")}</td></tr>`
     : context.model.compatibilityChecks.map((check) => {
         const tone = check.tier === "certified"
           ? "good"
           : check.tier === "schema_attested"
             ? "info"
             : "danger";
-        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td data-label="${t(context, "diagnostics.version")}"><code>${escapeDashboardHtml(check.version)}</code></td><td data-label="${t(context, "diagnostics.tier")}">${statusPill(t(context, `compatibilityTier.${check.tier}` as DashboardCopyKey), tone)}</td><td data-label="${t(context, "diagnostics.checkedAt")}">${renderTimestampAtSnapshot(context, check.checkedAt)}</td><td data-label="${t(context, "diagnostics.failure")}">${check.failure === undefined ? "—" : `<code>${escapeDashboardHtml(check.failure)}</code>`}</td><td data-label="${t(context, "column.issue")}">${check.safeErrorCode === undefined ? "—" : `<code>${check.safeErrorCode}</code>`}</td></tr>`;
+        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td data-label="${t(context, "diagnostics.version")}"><code>${escapeDashboardHtml(check.version)}</code></td><td data-label="${t(context, "diagnostics.testedVersion")}"><code>${escapeDashboardHtml(check.testedVersion)}</code></td><td data-label="${t(context, "diagnostics.supportedMajor")}"><code>${escapeDashboardHtml(check.supportedMajor)}</code></td><td data-label="${t(context, "diagnostics.tier")}">${statusPill(t(context, `compatibilityTier.${check.tier}` as DashboardCopyKey), tone)}</td><td data-label="${t(context, "diagnostics.checkedAt")}">${renderTimestampAtSnapshot(context, check.checkedAt)}</td><td data-label="${t(context, "diagnostics.failure")}">${check.failure === undefined ? "—" : `<code>${escapeDashboardHtml(check.failure)}</code>`}</td><td data-label="${t(context, "column.issue")}">${check.safeErrorCode === undefined ? "—" : `<code>${check.safeErrorCode}</code>`}</td></tr>`;
       }).join("");
   const connectorRows = context.model.connectors.length === 0
-    ? `<tr class="empty-row"><td colspan="7">${t(context, "diagnostics.connectors.empty")}</td></tr>`
-    : context.model.connectors.map((connector) => `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, connector.provider)}</th><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(connector.host)}</td><td data-label="${t(context, "diagnostics.health")}">${statusPill(healthLabel(context, connector.health), toneForHealth(connector.health))}</td><td data-label="${t(context, "column.compatibility")}">${statusPill(compatibilityLabel(context, connector.compatibility), toneForCompatibility(connector.compatibility))}</td><td data-label="${t(context, "diagnostics.protocol")}"><code>${escapeDashboardHtml([connector.protocol, connector.protocolVersion].filter(Boolean).join(" ") || "—")}</code></td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, connector.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${connector.safeErrorCode === undefined ? "—" : `<code>${connector.safeErrorCode}</code>`}</td></tr>`).join("");
+    ? `<tr class="empty-row"><td colspan="8">${t(context, "diagnostics.connectors.empty")}</td></tr>`
+    : context.model.connectors.map((connector) => {
+        const observation = connector.registry;
+        let registry = "—";
+        if (observation !== undefined) {
+          const stateKey: DashboardCopyKey =
+            observation.parseableRecordSeenSinceBoot
+              ? "diagnostics.registry.state.parseableRecordObserved"
+              : observation.entriesScanned === 0
+                ? "diagnostics.registry.state.emptySinceBoot"
+                : "diagnostics.registry.state.noParseableRecordSinceBoot";
+          const rejected = observation.rejected.length === 0
+            ? t(context, "diagnostics.registry.rejectedNone")
+            : observation.rejected
+                .map((row) => `<code>${escapeDashboardHtml(row.safeErrorCode)}</code> × ${formatInteger(row.count)}`)
+                .join(" · ");
+          const omitted = observation.rejectedCodesOmitted === 0
+            ? ""
+            : `<span class="cell-note">${t(context, "diagnostics.registry.rejectedCodesOmitted", { count: formatInteger(observation.rejectedCodesOmitted) })}</span>`;
+          registry = `${statusPill(t(context, stateKey), observation.parseableRecordSeenSinceBoot ? "good" : "warning")}<span class="cell-note">${t(context, "diagnostics.registry.entriesScanned")}: ${formatInteger(observation.entriesScanned)} · ${t(context, "diagnostics.registry.parseableRecords")}: ${formatInteger(observation.parseableRecords)}</span><span class="cell-note">${t(context, "diagnostics.registry.rejected")}: ${rejected}</span>${omitted}`;
+        }
+        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, connector.provider)}</th><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(connector.host)}</td><td data-label="${t(context, "diagnostics.health")}">${statusPill(healthLabel(context, connector.health), toneForHealth(connector.health))}</td><td data-label="${t(context, "column.compatibility")}">${statusPill(compatibilityLabel(context, connector.compatibility), toneForCompatibility(connector.compatibility))}</td><td data-label="${t(context, "diagnostics.protocol")}"><code>${escapeDashboardHtml([connector.protocol, connector.protocolVersion].filter(Boolean).join(" ") || "—")}</code></td><td data-label="${t(context, "diagnostics.registry.title")}">${registry}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, connector.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${connector.safeErrorCode === undefined ? "—" : `<code>${connector.safeErrorCode}</code>`}</td></tr>`;
+      }).join("");
   const omissions = context.model.omissions;
   const omissionEntries: readonly [number, DashboardCopyKey][] = [
     [omissions.connectors, "diagnostics.omissions.connectors"],
@@ -778,8 +805,8 @@ function renderDiagnostics(context: RenderContext): string {
     <summary><h2 id="diagnostics-title"><span class="disclosure-icon" aria-hidden="true"><span class="disclosure-icon__closed">+</span><span class="disclosure-icon__open">−</span></span>${t(context, "diagnostics.title")}</h2></summary>
     <div class="diagnostics__body">
       <p id="diagnostics-note" class="diagnostics__note">${t(context, "diagnostics.note")}</p>
-      <section aria-labelledby="compatibility-checks-title"><h3 id="compatibility-checks-title">${t(context, "diagnostics.compatibilityChecks")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="compatibility-checks-title"><table class="responsive-table"><caption>${t(context, "diagnostics.compatibilityChecks.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "diagnostics.version")}</th><th>${t(context, "diagnostics.tier")}</th><th>${t(context, "diagnostics.checkedAt")}</th><th>${t(context, "diagnostics.failure")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${compatibilityRows}</tbody></table></div></section>
-      <section aria-labelledby="connectors-title"><h3 id="connectors-title">${t(context, "diagnostics.connectors")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="connectors-title"><table class="responsive-table"><caption>${t(context, "diagnostics.connectors.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "column.host")}</th><th>${t(context, "diagnostics.health")}</th><th>${t(context, "column.compatibility")}</th><th>${t(context, "diagnostics.protocol")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${connectorRows}</tbody></table></div></section>
+      <section aria-labelledby="compatibility-checks-title"><h3 id="compatibility-checks-title">${t(context, "diagnostics.compatibilityChecks")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="compatibility-checks-title"><table class="responsive-table"><caption>${t(context, "diagnostics.compatibilityChecks.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "diagnostics.version")}</th><th>${t(context, "diagnostics.testedVersion")}</th><th>${t(context, "diagnostics.supportedMajor")}</th><th>${t(context, "diagnostics.tier")}</th><th>${t(context, "diagnostics.checkedAt")}</th><th>${t(context, "diagnostics.failure")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${compatibilityRows}</tbody></table></div></section>
+      <section aria-labelledby="connectors-title"><h3 id="connectors-title">${t(context, "diagnostics.connectors")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="connectors-title"><table class="responsive-table"><caption>${t(context, "diagnostics.connectors.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "column.host")}</th><th>${t(context, "diagnostics.health")}</th><th>${t(context, "column.compatibility")}</th><th>${t(context, "diagnostics.protocol")}</th><th>${t(context, "diagnostics.registry.title")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${connectorRows}</tbody></table></div></section>
       ${deadlineSection}
       <section aria-labelledby="accounting-title"><h3 id="accounting-title">${t(context, "diagnostics.accounting")}</h3><dl class="accounting"><div><dt>${t(context, "diagnostics.accepted")}</dt><dd>${formatInteger(accounting.accepted)}</dd></div><div><dt>${t(context, "diagnostics.duplicates")}</dt><dd>${formatInteger(accounting.duplicates)}</dd></div><div><dt>${t(context, "diagnostics.delivered")}</dt><dd>${formatInteger(accounting.delivered)}</dd></div><div><dt>${t(context, "diagnostics.unconfirmed")}</dt><dd>${formatInteger(accounting.unconfirmed)}</dd></div><div><dt>${t(context, "diagnostics.ambiguous")}</dt><dd>${formatInteger(accounting.ambiguous)}</dd></div><div><dt>${t(context, "diagnostics.failed")}</dt><dd>${formatInteger(accounting.failed)}</dd></div><div><dt>${t(context, "diagnostics.expired")}</dt><dd>${formatInteger(accounting.expired)}</dd></div><div><dt>${t(context, "diagnostics.cancelled")}</dt><dd>${formatInteger(accounting.cancelled)}</dd></div><div><dt>${t(context, "diagnostics.abandoned")}</dt><dd>${formatInteger(accounting.abandoned)}</dd></div><div><dt>${t(context, "diagnostics.rejected")}</dt><dd>${formatInteger(accounting.rejected)}</dd></div><div><dt>${t(context, "diagnostics.bytesAccepted")}</dt><dd>${formatBytes(accounting.bytesAccepted)}</dd></div><div><dt>${t(context, "diagnostics.queuedBytes")}</dt><dd>${formatBytes(accounting.queuedBytes)}</dd></div></dl></section>
       <p class="omissions"><strong>${t(context, "diagnostics.omissions")}:</strong> ${omissionText}</p>

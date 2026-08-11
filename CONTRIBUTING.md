@@ -1,6 +1,6 @@
 # Contributing to Embassy
 
-Embassy connects two powerful local agent runtimes across version-pinned native
+Embassy connects two powerful local agent runtimes across evidence-gated native
 interfaces. Small changes can alter permission, privacy, or delivery behavior,
 so contributions should be narrow, testable, and explicit about boundaries.
 
@@ -33,6 +33,11 @@ recovery.
 - Add deterministic regression coverage for routing, protocol, persistence,
   permission, process-lifecycle, or redaction changes.
 - Keep the pull request focused and explain every security-boundary change.
+- For every new audit check, cite the sentence it enforces in
+  [“What Embassy defends, and what it deliberately does not”](SECURITY.md#what-embassy-defends-and-what-it-deliberately-does-not).
+  If no sentence supports the check, propose the doctrine change explicitly,
+  with its product and threat-model consequence, before implementation. Do not
+  smuggle a boundary expansion into a test, review finding, or hardening patch.
 - Update README and architecture documentation when public behavior changes.
 - Verify that public files contain no credentials, native IDs, message bodies,
   local state, or personal absolute paths.
@@ -59,9 +64,28 @@ recovery.
 ### Provider adapters
 
 Claude Code's cross-session feature is official. Embassy's use of its external
-registry and peer socket shape is an internal, version-pinned adapter. Codex App
-Server is likewise version-pinned. Do not widen either compatibility range
-without a documented review and deterministic fixtures for the new version.
+registry and peer socket shape remains an internal adapter: require the
+native peer protocol 1 and bounded live-schema probes while
+validating every consumed field and frame. Unknown top-level registry fields
+may be ignored; required and consumed fields remain strict, and rejection or
+observed-empty counts must stay loud. A certified same-major build is writable;
+a same-major build whose probes all pass is `schema_attested`, but it is
+writable only when those probes cover the write path. Claude's probes do.
+Codex's bounded pre-write reads may include `initialize`, `thread/loaded/list`,
+and registration-time `thread/resume`, but never `turn/start`; untested Codex
+0.x therefore remains monitor-only pending a certified write schema. Failed
+probes, a different major, or version evidence that cannot establish a safe
+major leave only that
+provider degraded, monitor-only, and write-fenced while the broker,
+control/dashboard surfaces, and other provider remain available; probes can
+never promote across a major or unknown version. Unsafe ownership, path,
+symlink, lease, state, or generation evidence for Embassy-owned or executed
+artifacts and Embassy callback, control, or state paths still aborts startup;
+an unsafe Claude-owned external sessions registry root quarantines only Claude.
+Do not widen a supported major or declared protocol without a
+documented review and deterministic fixtures. Different-major guidance must
+safely name the observed/tested versions and supported major, say that a
+supporting Embassy release is required, and never prescribe `embassy health`.
 
 The gateway may publish one process-owned `codex-*` peer so Claude's native
 `ListAgents` and `SendMessage` tools can reach Codex. It must never overwrite a

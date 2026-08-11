@@ -2,7 +2,12 @@ import type {
   ProgressWatchJournalEvent,
   ProgressWatchMachine,
 } from "./progress-watch-machine.js";
-import type { CompatibilityAttestation } from "./compatibility.js";
+import {
+  certifiedCompatibilityVersions,
+  isCompatibilityAttestation,
+  type CompatibilityAttestation,
+  type CompatibilitySurface,
+} from "./compatibility.js";
 
 export const gatewayProviders = ["codex", "claude"] as const;
 
@@ -97,6 +102,7 @@ export type BusyPolicy = "queue";
 export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64,
   compatibilityChecks: 2,
+  registryRejectionCodes: 32,
   availablePeers: 256,
   routes: 256,
   pairs: 256,
@@ -378,6 +384,85 @@ export type PublicConnectorSnapshot = {
   protocolVersion: string;
   lastSeenAt?: string;
   safeErrorCode?: string;
+  registry?: PublicRegistryObservationSnapshot;
+};
+
+/**
+ * Public compatibility evidence adds this release's comparison point without
+ * changing the persisted attestation schema.
+ */
+export type PublicCompatibilityCheckSnapshot = CompatibilityAttestation &
+  Readonly<{
+    testedVersion: string;
+    supportedMajor: string;
+  }>;
+
+function publicCompatibilityReference(
+  surface: CompatibilitySurface,
+): Readonly<{ testedVersion: string; supportedMajor: string }> | undefined {
+  const testedVersion = certifiedCompatibilityVersions[surface][0];
+  if (testedVersion === undefined) return undefined;
+  const separator = testedVersion.indexOf(".");
+  if (separator < 1) return undefined;
+  return {
+    testedVersion,
+    supportedMajor: testedVersion.slice(0, separator),
+  };
+}
+
+export function projectPublicCompatibilityCheck(
+  attestation: CompatibilityAttestation,
+): PublicCompatibilityCheckSnapshot {
+  const reference = publicCompatibilityReference(attestation.surface);
+  if (reference === undefined) {
+    throw new RangeError("COMPATIBILITY_REFERENCE_UNAVAILABLE");
+  }
+  return {
+    ...attestation,
+    probes: attestation.probes.map((probe) => ({ ...probe })),
+    ...reference,
+  };
+}
+
+export function isPublicCompatibilityCheckSnapshot(
+  value: unknown,
+): value is PublicCompatibilityCheckSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (
+    !Object.hasOwn(candidate, "testedVersion") ||
+    !Object.hasOwn(candidate, "supportedMajor") ||
+    typeof candidate.testedVersion !== "string" ||
+    typeof candidate.supportedMajor !== "string"
+  ) {
+    return false;
+  }
+  const {
+    testedVersion: _testedVersion,
+    supportedMajor: _supportedMajor,
+    ...attestation
+  } = candidate;
+  if (!isCompatibilityAttestation(attestation)) return false;
+  const reference = publicCompatibilityReference(attestation.surface);
+  return (
+    reference !== undefined &&
+    candidate.testedVersion === reference.testedVersion &&
+    candidate.supportedMajor === reference.supportedMajor
+  );
+}
+
+/**
+ * Bounded, native-ID-free evidence attached to one Claude connector. Counts
+ * describe only the latest pass; the monotonic flag distinguishes an ordinary
+ * empty registry from one that has never yielded parseable required fields
+ * this boot.
+ */
+export type PublicRegistryObservationSnapshot = {
+  entriesScanned: number;
+  parseableRecords: number;
+  parseableRecordSeenSinceBoot: boolean;
+  rejected: { safeErrorCode: string; count: number }[];
+  rejectedCodesOmitted: number;
 };
 
 export const publicAvailablePeerStates = [
@@ -551,6 +636,62 @@ export function arePublicAvailablePeerSnapshots(
   return new Set(aliases).size === aliases.length;
 }
 
+export function isPublicRegistryObservationSnapshot(
+  value: unknown,
+): value is PublicRegistryObservationSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const keys = Object.keys(candidate);
+  if (
+    keys.length !== 5 ||
+    ![
+      "entriesScanned",
+      "parseableRecords",
+      "parseableRecordSeenSinceBoot",
+      "rejected",
+      "rejectedCodesOmitted",
+    ].every((key) => Object.hasOwn(candidate, key)) ||
+    !Number.isSafeInteger(candidate.entriesScanned) ||
+    Number(candidate.entriesScanned) < 0 ||
+    !Number.isSafeInteger(candidate.parseableRecords) ||
+    Number(candidate.parseableRecords) < 0 ||
+    Number(candidate.parseableRecords) > Number(candidate.entriesScanned) ||
+    typeof candidate.parseableRecordSeenSinceBoot !== "boolean" ||
+    (Number(candidate.parseableRecords) > 0 &&
+      candidate.parseableRecordSeenSinceBoot !== true) ||
+    !Number.isSafeInteger(candidate.rejectedCodesOmitted) ||
+    Number(candidate.rejectedCodesOmitted) < 0 ||
+    !Array.isArray(candidate.rejected) ||
+    candidate.rejected.length > gatewayPublicSnapshotLimits.registryRejectionCodes
+  ) {
+    return false;
+  }
+  const rejected = candidate.rejected as unknown[];
+  if (
+    !rejected.every((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+      const record = row as Record<string, unknown>;
+      return (
+        Object.keys(record).length === 2 &&
+        Object.hasOwn(record, "safeErrorCode") &&
+        Object.hasOwn(record, "count") &&
+        typeof record.safeErrorCode === "string" &&
+        PUBLIC_SAFE_CODE_PATTERN.test(record.safeErrorCode) &&
+        Number.isSafeInteger(record.count) &&
+        Number(record.count) > 0
+      );
+    })
+  ) {
+    return false;
+  }
+  const codes = rejected.map(
+    (row) => (row as { safeErrorCode: string }).safeErrorCode,
+  );
+  return codes.every(
+    (code, index) => index === 0 || codes[index - 1]! < code,
+  );
+}
+
 export type SafeGatewayAlert = {
   code: string;
   severity: AlertSeverity;
@@ -600,7 +741,7 @@ export type GatewayPublicSnapshot = {
   inboundMode: GatewayInboundMode;
   health: ConnectorHealth;
   connectors: PublicConnectorSnapshot[];
-  compatibilityChecks?: CompatibilityAttestation[];
+  compatibilityChecks?: PublicCompatibilityCheckSnapshot[];
   availablePeers: PublicAvailablePeerSnapshot[];
   routes: PublicRouteSnapshot[];
   pairs: PublicPairSnapshot[];
@@ -662,8 +803,8 @@ function snapshotBytes(snapshot: GatewayPublicSnapshot): number {
 /**
  * Deterministically projects a canonical snapshot under the local control
  * byte budget. Content is never shortened: complete metadata rows are either
- * retained or counted as omitted. Connector/selected-route inventory is the
- * last category removed.
+ * retained or counted as omitted. Registry rejection-code detail is shed
+ * before consent edges or selected routes; connector inventory remains last.
  */
 export function projectGatewayPublicSnapshot(
   snapshot: GatewayPublicSnapshot,
@@ -678,7 +819,21 @@ export function projectGatewayPublicSnapshot(
   }
   const projected: GatewayPublicSnapshot = {
     ...snapshot,
-    connectors: snapshot.connectors.slice(0, gatewayPublicSnapshotLimits.connectors),
+    connectors: snapshot.connectors
+      .slice(0, gatewayPublicSnapshotLimits.connectors)
+      .map((connector) => ({
+        ...connector,
+        ...(connector.registry === undefined
+          ? {}
+          : {
+              registry: {
+                ...connector.registry,
+                rejected: connector.registry.rejected.map((row) => ({
+                  ...row,
+                })),
+              },
+            }),
+      })),
     ...(snapshot.compatibilityChecks === undefined
       ? {}
       : {
@@ -889,6 +1044,37 @@ export function projectGatewayPublicSnapshot(
     return projected;
   }
 
+  const registryConnectorRows = projected.connectors;
+  const registryRejectionRows = registryConnectorRows.reduce(
+    (count, connector) => count + (connector.registry?.rejected.length ?? 0),
+    0,
+  );
+  if (
+    registryRejectionRows > 0 &&
+    retainUntilFit(registryRejectionRows, (retained) => {
+      let remaining = retained;
+      projected.connectors = registryConnectorRows.map((connector) => {
+        const registry = connector.registry;
+        if (registry === undefined) return connector;
+        const retainedHere = Math.min(remaining, registry.rejected.length);
+        remaining -= retainedHere;
+        return {
+          ...connector,
+          registry: {
+            ...registry,
+            rejected: registry.rejected.slice(0, retainedHere),
+            rejectedCodesOmitted:
+              registry.rejectedCodesOmitted +
+              registry.rejected.length -
+              retainedHere,
+          },
+        };
+      });
+    })
+  ) {
+    return projected;
+  }
+
   const routes = [...projected.routes].sort((left, right) => {
     if (left.enabled !== right.enabled) return left.enabled ? -1 : 1;
     const byState = routePriority(left.state) - routePriority(right.state);
@@ -921,6 +1107,19 @@ export function projectGatewayPublicSnapshot(
   }
 
   const connectors = [...projected.connectors].sort((left, right) => {
+    const leftHasRegistryIssue =
+      left.registry !== undefined &&
+      (left.registry.rejected.length > 0 ||
+        left.registry.rejectedCodesOmitted > 0 ||
+        !left.registry.parseableRecordSeenSinceBoot);
+    const rightHasRegistryIssue =
+      right.registry !== undefined &&
+      (right.registry.rejected.length > 0 ||
+        right.registry.rejectedCodesOmitted > 0 ||
+        !right.registry.parseableRecordSeenSinceBoot);
+    if (leftHasRegistryIssue !== rightHasRegistryIssue) {
+      return leftHasRegistryIssue ? -1 : 1;
+    }
     const byHealth =
       connectorPriority(left.health) - connectorPriority(right.health);
     if (byHealth !== 0) return byHealth;
@@ -938,6 +1137,7 @@ export function projectGatewayPublicSnapshot(
   ) {
     return projected;
   }
+
   throw new RangeError("GATEWAY_SNAPSHOT_BASE_EXCEEDS_BYTE_BUDGET");
 }
 

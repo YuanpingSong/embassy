@@ -13,7 +13,7 @@ namespace Embassy {
   /** Rendered wherever the live contract carries no value for a field. */
   const DIAGNOSTICS_ABSENT_FIELD = "—";
 
-  const DIAGNOSTICS_CONNECTOR_COLUMNS = 7;
+  const DIAGNOSTICS_CONNECTOR_COLUMNS = 8;
 
   const diagnosticsNumberFormatters = new Map<Locale, Intl.NumberFormat>();
 
@@ -91,6 +91,7 @@ namespace Embassy {
     props: Readonly<{ connectors: readonly DashboardConnectorRow[] }>,
   ): React.ReactElement {
     const t = useT();
+    const [locale] = useLocale();
     const { connectors } = props;
     return (
       <div className="table-wrap">
@@ -104,6 +105,7 @@ namespace Embassy {
               <th scope="col">{t("app.diag.col.version")}</th>
               <th scope="col">{t("diagnostics.health")}</th>
               <th scope="col">{t("app.diag.col.compat")}</th>
+              <th scope="col">{t("diagnostics.registry.title")}</th>
               <th scope="col">{t("column.issue")}</th>
             </tr>
           </thead>
@@ -115,8 +117,17 @@ namespace Embassy {
                 </td>
               </tr>
             ) : (
-              connectors.map((connector, index) => (
-                <tr key={`${connector.provider}|${connector.host}|${index}`}>
+              connectors.map((connector, index) => {
+                const observation = connector.registry;
+                const stateKey = observation === undefined
+                  ? undefined
+                  : observation.parseableRecordSeenSinceBoot
+                    ? "diagnostics.registry.state.parseableRecordObserved"
+                    : observation.entriesScanned === 0
+                      ? "diagnostics.registry.state.emptySinceBoot"
+                      : "diagnostics.registry.state.noParseableRecordSinceBoot";
+                return (
+                  <tr key={`${connector.provider}|${connector.host}|${index}`}>
                   <th scope="row">
                     {connector.provider === "claude"
                       ? t("provider.claude")
@@ -139,11 +150,44 @@ namespace Embassy {
                       small
                     />
                   </td>
+                  <td>
+                    {observation === undefined || stateKey === undefined ? (
+                      DIAGNOSTICS_ABSENT_FIELD
+                    ) : (
+                      <div className="stack-sm">
+                        <span>{t(stateKey)}</span>
+                        <span className="cell-note">
+                          {t("diagnostics.registry.entriesScanned")}: {formatDiagnosticsCount(observation.entriesScanned, locale)} · {t("diagnostics.registry.parseableRecords")}: {formatDiagnosticsCount(observation.parseableRecords, locale)}
+                        </span>
+                        <span className="cell-note">
+                          {t("diagnostics.registry.rejected")}: {observation.rejected.length === 0
+                            ? t("diagnostics.registry.rejectedNone")
+                            : observation.rejected.map((row, rejectionIndex) => (
+                                <React.Fragment key={row.safeErrorCode}>
+                                  {rejectionIndex === 0 ? null : " · "}
+                                  <code>{row.safeErrorCode}</code> × {formatDiagnosticsCount(row.count, locale)}
+                                </React.Fragment>
+                              ))}
+                        </span>
+                        {observation.rejectedCodesOmitted === 0 ? null : (
+                          <span className="cell-note">
+                            {t("diagnostics.registry.rejectedCodesOmitted", {
+                              count: formatDiagnosticsCount(
+                                observation.rejectedCodesOmitted,
+                                locale,
+                              ),
+                            })}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td className="cell-mono">
                     {connector.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
                   </td>
-                </tr>
-              ))
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -167,6 +211,8 @@ namespace Embassy {
             <tr>
               <th scope="col">{t("app.diag.col.provider")}</th>
               <th scope="col">{t("diagnostics.version")}</th>
+              <th scope="col">{t("diagnostics.testedVersion")}</th>
+              <th scope="col">{t("diagnostics.supportedMajor")}</th>
               <th scope="col">{t("diagnostics.tier")}</th>
               <th scope="col">{t("diagnostics.checkedAt")}</th>
               <th scope="col">{t("diagnostics.failure")}</th>
@@ -176,7 +222,7 @@ namespace Embassy {
           <tbody>
             {props.checks.length === 0 ? (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={8}>
                   {t("diagnostics.compatibilityChecks.empty")}
                 </td>
               </tr>
@@ -189,6 +235,8 @@ namespace Embassy {
                       : t("provider.codex")}
                   </th>
                   <td className="cell-mono">{check.version}</td>
+                  <td className="cell-mono">{check.testedVersion}</td>
+                  <td className="cell-mono">{check.supportedMajor}</td>
                   <td>{t(`compatibilityTier.${check.tier}`)}</td>
                   <td>
                     <TimeAgo iso={check.checkedAt} />
@@ -409,6 +457,7 @@ namespace Embassy {
       },
     ];
 
+
     const omissions = data.omissions;
     const omissionRows: readonly DiagnosticsOmissionRow[] = [
       {
@@ -520,7 +569,6 @@ namespace Embassy {
         note: t("app.routes.detail.absent"),
       },
     ];
-
     return (
       <div className="tab-panel tab-panel--narrow">
         {/* The designer opens this tab with the operator-tunable surface, not
@@ -608,9 +656,8 @@ namespace Embassy {
           </div>
           <div className="stack">
             <DiagnosticsConnectorTable connectors={data.connectors} />
-            {/* The prototype printed the pinned range beside each verdict; the
-                live contract does not carry it, so say so rather than let the
-                bare chip read as an omission. */}
+            {/* Connector rows stay transport-focused; the provider table below
+                carries the bounded version and probe evidence. */}
             <p className="footnote">{t("app.diag.versions.rangeAbsent")}</p>
           </div>
         </section>

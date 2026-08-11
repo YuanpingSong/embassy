@@ -290,46 +290,42 @@ test("managed installation pins release binary and already-running private socke
   }
 });
 
-test("startup admits only the exact managed Codex version", async () => {
+test("startup attests unreviewed Codex versions without opening App Server", async () => {
   for (const version of ["0.148.0", "1.0.0"] as const) {
     const installation = await installationFixture(version);
     try {
-      await assert.rejects(
-        createLocalCodexTransportFactory(
-          {
-            appServerVersion: VERSION,
-            environment: { HOME: installation.home },
-            writableProtocolAttested: true,
+      let spawnCalls = 0;
+      const factory = await createLocalCodexTransportFactory(
+        {
+          appServerVersion: VERSION,
+          environment: { HOME: installation.home },
+          writableProtocolAttested: true,
+        },
+        {
+          loginHome: () => installation.home,
+          spawn: () => {
+            spawnCalls += 1;
+            throw new Error("must not spawn during attestation");
           },
-          { loginHome: () => installation.home },
-        ),
-        (error: unknown) =>
-          error instanceof LocalCodexTransportError &&
-          error.code === "APP_SERVER_VERSION_MISMATCH",
+        },
       );
+
+      assert.equal(factory.appServerVersion, version);
+      assert.equal(factory.protocolVersion, version);
+      assert.equal(factory.schemaCompatibility.observedSchemaCandidate, true);
+      assert.equal(factory.writableReady, false);
+      assert.equal(factory.writeCompatibility, null);
+      assert.equal(spawnCalls, 0);
+      await factory.close();
     } finally {
       await installation.close();
     }
   }
 });
 
-test("refresh candidate resolution inspects same-major drift without relaxing exact startup", async () => {
+test("refresh candidate resolution preserves the monitor-only startup posture", async () => {
   const drifted = await installationFixture("0.148.0");
   try {
-    await assert.rejects(
-      createLocalCodexTransportFactory(
-        {
-          appServerVersion: VERSION,
-          environment: { HOME: drifted.home },
-          writableProtocolAttested: true,
-        },
-        { loginHome: () => drifted.home },
-      ),
-      (error: unknown) =>
-        error instanceof LocalCodexTransportError &&
-        error.code === "APP_SERVER_VERSION_MISMATCH",
-    );
-
     let spawnCalls = 0;
     const candidate = await createLocalCodexRefreshCandidateTransportFactory(
       {
@@ -348,6 +344,8 @@ test("refresh candidate resolution inspects same-major drift without relaxing ex
     assert.equal(candidate.appServerVersion, "0.148.0");
     assert.equal(candidate.protocolVersion, "0.148.0");
     assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
+    assert.equal(candidate.writableReady, false);
+    assert.equal(candidate.writeCompatibility, null);
     assert.equal(spawnCalls, 0);
     await candidate.close();
   } finally {
@@ -355,12 +353,50 @@ test("refresh candidate resolution inspects same-major drift without relaxing ex
   }
 });
 
-test("refresh candidate resolution rejects a major jump and non-numeric build", async () => {
-  for (const release of ["1.0.0", "0.148.0-alpha.1"] as const) {
-    const drifted = await installationFixture(release);
-    try {
+test("bounded non-numeric builds remain OS-attested but version-unknown without connecting", async () => {
+  const drifted = await installationFixture("0.148.0-alpha.1");
+  try {
+    for (const createFactory of [
+      createLocalCodexTransportFactory,
+      createLocalCodexRefreshCandidateTransportFactory,
+    ] as const) {
+      let spawnCalls = 0;
+      const candidate = await createFactory(
+        {
+          appServerVersion: VERSION,
+          environment: { HOME: drifted.home },
+          writableProtocolAttested: true,
+        },
+        {
+          loginHome: () => drifted.home,
+          spawn: () => {
+            spawnCalls += 1;
+            throw new Error("version-unknown resolution must not connect");
+          },
+        },
+      );
+      assert.equal(candidate.appServerVersion, "unknown");
+      assert.equal(candidate.protocolVersion, "unknown");
+      assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
+      assert.equal(candidate.writableReady, false);
+      assert.equal(candidate.writeCompatibility, null);
+      assert.equal(spawnCalls, 0);
+      await candidate.close();
+    }
+  } finally {
+    await drifted.close();
+  }
+});
+
+test("unsafe release leaves remain rejected before provider construction", async () => {
+  const drifted = await installationFixture("nightly build");
+  try {
+    for (const createFactory of [
+      createLocalCodexTransportFactory,
+      createLocalCodexRefreshCandidateTransportFactory,
+    ] as const) {
       await assert.rejects(
-        createLocalCodexRefreshCandidateTransportFactory(
+        createFactory(
           {
             appServerVersion: VERSION,
             environment: { HOME: drifted.home },
@@ -372,9 +408,9 @@ test("refresh candidate resolution rejects a major jump and non-numeric build", 
           error instanceof LocalCodexTransportError &&
           error.code === "APP_SERVER_VERSION_MISMATCH",
       );
-    } finally {
-      await drifted.close();
     }
+  } finally {
+    await drifted.close();
   }
 });
 
@@ -435,17 +471,79 @@ test("managed release directory remains an owned non-writable component", async 
   }
 });
 
-test("missing App Server socket fails closed and never bootstraps", async () => {
+test("missing App Server socket stays OS-attested and never bootstraps", async () => {
   const fixture = await installationFixture();
   try {
+    const live = await resolveManagedLocalCodexInstallation(
+      fixture.home,
+      VERSION,
+    );
     // Unlinking the synthetic endpoint makes discovery fail; the test never
     // invokes a CLI that could create or bootstrap a replacement.
     await rm(fixture.socket, { force: true });
+    const unavailable = await resolveManagedLocalCodexInstallation(
+      fixture.home,
+      VERSION,
+    );
+    assert.equal(
+      unavailable.availabilityFailure,
+      "CODEX_CONTROL_SOCKET_UNAVAILABLE",
+    );
+    assert.notEqual(unavailable.endpointGeneration, live.endpointGeneration);
+
+    let spawnCalls = 0;
+    const factory = await createLocalCodexTransportFactory(
+      {
+        appServerVersion: VERSION,
+        environment: { HOME: fixture.home },
+        writableProtocolAttested: true,
+      },
+      {
+        loginHome: () => fixture.home,
+        spawn: () => {
+          spawnCalls += 1;
+          throw new Error("an unavailable control socket must not spawn");
+        },
+      },
+    );
+    assert.equal(
+      factory.availabilityFailure,
+      "CODEX_CONTROL_SOCKET_UNAVAILABLE",
+    );
+    assert.equal(factory.writableReady, false);
+    assert.equal(factory.writeCompatibility, null);
+    assert.equal(spawnCalls, 0);
+    await assert.rejects(
+      factory.connectTransport(),
+      (error: unknown) =>
+        error instanceof LocalCodexTransportError &&
+        error.code === "LOCAL_APP_SERVER_NOT_RUNNING",
+    );
+    assert.equal(spawnCalls, 0);
+    await factory.close();
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("unsafe App Server socket and directory permissions remain fatal", async () => {
+  const fixture = await installationFixture();
+  try {
+    await chmod(fixture.socket, 0o666);
     await assert.rejects(
       resolveManagedLocalCodexInstallation(fixture.home, VERSION),
       (error: unknown) =>
         error instanceof LocalCodexTransportError &&
-        error.code === "LOCAL_APP_SERVER_NOT_RUNNING",
+        error.code === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
+    );
+    await chmod(fixture.socket, 0o600);
+    await rm(fixture.socket, { force: true });
+    await chmod(path.dirname(fixture.socket), 0o777);
+    await assert.rejects(
+      resolveManagedLocalCodexInstallation(fixture.home, VERSION),
+      (error: unknown) =>
+        error instanceof LocalCodexTransportError &&
+        error.code === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
     );
   } finally {
     await fixture.close();

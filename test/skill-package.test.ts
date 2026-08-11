@@ -75,7 +75,23 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /old name stops resolving immediately/);
   assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
-  assert.match(skill, /Compatibility is automatic, exact-version-pinned/);
+  assert.match(skill, /Compatibility is automatic and evidence-gated/);
+  assert.match(skill, /certified same-major provider is writable/i);
+  assert.match(skill, /schema-attested \(`schema_attested`\) and writable only when those probes cover the write path/);
+  assert.match(skill, /untested Codex 0\.x therefore stays monitor-only/);
+  assert.match(
+    skill,
+    /bounded pre-write reads may include `initialize`, `thread\/loaded\/list`, and registration-time `thread\/resume`, but never `turn\/start`/,
+  );
+  assert.match(skill, /Failed probes, a different major/);
+  assert.match(skill, /version evidence that cannot establish a safe major/);
+  assert.match(skill, /never promote across a major or unknown major/);
+  assert.match(skill, /Embassy release supporting the observed major is required/);
+  assert.match(skill, /`peerProtocol 1` is required per registry record/);
+  assert.match(skill, /Unknown top-level registry fields are tolerated/);
+  assert.match(skill, /required known field remains strict/);
+  assert.match(skill, /bounded rejected-record counts/);
+  assert.match(skill, /observed-empty registry/);
   assert.match(skill, /replacement generation starts monitor-only/);
   assert.match(skill, /default paired mode/);
   assert.match(skill, /SENDER_NOT_PAIRED/);
@@ -93,7 +109,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.doesNotMatch(skill, /~\/.claude|\/tmp\/cc-socks|\.claude\/sessions/);
   assert.doesNotMatch(
     skill,
-    /EMBASSY_COMPAT_POLICY|embassy compat-(?:check|certify)\b|--with-turn\b|schema-attested|LaunchAgent|live certification|on-machine certification/i,
+    /EMBASSY_COMPAT_POLICY|embassy compat-(?:check|certify)\b|--with-turn\b|LaunchAgent|live certification|on-machine certification/i,
   );
   assert.doesNotMatch(skill, /\b(?:printenv|set)\b/);
   assert.doesNotMatch(skill, /\bclaude\s+(?:-p|--print)\b/);

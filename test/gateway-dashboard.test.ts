@@ -13,6 +13,7 @@ import {
   evaluateCompatibilityAttestation,
   type CompatibilityProbeResult,
 } from "../src/gateway/compatibility.js";
+import { projectPublicCompatibilityCheck } from "../src/gateway/types.js";
 
 test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {
   const snapshot = dashboardFixture();
@@ -113,13 +114,15 @@ test("diagnostics reduce compatibility to automatic provider safety rows", () =>
           safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
         };
       }
-      return evaluateCompatibilityAttestation({
-        surface,
-        version: certifiedCompatibilityVersions[surface][0]!,
-        checkedAt: "2026-08-08T11:58:00.000Z",
-        certifiedVersions: certifiedCompatibilityVersions[surface],
-        probes,
-      });
+      return projectPublicCompatibilityCheck(
+        evaluateCompatibilityAttestation({
+          surface,
+          version: certifiedCompatibilityVersions[surface][0]!,
+          checkedAt: "2026-08-08T11:58:00.000Z",
+          certifiedVersions: certifiedCompatibilityVersions[surface],
+          probes,
+        }),
+      );
     },
   );
   snapshot.alerts = [
@@ -135,6 +138,8 @@ test("diagnostics reduce compatibility to automatic provider safety rows", () =>
   assert.deepEqual(model.compatibilityChecks[0], {
     surface: "claude",
     version: certifiedCompatibilityVersions.claude[0],
+    testedVersion: certifiedCompatibilityVersions.claude[0],
+    supportedMajor: "2",
     tier: "incompatible",
     checkedAt: "2026-08-08T11:58:00.000Z",
     failure: "registry_schema",
@@ -150,6 +155,8 @@ test("diagnostics reduce compatibility to automatic provider safety rows", () =>
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
   assert.match(en, /Provider compatibility/);
   assert.match(en, /Automatic provider compatibility status/);
+  assert.match(en, /Tested by this release/);
+  assert.match(en, /Supported major/);
   assert.match(en, /Failure/);
   assert.match(en, /CLAUDE_REGISTRY_SCHEMA_REJECTED/);
   assert.equal(en.includes("Live certification"), false);
@@ -157,6 +164,186 @@ test("diagnostics reduce compatibility to automatic provider safety rows", () =>
   assert.equal(en.includes("COMPATIBILITY_CERTIFICATION_FAILED"), false);
   assert.match(zh, /提供方兼容性/);
   assert.equal(zh.includes("实时认证"), false);
+});
+
+test("unsupported provider majors name bounded evidence while the broker stays usable", () => {
+  const snapshot = dashboardFixture();
+  snapshot.health = "degraded";
+  snapshot.connectors[0] = {
+    ...snapshot.connectors[0]!,
+    health: "degraded",
+    compatibility: "incompatible",
+    safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+  };
+  const probes: CompatibilityProbeResult[] = compatibilityProbeNames.claude.map(
+    (name) => ({
+      name,
+      outcome: name === "version" ? "fail" : "pass",
+      ...(name === "version"
+        ? { safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED" }
+        : {}),
+    }),
+  );
+  snapshot.compatibilityChecks = [
+    projectPublicCompatibilityCheck(
+      evaluateCompatibilityAttestation({
+        surface: "claude",
+        version: "3.0.0",
+        checkedAt: "2026-08-08T11:58:00.000Z",
+        certifiedVersions: certifiedCompatibilityVersions.claude,
+        probes,
+      }),
+    ),
+  ];
+  snapshot.alerts = [
+    {
+      code: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+      severity: "error",
+      timestamp: "2026-08-08T11:58:00.000Z",
+      provider: "claude",
+      host: "this-mac",
+    },
+  ];
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(model.compatibilityChecks[0], {
+    surface: "claude",
+    version: "3.0.0",
+    testedVersion: "2.1.227",
+    supportedMajor: "2",
+    tier: "incompatible",
+    checkedAt: "2026-08-08T11:58:00.000Z",
+    failure: "version",
+    safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+  });
+  assert.equal(
+    model.attention.some(
+      (item) => item.guidance === "provider_incompatible",
+    ),
+    true,
+  );
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Provider build is write-fenced/);
+  assert.match(en, /3\.0\.0[\s\S]*2\.1\.227[\s\S]*>2</u);
+  assert.equal(en.includes("embassy health"), false);
+  assert.match(zh, /提供方构建已禁止写入/);
+  assert.match(zh, /3\.0\.0[\s\S]*2\.1\.227/u);
+});
+
+test("registry evidence stays connector-scoped and raises one honest warning", () => {
+  const rejected = dashboardFixture();
+  const claude = rejected.connectors.find(
+    (connector) => connector.provider === "claude",
+  );
+  assert.ok(claude);
+  claude.registry = {
+    entriesScanned: 3,
+    parseableRecords: 2,
+    parseableRecordSeenSinceBoot: true,
+    rejected: [{ safeErrorCode: "REGISTRY_INVALID_SCHEMA", count: 1 }],
+    rejectedCodesOmitted: 0,
+  };
+  const rejectedModel = buildDashboardViewModel(rejected);
+  assert.deepEqual(rejectedModel.connectors[0]?.registry, {
+    entriesScanned: 3,
+    parseableRecords: 2,
+    parseableRecordSeenSinceBoot: true,
+    rejected: [{ safeErrorCode: "REGISTRY_INVALID_SCHEMA", count: 1 }],
+    rejectedCodesOmitted: 0,
+  });
+  assert.equal(
+    rejectedModel.attention.filter(
+      (item) => item.code === "CLAUDE_REGISTRY_RECORDS_REJECTED",
+    ).length,
+    1,
+  );
+  const rejectedEn = renderDashboardHtml(rejected, { locale: "en" });
+  const rejectedZh = renderDashboardHtml(rejected, { locale: "zh-CN" });
+  assert.match(rejectedEn, /Registry observation/);
+  assert.match(rejectedEn, /REGISTRY_INVALID_SCHEMA/);
+  assert.match(rejectedEn, /Parseable required fields observed/);
+  assert.match(rejectedEn, /Claude registry scan reported issues/);
+  assert.match(rejectedZh, /注册表观察/);
+  assert.match(rejectedZh, /Claude 注册表扫描报告了问题/);
+
+  claude.registry = {
+    entriesScanned: 0,
+    parseableRecords: 0,
+    parseableRecordSeenSinceBoot: false,
+    rejected: [{ safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE", count: 1 }],
+    rejectedCodesOmitted: 0,
+  };
+  claude.health = "degraded";
+  claude.compatibility = "incompatible";
+  claude.safeErrorCode = "CLAUDE_REGISTRY_UNAVAILABLE";
+  const unavailableModel = buildDashboardViewModel(rejected);
+  assert.deepEqual(
+    unavailableModel.attention.filter(
+      (item) => item.code === "CLAUDE_REGISTRY_UNAVAILABLE",
+    ),
+    [
+      {
+        kind: "connector",
+        code: "CLAUDE_REGISTRY_UNAVAILABLE",
+        severity: "warning",
+        provider: "claude",
+        host: "this-mac",
+        guidance: "registry_rejected",
+      },
+    ],
+  );
+  const unavailableAttention = renderDashboardHtml(rejected, {
+    locale: "en",
+  }).match(/<section class="section attention"[\s\S]*?<\/section>/u)?.[0];
+  assert.ok(unavailableAttention);
+  assert.equal(
+    (unavailableAttention.match(/CLAUDE_REGISTRY_UNAVAILABLE/gu) ?? []).length,
+    1,
+  );
+  assert.match(unavailableAttention, /Claude registry scan reported issues/);
+
+  const empty = dashboardFixture();
+  const emptyClaude = empty.connectors.find(
+    (connector) => connector.provider === "claude",
+  );
+  assert.ok(emptyClaude);
+  emptyClaude.registry = {
+    entriesScanned: 0,
+    parseableRecords: 0,
+    parseableRecordSeenSinceBoot: false,
+    rejected: [],
+    rejectedCodesOmitted: 0,
+  };
+  const emptyModel = buildDashboardViewModel(empty);
+  assert.equal(
+    emptyModel.attention.some(
+      (item) => item.code === "CLAUDE_REGISTRY_EMPTY_SINCE_BOOT",
+    ),
+    true,
+  );
+  assert.match(
+    renderDashboardHtml(empty, { locale: "en" }),
+    /No Claude registry record with parseable required fields has been observed since this broker started/,
+  );
+
+  emptyClaude.registry.entriesScanned = 2;
+  assert.equal(
+    buildDashboardViewModel(empty).attention.some(
+      (item) =>
+        item.code === "CLAUDE_REGISTRY_NO_PARSEABLE_RECORD_SINCE_BOOT",
+    ),
+    true,
+  );
+
+  emptyClaude.registry.parseableRecordSeenSinceBoot = true;
+  const previouslyObserved = buildDashboardViewModel(empty);
+  assert.equal(
+    previouslyObserved.attention.some((item) =>
+      item.code?.startsWith("CLAUDE_REGISTRY_") === true
+    ),
+    false,
+  );
 });
 
 test("progress watches project bounded countdowns, attention, and bilingual metadata only", () => {

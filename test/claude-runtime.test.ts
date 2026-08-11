@@ -18,6 +18,7 @@ import {
   attestClaudePeerRuntime,
   type ClaudeVersionCommand,
 } from "../src/gateway/claude-runtime.js";
+import { UNKNOWN_COMPATIBILITY_VERSION } from "../src/gateway/compatibility.js";
 
 const UID = process.getuid?.() ?? 501;
 const PINNED_VERSION = CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion;
@@ -99,23 +100,20 @@ test("runtime attestation invokes only --version with a closed non-secret enviro
   });
 });
 
-test("runtime rejects every unreviewed Claude version", async (t) => {
+test("runtime reports bounded Claude versions across major changes", async (t) => {
   const current = await fixture(t);
-  for (const version of ["2.2.0", "3.0.0"] as const) {
-    await assert.rejects(
-      attestClaudePeerRuntime(
-        { claudeExecutable: current.executable },
-        {
-          userInfo: () => current.user,
-          runVersion: async () => ({
-            stdout: `${version} (Claude Code)\n`,
-            stderr: "",
-          }),
-        },
-      ),
-      (error: unknown) =>
-        error instanceof BridgeError && error.code === "CLAUDE_VERSION_DRIFT",
+  for (const version of ["2.1.228", "2.2.0", "3.0.0"] as const) {
+    const runtime = await attestClaudePeerRuntime(
+      { claudeExecutable: current.executable },
+      {
+        userInfo: () => current.user,
+        runVersion: async () => ({
+          stdout: `${version} (Claude Code)\n`,
+          stderr: "",
+        }),
+      },
     );
+    assert.equal(runtime.claudeCodeVersion, version);
   }
 });
 
@@ -128,7 +126,7 @@ test("default runner executes the synthetic binary and no provider command", asy
   assert.equal(runtime.claudeCodeVersion, PINNED_VERSION);
 });
 
-test("runtime accepts only the exact official same-home pinned launcher symlink", async (t) => {
+test("runtime accepts only an official same-home versioned launcher symlink", async (t) => {
   const current = await fixture(t);
   const versionsDir = path.join(
     current.home,
@@ -158,35 +156,68 @@ test("runtime accepts only the exact official same-home pinned launcher symlink"
   assert.equal(invokedExecutable, target);
   assert.equal(runtime.claudeExecutable, target);
 
+  const targetEvidence = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "Claude Code development build\n",
+        stderr: "nonfatal launcher notice\n",
+      }),
+    },
+  );
+  assert.equal(
+    targetEvidence.claudeCodeVersion,
+    UNKNOWN_COMPATIBILITY_VERSION,
+  );
+  assert.equal(targetEvidence.launcherVersionEvidence, PINNED_VERSION);
+
   await unlink(current.executable);
   const observedTarget = path.join(versionsDir, "2.2.0");
   await writeFile(observedTarget, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   await symlink(observedTarget, current.executable);
-  await assert.rejects(
-    attestClaudePeerRuntime(
-      { claudeExecutable: current.executable },
-      { userInfo: () => current.user },
-    ),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_VERSION_DRIFT" &&
-      error.message.includes("2.2.0"),
+  const observed = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "2.2.0 (Claude Code)\n",
+        stderr: "",
+      }),
+    },
   );
+  assert.equal(observed.claudeCodeVersion, "2.2.0");
 
   await unlink(current.executable);
-  const wrongTarget = path.join(versionsDir, "2.1.224");
-  await writeFile(wrongTarget, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  await symlink(wrongTarget, current.executable);
-  await assert.rejects(
-    attestClaudePeerRuntime(
-      { claudeExecutable: current.executable },
-      { userInfo: () => current.user },
-    ),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_VERSION_DRIFT" &&
-      error.message.includes("2.1.224"),
+  const unsupportedTarget = path.join(versionsDir, "3.0.0");
+  await writeFile(unsupportedTarget, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(unsupportedTarget, current.executable);
+  const unsupported = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "3.0.0 (Claude Code)\n",
+        stderr: "",
+      }),
+    },
   );
+  assert.equal(unsupported.claudeCodeVersion, "3.0.0");
+  const unsupportedTargetOnly = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "Claude Code development build\n",
+        stderr: "",
+      }),
+    },
+  );
+  assert.equal(
+    unsupportedTargetOnly.claudeCodeVersion,
+    UNKNOWN_COMPATIBILITY_VERSION,
+  );
+  assert.equal(unsupportedTargetOnly.launcherVersionEvidence, "3.0.0");
 
   // A non-version-shaped target inside the versions directory is never
   // classified as drift and never reflected.
@@ -206,47 +237,118 @@ test("runtime accepts only the exact official same-home pinned launcher symlink"
   );
 });
 
-test("runtime classifies clean version drift and reflects only the version", async (t) => {
+test("runtime accepts a trailing suffix and bounded stderr evidence", async (t) => {
   const current = await fixture(t);
-  await assert.rejects(
-    attestClaudePeerRuntime(
-      { claudeExecutable: current.executable },
-      {
-        userInfo: () => current.user,
-        runVersion: async () => ({
-          stdout: "2.1.224 (Claude Code)\n",
-          stderr: "",
-        }),
-      },
-    ),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_VERSION_DRIFT" &&
-      error.message.includes("2.1.224"),
+  const runtime = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "2.1.228 (Claude Code) [beta]\n",
+        stderr: "update notice\n",
+      }),
+    },
+  );
+  assert.equal(runtime.claudeCodeVersion, "2.1.228");
+});
+
+test("runtime reports bounded stderr-only versions across major changes", async (t) => {
+  const current = await fixture(t);
+  const runtime = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "",
+        stderr: "2.1.228 (Claude Code) [release]\n",
+      }),
+    },
+  );
+  assert.equal(runtime.claudeCodeVersion, "2.1.228");
+
+  const unsupported = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "",
+        stderr: "3.0.0 (Claude Code)\n",
+      }),
+    },
+  );
+  assert.equal(unsupported.claudeCodeVersion, "3.0.0");
+});
+
+test("runtime quarantines conflicting recognized version evidence", async (t) => {
+  const current = await fixture(t);
+  const runtime = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "2.1.228 (Claude Code)\n",
+        stderr: "2.1.229 (Claude Code)\n",
+      }),
+    },
+  );
+  assert.equal(runtime.claudeCodeVersion, UNKNOWN_COMPATIBILITY_VERSION);
+  assert.equal(
+    runtime.versionEvidenceFailure,
+    "CLAUDE_VERSION_EVIDENCE_CONFLICT",
   );
 });
 
-test("runtime rejects stderr and oversized version output without reflecting it", async (t) => {
+test("runtime records unparseable bounded version evidence as unknown", async (t) => {
+  const current = await fixture(t);
+  const runtime = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => ({
+        stdout: "Claude Code development build\n",
+        stderr: "nonfatal launcher notice\n",
+      }),
+    },
+  );
+  assert.equal(runtime.claudeCodeVersion, UNKNOWN_COMPATIBILITY_VERSION);
+});
+
+test("runtime quarantines oversized version evidence without reflecting it", async (t) => {
   const current = await fixture(t);
   for (const output of [
-    { stdout: PINNED_VERSION_OUTPUT, stderr: "warning" },
     { stdout: "x".repeat(4_097), stderr: "" },
+    { stdout: PINNED_VERSION_OUTPUT, stderr: "x".repeat(4_097) },
   ]) {
-    await assert.rejects(
-      attestClaudePeerRuntime(
-        { claudeExecutable: current.executable },
-        {
-          userInfo: () => current.user,
-          runVersion: async () => output,
-        },
-      ),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "CLAUDE_PEER_VERSION_UNSUPPORTED" &&
-        !error.message.includes("warning") &&
-        !error.message.includes("xxxx"),
+    const runtime = await attestClaudePeerRuntime(
+      { claudeExecutable: current.executable },
+      {
+        userInfo: () => current.user,
+        runVersion: async () => output,
+      },
     );
+    assert.equal(runtime.claudeCodeVersion, UNKNOWN_COMPATIBILITY_VERSION);
+    assert.equal(
+      runtime.versionEvidenceFailure,
+      "CLAUDE_VERSION_EVIDENCE_TOO_LARGE",
+    );
+    assert.equal(JSON.stringify(runtime).includes("xxxx"), false);
   }
+});
+
+test("runtime quarantines a version command failure without exposing it", async (t) => {
+  const current = await fixture(t);
+  const runtime = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable },
+    {
+      userInfo: () => current.user,
+      runVersion: async () => {
+        throw new Error("private stderr /private/provider/path");
+      },
+    },
+  );
+  assert.equal(runtime.claudeCodeVersion, UNKNOWN_COMPATIBILITY_VERSION);
+  assert.equal(runtime.versionEvidenceFailure, "CLAUDE_VERSION_CHECK_FAILED");
+  assert.equal(JSON.stringify(runtime).includes("/private"), false);
 });
 
 test("runtime rejects executable symlinks, unsafe modes, and paths outside login home", async (t) => {
@@ -312,7 +414,7 @@ test("runtime rejects a binary generation changed during version attestation", a
   );
 });
 
-test("runtime rejects a pinned launcher symlink replaced during attestation", async (t) => {
+test("runtime rejects an official launcher symlink replaced during attestation", async (t) => {
   const current = await fixture(t);
   const versionsDir = path.join(
     current.home,
@@ -344,18 +446,15 @@ test("runtime rejects a pinned launcher symlink replaced during attestation", as
   );
 });
 
-test("default version runner enforces its bounded timeout", async (t) => {
+test("default version runner quarantines its bounded timeout", async (t) => {
   const current = await fixture(t);
   await writeFile(current.executable, "#!/bin/sh\nwhile :; do :; done\n", {
     mode: 0o700,
   });
-  await assert.rejects(
-    attestClaudePeerRuntime(
-      { claudeExecutable: current.executable, versionTimeoutMs: 100 },
-      { userInfo: () => current.user },
-    ),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_VERSION_CHECK_FAILED",
+  const runtime = await attestClaudePeerRuntime(
+    { claudeExecutable: current.executable, versionTimeoutMs: 100 },
+    { userInfo: () => current.user },
   );
+  assert.equal(runtime.claudeCodeVersion, UNKNOWN_COMPATIBILITY_VERSION);
+  assert.equal(runtime.versionEvidenceFailure, "CLAUDE_VERSION_CHECK_FAILED");
 });

@@ -49,6 +49,71 @@ against other processes running as the same OS user.
   environment or socket capabilities. Embassy is not a sandbox for untrusted
   same-user code.
 
+## What Embassy defends, and what it deliberately does not
+
+Embassy's security boundary is intentionally narrower than “protect this user
+from every process this user runs.” The boundary below governs implementation,
+review, and audit work.
+
+### What Embassy defends
+
+- **The same-UID OS and artifact boundary for anything Embassy executes or
+  treats as identity evidence.** Embassy validates canonical paths, ownership,
+  symlink policy, modes, approved version-directory containment, its own state
+  and sockets, and the generation of artifacts it owns. Before acting on an
+  identity-bearing input—such as an inherited task identity, provider record,
+  endpoint binding, route, or reply request—it validates the input's bounded
+  shape and its current ownership, correlation, and generation. Unsafe
+  controller-wide evidence is fatal; this class comprises Embassy-owned or
+  executed artifacts and Embassy callback, control, and state paths. The
+  Claude-owned external sessions registry root is instead a read-side identity
+  source: unsafe UID or mode evidence quarantines and write-fences only Claude,
+  with a loud observation, while the broker and other provider stay available.
+  A bad provider record, endpoint, or acted-on input is rejected or fenced at
+  that artifact rather than accepted on a best-effort basis.
+- **Honest provenance at the message boundary.** The broker creates the outer
+  `cross-session-message` frame and first-child reply hint from validated route
+  metadata, and neutralizes body text shaped like its reserved framing tags
+  before composition. Those marks tell the receiver which transport path and
+  sender alias Embassy observed. They are not a signature, and every delivered
+  body remains untrusted input whose claims and requested actions require the
+  receiver's normal judgment, sandbox, and approval policy.
+- **Anti-runaway containment.** Queue counts and bytes, message and frame sizes,
+  callbacks, conversations, retained bodies, deduplication records, rate
+  windows, and deadlines are bounded. Exhaustion rejects, expires, or fences
+  work with an explicit result; a bound never creates permission or justifies
+  replaying an ambiguous write.
+
+### What Embassy deliberately does not defend
+
+- **Other local software already running as the same user.** Embassy provides
+  no local-process authentication and no capability or local-user consent
+  boundary against software already operating under that UID. Pair edges encode
+  routing consent between agent endpoints; aliases, conversation tokens,
+  inherited environment values, private sockets, and same-user file modes do
+  not authenticate one same-user process from another.
+- **Local software through browser-origin checks.** Exact Host, Origin, the
+  `X-Embassy-Request` sentinel, and same-origin response policy constrain what a
+  browser can issue or read across origins. They do not authenticate a loopback
+  caller, its process, or its UID; the live dashboard assumes a trusted
+  single-user machine.
+- **Predictions based on version strings.** A version string is a compatibility
+  observation, never security evidence or attack detection. Directly observed
+  path, ownership, protocol, schema, and generation facts outrank prediction
+  from a version string. Within the security boundary, boot refusal is reserved
+  for an unsafe or lost singleton lease, corrupt controller state, or unsafe
+  OS-boundary attestation. Version drift, an unparseable version, failed probes,
+  or one incompatible provider degrades and write-fences that surface; it does
+  not take down the broker or the other provider.
+
+### Audit rule
+
+Every new audit check must cite the sentence in this doctrine that it enforces.
+If the proposed check has no supporting sentence here, raise it explicitly as
+a doctrine-change proposal, including the product and threat-model consequence,
+before adding the check. A test, review finding, or “hardening” patch must not
+silently expand Embassy's claimed boundary.
+
 ## Routing and consent
 
 - A Codex task must explicitly self-register with a `codex-*` alias before it
@@ -107,16 +172,34 @@ broker.
   only listeners are private Unix-domain sockets. The opt-in
   `embassy dashboard --live` companion is a separate process with its own
   loopback HTTP listener — see "Live companion boundary" below.
-- Provider protocols are exact-version-pinned. Provider startup automatically
-  validates the release's reviewed Claude launcher/runtime, Claude peer-version
-  inventory and protocol, and Codex App Server version. Unknown versions or
-  required schemas fail closed. Every replacement Codex endpoint generation
-  starts monitor-only and remains write-fenced until its fresh initialize and
-  exact-task listing checks pass and the controller activates it.
-- Embassy publishes at most one visibly prefixed, process-owned `codex-*`
-  record in Claude's registry. It creates one callback socket and removes only
-  exact-owned artifacts whose generation still matches during graceful
-  shutdown.
+- Provider compatibility is evidence-gated rather than patch-version-pinned.
+  Provider startup first validates exact OS ownership, path, symlink, lease,
+  state, and generation evidence. Unsafe evidence for Embassy-owned or executed
+  artifacts and Embassy callback, control, or state paths refuses broker
+  startup; unsafe UID or mode evidence for Claude's external sessions registry
+  root quarantines and write-fences only Claude.
+  A certified same-major provider build is writable. A same-major build whose
+  bounded live-schema probes all pass is `schema_attested` and writable only
+  when those probes cover the write path. Claude's probes cover its native
+  write path. Codex's bounded pre-write reads may include `initialize`,
+  `thread/loaded/list`, and registration-time `thread/resume`, but never
+  `turn/start`; untested Codex 0.x therefore stays monitor-only pending a
+  certified write schema. Failed
+  probes, a different major, or version evidence that cannot establish a safe
+  major leave only that
+  provider degraded, monitor-only, and write-fenced while the broker,
+  control/dashboard surfaces, and other provider remain available; probes
+  never promote across a major or unknown version. A Claude
+  session record whose peer protocol is not 1 is rejected in isolation and
+  included in bounded rejection evidence. Every replacement Codex endpoint
+  generation remains write-fenced until its fresh initialize and exact-task
+  listing checks pass and the controller activates it.
+- Embassy publishes at most one process-owned `codex-*` record in Claude's
+  registry with the supported explicit versioned Embassy-advertisement marker.
+  The prefix is a visible alias convention, not the discriminator: an unmarked
+  genuine Claude session named `codex-*` remains discoverable. Embassy creates
+  one callback socket and removes only exact-owned artifacts whose generation
+  still matches during graceful shutdown.
 - App Server methods are allowlisted. Embassy exposes no archive, deletion,
   shell, configuration, authentication, plugin, history, approval-response, or
   generic RPC method.
@@ -127,7 +210,7 @@ broker.
   retains at most three steers per route. The environment kill switch defaults
   on and can disable this classification globally. Interrupt remains limited to
   an exact turn started and positively observed by the same connector.
-- Exact App Server 0.147.0 initialization enables `experimentalApi: true`
+- The tested App Server 0.147.0 initialization enables `experimentalApi: true`
   solely for `thread/resume.excludeTurns: true`. It adds no general
   experimental method or authority. Missing, malformed, or nonempty returned
   turns fail closed and are never retained.
@@ -163,7 +246,7 @@ kernel lock.
 Embassy's provider-facing access is intentionally enumerable:
 
 - read and execute the configured Claude launcher only for bounded automatic
-  exact-version validation;
+  path, version-banner, and compatibility observation;
 - read the live Claude session registry and connect validated peer sockets;
 - create and later remove its one callback socket and one registry record;
 - resolve the managed Codex installation and attach to the already-running
@@ -171,10 +254,13 @@ Embassy's provider-facing access is intentionally enumerable:
 - inspect canonical filesystem metadata needed to validate provider-advertised
   endpoints and generations.
 
-Claude-owned registry files and peer sockets are accepted according to actual
-filesystem accessibility plus bounded schema, type, PID/path correlation,
-liveness, and generation checks. Embassy does not treat provider-owned Unix
-owner or mode bits as an additional routing policy.
+The Claude-owned external sessions registry root must be owned by the current
+UID with exact mode 0700 before Embassy enumerates it; failure quarantines and
+write-fences only Claude. Within an admitted root, individual registry records
+and peer sockets retain their bounded schema, file/socket type, PID/path and
+allowed-root correlation, accessibility, liveness, and generation checks.
+Embassy invents no additional owner or mode rule for those individual
+provider-owned artifacts.
 
 Embassy does not need or intentionally read credentials, Keychain items,
 Claude project history, Codex or Claude transcripts, shell history, or provider
@@ -253,14 +339,32 @@ because this surface intentionally has no such authentication boundary.
 Routine tests use temporary directories, fake peers, and fake App Server
 transports. They do not inspect live provider state or contact a model.
 
-Compatibility admission is automatic and exact-pinned. Broker/provider startup
-owns the bounded read-only validation of the configured installations, exact
-versions, protocol constants, and required schemas; an unknown same-major build
-is not admitted. These checks do not route a user message or start a model
-turn. A replacement Codex endpoint generation receives its own fresh
-monitor-only initialize and exact-task listing check, while the write gate
-stays closed until controller activation. Runtime record, frame, response,
-identity, generation, and deadline checks remain mandatory after admission.
+Compatibility admission is automatic and evidence-gated. Broker/provider
+startup owns bounded read-only validation of the configured installations,
+exact OS boundaries, provider majors, declared protocol constants, and live
+schemas. Unsafe Embassy-owned/executed artifacts or Embassy callback, control,
+or state paths remain startup-fatal; unsafe UID or mode evidence on Claude's
+external sessions registry root quarantines only that provider. Certified
+same-major builds are writable. Fully probed same-major
+builds are `schema_attested` and writable only where the probes cover writes.
+Codex's bounded pre-write reads may include `initialize`, `thread/loaded/list`,
+and registration-time `thread/resume`, but never `turn/start`; untested Codex
+0.x therefore remains monitor-only. Failed
+probes, different majors, and
+version evidence that cannot establish a safe major remain provider-local
+monitor-only states; the
+broker and other provider stay available, and no probe can promote across a
+major or unknown version. Different-major guidance
+names the observed/tested versions and supported major and requires an Embassy
+release supporting the observed major. These checks do not route a user
+message or start a model turn. Claude
+registry parsing remains strict for every required and consumed field while
+ignoring unknown top-level fields; bounded rejected-record counts and an
+observed-empty registry are surfaced instead of hidden. A replacement Codex
+endpoint generation receives its own fresh monitor-only initialize and
+exact-task listing check, while the write gate stays closed until controller
+activation. Runtime record, frame, response, identity, generation, and
+deadline checks remain mandatory after admission.
 
 Passive live discovery, a live provider connection, a native message, and an
 App Server turn are distinct authorization gates. Each requires an explicit

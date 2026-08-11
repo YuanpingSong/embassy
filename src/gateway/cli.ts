@@ -1169,12 +1169,7 @@ export async function runGatewayCli(
     if (error instanceof BridgeError) {
       writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.recoverable,
-        kind:
-          error.code === "CLAUDE_VERSION_DRIFT"
-            ? "versionDrift"
-            : error.recoverable
-              ? "unavailable"
-              : "input",
+        kind: error.recoverable ? "unavailable" : "input",
       });
       if (
         error.code === "LIVE_DASHBOARD_PORT_IN_USE" &&

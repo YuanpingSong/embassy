@@ -1,6 +1,9 @@
-import { arePublicAvailablePeerSnapshots } from "./types.js";
 import {
-  isCompatibilityAttestation,
+  arePublicAvailablePeerSnapshots,
+  isPublicCompatibilityCheckSnapshot,
+  isPublicRegistryObservationSnapshot,
+} from "./types.js";
+import {
   type CompatibilityTier,
   type CompatibilitySurface,
 } from "./compatibility.js";
@@ -77,6 +80,9 @@ export type DashboardAttentionItem = Readonly<{
     | "codex_succession_busy"
     | "codex_succession_recovery"
     | "progress_watch"
+    | "registry_empty"
+    | "registry_rejected"
+    | "provider_incompatible"
     | "generic";
 }>;
 
@@ -229,15 +235,29 @@ export type DashboardConnectorRow = Readonly<{
   protocolVersion?: string | undefined;
   lastSeenAt?: string | undefined;
   safeErrorCode?: string | undefined;
+  registry?: DashboardRegistryObservation | undefined;
 }>;
 
 export type DashboardCompatibilityCheckRow = Readonly<{
   surface: CompatibilitySurface;
   version: string;
+  testedVersion: string;
+  supportedMajor: string;
   tier: CompatibilityTier;
   checkedAt: string;
   failure?: string | undefined;
   safeErrorCode?: string | undefined;
+}>;
+
+export type DashboardRegistryObservation = Readonly<{
+  entriesScanned: number;
+  parseableRecords: number;
+  parseableRecordSeenSinceBoot: boolean;
+  rejected: readonly Readonly<{
+    safeErrorCode: string;
+    count: number;
+  }>[];
+  rejectedCodesOmitted: number;
 }>;
 
 export type DashboardOmissions = Readonly<{
@@ -456,6 +476,14 @@ function guidanceFor(
     case "ADAPTER_DEGRADED":
     case "ROUTE_DEGRADED":
       return "degraded";
+    case "CLAUDE_PEER_VERSION_UNSUPPORTED":
+    case "CLAUDE_VERSION_UNPARSEABLE":
+    case "CLAUDE_VERSION_CHECK_FAILED":
+    case "CLAUDE_VERSION_EVIDENCE_CONFLICT":
+    case "CLAUDE_VERSION_EVIDENCE_TOO_LARGE":
+    case "CODEX_APP_SERVER_VERSION_UNSUPPORTED":
+    case "CODEX_APP_SERVER_VERSION_UNPARSEABLE":
+      return "provider_incompatible";
     default:
       return "generic";
   }
@@ -856,8 +884,11 @@ export function buildDashboardViewModel(
   );
 
   const connectors = snapshot.connectors
-    .map(
-      (connector): DashboardConnectorRow => ({
+    .map((connector): DashboardConnectorRow => {
+      const registry = isPublicRegistryObservationSnapshot(connector.registry)
+        ? connector.registry
+        : undefined;
+      return {
         provider: connector.provider,
         host: boundedText(connector.host),
         health: connector.health,
@@ -874,15 +905,27 @@ export function buildDashboardViewModel(
         ...(safeCode(connector.safeErrorCode) === undefined
           ? {}
           : { safeErrorCode: safeCode(connector.safeErrorCode) }),
-      }),
-    )
+        ...(registry === undefined
+          ? {}
+          : {
+              registry: {
+                entriesScanned: registry.entriesScanned,
+                parseableRecords: registry.parseableRecords,
+                parseableRecordSeenSinceBoot:
+                  registry.parseableRecordSeenSinceBoot,
+                rejected: registry.rejected.map((row) => ({ ...row })),
+                rejectedCodesOmitted: registry.rejectedCodesOmitted,
+              },
+            }),
+      };
+    })
     .sort((left, right) =>
       compareText(`${left.provider}\0${left.host}`, `${right.provider}\0${right.host}`),
     )
     .slice(0, DASHBOARD_MODEL_LIMITS.connectors);
   const compatibilityChecks = (
     Array.isArray(snapshot.compatibilityChecks)
-      ? snapshot.compatibilityChecks.filter(isCompatibilityAttestation)
+      ? snapshot.compatibilityChecks.filter(isPublicCompatibilityCheckSnapshot)
       : []
   )
     .map((attestation): DashboardCompatibilityCheckRow => {
@@ -893,6 +936,8 @@ export function buildDashboardViewModel(
       return {
         surface: attestation.surface,
         version: boundedText(attestation.version),
+        testedVersion: boundedText(attestation.testedVersion),
+        supportedMajor: boundedText(attestation.supportedMajor),
         tier: attestation.tier,
         checkedAt: attestation.checkedAt,
         ...(failed === undefined ? {} : { failure: failed.name }),
@@ -1140,9 +1185,62 @@ export function buildDashboardViewModel(
       provider: connector.provider,
       host: connector.host,
       guidance:
-        connector.health === "offline" ? "connector_offline" : "degraded",
+        connector.health === "offline"
+          ? "connector_offline"
+          : connector.safeErrorCode === "CLAUDE_PEER_VERSION_UNSUPPORTED" ||
+              connector.safeErrorCode === "CLAUDE_VERSION_UNPARSEABLE" ||
+              connector.safeErrorCode === "CLAUDE_VERSION_CHECK_FAILED" ||
+              connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_CONFLICT" ||
+              connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_TOO_LARGE" ||
+              connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNSUPPORTED" ||
+              connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNPARSEABLE"
+            ? "provider_incompatible"
+            : "degraded",
     });
     representedScopes.add(scope);
+  }
+  for (const connector of connectors) {
+    const observation = connector.registry;
+    if (observation === undefined) continue;
+    if (
+      observation.rejected.length > 0 ||
+      observation.rejectedCodesOmitted > 0
+    ) {
+      const item: DashboardAttentionItem = {
+        kind: "connector",
+        code: observation.rejected.some(
+          (row) => row.safeErrorCode === "CLAUDE_REGISTRY_UNAVAILABLE",
+        )
+          ? "CLAUDE_REGISTRY_UNAVAILABLE"
+          : "CLAUDE_REGISTRY_RECORDS_REJECTED",
+        severity: "warning",
+        provider: "claude",
+        host: connector.host,
+        guidance: "registry_rejected",
+      };
+      const duplicateIndex = attentionCandidates.findIndex(
+        (candidate) =>
+          candidate.code === item.code &&
+          candidate.provider === item.provider &&
+          candidate.alias === item.alias &&
+          candidate.host === item.host,
+      );
+      if (duplicateIndex === -1) attentionCandidates.push(item);
+      else attentionCandidates[duplicateIndex] = item;
+      continue;
+    }
+    if (observation.parseableRecordSeenSinceBoot) continue;
+    attentionCandidates.push({
+      kind: "connector",
+      code:
+        observation.entriesScanned === 0
+          ? "CLAUDE_REGISTRY_EMPTY_SINCE_BOOT"
+          : "CLAUDE_REGISTRY_NO_PARSEABLE_RECORD_SINCE_BOOT",
+      severity: "warning",
+      provider: "claude",
+      host: connector.host,
+      guidance: "registry_empty",
+    });
   }
   if (
     (snapshot.health === "degraded" ||

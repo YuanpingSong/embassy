@@ -5,11 +5,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
-import { CLAUDE_PEER_COMPATIBILITY } from "./claude-peer.js";
-import { isCompatibilityVersion } from "./compatibility.js";
+import {
+  isCompatibilityVersion,
+  UNKNOWN_COMPATIBILITY_VERSION,
+} from "./compatibility.js";
 
 const MAX_VERSION_OUTPUT_BYTES = 4_096;
-const VERSION_OUTPUT_PATTERN = /^(\d{1,4}\.\d{1,4}\.\d{1,4}) \(Claude Code\)\r?\n?$/;
+const VERSION_OUTPUT_PATTERN = /\b(\d{1,4}\.\d{1,4}\.\d{1,4})\s+\(Claude Code\)/g;
 const USERNAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 export type ClaudePeerRuntimeOptions = {
@@ -21,6 +23,13 @@ export type ClaudePeerRuntimeOptions = {
 export type AttestedClaudePeerRuntime = {
   claudeExecutable: string;
   claudeCodeVersion: string;
+  /** OS-attested official launcher target; never upgrades an unknown banner. */
+  launcherVersionEvidence?: string;
+  /** Bounded command/banner failures quarantine this surface before construction. */
+  versionEvidenceFailure?:
+    | "CLAUDE_VERSION_CHECK_FAILED"
+    | "CLAUDE_VERSION_EVIDENCE_CONFLICT"
+    | "CLAUDE_VERSION_EVIDENCE_TOO_LARGE";
   sessionsDir: string;
   socketDir: string;
 };
@@ -325,29 +334,15 @@ async function attestExecutablePath(
     ) {
       throw new BridgeError(
         "UNSAFE_CLAUDE_EXECUTABLE",
-        "The official Claude launcher symlink target is outside its pinned version directory.",
+        "The official Claude launcher symlink target is outside its versions directory.",
       );
     }
     const targetVersion = path.basename(linkTarget);
-    if (targetVersion !== CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion) {
-      // A version-shaped target inside the official versions directory that
-      // is not the pinned version is drift from an auto-update, not
-      // tampering. Still fail closed, but say what happened and how to move
-      // forward. Only a strictly version-shaped basename is ever reflected.
-      const foundVersion = isCompatibilityVersion(targetVersion)
-        ? targetVersion
-        : undefined;
-      if (foundVersion !== undefined) {
-        throw new BridgeError(
-          "CLAUDE_VERSION_DRIFT",
-          `Installed Claude Code is ${foundVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
-        );
-      } else {
-        throw new BridgeError(
-          "UNSAFE_CLAUDE_EXECUTABLE",
-          "The official Claude launcher symlink target is outside its pinned version directory.",
-        );
-      }
+    if (!isCompatibilityVersion(targetVersion)) {
+      throw new BridgeError(
+        "UNSAFE_CLAUDE_EXECUTABLE",
+        "The official Claude launcher symlink target is not a versioned executable.",
+      );
     }
     const linkAfterRead = await lstat(configuredExecutable);
     if (
@@ -431,6 +426,29 @@ async function runVersionCommand(
   });
 }
 
+function parsedVersionEvidence(...outputs: readonly string[]): Readonly<{
+  version: string;
+  failure?: AttestedClaudePeerRuntime["versionEvidenceFailure"];
+}> {
+  const versions = new Set<string>();
+  for (const output of outputs) {
+    for (const match of output.matchAll(VERSION_OUTPUT_PATTERN)) {
+      const version = match[1];
+      if (version !== undefined) versions.add(version);
+    }
+  }
+  if (versions.size > 1) {
+    return {
+      version: UNKNOWN_COMPATIBILITY_VERSION,
+      failure: "CLAUDE_VERSION_EVIDENCE_CONFLICT",
+    };
+  }
+  return {
+    version:
+      versions.values().next().value ?? UNKNOWN_COMPATIBILITY_VERSION,
+  };
+}
+
 export async function attestClaudePeerRuntime(
   options: ClaudePeerRuntimeOptions,
   testing: ClaudePeerRuntimeTestOverrides = {},
@@ -462,49 +480,35 @@ export async function attestClaudePeerRuntime(
     timeoutMs: boundedTimeout(options.versionTimeoutMs),
     maxOutputBytes: MAX_VERSION_OUTPUT_BYTES,
   };
-  let output: ClaudeVersionCommandResult;
+  let versionEvidence: ReturnType<typeof parsedVersionEvidence>;
   try {
-    output = await (testing.runVersion ?? runVersionCommand)(command);
-  } catch (error) {
+    const output = await (testing.runVersion ?? runVersionCommand)(command);
     if (
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_VERSION_CHECK_FAILED"
+      Buffer.byteLength(output.stdout, "utf8") > MAX_VERSION_OUTPUT_BYTES ||
+      Buffer.byteLength(output.stderr, "utf8") > MAX_VERSION_OUTPUT_BYTES
     ) {
-      throw error;
+      versionEvidence = {
+        version: UNKNOWN_COMPATIBILITY_VERSION,
+        failure: "CLAUDE_VERSION_EVIDENCE_TOO_LARGE",
+      };
+    } else {
+      versionEvidence = parsedVersionEvidence(output.stdout, output.stderr);
     }
-    throw new BridgeError(
-      "CLAUDE_VERSION_CHECK_FAILED",
-      "The bounded Claude Code version check failed without accessing provider state.",
-    );
+  } catch {
+    versionEvidence = {
+      version: UNKNOWN_COMPATIBILITY_VERSION,
+      failure: "CLAUDE_VERSION_CHECK_FAILED",
+    };
   }
-  const versionMatch = VERSION_OUTPUT_PATTERN.exec(output.stdout);
+  const reportedVersion = versionEvidence.version;
   if (
-    Buffer.byteLength(output.stdout, "utf8") > MAX_VERSION_OUTPUT_BYTES ||
-    Buffer.byteLength(output.stderr, "utf8") > MAX_VERSION_OUTPUT_BYTES ||
-    output.stderr.length !== 0 ||
-    versionMatch === null
-  ) {
-    // Well-formed output for a different version is auto-update drift and
-    // gets the actionable code; anything else stays the strict refusal.
-    throw new BridgeError(
-      "CLAUDE_PEER_VERSION_UNSUPPORTED",
-      `Claude peer compatibility is pinned to Claude Code ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}.`,
-    );
-  }
-  const reportedVersion = versionMatch[1] as string;
-  if (
+    reportedVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
     before.linkTarget !== undefined &&
     path.basename(before.linkTarget) !== reportedVersion
   ) {
     throw new BridgeError(
       "CLAUDE_EXECUTABLE_CHANGED",
       "The Claude launcher target and reported version disagree.",
-    );
-  }
-  if (reportedVersion !== CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion) {
-    throw new BridgeError(
-      "CLAUDE_VERSION_DRIFT",
-      `Installed Claude Code reports ${reportedVersion}; this Embassy build is pinned to ${CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion}. Update Embassy, then run embassy health.`,
     );
   }
   const after = await attestExecutablePath(
@@ -532,6 +536,13 @@ export async function attestClaudePeerRuntime(
   return {
     claudeExecutable: executable,
     claudeCodeVersion: reportedVersion,
+    ...(reportedVersion === UNKNOWN_COMPATIBILITY_VERSION &&
+    before.linkTarget !== undefined
+      ? { launcherVersionEvidence: path.basename(before.linkTarget) }
+      : {}),
+    ...(versionEvidence.failure === undefined
+      ? {}
+      : { versionEvidenceFailure: versionEvidence.failure }),
     sessionsDir: path.join(user.homedir, ".claude", "sessions"),
     socketDir: path.join(path.sep, "tmp", "cc-socks"),
   };

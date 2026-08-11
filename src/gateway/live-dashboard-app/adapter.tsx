@@ -238,6 +238,9 @@ namespace Embassy {
     codex_succession_busy: "codexSuccessionBusy",
     codex_succession_recovery: "codexSuccessionRecovery",
     progress_watch: "progressWatch",
+    registry_empty: "registryEmpty",
+    registry_rejected: "registryRejected",
+    provider_incompatible: "providerIncompatible",
     generic: "generic",
   } as const satisfies Record<DashboardAttentionGuidance, string>;
 
@@ -261,6 +264,11 @@ namespace Embassy {
         return `embassy register-codex --alias ${item.alias ?? "<alias>"}`;
       case "consent_edge_unavailable":
         return "embassy refresh-dashboard";
+      case "registry_empty":
+      case "provider_incompatible":
+        return "embassy refresh-dashboard";
+      case "registry_rejected":
+        return "embassy status";
       case "codex_succession_busy":
       case "codex_succession_recovery":
         return `embassy register-codex --alias <new> --succeeds ${item.alias ?? "<old>"}`;
