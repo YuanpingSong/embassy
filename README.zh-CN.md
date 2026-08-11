@@ -53,7 +53,7 @@ embassy health
 embassy status
 ```
 
-`status` 列出 `availablePeers`——你可以选择的在线 Claude 会话。
+`status` 列出 `availablePeers`——你可以选择的在线 Claude 会话。如果该列表为空，请先启动一个 Claude Code 会话，然后运行 `embassy refresh-dashboard`——它会重新执行 Claude 发现；下一次 `status` 应该就能看到该会话。
 
 ### 2. 注册 Codex 任务
 
@@ -63,7 +63,7 @@ embassy status
 embassy register-codex --alias codex-reviewer@this-mac
 ```
 
-你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，运行 `unregister-codex`。
+你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，请在同一个任务内运行 `embassy unregister-codex --alias codex-reviewer@this-mac`。
 
 托管 App Server 端点代际变更与 `embassy serve` 重启都会使用精确任务重新激活。每个替代端点都从仅监控状态开始；只有重新初始化并通过 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才能重新锚定别名，而且在激活这个精确代际前写入始终保持封锁。因此，正常的代理重启不需要手动重新注册。端点不兼容，或精确任务缺失、重复，都会使路由以 `REOBSERVATION_REQUIRED` 保持陈旧；该任务恢复可观察后，请从精确任务内再次运行 `embassy register-codex --alias codex-reviewer@this-mac`，且不要先注销。Embassy 绝不会按别名改投其他任务，也不会重放写入结果不明确的正文。
 
@@ -75,7 +75,11 @@ embassy register-codex --alias codex-reviewer@this-mac
 embassy select-claude --alias advisor@this-mac
 ```
 
-你应看到 `"accepted":true`。注册和选择共同构成一个配对——现在这个 Claude 会话和这个 Codex 任务可以通过 Embassy 交换消息。（`select-claude` 是单任务场景下的简写；`embassy pair --claude <name@host> --codex <codex-alias>` 显式指定两端，且多个配对可以并存。）
+这条命令可以在操作员终端中运行，也可以在 Codex 任务内运行——两者都可以，因为 `select-claude` 在存在继承的 Codex 身份时会使用它，不存在时则解析唯一一个已注册任务。`embassy select-claude --session <uuid>` 通过原生 UUID 选择同一个会话。
+
+你应看到 `"accepted":true`。注册和选择共同构成一个配对——现在这个 Claude 会话和这个 Codex 任务可以通过 Embassy 交换消息。
+
+当你注册了多个任务后，请用 `embassy pair --claude <name@host> --codex <codex-alias>` 显式指定两端；多个配对可以并存。与 `select-claude` 不同，`pair` 和 `unpair` 必须**在 Codex 任务内部**运行，就像 `register-codex` 一样。在普通终端中它们会以 `CODEX_IDENTITY_REQUIRED` 失败，在 Claude 会话内则以 `CALLER_IDENTITY_CONFLICT` 失败。
 
 ### 4. 发送消息
 
@@ -92,6 +96,17 @@ MSG
 
 你应看到一个 `conv_` 对话令牌和一个 `dlv_` 投递令牌。因为此次发送请求了回复，Claude 的响应会被自动路由回 Codex 任务。反方向上，兼容的 Claude 会话使用其原生的 `ListAgents` 和 `SendMessage` 工具联系 `codex-reviewer`——无需 Embassy 命令。
 
+`send-to-codex` 是同一方向的 CLI 形式，供偏好显式命令的 Claude 会话使用。它接受相同的标志并从标准输入读取正文，并且必须在该 Claude 会话内运行，才能继承该会话的回复标识：
+
+```bash
+embassy send-to-codex \
+  --from advisor@this-mac \
+  --to codex-reviewer@this-mac \
+  --expects-reply <<'MSG'
+Summarize the migration risks you found.
+MSG
+```
+
 ### 5. 后续跟进
 
 任何持有完整 `conv_` 令牌的对话参与方都可以用 `reply` 继续仍然有效的对话。初始发送方从 Embassy 命令结果中获得令牌；接收方则从入站消息的来源封装中获得同一个完整令牌和回复提示：
@@ -106,9 +121,11 @@ MSG
 
 Embassy 会在实际写入提供方之前，为双向路由消息添加一个由代理控制的 `<cross-session-message>` 来源封装。封装标出已经验证的发送方别名，其首个 `<embassy-reply-hint>` 元素包含完整对话令牌、接收方自己的精确别名和可直接使用的 `embassy reply` 命令。朝向 Codex 时，外层标记本身还带有 `conversation="conv_..."`；朝向 Claude 时，为符合 Claude Code 的规范解析格式，完整令牌和回复提示位于封装正文中，而不作为外层属性。请使用收到的完整令牌，切勿猜测或重构它。令牌本身不授予路由权限：每次回复仍会重新检查调用方身份、对话参与关系和实时路由。
 
+该封装是清晰的来源标记，既不是密码学签名，也不表示正文可信。在写入提供方之前，Embassy 会中和不可信正文中嵌套出现的自有保留封装标签；以你的 OS 用户身份运行的任意代码和所有消息文本，始终都是不可信输入。
+
 ### 实时查看
 
-`embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断），默认地址为 `http://127.0.0.1:41961/`。如需为本次启动选择另一个稳定端口，请运行 `embassy dashboard --live --port <n>`，其中整数范围为 1024 到 65535。当前台组件运行时，多个窗口和浏览器可以使用同一个 URL；若端口已被占用，启动会明确失败并提示使用 `--port`，不会回退到其他端口。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
+`embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断），默认地址为 `http://127.0.0.1:41961/`。如需为本次启动选择另一个稳定端口，请运行 `embassy dashboard --live --port <n>`，其中整数范围为 1024 到 65535。当前台组件运行时，该 URL 最多支持四个并发实时视图（可分布在窗口、标签页或浏览器中）；在其中一个关闭前，第五条流会被拒绝。若端口已被占用，启动会明确失败并提示使用 `--port`，不会回退到其他端口。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
 
 实时仪表盘也可以在明确确认后移除孤立的 Codex 注册，但仅限代理已经证明该注册陈旧且其所属端点代际已失效的情况。当前、仅离线或代际状态不明确的注册绝不能通过此恢复操作移除。
 
@@ -134,6 +151,8 @@ Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份
 投递时机因方向而异。通过路由与写前检查后，所有朝向 Claude 的正文都会立即写入 Claude 的原生邮箱，无论观测到 Claude 正繁忙还是空闲。`transport_written` 记录这次邮箱写入，并且就是朝向 Claude 的终局 `delivered` 边界；它不表示 Claude 已读取或消费正文。朝向 Codex 的普通正文则在任务忙碌时排队，并在任务空闲后启动轮次。仅在 Claude→Codex 方向，正文以精确 `STEER:` 开头的消息可以在 App Server 的下一个工具调用边界进入当前轮次；若该边界不可用，消息会回到普通队列。
 
 每条被路由的消息在接收方看到时都位于 Embassy 生成的跨会话来源封装中，其中包含已验证的发送方别名、完整 `conv_` 令牌和面向该接收方的回复提示。来源封装是模型可见的结构性提示，并非密码学身份认证；消息正文始终应被视为不可信输入。
+
+完整对话令牌只出现在初始发送方收到的命令结果，以及接收方那次临时的消息载荷中；它绝不会进入仪表盘、公开快照、账簿、回执或日志。
 
 每条已结算的消息都会产生回执。`delivered` 表示观测到了该方向的终端提供方边界——朝向 Codex，意味着 App Server 接受了该轮次；朝向 Claude，意味着原生邮箱写入完成。两者都不意味着模型已读取或执行。`unconfirmed` 和 `ambiguous` 表示所需证据缺失；它们是终态，从不自动重试。完整语义详见[投递](docs/DELIVERY.zh-CN.md)。
 
@@ -165,16 +184,19 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | --- | --- | --- |
 | `serve` | 操作员 | 启动前台代理和仪表盘 |
 | `health` / `status` | 操作员 | 检查存活状态并查看脱敏快照 |
-| `refresh-dashboard` | 操作员 | 重新生成两个静态仪表盘文件 |
+| `refresh-dashboard` | 操作员 | 重新执行 Claude 会话发现，并重新生成两个静态仪表盘文件 |
 | `dashboard --live [--lang en\|zh-CN] [--port <n>]` | 操作员 | 启动带有限路由同意操作的实时仪表盘组件；需要 `embassy serve` 正在运行 |
 | `delivery-status` | 任一提供方 | 使用 `embassy delivery-status --token dlv_<token>` 读取单条投递跟踪器 |
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
-| `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；例如，`embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
-| `pair` / `unpair` | 操作员 | 显式指定两端来添加或移除一条 Claude↔Codex 边：`embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac` |
-| `select-claude` / `unselect-claude` | 操作员 | `pair`/`unpair` 的单任务简写：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
-| `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息 |
-| `send-to-codex` | Claude 会话 | 使用继承的原生回复标识发送一条有界消息 |
-| `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话；调用方、对话参与关系和路由会重新检查 |
+| `untrack` | 任一提供方 | 关闭一个活跃的进度监视：`embassy untrack --conversation conv_<token>` |
+| `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；两者都需要 `--alias <codex-alias>`，而 `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
+| `pair` / `unpair` | Codex 任务 | 显式指定两端来添加或移除一条 Claude↔Codex 边：`embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac`。与 `register-codex` 一样，它必须在 Codex 任务内部运行 |
+| `select-claude` / `unselect-claude` | 操作员或 Codex 任务 | `pair`/`unpair` 的单任务简写，接受 `--alias <name@host>` 或 `--session <uuid>`：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
+| `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息：`--from <codex-alias> --to <claude-alias>`，正文从标准输入读取，可选 `--expects-reply` 与 `--track [--idle-minutes <n>]` |
+| `send-to-codex` | Claude 会话 | 标志与正文输入方式相同，使用继承的原生回复标识 |
+| `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话：`--conversation conv_<token> --alias <你的别名>`，正文从标准输入读取，可选 `--track [--idle-minutes <n>]`；调用方、对话参与关系和路由会重新检查 |
+
+`--track` 会为该对话开启一个进度监视；`--idle-minutes <n>` 设置被监视线程在监视报告停滞前可以空闲多久（1–1440，默认 5，未加 `--track` 时会被拒绝）。用 `untrack` 关闭监视，或在回复正文开头使用 `DONE:` 关闭。详见[投递](docs/DELIVERY.zh-CN.md)。
 
 ## 一分钟了解安全性
 
@@ -198,7 +220,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 
 | 文档 | 涵盖内容 |
 | --- | --- |
-| [架构](docs/GATEWAY-ARCHITECTURE.md) | 完整设计：拓扑、适配器、控制平面、威胁模型、分级授权阶梯 |
+| [架构](docs/GATEWAY-ARCHITECTURE.md) | 完整设计：拓扑、适配器、控制平面、威胁模型，以及基于配对同意的入站模型 |
 | [投递](docs/DELIVERY.zh-CN.md) | 投递语义、令牌、结算状态与重试规则 |
 | [配置](docs/CONFIGURATION.zh-CN.md) | 环境变量、兼容性约定与寻址规则 |
 | [仪表盘](docs/DASHBOARD.zh-CN.md) | 静态与实时仪表盘设置、安全模型与变更操作 |

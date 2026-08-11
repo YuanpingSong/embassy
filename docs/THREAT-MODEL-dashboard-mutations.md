@@ -1,13 +1,11 @@
-# Threat Model — Live Dashboard Mutation Surface (Phase B.1)
+# Threat Model — Live Dashboard Mutation Surface
 
-Owner: PM. Status: implemented with deterministic boundary tests; final visual
-browser QA remains a release check. Scope: exactly four bounded operator
-actions — **pair**, **unpair**, **refresh discovery**, and **remove a stale
-Codex registration** — available to the live companion (PRD §3.3 plus the
-v1.1 recovery change order). Registration creation, send,
-reply, approve, interrupt, and settings mutation remain out of scope for
-this surface (registration handshake and the settings store are separate
-broker work with their own reviews).
+Status: implemented with deterministic boundary tests. Scope: exactly four
+bounded operator actions — **pair**, **unpair**, **refresh discovery**, and
+**remove a stale Codex registration** — available to the live companion.
+Registration creation, send, reply, approve, interrupt, and settings mutation
+remain out of scope for this surface; the registration handshake and the
+settings store are separate broker work with their own reviews.
 
 ## 1. What changes
 
@@ -89,7 +87,7 @@ headers.
 | A2 | XSS inside the dashboard escalating to mutations | CSP `script-src 'self'` with zero inline script; the app renders exclusively through React text nodes; no `dangerouslySetInnerHTML` anywhere (test-enforced). Residual risk accepted: an attacker who can modify served assets already owns the user account (Boundary 3). |
 | A3 | Local process or local user opens the stable URL | Accepted only under the explicit trusted single-user-machine assumption. The companion does not authenticate a process or UID; run it only where all local software is trusted. |
 | A4 | Replay of an action request | Local software can construct requests by design. Pair, unpair, and refresh are repeat-safe; replaying a completed stale-registration removal returns `not_found`. Broker revalidation, the exact action allowlist, alias bounds, and the companion-wide rate limit contain each request. |
-| A5 | Confused deputy via crafted alias | The companion validates shape only (string, length ≤ 128, gateway alias grammar) and forwards; the broker's own verb validation is authoritative — the same validation the CLI path uses. The dashboard can not name a verb outside the allowlist. |
+| A5 | Confused deputy via crafted alias | The companion validates shape before forwarding: an exact key set for the verb, string type, length ≤ 128, gateway alias grammar, the required `codex-` prefix (and `claude-` prefix for the pair endpoints), and — for pair/unpair — an identical host suffix on both aliases. The broker's own verb validation is then authoritative, the same validation the CLI path uses. The dashboard can not name a verb outside the allowlist. |
 | A6 | Flooding actions to churn selection state | Companion-wide rate limit (6/min) plus journal visibility. Selection churn is also self-evident in the UI. |
 | A7 | Downgrade/differential: tricking the read-only footer | The footer copy MUST name the exact authority the live surface carries (pair, unpair, refresh discovery, and request stale-registration removal — nothing else). Claiming read-only while carrying mutations would violate the honesty canon; treated as a release blocker. |
 | A8 | Unavailable broker mid-action | The control call fails closed; the UI surfaces the safe code and re-reads the snapshot. No retry loops; the operator decides. |
@@ -107,7 +105,7 @@ headers.
 - No non-loopback listener, no authentication ceremony, no CORS, and no
   fallback port.
 
-## 6. UX consent contract (PRD §3.3 requirements binding here)
+## 6. UX consent contract
 
 Every action renders a one-line consequence before an explicit confirm
 step (including the stale-and-dead-generation condition for recovery),

@@ -136,9 +136,9 @@ broker.
   never retried automatically.
 - Raw-body classification and accounting happen before framing. In the
   untrusted body only, Embassy case-insensitively neutralizes boundary-shaped
-  opening or closing copies of `cross-session-message` and
-  `embassy-reply-hint` before composing the real outer frame. Framing or size
-  failure occurs before provider write and is never an ambiguous write.
+  opening or closing copies of its reserved framing tags before composing the
+  real outer frame. Framing or size failure occurs before provider write and is
+  never an ambiguous write.
 - The only network listener Embassy can create belongs to the opt-in
   `embassy dashboard --live` companion, described under "Live companion
   boundary". Everything enumerated above concerns `embassy serve`.
@@ -147,7 +147,10 @@ broker.
 
 Controller-owned state is a dedicated mode-0700 directory. Its files and
 control socket are mode 0600 and validated against replacement, symlinks, and
-unexpected ownership or permissions.
+unexpected ownership or permissions. Those files include message content:
+the durable queue and the bounded recent-delivery ledger both retain message
+bodies, so the state file holds mail at rest and not metadata alone. Anything
+already running as the same OS user can read it.
 
 The host-wide singleton has one fixed surface under the verified login home:
 the private mode-0700 `~/.local/state/agent-embassy` directory and its mode-0600
@@ -179,9 +182,12 @@ configuration contents. Report a bug if any normal code path attempts to do so.
 
 ## Persistence and disclosure
 
-Message bodies, prompts, replies, raw provider frames, tool data, stderr,
-callback addresses, and socket paths remain memory-only. They are discarded on
-restart and never replayed.
+Raw provider frames, tool data, stderr, callback addresses, and socket paths
+remain memory-only and are discarded on restart. Message bodies are the
+exception: queued and recently delivered bodies are retained under bounded caps
+in the mode-0600 state file, so queued mail survives a broker restart and
+re-sends exactly once when its route is re-observed. A message in flight at the
+moment of a crash settles `ambiguous` and is never replayed.
 
 The full `conv_` token exposed to a CLI initiator or routed recipient travels
 only inside the accepted CLI result or transient provider payload. It is never

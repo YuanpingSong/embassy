@@ -12,8 +12,11 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`，解析到固定版本目标 | Claude Code 启动器的绝对路径；不搜索 `PATH` |
 | `EMBASSY_STEERING_ENABLED` | `1` | 全局 Claude→Codex `STEER:` 停用开关；精确设为 `0` 后，所有 Claude→Codex 正文都按朝向 Codex 的普通排队消息处理；朝向 Claude 的邮箱写入时机不受影响 |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
+| `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes`、`untrack` 以及 `TRACK:`/`DONE:` 正文前缀都会被拒绝。取值只能是 `1` 或 `0`，其他值均为配置错误 |
+| `EMBASSY_LOCALE` | `en` | CLI 输出语言，精确取值 `en` 或 `zh-CN`。`--lang` 标志会覆盖当次调用；未设置或为空表示 `en`，其他任何取值都是参数错误 |
+| `EMBASSY_HOSTS` | `this-mac` | 以逗号分隔的 1 到 32 个唯一小写主机别名。**v1 启动器只接受单个精确值 `this-mac`**：任何其他列表——包括包含 `this-mac` 的更长列表——都会让 `embassy serve` 以 `GATEWAY_REMOTE_PROVIDER_DISABLED` 关闭失败。该变量是为推迟的远程领事馆功能预留的，目前没有可用的设置 |
 
-当前台实时仪表盘组件运行时，可直接通过 `http://127.0.0.1:41961/` 访问。端口是单次命令的 CLI 选择，而不是环境设置；如需另一个稳定端口，请向 `embassy dashboard --live` 传入 `--port <n>`，其中整数范围为 1024 到 65535。多个窗口或浏览器可以使用同一个 URL。端口冲突会以 `LIVE_DASHBOARD_PORT_IN_USE` 失败并提示使用 `--port`；Embassy 绝不会回退到临时或其他端口。
+当前台实时仪表盘组件运行时，可直接通过 `http://127.0.0.1:41961/` 访问。端口是单次命令的 CLI 选择，而不是环境设置；如需另一个稳定端口，请向 `embassy dashboard --live` 传入 `--port <n>`，其中整数范围为 1024 到 65535。当前台进程运行时，该 URL 最多支持四个并发实时视图（可分布在窗口、标签页或浏览器中）；在其中一个关闭前，第五条流会被拒绝。端口冲突会以 `LIVE_DASHBOARD_PORT_IN_USE` 失败并提示使用 `--port`；Embassy 绝不会回退到临时或其他端口。
 
 ## 高级边界
 
@@ -22,6 +25,8 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | 变量 | 默认值 |
 | --- | ---: |
 | `EMBASSY_MAX_ROUTES` | `128` |
+| `EMBASSY_MAX_PAIRS` | `128` |
+| `EMBASSY_MAX_WATCHES` | `32` |
 | `EMBASSY_EVENT_CAPACITY` / `EMBASSY_EVENT_TTL_MS` | `500` / `86400000` |
 | `EMBASSY_DEDUPE_CAPACITY` / `EMBASSY_DEDUPE_TTL_MS` | `2000` / `300000` |
 | `EMBASSY_MAX_QUEUE_MESSAGES` / `EMBASSY_MAX_QUEUE_PER_ROUTE` | `100` / `20` |
@@ -30,13 +35,19 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | `EMBASSY_MESSAGE_DEADLINE_MS` | `14400000` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
+`EMBASSY_MAX_PAIRS` 就是 README 中"默认上限 128 个配对"背后的那个变量，取值范围为 1 到 256。`EMBASSY_MAX_WATCHES` 限制并发进度监视数量，硬上限为 256。`EMBASSY_MAX_ROUTES` 接受 2 到 256。本表中的每个值都在启动时校验；超出范围或非整数的设置会以 `INVALID_GATEWAY_CONFIGURATION` 关闭失败，而不是被截断到边界。
+
+停滞通知本身不可单独配置。它在 `min(floor(EMBASSY_MESSAGE_DEADLINE_MS / 2), 120000)` 毫秒时触发，因此在默认的四小时截止时间下，待投递消息会在两分钟时被报告，而不是两小时。
+
 初始发送方从 CLI 结果获得完整 `conv_` 令牌，接收方则从入站消息的来源封装和回复提示中获得同一个令牌。令牌是内存中的参与方范围定位符，不是权限凭据：每次 `reply` 都会重新检查调用方身份、参与关系和实时路由。代理重启后令牌不再存在；路由失效或身份转交后，也不得重试或重构旧令牌。
 
-公开发布的启动器仅接受主机 `this-mac`；远程连接器仍是未来功能。
+公开发布的启动器仅接受主机 `this-mac`；远程连接器仍是未来功能。因此 `register-codex` 提供可选的 `--host <id>`，但代理只会接纳 `this-mac`，而且别名必须以 `@<id>` 结尾才能匹配。`--host` 与 `--succeeds` 互斥，后者始终继承被接替别名的主机。
 
 ## Claude Code 自身的设置：`crossSessionInbound`
 
 `crossSessionInbound` 是 Claude Code 的原生跨会话消息设置：它决定一个 Claude 会话接受、挂起还是拒绝来自其他会话的消息。Embassy 需要在你选择作为 Codex→Claude 目的地的会话上启用此设置，且无法覆盖该决定。请在 Claude Code 中配置它，而不是在 Embassy 中。
+
+这是你唯一必须主动开启的前置条件，也是最常见的首次运行故障——因为它**失败得很晚**。快速开始的第 3 步（`select-claude`）无论该设置是否启用都会打印 `"accepted":true`：选择只创建 Embassy 自己的权限边，从不查询 Claude 的原生入站策略。拒绝要到第 4 步、消息抵达 Claude 端时才出现。如果注册与选择都成功，但你的第一条 `send-to-claude` 没有送达，请先检查目的地会话上的 `crossSessionInbound`，再去怀疑路由。
 
 ## 兼容性约定
 
