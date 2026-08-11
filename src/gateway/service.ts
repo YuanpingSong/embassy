@@ -141,7 +141,7 @@ function progressWatchActivity(
 ): NonNullable<EnqueueMessageInput["progressWatch"]> {
   const prefixedOpen = text.startsWith("TRACK:");
   const completionSignal = text.startsWith("DONE:");
-  if (completionSignal && (prefixedOpen || explicitIdleMinutes !== undefined)) {
+  if (completionSignal && explicitIdleMinutes !== undefined) {
     throw new BridgeError(
       "PROGRESS_WATCH_SIGNAL_CONFLICT",
       "A single message cannot both open and complete a progress watch.",
@@ -438,6 +438,8 @@ export interface GatewayProviderAdapter {
 
 type Conversation = {
   id: string;
+  /** Fresh memory-only prefix prevents recovered sends colliding with old dedupe rows. */
+  dedupeScope?: string;
   sourceAlias: string;
   targetAlias: string;
   expectsReply: boolean;
@@ -456,7 +458,7 @@ type MessageContext = {
   authorization: "selected_route" | "native_reply";
   targetAlias: string;
   deadlineAt: string;
-  /** Rebuilt with a fresh conversation capability for durable queued mail. */
+  /** Rebuilt from durable queued mail after a broker restart. */
   recovered?: true;
 };
 
@@ -1206,10 +1208,9 @@ export class GatewayService {
       untrack: async (params) =>
         await this.exclusiveDecision(
           async () => {
-            const settled = await this.store.settleProgressWatch({
-              conversationId: params.conversationId,
-              outcome: "done",
-            });
+            const settled = await this.store.endProgressWatch(
+              params.conversationId,
+            );
             if (!settled) {
               throw new BridgeError(
                 "PROGRESS_WATCH_NOT_FOUND",
@@ -3855,6 +3856,7 @@ export class GatewayService {
       params.alias,
       lease,
       inFlightSettlements,
+      "operator",
     );
     for (const settlement of settlements) {
       await this.applyTerminalSettlementLocked(settlement);
@@ -6020,18 +6022,7 @@ export class GatewayService {
       return false;
     }
     const actions = await this.store.advanceDueProgressWatches();
-    let changed = actions.length > 0;
     for (const action of actions) {
-      if (action.type === "settled") {
-        this.addRuntimeAlert(
-          action.outcome === "unresponsive"
-            ? "PROGRESS_WATCH_UNRESPONSIVE"
-            : "PROGRESS_WATCH_ENDPOINT_RETIRED",
-          action.outcome === "unresponsive" ? "error" : "warning",
-          { alias: action.ownerAlias },
-        );
-        continue;
-      }
       const text =
         `[Embassy automated liveness check — ${action.conversationId} / ` +
         `Embassy 自动活跃检查 — ${action.conversationId}]\n` +
@@ -6052,19 +6043,15 @@ export class GatewayService {
             },
           },
         );
-        this.addRuntimeAlert("PROGRESS_WATCH_NUDGE", "warning", {
-          alias: action.ownerAlias,
-        });
       } catch {
-        await this.store.deferProgressWatchNudge(action.conversationId);
-        this.addRuntimeAlert("PROGRESS_WATCH_NUDGE_DEFERRED", "warning", {
-          alias: action.ownerAlias,
-        });
-        changed = true;
+        await this.store.deferProgressWatchNudge(
+          action.conversationId,
+          action.nudgeNumber,
+        );
       }
     }
     await this.refreshNextProgressWatchWakeLocked();
-    return changed;
+    return actions.length > 0;
   }
 
   private async processLifecycleLocked(): Promise<boolean> {
@@ -6430,6 +6417,9 @@ export class GatewayService {
       options.existingConversationId ?? createGatewayConversationId();
     const conversation = this.conversations.get(conversationId) ?? {
       id: conversationId,
+      ...(options.existingConversationId === undefined
+        ? {}
+        : { dedupeScope: createGatewayConversationId() }),
       sourceAlias,
       targetAlias,
       expectsReply,
@@ -6448,7 +6438,7 @@ export class GatewayService {
       sourceAlias,
       targetAlias,
       body: text,
-      dedupeKey: `${conversationId}:${sequence}`,
+      dedupeKey: `${conversation.dedupeScope ?? conversationId}:${sequence}`,
       conversationIdSuffix: conversationId.slice(-8),
       deadlineAt,
       ...(options.steer === true ? { steer: true as const } : {}),
@@ -6547,7 +6537,7 @@ export class GatewayService {
         binding: capability.binding,
       },
       body: text,
-      dedupeKey: `${conversation.id}:${sequence}`,
+      dedupeKey: `${conversation.dedupeScope ?? conversation.id}:${sequence}`,
       conversationIdSuffix: conversation.id.slice(-8),
       deadlineAt,
       ...(conversation.pair === true ? { pair: true as const } : {}),
@@ -6629,7 +6619,7 @@ export class GatewayService {
       },
       targetAlias: conversation.sourceAlias,
       body: text,
-      dedupeKey: `${conversation.id}:${sequence}`,
+      dedupeKey: `${conversation.dedupeScope ?? conversation.id}:${sequence}`,
       conversationIdSuffix: conversation.id.slice(-8),
       deadlineAt,
       authorizedPairTeardownReply: true,
@@ -6771,15 +6761,21 @@ export class GatewayService {
   private restoreQueuedMessageContextLocked(
     item: TransientQueuedMessage,
     binding: PrivateRouteBinding,
+    canonicalConversationId?: string,
   ): MessageContext {
     this.pruneTransient();
-    const generatedConversationId = createGatewayConversationId();
     const conversationId =
-      item.conversationIdSuffix === undefined
-        ? generatedConversationId
-        : `${generatedConversationId.slice(0, -8)}${item.conversationIdSuffix}`;
-    const conversation: Conversation = {
+      canonicalConversationId ??
+      (item.conversationIdSuffix === undefined
+        ? createGatewayConversationId()
+        : `${createGatewayConversationId().slice(0, -8)}${
+            item.conversationIdSuffix
+          }`);
+    const conversation = this.conversations.get(conversationId) ?? {
       id: conversationId,
+      ...(canonicalConversationId === undefined
+        ? {}
+        : { dedupeScope: createGatewayConversationId() }),
       sourceAlias: item.sourceAlias,
       targetAlias: item.targetAlias,
       expectsReply: false,
@@ -6843,6 +6839,7 @@ export class GatewayService {
     if (item === undefined) return;
     const selectedBinding = this.routeBindings.get(targetAlias);
     let context = this.messageContexts.get(item.messageId);
+    let progressWatchActive: boolean | undefined;
     if (context === undefined && selectedBinding === undefined) {
       const result = await this.store.requeueInFlightMessage(
         item.messageId,
@@ -6855,7 +6852,20 @@ export class GatewayService {
       return;
     }
     if (context === undefined && selectedBinding !== undefined) {
-      context = this.restoreQueuedMessageContextLocked(item, selectedBinding);
+      const resolution =
+        item.pair === true && item.conversationIdSuffix !== undefined
+          ? await this.store.resolveProgressWatchDispatch({
+              recoveredConversationIdSuffix: item.conversationIdSuffix,
+              sourceAlias: item.sourceAlias,
+              targetAlias: item.targetAlias,
+            })
+          : undefined;
+      context = this.restoreQueuedMessageContextLocked(
+        item,
+        selectedBinding,
+        resolution?.conversationId,
+      );
+      progressWatchActive = resolution?.markerActive === true;
     }
     if (context === undefined) {
       const result = await this.store.settleMessage({
@@ -7018,31 +7028,18 @@ export class GatewayService {
       this.scheduleLifecycleWakeLocked();
       return;
     }
-    let progressWatches = await this.store.inspectProgressWatches();
-    if (
-      context.recovered === true &&
-      item.pair === true &&
-      !item.body.startsWith("DONE:") &&
-      progressWatches.some(
-        (watch) =>
-          watch.capability === "route" &&
-          watch.ownerAlias === item.sourceAlias &&
-          watch.workerAlias === item.targetAlias,
-      )
-    ) {
-      await this.store.bindProgressWatchConversation({
-        conversationId: context.conversationId,
-        ownerAlias: item.sourceAlias,
-        workerAlias: item.targetAlias,
-      });
-      progressWatches = await this.store.inspectProgressWatches();
+    if (progressWatchActive === undefined) {
+      progressWatchActive =
+        item.pair === true
+          ? (
+              await this.store.resolveProgressWatchDispatch({
+                conversationId: context.conversationId,
+                sourceAlias: item.sourceAlias,
+                targetAlias: item.targetAlias,
+              })
+            ).markerActive
+          : false;
     }
-    const progressWatchActive = progressWatches.some(
-      (watch) =>
-        watch.capability === "conversation" &&
-        watch.workerAlias === item.targetAlias &&
-        watch.conversationId === context.conversationId,
-    );
     let result: GatewayAdapterDispatchResult;
     try {
       result = await this.awaitDispatchWithNativeHeldLocked(

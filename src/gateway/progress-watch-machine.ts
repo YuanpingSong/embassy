@@ -1,107 +1,70 @@
-export const progressWatchPhases = ["quiet", "episode"] as const;
-export type ProgressWatchPhase = (typeof progressWatchPhases)[number];
-
-export const progressWatchCapabilities = ["conversation", "route"] as const;
-export type ProgressWatchCapability =
-  (typeof progressWatchCapabilities)[number];
-
-export const progressWatchOutcomes = [
-  "done",
-  "unresponsive",
-  "endpoint_retired",
-  "disabled",
-] as const;
-export type ProgressWatchOutcome = (typeof progressWatchOutcomes)[number];
-
 export const progressWatchJournalKinds = [
   "opened",
   "replaced",
-  "activity",
-  "nudge",
-  "worker_reported_complete",
-  "capability_degraded",
-  "conversation_rebound",
-  "done",
-  "unresponsive",
-  "pair_removed",
-  "endpoint_retired",
-  "disabled",
+  "settled",
 ] as const;
-export type ProgressWatchJournalKind =
-  (typeof progressWatchJournalKinds)[number];
 
 export const PROGRESS_WATCH_DEFAULT_IDLE_MS = 5 * 60_000;
 export const PROGRESS_WATCH_MIN_IDLE_MS = 60_000;
 export const PROGRESS_WATCH_MAX_IDLE_MS = 24 * 60 * 60_000;
+const PROGRESS_WATCH_NUDGE_RETRY_MS = 1_000;
 export const PROGRESS_WATCH_DEFAULT_CAPACITY = 32;
 export const PROGRESS_WATCH_HARD_CAPACITY = 256;
 
-/**
- * Durable, content-free liveness state. Route leases keep a watch attached to
- * the exact consent edge that opened it; they are never publicly projected.
- */
-export type ProgressWatchMachine = Readonly<{
+/** One durable active watch. Settlement is represented by its absence. */
+export type ProgressWatch = Readonly<{
   conversationId: string;
   ownerAlias: string;
   workerAlias: string;
   ownerLease: string;
   workerLease: string;
-  createdAt: string;
-  updatedAt: string;
   lastActivityAt: string;
   idleMs: number;
-  phase: ProgressWatchPhase;
   nudgeCount: 0 | 1 | 2;
   nextActionAt: string;
-  capability: ProgressWatchCapability;
-  degradedNoticeSent: boolean;
 }>;
 
-export type ProgressWatchJournalEvent = Readonly<{
+/**
+ * Settlement attribution is intentionally closed: live completion names the
+ * reporting side, operator commands name the operator, automatic transitions
+ * name the gateway, and only evidence inherited without attribution is unknown.
+ */
+export type ProgressWatchSettlement =
+  | Readonly<{ actor: "owner" | "worker"; reason: "done" }>
+  | Readonly<{
+      actor: "operator";
+      reason: "untracked" | "pair_removed" | "endpoint_retired";
+    }>
+  | Readonly<{
+      actor: "gateway";
+      reason:
+        | "idle_timeout"
+        | "endpoint_retired"
+        | "tracking_disabled"
+        | "legacy_upgrade";
+    }>
+  | Readonly<{ actor: "unknown"; reason: "legacy_done" }>;
+
+type ProgressWatchJournalBase = Readonly<{
   sequence: number;
   timestamp: string;
   conversationId: string;
   ownerAlias: string;
   workerAlias: string;
-  kind: ProgressWatchJournalKind;
-  nudgeNumber?: 1 | 2;
 }>;
 
-export type ProgressWatchEvent =
-  | Readonly<{
-      type: "activity";
-      at: number;
-    }>
-  | Readonly<{ type: "route_activity"; at: number }>
-  | Readonly<{
-      type: "due";
-      at: number;
-      bothIdle: boolean;
-      endpointsPresent: boolean;
-    }>
-  | Readonly<{
-      type: "restart";
-      at: number;
-      conversationCapabilityRestored: boolean;
-    }>
-  | Readonly<{ type: "nudge_deferred"; at: number; retryAt: number }>
-  | Readonly<{ type: "owner_done"; at: number }>
-  | Readonly<{ type: "worker_done"; at: number }>
-  | Readonly<{ type: "endpoint_retired"; at: number }>
-  | Readonly<{ type: "disabled"; at: number }>;
+export type ProgressWatchJournalEvent = ProgressWatchJournalBase &
+  (
+    | Readonly<{ kind: "opened"; actor: "owner" }>
+    | Readonly<{ kind: "replaced"; actor: "owner" | "unknown" }>
+    | (Readonly<{ kind: "settled" }> & ProgressWatchSettlement)
+  );
 
-export type ProgressWatchEffect =
-  | Readonly<{ type: "send_nudge"; nudgeNumber: 1 | 2 }>
-  | Readonly<{ type: "record_capability_degraded" }>
-  | Readonly<{
-      type: "settled";
-      outcome: ProgressWatchOutcome;
-    }>;
-
-export type ProgressWatchTransition = Readonly<{
-  state: ProgressWatchMachine | null;
-  effects: readonly ProgressWatchEffect[];
-}>;
+type ProgressWatchDueInspection =
+  | Readonly<{ kind: "not_due" }>
+  | Readonly<{ kind: "rescheduled"; watch: ProgressWatch }>
+  | Readonly<{ kind: "nudge"; nudgeNumber: 1 | 2 }>
+  | Readonly<{ kind: "settled"; reason: "idle_timeout" }>;
 
 function iso(at: number): string {
   if (!Number.isFinite(at)) throw new RangeError("INVALID_PROGRESS_WATCH_TIME");
@@ -112,13 +75,7 @@ function plus(at: number, delayMs: number): string {
   return iso(at + delayMs);
 }
 
-function settle(
-  outcome: ProgressWatchOutcome,
-): ProgressWatchTransition {
-  return { state: null, effects: [{ type: "settled", outcome }] };
-}
-
-export function createProgressWatchMachine(input: Readonly<{
+export function createProgressWatch(input: Readonly<{
   conversationId: string;
   ownerAlias: string;
   workerAlias: string;
@@ -126,7 +83,7 @@ export function createProgressWatchMachine(input: Readonly<{
   workerLease: string;
   idleMs: number;
   at: number;
-}>): ProgressWatchMachine {
+}>): ProgressWatch {
   if (
     !Number.isSafeInteger(input.idleMs) ||
     input.idleMs < PROGRESS_WATCH_MIN_IDLE_MS ||
@@ -141,128 +98,74 @@ export function createProgressWatchMachine(input: Readonly<{
     workerAlias: input.workerAlias,
     ownerLease: input.ownerLease,
     workerLease: input.workerLease,
-    createdAt: timestamp,
-    updatedAt: timestamp,
     lastActivityAt: timestamp,
     idleMs: input.idleMs,
-    phase: "quiet",
     nudgeCount: 0,
     nextActionAt: plus(input.at, input.idleMs),
-    capability: "conversation",
-    degradedNoticeSent: false,
   };
 }
 
-/** Pure, deterministic completion-ended progress-watch transition function. */
-export function transitionProgressWatch(
-  state: ProgressWatchMachine,
-  event: ProgressWatchEvent,
-): ProgressWatchTransition {
-  const at = event.at;
+export function recordProgressWatchActivity(
+  watch: ProgressWatch,
+  at: number,
+): ProgressWatch {
   const timestamp = iso(at);
-  switch (event.type) {
-    case "owner_done":
-    case "worker_done":
-      return settle("done");
-    case "endpoint_retired":
-      return settle("endpoint_retired");
-    case "disabled":
-      return settle("disabled");
-    case "activity":
-    case "route_activity": {
-      return {
-        state: {
-          ...state,
-          updatedAt: timestamp,
-          lastActivityAt: timestamp,
-          phase: "quiet",
-          nudgeCount: 0,
-          nextActionAt: plus(at, state.idleMs),
-        },
-        effects: [],
-      };
-    }
-    case "restart": {
-      if (event.conversationCapabilityRestored) {
-        return {
-          state: {
-            ...state,
-            updatedAt: timestamp,
-            capability: "conversation",
-          },
-          effects: [],
-        };
-      }
-      const notify = !state.degradedNoticeSent;
-      return {
-        state: {
-          ...state,
-          updatedAt: timestamp,
-          capability: "route",
-          degradedNoticeSent: true,
-        },
-        effects: notify ? [{ type: "record_capability_degraded" }] : [],
-      };
-    }
-    case "nudge_deferred": {
-      if (
-        !Number.isFinite(event.retryAt) ||
-        event.retryAt <= at ||
-        event.retryAt > at + Math.min(state.idleMs, 60_000)
-      ) {
-        throw new RangeError("INVALID_PROGRESS_WATCH_RETRY_AT");
-      }
-      return {
-        state: {
-          ...state,
-          updatedAt: timestamp,
-          nextActionAt: iso(event.retryAt),
-        },
-        effects: [],
-      };
-    }
-    case "due": {
-      if (at < Date.parse(state.nextActionAt)) {
-        return { state, effects: [] };
-      }
-      if (!event.endpointsPresent) return settle("endpoint_retired");
-      if (!event.bothIdle) {
-        return {
-          state: {
-            ...state,
-            updatedAt: timestamp,
-            lastActivityAt: timestamp,
-            phase: "quiet",
-            nudgeCount: 0,
-            nextActionAt: plus(at, state.idleMs),
-          },
-          effects: [],
-        };
-      }
-      if (state.phase === "quiet") {
-        return {
-          state: {
-            ...state,
-            updatedAt: timestamp,
-            phase: "episode",
-            nudgeCount: 1,
-            nextActionAt: plus(at, state.idleMs),
-          },
-          effects: [{ type: "send_nudge", nudgeNumber: 1 }],
-        };
-      }
-      if (state.nudgeCount === 1) {
-        return {
-          state: {
-            ...state,
-            updatedAt: timestamp,
-            nudgeCount: 2,
-            nextActionAt: plus(at, state.idleMs * 2),
-          },
-          effects: [{ type: "send_nudge", nudgeNumber: 2 }],
-        };
-      }
-      return settle("unresponsive");
-    }
+  return {
+    ...watch,
+    lastActivityAt: timestamp,
+    nudgeCount: 0,
+    nextActionAt: plus(at, watch.idleMs),
+  };
+}
+
+export function inspectProgressWatchDue(
+  watch: ProgressWatch,
+  input: Readonly<{
+    at: number;
+    bothIdle: boolean;
+  }>,
+): ProgressWatchDueInspection {
+  iso(input.at);
+  if (input.at < Date.parse(watch.nextActionAt)) return { kind: "not_due" };
+  if (!input.bothIdle) {
+    return {
+      kind: "rescheduled",
+      watch: recordProgressWatchActivity(watch, input.at),
+    };
   }
+  if (watch.nudgeCount < 2) {
+    return { kind: "nudge", nudgeNumber: (watch.nudgeCount + 1) as 1 | 2 };
+  }
+  return { kind: "settled", reason: "idle_timeout" };
+}
+
+export function commitProgressWatchNudge(
+  watch: ProgressWatch,
+  input: Readonly<{ at: number; nudgeNumber: 1 | 2 }>,
+): ProgressWatch {
+  iso(input.at);
+  if (
+    input.at < Date.parse(watch.nextActionAt) ||
+    input.nudgeNumber !== watch.nudgeCount + 1
+  ) {
+    throw new RangeError("INVALID_PROGRESS_WATCH_NUDGE");
+  }
+  return {
+    ...watch,
+    nudgeCount: input.nudgeNumber,
+    nextActionAt: plus(
+      input.at,
+      watch.idleMs * (input.nudgeNumber === 1 ? 1 : 2),
+    ),
+  };
+}
+
+export function deferProgressWatchNudge(
+  watch: ProgressWatch,
+  at: number,
+): ProgressWatch {
+  return {
+    ...watch,
+    nextActionAt: plus(at, PROGRESS_WATCH_NUDGE_RETRY_MS),
+  };
 }

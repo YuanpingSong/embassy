@@ -577,7 +577,11 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
   }
   assert.match(
     bundle.source,
-    /conversation_rebound:\s*"watches\.event\.conversationRebound"/u,
+    /settled:\s*"watches\.event\.settled"/u,
+  );
+  assert.match(
+    bundle.source,
+    /legacy_done:\s*"watches\.reason\.legacyDone"/u,
   );
 });
 

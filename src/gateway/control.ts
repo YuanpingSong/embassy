@@ -1343,11 +1343,8 @@ function isProgressWatchSnapshot(
       "conversationIdSuffix",
       "ownerAlias",
       "workerAlias",
-      "phase",
-      "capability",
       "lastActivityAt",
       "nextActionAt",
-      "idleMs",
       "nudgeCount",
     ]) &&
     typeof value.conversationIdSuffix === "string" &&
@@ -1355,12 +1352,8 @@ function isProgressWatchSnapshot(
     isAlias(value.ownerAlias) &&
     isAlias(value.workerAlias) &&
     value.ownerAlias !== value.workerAlias &&
-    (value.phase === "quiet" || value.phase === "episode") &&
-    (value.capability === "conversation" || value.capability === "route") &&
     isIsoTimestamp(value.lastActivityAt) &&
     isIsoTimestamp(value.nextActionAt) &&
-    typeof value.idleMs === "number" &&
-    isTrackIdleMinutes(value.idleMs / 60_000) &&
     (value.nudgeCount === 0 || value.nudgeCount === 1 || value.nudgeCount === 2)
   );
 }
@@ -1379,8 +1372,9 @@ function isProgressWatchEventSnapshot(
         "ownerAlias",
         "workerAlias",
         "kind",
+        "actor",
       ],
-      ["nudgeNumber"],
+      ["reason"],
     ) &&
     isNonNegativeInteger(value.sequence) &&
     isIsoTimestamp(value.timestamp) &&
@@ -1388,23 +1382,25 @@ function isProgressWatchEventSnapshot(
     CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix) &&
     isAlias(value.ownerAlias) &&
     isAlias(value.workerAlias) &&
-    [
-      "opened",
-      "replaced",
-      "nudge",
-      "worker_reported_complete",
-      "capability_degraded",
-      "conversation_rebound",
-      "done",
-      "unresponsive",
-      "pair_removed",
-      "endpoint_retired",
-      "disabled",
-    ].includes(String(value.kind)) &&
-    (value.nudgeNumber === undefined ||
-      value.nudgeNumber === 1 ||
-      value.nudgeNumber === 2) &&
-    ((value.kind === "nudge") === (value.nudgeNumber !== undefined))
+    ((value.kind === "opened" &&
+      value.actor === "owner" &&
+      value.reason === undefined) ||
+      (value.kind === "replaced" &&
+        (value.actor === "owner" || value.actor === "unknown") &&
+        value.reason === undefined) ||
+      (value.kind === "settled" &&
+        ((value.reason === "done" &&
+          (value.actor === "owner" || value.actor === "worker")) ||
+          (value.reason === "untracked" && value.actor === "operator") ||
+          ((value.reason === "idle_timeout" ||
+            value.reason === "tracking_disabled" ||
+            value.reason === "legacy_upgrade") &&
+            value.actor === "gateway") ||
+          (value.reason === "endpoint_retired" &&
+            (value.actor === "gateway" || value.actor === "operator")) ||
+          (value.reason === "pair_removed" &&
+            value.actor === "operator") ||
+          (value.reason === "legacy_done" && value.actor === "unknown"))))
   );
 }
 

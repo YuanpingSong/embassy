@@ -107,24 +107,20 @@ test("compatibility meanings describe the evidence ladder in both locales", () =
   );
 });
 
-test("progress-watch journal copy distinguishes worker and owner completion", () => {
-  assert.equal(
-    dashboardCopyEn["watches.event.workerReportedComplete"],
-    "Worker completed",
+test("progress-watch history copy names who settled it and why", () => {
+  assert.equal(dashboardCopyEn["watches.actor.owner"], "Owner");
+  assert.equal(dashboardCopyEn["watches.actor.worker"], "Worker");
+  assert.equal(dashboardCopyEn["watches.reason.done"], "exact DONE:");
+  assert.match(
+    dashboardCopyEn["watches.reason.legacyDone"],
+    /actor unavailable/,
   );
-  assert.equal(dashboardCopyEn["watches.event.done"], "Owner completed");
-  assert.equal(
-    dashboardCopyEn["watches.event.conversationRebound"],
-    "Conversation rebound",
-  );
-  assert.equal(
-    dashboardCopyZhCn["watches.event.workerReportedComplete"],
-    "工作方已完成",
-  );
-  assert.equal(dashboardCopyZhCn["watches.event.done"], "所有者已完成");
-  assert.equal(
-    dashboardCopyZhCn["watches.event.conversationRebound"],
-    "会话已重新绑定",
+  assert.equal(dashboardCopyZhCn["watches.actor.owner"], "所有者");
+  assert.equal(dashboardCopyZhCn["watches.actor.worker"], "工作方");
+  assert.equal(dashboardCopyZhCn["watches.reason.done"], "精确的 DONE:");
+  assert.match(
+    dashboardCopyZhCn["watches.reason.legacyDone"],
+    /行为方不可用/,
   );
   assert.match(
     dashboardCopyEn["watches.note"],
@@ -133,6 +129,10 @@ test("progress-watch journal copy distinguishes worker and owner completion", ()
   assert.match(
     dashboardCopyEn["guidance.progressWatch.action"],
     /Either participant can end supervision with exact DONE:/,
+  );
+  assert.match(
+    dashboardCopyEn["guidance.progressWatch.action"],
+    /operator can also run embassy untrack/,
   );
   assert.equal(
     dashboardCopyEn["watches.note"].includes("Owner-ended"),
@@ -143,8 +143,20 @@ test("progress-watch journal copy distinguishes worker and owner completion", ()
     dashboardCopyZhCn["guidance.progressWatch.action"],
     /任一参与方.*DONE:/,
   );
+  assert.match(
+    dashboardCopyZhCn["guidance.progressWatch.action"],
+    /操作员也可运行 embassy untrack/,
+  );
   assert.equal(
     dashboardCopyZhCn["watches.note"].includes("仅由所有者结束"),
+    false,
+  );
+  assert.equal(
+    dashboardCopyEn["guidance.progressWatch.body"].includes("route-only"),
+    false,
+  );
+  assert.equal(
+    dashboardCopyZhCn["guidance.progressWatch.body"].includes("仅路由"),
     false,
   );
 });

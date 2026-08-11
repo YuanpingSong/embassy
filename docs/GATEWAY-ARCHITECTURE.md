@@ -709,8 +709,10 @@ thread/session generation, source alias, bounds, and conversation state.
 `send-to-claude`, `send-to-codex`, and `reply` each accept an opt-in `--track`
 flag that opens one progress watch over the resulting conversation, plus an
 optional `--idle-minutes <n>` that sets how long the watched thread may sit idle
-before the watch reports a stall. `n` is an integer from 1 through 1440 and
-defaults to 5; supplying it without `--track` is an argument error. A body with
+before each bounded liveness nudge. If the watch ultimately times out, Embassy
+records `settled` / `gateway` / `idle_timeout` only in watch history and emits
+no runtime stall alert. `n` is an integer from 1 through 1440 and defaults to 5;
+supplying it without `--track` is an argument error. A body with
 an exact leading `TRACK:` prefix opens the same watch at the default idle window
 without the flag.
 

@@ -1,19 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createProgressWatchMachine,
+  commitProgressWatchNudge,
+  createProgressWatch,
+  deferProgressWatchNudge,
+  inspectProgressWatchDue,
   progressWatchJournalKinds,
-  progressWatchOutcomes,
-  transitionProgressWatch,
-  type ProgressWatchEvent,
-  type ProgressWatchMachine,
+  recordProgressWatchActivity,
+  type ProgressWatch,
+  type ProgressWatchJournalEvent,
 } from "../src/gateway/progress-watch-machine.js";
 
 const START = Date.parse("2026-08-09T12:00:00.000Z");
 const IDLE = 60_000;
 
-function initial(): ProgressWatchMachine {
-  return createProgressWatchMachine({
+function initial(): ProgressWatch {
+  return createProgressWatch({
     conversationId: "conv_abcdefghijklmnop",
     ownerAlias: "codex-owner@this-mac",
     workerAlias: "claude-worker@this-mac",
@@ -24,157 +26,172 @@ function initial(): ProgressWatchMachine {
   });
 }
 
-test("quiet watches nudge twice with bounded backoff then settle unresponsive", () => {
-  const first = transitionProgressWatch(initial(), {
-    type: "due",
-    at: START + IDLE,
-    bothIdle: true,
-    endpointsPresent: true,
+test("active watches retain only the nine fields required for supervision", () => {
+  assert.deepEqual(initial(), {
+    conversationId: "conv_abcdefghijklmnop",
+    ownerAlias: "codex-owner@this-mac",
+    workerAlias: "claude-worker@this-mac",
+    ownerLease: "lease_owner",
+    workerLease: "lease_worker",
+    lastActivityAt: "2026-08-09T12:00:00.000Z",
+    idleMs: IDLE,
+    nudgeCount: 0,
+    nextActionAt: "2026-08-09T12:01:00.000Z",
   });
-  assert.equal(first.state?.phase, "episode");
-  assert.equal(first.state?.nudgeCount, 1);
-  assert.deepEqual(first.effects, [{ type: "send_nudge", nudgeNumber: 1 }]);
-
-  const second = transitionProgressWatch(first.state!, {
-    type: "due",
-    at: START + IDLE * 2,
-    bothIdle: true,
-    endpointsPresent: true,
-  });
-  assert.equal(second.state?.nudgeCount, 2);
-  assert.equal(
-    Date.parse(second.state!.nextActionAt),
-    START + IDLE * 4,
+  assert.throws(
+    () => createProgressWatch({ ...initial(), idleMs: IDLE - 1, at: START }),
+    /INVALID_PROGRESS_WATCH_IDLE_MS/,
   );
-  assert.deepEqual(second.effects, [{ type: "send_nudge", nudgeNumber: 2 }]);
-
-  const terminal = transitionProgressWatch(second.state!, {
-    type: "due",
-    at: START + IDLE * 4,
-    bothIdle: true,
-    endpointsPresent: true,
-  });
-  assert.equal(terminal.state, null);
-  assert.deepEqual(terminal.effects, [
-    { type: "settled", outcome: "unresponsive" },
-  ]);
+  assert.throws(
+    () => createProgressWatch({ ...initial(), at: Number.NaN }),
+    /INVALID_PROGRESS_WATCH_TIME/,
+  );
 });
 
-test("conversation and route activity end an episode without ending the watch", () => {
-  const episode = transitionProgressWatch(initial(), {
-    type: "due",
-    at: START + IDLE,
-    bothIdle: true,
-    endpointsPresent: true,
-  }).state!;
-  for (const event of [
-    { type: "activity", at: START + IDLE + 1 } as const,
-    { type: "route_activity", at: START + IDLE + 2 } as const,
-  ]) {
-    const result = transitionProgressWatch(episode, event);
-    assert.equal(result.state?.phase, "quiet");
-    assert.equal(result.state?.nudgeCount, 0);
-    assert.notEqual(result.state, null);
-  }
-});
-
-test("worker and owner DONE signals are terminal", () => {
-  const worker = transitionProgressWatch(initial(), {
-    type: "worker_done",
-    at: START + 1,
-  });
-  assert.equal(worker.state, null);
-  assert.deepEqual(worker.effects, [{ type: "settled", outcome: "done" }]);
-  const owner = transitionProgressWatch(initial(), {
-    type: "owner_done",
-    at: START + 2,
-  });
-  assert.equal(owner.state, null);
-  assert.deepEqual(owner.effects, [{ type: "settled", outcome: "done" }]);
-});
-
-test("route activity postpones nudges and missing endpoints settle exactly", () => {
-  const busy = transitionProgressWatch(initial(), {
-    type: "due",
-    at: START + IDLE,
-    bothIdle: false,
-    endpointsPresent: true,
-  });
-  assert.equal(busy.state?.phase, "quiet");
-  assert.equal(Date.parse(busy.state!.nextActionAt), START + IDLE * 2);
-  const retired = transitionProgressWatch(busy.state!, {
-    type: "due",
-    at: START + IDLE * 2,
-    bothIdle: true,
-    endpointsPresent: false,
-  });
-  assert.deepEqual(retired.effects, [
-    { type: "settled", outcome: "endpoint_retired" },
-  ]);
-});
-
-test("restart degradation is announced once and never invents reply capability", () => {
-  const first = transitionProgressWatch(initial(), {
-    type: "restart",
-    at: START + 1,
-    conversationCapabilityRestored: false,
-  });
-  assert.equal(first.state?.capability, "route");
-  assert.deepEqual(first.effects, [{ type: "record_capability_degraded" }]);
-  const second = transitionProgressWatch(first.state!, {
-    type: "restart",
-    at: START + 2,
-    conversationCapabilityRestored: false,
-  });
-  assert.deepEqual(second.effects, []);
-});
-
-test("the reducer is deterministic, nonmutating, and covers every terminal outcome", () => {
-  const events: ProgressWatchEvent[] = [
-    { type: "activity", at: START + 1 },
-    { type: "route_activity", at: START + 1 },
-    {
-      type: "due",
+test("due inspection and atomic commit preserve the bounded two-nudge cadence", () => {
+  const original = initial();
+  assert.deepEqual(
+    inspectProgressWatchDue(original, {
       at: START + IDLE,
       bothIdle: true,
-      endpointsPresent: true,
-    },
-    { type: "owner_done", at: START + 1 },
-    { type: "endpoint_retired", at: START + 1 },
-    { type: "disabled", at: START + 1 },
+    }),
+    { kind: "nudge", nudgeNumber: 1 },
+  );
+  assert.equal(original.nudgeCount, 0);
+
+  const first = commitProgressWatchNudge(original, {
+    at: START + IDLE,
+    nudgeNumber: 1,
+  });
+  assert.equal(first.nudgeCount, 1);
+  assert.equal(Date.parse(first.nextActionAt), START + IDLE * 2);
+  assert.deepEqual(
+    inspectProgressWatchDue(first, {
+      at: START + IDLE * 2,
+      bothIdle: true,
+    }),
+    { kind: "nudge", nudgeNumber: 2 },
+  );
+
+  const second = commitProgressWatchNudge(first, {
+    at: START + IDLE * 2,
+    nudgeNumber: 2,
+  });
+  assert.equal(second.nudgeCount, 2);
+  assert.equal(Date.parse(second.nextActionAt), START + IDLE * 4);
+  assert.deepEqual(
+    inspectProgressWatchDue(second, {
+      at: START + IDLE * 4,
+      bothIdle: true,
+    }),
+    { kind: "settled", reason: "idle_timeout" },
+  );
+});
+
+test("activity and non-idle endpoints reset one quiet episode", () => {
+  const nudged = commitProgressWatchNudge(initial(), {
+    at: START + IDLE,
+    nudgeNumber: 1,
+  });
+  const active = recordProgressWatchActivity(nudged, START + IDLE + 1);
+  assert.equal(active.nudgeCount, 0);
+  assert.equal(Date.parse(active.lastActivityAt), START + IDLE + 1);
+  assert.equal(Date.parse(active.nextActionAt), START + IDLE * 2 + 1);
+
+  const rescheduled = inspectProgressWatchDue(nudged, {
+    at: START + IDLE * 2,
+    bothIdle: false,
+  });
+  assert.equal(rescheduled.kind, "rescheduled");
+  if (rescheduled.kind === "rescheduled") {
+    assert.equal(rescheduled.watch.nudgeCount, 0);
+    assert.equal(Date.parse(rescheduled.watch.nextActionAt), START + IDLE * 3);
+  }
+});
+
+test("not-due, deferred, and stale nudge decisions are exact", () => {
+  const watch = initial();
+  assert.deepEqual(
+    inspectProgressWatchDue(watch, {
+      at: START + IDLE - 1,
+      bothIdle: true,
+    }),
+    { kind: "not_due" },
+  );
+  assert.equal(
+    Date.parse(deferProgressWatchNudge(watch, START + IDLE).nextActionAt),
+    START + IDLE + 1_000,
+  );
+  assert.throws(
+    () =>
+      commitProgressWatchNudge(watch, {
+        at: START + IDLE - 1,
+        nudgeNumber: 1,
+      }),
+    /INVALID_PROGRESS_WATCH_NUDGE/,
+  );
+  assert.throws(
+    () =>
+      commitProgressWatchNudge(watch, {
+        at: START + IDLE,
+        nudgeNumber: 2,
+      }),
+    /INVALID_PROGRESS_WATCH_NUDGE/,
+  );
+});
+
+test("journal inventory records only open, replace, and attributed settlement", () => {
+  const valid: ProgressWatchJournalEvent[] = [
     {
-      type: "restart",
-      at: START + 1,
-      conversationCapabilityRestored: false,
+      sequence: 1,
+      timestamp: new Date(START).toISOString(),
+      conversationId: initial().conversationId,
+      ownerAlias: initial().ownerAlias,
+      workerAlias: initial().workerAlias,
+      kind: "opened",
+      actor: "owner",
+    },
+    {
+      sequence: 2,
+      timestamp: new Date(START + 1).toISOString(),
+      conversationId: initial().conversationId,
+      ownerAlias: initial().ownerAlias,
+      workerAlias: initial().workerAlias,
+      kind: "settled",
+      actor: "worker",
+      reason: "done",
+    },
+    {
+      sequence: 3,
+      timestamp: new Date(START + 2).toISOString(),
+      conversationId: initial().conversationId,
+      ownerAlias: initial().ownerAlias,
+      workerAlias: initial().workerAlias,
+      kind: "settled",
+      actor: "unknown",
+      reason: "legacy_done",
     },
   ];
-  for (const event of events) {
-    const state = initial();
-    const before = structuredClone(state);
-    assert.deepEqual(
-      transitionProgressWatch(state, event),
-      transitionProgressWatch(state, event),
-    );
-    assert.deepEqual(state, before);
-  }
-  assert.deepEqual(progressWatchOutcomes, [
-    "done",
-    "unresponsive",
-    "endpoint_retired",
-    "disabled",
-  ]);
-  assert.deepEqual(progressWatchJournalKinds, [
-    "opened",
-    "replaced",
-    "activity",
-    "nudge",
-    "worker_reported_complete",
-    "capability_degraded",
-    "conversation_rebound",
-    "done",
-    "unresponsive",
-    "pair_removed",
-    "endpoint_retired",
-    "disabled",
-  ]);
+  assert.equal(valid.length, 3);
+  assert.deepEqual(progressWatchJournalKinds, ["opened", "replaced", "settled"]);
+});
+
+test("all pure operations are deterministic and nonmutating", () => {
+  const watch = initial();
+  const before = structuredClone(watch);
+  const inspect = () =>
+    inspectProgressWatchDue(watch, {
+      at: START + IDLE,
+      bothIdle: true,
+    });
+  assert.deepEqual(inspect(), inspect());
+  assert.deepEqual(
+    recordProgressWatchActivity(watch, START + 1),
+    recordProgressWatchActivity(watch, START + 1),
+  );
+  assert.deepEqual(
+    deferProgressWatchNudge(watch, START + 1),
+    deferProgressWatchNudge(watch, START + 1),
+  );
+  assert.deepEqual(watch, before);
 });
