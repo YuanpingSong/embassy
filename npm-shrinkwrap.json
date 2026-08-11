@@ -1,12 +1,12 @@
 {
   "name": "agent-embassy",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "agent-embassy",
-      "version": "1.3.0",
+      "version": "1.4.0",
       "license": "MIT",
       "os": [
         "darwin"
@@ -15,7 +15,6 @@
         "ws": "8.21.3"
       },
       "bin": {
-        "claude-codex-gateway": "dist/src/gateway/cli.js",
         "embassy": "dist/src/gateway/cli.js"
       },
       "devDependencies": {
