@@ -16,7 +16,6 @@ export const cliCopyKeys = [
   "error.unsafe",
   "error.tokenUnknown",
   "error.deliveryTimeout",
-  "error.versionDrift",
 ] as const;
 
 export type CliCopyKey = (typeof cliCopyKeys)[number];

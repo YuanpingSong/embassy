@@ -54,6 +54,4 @@ Options:
     "delivery token not recognized; it may have expired or belong to a previous gateway session.",
   "error.deliveryTimeout":
     "the delivery has not settled yet; the gateway is still running. Check again later with embassy delivery-status.",
-  "error.versionDrift":
-    "installed Claude Code is not the exact version this Embassy build supports. Run npm update -g agent-embassy, then embassy health. If Embassy is already up to date, no released Embassy supports your Claude Code yet: wait for the next release, or run the Claude Code version this build names in its requirements.",
 } as const satisfies CliCopy;

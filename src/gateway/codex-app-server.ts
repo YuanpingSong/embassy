@@ -52,7 +52,8 @@ export type CodexRouteIdentity = {
 /**
  * Version/generation evidence supplied by the attach-only transport owner.
  * App Server's initialize result does not currently negotiate a protocol
- * version, so writable construction requires an outer, version-pinned probe.
+ * version, so writable construction requires a separately attested tested
+ * schema and write surface.
  * The attestation expires with any endpoint generation or binary change.
  */
 export type CodexEndpointCompatibilityAttestation = {

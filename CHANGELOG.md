@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Provider versions now follow one evidence ladder: certified same-major builds are writable; same-major builds with fully passing bounded probes are `schema_attested` and writable only when those probes cover the write path. Claude's probes cover its native write path, while untested Codex 0.x remains monitor-only pending a certified `turn/start` write schema. Failed probes, a different major, or version evidence that cannot establish a safe major leave only that provider degraded, monitor-only, and write-fenced while the broker, control socket, dashboards, and other provider keep running. Probes never promote across a major or compensate for unknown major evidence. An exact official launcher target may supply separate bounded major evidence even when its version banner is unparseable. Different-major guidance names the observed and tested versions plus the supported major and says that a supporting Embassy release is required. Exact OS ownership, path, symlink, lease, state, and generation failures still refuse broker startup.
+- A Claude registry record whose peer protocol is not 1 is rejected per record and included in bounded rejection evidence without stopping the broker.
+- Claude registry parsing remains strict for every required and consumed field while tolerating unknown top-level fields. Optional bounded evidence on the existing Claude connector row carries scanned/parseable-required-field totals, whether such a record has appeared since broker start, and rejected-record counts by safe code. Status and both dashboards surface that evidence so an observed-empty registry stays loud; if Claude is running, its registry layout may have changed.
+
+### Fixed
+
+- Bounded `claude --version` observation tolerates suffixes and stderr notices and reports an unparseable banner without turning it into a misleading patch-drift failure.
+
 ## [1.4.1] - 2026-08-11
 
 ### Changed

@@ -134,6 +134,11 @@ export const dashboardCopyEn = {
     "Embassy retained a normalized compatibility or connector warning.",
   "guidance.degraded.action":
     "Run embassy status. Restart only when queued messages and active deliveries are both zero; restarting abandons memory-only message bodies.",
+  "guidance.providerIncompatible.title": "Provider build is write-fenced",
+  "guidance.providerIncompatible.body":
+    "Embassy kept the broker and the other provider running. Provider compatibility names the bounded version evidence, this release's tested build, and the supported major.",
+  "guidance.providerIncompatible.action":
+    "Run embassy refresh-dashboard, then review Provider compatibility. For an unsupported major, install an Embassy release that supports it; this broker remains running in the meantime.",
   "guidance.generic.title": "Embassy reported a normalized alert",
   "guidance.generic.body":
     "This safe code has no automatic repair mapped in the dashboard.",
@@ -155,6 +160,17 @@ export const dashboardCopyEn = {
     "Embassy is supervising this completion-ended conversation and has observed a quiet episode or reduced route-only evidence.",
   "guidance.progressWatch.action":
     "Check the worker route and recent watch history. Either participant can end supervision with exact DONE:; the owner can also run embassy untrack --conversation <token>.",
+  "guidance.registryEmpty.title":
+    "Claude registry has yielded no parseable record",
+  "guidance.registryEmpty.body":
+    "No Claude registry record with parseable required fields has been observed since this broker started. If Claude is running, its registry layout may have changed.",
+  "guidance.registryEmpty.action":
+    "Run embassy refresh-dashboard. If Claude is running and this remains, review the Registry observation in embassy status.",
+  "guidance.registryRejected.title": "Claude registry scan reported issues",
+  "guidance.registryRejected.body":
+    "The latest bounded scan could not read the registry or rejected one or more records. Other records, if any, continue through normal validation.",
+  "guidance.registryRejected.action":
+    "Run embassy status and review the per-code counts under Registry observation.",
   "transit.eyebrow": "In transit",
   "transit.title": "Queue posture",
   "transit.queued": "Queued messages",
@@ -288,12 +304,28 @@ export const dashboardCopyEn = {
   "diagnostics.compatibilityChecks.empty": "No provider compatibility status is available.",
   "diagnostics.compatibilityChecks.caption": "Automatic provider compatibility status",
   "diagnostics.version": "Version",
+  "diagnostics.testedVersion": "Tested by this release",
+  "diagnostics.supportedMajor": "Supported major",
   "diagnostics.tier": "Tier",
   "diagnostics.checkedAt": "Checked",
   "diagnostics.failure": "Failure",
   "compatibilityTier.certified": "Supported",
-  "compatibilityTier.schema_attested": "Legacy observation",
+  "compatibilityTier.schema_attested":
+    "Live schema probes passed; build not tested by this release",
   "compatibilityTier.incompatible": "Incompatible",
+  "diagnostics.registry.title": "Registry observation",
+  "diagnostics.registry.entriesScanned": "Entries scanned",
+  "diagnostics.registry.parseableRecords":
+    "Records with parseable required fields",
+  "diagnostics.registry.rejected": "Rejected records by safe code",
+  "diagnostics.registry.rejectedNone": "None",
+  "diagnostics.registry.rejectedCodesOmitted":
+    "{count} additional rejection codes omitted",
+  "diagnostics.registry.state.parseableRecordObserved":
+    "Parseable required fields observed",
+  "diagnostics.registry.state.emptySinceBoot": "Empty since broker start",
+  "diagnostics.registry.state.noParseableRecordSinceBoot":
+    "No parseable record since broker start",
   "diagnostics.protocol": "Protocol",
   "diagnostics.health": "Health",
   "diagnostics.accounting": "Accounting snapshot",
@@ -340,15 +372,18 @@ export const dashboardCopyEn = {
   "health.meaning.connecting": "Establishing the local connection.",
   "health.meaning.degraded": "Connected with retained warnings.",
   "health.meaning.offline": "Not reachable on this machine.",
-  "health.meaning.incompatible": "Version handshake failed.",
+  "health.meaning.incompatible":
+    "Required compatibility evidence is missing or failed; inspect Provider compatibility.",
   "compatibility.unknown": "Unknown",
   "compatibility.compatible": "Compatible",
   "compatibility.incompatible": "Incompatible",
   "compatibility.expired": "Expired",
-  "compatibility.meaning.compatible": "Verified against the pinned range.",
+  "compatibility.meaning.compatible":
+    "Required compatibility evidence passed.",
   "compatibility.meaning.unknown": "Not yet verified.",
   "compatibility.meaning.expired": "Verification lapsed; re-observe.",
-  "compatibility.meaning.incompatible": "Outside the supported range.",
+  "compatibility.meaning.incompatible":
+    "Required compatibility evidence is missing or failed; inspect Provider compatibility.",
   "route.stale": "Stale",
   "route.idle": "Idle",
   "route.busy": "Busy",
@@ -610,7 +645,7 @@ export const dashboardCopyEn = {
   "app.diag.col.version": "Version",
   "app.diag.col.compat": "Compatibility",
   "app.diag.versions.rangeAbsent":
-    "The supported protocol range is not carried by the live contract, so only the compatibility verdict is shown.",
+    "Connector rows show observed protocol tokens. Provider compatibility below shows the observed version, this release's tested build, the supported major, and probe results.",
   "app.diag.providerCompatibility.title": "Provider compatibility",
   "app.diag.lease.title": "Lease / instance",
   "app.diag.lease.absent":

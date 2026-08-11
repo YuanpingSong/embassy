@@ -55,7 +55,7 @@ type Fixture = {
 type FixtureOverrides = Partial<
   Omit<
     ClaudePeerAdapterOptions,
-    "sessionsDir" | "socketDir" | "attestedClaudeCodeVersion"
+    "sessionsDir" | "socketDir"
   >
 > &
   Omit<
@@ -96,9 +96,11 @@ async function fixture(
     now,
     createId,
     createGeneration,
+    expectedUid,
     registryRename,
     registryOperationHook,
     registryPublicationHook,
+    postBindHook,
     ...productionOverrides
   } = overrides;
   const adapter = new ClaudePeerAdapter(
@@ -114,6 +116,7 @@ async function fixture(
     },
     {
       processInspector: async (pid) => processes.get(pid),
+      ...(expectedUid === undefined ? {} : { expectedUid }),
       ...(connect === undefined ? {} : { connect }),
       ...(now === undefined ? {} : { now }),
       ...(createId === undefined ? {} : { createId }),
@@ -125,6 +128,7 @@ async function fixture(
       ...(registryPublicationHook === undefined
         ? {}
         : { registryPublicationHook }),
+      ...(postBindHook === undefined ? {} : { postBindHook }),
       userHome: home,
       tempRoots: [systemTemp],
     },
@@ -251,6 +255,12 @@ async function eventually(
 }
 
 test("adapter accepts the reviewed Claude major and normalized private roots", async () => {
+  const unknownVersion = new ClaudePeerAdapter({
+    sessionsDir: "/synthetic/sessions",
+    socketDir: "/synthetic/sockets",
+    attestedClaudeCodeVersion: "unknown",
+  });
+  await unknownVersion.close();
   assert.throws(
     () =>
       new ClaudePeerAdapter({
@@ -694,30 +704,179 @@ test("discovery ignores provider modes but rejects invalid processes and paths",
   assert.equal(result.rejected.INVALID_FILE_NAME, 1);
 });
 
-test("discovery fails closed on unreviewed registry schema fields", async (t) => {
+test("discovery counts bad registry artifacts without hiding healthy peers", async (t) => {
+  const current = await fixture(t, { maxRegistryBytes: 1_024 });
+  await addPeer(current, { pid: 42_105 });
+
+  const badSocket = await addPeer(current, {
+    pid: 42_106,
+    sessionId: SESSION_TWO,
+  });
+  await new Promise<void>((resolve, reject) =>
+    badSocket.server.close((error) => (error ? reject(error) : resolve())),
+  );
+  current.servers.splice(current.servers.indexOf(badSocket.server), 1);
+  await writeFile(badSocket.socketPath, "not a socket", { mode: 0o600 });
+
+  await writeFile(
+    path.join(current.sessionsDir, "42107.json"),
+    "x".repeat(1_025),
+    { mode: 0o600 },
+  );
+  const outside = path.join(current.root, "outside-registry.json");
+  await writeFile(outside, "{}", { mode: 0o600 });
+  await symlink(outside, path.join(current.sessionsDir, "42108.json"));
+
+  const result = await current.adapter.discover();
+  assert.equal(result.peers.length, 1);
+  assert.equal(result.peers[0]?.alias, "peer-42105");
+  assert.deepEqual(result.rejected, {
+    SOCKET_NOT_SOCKET: 1,
+    REGISTRY_TOO_LARGE: 1,
+    REGISTRY_NOT_REGULAR: 1,
+  });
+  assert.equal(result.entriesScanned, 4);
+  assert.equal(result.parseableRecords, 2);
+});
+
+test("discovery tolerates unknown registry fields without exposing them", async (t) => {
   const current = await fixture(t);
-  const peer = await addPeer(current, { pid: 42_111 });
+  let connections = 0;
+  const peer = await addPeer(current, {
+    pid: 42_111,
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
   const record = JSON.parse(await readFile(peer.registryPath, "utf8")) as Record<
     string,
     unknown
   >;
-  record.unreviewedPath = "/private/provider/history";
+  record.waitingFor = "dialog open";
   await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
 
   const result = await current.adapter.discover();
-  assert.equal(result.peers.length, 0);
-  assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
-  assert.ok(!JSON.stringify(result).includes("provider/history"));
+  assert.equal(result.peers.length, 1);
+  assert.deepEqual(result.rejected, {});
+  assert.equal(result.parseableRecords, 1);
+  assert.ok(!JSON.stringify(result).includes("dialog open"));
+  const target = result.peers[0];
+  assert.ok(target !== undefined);
+  await current.adapter.assertTargetWorkspaceDisjoint(
+    target.targetId,
+    current.stateDir,
+  );
+  const sent = await current.adapter.send(
+    target.targetId,
+    "unknown fields do not hide this peer",
+  );
+  assert.equal(sent.transportStatus, "transport_written");
+  assert.equal(connections, 1);
 });
 
-test("discovery accepts accessible provider directories regardless of mode", async (t) => {
+test("discovery rejects unsupported peer protocols per record", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, { pid: 42_112, peerProtocol: 2 });
+
+  const result = await current.adapter.discover();
+  assert.deepEqual(result.peers, []);
+  assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
+  assert.equal(result.entriesScanned, 1);
+  assert.equal(result.parseableRecords, 0);
+});
+
+test("discovery rejects unsupported Claude majors per record", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, { pid: 42_113, version: "3.0.0" });
+
+  const result = await current.adapter.discover();
+  assert.deepEqual(result.peers, []);
+  assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
+  assert.equal(result.entriesScanned, 1);
+  assert.equal(result.parseableRecords, 0);
+});
+
+test("discovery excludes a marked Embassy helper advertisement before peer accounting", async (t) => {
+  const current = await fixture(t);
+  const helper = await addPeer(current, {
+    pid: 42_116,
+    name: "codex-helper",
+  });
+  const record = JSON.parse(
+    await readFile(helper.registryPath, "utf8"),
+  ) as Record<string, unknown>;
+  record.embassyAdvertisementVersion = 1;
+  await writeFile(helper.registryPath, JSON.stringify(record), { mode: 0o600 });
+
+  const result = await current.adapter.discover();
+  assert.deepEqual(result.peers, []);
+  assert.deepEqual(result.rejected, {});
+  assert.equal(result.entriesScanned, 1);
+  assert.equal(result.parseableRecords, 0);
+});
+
+test("discovery does not mistake an unmarked Claude codex-* name for an Embassy advertisement", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, { pid: 42_117, name: "codex-cli" });
+
+  const result = await current.adapter.discover();
+  assert.equal(result.peers.length, 1);
+  assert.equal(result.peers[0]?.alias, "codex-cli");
+  assert.deepEqual(result.rejected, {});
+  assert.equal(result.entriesScanned, 1);
+  assert.equal(result.parseableRecords, 1);
+});
+
+test("discovery still rejects malformed known registry fields", async (t) => {
+  const current = await fixture(t);
+  const malformed = [
+    await addPeer(current, { pid: 42_114 }),
+    await addPeer(current, { pid: 42_115, sessionId: SESSION_TWO }),
+    await addPeer(current, { pid: 42_116, sessionId: SESSION_THREE }),
+  ];
+  const invalidKnownFields: ReadonlyArray<Readonly<Record<string, unknown>>> = [
+    { statusUpdatedAt: -1 },
+    { nameSource: { source: "derived" } },
+    { entrypoint: "cli/unsafe" },
+  ];
+  for (const [index, peer] of malformed.entries()) {
+    assert.ok(peer !== undefined);
+    const record = JSON.parse(
+      await readFile(peer.registryPath, "utf8"),
+    ) as Record<string, unknown>;
+    Object.assign(record, invalidKnownFields[index]);
+    await writeFile(peer.registryPath, JSON.stringify(record), { mode: 0o600 });
+  }
+
+  const result = await current.adapter.discover();
+  assert.deepEqual(result.peers, []);
+  assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 3 });
+  assert.equal(result.entriesScanned, 3);
+  assert.equal(result.parseableRecords, 0);
+});
+
+test("discovery requires private owned sessions but accepts shared socket directory modes", async (t) => {
   const current = await fixture(t);
   await addPeer(current, { pid: 42_121 });
   await chmod(current.sessionsDir, 0o755);
+  await assert.rejects(
+    current.adapter.discover(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "UNSAFE_PEER_DIRECTORY",
+  );
+  await chmod(current.sessionsDir, 0o700);
   await chmod(current.socketDir, 0o755);
   const result = await current.adapter.discover();
   assert.equal(result.peers.length, 1);
   assert.deepEqual(result.rejected, {});
+
+  const wrongOwner = await fixture(t, { expectedUid: UID + 1 });
+  await assert.rejects(
+    wrongOwner.adapter.discover(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "UNSAFE_PEER_DIRECTORY",
+  );
 });
 
 test("registry enumeration stops at its configured entry bound", async (t) => {
@@ -1439,6 +1598,7 @@ test("listener advertises one native codex peer and removes it on close", async 
   >;
   assert.equal(record.pid, process.pid);
   assert.equal(record.name, "codex-isolated-test");
+  assert.equal(record.embassyAdvertisementVersion, 1);
   assert.equal(record.kind, "interactive");
   assert.equal(record.messagingSocketPath, listener.address.slice(4));
 
@@ -1451,6 +1611,30 @@ test("listener advertises one native codex peer and removes it on close", async 
 
   await listener.close();
   await assert.rejects(lstat(registryPath), { code: "ENOENT" });
+});
+
+test("listener advertises bounded unknown Claude version evidence", async (t) => {
+  const current = await fixture(t, {
+    createId: () => SESSION_ONE,
+    attestedClaudeCodeVersion: "unknown",
+  });
+  const listener = await current.adapter.listen({ onMessage: () => undefined });
+  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
+
+  await listener.advertise("codex-unknown-version", current.workspace);
+  const record = JSON.parse(await readFile(registryPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(record.version, "unknown");
+
+  const discovery = await current.adapter.discover();
+  assert.deepEqual(discovery.peers, []);
+  assert.deepEqual(discovery.rejected, {});
+  assert.equal(discovery.entriesScanned, 1);
+  assert.equal(discovery.parseableRecords, 0);
+
+  await listener.close();
 });
 
 test("prepared listener generations coexist, publish atomically, and activate explicitly", async (t) => {
@@ -1774,6 +1958,47 @@ test("prepared generations validate syntax and reject foreign adapter ownership"
   } finally {
     await foreignAdapter.close();
   }
+});
+
+test("post-bind registry quarantine confirms exact callback closure", async (t) => {
+  let socketPath: string | undefined;
+  const current = await fixture(t, {
+    postBindHook: async (boundPath) => {
+      socketPath = boundPath;
+      await chmod(current.sessionsDir, 0o755);
+    },
+  });
+
+  await assert.rejects(
+    current.adapter.listen({ onMessage: () => undefined }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "UNSAFE_PEER_DIRECTORY",
+  );
+  assert.ok(socketPath !== undefined);
+  await assert.rejects(lstat(socketPath), { code: "ENOENT" });
+  await chmod(current.sessionsDir, 0o700);
+});
+
+test("post-bind registry quarantine stays fatal after callback replacement", async (t) => {
+  let socketPath: string | undefined;
+  const current = await fixture(t, {
+    postBindHook: async (boundPath) => {
+      socketPath = boundPath;
+      await chmod(current.sessionsDir, 0o755);
+      await rename(boundPath, `${boundPath}.displaced`);
+      await writeFile(boundPath, "foreign callback path", { mode: 0o600 });
+    },
+  });
+
+  await assert.rejects(
+    current.adapter.listen({ onMessage: () => undefined }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_CALLBACK_UNSAFE",
+  );
+  assert.ok(socketPath !== undefined);
+  assert.equal((await lstat(socketPath)).isFile(), true);
+  await chmod(current.sessionsDir, 0o700);
 });
 
 test("ordinary listener generations are fresh across process-lifecycle replacements", async (t) => {

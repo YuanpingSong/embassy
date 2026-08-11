@@ -14,6 +14,7 @@ import type {
   LocalCodexGatewayProvider,
 } from "../src/gateway/providers.js";
 import {
+  GATEWAY_CODEX_APP_SERVER_VERSION,
   resolveGatewayClaudeLauncher,
   runGatewayServer,
   type GatewayServerDependencies,
@@ -44,9 +45,18 @@ function provider(
   } as unknown as LocalClaudeGatewayProvider & LocalCodexGatewayProvider;
 }
 
-function factory(onClose: () => void): LocalCodexTransportFactory {
+function factory(
+  onClose: () => void,
+  appServerVersion = GATEWAY_CODEX_APP_SERVER_VERSION,
+  availabilityFailure?: "CODEX_CONTROL_SOCKET_UNAVAILABLE",
+): LocalCodexTransportFactory {
   return {
+    appServerVersion,
+    ...(availabilityFailure === undefined ? {} : { availabilityFailure }),
     endpointGeneration: "synthetic_endpoint_generation",
+    hostId: "this-mac",
+    protocol: "codex-app-server",
+    protocolVersion: appServerVersion,
     close: async () => onClose(),
   } as unknown as LocalCodexTransportFactory;
 }
@@ -263,7 +273,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
   assert.equal(signals.listenerCount(), 0);
 });
 
-test("assembly keeps exact startup resolution and uses the refresh-only candidate resolver after startup", async () => {
+test("assembly uses attested resolvers at startup and after replacement", async () => {
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
     EMBASSY_STATE_DIR: "/synthetic/controller-state",
@@ -324,6 +334,347 @@ test("assembly keeps exact startup resolution and uses the refresh-only candidat
 
   assert.equal(startupCalls, 1);
   assert.equal(candidateCalls, 1);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("unsupported and unknown Claude versions boot quarantined without native construction", async () => {
+  for (const current of [
+    {
+      runtime: { ...runtime(), claudeCodeVersion: "3.0.0" },
+      version: "3.0.0",
+      safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+    },
+    {
+      runtime: {
+        ...runtime(),
+        claudeCodeVersion: "unknown",
+        launcherVersionEvidence: "3.0.0",
+      },
+      version: "3.0.0",
+      safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+    },
+    {
+      runtime: { ...runtime(), claudeCodeVersion: "unknown" },
+      version: "unknown",
+      safeErrorCode: "CLAUDE_VERSION_UNPARSEABLE",
+    },
+    {
+      runtime: {
+        ...runtime(),
+        claudeCodeVersion: "unknown",
+        launcherVersionEvidence: "2.1.227",
+        versionEvidenceFailure: "CLAUDE_VERSION_EVIDENCE_CONFLICT",
+      },
+      version: "2.1.227",
+      safeErrorCode: "CLAUDE_VERSION_EVIDENCE_CONFLICT",
+    },
+    {
+      runtime: {
+        ...runtime(),
+        claudeCodeVersion: "unknown",
+        launcherVersionEvidence: "3.0.0",
+        versionEvidenceFailure: "CLAUDE_VERSION_CHECK_FAILED",
+      },
+      version: "3.0.0",
+      safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+    },
+  ] as const) {
+    const env: NodeJS.ProcessEnv = {
+      HOME: SYNTHETIC_HOME,
+      EMBASSY_STATE_DIR: "/synthetic/controller-state",
+    };
+    const config = loadGatewayConfig(env);
+    const abort = new AbortController();
+    const signals = signalHarness();
+    let nativeClaudeConstructions = 0;
+
+    await runGatewayServer(
+      {
+        env,
+        signal: abort.signal,
+        onReady: () => abort.abort(),
+      },
+      {
+        ...signals.dependencies,
+        loadConfig: () => config,
+        loginHome: () => SYNTHETIC_HOME,
+        acquireInstanceLease: async () => instanceLease(() => undefined),
+        attestClaudeRuntime: async () => current.runtime,
+        createClaudeProvider: () => {
+          nativeClaudeConstructions += 1;
+          return provider(() => undefined);
+        },
+        createStore: () => new GatewayStore(config),
+        createCodexFactory: async () => factory(() => undefined),
+        createCodexProvider: () => provider(() => undefined),
+        createService: (options) => {
+          const adapters = options.adapters;
+          if (adapters === undefined) assert.fail("adapters are required");
+          return {
+            start: async () => {
+              const claude = adapters[0];
+              assert.deepEqual(claude?.compatibilitySurface?.(), {
+                surface: "claude",
+                version: current.version,
+              });
+              const failed = (await claude?.runCompatibilityProbes?.())?.find(
+                (probe) => probe.outcome === "fail",
+              );
+              assert.equal(failed?.safeErrorCode, current.safeErrorCode);
+            },
+            close: async () => {
+              await Promise.all(adapters.map((adapter) => adapter.close()));
+            },
+          };
+        },
+      },
+    );
+
+    assert.equal(nativeClaudeConstructions, 0);
+    assert.equal(signals.listenerCount(), 0);
+  }
+});
+
+test("same-major official launcher evidence names compatibility without changing the unknown banner", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+  let nativeClaudeConstructions = 0;
+
+  await runGatewayServer(
+    {
+      env,
+      signal: abort.signal,
+      onReady: () => abort.abort(),
+    },
+    {
+      ...signals.dependencies,
+      loadConfig: () => config,
+      loginHome: () => SYNTHETIC_HOME,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => ({
+        ...runtime(),
+        claudeCodeVersion: "unknown",
+        launcherVersionEvidence: "2.1.228",
+      }),
+      createClaudeProvider: (options) => {
+        nativeClaudeConstructions += 1;
+        assert.equal(options.runtime.claudeCodeVersion, "unknown");
+        assert.equal(options.runtime.launcherVersionEvidence, "2.1.228");
+        assert.equal(options.compatibilityVersion, "2.1.228");
+        return provider(() => undefined);
+      },
+      createStore: () => new GatewayStore(config),
+      createCodexFactory: async () => factory(() => undefined),
+      createCodexProvider: () => provider(() => undefined),
+      createService: () => ({
+        start: async () => undefined,
+        close: async () => undefined,
+      }),
+    },
+  );
+
+  assert.equal(nativeClaudeConstructions, 1);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("an unsupported Codex major boots quarantined without native construction", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+  let nativeCodexConstructions = 0;
+  let factoryCloses = 0;
+
+  await runGatewayServer(
+    {
+      env,
+      signal: abort.signal,
+      onReady: () => abort.abort(),
+    },
+    {
+      ...signals.dependencies,
+      loadConfig: () => config,
+      loginHome: () => SYNTHETIC_HOME,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => provider(() => undefined),
+      createStore: () => new GatewayStore(config),
+      createCodexFactory: async () =>
+        factory(() => {
+          factoryCloses += 1;
+        }, "1.0.0"),
+      createCodexProvider: () => {
+        nativeCodexConstructions += 1;
+        return provider(() => undefined);
+      },
+      createService: (options) => {
+        const adapters = options.adapters;
+        if (adapters === undefined) assert.fail("adapters are required");
+        return {
+          start: async () => {
+            const codex = adapters[1];
+            assert.deepEqual(codex?.compatibilitySurface?.(), {
+              surface: "codex",
+              version: "1.0.0",
+            });
+            const failed = (await codex?.runCompatibilityProbes?.())?.find(
+              (probe) => probe.outcome === "fail",
+            );
+            assert.equal(
+              failed?.safeErrorCode,
+              "CODEX_APP_SERVER_VERSION_UNSUPPORTED",
+            );
+          },
+          close: async () => {
+            await Promise.all(adapters.map((adapter) => adapter.close()));
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(nativeCodexConstructions, 0);
+  assert.equal(factoryCloses, 1);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("an unclassifiable Codex version boots quarantined without native construction", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+  let nativeCodexConstructions = 0;
+  let factoryCloses = 0;
+
+  await runGatewayServer(
+    {
+      env,
+      signal: abort.signal,
+      onReady: () => abort.abort(),
+    },
+    {
+      ...signals.dependencies,
+      loadConfig: () => config,
+      loginHome: () => SYNTHETIC_HOME,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => provider(() => undefined),
+      createStore: () => new GatewayStore(config),
+      createCodexFactory: async () =>
+        factory(() => {
+          factoryCloses += 1;
+        }, "unknown"),
+      createCodexProvider: () => {
+        nativeCodexConstructions += 1;
+        return provider(() => undefined);
+      },
+      createService: (options) => {
+        const adapters = options.adapters;
+        if (adapters === undefined) assert.fail("adapters are required");
+        return {
+          start: async () => {
+            const codex = adapters[1];
+            assert.deepEqual(codex?.compatibilitySurface?.(), {
+              surface: "codex",
+              version: "unknown",
+            });
+            const failed = (await codex?.runCompatibilityProbes?.())?.find(
+              (probe) => probe.outcome === "fail",
+            );
+            assert.equal(
+              failed?.safeErrorCode,
+              "CODEX_APP_SERVER_VERSION_UNPARSEABLE",
+            );
+          },
+          close: async () => {
+            await Promise.all(adapters.map((adapter) => adapter.close()));
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(nativeCodexConstructions, 0);
+  assert.equal(factoryCloses, 1);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("a missing Codex control socket boots quarantined without native construction", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+  let nativeCodexConstructions = 0;
+  let factoryCloses = 0;
+
+  await runGatewayServer(
+    {
+      env,
+      signal: abort.signal,
+      onReady: () => abort.abort(),
+    },
+    {
+      ...signals.dependencies,
+      loadConfig: () => config,
+      loginHome: () => SYNTHETIC_HOME,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => provider(() => undefined),
+      createStore: () => new GatewayStore(config),
+      createCodexFactory: async () =>
+        factory(
+          () => {
+            factoryCloses += 1;
+          },
+          GATEWAY_CODEX_APP_SERVER_VERSION,
+          "CODEX_CONTROL_SOCKET_UNAVAILABLE",
+        ),
+      createCodexProvider: () => {
+        nativeCodexConstructions += 1;
+        return provider(() => undefined);
+      },
+      createService: (options) => {
+        const adapters = options.adapters;
+        if (adapters === undefined) assert.fail("adapters are required");
+        return {
+          start: async () => {
+            const codex = adapters[1];
+            assert.deepEqual(codex?.compatibilitySurface?.(), {
+              surface: "codex",
+              version: GATEWAY_CODEX_APP_SERVER_VERSION,
+            });
+            const failed = (await codex?.runCompatibilityProbes?.())?.find(
+              (probe) => probe.outcome === "fail",
+            );
+            assert.equal(
+              failed?.safeErrorCode,
+              "CODEX_CONTROL_SOCKET_UNAVAILABLE",
+            );
+          },
+          close: async () => {
+            await Promise.all(adapters.map((adapter) => adapter.close()));
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(nativeCodexConstructions, 0);
+  assert.equal(factoryCloses, 1);
   assert.equal(signals.listenerCount(), 0);
 });
 

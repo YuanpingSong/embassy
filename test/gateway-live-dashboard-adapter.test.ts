@@ -19,14 +19,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script, createContext } from "node:vm";
 
-import type {
-  DashboardActivityEventRow,
-  DashboardAttentionItem,
-  DashboardMessageGroup,
-  DashboardOmissions,
-  DashboardPeerRow,
-  DashboardRouteRow,
-  DashboardViewModel,
+import {
+  buildDashboardViewModel,
+  type DashboardActivityEventRow,
+  type DashboardAttentionItem,
+  type DashboardMessageGroup,
+  type DashboardOmissions,
+  type DashboardPeerRow,
+  type DashboardRouteRow,
+  type DashboardViewModel,
 } from "../src/gateway/dashboard-model.js";
 import type {
   CompatibilityState,
@@ -35,6 +36,7 @@ import type {
   GatewayProvider,
   MessageDirection,
 } from "../src/gateway/types.js";
+import { dashboardFixture } from "./dashboard-fixture.js";
 
 // ---------------------------------------------------------------------------
 // The adapter surface under test (mirrors app-types.tsx / adapter.tsx)
@@ -1175,6 +1177,34 @@ test("attention teaching commands are real CLI verbs", () => {
   }
 });
 
+test("registry-unavailable evidence reaches live attention exactly once", () => {
+  const snapshot = dashboardFixture();
+  const claude = snapshot.connectors.find(
+    (connector) => connector.provider === "claude",
+  );
+  assert.ok(claude);
+  claude.health = "degraded";
+  claude.compatibility = "incompatible";
+  claude.safeErrorCode = "CLAUDE_REGISTRY_UNAVAILABLE";
+  claude.registry = {
+    entriesScanned: 0,
+    parseableRecords: 0,
+    parseableRecordSeenSinceBoot: false,
+    rejected: [{ safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE", count: 1 }],
+    rejectedCodesOmitted: 0,
+  };
+
+  const views = adapter
+    .overviewProps(buildDashboardViewModel(snapshot), GENERATED_MS)
+    .attention.filter(
+      (view) => view.item.code === "CLAUDE_REGISTRY_UNAVAILABLE",
+    );
+  assert.deepEqual(
+    plain(views).map((view) => [view.guidanceKey, view.command]),
+    [["registryRejected", "embassy status"]],
+  );
+});
+
 test("attention commands fall back to angle-bracket placeholders without an alias", () => {
   const anonymous: DashboardAttentionItem = {
     kind: "alert",
@@ -1665,12 +1695,16 @@ test("diagnosticsProps forwards automatic provider compatibility rows", () => {
     {
       surface: "claude",
       version: "2.1.226",
+      testedVersion: "2.1.227",
+      supportedMajor: "2",
       tier: "certified",
       checkedAt: "2026-08-09T12:00:00.000Z",
     },
     {
       surface: "codex",
       version: "0.148.0",
+      testedVersion: "0.147.0",
+      supportedMajor: "0",
       tier: "schema_attested",
       checkedAt: "2026-08-09T12:00:01.000Z",
       failure: "thread/loaded/list",
@@ -1681,6 +1715,34 @@ test("diagnosticsProps forwards automatic provider compatibility rows", () => {
     plain(adapter.diagnosticsProps(model).compatibilityChecks),
     plain(model.compatibilityChecks),
   );
+});
+
+test("diagnosticsProps preserves bounded connector registry evidence", () => {
+  const model = mutableClone(DEGRADED);
+  model.connectors = model.connectors.map((connector) =>
+    connector.provider === "claude"
+      ? {
+          ...connector,
+          registry: {
+            entriesScanned: 2,
+            parseableRecords: 1,
+            parseableRecordSeenSinceBoot: true,
+            rejected: [
+              { safeErrorCode: "REGISTRY_INVALID_SCHEMA", count: 1 },
+            ],
+            rejectedCodesOmitted: 0,
+          },
+        }
+      : connector,
+  );
+  const claude = model.connectors.find(
+    (connector) => connector.provider === "claude",
+  );
+  assert.ok(claude?.registry);
+  const projected = adapter.diagnosticsProps(model).connectors.find(
+    (connector) => connector.provider === "claude",
+  );
+  assert.deepEqual(plain(projected?.registry), plain(claude.registry));
 });
 
 // ---------------------------------------------------------------------------

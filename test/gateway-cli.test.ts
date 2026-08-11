@@ -26,6 +26,12 @@ import {
   gatewayCliExitCodes,
   runGatewayCli,
 } from "../src/gateway/cli.js";
+import {
+  certifiedCompatibilityVersions,
+  compatibilityProbeNames,
+  evaluateCompatibilityAttestation,
+} from "../src/gateway/compatibility.js";
+import { projectPublicCompatibilityCheck } from "../src/gateway/types.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
@@ -281,6 +287,21 @@ test("all client commands use one private control socket and expose only normali
   const replies: ReplyParams[] = [];
   const deliveryStatuses: string[] = [];
   const untracked: string[] = [];
+  const statusSnapshot = emptySnapshot();
+  statusSnapshot.compatibilityChecks = [
+    projectPublicCompatibilityCheck(
+      evaluateCompatibilityAttestation({
+        surface: "claude",
+        version: "2.1.228",
+        checkedAt: NOW,
+        certifiedVersions: certifiedCompatibilityVersions.claude,
+        probes: compatibilityProbeNames.claude.map((name) => ({
+          name,
+          outcome: "pass" as const,
+        })),
+      }),
+    ),
+  ];
   const handlers: GatewayControlHandlers = {
     health: () => ({ status: "ok", revision: 1 }),
     registerCodex: (params) => {
@@ -308,7 +329,7 @@ test("all client commands use one private control socket and expose only normali
       unpairs.push({ ...params });
       return { accepted: true, code: "ok" };
     },
-    listSnapshot: () => emptySnapshot(),
+    listSnapshot: () => statusSnapshot,
     observeSnapshot: () => ({
       snapshotRevision: 0,
       snapshot: emptySnapshot(),
@@ -523,7 +544,14 @@ test("all client commands use one private control socket and expose only normali
     const parsed = JSON.parse(result.stdout) as {
       ok: boolean;
       command: string;
-      result?: { deliveryToken?: string };
+      result?: {
+        deliveryToken?: string;
+        compatibilityChecks?: Array<{
+          version: string;
+          testedVersion: string;
+          supportedMajor: string;
+        }>;
+      };
     };
     assert.equal(parsed.ok, true);
     assert.equal(parsed.command, current.argv[0]);
@@ -540,6 +568,23 @@ test("all client commands use one private control socket and expose only normali
       current.argv[0] === "reply"
     ) {
       assert.equal(parsed.result?.deliveryToken, DELIVERY_TOKEN);
+    }
+    if (current.argv[0] === "status") {
+      assert.deepEqual(parsed.result?.compatibilityChecks, [
+        {
+          schemaVersion: 1,
+          surface: "claude",
+          version: "2.1.228",
+          tier: "schema_attested",
+          checkedAt: NOW,
+          probes: compatibilityProbeNames.claude.map((name) => ({
+            name,
+            outcome: "pass",
+          })),
+          testedVersion: "2.1.227",
+          supportedMajor: "2",
+        },
+      ]);
     }
   }
 

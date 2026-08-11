@@ -5,9 +5,12 @@ export type CompatibilitySurface = (typeof compatibilitySurfaces)[number];
 
 /** Exact upstream builds exercised by this release's deterministic suite. */
 export const certifiedCompatibilityVersions = Object.freeze({
-  claude: Object.freeze(["2.1.224", "2.1.225", "2.1.226", "2.1.227"]),
+  claude: Object.freeze(["2.1.227"]),
   codex: Object.freeze(["0.147.0"]),
 } satisfies Readonly<Record<CompatibilitySurface, readonly string[]>>);
+
+/** Bounded evidence used when a version banner is present but not parseable. */
+export const UNKNOWN_COMPATIBILITY_VERSION = "unknown" as const;
 
 export const compatibilityTiers = [
   "certified",
@@ -58,29 +61,46 @@ export type CompatibilitySurfaceObservation = Readonly<{
 
 const VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const PERSISTED_PROBE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const PERSISTED_PROBE_CAPACITY = 32;
 
-function versionDriftCode(surface: CompatibilitySurface): string {
+function legacyVersionDriftCode(surface: CompatibilitySurface): string {
   return surface === "claude" ? "CLAUDE_VERSION_DRIFT" : "CODEX_VERSION_DRIFT";
 }
 
-function requiredProbeNames(
+function unsupportedVersionCode(
   surface: CompatibilitySurface,
-): readonly CompatibilityProbeName[] {
-  return compatibilityProbeNames[surface];
+  version: string,
+  certifiedVersions: readonly string[] =
+    certifiedCompatibilityVersions[surface],
+): string | undefined {
+  if (version === UNKNOWN_COMPATIBILITY_VERSION) {
+    return surface === "claude"
+      ? "CLAUDE_VERSION_UNPARSEABLE"
+      : "CODEX_APP_SERVER_VERSION_UNPARSEABLE";
+  }
+  if (
+    certifiedVersions.some((certifiedVersion) =>
+      sharesCompatibilityMajor(certifiedVersion, version),
+    )
+  ) {
+    return undefined;
+  }
+  return surface === "claude"
+    ? "CLAUDE_PEER_VERSION_UNSUPPORTED"
+    : "CODEX_APP_SERVER_VERSION_UNSUPPORTED";
 }
 
 function versionMajor(version: string): number {
-  if (!VERSION_PATTERN.test(version)) {
-    throw new BridgeError(
-      "COMPAT_VERSION_INVALID",
-      "Compatibility versions must use bounded numeric semantic version syntax.",
-    );
-  }
   return Number(version.slice(0, version.indexOf(".")));
 }
 
 export function isCompatibilityVersion(value: unknown): value is string {
   return typeof value === "string" && VERSION_PATTERN.test(value);
+}
+
+export function isCompatibilityVersionEvidence(value: unknown): value is string {
+  return value === UNKNOWN_COMPATIBILITY_VERSION || isCompatibilityVersion(value);
 }
 
 export function sharesCompatibilityMajor(
@@ -98,7 +118,7 @@ function normalizeProbes(
   surface: CompatibilitySurface,
   probes: readonly CompatibilityProbeResult[],
 ): readonly CompatibilityProbeResult[] {
-  const required = requiredProbeNames(surface);
+  const required = compatibilityProbeNames[surface];
   if (
     probes.length !== required.length ||
     probes.some(
@@ -119,6 +139,45 @@ function normalizeProbes(
   return probes.map((probe) => Object.freeze({ ...probe }));
 }
 
+function persistedProbeSet(
+  value: readonly unknown[],
+): readonly CompatibilityProbeResult[] | undefined {
+  if (value.length === 0 || value.length > PERSISTED_PROBE_CAPACITY) {
+    return undefined;
+  }
+  const names = new Set<string>();
+  for (const candidate of value) {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      Array.isArray(candidate)
+    ) {
+      return undefined;
+    }
+    const probe = candidate as Record<string, unknown>;
+    const keys = Object.keys(probe);
+    if (
+      keys.length !== (probe.safeErrorCode === undefined ? 2 : 3) ||
+      keys.some(
+        (key) =>
+          key !== "name" && key !== "outcome" && key !== "safeErrorCode",
+      ) ||
+      typeof probe.name !== "string" ||
+      !PERSISTED_PROBE_NAME_PATTERN.test(probe.name) ||
+      names.has(probe.name) ||
+      (probe.outcome !== "pass" && probe.outcome !== "fail") ||
+      (probe.safeErrorCode !== undefined &&
+        (typeof probe.safeErrorCode !== "string" ||
+          !SAFE_CODE_PATTERN.test(probe.safeErrorCode))) ||
+      (probe.outcome === "pass") !== (probe.safeErrorCode === undefined)
+    ) {
+      return undefined;
+    }
+    names.add(probe.name);
+  }
+  return value as readonly CompatibilityProbeResult[];
+}
+
 export function evaluateCompatibilityAttestation(input: Readonly<{
   surface: CompatibilitySurface;
   version: string;
@@ -136,7 +195,12 @@ export function evaluateCompatibilityAttestation(input: Readonly<{
       "Compatibility evidence requires a valid timestamp.",
     );
   }
-  versionMajor(input.version);
+  if (!isCompatibilityVersionEvidence(input.version)) {
+    throw new BridgeError(
+      "COMPAT_VERSION_INVALID",
+      "Compatibility versions must be bounded semantic versions or explicit unknown evidence.",
+    );
+  }
   const certified = new Set(input.certifiedVersions);
   if (
     certified.size !== input.certifiedVersions.length ||
@@ -150,17 +214,20 @@ export function evaluateCompatibilityAttestation(input: Readonly<{
   }
   const normalizedProbes = normalizeProbes(input.surface, input.probes);
   const failed = normalizedProbes.find((probe) => probe.outcome === "fail");
-  const certifiedVersion = certified.has(input.version);
   let tier: CompatibilityTier;
   let safeErrorCode: string | undefined;
   if (failed !== undefined) {
     tier = "incompatible";
     safeErrorCode = failed.safeErrorCode;
-  } else if (certifiedVersion) {
+  } else if (certified.has(input.version)) {
     tier = "certified";
   } else {
-    tier = "incompatible";
-    safeErrorCode = versionDriftCode(input.surface);
+    safeErrorCode = unsupportedVersionCode(
+      input.surface,
+      input.version,
+      input.certifiedVersions,
+    );
+    tier = safeErrorCode === undefined ? "schema_attested" : "incompatible";
   }
 
   return Object.freeze({
@@ -174,7 +241,13 @@ export function evaluateCompatibilityAttestation(input: Readonly<{
   });
 }
 
-export function isCompatibilityAttestation(
+/**
+ * Validate the immutable evidence carried by a persisted attestation without
+ * consulting this build's release inventory. A release may later certify or
+ * stop certifying the observed version; neither change can corrupt evidence
+ * written by an earlier release.
+ */
+export function isPersistedCompatibilityAttestation(
   value: unknown,
 ): value is CompatibilityAttestation {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -197,8 +270,7 @@ export function isCompatibilityAttestation(
   if (
     candidate.schemaVersion !== 1 ||
     !compatibilitySurfaces.includes(candidate.surface as CompatibilitySurface) ||
-    typeof candidate.version !== "string" ||
-    !VERSION_PATTERN.test(candidate.version) ||
+    !isCompatibilityVersionEvidence(candidate.version) ||
     !compatibilityTiers.includes(candidate.tier as CompatibilityTier) ||
     typeof candidate.checkedAt !== "string" ||
     !Number.isFinite(Date.parse(candidate.checkedAt)) ||
@@ -212,22 +284,60 @@ export function isCompatibilityAttestation(
     return false;
   }
   try {
-    const normalized = normalizeProbes(
-      candidate.surface as CompatibilitySurface,
-      candidate.probes as CompatibilityProbeResult[],
-    );
-    const failed = normalized.find((probe) => probe.outcome === "fail");
-    if (candidate.tier === "incompatible") {
+    const persistedProbes = persistedProbeSet(candidate.probes);
+    if (persistedProbes === undefined) return false;
+    const failed = persistedProbes.find((probe) => probe.outcome === "fail");
+    if (candidate.tier === "certified") {
       return (
-        candidate.safeErrorCode ===
-        (failed?.safeErrorCode ??
-          versionDriftCode(candidate.surface as CompatibilitySurface))
+        failed === undefined &&
+        candidate.version !== UNKNOWN_COMPATIBILITY_VERSION &&
+        candidate.safeErrorCode === undefined
       );
     }
-    return failed === undefined && candidate.safeErrorCode === undefined;
+    if (candidate.tier === "incompatible") {
+      if (failed !== undefined) {
+        return candidate.safeErrorCode === failed.safeErrorCode;
+      }
+      return candidate.safeErrorCode !== undefined;
+    }
+    return (
+      failed === undefined &&
+      candidate.safeErrorCode === undefined &&
+      candidate.version !== UNKNOWN_COMPATIBILITY_VERSION
+    );
   } catch {
     return false;
   }
+}
+
+/** Validate a fresh attestation against this build's admission policy. */
+export function isCompatibilityAttestation(
+  value: unknown,
+): value is CompatibilityAttestation {
+  if (!isPersistedCompatibilityAttestation(value)) return false;
+  const required = compatibilityProbeNames[value.surface];
+  if (
+    value.probes.length !== required.length ||
+    value.probes.some((probe, index) => probe.name !== required[index])
+  ) {
+    return false;
+  }
+  if (value.tier === "certified") {
+    return certifiedCompatibilityVersions[value.surface].includes(value.version);
+  }
+  if (value.tier === "incompatible") {
+    if (value.probes.some((probe) => probe.outcome === "fail")) return true;
+    return (
+      value.safeErrorCode ===
+        unsupportedVersionCode(value.surface, value.version) ||
+      (value.version !== UNKNOWN_COMPATIBILITY_VERSION &&
+        value.safeErrorCode === legacyVersionDriftCode(value.surface))
+    );
+  }
+  return (
+    !certifiedCompatibilityVersions[value.surface].includes(value.version) &&
+    unsupportedVersionCode(value.surface, value.version) === undefined
+  );
 }
 
 export function compatibilityCacheKey(

@@ -40,6 +40,12 @@ live sends routine. Never enable a real provider message in CI.
 
 ## Product invariants
 
+The governing boundary doctrine is
+[“What Embassy defends, and what it deliberately does not”](SECURITY.md#what-embassy-defends-and-what-it-deliberately-does-not).
+Every new audit check must cite the doctrine sentence it enforces. If no current
+sentence supports it, escalate an explicit doctrine-change proposal rather than
+silently expanding the boundary through a test or hardening patch.
+
 - Keep the shipped v1 launcher macOS-only, foreground, same-machine, and
   local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP.
   The only network listener is the separately invoked, foreground
@@ -78,8 +84,8 @@ live sends routine. Never enable a real provider message in CI.
   become an in-memory `uds:` capability only; never accept it from an argument,
   print it, persist it, or instruct the user to prefix it.
 - Classify only an exact leading `STEER:` body in the Claude-to-Codex direction.
-  Deliver it through the pinned `turn/steer` schema at the next tool-call
-  boundary; never interrupt or inject mid-generation. A cleanly unavailable
+  Deliver it through the validated closed `turn/steer` schema at the next
+  tool-call boundary; never interrupt or inject mid-generation. A cleanly unavailable
   boundary falls back to the normal bounded queue. Keep the global kill switch,
   three-steer per-route cap, normal receipts, and journal marker. Expose no
   generic provider RPC escape hatch or approval-response method. Interrupt only
@@ -87,11 +93,36 @@ live sends routine. Never enable a real provider message in CI.
 - Embassy never mutates a Codex task's persistent approval or sandbox policy
   and never answers approvals. Registration—not a read-only-policy classifier—
   is the gateway reachability boundary.
-- Keep App Server 0.147.0 `experimentalApi: true` hard-coded solely for
+- Keep `experimentalApi: true` hard-coded solely for
   `thread/resume.excludeTurns: true`. Require an empty `thread.turns` response
   and never retain returned history.
-- Keep Claude Code and Codex App Server adapters exactly version-pinned and
-  fail closed on unknown schema, protocol, endpoint generation, or version.
+- Keep provider compatibility evidence-gated. Attest exact owned paths before
+  applying this ladder: a certified same-major build is writable; a same-major
+  build whose bounded probes all pass is `schema_attested` and writable only
+  when those probes cover the write path. Claude's probes cover its native
+  write path. Codex's bounded pre-write reads may include `initialize`,
+  `thread/loaded/list`, and registration-time `thread/resume`, but never
+  `turn/start`; untested Codex 0.x therefore remains monitor-only pending a
+  certified write schema. Failed probes leave only that provider degraded,
+  monitor-only, and write-fenced; a
+  different major or version evidence that cannot establish a safe major is
+  also provider-local
+  monitor-only, and probes must never promote either. Keep the broker,
+  control/dashboard surfaces, and other provider running for these degraded
+  cases. Only unsafe ownership, path, symlink, lease, state, or generation
+  evidence for Embassy-owned or executed artifacts and Embassy callback,
+  control, or state paths refuses broker startup. The Claude-owned external
+  sessions registry root is a read-side identity source: an unsafe UID or mode
+  quarantines and write-fences only Claude, with loud evidence, while the
+  broker and other provider stay available. Require Claude peer protocol 1 per
+  session record; reject any other
+  value in isolation and count that rejection loudly. Fail an unvalidated endpoint
+  generation closed on its responsible route.
+  Different-major guidance must safely name the observed and tested versions
+  plus the supported major and say that an Embassy release supporting the
+  observed major is required; never prescribe `embassy health` as recovery.
+  Ignore unknown top-level Claude registry fields while keeping every required
+  and consumed field strict, and expose bounded rejection/empty observations.
 - Preserve bounded queues, messages, callbacks, deadlines, deduplication, rate
   limits, and conversation tables. Never retry an ambiguous write.
 - The dashboard remains an atomically replaced, metadata-only static HTML file

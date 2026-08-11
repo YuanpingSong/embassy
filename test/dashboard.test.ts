@@ -59,6 +59,54 @@ test("dashboard catalogs have exact key parity", () => {
   }
 });
 
+test("compatibility meanings describe the evidence ladder in both locales", () => {
+  assert.match(
+    dashboardCopyEn["compatibility.meaning.compatible"],
+    /required compatibility evidence passed/i,
+  );
+  assert.match(
+    dashboardCopyEn["compatibility.meaning.incompatible"],
+    /evidence is missing or failed.*Provider compatibility/i,
+  );
+  assert.match(
+    dashboardCopyEn["app.diag.versions.rangeAbsent"],
+    /observed version.*tested build.*supported major.*probe results/i,
+  );
+  assert.equal(
+    /pinned range|outside the supported range|version handshake/i.test(
+      [
+        dashboardCopyEn["health.meaning.incompatible"],
+        dashboardCopyEn["compatibility.meaning.compatible"],
+        dashboardCopyEn["compatibility.meaning.incompatible"],
+      ].join(" "),
+    ),
+    false,
+  );
+
+  assert.match(
+    dashboardCopyZhCn["compatibility.meaning.compatible"],
+    /必需的兼容性证据已通过/u,
+  );
+  assert.match(
+    dashboardCopyZhCn["compatibility.meaning.incompatible"],
+    /缺少.*兼容性证据.*提供方兼容性/u,
+  );
+  assert.match(
+    dashboardCopyZhCn["app.diag.versions.rangeAbsent"],
+    /已观察版本.*测试的构建.*受支持主版本.*探测结果/u,
+  );
+  assert.equal(
+    /固定的版本范围|超出受支持的版本范围|版本握手/u.test(
+      [
+        dashboardCopyZhCn["health.meaning.incompatible"],
+        dashboardCopyZhCn["compatibility.meaning.compatible"],
+        dashboardCopyZhCn["compatibility.meaning.incompatible"],
+      ].join(" "),
+    ),
+    false,
+  );
+});
+
 test("progress-watch journal copy distinguishes worker and owner completion", () => {
   assert.equal(
     dashboardCopyEn["watches.event.workerReportedComplete"],

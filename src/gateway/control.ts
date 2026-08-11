@@ -20,10 +20,11 @@ import {
 import net, { type Server, type Socket } from "node:net";
 import path from "node:path";
 import { TextDecoder } from "node:util";
-import { isCompatibilityAttestation } from "./compatibility.js";
 import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
+  isPublicCompatibilityCheckSnapshot,
+  isPublicRegistryObservationSnapshot,
 } from "./types.js";
 import type {
   GatewayAccounting,
@@ -1127,7 +1128,7 @@ function isConnectorSnapshot(
         "protocol",
         "protocolVersion",
       ],
-      ["lastSeenAt", "safeErrorCode"],
+      ["lastSeenAt", "safeErrorCode", "registry"],
     ) &&
     isProvider(value.provider) &&
     isHostId(value.host) &&
@@ -1138,7 +1139,10 @@ function isConnectorSnapshot(
     typeof value.protocolVersion === "string" &&
     PROTOCOL_VERSION_PATTERN.test(value.protocolVersion) &&
     (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
-    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
+    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
+    (value.registry === undefined ||
+      (value.provider === "claude" &&
+        isPublicRegistryObservationSnapshot(value.registry)))
   );
 }
 
@@ -1592,7 +1596,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
       (!Array.isArray(value.compatibilityChecks) ||
         value.compatibilityChecks.length >
           gatewayPublicSnapshotLimits.compatibilityChecks ||
-        !value.compatibilityChecks.every(isCompatibilityAttestation))) ||
+        !value.compatibilityChecks.every(isPublicCompatibilityCheckSnapshot))) ||
     !Array.isArray(value.availablePeers) ||
     value.availablePeers.length > gatewayPublicSnapshotLimits.availablePeers ||
     !value.availablePeers.every(isAvailablePeerSnapshot) ||

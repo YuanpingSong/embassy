@@ -22,7 +22,10 @@ import {
   type SocketCompatibleDuplex,
   type WebSocketDuplexTransportOptions,
 } from "./codex-app-server.js";
-import { sharesCompatibilityMajor } from "./compatibility.js";
+import {
+  isCompatibilityVersion,
+  UNKNOWN_COMPATIBILITY_VERSION,
+} from "./compatibility.js";
 
 const APP_SERVER_CONTROL_DIRECTORY = "app-server-control";
 const APP_SERVER_CONTROL_SOCKET = "app-server-control.sock";
@@ -31,6 +34,11 @@ const DEFAULT_SPAWN_TIMEOUT_MS = 5_000;
 const DEFAULT_GRACEFUL_EXIT_MS = 2_000;
 const DEFAULT_SIGNAL_TIMEOUT_MS = 750;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const RELEASE_LEAF_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$/;
+const MANAGED_TARGET_TRIPLES = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+] as const;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 
 export type LocalCodexTransportErrorCode =
@@ -61,6 +69,8 @@ export class LocalCodexTransportError extends Error {
 
 export type ManagedLocalCodexInstallation = {
   appServerVersion: string;
+  /** Bounded availability evidence; unsafe endpoint evidence still throws. */
+  availabilityFailure?: "CODEX_CONTROL_SOCKET_UNAVAILABLE";
   binaryPath: string;
   controlSocketPath: string;
   endpointGeneration: string;
@@ -141,6 +151,7 @@ export type LocalCodexWriteCompatibilityAttestation =
 
 export type LocalCodexTransportFactory = {
   readonly appServerVersion: string;
+  readonly availabilityFailure?: "CODEX_CONTROL_SOCKET_UNAVAILABLE";
   /** Exact reviewed monitor schema; this does not authorize a turn write. */
   readonly schemaCompatibility: LocalCodexSchemaCompatibilityAttestation;
   /** Null until the separate writable notification/fanout gate is attested. */
@@ -231,7 +242,6 @@ function managedCodexTargetTriple(
 
 async function resolveRefreshCandidateManagedLocalCodexInstallation(
   home: string,
-  certifiedVersion: string,
   runtimeTarget: ManagedCodexRuntimeTarget,
 ): Promise<ManagedLocalCodexInstallation> {
   const currentLink = path.join(
@@ -252,30 +262,36 @@ async function resolveRefreshCandidateManagedLocalCodexInstallation(
     targetTriple !== undefined && releaseLeaf.endsWith(`-${targetTriple}`)
       ? releaseLeaf.slice(0, -1 - targetTriple.length)
       : releaseLeaf;
+  if (isCompatibilityVersion(observedVersion)) {
+    return await resolveManagedLocalCodexInstallation(
+      home,
+      observedVersion,
+      runtimeTarget,
+    );
+  }
   if (
-    !VERSION_PATTERN.test(observedVersion) ||
-    !sharesCompatibilityMajor(certifiedVersion, observedVersion)
+    !RELEASE_LEAF_PATTERN.test(releaseLeaf) ||
+    MANAGED_TARGET_TRIPLES.some(
+      (candidate) =>
+        releaseLeaf.endsWith(`-${candidate}`) && candidate !== targetTriple,
+    )
   ) {
     throw new LocalCodexTransportError("APP_SERVER_VERSION_MISMATCH");
   }
-  return await resolveManagedLocalCodexInstallation(
+  return await resolveManagedLocalCodexInstallationWithReleaseLeaves(
     home,
-    observedVersion,
+    UNKNOWN_COMPATIBILITY_VERSION,
     runtimeTarget,
+    new Set([releaseLeaf]),
   );
 }
 
-export async function resolveManagedLocalCodexInstallation(
+async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
   home: string,
   appServerVersion: string,
-  runtimeTarget: ManagedCodexRuntimeTarget = {
-    platform: process.platform,
-    architecture: process.arch,
-  },
+  _runtimeTarget: ManagedCodexRuntimeTarget,
+  allowedReleaseLeaves: ReadonlySet<string>,
 ): Promise<ManagedLocalCodexInstallation> {
-  if (!VERSION_PATTERN.test(appServerVersion)) {
-    throw new LocalCodexTransportError("INVALID_CONFIGURATION");
-  }
   const standalone = path.join(home, ".codex", "packages", "standalone");
   const currentLink = path.join(standalone, "current");
   const releasesDirectory = path.join(standalone, "releases");
@@ -312,16 +328,6 @@ export async function resolveManagedLocalCodexInstallation(
   ) {
     throw new LocalCodexTransportError("MANAGED_CODEX_INVALID");
   }
-  // Managed packages use either the version alone or the version plus the
-  // exact target triple for this runtime. Never accept a caller-invented
-  // suffix or a binary for a different architecture.
-  const targetTriple = managedCodexTargetTriple(runtimeTarget);
-  const allowedReleaseLeaves = new Set([
-    appServerVersion,
-    ...(targetTriple === undefined
-      ? []
-      : [`${appServerVersion}-${targetTriple}`]),
-  ]);
   const releaseLeaf = path.basename(resolvedCurrent);
   if (!allowedReleaseLeaves.has(releaseLeaf)) {
     throw new LocalCodexTransportError("APP_SERVER_VERSION_MISMATCH");
@@ -354,20 +360,19 @@ export async function resolveManagedLocalCodexInstallation(
     controlDirectory,
     APP_SERVER_CONTROL_SOCKET,
   );
-  let socketMetadata;
+  let socketMetadata: Awaited<ReturnType<typeof lstat>> | undefined;
+  let availabilityFailure:
+    | "CODEX_CONTROL_SOCKET_UNAVAILABLE"
+    | undefined;
   try {
     const directoryMetadata = await lstat(controlDirectory);
-    socketMetadata = await lstat(controlSocketPath);
     if (
       directoryMetadata.isSymbolicLink() ||
-      !directoryMetadata.isDirectory() ||
-      socketMetadata.isSymbolicLink() ||
-      !socketMetadata.isSocket()
+      !directoryMetadata.isDirectory()
     ) {
       throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
     }
     assertOwnedPrivate(directoryMetadata, 0o700);
-    assertOwnedPrivate(socketMetadata, 0o600);
   } catch (error) {
     if (error instanceof LocalCodexTransportError) {
       if (error.code === "MANAGED_CODEX_INVALID") {
@@ -376,11 +381,39 @@ export async function resolveManagedLocalCodexInstallation(
       throw error;
     }
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new LocalCodexTransportError("LOCAL_APP_SERVER_NOT_RUNNING");
+      availabilityFailure = "CODEX_CONTROL_SOCKET_UNAVAILABLE";
+    } else {
+      throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
     }
-    throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
   }
-  const endpointGeneration = `local_${createHash("sha256")
+  if (availabilityFailure === undefined) {
+    try {
+      socketMetadata = await lstat(controlSocketPath);
+      if (socketMetadata.isSymbolicLink() || !socketMetadata.isSocket()) {
+        throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
+      }
+      assertOwnedPrivate(socketMetadata, 0o600);
+    } catch (error) {
+      if (error instanceof LocalCodexTransportError) {
+        if (error.code === "MANAGED_CODEX_INVALID") {
+          throw new LocalCodexTransportError(
+            "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
+          );
+        }
+        throw error;
+      }
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        availabilityFailure = "CODEX_CONTROL_SOCKET_UNAVAILABLE";
+      } else {
+        throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
+      }
+    }
+  }
+  const generationHash = createHash("sha256")
     .update(appServerVersion)
     .update("\0")
     .update(releaseLeaf)
@@ -394,23 +427,58 @@ export async function resolveManagedLocalCodexInstallation(
     .update(String(binaryMetadata.birthtimeMs))
     .update(":")
     .update(String(binaryMetadata.ctimeMs))
-    .update("\0")
-    .update(String(socketMetadata.dev))
-    .update(":")
-    .update(String(socketMetadata.ino))
-    .update(":")
-    .update(String(socketMetadata.birthtimeMs))
-    .update(":")
-    .update(String(socketMetadata.ctimeMs))
+    .update("\0");
+  if (socketMetadata === undefined) {
+    generationHash.update("control_socket_unavailable");
+  } else {
+    generationHash
+      .update(String(socketMetadata.dev))
+      .update(":")
+      .update(String(socketMetadata.ino))
+      .update(":")
+      .update(String(socketMetadata.birthtimeMs))
+      .update(":")
+      .update(String(socketMetadata.ctimeMs));
+  }
+  const endpointGeneration = `local_${generationHash
     .digest("hex")
     .slice(0, 32)}`;
   return {
     appServerVersion,
+    ...(availabilityFailure === undefined ? {} : { availabilityFailure }),
     binaryPath: resolvedBinary,
     controlSocketPath,
     endpointGeneration,
     home,
   };
+}
+
+export async function resolveManagedLocalCodexInstallation(
+  home: string,
+  appServerVersion: string,
+  runtimeTarget: ManagedCodexRuntimeTarget = {
+    platform: process.platform,
+    architecture: process.arch,
+  },
+): Promise<ManagedLocalCodexInstallation> {
+  if (!VERSION_PATTERN.test(appServerVersion)) {
+    throw new LocalCodexTransportError("INVALID_CONFIGURATION");
+  }
+  // Managed packages use either the version alone or the version plus the
+  // exact target triple for this runtime. Never accept a caller-invented
+  // suffix or a binary for a different architecture.
+  const targetTriple = managedCodexTargetTriple(runtimeTarget);
+  return await resolveManagedLocalCodexInstallationWithReleaseLeaves(
+    home,
+    appServerVersion,
+    runtimeTarget,
+    new Set([
+      appServerVersion,
+      ...(targetTriple === undefined
+        ? []
+        : [`${appServerVersion}-${targetTriple}`]),
+    ]),
+  );
 }
 
 class ChildProxyDuplex extends Duplex implements SocketCompatibleDuplex {
@@ -671,6 +739,7 @@ class OwnedTransport implements LocalCodexOwnedTransport {
 class Factory implements LocalCodexTransportFactory {
   readonly protocol = "codex-app-server" as const;
   readonly protocolVersion: string;
+  readonly availabilityFailure?: "CODEX_CONTROL_SOCKET_UNAVAILABLE";
   readonly schemaCompatibility: LocalCodexSchemaCompatibilityAttestation;
   readonly writeCompatibility: LocalCodexWriteCompatibilityAttestation | null;
   readonly endpointGeneration: string;
@@ -696,9 +765,13 @@ class Factory implements LocalCodexTransportFactory {
   ) {
     this.endpointGeneration = installation.endpointGeneration;
     this.appServerVersion = installation.appServerVersion;
+    if (installation.availabilityFailure !== undefined) {
+      this.availabilityFailure = installation.availabilityFailure;
+    }
     this.protocolVersion = installation.appServerVersion;
     this.hostId = options.hostId ?? "this-mac";
     this.writableReady =
+      installation.availabilityFailure === undefined &&
       options.writableProtocolAttested === true &&
       CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
         this.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
@@ -727,6 +800,9 @@ class Factory implements LocalCodexTransportFactory {
 
   async connectTransport(): Promise<LocalCodexOwnedTransport> {
     if (this.closed) throw new LocalCodexTransportError("FACTORY_CLOSED");
+    if (this.availabilityFailure !== undefined) {
+      throw new LocalCodexTransportError("LOCAL_APP_SERVER_NOT_RUNNING");
+    }
     const current = await resolveManagedLocalCodexInstallation(
       this.installation.home,
       this.installation.appServerVersion,
@@ -848,10 +924,14 @@ class Factory implements LocalCodexTransportFactory {
   }
 }
 
-async function createLocalCodexTransportFactoryForResolution(
+/**
+ * Resolve and attest the installed factory without opening App Server.
+ * Unreviewed versions remain monitor-only; the server replaces unsupported
+ * majors with a no-I/O incompatible provider before any connector is built.
+ */
+export async function createLocalCodexTransportFactory(
   options: LocalCodexTransportFactoryOptions,
-  dependencies: LocalCodexTransportDependencies,
-  resolution: "startup" | "refresh_candidate",
+  dependencies: LocalCodexTransportDependencies = {},
 ): Promise<LocalCodexTransportFactory> {
   if (
     !VERSION_PATTERN.test(options.appServerVersion) ||
@@ -875,7 +955,6 @@ async function createLocalCodexTransportFactoryForResolution(
     );
   } catch (error) {
     if (
-      resolution !== "refresh_candidate" ||
       !(error instanceof LocalCodexTransportError) ||
       error.code !== "APP_SERVER_VERSION_MISMATCH"
     ) {
@@ -883,7 +962,6 @@ async function createLocalCodexTransportFactoryForResolution(
     }
     installation = await resolveRefreshCandidateManagedLocalCodexInstallation(
       home,
-      options.appServerVersion,
       runtimeTarget,
     );
   }
@@ -928,32 +1006,9 @@ async function createLocalCodexTransportFactoryForResolution(
 }
 
 /**
- * Resolve the startup factory at the exact reviewed build.
+ * Resolve a replacement endpoint after an already-admitted factory reports a
+ * generation change. Unreviewed builds use the same monitor-only posture as
+ * startup and never authorize provider writes.
  */
-export async function createLocalCodexTransportFactory(
-  options: LocalCodexTransportFactoryOptions,
-  dependencies: LocalCodexTransportDependencies = {},
-): Promise<LocalCodexTransportFactory> {
-  return await createLocalCodexTransportFactoryForResolution(
-    options,
-    dependencies,
-    "startup",
-  );
-}
-
-/**
- * Resolve only a replacement endpoint candidate after an already-admitted
- * factory reports a generation change. This narrow path may describe the
- * currently installed numeric build so the provider can record an incompatible
- * transition. It never relaxes startup admission or provider writes.
- */
-export async function createLocalCodexRefreshCandidateTransportFactory(
-  options: LocalCodexTransportFactoryOptions,
-  dependencies: LocalCodexTransportDependencies = {},
-): Promise<LocalCodexTransportFactory> {
-  return await createLocalCodexTransportFactoryForResolution(
-    options,
-    dependencies,
-    "refresh_candidate",
-  );
-}
+export const createLocalCodexRefreshCandidateTransportFactory =
+  createLocalCodexTransportFactory;

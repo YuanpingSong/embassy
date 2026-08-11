@@ -164,7 +164,10 @@ namespace Embassy {
     | "codex_succession_busy"
     | "codex_succession_recovery"
     | "progress_watch"
-    | "generic";
+      | "registry_empty"
+      | "registry_rejected"
+      | "provider_incompatible"
+      | "generic";
 
   export type DashboardAttentionItem = Readonly<{
     kind: "alert" | "route" | "connector" | "broker" | "watch";
@@ -343,6 +346,7 @@ namespace Embassy {
     protocolVersion?: string | undefined;
     lastSeenAt?: string | undefined;
     safeErrorCode?: string | undefined;
+    registry?: DashboardRegistryObservation | undefined;
   }>;
 
   export type CompatibilitySurface = "claude" | "codex";
@@ -355,10 +359,23 @@ namespace Embassy {
   export type DashboardCompatibilityCheckRow = Readonly<{
     surface: CompatibilitySurface;
     version: string;
+    testedVersion: string;
+    supportedMajor: string;
     tier: CompatibilityTier;
     checkedAt: string;
     failure?: string | undefined;
     safeErrorCode?: string | undefined;
+  }>;
+
+  export type DashboardRegistryObservation = Readonly<{
+    entriesScanned: number;
+    parseableRecords: number;
+    parseableRecordSeenSinceBoot: boolean;
+    rejected: readonly Readonly<{
+      safeErrorCode: string;
+      count: number;
+    }>[];
+    rejectedCodesOmitted: number;
   }>;
 
   export type DashboardOmissions = Readonly<{

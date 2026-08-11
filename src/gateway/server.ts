@@ -24,13 +24,19 @@ import {
 } from "./instance-lease.js";
 import type { DashboardLocale } from "./locale.js";
 import {
+  createIncompatibleClaudeGatewayProvider,
+  createIncompatibleCodexGatewayProvider,
   createLocalClaudeGatewayProvider,
   createLocalCodexGatewayProvider,
-  type LocalClaudeGatewayProvider,
   type LocalClaudeGatewayProviderOptions,
-  type LocalCodexGatewayProvider,
   type LocalCodexGatewayProviderOptions,
 } from "./providers.js";
+import {
+  isCompatibilityVersion,
+  sharesCompatibilityMajor,
+  UNKNOWN_COMPATIBILITY_VERSION,
+} from "./compatibility.js";
+import { CLAUDE_PEER_COMPATIBILITY } from "./claude-peer.js";
 import {
   GatewayService,
   type GatewayProviderAdapter,
@@ -79,19 +85,22 @@ export type GatewayServerDependencies = {
   ) => Promise<AttestedClaudePeerRuntime>;
   createClaudeProvider?: (
     options: LocalClaudeGatewayProviderOptions,
-  ) => LocalClaudeGatewayProvider;
+  ) => GatewayProviderAdapter;
+  createIncompatibleClaudeProvider?: typeof createIncompatibleClaudeGatewayProvider;
   acquireInstanceLease?: (loginHome: string) => Promise<GatewayInstanceLease>;
   createStore?: (config: GatewayConfig) => GatewayStore;
+  /** OS-only startup resolver; unsupported majors are fenced before connect. */
   createCodexFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
-  /** Refresh-only resolver; may inspect same-major drift for read-only probes. */
+  /** OS-only replacement resolver; unsupported majors are fenced before connect. */
   createCodexRefreshCandidateFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
   createCodexProvider?: (
     options: LocalCodexGatewayProviderOptions,
-  ) => LocalCodexGatewayProvider;
+  ) => GatewayProviderAdapter;
+  createIncompatibleCodexProvider?: typeof createIncompatibleCodexGatewayProvider;
   createService?: (options: GatewayServiceOptions) => GatewayServerService;
   addSignalListener?: (
     signal: GatewaySignal,
@@ -252,6 +261,9 @@ export async function runGatewayServer(
     dependencies.attestClaudeRuntime ?? attestClaudePeerRuntime;
   const createClaudeProvider =
     dependencies.createClaudeProvider ?? createLocalClaudeGatewayProvider;
+  const createIncompatibleClaudeProvider =
+    dependencies.createIncompatibleClaudeProvider ??
+    createIncompatibleClaudeGatewayProvider;
   const acquireInstanceLease =
     dependencies.acquireInstanceLease ?? acquireGatewayInstanceLease;
   const createStore =
@@ -263,6 +275,9 @@ export async function runGatewayServer(
     createLocalCodexRefreshCandidateTransportFactory;
   const createCodexProvider =
     dependencies.createCodexProvider ?? createLocalCodexGatewayProvider;
+  const createIncompatibleCodexProvider =
+    dependencies.createIncompatibleCodexProvider ??
+    createIncompatibleCodexGatewayProvider;
   const createService =
     dependencies.createService ??
     ((serviceOptions) => new GatewayService(serviceOptions));
@@ -278,9 +293,9 @@ export async function runGatewayServer(
     addSignalListener,
     removeSignalListener,
   );
-  let claudeProvider: LocalClaudeGatewayProvider | undefined;
+  let claudeProvider: GatewayProviderAdapter | undefined;
   let codexFactory: LocalCodexTransportFactory | undefined;
-  let codexProvider: LocalCodexGatewayProvider | undefined;
+  let codexProvider: GatewayProviderAdapter | undefined;
   let store: GatewayStore | undefined;
   let service: GatewayServerService | undefined;
   let instanceLease: GatewayInstanceLease | undefined;
@@ -361,14 +376,81 @@ export async function runGatewayServer(
         }),
       ),
     );
-    claudeProvider = createClaudeProvider({
-      runtime,
-      locale: options.locale ?? "en",
-      nativeHelpers: { maxHelpers: config.limits.maxRoutes },
-      ...(config.deliveryNotices === undefined
-        ? {}
-        : { deliveryNotices: config.deliveryNotices }),
-    });
+    if (
+      runtime.claudeCodeVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
+      !isCompatibilityVersion(runtime.claudeCodeVersion)
+    ) {
+      throw new BridgeError(
+        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
+        "Claude runtime version evidence must be bounded before provider construction.",
+      );
+    }
+    if (
+      runtime.launcherVersionEvidence !== undefined &&
+      !isCompatibilityVersion(runtime.launcherVersionEvidence)
+    ) {
+      throw new BridgeError(
+        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
+        "Claude launcher version evidence must be bounded before provider construction.",
+      );
+    }
+    if (
+      runtime.versionEvidenceFailure !== undefined &&
+      ![
+        "CLAUDE_VERSION_CHECK_FAILED",
+        "CLAUDE_VERSION_EVIDENCE_CONFLICT",
+        "CLAUDE_VERSION_EVIDENCE_TOO_LARGE",
+      ].includes(runtime.versionEvidenceFailure)
+    ) {
+      throw new BridgeError(
+        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
+        "Claude version failure evidence must use the closed safe-code vocabulary.",
+      );
+    }
+    const claudeLauncherMajorUnsupported =
+      runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION &&
+      runtime.launcherVersionEvidence !== undefined &&
+      !sharesCompatibilityMajor(
+        runtime.launcherVersionEvidence,
+        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      );
+    const claudeSafeErrorCode = claudeLauncherMajorUnsupported
+      ? "CLAUDE_PEER_VERSION_UNSUPPORTED"
+      : runtime.versionEvidenceFailure !== undefined
+        ? runtime.versionEvidenceFailure
+        : runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
+          ? runtime.launcherVersionEvidence === undefined
+            ? "CLAUDE_VERSION_UNPARSEABLE"
+            : undefined
+        : sharesCompatibilityMajor(
+              runtime.claudeCodeVersion,
+              CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+            )
+          ? undefined
+          : "CLAUDE_PEER_VERSION_UNSUPPORTED";
+    const claudeCompatibilityVersion =
+      runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION &&
+      runtime.launcherVersionEvidence !== undefined
+        ? runtime.launcherVersionEvidence
+        : runtime.claudeCodeVersion;
+    claudeProvider =
+      claudeSafeErrorCode === undefined
+        ? createClaudeProvider({
+            runtime,
+            ...(claudeCompatibilityVersion === runtime.claudeCodeVersion
+              ? {}
+              : { compatibilityVersion: claudeCompatibilityVersion }),
+            locale: options.locale ?? "en",
+            nativeHelpers: { maxHelpers: config.limits.maxRoutes },
+            ...(config.deliveryNotices === undefined
+              ? {}
+              : { deliveryNotices: config.deliveryNotices }),
+          })
+        : createIncompatibleClaudeProvider({
+            runtime,
+            version: claudeCompatibilityVersion,
+            safeErrorCode: claudeSafeErrorCode,
+          });
     store = createStore(config);
     const codexFactoryOptions: LocalCodexTransportFactoryOptions = {
       appServerVersion: GATEWAY_CODEX_APP_SERVER_VERSION,
@@ -389,11 +471,59 @@ export async function runGatewayServer(
       createCodexFactory,
     );
     codexFactory = createdCodexFactory;
-    codexProvider = createCodexProvider({
-      factory: createdCodexFactory,
-      refreshFactory: async () =>
-        await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
-    });
+    if (
+      createdCodexFactory.availabilityFailure !== undefined &&
+      createdCodexFactory.availabilityFailure !==
+        "CODEX_CONTROL_SOCKET_UNAVAILABLE"
+    ) {
+      throw new BridgeError(
+        "CODEX_RUNTIME_ATTESTATION_INVALID",
+        "Codex App Server availability evidence must use a reviewed bounded code.",
+      );
+    }
+    if (
+      createdCodexFactory.appServerVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
+      !isCompatibilityVersion(createdCodexFactory.appServerVersion)
+    ) {
+      throw new BridgeError(
+        "CODEX_RUNTIME_ATTESTATION_INVALID",
+        "Codex App Server version evidence must be bounded before provider construction.",
+      );
+    }
+    if (
+      createdCodexFactory.availabilityFailure === undefined &&
+      createdCodexFactory.appServerVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
+      sharesCompatibilityMajor(
+        createdCodexFactory.appServerVersion,
+        GATEWAY_CODEX_APP_SERVER_VERSION,
+      )
+    ) {
+      codexProvider = createCodexProvider({
+        factory: createdCodexFactory,
+        refreshFactory: async () =>
+          await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
+      });
+    } else {
+      const incompatibleIdentity = {
+        provider: "codex" as const,
+        hostId: createdCodexFactory.hostId,
+        endpointGeneration: createdCodexFactory.endpointGeneration,
+      };
+      await awaitWhileLeaseHeld(
+        Promise.resolve().then(() => createdCodexFactory.close()),
+      );
+      codexFactory = undefined;
+      codexProvider = createIncompatibleCodexProvider({
+        identity: incompatibleIdentity,
+        version: createdCodexFactory.appServerVersion,
+        safeErrorCode:
+          createdCodexFactory.availabilityFailure ??
+          (createdCodexFactory.appServerVersion ===
+          UNKNOWN_COMPATIBILITY_VERSION
+            ? "CODEX_APP_SERVER_VERSION_UNPARSEABLE"
+            : "CODEX_APP_SERVER_VERSION_UNSUPPORTED"),
+      });
+    }
     const createdService = createService({
       config,
       adapters: [claudeProvider, codexProvider],
