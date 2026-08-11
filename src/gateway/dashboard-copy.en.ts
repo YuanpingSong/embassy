@@ -12,7 +12,7 @@ export const dashboardCopyEn = {
     "A point-in-time, metadata-only register of routes between Claude Code and Codex.",
   "snapshot.asOf": "Snapshot {time}",
   "snapshot.static":
-    "This file does not update itself. Run embassy refresh-dashboard, then reload — or run embassy dashboard --live for a streaming view.",
+    "This file does not update itself. If the broker is not running, run embassy serve first. Then run embassy refresh-dashboard and reload — or run embassy dashboard --live for a streaming view.",
   "overall.ready": "Exchange ready",
   "overall.setup": "Setup incomplete",
   "overall.attention": "Needs attention",
@@ -111,7 +111,7 @@ export const dashboardCopyEn = {
   "guidance.connectorOffline.body":
     "Embassy cannot currently reach the local provider connector.",
   "guidance.connectorOffline.action":
-    "Run embassy status. Restart only when queued messages and active deliveries are both zero; restarting abandons memory-only message bodies.",
+    "Run embassy status. If a broker restart is necessary, queued mail survives and resumes exactly once; only a write in flight at the crash settles ambiguous.",
   "guidance.routeStale.title": "A route is stale",
   "guidance.routeStale.body": "The route no longer has current endpoint proof.",
   "guidance.routeStale.action":
@@ -137,7 +137,7 @@ export const dashboardCopyEn = {
   "guidance.degraded.body":
     "Embassy retained a normalized compatibility or connector warning.",
   "guidance.degraded.action":
-    "Run embassy status. Restart only when queued messages and active deliveries are both zero; restarting abandons memory-only message bodies.",
+    "Run embassy status. If a broker restart is necessary, queued mail survives and resumes exactly once; only a write in flight at the crash settles ambiguous.",
   "guidance.providerIncompatible.title": "Provider build is write-fenced",
   "guidance.providerIncompatible.body":
     "Embassy kept the broker and the other provider running. Provider compatibility names the bounded version evidence, this release's tested build, and the supported major.",
@@ -441,8 +441,6 @@ export const dashboardCopyEn = {
   "live.action.sectionTitle": "Bounded route actions",
   "live.action.scope":
     "Pair or unpair named Claude and Codex endpoints, refresh discovery, or recover an orphaned Codex alias. Every action requires confirmation and broker-side revalidation.",
-  "live.action.select": "Select session",
-  "live.action.unselect": "Unselect session",
   "live.action.pair": "Pair endpoints",
   "live.action.unpair": "Unpair endpoints",
   "live.action.removeStaleCodexRegistration": "Remove stale registration",
@@ -636,7 +634,7 @@ export const dashboardCopyEn = {
   "app.activity.operation.accepted": "accepted",
   "app.activity.operation.rejected": "rejected",
   "app.activity.limited":
-    "The operator-action ledger lasts for this broker process. Delivery and alert retention are bounded separately; bodies and full capability tokens are never shown.",
+    "The operator-action ledger lasts for this broker process. Operator-action rows carry no message bodies; Deliveries shows retained bodies by design. Full capability tokens are never shown.",
   "app.activity.empty":
     "Nothing in this window. Events appear as the broker produces them; try",
   "app.diag.versions": "Connector protocols",

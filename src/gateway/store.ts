@@ -6123,7 +6123,7 @@ export class GatewayStore {
       ) {
         throw new BridgeError(
           "PROGRESS_WATCH_OWNER_REQUIRED",
-          "Only the exact watch owner may reassert tracking options.",
+          "Tracking options persist from the original TRACK; a repeated TRACK from the exact owner refreshes activity without changing them.",
         );
       }
       if (activity.completionSignal === true) {

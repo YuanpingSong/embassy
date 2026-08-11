@@ -11,7 +11,7 @@ export const dashboardCopyZhCn = {
   "brand.subtitle": "Claude Code 与 Codex 路由在一个时间点的仅元数据记录。",
   "snapshot.asOf": "快照时间 {time}",
   "snapshot.static":
-    "此文件不会自行更新。运行 embassy refresh-dashboard 后重新加载；或者运行 embassy dashboard --live 查看流式视图。",
+    "此文件不会自行更新。如果代理未运行，请先运行 embassy serve。然后运行 embassy refresh-dashboard 并重新加载；或者运行 embassy dashboard --live 查看流式视图。",
   "overall.ready": "交换已就绪",
   "overall.setup": "设置尚未完成",
   "overall.attention": "需要处理",
@@ -99,7 +99,7 @@ export const dashboardCopyZhCn = {
   "guidance.connectorOffline.title": "提供方连接器离线",
   "guidance.connectorOffline.body": "Embassy 当前无法访问本地提供方连接器。",
   "guidance.connectorOffline.action":
-    "运行 embassy status。仅当排队消息和活跃投递均为零时才能重启；重启会放弃仅存于内存的消息正文。",
+    "运行 embassy status。如果必须重启代理，排队邮件会保留并精确恢复一次；只有崩溃时正在写入的投递会以结果不确定结算。",
   "guidance.routeStale.title": "路由需要重新观察",
   "guidance.routeStale.body": "该路由不再具有当前端点证明。",
   "guidance.routeStale.action": "刷新并恢复相应选择或注册。",
@@ -121,7 +121,7 @@ export const dashboardCopyZhCn = {
   "guidance.degraded.title": "交换状态降级",
   "guidance.degraded.body": "Embassy 保留了一条规范化的兼容性或连接器警告。",
   "guidance.degraded.action":
-    "运行 embassy status。仅当排队消息和活跃投递均为零时才能重启；重启会放弃仅存于内存的消息正文。",
+    "运行 embassy status。如果必须重启代理，排队邮件会保留并精确恢复一次；只有崩溃时正在写入的投递会以结果不确定结算。",
   "guidance.providerIncompatible.title": "提供方构建已禁止写入",
   "guidance.providerIncompatible.body":
     "Embassy 保持代理和另一提供方继续运行。“提供方兼容性”会列出有界版本证据、本次发布测试过的构建及受支持的主版本。",
@@ -402,8 +402,6 @@ export const dashboardCopyZhCn = {
   "live.action.sectionTitle": "有限的路由操作",
   "live.action.scope":
     "可为具名 Claude 与 Codex 端点配对或取消配对、刷新发现结果，或回收孤立的 Codex 别名。每项操作都必须确认并由代理重新验证。",
-  "live.action.select": "选择会话",
-  "live.action.unselect": "取消选择会话",
   "live.action.pair": "配对端点",
   "live.action.unpair": "取消端点配对",
   "live.action.removeStaleCodexRegistration": "移除陈旧注册",
@@ -587,7 +585,7 @@ export const dashboardCopyZhCn = {
   "app.activity.operation.accepted": "已接受",
   "app.activity.operation.rejected": "已拒绝",
   "app.activity.limited":
-    "操作者操作台账仅保留于本次代理进程。投递和警告各自有独立边界；消息正文与完整能力令牌始终不会显示。",
+    "操作者操作台账仅保留于本次代理进程。操作者操作行不携带消息正文；“投递”按设计显示已保留正文。完整能力令牌始终不会显示。",
   "app.activity.empty":
     "此窗口内没有内容。事件会随 broker 产生而出现；可以试试",
   "app.diag.versions": "连接器协议",

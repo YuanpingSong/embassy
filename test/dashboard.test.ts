@@ -59,6 +59,29 @@ test("dashboard catalogs have exact key parity", () => {
   }
 });
 
+test("dashboard remedies describe durable queues and bounded body visibility", () => {
+  assert.match(dashboardCopyEn["snapshot.static"], /run embassy serve first/i);
+  assert.match(dashboardCopyZhCn["snapshot.static"], /先运行 embassy serve/u);
+  for (const key of [
+    "guidance.connectorOffline.action",
+    "guidance.degraded.action",
+  ] as const) {
+    assert.match(dashboardCopyEn[key], /queued mail survives.*exactly once/i);
+    assert.doesNotMatch(dashboardCopyEn[key], /abandons.*bod/i);
+    assert.match(dashboardCopyZhCn[key], /排队邮件会保留并精确恢复一次/u);
+  }
+  assert.match(
+    dashboardCopyEn["app.activity.limited"],
+    /Operator-action rows carry no message bodies; Deliveries shows retained bodies by design/,
+  );
+  assert.match(
+    dashboardCopyZhCn["app.activity.limited"],
+    /操作者操作行不携带消息正文.*“投递”按设计显示已保留正文/u,
+  );
+  assert.equal(dashboardCopyKeys.includes("live.action.select" as never), false);
+  assert.equal(dashboardCopyKeys.includes("live.action.unselect" as never), false);
+});
+
 test("compatibility meanings describe the evidence ladder in both locales", () => {
   assert.match(
     dashboardCopyEn["compatibility.meaning.compatible"],

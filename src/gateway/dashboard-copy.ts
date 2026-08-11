@@ -351,8 +351,6 @@ export const dashboardCopyKeys = [
   "live.action.authorityBody",
   "live.action.sectionTitle",
   "live.action.scope",
-  "live.action.select",
-  "live.action.unselect",
   "live.action.pair",
   "live.action.unpair",
   "live.action.removeStaleCodexRegistration",

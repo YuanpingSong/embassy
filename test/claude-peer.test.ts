@@ -3089,6 +3089,7 @@ test("verbose notices preserve the localized expired diagnostic frame", async (t
   );
   assert.match(diagnosticContent, /本地网关无法投递前一条消息/);
   assert.match(diagnosticContent, /embassy status/);
+  assert.match(diagnosticContent, /排队邮件会在忙碌接收方的当前轮次结束后到达/);
   assert.equal(frames[1]?.from, undefined);
 });
 
@@ -3141,6 +3142,10 @@ test("merged notices keep stalls but fold expiry diagnostics into native status"
   assert.match(
     String((frames[0]?.message as Record<string, unknown>)?.content),
     /gateway-delivery-stall/,
+  );
+  assert.match(
+    String((frames[0]?.message as Record<string, unknown>)?.content),
+    /Queued mail reaches a busy recipient when its turn ends/,
   );
 
   await listener.acknowledge(receiptHandle as string, "expired", {
