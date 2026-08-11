@@ -3372,6 +3372,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         ...(input.progressWatchActive === true
           ? { progressWatchActive: true as const }
           : {}),
+        ...(input.steer === true && input.queuedAhead !== undefined
+          ? { queuedAhead: input.queuedAhead }
+          : {}),
       });
     } catch (error) {
       const safeErrorCode =

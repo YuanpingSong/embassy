@@ -4451,7 +4451,9 @@ export class GatewayStore {
   async dequeueMessage(
     targetAlias?: string,
     mode: "any" | "steer_only" = "any",
-  ): Promise<TransientQueuedMessage | undefined> {
+  ): Promise<
+    (TransientQueuedMessage & { queuedAhead?: number }) | undefined
+  > {
     return this.mutate(async (state, now) => {
       if (targetAlias !== undefined && !ALIAS_PATTERN.test(targetAlias)) {
         throw new BridgeError(
@@ -4480,6 +4482,10 @@ export class GatewayStore {
       }
       const metadata = state.queue[index];
       if (!metadata) return undefined;
+      const queuedAhead = state.queue
+        .slice(0, index)
+        .filter((candidate) => candidate.targetAlias === metadata.targetAlias)
+        .length;
       state.queue.splice(index, 1);
       state.accounting.queuedBytes -= metadata.bytes;
       const target = state.routes.find(
@@ -4508,7 +4514,11 @@ export class GatewayStore {
         ...(metadata.steer === true ? { steer: true as const } : {}),
         latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
       });
-      return { ...metadata, body };
+      return {
+        ...metadata,
+        body,
+        ...(queuedAhead === 0 ? {} : { queuedAhead }),
+      };
     });
   }
 

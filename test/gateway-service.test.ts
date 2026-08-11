@@ -8401,6 +8401,7 @@ test("exact STEER prefix bypasses older ordinary work only at a busy Codex bound
   assert.equal(codex.dispatches[0]?.text, "STEER: inspect the next tool result");
   assert.equal(codex.dispatches[0]?.steer, true);
   assert.equal(codex.dispatches[0]?.expectsReply, false);
+  assert.equal(codex.dispatches[0]?.queuedAhead, 1);
   assert.deepEqual(
     claude.nativeInboundStatuses.filter(
       ({ receiptHandle }) => receiptHandle === "receipt-steer-direct",
@@ -8641,6 +8642,7 @@ test("Claude control ingress classifies only the exact leading STEER prefix", as
   await waitFor(() => codex.dispatches.length === 1);
   assert.equal(codex.dispatches[0]?.steer, true);
   assert.equal(codex.dispatches[0]?.expectsReply, false);
+  assert.equal(codex.dispatches[0]?.queuedAhead, undefined);
   assert.deepEqual(dispatchProvenance(codex.dispatches[0]!), {
     sourceAlias: "claude-one@this-mac",
     targetAlias: "codex-main@this-mac",

@@ -524,6 +524,7 @@ function renderAttention(context: RenderContext): string {
         return `<li class="attention-item attention-item--${alertTone(item.severity)}">
           <div class="attention-item__meta">${statusPill(severityLabel(context, item.severity), alertTone(item.severity))}${item.code === undefined ? "" : `<code>${item.code}</code>`}${renderTimestampAtSnapshot(context, item.timestamp)}</div>
           <h3>${t(context, titleKey)}</h3><p>${t(context, bodyKey)}</p>
+          ${item.queueDepth === undefined ? "" : `<p><strong>${t(context, "transit.queued")}:</strong> ${formatInteger(item.queueDepth)}</p><p>${t(context, "guidance.queueStalled.busy")}</p>`}
           ${scope.length === 0 ? "" : `<p class="scope"><strong>${t(context, "attention.scope")}:</strong> ${scope.join(" · ")}</p>`}
           <p class="next-action"><strong>${t(context, "next.label")}:</strong> ${t(context, actionKey, { alias: item.alias ?? "<alias>" })}</p>
         </li>`;

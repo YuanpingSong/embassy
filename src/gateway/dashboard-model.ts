@@ -64,6 +64,8 @@ export type DashboardAttentionItem = Readonly<{
   provider?: GatewayProvider | undefined;
   alias?: string | undefined;
   host?: string | undefined;
+  /** Present only for a threshold-stalled queue behind a busy Codex route. */
+  queueDepth?: number | undefined;
   guidance:
     | "reobserve_claude"
     | "reobserve_codex"
@@ -1018,6 +1020,10 @@ export function buildDashboardViewModel(
       .filter((alert) => alert.code !== "COMPATIBILITY_CERTIFICATION_FAILED")
       .map((alert): DashboardAttentionItem => {
         const code = safeCode(alert.code);
+        const route =
+          code === "QUEUE_STALLED" && typeof alert.alias === "string"
+            ? routeByAlias.get(alert.alias)
+            : undefined;
         return {
           kind: "alert",
           ...(code === undefined ? {} : { code }),
@@ -1039,6 +1045,15 @@ export function buildDashboardViewModel(
           ...(typeof alert.host === "string"
             ? { host: boundedText(alert.host) }
             : {}),
+          ...(alert.provider === "codex" &&
+            typeof alert.host === "string" &&
+            route !== undefined &&
+            alert.host === route.host &&
+            route.provider === "codex" &&
+            route.state === "busy" &&
+            route.queueDepth > 0
+              ? { queueDepth: route.queueDepth }
+              : {}),
           guidance: guidanceFor(code, alert.provider),
         };
       }),

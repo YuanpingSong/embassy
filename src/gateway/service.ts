@@ -304,6 +304,8 @@ export type GatewayAdapterDispatchInput = {
   steer?: true;
   /** Broker-derived display metadata; never grants or persists authority. */
   progressWatchActive?: true;
+  /** Older accepted rows observed when this exact STEER left the queue. */
+  queuedAhead?: number;
 };
 
 /**
@@ -7055,6 +7057,9 @@ export class GatewayService {
           expectsReply: context.expectsReply,
           deadlineAt: item.deadlineAt,
           ...(item.steer === true ? { steer: true as const } : {}),
+          ...(item.steer === true && item.queuedAhead !== undefined
+            ? { queuedAhead: item.queuedAhead }
+            : {}),
           ...(progressWatchActive
             ? { progressWatchActive: true as const }
             : {}),

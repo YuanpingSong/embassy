@@ -2866,6 +2866,7 @@ test("queued steers retain three newest per edge and expose an exact journal mar
   assert.equal(firstSteer?.messageId, steers[1]?.messageId);
   assert.equal(firstSteer?.body, "STEER: instruction 2");
   assert.equal(firstSteer?.steer, true);
+  assert.equal(firstSteer?.queuedAhead, 1);
   await store.settleMessage({
     messageId: firstSteer?.messageId ?? "",
     state: "delivered",
@@ -2873,6 +2874,7 @@ test("queued steers retain three newest per edge and expose an exact journal mar
   const ordinary = await store.dequeueMessage("reviewer@this-mac");
   assert.equal(ordinary?.body, "ordinary message stays ahead in the normal queue");
   assert.equal(ordinary?.steer, undefined);
+  assert.equal(ordinary?.queuedAhead, undefined);
   await store.close();
 });
 
