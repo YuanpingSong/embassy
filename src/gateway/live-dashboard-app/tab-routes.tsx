@@ -832,6 +832,8 @@ namespace Embassy {
     );
 
     const edges = topologyEdges(data);
+    const hasPair =
+      data.graph.pairCount > 0 || data.graph.pairCountIsLowerBound;
     const highlightAt = (
       side: TopologySide,
       index: number,
@@ -841,8 +843,8 @@ namespace Embassy {
       (peer, index): TopologyItem => ({
         key: `${rowIdentity(peer.alias, peer.host)}|${index}`,
         alias: peer.alias,
-        candidate: !edges.some((edge) => edge.claudeAlias === peer.alias),
-        srLabel: edges.some((edge) => edge.claudeAlias === peer.alias)
+        candidate: !data.pairs.some((pair) => pair.claudeAlias === peer.alias),
+        srLabel: data.pairs.some((pair) => pair.claudeAlias === peer.alias)
           ? t("status.selected")
           : peer.selectable
             ? t("status.available")
@@ -853,8 +855,8 @@ namespace Embassy {
       (view, index): TopologyItem => ({
         key: `${rowIdentity(view.route.alias, view.route.host)}|${index}`,
         alias: view.route.alias,
-        candidate: !edges.some(
-          (edge) => edge.codexAlias === view.route.alias,
+        candidate: !data.pairs.some(
+          (pair) => pair.codexAlias === view.route.alias,
         ),
         srLabel: t(`route.${camelCaseToken(view.route.state)}`),
       }),
@@ -881,9 +883,9 @@ namespace Embassy {
               {t(
                 openInbound
                   ? "inbound.open.body"
-                  : edges.length === 0
-                    ? "inbound.noPair.body"
-                    : "inbound.paired.body",
+                  : hasPair
+                    ? "inbound.paired.body"
+                    : "inbound.noPair.body",
               )}
             </p>
           </div>
@@ -920,7 +922,7 @@ namespace Embassy {
                 onFocusChange={setFocus}
               />
             </div>
-            {edges.length === 0 ? (
+            {!hasPair ? (
               <p className="topology__empty">
                 {t(
                   openInbound
@@ -933,13 +935,35 @@ namespace Embassy {
                 className="topology__edge-list"
                 aria-label={t("app.routes.pairs")}
               >
-                {edges.map((edge) => (
-                  <li key={`${edge.claudeAlias}\0${edge.codexAlias}`}>
+                {data.pairs.map((pair) => (
+                  <li key={`${pair.claudeAlias}\0${pair.codexAlias}`}>
                     {t("app.routes.pairDescription", {
-                      claude: edge.claudeAlias,
-                      codex: edge.codexAlias,
+                      claude: pair.claudeAlias,
+                      codex: pair.codexAlias,
                     })}{" "}
-                    <StateChip domain="route" state={edge.state === "ready" ? "idle" : "stale"} small />
+                    <StateChip
+                      domain="route"
+                      state={pair.state === "ready" ? "idle" : "stale"}
+                      label={
+                        pair.state === "ready"
+                          ? t("status.ready")
+                          : t(
+                              pair.state === "degraded"
+                                ? "app.routes.pairState.degraded"
+                                : "app.routes.pairState.unavailable",
+                            )
+                      }
+                      small
+                    />
+                    {pair.state === "ready" ? null : (
+                      <span className="text-body-muted">
+                        {t(
+                          pair.state === "degraded"
+                            ? "app.routes.pairDegradedReason"
+                            : "app.routes.pairUnavailableReason",
+                        )}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

@@ -819,6 +819,17 @@ function isRejectedResult(result: unknown): boolean {
   );
 }
 
+function isProgressWatchOwnerConflict(result: unknown): boolean {
+  return (
+    result !== null &&
+    typeof result === "object" &&
+    Object.hasOwn(result, "accepted") &&
+    Object.hasOwn(result, "code") &&
+    (result as { accepted?: unknown }).accepted === false &&
+    (result as { code?: unknown }).code === "watch_owner_conflict"
+  );
+}
+
 function responseExitCode(response: GatewayControlResponse): number {
   if (!response.ok) return gatewayCliExitCodes.failure;
   if (isRejectedResult(response.result)) return gatewayCliExitCodes.rejected;
@@ -1101,6 +1112,11 @@ export async function runGatewayCli(
         : waitDeliveryExitCode(waitedDeliveryResponse);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr(locale, "decision"));
+      if (isProgressWatchOwnerConflict(response.result)) {
+        stderr.write(
+          `[embassy] ${getCliCopy(locale)["hint.progressWatchOwnerConflict"]}\n`,
+        );
+      }
     } else if (
       command === "wait-delivery" &&
       exitCode === gatewayCliExitCodes.failure

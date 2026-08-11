@@ -333,15 +333,30 @@ function renderParty(context: RenderContext, party: DashboardExchangeParty): str
 
 function renderPairGraph(context: RenderContext): string {
   const graph = context.model.graph;
+  const locallyOmittedPairs = Math.max(
+    0,
+    graph.pairCount - context.model.pairs.length,
+  );
+  const upstreamOmittedPairs = Math.max(
+    0,
+    context.model.omissions.pairs - locallyOmittedPairs,
+  );
+  const knownPairCount = graph.pairCount + upstreamOmittedPairs;
   const summary = t(context, "app.routes.pairSummary", {
-    ready: renderCount(context, graph.readyPairCount, graph.pairCountIsLowerBound),
-    total: renderCount(context, graph.pairCount, graph.pairCountIsLowerBound),
+    ready: renderCount(
+      context,
+      graph.readyPairCount,
+      graph.pairCountIsLowerBound,
+    ),
+    total: renderCount(context, knownPairCount, graph.pairCountIsLowerBound),
   });
   const unpaired = t(context, "app.routes.unpairedSummary", {
     claude: String(graph.unpairedReadyClaude),
     codex: String(graph.unpairedReadyCodex),
   });
-  const rows = context.model.pairs.length === 0
+  const hasPairEvidence =
+    graph.pairCount > 0 || graph.pairCountIsLowerBound;
+  const rows = context.model.pairs.length === 0 && !hasPairEvidence
     ? `<p class="quiet">${t(context, "app.routes.noPairInline")}</p>`
     : `<ul class="pair-list">${context.model.pairs.map((pair) => {
         const label = t(context, "app.routes.pairDescription", {
@@ -350,15 +365,21 @@ function renderPairGraph(context: RenderContext): string {
         });
         const stateLabel = pair.state === "ready"
           ? t(context, "status.ready")
-          : pair.state === "degraded"
-            ? t(context, "status.attention")
-            : t(context, "status.missing");
+          : t(
+              context,
+              pair.state === "degraded"
+                ? "app.routes.pairState.degraded"
+                : "app.routes.pairState.unavailable",
+            );
         const tone: DashboardTone = pair.state === "ready"
           ? "good"
           : pair.state === "degraded"
             ? "warning"
             : "danger";
-        return `<li><span>${label}</span>${statusPill(stateLabel, tone)}</li>`;
+        const reason = pair.state === "ready"
+          ? ""
+          : `<small>${t(context, pair.state === "degraded" ? "app.routes.pairDegradedReason" : "app.routes.pairUnavailableReason")}</small>`;
+        return `<li><span>${label}${reason}</span>${statusPill(stateLabel, tone)}</li>`;
       }).join("")}</ul>`;
   const omitted = context.model.omissions.pairs === 0
     ? ""
@@ -388,7 +409,9 @@ function renderExchange(context: RenderContext): string {
         ),
       });
   const paired = context.model.inboundMode === "paired";
-  const hasPair = context.model.graph.readyPairCount > 0;
+  const hasPair =
+    context.model.graph.pairCount > 0 ||
+    context.model.graph.pairCountIsLowerBound;
   const policyBody = paired
     ? t(context, hasPair ? "inbound.paired.body" : "inbound.noPair.body")
     : t(context, "inbound.open.body");
@@ -444,6 +467,10 @@ function guidanceKeys(guidance: DashboardAttentionItem["guidance"]): readonly [D
       return ["guidance.reobserveClaude.title", "guidance.reobserveClaude.body", "guidance.reobserveClaude.action"];
     case "reobserve_codex":
       return ["guidance.reobserveCodex.title", "guidance.reobserveCodex.body", "guidance.reobserveCodex.action"];
+    case "codex_reactivation_required":
+      return ["guidance.codexReactivationRequired.title", "guidance.codexReactivationRequired.body", "guidance.codexReactivationRequired.action"];
+    case "consent_edge_unavailable":
+      return ["guidance.consentEdgeUnavailable.title", "guidance.consentEdgeUnavailable.body", "guidance.consentEdgeUnavailable.action"];
     case "claude_not_observed":
       return ["guidance.claudeNotObserved.title", "guidance.claudeNotObserved.body", "guidance.claudeNotObserved.action"];
     case "codex_stale":
@@ -492,7 +519,7 @@ function renderAttention(context: RenderContext): string {
           <div class="attention-item__meta">${statusPill(severityLabel(context, item.severity), alertTone(item.severity))}${item.code === undefined ? "" : `<code>${item.code}</code>`}${renderTimestampAtSnapshot(context, item.timestamp)}</div>
           <h3>${t(context, titleKey)}</h3><p>${t(context, bodyKey)}</p>
           ${scope.length === 0 ? "" : `<p class="scope"><strong>${t(context, "attention.scope")}:</strong> ${scope.join(" · ")}</p>`}
-          <p class="next-action"><strong>${t(context, "next.label")}:</strong> ${t(context, actionKey)}</p>
+          <p class="next-action"><strong>${t(context, "next.label")}:</strong> ${t(context, actionKey, { alias: item.alias ?? "<alias>" })}</p>
         </li>`;
       })
       .join("")}</ol>`}
@@ -614,7 +641,7 @@ function renderProgressWatches(context: RenderContext): string {
         .map(
           (watch) => `<tr data-dashboard-row="progress-watch" data-watch-phase="${watch.phase}">
             <th scope="row" data-label="${t(context, "watches.column.conversation")}"><code>…${escapeDashboardHtml(watch.conversationIdSuffix)}</code></th>
-            <td data-label="${t(context, "watches.column.parties")}" class="route-cell"><strong>${escapeDashboardHtml(watch.ownerAlias)} → ${escapeDashboardHtml(watch.workerAlias)}</strong>${watch.workerReportedComplete ? `<span class="cell-note">${t(context, "watches.workerComplete")}</span>` : ""}</td>
+            <td data-label="${t(context, "watches.column.parties")}" class="route-cell"><strong>${escapeDashboardHtml(watch.ownerAlias)} → ${escapeDashboardHtml(watch.workerAlias)}</strong></td>
             <td data-label="${t(context, "watches.column.phase")}">${statusPill(t(context, watch.phase === "episode" ? "watches.phase.episode" : "watches.phase.quiet"), watch.phase === "episode" ? "warning" : "quiet")}</td>
             <td data-label="${t(context, "watches.column.quietFor")}" class="numeric">${formatDuration(watch.idleForMs)}</td>
             <td data-label="${t(context, "watches.column.nextAction")}" class="numeric">${formatDuration(watch.dueInMs)}</td>
@@ -857,6 +884,7 @@ const DASHBOARD_STYLES = `
     .pair-graph__heading strong, .pair-graph p { color: var(--muted); font: .78rem/1.45 ui-sans-serif, system-ui, sans-serif; }
     .pair-list { display: grid; gap: .45rem; margin: .8rem 0 0; padding: 0; list-style: none; }
     .pair-list li { display: flex; justify-content: space-between; gap: .8rem; align-items: center; padding-top: .45rem; border-top: 1px solid var(--hairline); overflow-wrap: anywhere; }
+    .pair-list small { display: block; margin-top: .2rem; color: var(--muted); font-size: .8em; }
     .attention { border-bottom-color: var(--danger); }
     .attention-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--hairline); }
     .attention-projection-note { margin: 0; padding: 1rem; background: var(--warning-soft); }

@@ -1244,6 +1244,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
+    progressWatchActive?: true;
   }): Promise<GatewayAdapterDispatchResult> {
     if (this.nativeHelpers !== undefined) {
       if (
@@ -1362,6 +1363,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         targetAlias: input.targetAlias,
         conversationId: input.conversationId,
         body: input.text,
+        ...(input.progressWatchActive === true
+          ? { progressWatchActive: true as const }
+          : {}),
       });
     } catch (error) {
       if (
@@ -2910,6 +2914,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         targetAlias: input.targetAlias,
         conversationId: input.conversationId,
         body: input.text,
+        ...(input.progressWatchActive === true
+          ? { progressWatchActive: true as const }
+          : {}),
       });
     } catch (error) {
       const safeErrorCode =

@@ -309,6 +309,7 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       text: "outbound body",
       expectsReply: false,
       deadlineAt,
+      progressWatchActive: true,
     });
     assert.deepEqual(dispatched, { state: "pending" });
     assert.equal(deliveries.at(-1)?.state, "transport_written");
@@ -329,6 +330,7 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       text: "outbound body",
       expectsReply: false,
       deadlineAt,
+      progressWatchActive: true,
     });
 
     clients[0]!.crash();
@@ -368,6 +370,7 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
     text: "x".repeat(16 * 1024),
     expectsReply: false,
     deadlineAt: "2030-01-01T00:00:00.000Z",
+    progressWatchActive: true,
   } as const;
   const parent = {
     protocolVersion: 1,
@@ -388,6 +391,7 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
     { ...command, targetAlias: "not an alias" },
     { ...command, conversationId: "conv_short" },
     { ...command, text: "x".repeat(16 * 1024 + 1) },
+    { ...command, progressWatchActive: false },
     { ...command, unexpected: true },
   ]) {
     assert.equal(
@@ -469,6 +473,7 @@ test("supervisor carries only the activated source alias and exact selected targ
       text: "outbound body",
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+      progressWatchActive: true,
     } as const;
     assert.deepEqual(
       await supervisor.dispatch({
@@ -513,6 +518,7 @@ test("supervisor carries only the activated source alias and exact selected targ
     assert.equal(sent.targetAlias, "claude-first@this-mac");
     assert.equal(sent.conversationId, "conv_0123456789abcdef");
     assert.equal(sent.text, "outbound body");
+    assert.equal(sent.progressWatchActive, true);
 
     assert.deepEqual(
       await supervisor.dispatch({

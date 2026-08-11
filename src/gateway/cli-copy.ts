@@ -7,6 +7,7 @@ export const cliCopyKeys = [
   "hint.dashboardLiveRequired",
   "hint.dashboardPortInUse",
   "hint.controlInvalidResponse",
+  "hint.progressWatchOwnerConflict",
   "error.input",
   "error.decision",
   "error.unavailable",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createProgressWatchMachine,
+  progressWatchJournalKinds,
   progressWatchOutcomes,
   transitionProgressWatch,
   type ProgressWatchEvent,
@@ -77,14 +78,14 @@ test("conversation and route activity end an episode without ending the watch", 
   }
 });
 
-test("worker DONE is a hint while owner DONE is terminal", () => {
+test("worker and owner DONE signals are terminal", () => {
   const worker = transitionProgressWatch(initial(), {
-    type: "activity",
+    type: "worker_done",
     at: START + 1,
-    workerReportedComplete: true,
   });
-  assert.equal(worker.state?.workerReportedCompleteAt, "2026-08-09T12:00:00.001Z");
-  const owner = transitionProgressWatch(worker.state!, {
+  assert.equal(worker.state, null);
+  assert.deepEqual(worker.effects, [{ type: "settled", outcome: "done" }]);
+  const owner = transitionProgressWatch(initial(), {
     type: "owner_done",
     at: START + 2,
   });
@@ -119,7 +120,7 @@ test("restart degradation is announced once and never invents reply capability",
     conversationCapabilityRestored: false,
   });
   assert.equal(first.state?.capability, "route");
-  assert.deepEqual(first.effects, [{ type: "notify_capability_degraded" }]);
+  assert.deepEqual(first.effects, [{ type: "record_capability_degraded" }]);
   const second = transitionProgressWatch(first.state!, {
     type: "restart",
     at: START + 2,
@@ -159,6 +160,20 @@ test("the reducer is deterministic, nonmutating, and covers every terminal outco
   assert.deepEqual(progressWatchOutcomes, [
     "done",
     "unresponsive",
+    "endpoint_retired",
+    "disabled",
+  ]);
+  assert.deepEqual(progressWatchJournalKinds, [
+    "opened",
+    "replaced",
+    "activity",
+    "nudge",
+    "worker_reported_complete",
+    "capability_degraded",
+    "conversation_rebound",
+    "done",
+    "unresponsive",
+    "pair_removed",
     "endpoint_retired",
     "disabled",
   ]);

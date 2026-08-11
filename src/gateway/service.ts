@@ -256,6 +256,8 @@ export type GatewayAdapterDispatchInput = {
   expectsReply: boolean;
   deadlineAt: string;
   steer?: true;
+  /** Broker-derived display metadata; never grants or persists authority. */
+  progressWatchActive?: true;
 };
 
 /**
@@ -637,6 +639,9 @@ type CodexSuccessionExecution = {
 function decisionFor(error: unknown): RejectedDecision {
   if (!(error instanceof BridgeError)) {
     return { accepted: false, code: "rejected" };
+  }
+  if (error.code === "PROGRESS_WATCH_REPLACEMENT_OWNER_REQUIRED") {
+    return { accepted: false, code: "watch_owner_conflict" };
   }
   if (error.code.includes("NOT_FOUND") || error.code === "ROUTE_UNAVAILABLE") {
     return { accepted: false, code: "not_found" };
@@ -5783,12 +5788,6 @@ export class GatewayService {
         );
         continue;
       }
-      if (action.type === "notify_capability_degraded") {
-        this.addRuntimeAlert("PROGRESS_WATCH_CAPABILITY_DEGRADED", "warning", {
-          alias: action.ownerAlias,
-        });
-        continue;
-      }
       const text =
         `[Embassy automated liveness check — ${action.conversationId} / ` +
         `Embassy 自动活跃检查 — ${action.conversationId}]\n` +
@@ -6614,7 +6613,6 @@ export class GatewayService {
     if (context === undefined && selectedBinding !== undefined) {
       context = this.restoreQueuedMessageContextLocked(item, selectedBinding);
     }
-    const binding = context?.nativeReplyBinding ?? selectedBinding;
     if (context === undefined) {
       const result = await this.store.settleMessage({
         messageId: item.messageId,
@@ -6627,6 +6625,7 @@ export class GatewayService {
       }
       return;
     }
+    const binding = context.nativeReplyBinding ?? selectedBinding;
     if (binding === undefined) {
       const result = await this.store.requeueInFlightMessage(
         item.messageId,
@@ -6775,6 +6774,31 @@ export class GatewayService {
       this.scheduleLifecycleWakeLocked();
       return;
     }
+    let progressWatches = await this.store.inspectProgressWatches();
+    if (
+      context.recovered === true &&
+      item.pair === true &&
+      !item.body.startsWith("DONE:") &&
+      progressWatches.some(
+        (watch) =>
+          watch.capability === "route" &&
+          watch.ownerAlias === item.sourceAlias &&
+          watch.workerAlias === item.targetAlias,
+      )
+    ) {
+      await this.store.bindProgressWatchConversation({
+        conversationId: context.conversationId,
+        ownerAlias: item.sourceAlias,
+        workerAlias: item.targetAlias,
+      });
+      progressWatches = await this.store.inspectProgressWatches();
+    }
+    const progressWatchActive = progressWatches.some(
+      (watch) =>
+        watch.capability === "conversation" &&
+        watch.workerAlias === item.targetAlias &&
+        watch.conversationId === context.conversationId,
+    );
     let result: GatewayAdapterDispatchResult;
     try {
       result = await this.awaitDispatchWithNativeHeldLocked(
@@ -6787,9 +6811,12 @@ export class GatewayService {
           authorization: context.authorization,
           messageId: item.messageId,
           text: item.body,
-          expectsReply: context?.expectsReply ?? false,
+          expectsReply: context.expectsReply,
           deadlineAt: item.deadlineAt,
           ...(item.steer === true ? { steer: true as const } : {}),
+          ...(progressWatchActive
+            ? { progressWatchActive: true as const }
+            : {}),
         }),
       );
     } catch {

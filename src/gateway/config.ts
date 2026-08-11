@@ -26,7 +26,7 @@ export type GatewayConfig = {
   allowedHosts: readonly string[];
   /** Global fail-closed switch for Claude-to-Codex `STEER:` delivery. */
   steeringEnabled: boolean;
-  /** Global fail-closed switch for opt-in, owner-ended progress watches. */
+  /** Global fail-closed switch for opt-in, completion-ended progress watches. */
   trackingEnabled?: boolean;
   /** Claude-to-Codex sender consent. Only an explicit CLI opt-out is open. */
   inboundMode: GatewayInboundMode;

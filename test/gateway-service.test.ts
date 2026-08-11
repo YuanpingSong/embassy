@@ -6396,7 +6396,7 @@ test("a renamed-session collision revokes the exact selected Claude route", asyn
   assert.deepEqual(claude.dispatches, []);
 });
 
-test("restoring a durable Claude UUID retains queued mail until the route is reobserved", async (t) => {
+test("a recovered route-capability watch marks queued mail after its conversation ID is regenerated", async (t) => {
   const { root, stateDir } = await fixture();
   const config = loadGatewayConfig({
     EMBASSY_STATE_DIR: stateDir,
@@ -6414,24 +6414,25 @@ test("restoring a durable Claude UUID retains queued mail until the route is reo
     },
   ];
   const firstCodex = new FakeProvider("codex");
+  const firstStore = new GatewayStore(config);
   const first = new GatewayService({
     config,
+    store: firstStore,
     adapters: [firstClaude, firstCodex],
   });
   await first.start();
   await first.handlers().refreshDashboard();
   await first.handlers().registerCodex(codexRegistration());
   await first.handlers().selectClaude({ alias: "busy-peer@this-mac" });
-  assert.equal(
-    (
-      await first.handlers().sendToClaude({
-        ...toClaude("must survive restart"),
-        toAlias: "busy-peer@this-mac",
-        expectsReply: true,
-      })
-    ).accepted,
-    true,
-  );
+  const accepted = await first.handlers().sendToClaude({
+    ...toClaude("must survive restart"),
+    toAlias: "busy-peer@this-mac",
+    expectsReply: true,
+    trackIdleMinutes: 1,
+  });
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  assert.equal((await firstStore.inspectProgressWatches()).length, 1);
   assert.equal(firstClaude.dispatches.length, 0);
   await first.close();
 
@@ -6442,9 +6443,20 @@ test("restoring a durable Claude UUID retains queued mail until the route is reo
       state: "idle",
     },
   ];
+  secondClaude.resolveReplyAddress = async (address) => {
+    if (address !== "uds:/synthetic/claude.sock") {
+      throw new BridgeError(
+        "REPLY_ADDRESS_MISMATCH",
+        "Synthetic unrelated socket.",
+      );
+    }
+    return { routeHandle: CLAUDE_SESSION_ID };
+  };
   const secondCodex = new FakeProvider("codex", "codex_generation_after");
+  const secondStore = new GatewayStore(config);
   const second = new GatewayService({
     config,
+    store: secondStore,
     adapters: [secondClaude, secondCodex],
   });
   await second.start();
@@ -6455,6 +6467,10 @@ test("restoring a durable Claude UUID retains queued mail until the route is reo
   await second.handlers().refreshDashboard();
   await new Promise((resolve) => setTimeout(resolve, 25));
   const snapshot = await second.snapshot();
+  assert.equal(
+    (await secondStore.inspectProgressWatches())[0]?.capability,
+    "route",
+  );
   assert.equal(secondClaude.dispatches.length, 0);
   assert.equal(secondCodex.dispatches.length, 0);
   assert.equal(
@@ -6476,12 +6492,52 @@ test("restoring a durable Claude UUID retains queued mail until the route is reo
   secondClaude.emitRouteState(CLAUDE_SESSION_ID, "idle");
   await waitFor(() => secondClaude.dispatches.length === 1);
   assert.equal(secondClaude.dispatches[0]?.text, "must survive restart");
+  assert.equal(secondClaude.dispatches[0]?.progressWatchActive, true);
+  assert.notEqual(
+    secondClaude.dispatches[0]?.conversationId,
+    accepted.conversationId,
+  );
   assert.equal(
     secondClaude.dispatches[0]?.conversationId.endsWith(
       snapshot.messages.find((event) => event.body === "must survive restart")
         ?.conversationIdSuffix ?? "missing",
     ),
     true,
+  );
+  const regeneratedConversationId =
+    secondClaude.dispatches[0]?.conversationId;
+  assert.ok(regeneratedConversationId);
+  assert.deepEqual(
+    (await secondStore.inspectProgressWatches()).map((watch) => ({
+      conversationId: watch.conversationId,
+      capability: watch.capability,
+    })),
+    [
+      {
+        conversationId: regeneratedConversationId,
+        capability: "conversation",
+      },
+    ],
+  );
+  assert.equal(
+    (await secondStore.publicSnapshot()).progressWatchEvents?.at(-1)?.kind,
+    "conversation_rebound",
+  );
+  const completion = await second.handlers().reply({
+    conversationId: regeneratedConversationId,
+    text: "DONE: recovered work is complete",
+    caller: {
+      kind: "claude",
+      alias: "busy-peer@this-mac",
+      replyAddress: "uds:/synthetic/claude.sock",
+    },
+  });
+  assert.equal(completion.accepted, true, JSON.stringify(completion));
+  await waitFor(() => secondCodex.dispatches.length === 1);
+  assert.deepEqual(await secondStore.inspectProgressWatches(), []);
+  assert.equal(
+    (await secondStore.publicSnapshot()).progressWatchEvents?.at(-1)?.kind,
+    "worker_reported_complete",
   );
 });
 
@@ -6974,10 +7030,12 @@ test("clean Claude prewrite gaps retry boundedly without waiting for an idle obs
   const accepted = await service.handlers().sendToClaude({
     ...toClaude("reattest after the route returns"),
     expectsReply: false,
+    trackIdleMinutes: 1,
   });
   assert.equal(accepted.accepted, true);
   if (!accepted.accepted) return;
   await waitFor(() => claude.dispatches.length === 1);
+  assert.equal(claude.dispatches[0]?.progressWatchActive, true);
 
   await clock.advanceBy(499);
   assert.equal(claude.dispatches.length, 1);
@@ -6992,6 +7050,7 @@ test("clean Claude prewrite gaps retry boundedly without waiting for an idle obs
 
   await clock.advanceBy(1);
   await waitFor(() => claude.dispatches.length === 2);
+  assert.equal(claude.dispatches[1]?.progressWatchActive, true);
   claude.emitDelivery({
     messageId: claude.dispatches[1]!.messageId,
     state: "transport_written",
@@ -8858,7 +8917,7 @@ test("opt-in progress watches nudge through the ordinary queue and settle bounde
   );
 });
 
-test("TRACK and DONE prefixes preserve owner-only completion and untrack capability", async (t) => {
+test("TRACK marks watched delivery and worker DONE closes the watch", async (t) => {
   const { root, stateDir } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -8891,6 +8950,35 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
   const handlers = service.handlers();
   await selectAndRegister(handlers);
 
+  const reverse = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    text: "TRACK: supervise the Codex task",
+    expectsReply: false,
+  });
+  assert.equal(reverse.accepted, true);
+  if (!reverse.accepted) return;
+  await waitFor(() => codex.dispatches.length === 1);
+  assert.equal(codex.dispatches[0]?.progressWatchActive, true);
+  assert.equal(
+    (await store.inspectProgressWatches())[0]?.workerAlias,
+    "codex-main@this-mac",
+  );
+  const ownerConflict = await handlers.sendToClaude({
+    ...toClaude("TRACK: counterparty cannot replace this watch"),
+    expectsReply: false,
+  });
+  assert.deepEqual(ownerConflict, {
+    accepted: false,
+    code: "watch_owner_conflict",
+  });
+  assert.deepEqual(
+    await handlers.untrack({ conversationId: reverse.conversationId }),
+    { accepted: true, code: "ok" },
+  );
+  codex.dispatches.length = 0;
+  codex.emitRouteState(THREAD_ID, "idle");
+  await immediate();
+
   const opened = await handlers.sendToClaude({
     ...toClaude("TRACK: keep this long-running exchange visible"),
     expectsReply: true,
@@ -8904,6 +8992,7 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
     conversationId: opened.conversationId,
     text: "TRACK: keep this long-running exchange visible",
   });
+  assert.equal(claude.dispatches[0]?.progressWatchActive, true);
   assert.equal((await store.inspectProgressWatches())[0]?.ownerAlias, "codex-main@this-mac");
 
   const workerHint = await handlers.reply({
@@ -8923,9 +9012,11 @@ test("TRACK and DONE prefixes preserve owner-only completion and untrack capabil
     conversationId: opened.conversationId,
     text: "DONE: worker reports the result is ready",
   });
-  assert.notEqual(
-    (await store.inspectProgressWatches())[0]?.workerReportedCompleteAt,
-    undefined,
+  assert.equal(codex.dispatches[0]?.progressWatchActive, undefined);
+  assert.deepEqual(await store.inspectProgressWatches(), []);
+  assert.equal(
+    (await handlers.listSnapshot()).progressWatchEvents?.at(-1)?.kind,
+    "worker_reported_complete",
   );
 
   const ownerDone = await handlers.reply({

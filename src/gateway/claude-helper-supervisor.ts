@@ -217,6 +217,7 @@ export class ClaudeNativeHelperSupervisor {
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
+    progressWatchActive?: true;
   }>): Promise<GatewayAdapterDispatchResult> {
     if (
       typeof input.sourceAlias !== "string" ||
@@ -277,6 +278,9 @@ export class ClaudeNativeHelperSupervisor {
           text: input.text,
           expectsReply: input.expectsReply,
           deadlineAt: input.deadlineAt,
+          ...(input.progressWatchActive === true
+            ? { progressWatchActive: true as const }
+            : {}),
         },
         Math.max(
           1,

@@ -151,6 +151,8 @@ namespace Embassy {
   export type DashboardAttentionGuidance =
     | "reobserve_claude"
     | "reobserve_codex"
+    | "codex_reactivation_required"
+    | "consent_edge_unavailable"
     | "claude_not_observed"
     | "codex_stale"
     | "connector_offline"
@@ -301,7 +303,6 @@ namespace Embassy {
     idleForMs: number;
     dueInMs: number;
     nudgeCount: 0 | 1 | 2;
-    workerReportedComplete: boolean;
   }>;
 
   export type DashboardProgressWatchEventRow = Readonly<{
@@ -315,9 +316,12 @@ namespace Embassy {
       | "nudge"
       | "worker_reported_complete"
       | "capability_degraded"
+      | "conversation_rebound"
+      | "replaced"
       | "done"
       | "unresponsive"
       | "endpoint_retired"
+      | "pair_removed"
       | "disabled";
     nudgeNumber?: 1 | 2 | undefined;
   }>;
@@ -477,6 +481,10 @@ namespace Embassy {
     queueClaudeToCodex: QueueSummary;
     queueCodexToClaude: QueueSummary;
     graph: DashboardGraphFacts;
+    degradedPairCopyKey:
+      | "app.overview.degradedEdge"
+      | "app.overview.degradedEdges"
+      | undefined;
     attention: readonly AttentionView[];
     attentionOmitted: number;
     pulse: PulseData;

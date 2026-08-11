@@ -58,6 +58,7 @@ export type ClaudeNativeHelperCommand =
       text: string;
       expectsReply: boolean;
       deadlineAt: string;
+      progressWatchActive?: true;
     }>
   | Readonly<{
       method: "update_inbound_status";
@@ -327,18 +328,22 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
       );
     case "dispatch":
       return (
-        exact(value, [
-          "method",
-          "binding",
-          "authorization",
-          "messageId",
-          "sourceAlias",
-          "targetAlias",
-          "conversationId",
-          "text",
-          "expectsReply",
-          "deadlineAt",
-        ]) &&
+        exact(
+          value,
+          [
+            "method",
+            "binding",
+            "authorization",
+            "messageId",
+            "sourceAlias",
+            "targetAlias",
+            "conversationId",
+            "text",
+            "expectsReply",
+            "deadlineAt",
+          ],
+          ["progressWatchActive"],
+        ) &&
         binding(value.binding) &&
         (value.authorization === "selected_route" ||
           value.authorization === "native_reply") &&
@@ -353,7 +358,9 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         typeof value.text === "string" &&
         Buffer.byteLength(value.text, "utf8") <= 16 * 1024 &&
         typeof value.expectsReply === "boolean" &&
-        iso(value.deadlineAt)
+        iso(value.deadlineAt) &&
+        (value.progressWatchActive === undefined ||
+          value.progressWatchActive === true)
       );
     case "update_inbound_status":
       return (

@@ -25,6 +25,7 @@ import {
 import type { GatewayConfig } from "./config.js";
 import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
+  PROGRESS_WATCH_HARD_CAPACITY,
   PROGRESS_WATCH_MAX_IDLE_MS,
   PROGRESS_WATCH_MIN_IDLE_MS,
   createProgressWatchMachine,
@@ -145,13 +146,6 @@ const PROGRESS_WATCH_JOURNAL_KINDS = new Set<string>(
   progressWatchJournalKinds,
 );
 
-export type OpenProgressWatchInput = Readonly<{
-  conversationId: string;
-  ownerAlias: string;
-  workerAlias: string;
-  idleMs: number;
-}>;
-
 export type ProgressWatchAction =
   | Readonly<{
       type: "send_nudge";
@@ -159,12 +153,6 @@ export type ProgressWatchAction =
       ownerAlias: string;
       workerAlias: string;
       nudgeNumber: 1 | 2;
-    }>
-  | Readonly<{
-      type: "notify_capability_degraded";
-      conversationId: string;
-      ownerAlias: string;
-      workerAlias: string;
     }>
   | Readonly<{
       type: "settled";
@@ -579,7 +567,43 @@ function isPairRecord(value: unknown): value is GatewayPairRecord {
   );
 }
 
-function isProgressWatchMachine(value: unknown): value is ProgressWatchMachine {
+function progressWatchPairKey(watch: ProgressWatchMachine): string {
+  return [
+    `${watch.ownerAlias}\0${watch.ownerLease}`,
+    `${watch.workerAlias}\0${watch.workerLease}`,
+  ]
+    .sort()
+    .join("\0");
+}
+
+function progressWatchMatchesPair(
+  watch: ProgressWatchMachine,
+  pair: Pick<
+    GatewayPairRecord,
+    | "claudeAlias"
+    | "codexAlias"
+    | "claudeOwnerLease"
+    | "codexOwnerLease"
+  >,
+): boolean {
+  return (
+    (watch.ownerAlias === pair.claudeAlias &&
+      watch.ownerLease === pair.claudeOwnerLease &&
+      watch.workerAlias === pair.codexAlias &&
+      watch.workerLease === pair.codexOwnerLease) ||
+    (watch.ownerAlias === pair.codexAlias &&
+      watch.ownerLease === pair.codexOwnerLease &&
+      watch.workerAlias === pair.claudeAlias &&
+      watch.workerLease === pair.claudeOwnerLease)
+  );
+}
+
+type LegacyProgressWatchMachine = ProgressWatchMachine &
+  Readonly<{ workerReportedCompleteAt?: string }>;
+
+function isLegacyProgressWatchMachine(
+  value: unknown,
+): value is LegacyProgressWatchMachine {
   if (
     !isObject(value) ||
     !hasOnlyKeys(
@@ -636,6 +660,13 @@ function isProgressWatchMachine(value: unknown): value is ProgressWatchMachine {
     typeof value.degradedNoticeSent === "boolean" &&
     (value.workerReportedCompleteAt === undefined ||
       isIsoTimestamp(value.workerReportedCompleteAt))
+  );
+}
+
+function isProgressWatchMachine(value: unknown): value is ProgressWatchMachine {
+  return (
+    isLegacyProgressWatchMachine(value) &&
+    !Object.hasOwn(value, "workerReportedCompleteAt")
   );
 }
 
@@ -1198,6 +1229,126 @@ function migrateLegacyCompatibilityCertifications(value: unknown): unknown {
   return changed ? { ...value, compatibilityAttestations } : value;
 }
 
+/**
+ * Before v1.4, separately tracked conversations could leave multiple active
+ * watches on one exact pair, and a worker completion could remain as a flag on
+ * an active watch. Settle both legacy shapes into the bounded journal. Losers
+ * are ordered by their stable original-array position, so a persisted result
+ * is idempotent when loaded again.
+ */
+function migrateLegacyProgressWatchState(
+  value: unknown,
+  eventCapacity: number,
+): unknown {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !isIsoTimestamp(value.updatedAt) ||
+    !isNonNegativeInteger(value.watchSequence) ||
+    !Array.isArray(value.progressWatches) ||
+    value.progressWatches.length > PROGRESS_WATCH_HARD_CAPACITY ||
+    !value.progressWatches.every(isLegacyProgressWatchMachine) ||
+    !Array.isArray(value.progressWatchEvents) ||
+    !value.progressWatchEvents.every(isProgressWatchJournalEvent) ||
+    value.progressWatchEvents.length > eventCapacity ||
+    new Set(
+      value.progressWatches.map((watch) => watch.conversationId),
+    ).size !== value.progressWatches.length
+  ) {
+    return value;
+  }
+  const progressWatches = value.progressWatches as LegacyProgressWatchMachine[];
+  const existingEvents =
+    value.progressWatchEvents as ProgressWatchJournalEvent[];
+  const watchSequenceBefore = value.watchSequence as number;
+  if (
+    existingEvents.some(
+      (event, index) =>
+        event.sequence > watchSequenceBefore ||
+        (index > 0 && event.sequence <= existingEvents[index - 1]!.sequence),
+    )
+  ) {
+    return value;
+  }
+  const winnerByPair = new Map<string, number>();
+  for (const [index, watch] of progressWatches.entries()) {
+    const key = progressWatchPairKey(watch);
+    const winnerIndex = winnerByPair.get(key);
+    const winner =
+      winnerIndex === undefined
+        ? undefined
+        : progressWatches[winnerIndex];
+    if (
+      winner === undefined ||
+      Date.parse(watch.createdAt) >= Date.parse(winner.createdAt)
+    ) {
+      winnerByPair.set(key, index);
+    }
+  }
+  const winnerIndexes = new Set(winnerByPair.values());
+  const loserIndexes = progressWatches
+    .map((_, index) => index)
+    .filter((index) => !winnerIndexes.has(index));
+  const completedWinnerIndexes = [...winnerByPair.values()].filter(
+    (index) =>
+      progressWatches[index]?.workerReportedCompleteAt !== undefined,
+  );
+  const additions = loserIndexes.length + completedWinnerIndexes.length;
+  if (additions === 0) return value;
+  if (watchSequenceBefore > Number.MAX_SAFE_INTEGER - additions) {
+    throw new BridgeError(
+      "PROGRESS_WATCH_SEQUENCE_EXHAUSTED",
+      "The bounded progress-watch journal sequence is exhausted.",
+    );
+  }
+
+  const retained = new Set(winnerIndexes);
+  for (const index of completedWinnerIndexes) retained.delete(index);
+  let watchSequence = watchSequenceBefore;
+  const progressWatchEvents = [...existingEvents];
+  const append = (
+    watch: LegacyProgressWatchMachine,
+    kind: "replaced" | "worker_reported_complete",
+    timestamp: string,
+  ): void => {
+    watchSequence += 1;
+    progressWatchEvents.push({
+      sequence: watchSequence,
+      timestamp,
+      conversationId: watch.conversationId,
+      ownerAlias: watch.ownerAlias,
+      workerAlias: watch.workerAlias,
+      kind,
+    });
+    while (progressWatchEvents.length > eventCapacity) {
+      progressWatchEvents.shift();
+    }
+  };
+  for (const index of loserIndexes) {
+    const watch = progressWatches[index]!;
+    const winner = progressWatches[winnerByPair.get(
+      progressWatchPairKey(watch),
+    )!]!;
+    append(watch, "replaced", winner.createdAt);
+  }
+  for (const index of completedWinnerIndexes) {
+    const watch = progressWatches[index]!;
+    append(
+      watch,
+      "worker_reported_complete",
+      watch.workerReportedCompleteAt!,
+    );
+  }
+  return {
+    ...value,
+    watchSequence,
+    progressWatches: progressWatches
+      .filter((_, index) => retained.has(index))
+      .map(({ workerReportedCompleteAt: _legacy, ...watch }) => watch),
+    progressWatchEvents,
+  };
+}
+
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -1302,6 +1453,10 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (watchConversationIds.size !== candidate.progressWatches.length) {
     return false;
   }
+  const watchPairKeys = new Set(
+    candidate.progressWatches.map(progressWatchPairKey),
+  );
+  if (watchPairKeys.size !== candidate.progressWatches.length) return false;
   const compatibilityKeys = candidate.compatibilityAttestations.map(
     compatibilityCacheKey,
   );
@@ -1416,6 +1571,14 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       index === 0 ||
       event.sequence > (candidate.events[index - 1]?.sequence ?? 0),
   );
+  const progressWatchSequencesStrictlyIncrease =
+    candidate.progressWatchEvents.every(
+      (event, index) =>
+        event.sequence <= candidate.watchSequence &&
+        (index === 0 ||
+          event.sequence >
+            (candidate.progressWatchEvents[index - 1]?.sequence ?? 0)),
+    );
   const endpointRefreshSequenceConsistent =
     candidate.codexEndpointRefreshEvents.length === 0
       ? candidate.codexEndpointRefreshSequence === 0
@@ -1455,6 +1618,7 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       candidate.rateBuckets.length &&
     candidate.accounting.queuedBytes === expectedQueuedBytes &&
     sequencesStrictlyIncrease &&
+    progressWatchSequencesStrictlyIncrease &&
     candidate.events.every(
       (event) => event.sequence <= candidate.eventSequence,
     ) &&
@@ -2262,6 +2426,14 @@ export class GatewayStore {
         (route) => route !== retained && route === aliasOwner,
       );
       const retiredAliases = new Set(retired.map((route) => route.alias));
+      this.requireProgressWatchJournalCapacity(
+        state,
+        state.progressWatches.filter(
+          (watch) =>
+            retiredAliases.has(watch.ownerAlias) ||
+            retiredAliases.has(watch.workerAlias),
+        ).length,
+      );
       const settlementPlan = this.validateAffectedInFlightSettlements(
         state,
         retiredAliases,
@@ -2854,6 +3026,13 @@ export class GatewayStore {
     return await this.mutate(async (state, now) => {
       const route = this.requireOwnedRoute(state, alias, ownerLease);
       const aliases = new Set([route.alias]);
+      this.requireProgressWatchJournalCapacity(
+        state,
+        state.progressWatches.filter(
+          (watch) =>
+            aliases.has(watch.ownerAlias) || aliases.has(watch.workerAlias),
+        ).length,
+      );
       const settlementPlan = this.validateAffectedInFlightSettlements(
         state,
         aliases,
@@ -3518,99 +3697,60 @@ export class GatewayStore {
     });
   }
 
-  /** Open one durable owner-ended watch on an exact consent edge. */
-  async openProgressWatch(
-    input: OpenProgressWatchInput,
-  ): Promise<{ created: boolean; watch: ProgressWatchMachine }> {
-    return this.mutate(async (state, now) => {
-      if (this.config.trackingEnabled === false) {
-        throw new BridgeError(
-          "PROGRESS_TRACKING_DISABLED",
-          "Progress tracking is disabled by the controller configuration.",
-        );
-      }
-      if (
-        !CONVERSATION_ID_PATTERN.test(input.conversationId) ||
-        !ALIAS_PATTERN.test(input.ownerAlias) ||
-        !ALIAS_PATTERN.test(input.workerAlias) ||
-        input.ownerAlias === input.workerAlias ||
-        !Number.isSafeInteger(input.idleMs) ||
-        input.idleMs < PROGRESS_WATCH_MIN_IDLE_MS ||
-        input.idleMs > PROGRESS_WATCH_MAX_IDLE_MS
-      ) {
-        throw new BridgeError(
-          "INVALID_PROGRESS_WATCH",
-          "The progress-watch request is malformed or outside its idle bound.",
-        );
-      }
-      const existing = state.progressWatches.find(
-        (watch) => watch.conversationId === input.conversationId,
-      );
-      if (existing !== undefined) {
-        if (
-          existing.ownerAlias !== input.ownerAlias ||
-          existing.workerAlias !== input.workerAlias
-        ) {
-          throw new BridgeError(
-            "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
-            "The conversation watch belongs to different exact endpoints.",
-          );
-        }
-        return { created: false, watch: { ...existing } };
-      }
-      if (
-        state.progressWatches.length >=
-        (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY)
-      ) {
-        throw new BridgeError(
-          "PROGRESS_WATCH_CAPACITY_REACHED",
-          "The bounded progress-watch inventory is full.",
-          true,
-        );
-      }
-      const owner = this.requireAvailableRoute(state, input.ownerAlias);
-      const worker = this.requireAvailableRoute(state, input.workerAlias);
-      const pairAliases = pairAliasesForRoutes(owner, worker);
-      this.requireExactPair(
-        state,
-        owner.binding.provider === "claude" ? owner : worker,
-        owner.binding.provider === "codex" ? owner : worker,
-      );
-      if (
-        pairAliases.claudeAlias !==
-          (owner.binding.provider === "claude"
-            ? owner.alias
-            : worker.alias) ||
-        pairAliases.codexAlias !==
-          (owner.binding.provider === "codex" ? owner.alias : worker.alias)
-      ) {
-        throw new BridgeError(
-          "PROGRESS_WATCH_EDGE_MISMATCH",
-          "The watch endpoints do not form one exact consent edge.",
-        );
-      }
-      const watch = createProgressWatchMachine({
-        conversationId: input.conversationId,
-        ownerAlias: owner.alias,
-        workerAlias: worker.alias,
-        ownerLease: owner.binding.ownerLease,
-        workerLease: worker.binding.ownerLease,
-        idleMs: input.idleMs,
-        at: now.getTime(),
-      });
-      state.progressWatches.push(watch);
-      this.appendProgressWatchEvent(state, watch, {
-        kind: "opened",
-        timestamp: now.toISOString(),
-      });
-      return { created: true, watch: { ...watch } };
-    });
-  }
-
   async inspectProgressWatches(): Promise<ProgressWatchMachine[]> {
     return this.mutex.run("gateway", async () =>
       this.requireState().progressWatches.map((watch) => ({ ...watch })),
     );
+  }
+
+  /** Bind one restarted route-capability watch to its first exact owner send. */
+  async bindProgressWatchConversation(input: Readonly<{
+    conversationId: string;
+    ownerAlias: string;
+    workerAlias: string;
+  }>): Promise<boolean> {
+    return this.mutate(async (state, now) => {
+      if (
+        !CONVERSATION_ID_PATTERN.test(input.conversationId) ||
+        !ALIAS_PATTERN.test(input.ownerAlias) ||
+        !ALIAS_PATTERN.test(input.workerAlias) ||
+        input.ownerAlias === input.workerAlias
+      ) {
+        throw new BridgeError(
+          "INVALID_PROGRESS_WATCH",
+          "The progress-watch conversation binding is malformed.",
+        );
+      }
+      const routeWatch = state.progressWatches.find(
+        (watch) =>
+          watch.capability === "route" &&
+          watch.ownerAlias === input.ownerAlias &&
+          watch.workerAlias === input.workerAlias,
+      );
+      if (routeWatch === undefined) return false;
+      const pair = state.pairs.find(
+        (candidate) =>
+          pairMatchesMessage(candidate, {
+            sourceAlias: input.ownerAlias,
+            targetAlias: input.workerAlias,
+            pair: true,
+          }) && progressWatchMatchesPair(routeWatch, candidate),
+      );
+      if (pair === undefined) {
+        throw new BridgeError(
+          "PROGRESS_WATCH_EDGE_REQUIRED",
+          "A restarted watch can bind only through its exact durable pair.",
+        );
+      }
+      return this.bindRouteProgressWatchConversation(
+        state,
+        now,
+        input.conversationId,
+        input.ownerAlias,
+        input.workerAlias,
+        pair,
+      );
+    });
   }
 
   async inspectCompatibilityAttestation(
@@ -3670,48 +3810,6 @@ export class GatewayStore {
         state.compatibilityAttestations.shift();
       }
       state.compatibilityAttestations.push(structuredClone(attestation));
-    });
-  }
-
-  async touchProgressWatch(input: Readonly<{
-    conversationId: string;
-    actorAlias: string;
-    workerReportedComplete?: true;
-  }>): Promise<boolean> {
-    return this.mutate(async (state, now) => {
-      const index = state.progressWatches.findIndex(
-        (watch) => watch.conversationId === input.conversationId,
-      );
-      const watch = state.progressWatches[index];
-      if (watch === undefined) return false;
-      if (
-        input.actorAlias !== watch.ownerAlias &&
-        input.actorAlias !== watch.workerAlias
-      ) {
-        throw new BridgeError(
-          "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
-          "The watch activity did not come from an endpoint on its exact edge.",
-        );
-      }
-      const workerReportedComplete =
-        input.workerReportedComplete === true &&
-        input.actorAlias === watch.workerAlias;
-      const transition = transitionProgressWatch(watch, {
-        type: "activity",
-        at: now.getTime(),
-        ...(workerReportedComplete
-          ? { workerReportedComplete: true as const }
-          : {}),
-      });
-      if (transition.state === null) return false;
-      state.progressWatches[index] = transition.state;
-      if (workerReportedComplete) {
-        this.appendProgressWatchEvent(state, transition.state, {
-          kind: "worker_reported_complete",
-          timestamp: now.toISOString(),
-        });
-      }
-      return true;
     });
   }
 
@@ -3775,6 +3873,7 @@ export class GatewayStore {
         );
       }
       const transition = transitionProgressWatch(watch, event);
+      this.requireProgressWatchJournalCapacity(state, 1);
       state.progressWatches.splice(index, 1);
       this.appendProgressWatchEvent(state, watch, {
         kind: input.outcome,
@@ -3787,6 +3886,13 @@ export class GatewayStore {
   /** Advance every due watch once under one durable store mutation. */
   async advanceDueProgressWatches(): Promise<ProgressWatchAction[]> {
     return this.mutate(async (state, now) => {
+      const terminalCount = state.progressWatches.filter((watch) => {
+        if (Date.parse(watch.nextActionAt) > now.getTime()) return false;
+        return this.progressWatchDueTransition(state, watch, now).effects.some(
+          (effect) => effect.type === "settled",
+        );
+      }).length;
+      this.requireProgressWatchJournalCapacity(state, terminalCount);
       const actions: ProgressWatchAction[] = [];
       const retained: ProgressWatchMachine[] = [];
       for (const watch of state.progressWatches) {
@@ -3908,6 +4014,12 @@ export class GatewayStore {
     return this.mutate(async (state, now) => {
       const { claude, codex } = this.requirePairRoutes(state, input, false);
       const pair = this.requireExactPair(state, claude, codex);
+      this.requireProgressWatchJournalCapacity(
+        state,
+        state.progressWatches.filter((watch) =>
+          progressWatchMatchesPair(watch, pair),
+        ).length,
+      );
       const plan = this.validateAffectedPairInFlightSettlements(
         state,
         pair,
@@ -4595,8 +4707,6 @@ export class GatewayStore {
             nextActionAt: watch.nextActionAt,
             idleMs: watch.idleMs,
             nudgeCount: watch.nudgeCount,
-            workerReportedComplete:
-              watch.workerReportedCompleteAt !== undefined,
           }))
           .sort((left, right) =>
             `${left.nextActionAt}\0${left.ownerAlias}\0${left.workerAlias}`.localeCompare(
@@ -4941,6 +5051,15 @@ export class GatewayStore {
     compatibility: "compatible" | "expired",
   ): void {
     const oldAlias = route.alias;
+    const affectedAliases = new Set([oldAlias, identity.alias]);
+    this.requireProgressWatchJournalCapacity(
+      state,
+      state.progressWatches.filter(
+        (watch) =>
+          affectedAliases.has(watch.ownerAlias) ||
+          affectedAliases.has(watch.workerAlias),
+      ).length,
+    );
     route.alias = identity.alias;
     route.binding = { ...identity.binding };
     route.registrationMode = "explicit_opt_in";
@@ -4972,10 +5091,10 @@ export class GatewayStore {
     );
     this.settleProgressWatchesForAliases(
       state,
-      new Set([oldAlias, identity.alias]),
+      affectedAliases,
       now,
     );
-    removePairsForAliases(state, new Set([oldAlias, identity.alias]));
+    removePairsForAliases(state, affectedAliases);
   }
 
   private assertAllowedIdentity(identity: PrivateEndpointIdentity): void {
@@ -5784,14 +5903,51 @@ export class GatewayStore {
       );
     }
 
-    const index = state.progressWatches.findIndex(
+    const pair =
+      sides.pair === true
+        ? state.pairs.find((candidate) => pairMatchesMessage(candidate, sides))
+        : undefined;
+    let index = state.progressWatches.findIndex(
       (watch) => watch.conversationId === activity.conversationId,
     );
+    if (
+      index < 0 &&
+      activity.openIdleMs === undefined &&
+      activity.completionSignal !== true &&
+      pair !== undefined
+    ) {
+      const routeMatches = state.progressWatches
+        .map((watch, watchIndex) => ({ watch, watchIndex }))
+        .filter(
+          ({ watch }) =>
+            watch.capability === "route" &&
+            watch.ownerAlias === sides.sourceAlias &&
+            watch.workerAlias === sides.targetAlias &&
+            progressWatchMatchesPair(watch, pair),
+        );
+      if (routeMatches.length === 1) {
+        this.bindRouteProgressWatchConversation(
+          state,
+          now,
+          activity.conversationId,
+          sides.sourceAlias,
+          sides.targetAlias,
+          pair,
+        );
+        index = routeMatches[0]!.watchIndex;
+      }
+    }
     const existing = state.progressWatches[index];
     if (existing !== undefined) {
       if (
-        activity.actorAlias !== existing.ownerAlias &&
-        activity.actorAlias !== existing.workerAlias
+        pair === undefined ||
+        !progressWatchMatchesPair(existing, pair) ||
+        !(
+          (sides.sourceAlias === existing.ownerAlias &&
+            sides.targetAlias === existing.workerAlias) ||
+          (sides.sourceAlias === existing.workerAlias &&
+            sides.targetAlias === existing.ownerAlias)
+        )
       ) {
         throw new BridgeError(
           "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
@@ -5807,35 +5963,36 @@ export class GatewayStore {
           "Only the exact watch owner may reassert tracking options.",
         );
       }
-      if (
-        activity.completionSignal === true &&
-        activity.actorAlias === existing.ownerAlias
-      ) {
+      if (activity.completionSignal === true) {
+        const transition = transitionProgressWatch(
+          existing,
+          activity.actorAlias === existing.ownerAlias
+            ? { type: "owner_done", at: now.getTime() }
+            : { type: "worker_done", at: now.getTime() },
+        );
+        if (transition.state !== null) {
+          throw new BridgeError(
+            "INVALID_PROGRESS_WATCH_SETTLEMENT",
+            "The completion signal did not settle its exact watch.",
+          );
+        }
+        this.requireProgressWatchJournalCapacity(state, 1);
         state.progressWatches.splice(index, 1);
         this.appendProgressWatchEvent(state, existing, {
-          kind: "done",
+          kind:
+            activity.actorAlias === existing.ownerAlias
+              ? "done"
+              : "worker_reported_complete",
           timestamp: now.toISOString(),
         });
         return;
       }
-      const workerReportedComplete =
-        activity.completionSignal === true &&
-        activity.actorAlias === existing.workerAlias;
       const transition = transitionProgressWatch(existing, {
         type: "activity",
         at: now.getTime(),
-        ...(workerReportedComplete
-          ? { workerReportedComplete: true as const }
-          : {}),
       });
       if (transition.state !== null) {
         state.progressWatches[index] = transition.state;
-        if (workerReportedComplete) {
-          this.appendProgressWatchEvent(state, transition.state, {
-            kind: "worker_reported_complete",
-            timestamp: now.toISOString(),
-          });
-        }
       }
       return;
     }
@@ -5847,20 +6004,10 @@ export class GatewayStore {
         "Progress tracking is disabled by the controller configuration.",
       );
     }
-    if (sides.pair !== true) {
+    if (pair === undefined) {
       throw new BridgeError(
         "PROGRESS_WATCH_EDGE_REQUIRED",
         "Progress tracking requires one exact paired consent edge.",
-      );
-    }
-    if (
-      state.progressWatches.length >=
-      (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY)
-    ) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_CAPACITY_REACHED",
-        "The bounded progress-watch inventory is full.",
-        true,
       );
     }
     const owner = state.routes.find(
@@ -5884,11 +6031,13 @@ export class GatewayStore {
       idleMs: activity.openIdleMs,
       at: now.getTime(),
     });
-    state.progressWatches.push(watch);
-    this.appendProgressWatchEvent(state, watch, {
-      kind: "opened",
-      timestamp: now.toISOString(),
-    });
+    if (!progressWatchMatchesPair(watch, pair)) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_EDGE_MISMATCH",
+        "The watch endpoints do not form one exact consent edge.",
+      );
+    }
+    this.installProgressWatch(state, watch, pair, now);
   }
 
   private progressWatchDueTransition(
@@ -5968,12 +6117,77 @@ export class GatewayStore {
         true,
       );
     }
+    this.requireProgressWatchJournalCapacity(state, 1);
     state.progressWatches[index] = transition.state;
     this.appendProgressWatchEvent(state, transition.state, {
       kind: "nudge",
       timestamp: now.toISOString(),
       nudgeNumber: nudge.nudgeNumber,
     });
+  }
+
+  private installProgressWatch(
+    state: GatewayPersistedState,
+    watch: ProgressWatchMachine,
+    pair: GatewayPairRecord,
+    now: Date,
+  ): void {
+    const replacedIndex = state.progressWatches.findIndex((candidate) =>
+      progressWatchMatchesPair(candidate, pair),
+    );
+    if (
+      replacedIndex < 0 &&
+      state.progressWatches.length >=
+        (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY)
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_CAPACITY_REACHED",
+        "The bounded progress-watch inventory is full.",
+        true,
+      );
+    }
+    if (
+      replacedIndex >= 0 &&
+      state.progressWatches[replacedIndex]!.ownerAlias !== watch.ownerAlias
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_REPLACEMENT_OWNER_REQUIRED",
+        "Only the incumbent watch owner may replace this pair watch; ask that owner to untrack it first.",
+      );
+    }
+    this.requireProgressWatchJournalCapacity(
+      state,
+      replacedIndex < 0 ? 1 : 2,
+    );
+    if (replacedIndex >= 0) {
+      const replaced = state.progressWatches[replacedIndex]!;
+      state.progressWatches.splice(replacedIndex, 1);
+      this.appendProgressWatchEvent(state, replaced, {
+        kind: "replaced",
+        timestamp: now.toISOString(),
+      });
+    }
+    state.progressWatches.push(watch);
+    this.appendProgressWatchEvent(state, watch, {
+      kind: "opened",
+      timestamp: now.toISOString(),
+    });
+  }
+
+  private requireProgressWatchJournalCapacity(
+    state: GatewayPersistedState,
+    additions: number,
+  ): void {
+    if (
+      !Number.isSafeInteger(additions) ||
+      additions < 0 ||
+      state.watchSequence > Number.MAX_SAFE_INTEGER - additions
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_SEQUENCE_EXHAUSTED",
+        "The bounded progress-watch journal sequence is exhausted.",
+      );
+    }
   }
 
   private appendProgressWatchEvent(
@@ -5985,6 +6199,7 @@ export class GatewayStore {
       nudgeNumber?: 1 | 2;
     }>,
   ): void {
+    this.requireProgressWatchJournalCapacity(state, 1);
     state.watchSequence += 1;
     state.progressWatchEvents.push({
       sequence: state.watchSequence,
@@ -6009,6 +6224,13 @@ export class GatewayStore {
     aliases: ReadonlySet<string>,
     now: Date,
   ): void {
+    this.requireProgressWatchJournalCapacity(
+      state,
+      state.progressWatches.filter(
+        (watch) =>
+          aliases.has(watch.ownerAlias) || aliases.has(watch.workerAlias),
+      ).length,
+    );
     const retained: ProgressWatchMachine[] = [];
     for (const watch of state.progressWatches) {
       if (
@@ -6028,26 +6250,91 @@ export class GatewayStore {
 
   private settleProgressWatchesForPair(
     state: GatewayPersistedState,
-    pair: GatewayPairInput,
+    pair: GatewayPairRecord,
     now: Date,
   ): void {
+    this.requireProgressWatchJournalCapacity(
+      state,
+      state.progressWatches.filter((watch) =>
+        progressWatchMatchesPair(watch, pair),
+      ).length,
+    );
     const retained: ProgressWatchMachine[] = [];
     for (const watch of state.progressWatches) {
-      const matches =
-        (watch.ownerAlias === pair.claudeAlias &&
-          watch.workerAlias === pair.codexAlias) ||
-        (watch.ownerAlias === pair.codexAlias &&
-          watch.workerAlias === pair.claudeAlias);
-      if (!matches) {
+      if (!progressWatchMatchesPair(watch, pair)) {
         retained.push(watch);
         continue;
       }
       this.appendProgressWatchEvent(state, watch, {
-        kind: "endpoint_retired",
+        kind: "pair_removed",
         timestamp: now.toISOString(),
       });
     }
     state.progressWatches = retained;
+  }
+
+  private bindRouteProgressWatchConversation(
+    state: GatewayPersistedState,
+    now: Date,
+    conversationId: string,
+    ownerAlias: string,
+    workerAlias: string,
+    pair: GatewayPairRecord,
+  ): boolean {
+    const conversationOwner = state.progressWatches.find(
+      (watch) => watch.conversationId === conversationId,
+    );
+    if (
+      conversationOwner !== undefined &&
+      (conversationOwner.capability !== "route" ||
+        conversationOwner.ownerAlias !== ownerAlias ||
+        conversationOwner.workerAlias !== workerAlias ||
+        !progressWatchMatchesPair(conversationOwner, pair))
+    ) {
+      throw new BridgeError(
+        "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
+        "The fresh conversation capability belongs to another exact watch.",
+      );
+    }
+    const matches = state.progressWatches
+      .map((watch, index) => ({ watch, index }))
+      .filter(
+        ({ watch }) =>
+          watch.capability === "route" &&
+          watch.ownerAlias === ownerAlias &&
+          watch.workerAlias === workerAlias &&
+          progressWatchMatchesPair(watch, pair),
+      );
+    if (matches.length === 0) return false;
+    if (matches.length !== 1) {
+      throw new BridgeError(
+        "CORRUPT_GATEWAY_STATE",
+        "More than one route-capability watch claims the exact pair.",
+      );
+    }
+    const match = matches[0]!;
+    this.requireProgressWatchJournalCapacity(state, 1);
+    const restored = transitionProgressWatch(match.watch, {
+      type: "restart",
+      at: now.getTime(),
+      conversationCapabilityRestored: true,
+    });
+    if (restored.state === null) {
+      throw new BridgeError(
+        "INVALID_PROGRESS_WATCH_REBIND",
+        "The exact progress watch could not restore conversation authority.",
+      );
+    }
+    const rebound = {
+      ...restored.state,
+      conversationId,
+    };
+    state.progressWatches[match.index] = rebound;
+    this.appendProgressWatchEvent(state, rebound, {
+      kind: "conversation_rebound",
+      timestamp: now.toISOString(),
+    });
+    return true;
   }
 
   private finishMetadata(
@@ -6353,6 +6640,10 @@ export class GatewayStore {
     const state = this.requireState();
     this.recoverCodexSuccessionAfterRestart(state, now);
     if (this.config.trackingEnabled === false) {
+      this.requireProgressWatchJournalCapacity(
+        state,
+        state.progressWatches.length,
+      );
       for (const watch of state.progressWatches) {
         this.appendProgressWatchEvent(state, watch, {
           kind: "disabled",
@@ -6360,6 +6651,13 @@ export class GatewayStore {
         });
       }
       state.progressWatches = [];
+    } else {
+      this.requireProgressWatchJournalCapacity(
+        state,
+        state.progressWatches.filter(
+          (watch) => !watch.degradedNoticeSent,
+        ).length,
+      );
     }
     for (let index = 0; index < state.progressWatches.length; index += 1) {
       const watch = state.progressWatches[index];
@@ -6374,7 +6672,7 @@ export class GatewayStore {
       }
       if (
         transition.effects.some(
-          (effect) => effect.type === "notify_capability_degraded",
+          (effect) => effect.type === "record_capability_degraded",
         )
       ) {
         this.appendProgressWatchEvent(state, transition.state ?? watch, {
@@ -6829,6 +7127,10 @@ export class GatewayStore {
     parsed = migratePreCodexOrphanRemovalJournal(parsed);
     parsed = migrateLegacyHopCounts(parsed);
     parsed = migrateLegacyCompatibilityCertifications(parsed);
+    parsed = migrateLegacyProgressWatchState(
+      parsed,
+      this.config.limits.eventCapacity,
+    );
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",

@@ -257,7 +257,9 @@ namespace Embassy {
           {t(`guidance.${guidanceKey}.body`)}
         </p>
         <p className="attention-item__body">
-          {t(`guidance.${guidanceKey}.action`)}
+          {t(`guidance.${guidanceKey}.action`, {
+            alias: item.alias ?? "<alias>",
+          })}
         </p>
         {scope === "" ? null : (
           <div className="attention-item__scope">
@@ -319,14 +321,15 @@ namespace Embassy {
     const queueOut = data.queueClaudeToCodex;
     const queueIn = data.queueCodexToClaude;
     const openInbound = data.inboundMode === "open";
+    const hasPair =
+      data.graph.pairCount > 0 || data.graph.pairCountIsLowerBound;
     // Queued work is shown even without a ready pair — hiding a non-empty
     // queue behind the "no pair" state would conceal the stall it explains.
     // The board still renders exactly three columns (claude · middle · codex):
     // edges win the middle when there is anything to show, and the "no pair"
     // explanation moves to the notes under the board so the codex node never
     // slides off centre.
-    const showEdges =
-      data.graph.readyPairCount > 0 || queueOut.depth > 0 || queueIn.depth > 0;
+    const showEdges = hasPair || queueOut.depth > 0 || queueIn.depth > 0;
     const nextActionLine = (
       who: string,
       action: DashboardNextAction,
@@ -335,9 +338,12 @@ namespace Embassy {
         ? null
         : `${t("next.label")} · ${who}: ${t(NEXT_ACTION_COPY_KEYS[action])}`;
     const boardNotes: readonly string[] = [
-      !openInbound && showEdges && data.graph.readyPairCount === 0
+      !openInbound && !hasPair && showEdges
         ? `${t("app.overview.noPair.title")} — ${t("app.overview.noPair.body")}`
         : null,
+      data.degradedPairCopyKey === undefined
+        ? null
+        : t(data.degradedPairCopyKey),
       nextActionLine(t("provider.claude"), data.exchange.claude.nextAction),
       nextActionLine(t("provider.codex"), data.exchange.codex.nextAction),
     ].filter((line): line is string => line !== null);
@@ -409,7 +415,7 @@ namespace Embassy {
               {t(
                 openInbound
                   ? "inbound.open.body"
-                  : data.graph.readyPairCount > 0
+                  : hasPair
                     ? "inbound.paired.body"
                     : "inbound.noPair.body",
               )}

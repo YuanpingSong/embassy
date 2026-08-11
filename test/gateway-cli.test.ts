@@ -1364,6 +1364,64 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
   );
 });
 
+test("watch-owner conflict preserves its code and localizes the untrack remedy", async () => {
+  const expectedHint = {
+    en:
+      "[embassy] gateway rejected the request.\n[embassy] this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.\n",
+    "zh-CN":
+      "[embassy] 网关拒绝了该请求。\n[embassy] 此配对已有由另一参与方拥有的监视；请先让该所有者运行 `embassy untrack --conversation <conversation-token>`。\n",
+  } as const;
+  let englishStdout: string | undefined;
+  for (const locale of ["en", "zh-CN"] as const) {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(
+      [
+        "send-to-claude",
+        "--from",
+        "codex-reviewer@this-mac",
+        "--to",
+        "advisor@this-mac",
+        "--lang",
+        locale,
+      ],
+      {
+        env: { CODEX_THREAD_ID: THREAD_ID },
+        stdin: input("TRACK: replacement attempt"),
+        stdout,
+        stderr,
+        loadConfig: () => ({
+          stateDir: "/private/fake-state",
+          controlSocketPath: "/private/fake-state/control.sock",
+          allowedHosts: ["this-mac"],
+          stallNoticeMs: 30_000,
+          steeringEnabled: true,
+          inboundMode: "paired",
+          limits: {} as never,
+        }),
+        validateControlSocket: async () => undefined,
+        sendRequest: (async () => ({
+          protocolVersion: 1,
+          ok: true,
+          result: {
+            accepted: false,
+            code: "watch_owner_conflict",
+          },
+        })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      },
+    );
+    assert.equal(code, gatewayCliExitCodes.rejected);
+    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+      ok: true,
+      command: "send-to-claude",
+      result: { accepted: false, code: "watch_owner_conflict" },
+    });
+    assert.equal(stderr.chunks.join(""), expectedHint[locale]);
+    if (englishStdout === undefined) englishStdout = stdout.chunks.join("");
+    else assert.equal(stdout.chunks.join(""), englishStdout);
+  }
+});
+
 test("identity, stdin, and argument failures happen before any control request", async () => {
   const cases: Array<{
     argv: string[];

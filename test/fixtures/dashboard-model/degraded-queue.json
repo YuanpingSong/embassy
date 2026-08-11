@@ -359,7 +359,7 @@
     "pairCount": 1,
     "readyPairCount": 0,
     "pairCountIsLowerBound": true,
-    "unpairedReadyClaude": 2,
+    "unpairedReadyClaude": 1,
     "unpairedReadyCodex": 0
   },
   "connectors": [

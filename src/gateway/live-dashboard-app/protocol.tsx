@@ -251,7 +251,7 @@ namespace Embassy {
         Object.keys(record).length === 2 &&
         typeof record.ok === "boolean" &&
         typeof record.code === "string" &&
-        /^(?:ok|not_found|conflict|route_mismatch|busy|unavailable|rejected|rate_limited)$/u.test(
+        /^(?:ok|not_found|conflict|watch_owner_conflict|route_mismatch|busy|unavailable|rejected|rate_limited)$/u.test(
           record.code,
         ) &&
         ((record.ok && record.code === "ok") ||

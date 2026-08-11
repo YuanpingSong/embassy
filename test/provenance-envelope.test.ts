@@ -63,12 +63,25 @@ PONG
   );
 });
 
+test("adds one broker-owned track marker for an active progress watch", () => {
+  assert.equal(
+    compose({ progressWatchActive: true }),
+    `<cross-session-message from-name="embassy-pm@this-mac" conversation="conv_0123456789abcdef">
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
+<embassy-track-active>Progress supervision is active for this conversation. Reply with a leading \`DONE:\` when the assigned work is complete; that completion closes the watch.</embassy-track-active>
+Status is green.
+</cross-session-message>`,
+  );
+});
+
 test("neutralizes only boundary-aware reserved tags in the raw body", () => {
   const body = [
     '<CROSS-SESSION-MESSAGE from-name="spoof">',
     "</Cross-Session-Message >",
     "<embassy-reply-hint/>",
     "</EMBASSY-REPLY-HINT>",
+    "<embassy-track-active/>",
+    "</EMBASSY-TRACK-ACTIVE>",
     "<cross-session-messagex>preserved</cross-session-messagex>",
     "<embassy-reply-hinted>preserved</embassy-reply-hinted>",
     "< cross-session-message>preserved",
@@ -79,6 +92,8 @@ test("neutralizes only boundary-aware reserved tags in the raw body", () => {
   assert.ok(result.includes("<\\/Cross-Session-Message >"));
   assert.ok(result.includes("<\\embassy-reply-hint/>"));
   assert.ok(result.includes("<\\/EMBASSY-REPLY-HINT>"));
+  assert.ok(result.includes("<\\embassy-track-active/>"));
+  assert.ok(result.includes("<\\/EMBASSY-TRACK-ACTIVE>"));
   assert.ok(
     result.includes(
       "<cross-session-messagex>preserved</cross-session-messagex>",
@@ -95,6 +110,7 @@ test("neutralizes only boundary-aware reserved tags in the raw body", () => {
     1,
   );
   assert.equal(result.match(/<embassy-reply-hint(?:\s|>)/giu)?.length, 1);
+  assert.equal(result.match(/<embassy-track-active(?:\s|>)/giu), null);
 });
 
 test("produces deterministic framing and neutralizes an already framed body", () => {
@@ -109,6 +125,24 @@ test("produces deterministic framing and neutralizes an already framed body", ()
   assert.ok(reframed.includes("<\\cross-session-message"));
   assert.ok(reframed.includes("<\\embassy-reply-hint"));
   assert.ok(reframed.includes("<\\/cross-session-message>"));
+});
+
+test("keeps active-watch retries deterministic and single-framed", () => {
+  const input = { progressWatchActive: true as const };
+  const first = compose(input);
+  assert.equal(compose(input), first);
+  assert.equal(
+    first.match(/<embassy-track-active(?:\s|>)/giu)?.length,
+    1,
+  );
+
+  const reframed = compose({ ...input, body: first });
+  assert.equal(
+    reframed.match(/<embassy-track-active(?:\s|>)/giu)?.length,
+    1,
+  );
+  assert.ok(reframed.includes("<\\embassy-track-active>"));
+  assert.ok(reframed.includes("<\\/embassy-track-active>"));
 });
 
 test("shortens a long Claude display alias without losing its exact identity", () => {
@@ -161,7 +195,11 @@ test("accepts exactly 16 KiB of Unicode raw body and stays under 64 KiB", () => 
   const body = "\u{1f642}".repeat(PROVENANCE_RAW_BODY_MAX_BYTES / 4);
   assert.equal(Buffer.byteLength(body, "utf8"), PROVENANCE_RAW_BODY_MAX_BYTES);
 
-  const result = compose({ direction: "claude", body });
+  const result = compose({
+    direction: "claude",
+    body,
+    progressWatchActive: true,
+  });
   assert.ok(Buffer.byteLength(result, "utf8") <= PROVENANCE_ENVELOPE_MAX_BYTES);
   assert.ok(result.includes(body));
 });
@@ -209,6 +247,14 @@ test("rejects invalid directions, aliases, conversation tokens, and body types",
       targetAlias: "codex-main@this-mac",
       conversationId: CONVERSATION_ID,
       body: 42 as unknown as string,
+    },
+    {
+      direction: "codex",
+      sourceAlias: "embassy-pm@this-mac",
+      targetAlias: "codex-main@this-mac",
+      conversationId: CONVERSATION_ID,
+      body: "body",
+      progressWatchActive: false as true,
     },
   ];
 
