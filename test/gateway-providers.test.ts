@@ -598,6 +598,39 @@ test("local Claude provider forwards the exact delivery notice policy", () => {
   assert.equal(receivedDeliveryNotices, "quiet");
 });
 
+test("Claude endpoint identity stays stable across runtime evidence changes", () => {
+  const first = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    peerFactory: () => new FakeClaudePeer() as never,
+  });
+  const changedRuntime = {
+    ...claudeRuntime("2.1.228"),
+    claudeExecutable:
+      "/synthetic/home/.local/share/claude/versions/2.1.228",
+    sessionsDir: "/synthetic/alternate/.claude/sessions",
+    socketDir: "/synthetic/tmp/alternate-cc-socks",
+  };
+  const changed = createLocalClaudeGatewayProvider({
+    runtime: changedRuntime,
+    peerFactory: () => new FakeClaudePeer() as never,
+  });
+  const incompatible = createIncompatibleClaudeGatewayProvider({
+    runtime: { ...changedRuntime, claudeCodeVersion: "3.0.0" },
+    version: "3.0.0",
+    safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
+  });
+
+  assert.equal(first.identity.endpointGeneration, "claude_local_endpoint");
+  assert.equal(
+    changed.identity.endpointGeneration,
+    first.identity.endpointGeneration,
+  );
+  assert.equal(
+    incompatible.identity.endpointGeneration,
+    first.identity.endpointGeneration,
+  );
+});
+
 test("Claude provider admits same-major evidence and OS-classified unknown evidence without certifying either", async () => {
   for (const [version, launcherVersionEvidence] of [
     ["2.1.228", undefined],

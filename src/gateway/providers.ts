@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
@@ -69,6 +68,7 @@ import type {
 } from "./types.js";
 
 const LOCAL_HOST = "this-mac";
+const STABLE_CLAUDE_ENDPOINT_GENERATION = "claude_local_endpoint";
 const NATIVE_CLAUDE_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const PUBLIC_ALIAS =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -386,21 +386,6 @@ function validateClaudeRuntimePathEvidence(
   }
 }
 
-function claudeEndpointGeneration(
-  runtime: AttestedClaudePeerRuntime,
-): string {
-  return `claude_${createHash("sha256")
-    .update(runtime.claudeCodeVersion)
-    .update("\0")
-    .update(runtime.claudeExecutable)
-    .update("\0")
-    .update(runtime.sessionsDir)
-    .update("\0")
-    .update(runtime.socketDir)
-    .digest("hex")
-    .slice(0, 32)}`;
-}
-
 function claudeRouteState(
   peer: ClaudePeerDescriptor,
 ): GatewayAdapterRouteState {
@@ -610,7 +595,7 @@ export function createIncompatibleClaudeGatewayProvider(options: Readonly<{
     identity: {
       provider: "claude",
       hostId: LOCAL_HOST,
-      endpointGeneration: claudeEndpointGeneration(options.runtime),
+      endpointGeneration: STABLE_CLAUDE_ENDPOINT_GENERATION,
     },
     version: options.version,
     probes: [
@@ -736,7 +721,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.identity = {
       provider: "claude",
       hostId,
-      endpointGeneration: claudeEndpointGeneration(options.runtime),
+      endpointGeneration: STABLE_CLAUDE_ENDPOINT_GENERATION,
     };
     this.runtimeVersion = compatibilityVersion;
     this.maxPending = positiveBounded(

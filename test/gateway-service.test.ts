@@ -7164,13 +7164,16 @@ test("retained stale Codex authority cannot replace a Claude route before pairin
   );
 });
 
-test("authorized discovery restores one exact Claude UUID and atomically adopts only its latest name", async (t) => {
+test("authorized discovery heals one legacy hashed Claude generation and adopts only its latest name", async (t) => {
   const { root, stateDir } = await fixture();
   const config = loadGatewayConfig({
     EMBASSY_STATE_DIR: stateDir,
     EMBASSY_HOSTS: "this-mac",
   });
-  const firstClaude = new FakeProvider("claude", "claude_generation_before");
+  const firstClaude = new FakeProvider(
+    "claude",
+    "claude_0123456789abcdef0123456789abcdef",
+  );
   const firstCodex = new FakeProvider("codex");
   firstClaude.discoveries = [
     {
@@ -7190,7 +7193,7 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
   );
   await first.close();
 
-  const secondClaude = new FakeProvider("claude", "claude_generation_after");
+  const secondClaude = new FakeProvider("claude", "claude_local_endpoint");
   const secondCodex = new FakeProvider("codex");
   secondClaude.discoveries = [
     {
@@ -7253,7 +7256,7 @@ test("authorized discovery restores one exact Claude UUID and atomically adopts 
   assert.equal(privateRoute?.binding.routeHandle, CLAUDE_SESSION_ID);
   assert.equal(
     privateRoute?.binding.endpointGeneration,
-    "claude_generation_after",
+    "claude_local_endpoint",
   );
 });
 
