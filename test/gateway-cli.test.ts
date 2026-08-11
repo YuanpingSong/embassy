@@ -1980,20 +1980,33 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
   assert.doesNotMatch(result.stdout, new RegExp(state.root.replaceAll("/", "\\/")));
 });
 
-test("oversized and non-UTF-8 stdin are rejected without a request", async () => {
+test("oversized stdin renders its localized hint while generic input rejection does not", async () => {
   const cases = [
     {
       body: Buffer.alloc(16 * 1024 + 1, 0x61),
       expected: "MESSAGE_TOO_LARGE",
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      stderr:
+        "[embassy] request rejected.\n[embassy] message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.\n",
     },
     {
       body: Buffer.from([0xc3, 0x28]),
       expected: "INVALID_MESSAGE_INPUT",
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      stderr: "[embassy] request rejected.\n",
+    },
+    {
+      body: Buffer.alloc(16 * 1024 + 1, 0x61),
+      expected: "MESSAGE_TOO_LARGE",
+      env: { CODEX_THREAD_ID: THREAD_ID, EMBASSY_LOCALE: "zh-CN" },
+      stderr:
+        "[embassy] 请求被拒绝。\n[embassy] 消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。\n",
     },
   ];
 
   for (const current of cases) {
     const stdout = capture();
+    const stderr = capture();
     let requested = false;
     const exitCode = await runGatewayCli(
       [
@@ -2004,10 +2017,10 @@ test("oversized and non-UTF-8 stdin are rejected without a request", async () =>
         "advisor@this-mac",
       ],
       {
-        env: { CODEX_THREAD_ID: THREAD_ID },
+        env: current.env,
         stdin: Readable.from([current.body]),
         stdout,
-        stderr: capture(),
+        stderr,
         sendRequest: async () => {
           requested = true;
           throw new Error("must not connect");
@@ -2021,6 +2034,7 @@ test("oversized and non-UTF-8 stdin are rejected without a request", async () =>
         .code,
       current.expected,
     );
+    assert.equal(stderr.chunks.join(""), current.stderr);
   }
 });
 

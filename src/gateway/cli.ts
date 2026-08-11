@@ -431,7 +431,7 @@ async function readMessageBody(stdin: AsyncIterable<unknown>): Promise<string> {
       : Buffer.from(chunk, "utf8");
     length += buffer.length;
     if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES) {
-      throw new CliFault("MESSAGE_TOO_LARGE");
+      throw new CliFault("MESSAGE_TOO_LARGE", false, "hint.messageTooLarge");
     }
     chunks.push(buffer);
   }

@@ -41,6 +41,8 @@ Options:
     "live dashboard port {port} is already in use; close the holding process or choose another with --port <n>.",
   "hint.controlInvalidResponse":
     "client/broker version skew is likely; rebuild or repoint this client to the broker's Embassy installation, then retry.",
+  "hint.messageTooLarge":
+    "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
   "hint.progressWatchOwnerConflict":
     "this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.",
   "error.input": "request rejected.",
