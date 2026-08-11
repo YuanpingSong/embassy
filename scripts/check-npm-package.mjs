@@ -240,15 +240,13 @@ async function smokeInstalledPackage(tarballPath, pkg) {
       await import(pathToFileURL(path.join(installedRoot, modulePath)).href);
     }
 
-    for (const binary of ["embassy", "claude-codex-gateway"]) {
-      const cliPath = path.join(smokeRoot, "node_modules", ".bin", binary);
-      const cli = await run(cliPath, ["--version"], {
-        cwd: smokeRoot,
-        env: process.env,
-      });
-      if (cli.stdout !== `embassy ${pkg.version}\n` || cli.stderr !== "") {
-        fail(`installed ${binary} CLI returned unexpected version output`);
-      }
+    const cliPath = path.join(smokeRoot, "node_modules", ".bin", "embassy");
+    const cli = await run(cliPath, ["--version"], {
+      cwd: smokeRoot,
+      env: process.env,
+    });
+    if (cli.stdout !== `embassy ${pkg.version}\n` || cli.stderr !== "") {
+      fail("installed embassy CLI returned unexpected version output");
     }
   } finally {
     await rm(smokeRoot, { recursive: true, force: true });

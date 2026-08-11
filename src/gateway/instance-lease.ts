@@ -11,7 +11,6 @@ import {
   open,
   readdir,
   realpath,
-  unlink,
   type FileHandle,
 } from "node:fs/promises";
 import os from "node:os";
@@ -23,15 +22,6 @@ const HOST_STATE_DIRECTORY = path.join(".local", "state", "agent-embassy");
 const HOST_STATE_MARKER_FILE = ".agent-embassy-state";
 const HOST_STATE_MARKER_CONTENT = "agent-embassy-state-v1\n";
 const HOST_LOCK_FILE = ".gateway-host.lock";
-const LEGACY_STATE_DIRECTORY = path.join(
-  ".local",
-  "state",
-  "claude-agent-bridge",
-  "gateway",
-);
-const LEGACY_MARKER_FILE = ".claude-codex-gateway-state";
-const LEGACY_MARKER_CONTENT = "claude-codex-local-gateway-state-v1\n";
-const LEGACY_LOCK_FILE = ".gateway-controller.lock";
 const MAX_MARKER_BYTES = 128;
 const MAX_LOCK_BYTES = 4 * 1024;
 const LOCKF_PATH = "/usr/bin/lockf";
@@ -53,10 +43,6 @@ export type GatewayInstanceLease = Readonly<{
   close: () => Promise<void>;
 }>;
 
-type ProcessLease = Readonly<{
-  close: () => Promise<void>;
-}>;
-
 export type GatewayInstanceLeaseDependencies = Readonly<{
   hostLeaseExitTimeoutMs?: number;
   spawnLeaseHelper?: (
@@ -69,11 +55,11 @@ export type GatewayInstanceLeaseDependencies = Readonly<{
   ) => ChildProcessWithoutNullStreams;
 }>;
 
-type HostProcessLease = ProcessLease &
-  Readonly<{
-    lost: Promise<void>;
-    isLost: () => boolean;
-  }>;
+type HostProcessLease = Readonly<{
+  lost: Promise<void>;
+  isLost: () => boolean;
+  close: () => Promise<void>;
+}>;
 
 type HostLeaseLossMonitor = Readonly<{
   lost: Promise<void>;
@@ -82,34 +68,6 @@ type HostLeaseLossMonitor = Readonly<{
   expectClose: () => void;
   dispose: () => void;
 }>;
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
-}
-
-function isLockRecord(value: unknown): value is LockRecord {
-  if (!isObject(value)) return false;
-  const keys = Object.keys(value);
-  return (
-    keys.length === 4 &&
-    keys.every((key) =>
-      ["schemaVersion", "pid", "hostname", "token"].includes(key),
-    ) &&
-    value.schemaVersion === 1 &&
-    isPositiveInteger(value.pid) &&
-    typeof value.hostname === "string" &&
-    value.hostname.length > 0 &&
-    value.hostname.length <= 255 &&
-    typeof value.token === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      value.token,
-    )
-  );
-}
 
 function assertPrivateOwned(
   uid: number,
@@ -489,92 +447,6 @@ async function acquireHostAdvisoryLease(
   };
 }
 
-async function acquireProcessLease(
-  directory: string,
-  lockFileName: string,
-): Promise<ProcessLease> {
-  const lockPath = path.join(directory, lockFileName);
-  const ownedToken = randomUUID();
-  let handle: FileHandle;
-  try {
-    handle = await open(
-      lockPath,
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_RDWR |
-        (constants.O_NOFOLLOW ?? 0),
-      0o600,
-    );
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === "EEXIST"
-    ) {
-      // The legacy controller did not participate in Embassy's kernel-held
-      // host lease. Preserve any pre-existing legacy lock—live, stale, or
-      // unverifiable—rather than path-reclaiming across that protocol boundary.
-      await readPrivateFile(lockPath, MAX_LOCK_BYTES).catch(() => undefined);
-      throw new BridgeError(
-        "GATEWAY_INSTANCE_IN_USE",
-        "A legacy or unverifiable gateway lock already exists.",
-        true,
-      );
-    }
-    throw error;
-  }
-  try {
-    const record: LockRecord = {
-      schemaVersion: 1,
-      pid: process.pid,
-      hostname: os.hostname(),
-      token: ownedToken,
-    };
-    await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
-    await handle.sync();
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await unlink(lockPath).catch(() => undefined);
-    throw error;
-  }
-
-  let closed = false;
-  return {
-    close: async () => {
-      if (closed) return;
-      closed = true;
-      try {
-        await handle.close();
-      } catch {
-        throw new BridgeError(
-          "GATEWAY_CLEANUP_FAILED",
-          "Embassy could not confirm legacy instance-lease cleanup.",
-        );
-      }
-      try {
-        const current = JSON.parse(
-          await readPrivateFile(lockPath, MAX_LOCK_BYTES),
-        );
-        if (isLockRecord(current) && current.token === ownedToken) {
-          await unlink(lockPath);
-        }
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "ENOENT"
-        ) {
-          return;
-        }
-        throw new BridgeError(
-          "GATEWAY_CLEANUP_FAILED",
-          "Embassy could not confirm legacy instance-lease cleanup.",
-        );
-      }
-    },
-  };
-}
-
 async function ensureHostStateMarker(directory: string): Promise<void> {
   const markerPath = path.join(directory, HOST_STATE_MARKER_FILE);
   try {
@@ -711,31 +583,10 @@ async function prepareHostLeaseDirectory(loginHome: string): Promise<string> {
   return current;
 }
 
-async function recognizedLegacyRoot(
-  loginHome: string,
-): Promise<string | undefined> {
-  const directory = path.join(loginHome, LEGACY_STATE_DIRECTORY);
-  try {
-    const info = await lstat(directory);
-    if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
-    assertPrivateOwned(info.uid, info.mode, "The legacy gateway root");
-    if ((await realpath(directory)) !== directory) return undefined;
-    const marker = await readPrivateFile(
-      path.join(directory, LEGACY_MARKER_FILE),
-      MAX_MARKER_BYTES,
-    );
-    return marker === LEGACY_MARKER_CONTENT ? directory : undefined;
-  } catch {
-    // An absent, unsafe, or unrecognized legacy tree is never mutated.
-    return undefined;
-  }
-}
-
 /**
  * Acquire the one per-login-user Embassy controller lease. The fixed lease is
- * deliberately independent of EMBASSY_STATE_DIR. For one release, a genuine
- * legacy default state root is also leased so a still-running pre-rename
- * gateway cannot advertise a second Codex peer.
+ * deliberately independent of EMBASSY_STATE_DIR, so a second controller cannot
+ * evade it by pointing at another state root.
  */
 export async function acquireGatewayInstanceLease(
   suppliedLoginHome: string,
@@ -743,44 +594,30 @@ export async function acquireGatewayInstanceLease(
 ): Promise<GatewayInstanceLease> {
   const loginHome = validateLoginHome(suppliedLoginHome);
   const hostDirectory = await prepareHostLeaseDirectory(loginHome);
-  const leases: ProcessLease[] = [];
-  let hostLease: HostProcessLease | undefined;
-  try {
-    // A kernel-held macOS lease makes state-directory overrides irrelevant and
-    // disappears automatically if the gateway crashes. The PID/token record
-    // is metadata for exact cleanup; it is never used for path-only reclaim.
-    const spawnLeaseHelper =
-      dependencies.spawnLeaseHelper ??
-      ((command, args, options) => spawn(command, args, options));
-    const exitTimeoutMs =
-      dependencies.hostLeaseExitTimeoutMs ?? HOST_LEASE_EXIT_TIMEOUT_MS;
-    if (
-      !Number.isSafeInteger(exitTimeoutMs) ||
-      exitTimeoutMs < 10 ||
-      exitTimeoutMs > HOST_LEASE_EXIT_TIMEOUT_MS
-    ) {
-      throw new BridgeError(
-        "GATEWAY_INSTANCE_IN_USE",
-        "The Embassy host-lease cleanup bound is invalid.",
-        true,
-      );
-    }
-    hostLease = await acquireHostAdvisoryLease(
-      hostDirectory,
-      spawnLeaseHelper,
-      exitTimeoutMs,
+  // A kernel-held macOS lease makes state-directory overrides irrelevant and
+  // disappears automatically if the gateway crashes. The PID/token record is
+  // metadata for exact cleanup; it is never used for path-only reclaim.
+  const spawnLeaseHelper =
+    dependencies.spawnLeaseHelper ??
+    ((command, args, options) => spawn(command, args, options));
+  const exitTimeoutMs =
+    dependencies.hostLeaseExitTimeoutMs ?? HOST_LEASE_EXIT_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(exitTimeoutMs) ||
+    exitTimeoutMs < 10 ||
+    exitTimeoutMs > HOST_LEASE_EXIT_TIMEOUT_MS
+  ) {
+    throw new BridgeError(
+      "GATEWAY_INSTANCE_IN_USE",
+      "The Embassy host-lease cleanup bound is invalid.",
+      true,
     );
-    leases.push(hostLease);
-    const legacyDirectory = await recognizedLegacyRoot(loginHome);
-    if (legacyDirectory !== undefined) {
-      leases.push(
-        await acquireProcessLease(legacyDirectory, LEGACY_LOCK_FILE),
-      );
-    }
-  } catch (error) {
-    for (const lease of leases.reverse()) await lease.close();
-    throw error;
   }
+  const hostLease: HostProcessLease = await acquireHostAdvisoryLease(
+    hostDirectory,
+    spawnLeaseHelper,
+    exitTimeoutMs,
+  );
 
   let closed = false;
   return {
@@ -789,11 +626,9 @@ export async function acquireGatewayInstanceLease(
     close: async () => {
       if (closed) return;
       closed = true;
-      const failures: unknown[] = [];
-      for (const lease of leases.reverse()) {
-        await lease.close().catch((error: unknown) => failures.push(error));
-      }
-      if (failures.length > 0) {
+      try {
+        await hostLease.close();
+      } catch {
         throw new BridgeError(
           "GATEWAY_CLEANUP_FAILED",
           "Embassy could not confirm exact instance-lease cleanup.",

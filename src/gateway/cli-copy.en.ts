@@ -27,6 +27,7 @@ Commands:
   reply                  Reply with a conversation token
   delivery-status        Read a delivery token
   wait-delivery          Wait for terminal delivery status
+  untrack                Close one active progress watch
 
 Options:
   --lang en|zh-CN        Localize user-facing text

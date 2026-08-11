@@ -24,8 +24,7 @@
     "darwin"
   ],
   "bin": {
-    "embassy": "dist/src/gateway/cli.js",
-    "claude-codex-gateway": "dist/src/gateway/cli.js"
+    "embassy": "dist/src/gateway/cli.js"
   },
   "files": [
     "dist/src/gateway",
