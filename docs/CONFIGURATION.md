@@ -83,8 +83,8 @@ the destination session before suspecting the route.
 
 Embassy speaks two provider surfaces that are not documented as stable third-party APIs. Compatibility is automatic and exact-pinned, not an operator workflow. This release accepts only:
 
-- the Claude Code 2.1.226 launcher/runtime and peer protocol 1;
-- already-running Claude peer sessions whose explicit reviewed version is 2.1.224, 2.1.225, or 2.1.226 and whose peer protocol is 1; and
+- the Claude Code 2.1.227 launcher/runtime and peer protocol 1;
+- already-running Claude peer sessions whose explicit reviewed version is 2.1.224, 2.1.225, 2.1.226, or 2.1.227 and whose peer protocol is 1; and
 - Codex App Server 0.147.0.
 
 An unknown provider version or peer protocol, a required-schema failure, or an endpoint generation that fails fresh validation closes the affected surface. The broker owns bounded read-only compatibility validation as part of provider startup: it checks the configured launcher or managed installation, exact version, registry/control-socket shape, initialization and listing schemas, and protocol constants. These checks do not route a user message or start a model turn. Runtime parsing remains strict on every record, frame, and response.

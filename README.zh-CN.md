@@ -25,7 +25,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 ## 快速开始
 
-**前置要求：** macOS、Node.js 20+、Claude Code 2.1.226（仍在运行的 2.1.224–2.1.225 会话保持可发现），以及配置为使用托管独立 App Server 0.147.0 的 Codex 桌面应用：
+**前置要求：** macOS、Node.js 20+、Claude Code 2.1.227（仍在运行的 2.1.224–2.1.226 会话保持可发现），以及配置为使用托管独立 App Server 0.147.0 的 Codex 桌面应用：
 
 ```bash
 ~/.codex/packages/standalone/current/codex app-server daemon start

@@ -25,7 +25,7 @@ Embassy is built for one person, one macOS account, and agents you already trust
 
 ## Quickstart
 
-**Requirements:** macOS, Node.js 20+, Claude Code 2.1.226 (still-running 2.1.224–2.1.225 sessions remain discoverable), and Codex desktop configured to use the managed standalone App Server 0.147.0:
+**Requirements:** macOS, Node.js 20+, Claude Code 2.1.227 (still-running 2.1.224–2.1.226 sessions remain discoverable), and Codex desktop configured to use the managed standalone App Server 0.147.0:
 
 ```bash
 ~/.codex/packages/standalone/current/codex app-server daemon start

@@ -55,8 +55,8 @@ body:
     id: claude-version
     attributes:
       label: Claude Code version
-      description: Embassy v1 is pinned to Claude Code 2.1.225.
-      placeholder: "2.1.225"
+      description: Embassy v1 is pinned to Claude Code 2.1.227.
+      placeholder: "2.1.227"
     validations:
       required: true
 
