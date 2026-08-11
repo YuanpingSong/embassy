@@ -38,6 +38,80 @@ live sends routine. Never enable a real provider message in CI.
   failure to the user in the current task and stop unless the sender explicitly
   authorizes a bounded retry.
 
+### Tickets and budgets
+
+Every task arrives from the PM pre-priced on two independent axes. The rating
+is part of the spec: it tells you what level of implementation to build, which
+is a product decision, not an engineering one.
+
+**Effort (E)** is the size budget:
+
+| Rating | Line budget | What it buys |
+|---|---|---|
+| E1 | ≤50 changed lines | Happy path only. No new concepts, no recovery machinery. A documented limitation beats an engineered edge. |
+| E2 | ≤200 | Happy path + failure modes users have actually hit. A loud error with an exact safe code IS the handling. At most one new concept. |
+| E3 | ≤500 | Every stated promise tested. Known failures get honest errors; everything beyond gets an assertion, not machinery. |
+| E5 | negotiated in the ticket | Subsystem or redesign scope. |
+| E8 | negotiated | Go all out. Rare, and says so explicitly. |
+
+**Blast radius (R)** is the verification depth, and it is a property of the
+code region, not the diff size—one wrong line in settlement outweighs five
+hundred wrong lines of copy:
+
+| Rating | Meaning | Verification |
+|---|---|---|
+| R1 | Cosmetic: copy, docs, site. Wrong = someone reads a bad sentence. | Proofread + en/zh parity; gate compiles. |
+| R2 | Misleading but harmless: view derivations, CLI hints. Wrong = user misinformed until next release; nothing lost. | Targeted tests + gate. |
+| R3 | Recoverable behavior: dispatch scheduling, discovery, fencing, transports, boot, control plane. Wrong = delay or misroute; settlement stays honest; a restart recovers. | Full gate + soak + one adversarial review. |
+| R4 | Trust and data: store settlement/persistence/migrations, provenance envelope, instance lease, runtime attestation, release pipeline. Wrong = silent loss or false green. | Multi-round adversarial review + live proof. |
+
+**Region defaults** (apply mechanically; the ticket may override):
+
+- R4: `store.ts` settlement/persistence/migration paths,
+  `provenance-envelope.ts`, `instance-lease.ts`, runtime attestation in
+  `claude-runtime.ts`, `.github/workflows/release.yml`, package manifest.
+- R3: `service.ts` dispatch/scheduling, `claude-peer.ts`,
+  `codex-app-server.ts`, `codex-local-transport.ts`, `server.ts` boot,
+  `control.ts`, `config.ts`.
+- R2: `dashboard-model.ts`, `dashboard.ts`, `live-dashboard-app/*`, CLI
+  argument surfaces.
+- R1: `*copy*.ts`, `docs/`, README, site, help text.
+
+### Hard rules (no judgment required)
+
+1. Never guard a case that requires corruption, hand-edited state, or an
+   astronomical event count to reach. Validation rejects it; an assertion
+   documents it.
+2. A failure that settles loudly with an exact safe code is handled. Recovery
+   machinery costs budget the ticket must grant explicitly.
+3. New concepts—a state, an error code, a journal kind, an env var, a config
+   knob—exist only if the ticket's budget names them.
+4. Verify at the ticket's R depth, no deeper. An audit finding that proposes a
+   NEW check must cite the boundary doctrine in SECURITY.md or go to the PM as
+   a queue item—never into the slice.
+5. When the budget and thoroughness conflict, the budget wins. Escalate; don't
+   gold-plate.
+6. **Contest channel:** if a budget is wrong—the E is unachievable for the
+   promises, or the R understates a real consequence—say so with reasons
+   BEFORE building. The channel is expected to be used. What is never
+   acceptable is silently exceeding the budget.
+7. SLICE READY reports: exact file list, src-vs-test diffstat, actual lines vs
+   budget, and any concept added under the budget's allowance.
+
+### Send-failure policy
+
+A send or reply whose command result is an error, truncation, or ambiguity is
+not a delivery—it is a failed attempt to create one. Verify with read-only
+`status`/`delivery-status`; if no acceptance is confirmed, resend without
+asking, up to three attempts. Escalate to the PM only when a recipient
+explicitly denied the message or three resends have failed. A duplicated
+coordination message is a nuisance; a lost one deadlocks the pipeline, so
+deliverability beats ceremony. Never auto-retry a delivery the recipient's
+user denied: that is consent, not transport.
+
+For long messages, write the body to a file and pipe it
+(`embassy reply ... < body.md`); never inline `printf` for prose.
+
 ## Product invariants
 
 The governing boundary doctrine is

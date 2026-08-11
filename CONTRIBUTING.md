@@ -151,8 +151,9 @@ registry discovery, peer connection, provider messaging, App Server turns, and
 SSH attachment are separate external actions.
 
 A live action requires an explicit user request that identifies its scope. For
-a message, confirm the exact destination and body, send only once, avoid fanout,
-and do not retry an ambiguous result. Never put real provider traffic in CI.
+a message, confirm the exact destination and body and avoid fanout. Follow the
+send-failure policy below for command failures; never retry a confirmed
+delivery or a recipient denial. Never put real provider traffic in CI.
 
 ## Reporting security issues
 
@@ -178,3 +179,33 @@ site, docs, in both languages:
 - The brand accent is never a state color, and state colors are never
   decoration.
 - Every alert pairs its state with the exact next command, copyable.
+
+### The declined ledger
+
+[`docs/DECLINED.md`](docs/DECLINED.md) records, per release, what we considered
+and chose not to build, each with a one-line reason. It is product
+documentation: a product that documents what it refuses to build is making the
+same promise the dashboard makes—the truth over the appearance of completeness.
+PRs that implement something in the ledger must address its reason.
+
+### Why tickets are priced by the PM
+
+The level of implementation—the one-hour version versus the one-week version—
+is a scope decision, and scope is a product judgment. The PM prices it; the
+engineer builds it faithfully within budget or contests the price with reasons.
+Economy here never means lowering the bar on what ships: it means fewer things,
+done well, and being explicit about what waits.
+
+### Send-failure policy
+
+A send or reply whose command result is an error, truncation, or ambiguity is
+not a delivery—it is a failed attempt to create one. Verify with read-only
+`status`/`delivery-status`; if no acceptance is confirmed, resend without
+asking, up to three attempts. Escalate to the PM only when a recipient
+explicitly denied the message or three resends have failed. A duplicated
+coordination message is a nuisance; a lost one deadlocks the pipeline, so
+deliverability beats ceremony. Never auto-retry a delivery the recipient's
+user denied: that is consent, not transport.
+
+For long messages, write the body to a file and pipe it
+(`embassy reply ... < body.md`); never inline `printf` for prose.
