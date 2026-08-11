@@ -6,15 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-11
+
 ### Changed
 
 - Provider versions now follow one evidence ladder: certified same-major builds are writable; same-major builds with fully passing bounded probes are `schema_attested` and writable only when those probes cover the write path. Claude's probes cover its native write path, while untested Codex 0.x remains monitor-only pending a certified `turn/start` write schema. Failed probes, a different major, or version evidence that cannot establish a safe major leave only that provider degraded, monitor-only, and write-fenced while the broker, control socket, dashboards, and other provider keep running. Probes never promote across a major or compensate for unknown major evidence. An exact official launcher target may supply separate bounded major evidence even when its version banner is unparseable. Different-major guidance names the observed and tested versions plus the supported major and says that a supporting Embassy release is required. Exact OS ownership, path, symlink, lease, state, and generation failures still refuse broker startup.
-- A Claude registry record whose peer protocol is not 1 is rejected per record and included in bounded rejection evidence without stopping the broker.
-- Claude registry parsing remains strict for every required and consumed field while tolerating unknown top-level fields. Optional bounded evidence on the existing Claude connector row carries scanned/parseable-required-field totals, whether such a record has appeared since broker start, and rejected-record counts by safe code. Status and both dashboards surface that evidence so an observed-empty registry stays loud; if Claude is running, its registry layout may have changed.
+- The progress watch keeps its six promises — visible to both parties, one per consent edge, closed by `DONE:` from either side with attribution, idle nudges, restart survival, attributed history — with a third of the machinery. Settlement is absence plus history; the journal vocabulary is exactly `opened`, `replaced`, `settled`, each row carrying a strict actor and reason; every journal write flows through one guarded batch append site. Upgrading from v1.4 settles each live watch once with a journaled row, and migration never consults today's configuration: history a past broker legitimately wrote loads to the immutable hard bound regardless of current depth settings.
+- The static and live dashboards render one shared semantic vocabulary from `dashboard-model`, shipped to the live app inside its boot payload and compiler-linked through source-level type declarations verified against a never-built checkout. The surfaces keep deliberately different prose and CSS but can no longer disagree about what a state means. The static view model cannot materialize message bodies at all, proven by a sentinel test.
+- A Claude route's endpoint generation is a named constant: broker restarts and upgrades no longer cycle Claude routes through stale and reobservation when the session is unchanged. Old hashed rows load untouched and heal exactly once through the existing session-identity rebind.
+
+### Added
+
+- A `STEER:` message delivered to Codex carries one broker-owned line naming how many earlier accepted messages are queued on that route, counted read-only at injection and omitted when zero. The stalled-queue attention item carries the live queue depth for a busy Codex route, and the dashboard states the dynamic plainly: queued mail reaches the recipient when its current turn ends; end the turn if you control it.
+- `docs/DECLINED.md`, the declined ledger: what Embassy considered and chose not to build, each with its reason. AGENTS.md and CONTRIBUTING.md carry the two-axis ticket system (effort budgets and blast-radius ratings) this release was built under.
 
 ### Fixed
 
+- A monitor-only Codex route renders as needing attention with a plain-language explanation on both dashboard surfaces — never as a ready exchange with a ready pair. A quarantined provider owns its recovery guidance: discovery, restore, and registration suggestions that cannot change compatibility evidence are suppressed; observation commands remain. Unsupported-major guidance stands alone without adjacent restart noise.
+- A Claude registry record whose peer protocol is not 1 is rejected per record and included in bounded rejection evidence without stopping the broker.
+- Claude registry parsing remains strict for every required and consumed field while tolerating unknown top-level fields. Optional bounded evidence on the existing Claude connector row carries scanned/parseable-required-field totals, whether such a record has appeared since broker start, and rejected-record counts by safe code. Status and both dashboards surface that evidence so an observed-empty registry stays loud; if Claude is running, its registry layout may have changed.
 - Bounded `claude --version` observation tolerates suffixes and stderr notices and reports an unparseable banner without turning it into a misleading patch-drift failure.
+- Dashboard guidance no longer claims a broker restart abandons queued mail — the durable queue re-sends exactly once, and only a write in flight at the moment of a crash settles ambiguous. The live view's privacy footnote says which rows carry no bodies and which show retained bodies by design. The static snapshot tells a dead-broker reader to run `embassy serve`. The native stall notice names the one-hop remedy for a busy recipient. A message over the 16 KiB acceptance cap gets a hint naming the cap and the remedy.
 
 ## [1.4.1] - 2026-08-11
 
