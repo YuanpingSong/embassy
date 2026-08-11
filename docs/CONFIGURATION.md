@@ -16,12 +16,17 @@ or CLI flags.
 | `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`, resolved to the pinned version target | Absolute Claude Code launcher path; `PATH` is not searched |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
+| `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, `untrack`, and the `TRACK:`/`DONE:` body prefixes. Any value other than `1` or `0` is a configuration error |
+| `EMBASSY_LOCALE` | `en` | CLI output language, exactly `en` or `zh-CN`. The `--lang` flag overrides it for the invocation that carries it; an unset or empty value means `en`, and any other value is an argument error |
+| `EMBASSY_HOSTS` | `this-mac` | Comma-separated list of 1 through 32 unique lowercase host aliases. **The v1 launcher accepts only the single exact value `this-mac`**: any other list — including a longer one that contains `this-mac` — fails `embassy serve` closed with `GATEWAY_REMOTE_PROVIDER_DISABLED`. The variable exists for the deferred remote-consulate work and has no useful setting today |
 
 The live dashboard is available directly at `http://127.0.0.1:41961/` while
 its foreground companion runs. Its port is a per-invocation CLI choice, not an
 environment setting: pass `--port <n>` with an integer from 1024 through 65535
-to `embassy dashboard --live` when another stable port is needed. Several
-windows or browsers may use that URL. A port collision fails with
+to `embassy dashboard --live` when another stable port is needed. Up to four
+concurrent live views — across windows, tabs, or browsers — can use that URL
+while the foreground process runs; a fifth stream is refused until one closes.
+A port collision fails with
 `LIVE_DASHBOARD_PORT_IN_USE`, points to `--port`, and never falls back to an
 ephemeral or alternate port.
 
@@ -32,6 +37,8 @@ These variables retain conservative defaults:
 | Variable | Default |
 | --- | ---: |
 | `EMBASSY_MAX_ROUTES` | `128` |
+| `EMBASSY_MAX_PAIRS` | `128` |
+| `EMBASSY_MAX_WATCHES` | `32` |
 | `EMBASSY_EVENT_CAPACITY` / `EMBASSY_EVENT_TTL_MS` | `500` / `86400000` |
 | `EMBASSY_DEDUPE_CAPACITY` / `EMBASSY_DEDUPE_TTL_MS` | `2000` / `300000` |
 | `EMBASSY_MAX_QUEUE_MESSAGES` / `EMBASSY_MAX_QUEUE_PER_ROUTE` | `100` / `20` |
@@ -40,9 +47,20 @@ These variables retain conservative defaults:
 | `EMBASSY_MESSAGE_DEADLINE_MS` | `14400000` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
+`EMBASSY_MAX_PAIRS` is the bound behind the README's "128 pairs by default"; its
+range is 1 through 256. `EMBASSY_MAX_WATCHES` bounds concurrent progress watches
+and is capped at 256. `EMBASSY_MAX_ROUTES` accepts 2 through 256. Every value in
+this table is validated at startup, and an out-of-range or non-integer setting
+fails closed with `INVALID_GATEWAY_CONFIGURATION` rather than being clamped.
+
+The stall notice is not separately configurable. It fires at
+`min(floor(EMBASSY_MESSAGE_DEADLINE_MS / 2), 120000)` milliseconds, so under the
+default four-hour deadline a pending delivery is reported at two minutes, not
+two hours.
+
 A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity succession.
 
-The public launcher accepts only host `this-mac`; remote connectors remain a future capability.
+The public launcher accepts only host `this-mac`; remote connectors remain a future capability. `register-codex` therefore takes an optional `--host <id>`, but `this-mac` is the only value the broker will admit, and the alias must end in `@<id>` to match. `--host` is also mutually exclusive with `--succeeds`, which always inherits the succeeded alias's host.
 
 ## Claude Code's own setting: `crossSessionInbound`
 
@@ -51,6 +69,15 @@ messaging: it decides whether a Claude session accepts, holds, or refuses
 messages arriving from another session. Embassy needs it enabled on the
 session you select as a Codex-to-Claude destination, and it cannot override
 that decision. Configure it in Claude Code, not in Embassy.
+
+This is the one prerequisite you must actively toggle, and it is the most
+common first-run failure — because it fails *late*. Quickstart step 3
+(`select-claude`) prints `"accepted":true` whether or not the setting is
+enabled: selection only creates Embassy's own permission edge and never
+consults Claude's native inbound policy. The refusal appears at step 4, when
+the send reaches the Claude end. If registration and selection both succeeded
+but your first `send-to-claude` does not arrive, check `crossSessionInbound` on
+the destination session before suspecting the route.
 
 ## Compatibility contract
 

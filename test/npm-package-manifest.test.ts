@@ -38,6 +38,13 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "assets/mark.svg",
     "assets/social-preview.png",
     "docs/GATEWAY-ARCHITECTURE.md",
+    // Every doc the published README links must ship in the tarball.
+    "docs/CONFIGURATION.md",
+    "docs/CONFIGURATION.zh-CN.md",
+    "docs/DASHBOARD.md",
+    "docs/DASHBOARD.zh-CN.md",
+    "docs/DELIVERY.md",
+    "docs/DELIVERY.zh-CN.md",
     "README.zh-CN.md",
     "dist/src/gateway/codex-registration-succession.js",
     "dist/src/gateway/delivery-machine.js",

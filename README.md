@@ -53,7 +53,10 @@ embassy health
 embassy status
 ```
 
-`status` lists `availablePeers` — the live Claude sessions you can select.
+`status` lists `availablePeers` — the live Claude sessions you can select. If
+that list is empty, start a Claude Code session and run
+`embassy refresh-dashboard`, which re-runs Claude discovery; the next `status`
+should show it.
 
 ### 2. Register the Codex task
 
@@ -63,7 +66,7 @@ Ask your Codex agent to run this as a shell step in its current turn — the com
 embassy register-codex --alias codex-reviewer@this-mac
 ```
 
-You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `unregister-codex`.
+You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `embassy unregister-codex --alias codex-reviewer@this-mac` from inside that same task.
 
 Managed App Server generation changes and `embassy serve` restarts both use exact-task reactivation. Each replacement starts monitor-only; only a fresh initialize plus `thread/loaded/list` result that finds the byte-identical task exactly once may re-anchor the alias, and writes stay fenced until that exact generation is activated. A normal broker restart therefore needs no manual registration. An incompatible endpoint or a missing or duplicate exact task leaves the route stale with `REOBSERVATION_REQUIRED`; once that task is observable, rerun `embassy register-codex --alias codex-reviewer@this-mac` from the exact task without unregistering first. Embassy never retargets by alias or replays an ambiguously written body.
 
@@ -75,7 +78,11 @@ Pick one name from `availablePeers`:
 embassy select-claude --alias advisor@this-mac
 ```
 
-You should see `"accepted":true`. Registration and selection together form a pair — this Claude session and this Codex task can now exchange messages through Embassy. (`select-claude` is the one-task shorthand; `embassy pair --claude <name@host> --codex <codex-alias>` names both ends explicitly, and many pairs can coexist.)
+Run this from the operator terminal, or from inside the Codex task — either works, because `select-claude` uses an inherited Codex identity when one is present and resolves the sole registered task when one is not. `embassy select-claude --session <uuid>` selects the same session by its native UUID.
+
+You should see `"accepted":true`. Registration and selection together form a pair — this Claude session and this Codex task can now exchange messages through Embassy.
+
+Once you have more than one registered task, name both ends explicitly with `embassy pair --claude <name@host> --codex <codex-alias>`; many pairs can coexist. Unlike `select-claude`, `pair` and `unpair` must run **inside the Codex task**, the same way `register-codex` does. From a plain terminal they fail `CODEX_IDENTITY_REQUIRED`, and from inside a Claude session they fail `CALLER_IDENTITY_CONFLICT`.
 
 ### 4. Send a message
 
@@ -91,6 +98,17 @@ MSG
 ```
 
 You should see a `conv_` conversation token and a `dlv_` delivery token. Because this send requested a reply, Claude's response is automatically routed back to the Codex task. In the other direction, a compatible Claude session uses its native `ListAgents` and `SendMessage` tools to contact `codex-reviewer` — no Embassy command needed.
+
+`send-to-codex` is the CLI form of that same direction, for a Claude session that prefers an explicit command. It takes the same flags and reads the body from stdin, and it must run inside the Claude session so it inherits that session's reply identity:
+
+```bash
+embassy send-to-codex \
+  --from advisor@this-mac \
+  --to codex-reviewer@this-mac \
+  --expects-reply <<'MSG'
+Summarize the migration risks you found.
+MSG
+```
 
 ### 5. Follow up
 
@@ -117,7 +135,7 @@ not a permission bypass.
 
 The frame is a clear provenance marker, not a cryptographic signature or a
 claim that the body is trustworthy. Embassy neutralizes nested occurrences of
-its two reserved framing tags in the untrusted body before provider delivery;
+its reserved framing tags in the untrusted body before provider delivery;
 arbitrary same-user code and all message text remain untrusted input.
 
 ### See it live
@@ -126,8 +144,9 @@ arbitrary same-user code and all message text remain untrusted input.
 (overview, deliveries, routes, activity, diagnostics) at
 `http://127.0.0.1:41961/` by default. To choose another stable port for that
 invocation, run `embassy dashboard --live --port <n>` with an integer from 1024
-through 65535. Multiple windows and browsers can use the same URL while the
-foreground companion runs. If the port is occupied, startup fails explicitly,
+through 65535. Up to four concurrent live views — across windows, tabs, or
+browsers — can use that URL while the foreground companion runs; a fifth stream
+is refused until one closes. If the port is occupied, startup fails explicitly,
 points to `--port`, and never falls back to another port. See
 [Dashboard](docs/DASHBOARD.md) for details.
 
@@ -190,16 +209,22 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | --- | --- | --- |
 | `serve` | operator | Start the foreground broker and dashboard |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
-| `refresh-dashboard` | operator | Regenerate both static dashboard files |
+| `refresh-dashboard` | operator | Re-run Claude session discovery and regenerate both static dashboard files |
 | `dashboard --live [--lang en\|zh-CN] [--port <n>]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
-| `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; for example, `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
-| `pair` / `unpair` | operator | Add or remove one explicit Claude↔Codex edge by naming both ends: `embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac` |
-| `select-claude` / `unselect-claude` | operator | One-task shorthand for `pair`/`unpair`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
-| `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session |
-| `send-to-codex` | Claude session | Send one bounded message using the inherited native reply identity |
-| `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint |
+| `untrack` | either provider | Close one active progress watch: `embassy untrack --conversation conv_<token>` |
+| `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
+| `pair` / `unpair` | Codex task | Add or remove one explicit Claude↔Codex edge by naming both ends: `embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac`. Like `register-codex`, it must run inside the Codex task |
+| `select-claude` / `unselect-claude` | operator or Codex task | One-task shorthand for `pair`/`unpair`, taking `--alias <name@host>` or `--session <uuid>`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
+| `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session: `--from <codex-alias> --to <claude-alias>`, body on stdin, optional `--expects-reply` and `--track [--idle-minutes <n>]` |
+| `send-to-codex` | Claude session | Same flags and stdin body, using the inherited native reply identity |
+| `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin, optional `--track [--idle-minutes <n>]` |
+
+`--track` opens a progress watch over the conversation; `--idle-minutes <n>`
+sets how long the watched thread may idle before the watch reports a stall
+(1–1440, default 5, rejected without `--track`). Close a watch with `untrack`,
+or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 
 ## Safety in one minute
 
@@ -223,7 +248,7 @@ See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting
 
 | Document | What it covers |
 | --- | --- |
-| [Architecture](docs/GATEWAY-ARCHITECTURE.md) | The full design: topology, adapters, control plane, threat model, staged authorization ladder |
+| [Architecture](docs/GATEWAY-ARCHITECTURE.md) | The full design: topology, adapters, control plane, threat model, and the paired-consent inbound model |
 | [Delivery](docs/DELIVERY.md) | Delivery semantics, tokens, settlement states, and retry rules |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables, compatibility contract, and addressing rules |
 | [Dashboard](docs/DASHBOARD.md) | Static and live dashboard setup, security model, and mutation actions |

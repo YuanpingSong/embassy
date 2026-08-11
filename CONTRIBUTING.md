@@ -13,14 +13,23 @@ npm ci
 npm run check
 ```
 
-`npm run check` type-checks and runs the deterministic test suite. Routine tests
-use fake Claude peers, fake App Server transports, and temporary directories;
-they must not contact Anthropic, OpenAI, SSH hosts, live provider sockets, or
-models.
+`npm run check` type-checks and runs the deterministic test suite; its `pretest`
+hook rebuilds `dist` first, so the suite always runs against freshly compiled
+output. Routine tests use fake Claude peers, fake App Server transports, and
+temporary directories; they must not contact Anthropic, OpenAI, SSH hosts, live
+provider sockets, or models.
+
+`npm run soak` is the separate deliverability gate. It drives a seeded,
+randomized churn of sends through scripted dispatch faults, busy/idle flips,
+clock jumps, and full restarts, asserting that every accepted message settles
+exactly once into an explicit terminal outcome. It is still deterministic and
+offline; run it for any change to routing, the queue, settlement, or restart
+recovery.
 
 ## Before opening a pull request
 
-- Run `npm run check`.
+- Run `npm run check`, and `npm run soak` as well for any delivery, queue,
+  settlement, or restart-recovery change.
 - Add deterministic regression coverage for routing, protocol, persistence,
   permission, process-lifecycle, or redaction changes.
 - Keep the pull request focused and explain every security-boundary change.
@@ -38,8 +47,11 @@ models.
   `codex-*` alias. Never add a thread-ID argument or global task-history scan.
 - Codex-to-Claude sends require a previously selected compatible live session.
   Do not auto-select during send.
-- Exact compatible live same-UID Claude sessions may reach the registered
-  native Codex peer without becoming outbound-selected.
+- In the default `paired` inbound mode, a Claude session reaches the registered
+  native Codex peer only across an existing pair edge; a sender without one is
+  refused `SENDER_NOT_PAIRED` before admission and the refusal is journaled.
+  Only `serve --inbound open` admits any exact compatible live same-UID session.
+  Neither path makes the inbound session outbound-selected.
 - Claude's session UUID is its stable logical identity. Current names are a
   live index; do not add historical-name routing or PID/socket identity.
 - Preserve current-name collision refusal and endpoint-generation fencing.
@@ -74,13 +86,17 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
 
 ### Delivery and state
 
-- Bodies and reply addresses are transient and bounded.
+- Reply addresses are transient. Bodies are bounded and durable: the queue and
+  the recent-delivery ledger both persist them under bounded retention caps.
 - Queue while a Codex task is busy; do not interrupt an unrelated turn.
 - Distinguish gateway acceptance, transport progress, destination acceptance,
   terminal failure, ambiguity, expiry, and restart abandonment.
 - Never retry an ambiguous provider write. Requeue only a confirmed clean
   deferral that has not crossed an ambiguous mutation boundary.
-- Restarts discard bodies and leave restored routes stale until exact
+- Restarts keep queued bodies under bounded retention and re-send each exactly
+  once when its exact route is re-observed. A message in flight at the moment of
+  a crash settles `ambiguous`; a message whose target authority was transient is
+  abandoned rather than reconstructed. Restored routes stay stale until exact
   re-observation.
 - Persist native route identifiers only in the closed private binding schema.
   Keep them out of events, snapshots, dashboard rows, logs, errors, and CLI
