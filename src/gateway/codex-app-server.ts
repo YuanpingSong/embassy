@@ -1649,7 +1649,7 @@ export class CodexAppServerConnector {
 
   private handleNotification(method: string, params: unknown): void {
     if (method === "item/completed") {
-      this.captureCompletedAgentMessage(params);
+      this.handleCompletedItem(params);
       return;
     }
 
@@ -1919,7 +1919,44 @@ export class CodexAppServerConnector {
     // authority. The owning Desktop client must resolve the request.
   }
 
-  private captureCompletedAgentMessage(params: unknown): void {
+  private handleCompletedItem(params: unknown): void {
+    if (
+      !isRecord(params) ||
+      typeof params.threadId !== "string"
+    ) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+    if (params.threadId !== this.route.threadId) return;
+    if (
+      typeof params.turnId !== "string" ||
+      !validOpaqueId(params.turnId) ||
+      !isRecord(params.item) ||
+      typeof params.item.type !== "string" ||
+      !validOpaqueId(params.item.type, 128)
+    ) {
+      this.protocolFault("PROTOCOL_ERROR");
+      return;
+    }
+
+    if (
+      !this.ownsActiveTurn &&
+      this.activeMessageId === null &&
+      this.activeTurnId === null &&
+      this.routeStatus === "active" &&
+      this.lastCompletedTurnId !== params.turnId
+    ) {
+      // `thread/resume` deliberately excludes turn history, so attaching to a
+      // turn that another client already started proves only `active` status.
+      // A subsequent item/completed notification is a bounded protocol frame
+      // that carries the exact current turn ID. Adopt only that ID so a
+      // queued STEER can target the next tool-call boundary; retain no item.
+      this.activeTurnId = params.turnId;
+      this.bumpRevision();
+      this.emit("turn_started");
+      return;
+    }
+
     if (
       !this.ownsActiveTurn ||
       this.activeMessageId === null ||
@@ -1927,16 +1964,6 @@ export class CodexAppServerConnector {
     ) {
       return;
     }
-    if (
-      !isRecord(params) ||
-      typeof params.threadId !== "string" ||
-      typeof params.turnId !== "string" ||
-      !isRecord(params.item)
-    ) {
-      this.protocolFault("PROTOCOL_ERROR");
-      return;
-    }
-    if (params.threadId !== this.route.threadId) return;
     if (params.turnId !== this.activeTurnId) {
       return;
     }
