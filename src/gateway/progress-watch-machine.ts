@@ -15,12 +15,15 @@ export type ProgressWatchOutcome = (typeof progressWatchOutcomes)[number];
 
 export const progressWatchJournalKinds = [
   "opened",
+  "replaced",
   "activity",
   "nudge",
   "worker_reported_complete",
   "capability_degraded",
+  "conversation_rebound",
   "done",
   "unresponsive",
+  "pair_removed",
   "endpoint_retired",
   "disabled",
 ] as const;
@@ -52,7 +55,6 @@ export type ProgressWatchMachine = Readonly<{
   nextActionAt: string;
   capability: ProgressWatchCapability;
   degradedNoticeSent: boolean;
-  workerReportedCompleteAt?: string;
 }>;
 
 export type ProgressWatchJournalEvent = Readonly<{
@@ -69,7 +71,6 @@ export type ProgressWatchEvent =
   | Readonly<{
       type: "activity";
       at: number;
-      workerReportedComplete?: true;
     }>
   | Readonly<{ type: "route_activity"; at: number }>
   | Readonly<{
@@ -85,12 +86,13 @@ export type ProgressWatchEvent =
     }>
   | Readonly<{ type: "nudge_deferred"; at: number; retryAt: number }>
   | Readonly<{ type: "owner_done"; at: number }>
+  | Readonly<{ type: "worker_done"; at: number }>
   | Readonly<{ type: "endpoint_retired"; at: number }>
   | Readonly<{ type: "disabled"; at: number }>;
 
 export type ProgressWatchEffect =
   | Readonly<{ type: "send_nudge"; nudgeNumber: 1 | 2 }>
-  | Readonly<{ type: "notify_capability_degraded" }>
+  | Readonly<{ type: "record_capability_degraded" }>
   | Readonly<{
       type: "settled";
       outcome: ProgressWatchOutcome;
@@ -151,7 +153,7 @@ export function createProgressWatchMachine(input: Readonly<{
   };
 }
 
-/** Pure, deterministic owner-ended progress-watch transition function. */
+/** Pure, deterministic completion-ended progress-watch transition function. */
 export function transitionProgressWatch(
   state: ProgressWatchMachine,
   event: ProgressWatchEvent,
@@ -160,6 +162,7 @@ export function transitionProgressWatch(
   const timestamp = iso(at);
   switch (event.type) {
     case "owner_done":
+    case "worker_done":
       return settle("done");
     case "endpoint_retired":
       return settle("endpoint_retired");
@@ -167,8 +170,6 @@ export function transitionProgressWatch(
       return settle("disabled");
     case "activity":
     case "route_activity": {
-      const workerReportedComplete =
-        event.type === "activity" && event.workerReportedComplete === true;
       return {
         state: {
           ...state,
@@ -177,9 +178,6 @@ export function transitionProgressWatch(
           phase: "quiet",
           nudgeCount: 0,
           nextActionAt: plus(at, state.idleMs),
-          ...(workerReportedComplete
-            ? { workerReportedCompleteAt: timestamp }
-            : {}),
         },
         effects: [],
       };
@@ -203,7 +201,7 @@ export function transitionProgressWatch(
           capability: "route",
           degradedNoticeSent: true,
         },
-        effects: notify ? [{ type: "notify_capability_degraded" }] : [],
+        effects: notify ? [{ type: "record_capability_degraded" }] : [],
       };
     }
     case "nudge_deferred": {

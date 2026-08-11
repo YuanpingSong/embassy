@@ -320,6 +320,7 @@ export type GatewayDecisionCode =
   | "ok"
   | "not_found"
   | "conflict"
+  | "watch_owner_conflict"
   | "route_mismatch"
   | "busy"
   | "unavailable"
@@ -966,6 +967,7 @@ function isDecision(value: unknown): value is GatewayDecision {
   return (
     value.code === "not_found" ||
     value.code === "conflict" ||
+    value.code === "watch_owner_conflict" ||
     value.code === "route_mismatch" ||
     value.code === "busy" ||
     value.code === "unavailable" ||
@@ -1343,7 +1345,6 @@ function isProgressWatchSnapshot(
       "nextActionAt",
       "idleMs",
       "nudgeCount",
-      "workerReportedComplete",
     ]) &&
     typeof value.conversationIdSuffix === "string" &&
     CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix) &&
@@ -1356,8 +1357,7 @@ function isProgressWatchSnapshot(
     isIsoTimestamp(value.nextActionAt) &&
     typeof value.idleMs === "number" &&
     isTrackIdleMinutes(value.idleMs / 60_000) &&
-    (value.nudgeCount === 0 || value.nudgeCount === 1 || value.nudgeCount === 2) &&
-    typeof value.workerReportedComplete === "boolean"
+    (value.nudgeCount === 0 || value.nudgeCount === 1 || value.nudgeCount === 2)
   );
 }
 
@@ -1386,11 +1386,14 @@ function isProgressWatchEventSnapshot(
     isAlias(value.workerAlias) &&
     [
       "opened",
+      "replaced",
       "nudge",
       "worker_reported_complete",
       "capability_degraded",
+      "conversation_rebound",
       "done",
       "unresponsive",
+      "pair_removed",
       "endpoint_retired",
       "disabled",
     ].includes(String(value.kind)) &&

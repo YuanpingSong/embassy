@@ -41,6 +41,8 @@ export const cliCopyZhCn = {
     "实时仪表盘端口 {port} 已被占用；请关闭占用进程，或使用 --port <n> 选择其他端口。",
   "hint.controlInvalidResponse":
     "客户端与网关进程的版本可能不一致；请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。",
+  "hint.progressWatchOwnerConflict":
+    "此配对已有由另一参与方拥有的监视；请先让该所有者运行 `embassy untrack --conversation <conversation-token>`。",
   "error.input": "请求被拒绝。",
   "error.decision": "网关拒绝了该请求。",
   "error.unavailable": "网关不可用。",

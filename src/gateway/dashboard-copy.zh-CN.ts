@@ -23,7 +23,7 @@ export const dashboardCopyZhCn = {
   "inbound.paired.body": "每个已注册的 Codex 任务只接受沿显式 Claude 同意边发送的消息。",
   "inbound.open.badge": "开放入站",
   "inbound.open.body": "同一操作系统用户下的任何在线 Claude 会话都可发起入站工作；显式 Codex 发送仍需同意边。",
-  "inbound.noPair.body": "当前没有就绪的同意边；配对模式会拒绝未配对发送方。",
+  "inbound.noPair.body": "当前没有同意边；配对模式会拒绝未配对发送方。",
   "exchange.claude.title": "Claude 会话",
   "exchange.claude.note": "同意边端点",
   "exchange.codex.title": "Codex 任务",
@@ -76,6 +76,16 @@ export const dashboardCopyZhCn = {
   "guidance.reobserveCodex.title": "需要重新观察 Codex 注册",
   "guidance.reobserveCodex.body": "已保存路由目前没有匹配的在线端点证明。",
   "guidance.reobserveCodex.action": "在该 Codex 任务内重新运行 register-codex。",
+  "guidance.codexReactivationRequired.title": "已保存的 Codex 路由不在线",
+  "guidance.codexReactivationRequired.body":
+    "同意边仍然保留，但已保存的 Codex 路由当前没有在线端点证明。",
+  "guidance.codexReactivationRequired.action":
+    "在该 Codex 任务内运行 embassy register-codex --alias {alias}。",
+  "guidance.consentEdgeUnavailable.title": "同意边端点不可用",
+  "guidance.consentEdgeUnavailable.body":
+    "同意边仍然保留，但当前有界快照中缺少这个已保存端点。",
+  "guidance.consentEdgeUnavailable.action":
+    "请先运行 embassy refresh-dashboard。如果端点仍然缺失，请恢复“范围”中显示的确切端点；无需重建同意边。",
   "guidance.claudeNotObserved.title": "已选择的 Claude 会话不可见",
   "guidance.claudeNotObserved.body": "当前本地发现中没有该会话。",
   "guidance.claudeNotObserved.action":
@@ -123,9 +133,9 @@ export const dashboardCopyZhCn = {
     "请勿发送消息、重试任务更换或假定任一任务处于活跃状态。运行 embassy status，并保留当前状态以供手动恢复。",
   "guidance.progressWatch.title": "受监视的对话已安静",
   "guidance.progressWatch.body":
-    "Embassy 正在监视此项由所有者结束的对话，并观察到安静阶段或已降级为仅路由证据。",
+    "Embassy 正在监视这项以完成为终止条件的对话，并观察到安静阶段或已降级为仅路由证据。",
   "guidance.progressWatch.action":
-    "请检查工作方路由和最近的监视历史。所有者可用 DONE: 或 embassy untrack --conversation <token> 结束监视。",
+    "请检查工作方路由和最近的监视历史。任一参与方都可用精确的 DONE: 结束监视；所有者也可运行 embassy untrack --conversation <token>。",
   "transit.eyebrow": "传输中",
   "transit.title": "队列状态",
   "transit.queued": "排队消息",
@@ -136,7 +146,8 @@ export const dashboardCopyZhCn = {
   "count.atLeast": "至少 {count}",
   "watches.eyebrow": "进度监视",
   "watches.title": "活跃进度监视",
-  "watches.note": "仅由所有者结束；不显示消息正文或完整对话令牌。",
+  "watches.note":
+    "任一参与方报告精确的 DONE: 都会结束监视；不显示消息正文或完整对话令牌。",
   "watches.empty": "当前没有受监视的对话。",
   "watches.column.conversation": "对话",
   "watches.column.parties": "所有者 → 工作方",
@@ -149,15 +160,17 @@ export const dashboardCopyZhCn = {
   "watches.phase.episode": "安静阶段",
   "watches.capability.conversation": "对话锚定",
   "watches.capability.route": "仅路由",
-  "watches.workerComplete": "工作方已报告完成；仍需所有者确认。",
   "watches.history.title": "最近监视终局",
   "watches.event.opened": "已开启",
   "watches.event.nudge": "已提醒",
-  "watches.event.workerReportedComplete": "工作方已报告完成",
+  "watches.event.workerReportedComplete": "工作方已完成",
   "watches.event.capabilityDegraded": "仅路由证据",
-  "watches.event.done": "所有者已结束",
+  "watches.event.conversationRebound": "会话已重新绑定",
+  "watches.event.replaced": "已由较新的监视替代",
+  "watches.event.done": "所有者已完成",
   "watches.event.unresponsive": "无响应",
   "watches.event.endpointRetired": "端点已退役",
+  "watches.event.pairRemoved": "配对已移除",
   "watches.event.disabled": "监视已禁用",
   "activity.eyebrow": "活动记录",
   "activity.title": "最近投递证据",
@@ -435,9 +448,11 @@ export const dashboardCopyZhCn = {
   "app.overview.node.codex.sub": "任务",
   "app.overview.count.codex":
     "已就绪 {ready} · 已注册 {total} · 仅监控 {monitorOnly}",
-  "app.overview.noPair.title": "没有就绪同意边",
+  "app.overview.noPair.title": "没有同意边",
   "app.overview.noPair.body":
     "配对入站仅接受由显式同意边连接到已注册 Codex 任务的发送方；Codex 也只沿显式边路由。",
+  "app.overview.degradedEdge": "有一条已显示的同意边尚未就绪。",
+  "app.overview.degradedEdges": "部分同意边仍然保留，但尚未就绪。",
   "app.overview.queueC2x": "Claude → Codex",
   "app.overview.queueX2c": "Claude ← Codex",
   "app.overview.depth": "深度",
@@ -474,10 +489,15 @@ export const dashboardCopyZhCn = {
   "app.routes.claudeSessions": "Claude 会话",
   "app.routes.codexRoutes": "Codex 任务",
   "app.routes.pairs": "同意边",
-  "app.routes.pairDescription": "{claude} 已与 {codex} 配对",
-  "app.routes.pairSummary": "{total} 条同意边中有 {ready} 条就绪",
+  "app.routes.pairDescription": "同意边：{claude} ↔ {codex}",
+  "app.routes.pairState.degraded": "已降级",
+  "app.routes.pairState.unavailable": "不可用",
+  "app.routes.pairDegradedReason": "同意边仍然保留；一端或两端路由需要处理。",
+  "app.routes.pairUnavailableReason":
+    "同意边仍然保留；此快照中缺少一端或两端已保存路由的记录。",
+  "app.routes.pairSummary": "就绪：{ready} · 同意边：{total}",
   "app.routes.unpairedSummary":
-    "{claude} 个就绪 Claude 端点与 {codex} 个就绪 Codex 端点没有就绪边。",
+    "{claude} 个就绪 Claude 端点与 {codex} 个就绪 Codex 端点没有同意边。",
   "app.routes.pairCmd.consequence":
     "仅在 {claude} 与 {codex} 之间建立同意；现有边保持不变。",
   "app.routes.unpairCmd.consequence":

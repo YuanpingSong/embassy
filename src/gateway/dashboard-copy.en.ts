@@ -27,7 +27,7 @@ export const dashboardCopyEn = {
   "inbound.open.body":
     "Any live Claude session under this OS user may initiate inbound work; explicit Codex sends still require an edge.",
   "inbound.noPair.body":
-    "No ready consent edge exists; paired-mode endpoints refuse unpaired senders.",
+    "No consent edge exists; paired-mode endpoints refuse unpaired senders.",
   "exchange.claude.title": "Claude sessions",
   "exchange.claude.note": "Consent-edge endpoints",
   "exchange.codex.title": "Codex tasks",
@@ -85,6 +85,16 @@ export const dashboardCopyEn = {
     "The saved route does not currently have a matching live endpoint proof.",
   "guidance.reobserveCodex.action":
     "Re-run register-codex inside that exact Codex task.",
+  "guidance.codexReactivationRequired.title": "Saved Codex route is not live",
+  "guidance.codexReactivationRequired.body":
+    "The consent edge remains, but the saved Codex route has no current live endpoint proof.",
+  "guidance.codexReactivationRequired.action":
+    "Inside that exact Codex task, run embassy register-codex --alias {alias}.",
+  "guidance.consentEdgeUnavailable.title": "Consent edge endpoint unavailable",
+  "guidance.consentEdgeUnavailable.body":
+    "The consent edge remains, but this saved endpoint is unavailable in the current bounded snapshot.",
+  "guidance.consentEdgeUnavailable.action":
+    "Run embassy refresh-dashboard first. If the endpoint is still absent, restore the exact endpoint shown in Scope; do not recreate the consent edge.",
   "guidance.claudeNotObserved.title": "Selected Claude session is not visible",
   "guidance.claudeNotObserved.body":
     "The selected session is absent from current local discovery.",
@@ -142,9 +152,9 @@ export const dashboardCopyEn = {
     "Do not send, retry the task change, or assume either task is active. Run embassy status and preserve the current state for manual recovery.",
   "guidance.progressWatch.title": "A tracked conversation is quiet",
   "guidance.progressWatch.body":
-    "Embassy is supervising this owner-ended conversation and has observed a quiet episode or reduced route-only evidence.",
+    "Embassy is supervising this completion-ended conversation and has observed a quiet episode or reduced route-only evidence.",
   "guidance.progressWatch.action":
-    "Check the worker route and recent watch history. The owner can end supervision with DONE: or embassy untrack --conversation <token>.",
+    "Check the worker route and recent watch history. Either participant can end supervision with exact DONE:; the owner can also run embassy untrack --conversation <token>.",
   "transit.eyebrow": "In transit",
   "transit.title": "Queue posture",
   "transit.queued": "Queued messages",
@@ -156,7 +166,7 @@ export const dashboardCopyEn = {
   "watches.eyebrow": "Progress supervision",
   "watches.title": "Active progress watches",
   "watches.note":
-    "Owner-ended watches only; message bodies and full conversation tokens are omitted.",
+    "Watches end when either participant reports exact DONE:; message bodies and full conversation tokens are omitted.",
   "watches.empty": "No conversation is being supervised.",
   "watches.column.conversation": "Conversation",
   "watches.column.parties": "Owner → worker",
@@ -169,15 +179,17 @@ export const dashboardCopyEn = {
   "watches.phase.episode": "Quiet episode",
   "watches.capability.conversation": "Conversation anchored",
   "watches.capability.route": "Route-only",
-  "watches.workerComplete": "Worker reported completion; owner confirmation is still required.",
   "watches.history.title": "Recent watch settlements",
   "watches.event.opened": "Opened",
   "watches.event.nudge": "Nudged",
-  "watches.event.workerReportedComplete": "Worker reported complete",
+  "watches.event.workerReportedComplete": "Worker completed",
   "watches.event.capabilityDegraded": "Route-only evidence",
-  "watches.event.done": "Owner ended",
+  "watches.event.conversationRebound": "Conversation rebound",
+  "watches.event.replaced": "Replaced by a newer watch",
+  "watches.event.done": "Owner completed",
   "watches.event.unresponsive": "Unresponsive",
   "watches.event.endpointRetired": "Endpoint retired",
+  "watches.event.pairRemoved": "Pair removed",
   "watches.event.disabled": "Tracking disabled",
   "activity.eyebrow": "Activity ledger",
   "activity.title": "Recent delivery evidence",
@@ -472,9 +484,13 @@ export const dashboardCopyEn = {
   "app.overview.node.codex.sub": "tasks",
   "app.overview.count.codex":
     "{ready} ready · {total} registered · {monitorOnly} monitor-only",
-  "app.overview.noPair.title": "No ready consent edge",
+  "app.overview.noPair.title": "No consent edge",
   "app.overview.noPair.body":
     "Paired inbound accepts only senders connected to a registered Codex task by an explicit edge; Codex routes only along explicit edges.",
+  "app.overview.degradedEdge":
+    "One shown consent edge is not ready.",
+  "app.overview.degradedEdges":
+    "Some consent edges remain but are not ready.",
   "app.overview.queueC2x": "Claude → Codex",
   "app.overview.queueX2c": "Claude ← Codex",
   "app.overview.depth": "depth",
@@ -514,10 +530,16 @@ export const dashboardCopyEn = {
   "app.routes.claudeSessions": "Claude sessions",
   "app.routes.codexRoutes": "Codex tasks",
   "app.routes.pairs": "Consent edges",
-  "app.routes.pairDescription": "{claude} paired with {codex}",
-  "app.routes.pairSummary": "{ready} ready of {total} consent edges",
+  "app.routes.pairDescription": "Consent edge: {claude} ↔ {codex}",
+  "app.routes.pairState.degraded": "Degraded",
+  "app.routes.pairState.unavailable": "Unavailable",
+  "app.routes.pairDegradedReason":
+    "Consent edge retained; one or both routes need attention.",
+  "app.routes.pairUnavailableReason":
+    "Consent edge retained; one or both saved route records are unavailable in this snapshot.",
+  "app.routes.pairSummary": "Ready: {ready} · Consent edges: {total}",
   "app.routes.unpairedSummary":
-    "{claude} ready Claude endpoints and {codex} ready Codex endpoints have no ready edge.",
+    "{claude} ready Claude endpoints and {codex} ready Codex endpoints have no consent edge.",
   "app.routes.pairCmd.consequence":
     "Create consent only between {claude} and {codex}. Existing edges stay unchanged.",
   "app.routes.unpairCmd.consequence":

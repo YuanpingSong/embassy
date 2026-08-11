@@ -323,7 +323,7 @@ function isActionResult(value: unknown): value is LiveDashboardActionResult {
     Object.keys(record).length === 2 &&
     typeof record.ok === "boolean" &&
     typeof record.code === "string" &&
-    /^(?:ok|not_found|conflict|route_mismatch|busy|unavailable|rejected)$/u.test(
+    /^(?:ok|not_found|conflict|watch_owner_conflict|route_mismatch|busy|unavailable|rejected)$/u.test(
       record.code,
     );
   return (

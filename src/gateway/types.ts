@@ -570,7 +570,6 @@ export type PublicProgressWatchSnapshot = {
   nextActionAt: string;
   idleMs: number;
   nudgeCount: 0 | 1 | 2;
-  workerReportedComplete: boolean;
 };
 
 export type PublicProgressWatchEventSnapshot = {
@@ -581,11 +580,14 @@ export type PublicProgressWatchEventSnapshot = {
   workerAlias: string;
   kind:
     | "opened"
+    | "replaced"
     | "nudge"
     | "worker_reported_complete"
     | "capability_degraded"
+    | "conversation_rebound"
     | "done"
     | "unresponsive"
+    | "pair_removed"
     | "endpoint_retired"
     | "disabled";
   nudgeNumber?: 1 | 2;

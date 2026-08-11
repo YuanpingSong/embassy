@@ -64,6 +64,8 @@ export type DashboardAttentionItem = Readonly<{
   guidance:
     | "reobserve_claude"
     | "reobserve_codex"
+    | "codex_reactivation_required"
+    | "consent_edge_unavailable"
     | "claude_not_observed"
     | "codex_stale"
     | "connector_offline"
@@ -90,7 +92,6 @@ export type DashboardProgressWatchRow = Readonly<{
   idleForMs: number;
   dueInMs: number;
   nudgeCount: 0 | 1 | 2;
-  workerReportedComplete: boolean;
 }>;
 
 export type DashboardProgressWatchEventRow = Readonly<{
@@ -104,9 +105,12 @@ export type DashboardProgressWatchEventRow = Readonly<{
     | "nudge"
     | "worker_reported_complete"
     | "capability_degraded"
+    | "conversation_rebound"
+    | "replaced"
     | "done"
     | "unresponsive"
     | "endpoint_retired"
+    | "pair_removed"
     | "disabled";
   nudgeNumber?: 1 | 2 | undefined;
 }>;
@@ -425,6 +429,13 @@ function guidanceFor(
   if (code?.startsWith("CODEX_SUCCESSION_") === true) {
     return "codex_succession_recovery";
   }
+  if (
+    provider === "codex" &&
+    (code === "REOBSERVATION_REQUIRED" ||
+      code === "CODEX_BOOT_REACTIVATION_SKIPPED")
+  ) {
+    return "codex_reactivation_required";
+  }
   switch (code) {
     case "REOBSERVATION_REQUIRED":
       return provider === "claude" ? "reobserve_claude" : "reobserve_codex";
@@ -448,6 +459,64 @@ function guidanceFor(
     default:
       return "generic";
   }
+}
+
+function isCodexReactivationCondition(item: DashboardAttentionItem): boolean {
+  return (
+    item.provider === "codex" &&
+    (item.code === "REOBSERVATION_REQUIRED" ||
+      item.code === "CODEX_BOOT_REACTIVATION_SKIPPED")
+  );
+}
+
+function coalesceCodexReactivationAlerts(
+  alerts: readonly DashboardAttentionItem[],
+  routes: readonly DashboardRouteRow[],
+): DashboardAttentionItem[] {
+  const staleCodexScopes = new Set(
+    routes
+      .filter((route) => route.provider === "codex" && route.state === "stale")
+      .map((route) => `${route.alias}\0${route.host}`),
+  );
+  const coalesced: DashboardAttentionItem[] = [];
+  for (const alert of alerts) {
+    if (!isCodexReactivationCondition(alert)) {
+      coalesced.push(alert);
+      continue;
+    }
+    if (alert.alias === undefined || alert.host === undefined) continue;
+    const scope = `${alert.alias}\0${alert.host}`;
+    if (!staleCodexScopes.has(scope)) continue;
+    const existingIndex = coalesced.findIndex(
+      (candidate) =>
+        isCodexReactivationCondition(candidate) &&
+        candidate.alias === alert.alias &&
+        candidate.host === alert.host,
+    );
+    if (existingIndex === -1) {
+      coalesced.push(alert);
+      continue;
+    }
+    const existing = coalesced[existingIndex]!;
+    const bootSkipped = alert.code === "CODEX_BOOT_REACTIVATION_SKIPPED"
+      ? alert
+      : existing.code === "CODEX_BOOT_REACTIVATION_SKIPPED"
+        ? existing
+        : alert;
+    const timestamp = compareText(
+      alert.timestamp ?? "",
+      existing.timestamp ?? "",
+    ) >= 0 ? alert.timestamp : existing.timestamp;
+    coalesced[existingIndex] = {
+      ...bootSkipped,
+      severity:
+        alertPriority(alert.severity) < alertPriority(existing.severity)
+          ? alert.severity
+          : existing.severity,
+      ...(timestamp === undefined ? {} : { timestamp }),
+    };
+  }
+  return coalesced;
 }
 
 function recipientIsUnobserved(route: DashboardRouteRow): boolean {
@@ -744,7 +813,6 @@ export function buildDashboardViewModel(
           idleForMs: Math.max(0, generatedAtMs - Date.parse(lastActivityAt)),
           dueInMs: Math.max(0, Date.parse(nextActionAt) - generatedAtMs),
           nudgeCount: watch.nudgeCount,
-          workerReportedComplete: Boolean(watch.workerReportedComplete),
         },
       ];
     })
@@ -855,20 +923,26 @@ export function buildDashboardViewModel(
   const readyClaude = claudeRoutes.filter(routeIsReady).length;
   const readyCodex = codexRoutes.filter(routeIsReady).length;
   const readyPairs = allPairs.filter((pair) => pair.state === "ready");
-  const pairedReadyClaude = new Set(
-    readyPairs.map((pair) => pair.claudeAlias),
+  const pairedClaude = new Set(allPairs.map((pair) => pair.claudeAlias));
+  const pairedCodex = new Set(allPairs.map((pair) => pair.codexAlias));
+  const readyPairedClaude = claudeRoutes.some(
+    (route) => routeIsReady(route) && pairedClaude.has(route.alias),
   );
-  const pairedReadyCodex = new Set(readyPairs.map((pair) => pair.codexAlias));
+  const readyPairedCodex = codexRoutes.some(
+    (route) => routeIsReady(route) && pairedCodex.has(route.alias),
+  );
+  const pairCountIsLowerBound =
+    (normalizedInteger(snapshot.truncation.pairs) ?? 0) > 0;
+  const hasPairEvidence = allPairs.length > 0 || pairCountIsLowerBound;
   const graph: DashboardGraphFacts = {
     pairCount: allPairs.length,
     readyPairCount: readyPairs.length,
-    pairCountIsLowerBound:
-      (normalizedInteger(snapshot.truncation.pairs) ?? 0) > 0,
+    pairCountIsLowerBound,
     unpairedReadyClaude: claudeRoutes.filter(
-      (route) => routeIsReady(route) && !pairedReadyClaude.has(route.alias),
+      (route) => routeIsReady(route) && !pairedClaude.has(route.alias),
     ).length,
     unpairedReadyCodex: codexRoutes.filter(
-      (route) => routeIsReady(route) && !pairedReadyCodex.has(route.alias),
+      (route) => routeIsReady(route) && !pairedCodex.has(route.alias),
     ).length,
   };
   const selectedPeers = validPeers.filter(
@@ -879,55 +953,85 @@ export function buildDashboardViewModel(
   const claudeStatus = partyStatus(claudeRoutes, readyClaude);
   const codexStatus = partyStatus(codexRoutes, readyCodex);
   const claudeNextAction: DashboardNextAction =
-    graph.readyPairCount > 0 && selectedClaudeCount > 0 && readyClaude > 0
+    selectedClaudeCount > 0 &&
+    (readyPairedClaude || (pairCountIsLowerBound && readyClaude > 0))
       ? "none"
-      : validPeers.length === 0
-        ? "discover_claude"
-        : selectablePeers.length > 0
-          ? "pair_routes"
-          : selectedPeers.length > 0
-            ? "restore_claude"
-            : "repair_claude_inventory";
+      : readyClaude > 0
+        ? "pair_routes"
+        : validPeers.length === 0
+          ? "discover_claude"
+          : selectablePeers.length > 0
+            ? !hasPairEvidence
+              ? "pair_routes"
+              : "restore_claude"
+            : selectedPeers.length > 0
+              ? "restore_claude"
+              : "repair_claude_inventory";
   const codexNextAction: DashboardNextAction =
-    codexRoutes.length === 0
-      ? "register_codex"
-      : readyCodex === 0
-        ? "restore_codex"
-        : graph.readyPairCount === 0
-          ? "pair_routes"
-          : "none";
+    readyPairedCodex || (pairCountIsLowerBound && readyCodex > 0)
+      ? "none"
+      : readyCodex > 0
+        ? "pair_routes"
+        : codexRoutes.length === 0
+          ? "register_codex"
+          : "restore_codex";
 
-  const explicitAlerts: DashboardAttentionItem[] = snapshot.alerts
-    .filter((alert) => alert.code !== "COMPATIBILITY_CERTIFICATION_FAILED")
-    .map((alert): DashboardAttentionItem => {
-      const code = safeCode(alert.code);
-      return {
-        kind: "alert",
-        ...(code === undefined ? {} : { code }),
-        severity:
-          alert.severity === "error" ||
-          alert.severity === "warning" ||
-          alert.severity === "info"
-            ? alert.severity
-            : "warning",
-        ...(normalizedTimestamp(alert.timestamp) === undefined
-          ? {}
-          : { timestamp: normalizedTimestamp(alert.timestamp) }),
-        ...(alert.provider === "claude" || alert.provider === "codex"
-          ? { provider: alert.provider }
-          : {}),
-        ...(typeof alert.alias === "string"
-          ? { alias: boundedText(alert.alias) }
-          : {}),
-        ...(typeof alert.host === "string" ? { host: boundedText(alert.host) } : {}),
-        guidance: guidanceFor(code, alert.provider),
-      };
-    })
-    .sort((left, right) =>
-      alertPriority(left.severity) - alertPriority(right.severity) ||
-      compareText(right.timestamp ?? "", left.timestamp ?? ""),
-    );
+  const explicitAlerts = coalesceCodexReactivationAlerts(
+    snapshot.alerts
+      .filter((alert) => alert.code !== "COMPATIBILITY_CERTIFICATION_FAILED")
+      .map((alert): DashboardAttentionItem => {
+        const code = safeCode(alert.code);
+        return {
+          kind: "alert",
+          ...(code === undefined ? {} : { code }),
+          severity:
+            alert.severity === "error" ||
+            alert.severity === "warning" ||
+            alert.severity === "info"
+              ? alert.severity
+              : "warning",
+          ...(normalizedTimestamp(alert.timestamp) === undefined
+            ? {}
+            : { timestamp: normalizedTimestamp(alert.timestamp) }),
+          ...(alert.provider === "claude" || alert.provider === "codex"
+            ? { provider: alert.provider }
+            : {}),
+          ...(typeof alert.alias === "string"
+            ? { alias: boundedText(alert.alias) }
+            : {}),
+          ...(typeof alert.host === "string"
+            ? { host: boundedText(alert.host) }
+            : {}),
+          guidance: guidanceFor(code, alert.provider),
+        };
+      }),
+    allRoutes,
+  ).sort((left, right) =>
+    alertPriority(left.severity) - alertPriority(right.severity) ||
+    compareText(right.timestamp ?? "", left.timestamp ?? ""),
+  );
   const attentionCandidates: DashboardAttentionItem[] = [...explicitAlerts];
+  const unavailableConsentEdgeScopes = new Set<string>();
+  for (const pair of allPairs) {
+    if (pair.state !== "unavailable") continue;
+    for (const endpoint of [
+      { provider: "claude" as const, alias: pair.claudeAlias },
+      { provider: "codex" as const, alias: pair.codexAlias },
+    ]) {
+      if (routeByAlias.has(endpoint.alias)) continue;
+      const scope = `${endpoint.provider}\0${endpoint.alias}\0${pair.host}`;
+      if (unavailableConsentEdgeScopes.has(scope)) continue;
+      unavailableConsentEdgeScopes.add(scope);
+      attentionCandidates.push({
+        kind: "route",
+        severity: "warning",
+        provider: endpoint.provider,
+        alias: endpoint.alias,
+        host: pair.host,
+        guidance: "consent_edge_unavailable",
+      });
+    }
+  }
   for (const route of allRoutes) {
     const writes = messages.groups.filter(
       ({ direction, targetAlias, state, timestamp }) =>
@@ -1005,9 +1109,13 @@ export function buildDashboardViewModel(
       alias: route.alias,
       host: route.host,
       guidance:
-        route.provider === "codex" && route.state === "stale"
-          ? "codex_stale"
-          : "route_stale",
+        route.provider === "codex" &&
+        route.state === "stale" &&
+        route.safeErrorCode === "REOBSERVATION_REQUIRED"
+          ? "codex_reactivation_required"
+          : route.provider === "codex" && route.state === "stale"
+            ? "codex_stale"
+            : "route_stale",
     });
     representedScopes.add(scope);
   }
@@ -1051,10 +1159,12 @@ export function buildDashboardViewModel(
   }
   const attention = attentionCandidates.slice(0, DASHBOARD_MODEL_LIMITS.alerts);
 
-  const setupComplete = graph.readyPairCount > 0;
+  const setupComplete = hasPairEvidence;
+  const hasDegradedPair = allPairs.some((pair) => pair.state !== "ready");
   const overall =
     attentionCandidates.length > 0 ||
-    (normalizedInteger(snapshot.truncation.alerts) ?? 0) > 0
+    (normalizedInteger(snapshot.truncation.alerts) ?? 0) > 0 ||
+    hasDegradedPair
       ? "attention"
       : setupComplete
         ? "ready"

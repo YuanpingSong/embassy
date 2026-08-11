@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - `embassy --help` lists `untrack` in both locales. The command has been real and documented since v1.0.0, but was missing from the usage text, so the one way to close a progress watch from the CLI was undiscoverable from the CLI.
+- Progress supervision now keeps at most one active watch on an exact consent edge, lets either the worker or owner close that watch with `DONE:`, and refuses a counterparty `TRACK:` replacement with explicit `untrack` guidance. When an older state contains duplicate watches for one edge, upgrade settles the superseded watches deterministically and records each settlement in history.
 
 ## [1.3.0] - 2026-08-10
 

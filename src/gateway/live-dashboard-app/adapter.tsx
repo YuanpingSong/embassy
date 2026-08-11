@@ -225,6 +225,8 @@ namespace Embassy {
   const GUIDANCE_COPY_KEYS = {
     reobserve_claude: "reobserveClaude",
     reobserve_codex: "reobserveCodex",
+    codex_reactivation_required: "codexReactivationRequired",
+    consent_edge_unavailable: "consentEdgeUnavailable",
     claude_not_observed: "claudeNotObserved",
     codex_stale: "codexStale",
     connector_offline: "connectorOffline",
@@ -255,7 +257,10 @@ namespace Embassy {
         return `embassy select-claude --alias ${item.alias ?? "<alias>"}`;
       case "reobserve_codex":
       case "codex_stale":
+      case "codex_reactivation_required":
         return `embassy register-codex --alias ${item.alias ?? "<alias>"}`;
+      case "consent_edge_unavailable":
+        return "embassy refresh-dashboard";
       case "codex_succession_busy":
       case "codex_succession_recovery":
         return `embassy register-codex --alias <new> --succeeds ${item.alias ?? "<old>"}`;
@@ -304,6 +309,8 @@ namespace Embassy {
     model: DashboardViewModel,
     nowMs: number,
   ): OverviewData {
+    const nonReadyPairCount =
+      model.graph.pairCount - model.graph.readyPairCount;
     return {
       generatedAt: model.generatedAt,
       inboundMode: model.inboundMode,
@@ -326,6 +333,12 @@ namespace Embassy {
       queueClaudeToCodex: queueSplit(model, "codex", nowMs),
       queueCodexToClaude: queueSplit(model, "claude", nowMs),
       graph: model.graph,
+      degradedPairCopyKey:
+        nonReadyPairCount <= 0
+          ? undefined
+          : nonReadyPairCount === 1 && !model.graph.pairCountIsLowerBound
+            ? "app.overview.degradedEdge"
+            : "app.overview.degradedEdges",
       attention: attentionViews(model),
       attentionOmitted: model.omissions.attentionItems,
       pulse: pulse(model),

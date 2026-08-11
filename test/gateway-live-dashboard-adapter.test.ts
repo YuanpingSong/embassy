@@ -77,6 +77,10 @@ type OverviewData = Readonly<{
   queueClaudeToCodex: QueueSummary;
   queueCodexToClaude: QueueSummary;
   graph: DashboardViewModel["graph"];
+  degradedPairCopyKey:
+    | "app.overview.degradedEdge"
+    | "app.overview.degradedEdges"
+    | undefined;
   attention: readonly AttentionView[];
   attentionOmitted: number;
   pulse: PulseData;
@@ -569,6 +573,10 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
     assert.equal(bundle.mounts.length, 1, "expected one top-level mount");
     assert.equal(at(bundle.mounts, 0).container, bundle.rootElement);
   }
+  assert.match(
+    bundle.source,
+    /conversation_rebound:\s*"watches\.event\.conversationRebound"/u,
+  );
 });
 
 test("root browser protocol ignores fragments and uses cookie-free API posts", async () => {
@@ -1119,6 +1127,8 @@ test("guidanceCopyKey camelCases every guidance value", () => {
   const expected: readonly [DashboardAttentionItem["guidance"], string][] = [
     ["reobserve_claude", "reobserveClaude"],
     ["reobserve_codex", "reobserveCodex"],
+    ["codex_reactivation_required", "codexReactivationRequired"],
+    ["consent_edge_unavailable", "consentEdgeUnavailable"],
     ["claude_not_observed", "claudeNotObserved"],
     ["codex_stale", "codexStale"],
     ["connector_offline", "connectorOffline"],
@@ -1129,6 +1139,7 @@ test("guidanceCopyKey camelCases every guidance value", () => {
     ["degraded", "degraded"],
     ["codex_succession_busy", "codexSuccessionBusy"],
     ["codex_succession_recovery", "codexSuccessionRecovery"],
+    ["progress_watch", "progressWatch"],
     ["generic", "generic"],
   ];
   for (const [guidance, key] of expected) {
@@ -1177,6 +1188,21 @@ test("attention commands fall back to angle-bracket placeholders without an alia
   assert.equal(
     adapter.attentionCommand({ ...anonymous, guidance: "reobserve_codex" }),
     "embassy register-codex --alias <alias>",
+  );
+  assert.equal(
+    adapter.attentionCommand({
+      ...anonymous,
+      alias: "codex-reviewer@this-mac",
+      guidance: "codex_reactivation_required",
+    }),
+    "embassy register-codex --alias codex-reviewer@this-mac",
+  );
+  assert.equal(
+    adapter.attentionCommand({
+      ...anonymous,
+      guidance: "consent_edge_unavailable",
+    }),
+    "embassy refresh-dashboard",
   );
   assert.equal(
     adapter.attentionCommand({
@@ -1571,6 +1597,7 @@ test("overviewProps composes the status strip, queues and attention", () => {
   assert.equal(data.queueCodexToClaude.depth, 2);
   assert.equal(data.queueCodexToClaude.oldestAgeMs, 210_000);
   assert.equal(data.graph.readyPairCount, 0);
+  assert.equal(data.degradedPairCopyKey, "app.overview.degradedEdges");
   assert.equal(data.attention.length, 4);
   assert.equal(data.attentionOmitted, 5);
   assert.equal(data.pulse.total, 3);
@@ -1588,12 +1615,35 @@ test("overviewProps on a healthy exchange reports no attention and a live pair",
     compatibility: "compatible",
   });
   assert.equal(data.graph.readyPairCount, 1);
+  assert.equal(data.degradedPairCopyKey, undefined);
   assert.equal(data.attention.length, 0);
   assert.equal(data.attentionOmitted, 0);
   assert.equal(data.pulse.total, 2);
   assert.equal(data.pulse.isLowerBound, false);
   assert.equal(data.queueClaudeToCodex.depth, 0);
   assert.equal(data.queueCodexToClaude.oldestAgeMs, undefined);
+});
+
+test("overview pair note distinguishes one degraded edge from several", () => {
+  const mixed = mutableClone(HEALTHY);
+  mixed.graph = {
+    ...mixed.graph,
+    pairCount: 2,
+    readyPairCount: 1,
+  };
+  assert.equal(
+    adapter.overviewProps(mixed, GENERATED_MS).degradedPairCopyKey,
+    "app.overview.degradedEdge",
+  );
+
+  mixed.graph = {
+    ...mixed.graph,
+    pairCount: 3,
+  };
+  assert.equal(
+    adapter.overviewProps(mixed, GENERATED_MS).degradedPairCopyKey,
+    "app.overview.degradedEdges",
+  );
 });
 
 test("diagnosticsProps forwards counters, omissions and queue pressure", () => {

@@ -59,6 +59,75 @@ test("dashboard catalogs have exact key parity", () => {
   }
 });
 
+test("progress-watch journal copy distinguishes worker and owner completion", () => {
+  assert.equal(
+    dashboardCopyEn["watches.event.workerReportedComplete"],
+    "Worker completed",
+  );
+  assert.equal(dashboardCopyEn["watches.event.done"], "Owner completed");
+  assert.equal(
+    dashboardCopyEn["watches.event.conversationRebound"],
+    "Conversation rebound",
+  );
+  assert.equal(
+    dashboardCopyZhCn["watches.event.workerReportedComplete"],
+    "工作方已完成",
+  );
+  assert.equal(dashboardCopyZhCn["watches.event.done"], "所有者已完成");
+  assert.equal(
+    dashboardCopyZhCn["watches.event.conversationRebound"],
+    "会话已重新绑定",
+  );
+  assert.match(
+    dashboardCopyEn["watches.note"],
+    /either participant reports exact DONE:/,
+  );
+  assert.match(
+    dashboardCopyEn["guidance.progressWatch.action"],
+    /Either participant can end supervision with exact DONE:/,
+  );
+  assert.equal(
+    dashboardCopyEn["watches.note"].includes("Owner-ended"),
+    false,
+  );
+  assert.match(dashboardCopyZhCn["watches.note"], /任一参与方.*DONE:/);
+  assert.match(
+    dashboardCopyZhCn["guidance.progressWatch.action"],
+    /任一参与方.*DONE:/,
+  );
+  assert.equal(
+    dashboardCopyZhCn["watches.note"].includes("仅由所有者结束"),
+    false,
+  );
+});
+
+test("pair copy names consent counts, exact refresh recovery, and one shown degraded edge", () => {
+  assert.match(
+    dashboardCopyEn["app.routes.unpairedSummary"],
+    /have no consent edge/,
+  );
+  assert.equal(
+    dashboardCopyEn["app.overview.degradedEdge"],
+    "One shown consent edge is not ready.",
+  );
+  assert.match(
+    dashboardCopyEn["guidance.consentEdgeUnavailable.action"],
+    /^Run embassy refresh-dashboard first\./,
+  );
+  assert.match(
+    dashboardCopyZhCn["app.routes.unpairedSummary"],
+    /没有同意边/,
+  );
+  assert.equal(
+    dashboardCopyZhCn["app.overview.degradedEdge"],
+    "有一条已显示的同意边尚未就绪。",
+  );
+  assert.match(
+    dashboardCopyZhCn["guidance.consentEdgeUnavailable.action"],
+    /^请先运行 embassy refresh-dashboard。/,
+  );
+});
+
 test("dashboard locale grammar is one exact shared allowlist", () => {
   assert.deepEqual(dashboardLocales, ["en", "zh-CN"]);
   for (const locale of dashboardLocales) {
@@ -127,6 +196,10 @@ test("dashboard is an inert self-contained snapshot with strict accessibility fl
   assert.match(html, /@media \(forced-colors: active\)/);
   assert.match(html, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(html, /\.register-grid > section \{ min-width: 0; \}/);
+  assert.match(
+    html,
+    /\.pair-list small \{[^}]*font-size: \.8em;/,
+  );
   assert.match(html, /tabindex="0" role="region"/);
   assert.match(
     html,
@@ -361,7 +434,7 @@ test("dense dashboard projections remain independently bounded in both locales",
   assert.equal(model.omissions.messageGroups, 4);
   assert.equal(model.omissions.messageEvents, 0);
   assert.equal(model.omissions.upstreamAlerts, 0);
-  assert.equal(model.omissions.attentionItems, 4);
+  assert.equal(model.omissions.attentionItems, 6);
 });
 
 test("diagnostics disclose every lifetime accounting field", () => {

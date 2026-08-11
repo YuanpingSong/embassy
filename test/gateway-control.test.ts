@@ -161,7 +161,6 @@ function snapshot(): GatewaySnapshot {
         nextActionAt: NOW,
         idleMs: 300_000,
         nudgeCount: 0,
-        workerReportedComplete: false,
       },
     ],
     progressWatchEvents: [
@@ -172,6 +171,30 @@ function snapshot(): GatewaySnapshot {
         ownerAlias: "codex-main@this-mac",
         workerAlias: "claude-one@build-mac",
         kind: "opened",
+      },
+      {
+        sequence: 2,
+        timestamp: NOW,
+        conversationIdSuffix: "BcDe_234",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "replaced",
+      },
+      {
+        sequence: 3,
+        timestamp: NOW,
+        conversationIdSuffix: "CdEf_345",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "conversation_rebound",
+      },
+      {
+        sequence: 4,
+        timestamp: NOW,
+        conversationIdSuffix: "CdEf_345",
+        ownerAlias: "codex-main@this-mac",
+        workerAlias: "claude-one@build-mac",
+        kind: "pair_removed",
       },
     ],
     activityEvents: [
@@ -410,6 +433,12 @@ test("serves the two directional routes and emits metadata-only responses", asyn
         return { accepted: true, code: "ok" };
       },
       sendToClaude: (params) => {
+        if (params.text === "TRACK: owner conflict") {
+          return {
+            accepted: false as const,
+            code: "watch_owner_conflict" as const,
+          };
+        }
         toClaude = { ...params };
         return {
           accepted: true,
@@ -546,6 +575,27 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       },
     },
   });
+  assert.deepEqual(
+    await sendGatewayControlRequest({
+      socketPath,
+      request: {
+        protocolVersion: 1,
+        method: "send_to_claude",
+        params: {
+          fromAlias: "codex-main@this-mac",
+          threadId: THREAD_ID,
+          toAlias: "claude-one@build-mac",
+          text: "TRACK: owner conflict",
+          expectsReply: false,
+        },
+      },
+    }),
+    {
+      protocolVersion: 1,
+      ok: true,
+      result: { accepted: false, code: "watch_owner_conflict" },
+    },
+  );
   assert.deepEqual(toClaude, {
     fromAlias: "codex-main@this-mac",
     threadId: THREAD_ID,

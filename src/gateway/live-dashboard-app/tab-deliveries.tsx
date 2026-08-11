@@ -431,9 +431,12 @@ namespace Embassy {
     nudge: "watches.event.nudge",
     worker_reported_complete: "watches.event.workerReportedComplete",
     capability_degraded: "watches.event.capabilityDegraded",
+    conversation_rebound: "watches.event.conversationRebound",
+    replaced: "watches.event.replaced",
     done: "watches.event.done",
     unresponsive: "watches.event.unresponsive",
     endpoint_retired: "watches.event.endpointRetired",
+    pair_removed: "watches.event.pairRemoved",
     disabled: "watches.event.disabled",
   };
 
@@ -491,9 +494,6 @@ namespace Embassy {
                   <div><dt>{t("watches.column.nudges")}</dt><dd>{fmtCount(locale, watch.nudgeCount)}</dd></div>
                   <div><dt>{t("watches.column.capability")}</dt><dd>{t(watch.capability === "route" ? "watches.capability.route" : "watches.capability.conversation")}</dd></div>
                 </dl>
-                {watch.workerReportedComplete ? (
-                  <p className="footnote">{t("watches.workerComplete")}</p>
-                ) : null}
               </article>
             ))}
           </div>

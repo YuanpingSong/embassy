@@ -172,10 +172,49 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       nextActionAt: "2026-08-08T12:05:00.000Z",
       idleMs: 300_000,
       nudgeCount: 1,
-      workerReportedComplete: true,
     },
   ];
   snapshot.progressWatchEvents = [
+    {
+      sequence: 12,
+      timestamp: "2026-08-08T11:59:30.000Z",
+      conversationIdSuffix: "MnOp_345",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      kind: "conversation_rebound",
+    },
+    {
+      sequence: 11,
+      timestamp: "2026-08-08T11:59:00.000Z",
+      conversationIdSuffix: "KlMn_012",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      kind: "done",
+    },
+    {
+      sequence: 10,
+      timestamp: "2026-08-08T11:58:00.000Z",
+      conversationIdSuffix: "IjKl_901",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      kind: "worker_reported_complete",
+    },
+    {
+      sequence: 9,
+      timestamp: "2026-08-08T11:57:00.000Z",
+      conversationIdSuffix: "GhIj_789",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      kind: "pair_removed",
+    },
+    {
+      sequence: 8,
+      timestamp: "2026-08-08T11:56:00.000Z",
+      conversationIdSuffix: "EfGh_456",
+      ownerAlias: "claude-advisor@this-mac",
+      workerAlias: "codex-reviewer@this-mac",
+      kind: "replaced",
+    },
     {
       sequence: 7,
       timestamp: "2026-08-08T11:55:00.000Z",
@@ -188,20 +227,41 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
   ];
   const model = buildDashboardViewModel(snapshot);
   assert.deepEqual(model.watches[0], {
-    ...snapshot.progressWatches[0],
+    conversationIdSuffix: "AbCd_123",
+    ownerAlias: "claude-advisor@this-mac",
+    workerAlias: "codex-reviewer@this-mac",
+    phase: "episode",
+    capability: "conversation",
+    lastActivityAt: "2026-08-08T11:55:00.000Z",
+    nextActionAt: "2026-08-08T12:05:00.000Z",
+    idleMs: 300_000,
+    nudgeCount: 1,
     idleForMs: 300_000,
     dueInMs: 300_000,
   });
-  assert.equal(model.watchEvents[0]?.kind, "nudge");
+  assert.deepEqual(
+    model.watchEvents.map((event) => event.kind),
+    [
+      "conversation_rebound",
+      "done",
+      "worker_reported_complete",
+      "pair_removed",
+      "replaced",
+      "nudge",
+    ],
+  );
   assert.equal(model.attention.some((item) => item.guidance === "progress_watch"), true);
 
   const en = renderDashboardHtml(snapshot, { locale: "en" });
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
   assert.match(en, /Active progress watches/);
-  assert.match(en, /Worker reported completion/);
+  assert.match(en, /either participant reports exact DONE:/);
+  assert.equal(en.includes("owner confirmation is still required"), false);
+  assert.equal(en.includes("Owner-ended watches only"), false);
   assert.match(en, /…AbCd_123/);
   assert.match(zh, /活跃进度监视/);
-  assert.match(zh, /工作方已报告完成/);
+  assert.match(zh, /任一参与方报告精确的 DONE:/);
+  assert.equal(zh.includes("仍需所有者确认"), false);
   for (const secret of ["conv_", "ownerLease", "receiptHandle"]) {
     assert.equal(en.includes(secret), false);
     assert.equal(zh.includes(secret), false);
@@ -246,6 +306,7 @@ test("malformed, future, and empty-route queue timestamps never leak or become i
     { ...snapshot.routes[1]!, alias: "codex-future@this-mac", oldestQueuedAt: "2026-08-08T12:00:00.001Z" },
     { ...snapshot.routes[1]!, alias: "codex-empty@this-mac", queueDepth: 0, oldestQueuedAt: "2026-08-01T00:00:00.000Z" },
   ];
+  snapshot.pairs = [];
   const model = buildDashboardViewModel(snapshot);
   assert.equal(model.transit.queuedMessages, 6);
   assert.equal(model.transit.oldestQueueAgeMs, undefined);
@@ -276,7 +337,7 @@ test("QUEUE_STALLED is rendered only from a provided normalized alert", () => {
   assert.match(html, /id="attention-title"/);
 });
 
-test("non-ready routes surface one bounded derived attention item without inventing a stall", () => {
+test("a durable pair stays visible and degraded when its Codex route needs re-observation", () => {
   const snapshot = dashboardFixture();
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
@@ -286,15 +347,161 @@ test("non-ready routes surface one bounded derived attention item without invent
   };
   const model = buildDashboardViewModel(snapshot);
   assert.equal(model.overall, "attention");
+  assert.equal(model.graph.pairCount, 1);
+  assert.equal(model.graph.readyPairCount, 0);
+  assert.equal(model.graph.unpairedReadyClaude, 0);
+  assert.equal(model.graph.unpairedReadyCodex, 0);
+  assert.equal(model.pairs[0]?.state, "degraded");
+  assert.equal(model.exchange.claude.nextAction, "none");
+  assert.equal(model.exchange.codex.nextAction, "restore_codex");
   assert.equal(model.attention.length, 1);
   assert.equal(model.attention[0]?.kind, "route");
-  assert.equal(model.attention[0]?.guidance, "codex_stale");
+  assert.equal(model.attention[0]?.guidance, "codex_reactivation_required");
   const html = renderDashboardHtml(snapshot);
-  assert.match(html, /Codex route is stale/);
-  assert.match(html, /Re-run register-codex with the same alias/);
-  assert.match(html, /Do not unregister first/);
-  assert.equal(html.includes("Unregister and register"), false);
+  assert.match(html, /Consent edge: claude-advisor@this-mac ↔ codex-reviewer@this-mac/);
+  assert.match(html, /Consent edge retained; one or both routes need attention/);
+  assert.match(html, /Saved Codex route is not live/);
+  assert.match(html, /saved Codex route has no current live endpoint proof/);
+  assert.match(
+    html,
+    /embassy register-codex --alias codex-reviewer@this-mac/,
+  );
+  assert.match(html, />Degraded</);
+  assert.equal(html.includes("No consent edge exists"), false);
   assert.equal(html.includes("QUEUE_STALLED"), false);
+});
+
+test("a durable pair stays visible with an unavailable reason when one saved route is absent", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes = snapshot.routes.filter(
+    (route) => route.alias !== "codex-reviewer@this-mac",
+  );
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.overall, "attention");
+  assert.equal(model.graph.pairCount, 1);
+  assert.equal(model.graph.readyPairCount, 0);
+  assert.equal(model.pairs[0]?.state, "unavailable");
+  assert.equal(model.exchange.codex.nextAction, "register_codex");
+  assert.equal(model.attention.length, 1);
+  assert.deepEqual(model.attention[0], {
+    kind: "route",
+    severity: "warning",
+    provider: "codex",
+    alias: "codex-reviewer@this-mac",
+    host: "this-mac",
+    guidance: "consent_edge_unavailable",
+  });
+
+  const en = renderDashboardHtml(snapshot);
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Consent edge: claude-advisor@this-mac ↔ codex-reviewer@this-mac/);
+  assert.match(en, /Consent edge retained; one or both saved route records are unavailable in this snapshot/);
+  assert.match(en, /Consent edge endpoint unavailable/);
+  assert.match(en, /Run embassy refresh-dashboard first/);
+  assert.match(en, />Unavailable</);
+  assert.equal(en.includes("No consent edge exists"), false);
+  assert.match(zh, /同意边仍然保留；此快照中缺少一端或两端已保存路由的记录/);
+  assert.match(zh, /同意边端点不可用/);
+  assert.match(zh, /请先运行 embassy refresh-dashboard/);
+  assert.equal(zh.includes("当前没有同意边"), false);
+});
+
+test("Codex restart alerts for one route coalesce into one human condition", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes[1] = {
+    ...snapshot.routes[1]!,
+    state: "stale",
+    compatibility: "expired",
+    safeErrorCode: "REOBSERVATION_REQUIRED",
+  };
+  snapshot.alerts = [
+    {
+      code: "REOBSERVATION_REQUIRED",
+      severity: "warning",
+      timestamp: "2026-08-08T11:59:58.000Z",
+      provider: "codex",
+      host: "this-mac",
+      alias: "codex-reviewer@this-mac",
+    },
+    {
+      code: "CODEX_BOOT_REACTIVATION_SKIPPED",
+      severity: "warning",
+      timestamp: "2026-08-08T11:59:59.000Z",
+      provider: "codex",
+      host: "this-mac",
+      alias: "codex-reviewer@this-mac",
+    },
+  ];
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.attention.length, 1);
+  assert.equal(model.attention[0]?.code, "CODEX_BOOT_REACTIVATION_SKIPPED");
+  assert.equal(model.attention[0]?.timestamp, "2026-08-08T11:59:59.000Z");
+  assert.equal(model.attention[0]?.guidance, "codex_reactivation_required");
+
+  const en = renderDashboardHtml(snapshot);
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /CODEX_BOOT_REACTIVATION_SKIPPED/);
+  assert.match(en, /Saved Codex route is not live/);
+  assert.match(en, /saved Codex route has no current live endpoint proof/);
+  assert.match(en, /embassy register-codex --alias codex-reviewer@this-mac/);
+  assert.match(zh, /已保存的 Codex 路由不在线/);
+  assert.match(zh, /当前没有在线端点证明/);
+  assert.match(zh, /embassy register-codex --alias codex-reviewer@this-mac/);
+});
+
+test("Codex reactivation evidence disappears once its exact route is live", () => {
+  const snapshot = dashboardFixture();
+  snapshot.alerts = [
+    {
+      code: "CODEX_BOOT_REACTIVATION_SKIPPED",
+      severity: "warning",
+      timestamp: "2026-08-08T11:59:59.000Z",
+      provider: "codex",
+      host: "this-mac",
+      alias: "codex-reviewer@this-mac",
+    },
+  ];
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(
+    model.attention.some(
+      (item) => item.code === "CODEX_BOOT_REACTIVATION_SKIPPED",
+    ),
+    false,
+  );
+  assert.equal(
+    renderDashboardHtml(snapshot).includes("Saved Codex route is not live"),
+    false,
+  );
+});
+
+test("route-derived reactivation guidance requires an actually stale Codex route", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes[1] = {
+    ...snapshot.routes[1]!,
+    state: "offline",
+    compatibility: "expired",
+    safeErrorCode: "REOBSERVATION_REQUIRED",
+  };
+
+  const model = buildDashboardViewModel(snapshot);
+  const routeAttention = model.attention.find(
+    (item) => item.alias === "codex-reviewer@this-mac",
+  );
+  assert.equal(routeAttention?.code, "REOBSERVATION_REQUIRED");
+  assert.equal(routeAttention?.guidance, "route_stale");
+  assert.equal(
+    model.attention.some(
+      (item) => item.guidance === "codex_reactivation_required",
+    ),
+    false,
+  );
+  assert.equal(
+    renderDashboardHtml(snapshot).includes("Saved Codex route is not live"),
+    false,
+  );
 });
 
 test("an aged Claude mailbox write surfaces one notice only while its exact recipient is unobserved", () => {
@@ -457,7 +664,7 @@ test("first-run exchange board gives truthful paired setup actions", () => {
   const noPeers = renderDashboardHtml(snapshot);
   assert.match(noPeers, /Start or keep a Claude Code session running/);
   assert.match(noPeers, /embassy refresh-dashboard/);
-  assert.match(noPeers, /No ready consent edge exists/);
+  assert.match(noPeers, /No consent edge exists/);
   assert.match(noPeers, /refuse unpaired senders/);
   assert.match(noPeers, /data-inbound-mode="paired"/);
 
@@ -518,14 +725,68 @@ test("dashboard projects explicit consent edges and graph readiness", () => {
     pairCount: 2,
     readyPairCount: 1,
     pairCountIsLowerBound: true,
-    unpairedReadyClaude: 1,
+    unpairedReadyClaude: 0,
     unpairedReadyCodex: 0,
   });
   assert.equal(model.omissions.pairs, 2);
   const html = renderDashboardHtml(snapshot);
-  assert.match(html, /claude-advisor@this-mac paired with codex-reviewer@this-mac/);
-  assert.match(html, /claude-reviewer@this-mac paired with codex-builder@this-mac/);
+  assert.match(html, /Consent edge: claude-advisor@this-mac ↔ codex-reviewer@this-mac/);
+  assert.match(html, /Consent edge: claude-reviewer@this-mac ↔ codex-builder@this-mac/);
+  assert.match(html, /Ready: At least 1 · Consent edges: At least 4/);
   assert.match(html, /2 additional consent edges are omitted/);
+});
+
+test("pair truncation remains evidence of consent even when every edge row is omitted", () => {
+  const snapshot = dashboardFixture();
+  snapshot.pairs = [];
+  snapshot.truncation.pairs = 1;
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(model.graph, {
+    pairCount: 0,
+    readyPairCount: 0,
+    pairCountIsLowerBound: true,
+    unpairedReadyClaude: 1,
+    unpairedReadyCodex: 1,
+  });
+  assert.equal(model.overall, "ready");
+  assert.equal(model.exchange.claude.nextAction, "none");
+  assert.equal(model.exchange.codex.nextAction, "none");
+
+  const html = renderDashboardHtml(snapshot);
+  assert.match(html, /Ready: At least 0 · Consent edges: At least 1/);
+  assert.match(html, /1 additional consent edges are omitted/);
+  assert.equal(html.includes("No consent edge exists"), false);
+  assert.equal(html.includes("no consent edge —"), false);
+});
+
+test("a fresh Codex task remains pairable beside an existing degraded edge", () => {
+  const snapshot = dashboardFixture();
+  snapshot.routes[1] = {
+    ...snapshot.routes[1]!,
+    state: "stale",
+    compatibility: "expired",
+    safeErrorCode: "REOBSERVATION_REQUIRED",
+  };
+  const { oldestQueuedAt: _oldestQueuedAt, ...freshCodex } =
+    dashboardFixture().routes[1]!;
+  snapshot.routes.push({
+    ...freshCodex,
+    alias: "codex-fresh@this-mac",
+    state: "idle",
+    queueDepth: 0,
+  });
+
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(model.pairs[0]?.state, "degraded");
+  assert.equal(model.graph.unpairedReadyCodex, 1);
+  assert.equal(model.exchange.codex.nextAction, "pair_routes");
+  const html = renderDashboardHtml(snapshot);
+  assert.equal(html.includes("No consent edge exists"), false);
+  assert.match(
+    html,
+    /0 ready Claude endpoints and 1 ready Codex endpoints have no consent edge/,
+  );
 });
 
 test("unpaired sender refusal is neutral and explains the pairing boundary", () => {
