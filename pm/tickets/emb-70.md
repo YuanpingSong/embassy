@@ -36,5 +36,20 @@ attestation, not loose lookup; preserve pre/post-write uncertainty; keep
 refresh freeze/settlement/CAS; no migration/prune/support-manifest runtime
 concept appears.
 
-**Budgets**: E5/R3. Caps: ≤2,500 source + ≤3,200 tests touched (≤5,700
-total). Expected net: source −1,400…−1,970, tests −1,900…−2,500.
+**Budgets**: E5/R3. Caps REVISED by contest #11: ≤3,200 source + ≤5,200
+tests touched (≤8,400 total). Expected net unchanged: strongly negative.
+
+## Contest #11 (budget, 2026-08-16) — GRANTED
+
+Engineer froze all edits at ~2,800 source / ~4,050 tests touched with bound
+work remaining (providers refresh/recovery latch conversion;
+gateway-providers.test.ts probe/two-factor test deletion; 10 stale service
+event fixtures; app-server probe deletion +9/−804 src, −1,274 tests) and
+contested rather than overrun silently. PM verification: the accepted
+design's own GROSS inventory (tests 3,800–4,900) already exceeded the
+original 3,200 test cap — the per-batch table and the gross numbers were in
+tension, ground truth wins. Old caps (≤2,500 src + ≤3,200 tests) were
+PM-set; retaining dead authority tests to fit them would fail the ticket.
+Ledger: 11/11 engineer-correct. Added SLICE READY requirement: touched-line
+accounting split into deleted-dead-authority / added-best-effort /
+added-rewritten-tests / emb-68 shim lines.
