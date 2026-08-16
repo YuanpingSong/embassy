@@ -4536,6 +4536,17 @@ test("a fresh selector claims retained evidence after the endpoint transition co
   assert.strictEqual(selected.endpointRefresh, observed.endpointRefreshes[0]);
   assert.equal(selected.state, "idle");
   assert.equal(refreshCalls, 1);
+  if (selected.endpointRefresh?.outcome !== "compatible") {
+    assert.fail("expected retained compatible endpoint evidence");
+  }
+  provider.releaseEndpointRefreshSelectorClaim(
+    selected.endpointRefresh.current.endpointGeneration,
+  );
+  const reclaimed = await provider.selectRoute({
+    alias: "codex-fresh@this-mac",
+    routeHandle: freshThread,
+  });
+  assert.strictEqual(reclaimed.endpointRefresh, selected.endpointRefresh);
   provider.acceptCompatibilityAttestation(
     selected.endpointRefresh!.attestation,
   );
@@ -4543,6 +4554,45 @@ test("a fresh selector claims retained evidence after the endpoint transition co
     provider.observeRouteSuccessionBarrier(freshThread).clean,
     true,
   );
+  await provider.close();
+});
+
+test("a live connector edge re-arms exhausted endpoint activation without timer spin", async () => {
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-rearm-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-rearm-generation-2",
+  );
+  const provider = codexProvider(firstFactory, {
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => observed.endpointRefreshes.length === 4, 2_000);
+  await new Promise<void>((resolve) => setTimeout(resolve, 300));
+  assert.equal(observed.endpointRefreshes.length, 4);
+
+  provider.rearmEndpointRefreshActivation(
+    secondFactory.endpointGeneration,
+  );
+  assert.equal(observed.endpointRefreshes.length, 5);
+  provider.acceptCompatibilityAttestation(
+    observed.endpointRefreshes.at(-1)!.attestation,
+  );
+  await new Promise<void>((resolve) => setTimeout(resolve, 300));
+  assert.equal(observed.endpointRefreshes.length, 5);
   await provider.close();
 });
 

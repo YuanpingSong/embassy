@@ -2977,6 +2977,28 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.compatibilityFailureCode = undefined;
   }
 
+  releaseEndpointRefreshSelectorClaim(endpointGeneration: string): void {
+    const event = this.pendingEndpointRefreshEvent;
+    if (
+      event?.current.endpointGeneration === endpointGeneration &&
+      this.pendingEndpointAttestation !== undefined
+    ) {
+      this.pendingEndpointRefreshSelectorClaimed = false;
+    }
+  }
+
+  rearmEndpointRefreshActivation(endpointGeneration: string): void {
+    const event = this.pendingEndpointRefreshEvent;
+    if (
+      event?.current.endpointGeneration === endpointGeneration &&
+      this.pendingEndpointAttestation !== undefined &&
+      !this.closing &&
+      !this.closed
+    ) {
+      this.publishEndpointRefresh(event);
+    }
+  }
+
   async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
     return await this.runCompatibilityProbesFor(this.factory);
   }

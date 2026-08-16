@@ -325,6 +325,10 @@ export interface GatewayProviderAdapter {
   acceptCompatibilityAttestation(
     attestation: CompatibilityAttestation,
   ): void;
+  /** Releases one selector claim after controller-side activation fails. */
+  releaseEndpointRefreshSelectorClaim?(endpointGeneration: string): void;
+  /** Re-publishes pending transition evidence on one observed recovery edge. */
+  rearmEndpointRefreshActivation?(endpointGeneration: string): void;
   initialize(callbacks: GatewayAdapterCallbacks): Promise<GatewayAdapterStart>;
   discoverClaudePeers?(): Promise<GatewayAdapterDiscoverySnapshot>;
   selectRoute(input: {
@@ -7832,6 +7836,11 @@ export class GatewayService {
       succeeded = true;
       return activationDeferred;
     } finally {
+      if (!succeeded && event.outcome === "compatible") {
+        adapter.releaseEndpointRefreshSelectorClaim?.(
+          event.current.endpointGeneration,
+        );
+      }
       if (
         ownsActiveTransition &&
         this.activeEndpointRefreshCallbackKey === transitionKey
@@ -8478,6 +8487,11 @@ export class GatewayService {
             ? "waiting"
             : "busy",
       );
+      if (previousState === "stale" && event.state !== "stale") {
+        adapter.rearmEndpointRefreshActivation?.(
+          binding.endpointGeneration,
+        );
+      }
     }
     if (event.state === "idle" || event.state === "stale") {
       const heldTimer = this.heldRedispatchTimers.get(alias);
