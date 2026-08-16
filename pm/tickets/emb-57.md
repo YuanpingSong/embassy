@@ -60,3 +60,13 @@ same-series stable builds. The north star's capability probes are the eventual d
 fence, not tonight's.
 
 Budget: size 2 / <=200 confirmed; concepts 0.
+
+## Test-window expansion (2026-08-16)
+
+**APPROVED**: fixture/expectation-only edits in exactly test/codex-local-transport.test.ts,
+test/gateway-dashboard.test.ts, test/gateway-providers.test.ts, test/gateway-service.test.ts —
+the eight failures are old-contract fixtures (0.148.0-as-same-series; prerelease-normalizes-to-
+unknown) contradicting the approved semantics; a suite must not assert both sides. Same-series
+fixtures move to 0.147.1; explicit unsupported-0.148 and incompatible-next-minor cases stay
+unchanged as the new contract's own assertions. No source expansion. Size 2 holds unless honest
+accounting says otherwise — re-contest at the number, as always.
