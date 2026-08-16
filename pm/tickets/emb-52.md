@@ -220,3 +220,9 @@ under a live pair, broker on this build) discovered two environmental truths and
 Ticket promises 1-3 are test-and-ablation proven within the retry envelope; promise 4 (truthful
 surfaces) was validated LIVE (stale-with-reason, alerts emitted, health honest). The release call —
 ship v1.6 with a scoped headline vs hold for emb-62 — is the founder's, queued for morning.
+
+## Backlog item 2 resolved (2026-08-16)
+
+The predicted timing-marginal flake fired in main's emb-59 post-rebase gate (measured 1,010.9ms /
+1,008.7ms vs the 1,000ms waitFor bound — zero margin, exactly as the bounded review flagged).
+Fix ruled and applied through emb-59's lane: waitFor widened to 2,000ms matching the adjacent test.
