@@ -30,3 +30,38 @@ any provider pair that holds a consent edge. Two-provider behavior unchanged
 asserted.
 
 **Budgets**: size 5. Sequenced after emb-67 lands its transport seam.
+
+## Contest #12 + four pre-cut bindings (2026-08-16, ruled before any edit)
+
+Engineer produced the required early remainder map from seven read-only
+seam passes and contested before cutting. CONTEST GRANTED: addition caps
+revised to ≤1,500 source + ≤1,800 tests added (headroom variant, one grant);
+deletions unbounded (~2,300–2,970 test deletions mapped, principally
+migration + compatibility-shadow suites); binding promise = strongly
+net-negative total. Ledger: 12/12.
+
+BINDINGS RULED:
+1. Provider universe owned HERE: canonical keys/order ["claude", "codex",
+   "deepseek", "grok"] (alphabetical); display names Claude/Codex/DeepSeek/
+   Grok Build; ingress prefixes codex-/dsh-/grok- (ingress convention only,
+   never provider proof; Claude unprefixed); 12 derived ordered directions.
+   emb-69 adds launch/adapter definitions only — no schema reopening.
+2. Native state: schemaVersion 2; role-neutral consentEdges (two canonical
+   endpoints {alias, provider, ownerLease} sorted by provider order then
+   alias; exact binding/host/lease match; distinct providers; reversed dupes
+   reject). Old state/pair rows/compat fields = ordinary
+   CORRUPT_GATEWAY_STATE, no rewrite (founder no-migration ruling; PM
+   hand-migrates the one real state file at upgrade). Runtime TTL/cap
+   pruning stays.
+3. Consent authority: legacy Claude/Codex pair/unpair arm byte-for-byte +
+   strict generic arm {aliases:[a,b], threadAttestation?}; generic pairing
+   is an explicit same-user control action (0600 control socket = same-user
+   proof); both routes registered/live/same-host/distinct-provider;
+   select-claude stays a wrapper.
+4. Claude return path owned HERE: helper registration/IPC seam generalized
+   to {sourceAlias, sourceProvider} for every process-owned source route —
+   an all-to-all edge universe lands together with the routability of its
+   claude-bound edges (Q7 honesty). Codex succession APIs stay
+   Codex-specific.
+
+Wire-change set + golden preservation list ratified as proposed.
