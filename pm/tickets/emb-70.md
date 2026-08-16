@@ -65,3 +65,24 @@ amended 5,200 → 6,000; source cap unchanged. Engineer re-froze on the stale
 grant rather than riding it — correct. Messages crossed once (delayed-echo
 class, retro item stands). RETRO RULE from this contest: de-ceremony batch
 caps are set from a frozen-lane remainder map, not from design-stage tables.
+
+## Adversarial hold + scope ruling A (2026-08-16)
+
+Main's challenger found residual live version authority the seam map had
+parked with emb-71 phase 2: LocalClaudeGatewayProvider passes
+runtime.claudeCodeVersion into ClaudePeerAdapter; claude-peer.ts rejects a
+different major at construction and filters registry records via
+sharesCompatibilityMajor — version-derived admission surviving in a ticket
+that promises none. Engineer held the freeze and asked for a ruling
+(cut at 3,041/3,200 source, 5,867/6,000 tests, 323 focused pass).
+
+RULED (A): narrow window expansion — claude-peer.ts (+ adapter call site if
+signature demands) + focused tests; delete EXACTLY the two version-trust
+checks; preserve peerProtocol:1 exact wire grammar (the real admission gate,
+KEEP-list), all identity/OS/socket/ownership checks, record schema
+validation. claudeCodeVersion keeps flowing as inert unverified metadata —
+sourcing/retention stays emb-71 phase 2's decision. SEAM RE-DRAW recorded:
+admission authority = emb-70; version-metadata sourcing = emb-71 phase 2.
+Expansion budget by remainder-map rule: ≤+300 src / ≤+500 tests without
+another round-trip (≤3,500 / ≤6,500 hard); over that, map first. The
+Codex-side user authorization explicitly covers these version-gate removals.
