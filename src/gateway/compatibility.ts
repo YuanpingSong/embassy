@@ -86,7 +86,8 @@ export interface CompatibilitySurfaceObserver {
   acceptCompatibilityAttestation?(attestation: CompatibilityAttestation): void;
 }
 
-const VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/;
+const VERSION_PATTERN =
+  /^(?=.{1,128}$)([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4})(?:-([0-9A-Za-z-]{1,64}(?:\.[0-9A-Za-z-]{1,64}){0,7}))?$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PERSISTED_PROBE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const PERSISTED_PROBE_CAPACITY = 32;
@@ -141,12 +142,46 @@ function unsupportedVersionCode(
   return exhaustive;
 }
 
-function versionMajor(version: string): number {
-  return Number(version.slice(0, version.indexOf(".")));
+function compatibilityVersionParts(version: string): Readonly<{
+  major: number;
+  minor: number;
+  prerelease: boolean;
+}> | undefined {
+  const match = VERSION_PATTERN.exec(version);
+  const prerelease = match?.[4];
+  if (
+    match === null ||
+    prerelease?.split(".").some(
+      (identifier) =>
+        /^[0-9]+$/.test(identifier) &&
+        identifier.length > 1 &&
+        identifier.startsWith("0"),
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    prerelease: prerelease !== undefined,
+  };
+}
+
+function isStableCompatibilityVersion(version: string): boolean {
+  return compatibilityVersionParts(version)?.prerelease === false;
+}
+
+function compatibilitySeries(version: string): string | undefined {
+  const parsed = compatibilityVersionParts(version);
+  if (parsed === undefined) return undefined;
+  return parsed.major === 0 ? `0.${parsed.minor}` : String(parsed.major);
 }
 
 export function isCompatibilityVersion(value: unknown): value is string {
-  return typeof value === "string" && VERSION_PATTERN.test(value);
+  return (
+    typeof value === "string" &&
+    compatibilityVersionParts(value) !== undefined
+  );
 }
 
 export function isCompatibilityVersionEvidence(value: unknown): value is string {
@@ -157,11 +192,8 @@ export function sharesCompatibilityMajor(
   left: string,
   right: string,
 ): boolean {
-  return (
-    isCompatibilityVersion(left) &&
-    isCompatibilityVersion(right) &&
-    versionMajor(left) === versionMajor(right)
-  );
+  const leftSeries = compatibilitySeries(left);
+  return leftSeries !== undefined && leftSeries === compatibilitySeries(right);
 }
 
 function hasCurrentProbeSequence(
@@ -274,11 +306,13 @@ export function evaluateCompatibilityAttestation(input: Readonly<{
       compatibilitySurfaceDefinitions.find(
         ({ surface }) => surface === input.surface,
       )?.required !== false) ||
-    input.certifiedVersions.some((version) => !VERSION_PATTERN.test(version))
+    input.certifiedVersions.some(
+      (version) => !isStableCompatibilityVersion(version),
+    )
   ) {
     throw new BridgeError(
       "COMPAT_CERTIFIED_SET_INVALID",
-      "The certified version inventory must be nonempty, unique, and bounded.",
+      "The certified version inventory must be nonempty, unique, stable, and bounded.",
     );
   }
   const normalizedProbes = normalizeProbes(input.surface, input.probes);
@@ -359,7 +393,7 @@ export function isPersistedCompatibilityAttestation(
     if (candidate.tier === "certified") {
       return (
         failed === undefined &&
-        candidate.version !== UNKNOWN_COMPATIBILITY_VERSION &&
+        isStableCompatibilityVersion(candidate.version as string) &&
         candidate.safeErrorCode === undefined
       );
     }
@@ -408,10 +442,14 @@ export function isCompatibilityAttestation(
 }
 
 export function compatibilityCoversWrites(
-  attestation: Pick<CompatibilityAttestation, "surface" | "tier" | "probes">,
+  attestation: Pick<
+    CompatibilityAttestation,
+    "surface" | "version" | "tier" | "probes"
+  >,
 ): boolean {
   return (
     attestation.surface === "codex" &&
+    isStableCompatibilityVersion(attestation.version) &&
     attestation.tier === "schema_attested" &&
     attestation.probes.some((probe) =>
       probe.name === "write_attestation" && probe.outcome === "pass"

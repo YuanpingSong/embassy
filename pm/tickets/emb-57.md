@@ -70,3 +70,23 @@ unknown) contradicting the approved semantics; a suite must not assert both side
 fixtures move to 0.147.1; explicit unsupported-0.148 and incompatible-next-minor cases stay
 unchanged as the new contract's own assertions. No source expansion. Size 2 holds unless honest
 accounting says otherwise — re-contest at the number, as always.
+## Implemented design decision (written before code)
+
+1. Compatibility version evidence accepts a bounded SemVer-style prerelease
+   suffix such as `-rc.1`; build metadata remains outside this ticket.
+   Certified inventories remain stable-version-only, so prerelease evidence can
+   never be `certified`.
+2. A prerelease on a supported compatibility series may reach
+   `schema_attested` after all required probes pass, but it remains monitor-only.
+   Even a passing optional write attestation cannot cover prerelease writes.
+   Failed probes and unsupported series remain `incompatible` under the existing
+   surface safe codes; no tier or error code is added.
+3. A compatibility series is the major number for versions at 1.x or later and
+   the `0.minor` pair for 0.x. Thus 2.1 and 2.2 share a series, as before;
+   0.147.0 and 0.147.1 share one; 0.147.x and 0.148.x do not. Exact certified
+   stable versions remain byte-identically `certified`.
+4. This is a waypoint toward capability-over-version, not new pin machinery.
+   emb-60 may raise stable same-tier authority when write capability is proven,
+   but it cannot launder prerelease, unknown-version, or cross-series evidence.
+   The accepted present cost is explicit: every Codex minor bump is monitor-only
+   until an Embassy release certifies that new 0.x series.

@@ -353,7 +353,7 @@ test("refresh candidate resolution preserves the monitor-only startup posture", 
   }
 });
 
-test("bounded non-numeric builds remain OS-attested but version-unknown without connecting", async () => {
+test("bounded prerelease builds remain OS-attested without connecting", async () => {
   const drifted = await installationFixture("0.148.0-alpha.1");
   try {
     for (const createFactory of [
@@ -371,12 +371,12 @@ test("bounded non-numeric builds remain OS-attested but version-unknown without 
           loginHome: () => drifted.home,
           spawn: () => {
             spawnCalls += 1;
-            throw new Error("version-unknown resolution must not connect");
+            throw new Error("prerelease resolution must not connect");
           },
         },
       );
-      assert.equal(candidate.appServerVersion, "unknown");
-      assert.equal(candidate.protocolVersion, "unknown");
+      assert.equal(candidate.appServerVersion, "0.148.0-alpha.1");
+      assert.equal(candidate.protocolVersion, "0.148.0-alpha.1");
       assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
       assert.equal(candidate.writableReady, false);
       assert.equal(candidate.writeCompatibility, null);

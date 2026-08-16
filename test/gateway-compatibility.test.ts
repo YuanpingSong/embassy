@@ -8,7 +8,9 @@ import {
   compatibilitySurfaceDefinitions,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
+  isCompatibilityVersion,
   isPersistedCompatibilityAttestation,
+  sharesCompatibilityMajor,
   UNKNOWN_COMPATIBILITY_VERSION,
   type CompatibilityProbeResult,
   type CompatibilitySurface,
@@ -41,6 +43,82 @@ test("an uncertified optional surface is incompatible without fake reference evi
   assert.equal(result.tier, "incompatible");
   assert.equal(result.safeErrorCode, "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE");
   assert.equal(isCompatibilityAttestation(result), true);
+});
+
+test("bounded prerelease evidence is schema-attested but permanently write-fenced", () => {
+  for (const version of [
+    "2.2.0-rc",
+    "2.2.0-rc.1",
+    "0.147.1-dev-20260816",
+  ]) {
+    assert.equal(isCompatibilityVersion(version), true);
+  }
+  for (const version of [
+    "2.2.0-",
+    "2.2.0-rc..1",
+    "2.2.0-01",
+    "2.2.0+build",
+    `2.2.0-${"a".repeat(129)}`,
+  ]) {
+    assert.equal(isCompatibilityVersion(version), false);
+  }
+
+  const attestation = evaluateCompatibilityAttestation({
+    surface: "codex",
+    version: "0.147.1-rc.1",
+    checkedAt: "2026-08-16T12:00:00.000Z",
+    certifiedVersions: ["0.147.0"],
+    probes: [
+      ...passing("codex"),
+      { name: "write_attestation", outcome: "pass" },
+    ],
+  });
+  assert.deepEqual(
+    [attestation.tier, attestation.safeErrorCode],
+    ["schema_attested", undefined],
+  );
+  assert.equal(isCompatibilityAttestation(attestation), true);
+  assert.equal(compatibilityCoversWrites(attestation), false);
+  assert.equal(isPersistedCompatibilityAttestation({ ...attestation, tier: "certified" }), false);
+  assert.throws(
+    () =>
+      evaluateCompatibilityAttestation({
+        ...attestation,
+        certifiedVersions: ["0.147.1-rc.1"],
+      }),
+    { message: /inventory must be .*stable/ },
+  );
+});
+
+test("0.x minors are major-equivalent compatibility series", () => {
+  assert.equal(sharesCompatibilityMajor("2.1.0", "2.99.0-rc.1"), true);
+  assert.equal(sharesCompatibilityMajor("0.147.0", "0.147.9-rc.1"), true);
+  assert.equal(sharesCompatibilityMajor("0.147.0", "0.148.0"), false);
+  assert.equal(sharesCompatibilityMajor("0.147.0", "invalid"), false);
+
+  const base = {
+    surface: "codex" as const,
+    checkedAt: "2026-08-16T12:00:00.000Z",
+    certifiedVersions: ["0.147.0"],
+    probes: passing("codex"),
+  };
+  assert.equal(
+    evaluateCompatibilityAttestation({ ...base, version: "0.147.0" }).tier,
+    "certified",
+  );
+  assert.equal(
+    evaluateCompatibilityAttestation({ ...base, version: "0.147.1" }).tier,
+    "schema_attested",
+  );
+  const nextMinor = evaluateCompatibilityAttestation({
+    ...base,
+    version: "0.148.0",
+  });
+  assert.deepEqual(
+    [nextMinor.tier, nextMinor.safeErrorCode],
+    ["incompatible", "CODEX_APP_SERVER_VERSION_UNSUPPORTED"],
+  );
+  assert.equal(isCompatibilityAttestation(nextMinor), true);
 });
 
 function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {
@@ -115,7 +193,7 @@ test("compatibility admission trusts only passing same-major probes beyond the c
 });
 
 test("v1.5 persistence accepts pass-only write evidence without widening authority", () => {
-  const input = { surface: "codex", version: "0.148.0", checkedAt: "2026-08-09T12:00:00.000Z",
+  const input = { surface: "codex", version: "0.147.1", checkedAt: "2026-08-09T12:00:00.000Z",
     certifiedVersions: ["0.147.0"] } as const;
   const writeAttested = evaluateCompatibilityAttestation({
     ...input,
