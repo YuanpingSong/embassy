@@ -246,6 +246,7 @@ export type DashboardCompatibilityCheckRow = Readonly<{
   testedVersion: string;
   supportedMajor: string;
   tier: CompatibilityTier;
+  writesCovered: boolean;
   checkedAt: string;
   failure?: string | undefined;
   safeErrorCode?: string | undefined;
@@ -1024,6 +1025,11 @@ function buildProjectedDashboardViewModel(
   const validPeers = arePublicAvailablePeerSnapshots(snapshot.availablePeers)
     ? snapshot.availablePeers
     : [];
+  const writesCoveredProviders = new Set(
+    (Array.isArray(snapshot.compatibilityChecks)
+      ? snapshot.compatibilityChecks.filter(isPublicCompatibilityCheckSnapshot)
+      : []).filter((check) => check.writesCovered).map((check) => check.surface),
+  );
   const quarantinedProviders = new Set<GatewayProvider>([
     ...snapshot.connectors
       .filter((connector) => connector.compatibility === "incompatible")
@@ -1279,6 +1285,7 @@ function buildProjectedDashboardViewModel(
         testedVersion: boundedText(attestation.testedVersion),
         supportedMajor: boundedText(attestation.supportedMajor),
         tier: attestation.tier,
+        writesCovered: attestation.writesCovered,
         checkedAt: attestation.checkedAt,
         ...(failed === undefined ? {} : { failure: failed.name }),
         ...(issue === undefined ? {} : { safeErrorCode: issue }),
@@ -1377,6 +1384,9 @@ function buildProjectedDashboardViewModel(
       .filter((alert) => alert.code !== "COMPATIBILITY_CERTIFICATION_FAILED")
       .map((alert): DashboardAttentionItem => {
         const code = safeCode(alert.code);
+        const providerWritesCovered =
+          (alert.provider === "claude" || alert.provider === "codex") &&
+          writesCoveredProviders.has(alert.provider);
         const route =
           code === "QUEUE_STALLED" && typeof alert.alias === "string"
             ? routeByAlias.get(alert.alias)
@@ -1412,10 +1422,14 @@ function buildProjectedDashboardViewModel(
               ? { queueDepth: route.queueDepth }
               : {}),
           guidance:
+            !providerWritesCovered &&
             alert.provider !== undefined &&
             quarantinedProviders.has(alert.provider)
               ? "provider_incompatible"
-              : guidanceFor(code, alert.provider),
+              : providerWritesCovered &&
+                  guidanceFor(code, alert.provider) === "provider_incompatible"
+                ? "degraded"
+                : guidanceFor(code, alert.provider),
         };
       }),
     allRoutes,
@@ -1554,14 +1568,15 @@ function buildProjectedDashboardViewModel(
       guidance:
         connector.health === "offline"
           ? "connector_offline"
-          : quarantinedProviders.has(connector.provider) ||
+          : !writesCoveredProviders.has(connector.provider) &&
+              (quarantinedProviders.has(connector.provider) ||
               connector.safeErrorCode === "CLAUDE_PEER_VERSION_UNSUPPORTED" ||
               connector.safeErrorCode === "CLAUDE_VERSION_UNPARSEABLE" ||
               connector.safeErrorCode === "CLAUDE_VERSION_CHECK_FAILED" ||
               connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_CONFLICT" ||
               connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_TOO_LARGE" ||
               connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNSUPPORTED" ||
-              connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNPARSEABLE"
+              connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNPARSEABLE")
             ? "provider_incompatible"
             : "degraded",
     });

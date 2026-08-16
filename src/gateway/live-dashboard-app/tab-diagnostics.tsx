@@ -237,7 +237,13 @@ namespace Embassy {
                   <td className="cell-mono">{check.version}</td>
                   <td className="cell-mono">{check.testedVersion}</td>
                   <td className="cell-mono">{check.supportedMajor}</td>
-                  <td>{t(`compatibilityTier.${check.tier}`)}</td>
+                  <td>
+                    {t(
+                      check.tier === "schema_attested" && check.writesCovered
+                        ? "compatibilityTier.schema_attested.writesCovered"
+                        : `compatibilityTier.${check.tier}`,
+                    )}
+                  </td>
                   <td>
                     <TimeAgo iso={check.checkedAt} />
                   </td>

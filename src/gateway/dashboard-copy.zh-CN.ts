@@ -286,6 +286,8 @@ export const dashboardCopyZhCn = {
   "diagnostics.failure": "失败项",
   "compatibilityTier.certified": "受支持",
   "compatibilityTier.schema_attested": "实时架构探测通过；本次发布未测试此构建",
+  "compatibilityTier.schema_attested.writesCovered":
+    "实时读写探测通过；本次发布未测试此构建",
   "compatibilityTier.incompatible": "不兼容",
   "diagnostics.registry.title": "注册表观察",
   "diagnostics.registry.entriesScanned": "已扫描条目",

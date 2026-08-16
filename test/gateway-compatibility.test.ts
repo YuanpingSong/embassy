@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   compatibilityCacheKey,
+  compatibilityCoversWrites,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
@@ -17,6 +18,27 @@ function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {
     name,
     outcome: "pass",
   }));
+}
+
+// Frozen, row-focused copy of the v1.5 persisted-attestation contract.
+function v15AcceptsPersistedWriteEvidence(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).sort().join(",") !== "checkedAt,probes,schemaVersion,surface,tier,version") return false;
+  const probes = Array.isArray(row.probes) ? row.probes : [];
+  const checkedAt = typeof row.checkedAt === "string" ? row.checkedAt : "";
+  const names = probes.map((probe) => typeof probe === "object" && probe !== null && !Array.isArray(probe)
+    ? (probe as Record<string, unknown>).name : undefined);
+  return row.schemaVersion === 1 && row.surface === "codex" && row.tier === "schema_attested" &&
+    typeof row.version === "string" && /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/.test(row.version) &&
+    Number.isFinite(Date.parse(checkedAt)) && new Date(Date.parse(checkedAt)).toISOString() === checkedAt &&
+    probes.length > 0 && probes.length <= 32 && new Set(names).size === probes.length &&
+    probes.every((probe) => {
+      if (typeof probe !== "object" || probe === null || Array.isArray(probe)) return false;
+      const item = probe as Record<string, unknown>;
+      return Object.keys(item).sort().join(",") === "name,outcome" && typeof item.name === "string" &&
+        /^[a-z][a-z0-9_]{0,63}$/.test(item.name) && item.outcome === "pass";
+    });
 }
 
 test("compatibility admission trusts only passing same-major probes beyond the certified inventory", () => {
@@ -60,6 +82,40 @@ test("compatibility admission trusts only passing same-major probes beyond the c
     assert.equal(isCompatibilityAttestation(result), true);
     assert.equal(compatibilityCacheKey(result), `claude\0${version}`);
   }
+});
+
+test("v1.5 persistence accepts pass-only write evidence without widening authority", () => {
+  const input = { surface: "codex", version: "0.148.0", checkedAt: "2026-08-09T12:00:00.000Z",
+    certifiedVersions: ["0.147.0"] } as const;
+  const writeAttested = evaluateCompatibilityAttestation({
+    ...input,
+    probes: [...passing("codex"), { name: "write_attestation", outcome: "pass" }],
+  });
+  assert.deepEqual(
+    [writeAttested.tier, compatibilityCoversWrites(writeAttested), isCompatibilityAttestation(writeAttested)],
+    ["schema_attested", true, true],
+  );
+  assert.equal(v15AcceptsPersistedWriteEvidence(writeAttested), true);
+  assert.equal(v15AcceptsPersistedWriteEvidence({ ...writeAttested, writesCovered: true }), false);
+  assert.equal(isCompatibilityAttestation({
+    ...writeAttested, probes: [...passing("codex"), { name: "unknown" as never, outcome: "pass" }],
+  }), false);
+  assert.equal(compatibilityCoversWrites({ ...writeAttested, tier: "incompatible" }), false);
+  assert.throws(
+    () =>
+      evaluateCompatibilityAttestation({
+        ...input,
+        probes: [
+          ...passing("codex"),
+          {
+            name: "write_attestation",
+            outcome: "fail",
+            safeErrorCode: "CODEX_WRITE_PROBE_FAILED",
+          },
+        ],
+      }),
+    { message: /known passing optional probes/ },
+  );
 });
 
 test("persisted compatibility evidence is release-invariant but remains strict", () => {

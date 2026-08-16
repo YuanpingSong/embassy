@@ -35,8 +35,14 @@ export const compatibilityProbeNames = {
   ],
 } as const;
 
+const compatibilityOptionalProbeNames = {
+  claude: [],
+  codex: ["write_attestation"],
+} as const satisfies Readonly<Record<CompatibilitySurface, readonly string[]>>;
+
 export type CompatibilityProbeName =
-  (typeof compatibilityProbeNames)[CompatibilitySurface][number];
+  | (typeof compatibilityProbeNames)[CompatibilitySurface][number]
+  | (typeof compatibilityOptionalProbeNames)[CompatibilitySurface][number];
 
 export type CompatibilityProbeResult = Readonly<{
   name: CompatibilityProbeName;
@@ -114,16 +120,32 @@ export function sharesCompatibilityMajor(
   );
 }
 
+function hasCurrentProbeSequence(
+  surface: CompatibilitySurface,
+  probes: readonly CompatibilityProbeResult[],
+): boolean {
+  const required = compatibilityProbeNames[surface] as readonly string[];
+  const optional = compatibilityOptionalProbeNames[surface] as readonly string[];
+  const suffix = probes.slice(required.length);
+  return !(
+    probes.length < required.length ||
+    probes.length > required.length + optional.length ||
+    required.some((name, index) => probes[index]?.name !== name)
+  ) && suffix.every((probe, index) =>
+    optional.indexOf(probe.name) >
+      optional.indexOf(suffix[index - 1]?.name ?? "") &&
+    probe.outcome === "pass" && probe.safeErrorCode === undefined
+  );
+}
+
 function normalizeProbes(
   surface: CompatibilitySurface,
   probes: readonly CompatibilityProbeResult[],
 ): readonly CompatibilityProbeResult[] {
-  const required = compatibilityProbeNames[surface];
   if (
-    probes.length !== required.length ||
+    !hasCurrentProbeSequence(surface, probes) ||
     probes.some(
-      (probe, index) =>
-        probe.name !== required[index] ||
+      (probe) =>
         (probe.outcome !== "pass" && probe.outcome !== "fail") ||
         (probe.safeErrorCode !== undefined &&
           !SAFE_CODE_PATTERN.test(probe.safeErrorCode)) ||
@@ -133,7 +155,7 @@ function normalizeProbes(
   ) {
     throw new BridgeError(
       "COMPAT_PROBE_SET_INVALID",
-      "Compatibility probes must contain the exact ordered surface probe set.",
+      "Compatibility probes must contain the exact ordered surface probe set plus known passing optional probes.",
     );
   }
   return probes.map((probe) => Object.freeze({ ...probe }));
@@ -315,11 +337,7 @@ export function isCompatibilityAttestation(
   value: unknown,
 ): value is CompatibilityAttestation {
   if (!isPersistedCompatibilityAttestation(value)) return false;
-  const required = compatibilityProbeNames[value.surface];
-  if (
-    value.probes.length !== required.length ||
-    value.probes.some((probe, index) => probe.name !== required[index])
-  ) {
+  if (!hasCurrentProbeSequence(value.surface, value.probes)) {
     return false;
   }
   if (value.tier === "certified") {
@@ -337,6 +355,18 @@ export function isCompatibilityAttestation(
   return (
     !certifiedCompatibilityVersions[value.surface].includes(value.version) &&
     unsupportedVersionCode(value.surface, value.version) === undefined
+  );
+}
+
+export function compatibilityCoversWrites(
+  attestation: Pick<CompatibilityAttestation, "surface" | "tier" | "probes">,
+): boolean {
+  return (
+    attestation.surface === "codex" &&
+    attestation.tier === "schema_attested" &&
+    attestation.probes.some((probe) =>
+      probe.name === "write_attestation" && probe.outcome === "pass"
+    )
   );
 }
 

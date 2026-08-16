@@ -5639,7 +5639,7 @@ test("automatic compatibility evidence is strict, persistent, keyed by surface a
   await recovered.close();
 });
 
-test("persisted compatibility tiers survive release inventory changes while malformed evidence fails closed", async () => {
+test("current persistence loads optional write evidence while malformed evidence fails closed", async () => {
   const { store, config } = await fixture();
   await store.initialize();
   const passingProbes = compatibilityProbeNames.claude.map((name) => ({
@@ -5660,6 +5660,19 @@ test("persisted compatibility tiers survive release inventory changes while malf
     certifiedVersions: ["2.1.226"],
     probes: passingProbes,
   });
+  const writeAttested = evaluateCompatibilityAttestation({
+    surface: "codex",
+    version: "0.148.0",
+    checkedAt: "2026-08-09T12:02:00.000Z",
+    certifiedVersions: certifiedCompatibilityVersions.codex,
+    probes: [...compatibilityProbeNames.codex.map((name) => ({
+      name,
+      outcome: "pass" as const,
+    })),
+      { name: "write_attestation", outcome: "pass" },
+    ],
+  });
+  assert.equal("writesCovered" in writeAttested, false);
   for (const releaseRelative of [decertifiedLater, certifiedLater]) {
     await assert.rejects(
       store.recordCompatibilityAttestation(releaseRelative),
@@ -5678,7 +5691,7 @@ test("persisted compatibility tiers survive release inventory changes while malf
   const persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
     compatibilityAttestations: Array<Record<string, unknown>>;
   };
-  persisted.compatibilityAttestations = [historicalCertified, certifiedLater];
+  persisted.compatibilityAttestations = [historicalCertified, certifiedLater, writeAttested];
   await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
     mode: 0o600,
   });
@@ -5687,7 +5700,7 @@ test("persisted compatibility tiers survive release inventory changes while malf
   await recovered.initialize();
   assert.deepEqual(
     await recovered.inspectCompatibilityAttestations(),
-    [historicalCertified, certifiedLater],
+    [historicalCertified, certifiedLater, writeAttested],
   );
   await recovered.close();
   const recoveredBytes = await readFile(store.stateFilePath, "utf8");

@@ -1526,6 +1526,7 @@ test("diagnosticsProps forwards automatic provider compatibility rows", () => {
       testedVersion: "2.1.227",
       supportedMajor: "2",
       tier: "certified",
+      writesCovered: false,
       checkedAt: "2026-08-09T12:00:00.000Z",
     },
     {
@@ -1534,6 +1535,7 @@ test("diagnosticsProps forwards automatic provider compatibility rows", () => {
       testedVersion: "0.147.0",
       supportedMajor: "0",
       tier: "schema_attested",
+      writesCovered: false,
       checkedAt: "2026-08-09T12:00:01.000Z",
       failure: "thread/loaded/list",
       safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",

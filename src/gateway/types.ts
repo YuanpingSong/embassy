@@ -4,6 +4,7 @@ import type {
 } from "./progress-watch-machine.js";
 import {
   certifiedCompatibilityVersions,
+  compatibilityCoversWrites,
   isCompatibilityAttestation,
   type CompatibilityAttestation,
   type CompatibilitySurface,
@@ -395,6 +396,7 @@ export type PublicCompatibilityCheckSnapshot = CompatibilityAttestation &
   Readonly<{
     testedVersion: string;
     supportedMajor: string;
+    writesCovered: boolean;
   }>;
 
 function publicCompatibilityReference(
@@ -421,6 +423,7 @@ export function projectPublicCompatibilityCheck(
     ...attestation,
     probes: attestation.probes.map((probe) => ({ ...probe })),
     ...reference,
+    writesCovered: compatibilityCoversWrites(attestation),
   };
 }
 
@@ -432,14 +435,17 @@ export function isPublicCompatibilityCheckSnapshot(
   if (
     !Object.hasOwn(candidate, "testedVersion") ||
     !Object.hasOwn(candidate, "supportedMajor") ||
+    !Object.hasOwn(candidate, "writesCovered") ||
     typeof candidate.testedVersion !== "string" ||
-    typeof candidate.supportedMajor !== "string"
+    typeof candidate.supportedMajor !== "string" ||
+    typeof candidate.writesCovered !== "boolean"
   ) {
     return false;
   }
   const {
     testedVersion: _testedVersion,
     supportedMajor: _supportedMajor,
+    writesCovered: _writesCovered,
     ...attestation
   } = candidate;
   if (!isCompatibilityAttestation(attestation)) return false;
@@ -447,7 +453,8 @@ export function isPublicCompatibilityCheckSnapshot(
   return (
     reference !== undefined &&
     candidate.testedVersion === reference.testedVersion &&
-    candidate.supportedMajor === reference.supportedMajor
+    candidate.supportedMajor === reference.supportedMajor &&
+    candidate.writesCovered === compatibilityCoversWrites(attestation)
   );
 }
 
