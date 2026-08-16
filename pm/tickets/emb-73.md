@@ -3,7 +3,7 @@ id: emb-73
 title: v1.8 — first-principles core rebuild to a 20k-line budget
 kind: design
 size: 8
-status: dispatched
+status: landed
 release: v1.8
 updated: 2026-08-16
 ---
@@ -79,3 +79,37 @@ fix + orphan detector) so diagnostics are truthful until this lands.
 land this in v1.8 on top of the broader simplification work." The stateless
 Codex transport is bound as v1.8's first implementation slice; the design
 phase must produce it first and the rest of the rebuild composes around it.
+
+## Design ACCEPTED (2026-08-16 late) — full report on conv_jyZwrs34mRmBd4R-z6fPqRBo
+## and /private/tmp/emb73-design-report.md
+
+Three primitives: durable logical routes + consent edges; ONE message/attempt
+state machine (queued→reserved→armed→accepted→terminal; authorization commit
+= consent linearization; reserved loss retries, armed loss ambiguous, no
+auto-replay); small per-operation transports with ALL provider I/O outside
+the durable commit lane (the hard rule that kills the emb-75 starvation
+class architecturally). Stateless Codex = first slice and forcing function.
+Budget table VERIFIED: sums 18,850 hard (1,150 under the 20k mandate) /
+13,000 stretch from current 37,817. Self-policing fences: no WAL/database/
+actor framework/generic transactions/capability registry. v1.9 constraint
+honored (federation = address + transport on the kernel; peer ingress reuses
+it; no second scheduler/mailbox). State v3 with one release-owned OFFLINE
+v2→v3 converter (broker stopped), runtime accepts only v3; validation =
+decode once, re-attest late. Landing: conformance-before-rewrite, golden
+fixtures preclassified HOLD/INTENTIONAL/DELETE, staged R3→R4, deterministic
+90s-pause headline test, separately-itemized live drill.
+
+GATES RULED: (1) narrow doctrine amendment APPROVED — boot + fixed 15s-timer
+exact-UUID Claude reobservation, observation-only connections fenced exactly
+as proposed (never send/pair/approve/credentials/history; bounded; failure
+projects unobserved) — grounded in the founder's explicit "your route should
+not go stale" directive; flagged for founder ratification in the summary.
+(2) split-brain live matrix (Desktop dead / attached / private-server) =
+landing-drill item under PM standing restart authority, itemized per
+operation; if the private-server case cannot resume, queue/defer with the
+existing thread-not-observed code — never certification, never discovering
+an untrusted socket.
+
+Sequencing: implementation lands after emb-75/v1.7.1. Stage 1+2+3
+(fixtures, test-only conformance suite, stateless Codex inactive behind the
+current seam) ticketed as emb-76 → main.
