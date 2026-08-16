@@ -4,7 +4,7 @@ title: DeepSeek harness monitor-only attestation (Shape A)
 kind: normal
 size: 3
 status: review
-release: v1.7
+release: v1.6
 updated: 2026-08-16
 ---
 

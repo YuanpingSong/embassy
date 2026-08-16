@@ -4,15 +4,24 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.6.0] - 2026-08-16
+
+### Fixed
+
+- An App Server restart no longer wedges Codex routes until the broker is restarted: endpoint-transition evidence survives to be claimed once by a later selector, queued message contexts migrate their binding keys across the transition, already-published evidence can never be republished under a divergent key, and one observed stale-to-healthy recovery edge re-arms an exhausted transition — recovery listens for reality instead of retrying into silence.
+- Stale Codex guidance now distinguishes the automatic endpoint transition from a Desktop app or task that has not reconnected after the recovery burst, and gives the exact managed-daemon relaunch command. The quickstart documents Desktop's attach-at-launch precondition.
 
 ### Added
 
 - Codex compatibility now includes an optional write-attestation probe that may create at most one disposable broker-owned thread per attempt under a bounded write fence, never touches user threads, and archives every created probe thread with loaded-set cleanup confirmed. It grants no authority by itself. The probe resolves the pinned model's lowest advertised effort; whenever that model/effort pin cannot resolve, it declines in a zero-spend fail-safe before creating any thread or model turn.
+- The evidence ladder records which authority its probes covered: passing write attestation appears as optional probe evidence and a derived writes-covered marker on the diagnostics table — downgrade-safe, never persisted as a new field, unlocking nothing by itself.
+- Compatibility surfaces may now be optional: a declared-but-absent surface boots quietly and renders as "Not detected" instead of failing the broker, and the diagnostics capacity derives from the declared surface set so a third surface can never be silently truncated.
+- A locally installed DeepSeek harness (dsh) is detected and shown on the diagnostics table — attested executable and harness home, one bounded closed-environment --version read, never launched, never routed, credentials provably untouched — rendered honestly as unknown/incompatible until a stable release is certified.
+- Version evidence accepts bounded SemVer prerelease suffixes and represents them honestly: a prerelease on a supported series can earn schema_attested but remains monitor-only forever, and 0.x compatibility series are per-minor — a Codex minor bump stays monitor-only until an Embassy release certifies the new series.
 
-### Fixed
+### Changed
 
-- Stale Codex guidance now distinguishes the automatic endpoint transition from a Desktop app or task that has not reconnected after the recovery burst, and gives the exact managed-daemon relaunch command. The quickstart documents Desktop's attach-at-launch precondition.
+- Every published claim that bounded Codex reads "never invoke turn/start" was replaced across all surfaces and both languages with the precise truth: ordinary reads remain read-only; the optional write-attestation probe alone may create one fenced disposable thread, and only it may archive that thread.
 
 ## [1.5.0] - 2026-08-11
 

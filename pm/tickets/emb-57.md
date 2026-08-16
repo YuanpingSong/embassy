@@ -4,7 +4,7 @@ title: Version semantics: prerelease identifiers and 0.x majors
 kind: normal
 size: 2
 status: review
-release: v1.7
+release: v1.6
 updated: 2026-08-16
 ---
 
