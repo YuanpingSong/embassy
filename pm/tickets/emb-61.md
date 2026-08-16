@@ -545,3 +545,9 @@ PM recommendations on the seven founder questions:
 6. DeepSeek registration prefix: require `deepseek-` at registration, mirroring the codex- asymmetry.
 7. First routable slice: DeepSeek↔Codex ONLY, Claude-ingress gate stays shut (concur) — the
    existing fail-closed fence is a gift; opening it is its own later decision.
+
+## Release-shape note (2026-08-16)
+
+The visibility slice (emb-55/56/57) ships in v1.6.0 — the night's tree was gated and soaked as one
+unit and a tag split would have required reordering interdependent cherry-picks (57's fixtures sit
+under 59's diff base). v1.7 remains THIS ticket's milestone: the routable DeepSeek provider.
