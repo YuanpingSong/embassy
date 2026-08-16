@@ -3,7 +3,7 @@ id: emb-52
 title: Runtime re-anchor must outlive the endpoint transition
 kind: normal
 size: 5
-status: dispatched
+status: building
 release: v1.6
 updated: 2026-08-16
 ---
@@ -38,3 +38,19 @@ Handoff per house protocol: declared file list, evidence per promise, and the fu
 verdict printed as a value. Liveness confirmed this conversation (READY, conv_2ziJHYk0eS3_7oX3wL28TRts).
 PM runs the live drill at landing (daemon kill+restart under the live pair) under founder-granted
 restart authority.
+
+## Contest and ruling (2026-08-16)
+
+**Contest (swe3, before any edit)**: the dispatched scope contract excluded the transition owner.
+Re-verified against HEAD: the freeze/track logic (providers.ts:3880-4010, after the 250ms recovery
+timer at :3720-3815), the same-generation CHURN wall (providers.ts:4027-4133), and the only
+transition-surviving evidence (`pendingEndpointRefreshEvent`, providers.ts:2827, 3998-4007,
+4193-4268) all live in `src/gateway/providers.ts`; `service.ts` only consumes the callback.
+Budget claim unchanged: E5, no new user-facing concepts.
+
+**Ruling: ACCEPTED, immediately.** PM spot-check confirms the anchors (CHURN: 3 sites in
+providers.ts vs 1 consumer site in service.ts; the refresh event is a providers.ts private field).
+The scope contract now includes `src/gateway/providers.ts` and names `test/gateway-providers.test.ts`
+explicitly (already covered by test/**). Budgets unchanged. The error was the PM's: the window was
+drawn from the retro trace's consumer-site line number — the exact stale-evidence failure the ticket's
+own Background warned about. Contest quality: exactly what the channel exists for.
