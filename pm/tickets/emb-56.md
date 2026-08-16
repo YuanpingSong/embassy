@@ -85,3 +85,18 @@ honest quarantine is compatible with any answer it produces.
 
 **Budget**: size 3 stands; if the honest implementation exceeds 500, report the actual per the
 emb-59 ground-truth precedent — expected to fit.
+
+## Landing review finding (2026-08-16) — one bounded correction
+
+PM read: detector, empty-set handling, observer seam, credential-boundary tests all exemplary;
+budget 574/500 accepted as declared ground truth under the certified-set ruling's clause.
+
+**Finding (blocking, single)**: the boot call site (server.ts:536) awaits detectDeepSeekSurface with
+no enclosing catch, and the detector rethrows non-ENOENT lstat errors (its correct unit contract) —
+so one EACCES PATH directory or dangling mount aborts broker boot. An OPTIONAL surface must never
+prevent boot (emb-55 doctrine; same never-throw class as the codex probe rulings).
+
+**Correction ruled**: catch at the boot call site → treat detector failure as undefined (surface
+renders "Not detected" — honest: no attestable installation was observed) with a bounded warning
+alert if cheap; keep the detector's internal rethrow semantics. Plus one focused test: hostile
+EACCES PATH entry → broker boots, neutral row renders. Then re-run the authoritative pair.
