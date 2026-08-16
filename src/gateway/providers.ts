@@ -2675,6 +2675,7 @@ type CodexEndpointRefreshResult = {
   event: GatewayAdapterEndpointRefresh;
   delivery: "callback" | "selector";
   selectorClaimed: boolean;
+  published: boolean;
 };
 
 function codexVersionFailureCode(version: string): string | undefined {
@@ -2827,6 +2828,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private pendingEndpointRefreshEvent:
     | Extract<GatewayAdapterEndpointRefresh, { outcome: "compatible" }>
     | undefined;
+  private pendingEndpointRefreshSelectorClaimed = false;
   private initialized = false;
   private closing = false;
   private closed = false;
@@ -2937,6 +2939,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     if (attestation.tier === "incompatible") {
       this.pendingEndpointAttestation = undefined;
       this.pendingEndpointRefreshEvent = undefined;
+      this.pendingEndpointRefreshSelectorClaimed = false;
       this.clearEndpointActivationRetry();
       this.compatibilityAttested = false;
       this.endpointUnavailable = true;
@@ -2967,6 +2970,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
+    this.pendingEndpointRefreshSelectorClaimed = false;
     this.clearEndpointActivationRetry();
     this.compatibilityAttested = writableCertified;
     this.endpointUnavailable = !writableCertified;
@@ -3154,10 +3158,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       }
     };
 
+    const retainedEndpointRefresh = this.retainedEndpointRefreshResult();
     if (this.endpointRefresh !== undefined) {
       route = await stageRefreshedRoute(
         await this.refreshEndpoint("selector"),
       );
+    } else if (retainedEndpointRefresh !== undefined) {
+      route = await stageRefreshedRoute(retainedEndpointRefresh);
     } else if (
       this.endpointUnavailable &&
       this.pendingEndpointAttestation === undefined
@@ -3463,6 +3470,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.routesRequiringRecovery.clear();
     this.clearEndpointActivationRetry();
     this.pendingEndpointRefreshEvent = undefined;
+    this.pendingEndpointRefreshSelectorClaimed = false;
     this.pendingEndpointAttestation = undefined;
     const refreshResult =
       this.endpointRefresh === undefined
@@ -3501,6 +3509,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.callbackQueue.length = 0;
     this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
+    this.pendingEndpointRefreshSelectorClaimed = false;
     this.trackedRoutes.clear();
     this.routeAliases.clear();
     this.expectsReply.clear();
@@ -3850,6 +3859,26 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     );
   }
 
+  private retainedEndpointRefreshResult():
+    | CodexEndpointRefreshResult
+    | undefined {
+    const event = this.pendingEndpointRefreshEvent;
+    if (
+      event === undefined ||
+      this.pendingEndpointRefreshSelectorClaimed ||
+      this.pendingEndpointAttestation === undefined ||
+      event.current.endpointGeneration !== this.factory.endpointGeneration
+    ) {
+      return undefined;
+    }
+    return {
+      event,
+      delivery: "selector",
+      selectorClaimed: false,
+      published: true,
+    };
+  }
+
   private async refreshEndpoint(
     delivery: "callback" | "selector",
   ): Promise<CodexEndpointRefreshResult | undefined> {
@@ -3903,6 +3932,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         this.compatibilityAttested = false;
         this.pendingEndpointAttestation = undefined;
         this.pendingEndpointRefreshEvent = undefined;
+        this.pendingEndpointRefreshSelectorClaimed = false;
         for (const routeHandle of this.trackedRoutes) {
           this.routesRequiringRecovery.add(routeHandle);
         }
@@ -3916,7 +3946,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
           },
           delivery: "callback",
           selectorClaimed: true,
+          published: false,
         };
+        result.published = true;
         this.emitEndpointRefresh(result.event);
         for (const routeHandle of this.routesRequiringRecovery) {
           if (this.trackedRoutes.has(routeHandle)) {
@@ -3997,12 +4029,15 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         },
         delivery: this.endpointRefreshDelivery ?? "callback",
         selectorClaimed: false,
+        published: false,
       };
       if (result.event.outcome === "compatible") {
         this.pendingEndpointRefreshEvent = result.event;
+        this.pendingEndpointRefreshSelectorClaimed = false;
       }
       if (result.delivery === "callback") {
         result.selectorClaimed = true;
+        result.published = true;
         this.publishEndpointRefresh(result.event);
       }
       for (const routeHandle of this.routesRequiringRecovery) {
@@ -4164,6 +4199,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       return false;
     }
     result.selectorClaimed = true;
+    if (this.pendingEndpointRefreshEvent === result.event) {
+      this.pendingEndpointRefreshSelectorClaimed = true;
+    }
     return true;
   }
 
@@ -4172,6 +4210,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     staleRouteHandle?: string,
   ): void {
     if (result.delivery !== "selector" || !result.selectorClaimed) return;
+    if (result.published) return;
     let event = result.event;
     if (
       staleRouteHandle !== undefined &&
@@ -4187,6 +4226,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       result.event = event;
       this.pendingEndpointRefreshEvent = event;
     }
+    result.published = true;
     this.publishEndpointRefresh(event);
   }
 
