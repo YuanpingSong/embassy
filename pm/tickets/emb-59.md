@@ -78,3 +78,27 @@ only the GatewayProviderAdapter compatibility-probe interface/context and
 runAutomaticCompatibilityProbesLocked. swe3 (emb-62) owns: route recovery, endpoint-transition,
 dispatch, and delivery-settlement neighborhoods. Neither enters the other's symbols; any collision
 stops and contests through the PM. Landing order decided by the PM at handoff time.
+
+## Budget contest and rulings (2026-08-16, contest #11)
+
+**Contest**: the design's ~520-source-line estimate is unattainable without dropping promises —
+typechecking skeleton is +1,019/-7 (connector +667 vs ~260 predicted), with the delta itemized as
+required behavior (create/turn correlation, preflight pin/rate parsing, fail-closed fences, cleanup
+proofs, ambiguous-create handling, owned-cwd attestation) that the offline schema resolution and
+post-design PM rulings made concrete.
+
+**Ruling 1 — budget REVISED, promises intact.** The estimate was made before ground truth; the
+promise set is what the founder ordered and appetite strips what a promise doesn't need, never what
+it does. Ticket stays size 5 (5 = negotiated subsystem budget); the negotiated line budget becomes
+**smallest reviewed implementation, target ≤1,050 source lines post-diet**, diet after correctness,
+SLICE READY reports actual against this number. Estimation lesson recorded: line estimates made
+before schema/ruling ground truth carry a multiplier — future design-pass estimates get re-priced
+at implementation dispatch.
+
+**Ruling 2 — cardinality bound APPROVED as proposed**: fixed 16-tuple process cap on the one-shot
+(version, generation) maps, mirroring compatibility evidence capacity; NEVER evict (eviction would
+permit a duplicate probe — the one-shot property is load-bearing); the 17th distinct tuple returns
+a frozen THREAD_SETUP failure without creating a thread. No persisted or public concept.
+
+**Acknowledged in-scope fixes**: accept schema-required non-null collaborationMode in
+thread/settings/updated; preserve THREAD_SETUP (not TOOL_ACTIVITY) when mkdtemp never created a cwd.
