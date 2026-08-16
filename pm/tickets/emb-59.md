@@ -3,13 +3,14 @@ id: emb-59
 title: Bounded Codex write probe (49B): records evidence, unlocks nothing
 kind: sensitive
 size: 5
-status: draft
+status: dispatched
+release: v1.6
 updated: 2026-08-16
 ---
 
-## Binding — HELD FOR FOUNDER (see emb-49 acceptance ruling)
+## Binding
 
-**Founder question this ticket waits on**: the probe thread is created in the user's own Codex and archive likely moves rather than erases (1,302 entries in ~/.codex/archived_sessions on this machine) — is one durable archived probe thread per Codex version acceptable? If no, this shape is unshippable and write authority stays release-pinned.
+**Founder ruling (2026-08-16)**: the durable-artifact question was put to the founder and answered — "acceptable." One archived probe thread per Codex version may remain in history. Token consumption for probing: "immaterial" (founder, same date).
 
 **Why**: a passing bounded write probe is the only evidence class that can legitimately cover turn/start authority (design law 3). This ticket produces and records that evidence — and deliberately does not unlock anything.
 
