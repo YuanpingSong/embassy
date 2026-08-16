@@ -3,7 +3,7 @@ id: emb-68
 title: N-provider generalization — all-to-all routing, unified native state, from/to-provider surfaces
 kind: normal
 size: 5
-status: dispatched
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -65,3 +65,35 @@ BINDINGS RULED:
    Codex-specific.
 
 Wire-change set + golden preservation list ratified as proposed.
+
+## Landed (2026-08-16)
+
+SLICE READY at lane HEAD b298abb on declared base 9883b24 (= dev tip);
+accounting verified to the digit: source +1,500/−3,934 (additions exactly at
+the 1,500 cap), tests +1,726/−2,833 (1,726/1,800), 54 files, NET −3,541.
+PM review: all four pre-cut bindings verified in the gate tree — (1)
+gatewayProviders ["claude","codex","deepseek","grok"] + frozen exhaustive
+ingress-prefix table {claude:undefined, codex-, dsh-, grok-}; (2) state
+schemaVersion 2 with lease-bound consentEdges and ordinary strict-parse
+rejection of old state (the surviving schemaVersion:1 is the succession
+journal's own record — different concept, untouched); (3) legacy pair arm
+byte-preserved beside the strict generic arm; (4) helper protocol carries
+{alias, sourceProvider} with exact-key validation. Provenance envelope
+refactored to the frozen recipient-profile table (satisfies-exhaustive) with
+sourceProvider/recipientProvider replacing the binary direction and the
+additive from-provider attribute. compatibility.ts reduced 474→53 lines
+(metadata helpers only); all emb-68 shims deleted. Engineer-side: three R4
+adversarial rounds GO with named corrections (owner-lease retention on
+pre-teardown replies, non-Claude alias-reuse rejection, Claude-only
+available-peer validation, live-only UI pairing candidates); soak caught a
+stale test fake exposing retired helper methods — fake corrected, final pair
+green. PM gate: isolated worktree at b298abb, check 735 pass / 0 fail
+(752→735 = −17 net tests), soak 1/0 (1,200 randomized iterations, every
+accepted message terminally accounted exactly once). Landed as one commit
+from the frozen patch (SHA 06fdaaed…).
+
+RELEASE RUNBOOK NOTE: at v1.7.0 upgrade time the machine's live state file
+(~/.local/state/agent-embassy/gateway-state.json, schema v1) becomes
+unreadable by the new binary BY DESIGN. Hand-migration options at drill
+time: write the v2 shape from v1 content, or fresh state + re-register +
+re-pair (minutes, and exercises the registration paths live). Decide then.
