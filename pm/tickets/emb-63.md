@@ -3,7 +3,7 @@ id: emb-63
 title: Stale-route guidance names the actual blocker (waiting for Codex app)
 kind: normal
 size: 2
-status: draft
+status: dispatched
 release: v1.6
 updated: 2026-08-16
 ---
@@ -24,3 +24,7 @@ may not.
    command.
 
 **Budgets**: size 2; concepts: at most one new guidance kind. Tests: happy path + rendered-state check.
+
+## Dispatch note (2026-08-16)
+
+Dispatched to swe3, queued behind emb-62. Scope contract: src/gateway/dashboard-model.ts, dashboard copy files (en/zh-CN), docs/README release-notes touchpoints, test/**.
