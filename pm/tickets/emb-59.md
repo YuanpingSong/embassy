@@ -102,3 +102,19 @@ a frozen THREAD_SETUP failure without creating a thread. No persisted or public 
 
 **Acknowledged in-scope fixes**: accept schema-required non-null collaborationMode in
 thread/settings/updated; preserve THREAD_SETUP (not TOOL_ACTIVITY) when mkdtemp never created a cwd.
+
+## Live proof result and ruling (2026-08-16)
+
+**Live proof: the fail-safe boundary held.** Pin gpt-5.6-luna/minimal did not resolve against the
+live catalog; the probe declined BEFORE thread creation — archivedThreadCount 0, measured token
+count 0, safe code CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE, all four read probes passing. Offline
+schema recheck confirms the parser matches generated 0.147.0 exactly; the pin was not weakened.
+
+**Ruling**: (1) This IS an acceptable live-proof outcome for the fail-safe half of the promise set —
+the founder's cost requirement demonstrated live is evidence, not absence of it. (2) ONE bounded
+catalog-shape diagnostic AUTHORIZED (model/list read only; no turn, no creation, no second live
+write attempt): report whether gpt-5.6-luna is absent, hidden, or lacks minimal support, and name
+the cheapest visible model supporting minimal. (3) The pin is FOUNDER-NAMED: any revision is the
+founder's call, queued with the diagnostic data. (4) emb-60 stays gated on a live PASSING probe —
+unchanged. SLICE READY proceeds after the diagnostic; the fork trial runs on the frozen diff
+regardless (taste review needs no live pin).
