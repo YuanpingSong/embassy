@@ -607,3 +607,15 @@ trust model, not restriction.
 the two-table design, and the DeepSeek↔Codex-only slice — superseded. New
 split drafts after emb-65 (ACP ground truth) lands. v1.7 theme is now:
 ACP transport + all-to-all routing + unified route table + de-ceremony.
+
+## Founder ruling addendum (2026-08-16): no migration machinery in the binary
+
+Simpler than migrate-forward-once: there are no external users at the moment,
+so the v1.7 binary ships the unified table as its NATIVE state format with no
+forward-migration path and no reverse/prune command built in. We migrate OUR
+OWN state database once, as a one-off operator step at upgrade time. A binary
+that encounters state it cannot parse surfaces its normal strict-parse error
+clearly — that is ordinary honest error handling, not migration machinery.
+CONSEQUENCE: the deferred-taint downgrade design and the prune-provider
+command (part 2 §2 above, and Q2's law-2 reading) are MOOT — deleted from
+v1.7 scope entirely. The new split shrinks accordingly.
