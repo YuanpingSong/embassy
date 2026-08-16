@@ -3,7 +3,7 @@ id: emb-71
 title: De-ceremony 66B — Claude boundary-safe version decision + offline compatibility core
 kind: normal
 size: 3
-status: draft
+status: dispatched
 release: v1.7
 updated: 2026-08-16
 ---
@@ -32,3 +32,12 @@ runtime.
 
 **Budgets**: E5/R4 effort rating, size 3 (bounded ≤300 source + ≤700
 test/workflow). Sequenced after emb-70 lands.
+
+## Phase split (PM, 2026-08-16)
+
+Phase 1 (DISPATCHED to swe3 immediately after emb-67 landed): deliverable (2)
+only — the offline ACP protocol-core conformance suite as NEW test files
+against the landed acp-client, zero overlap with emb-70's authority seam
+(main cutting it concurrently). E3, new-files-only window.
+Phase 2 (HELD until emb-70 lands): deliverables (1) and (3) — the Claude
+version-read decision needs the post-cutover seam to exist.
