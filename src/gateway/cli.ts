@@ -308,6 +308,17 @@ function gatewayAliasHost(alias: string): string {
   return alias.slice(alias.lastIndexOf("@") + 1);
 }
 
+function requirePairAliases(
+  options: ParsedOptions,
+): readonly [string, string] {
+  const from = requireAlias(options, "from");
+  const to = requireAlias(options, "to");
+  if (from === to || gatewayAliasHost(from) !== gatewayAliasHost(to)) {
+    throw new CliFault("INVALID_ARGUMENTS");
+  }
+  return [from, to];
+}
+
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) {
@@ -617,15 +628,28 @@ async function buildRequest(
     }
     case "pair":
     case "unpair": {
-      const options = parseOptions(args, ["claude", "codex"]);
+      const options = parseOptions(args, ["claude", "codex", "from", "to"]);
       assertExactOptionCount(options, 2);
+      const legacyArm = options.claude !== undefined || options.codex !== undefined;
+      if (legacyArm) {
+        if (options.from !== undefined || options.to !== undefined) {
+          throw new CliFault("INVALID_ARGUMENTS");
+        }
+        return {
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+          method: command,
+          params: {
+            claudeAlias: requireClaudeSelector(options, "claude"),
+            codexAlias: requireCodexAlias(options, "codex"),
+            codexThreadId: requireExclusiveCodexThreadId(env),
+          },
+        };
+      }
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: command,
         params: {
-          claudeAlias: requireClaudeSelector(options, "claude"),
-          codexAlias: requireCodexAlias(options, "codex"),
-          codexThreadId: requireExclusiveCodexThreadId(env),
+          aliases: requirePairAliases(options),
         },
       };
     }

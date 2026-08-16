@@ -21,14 +21,17 @@ import type {
   GatewayAdapterCallbacks,
   GatewayAdapterDispatchResult,
 } from "./service.js";
-import type {
-  PrivateEndpointIdentity,
-  PrivateRouteBinding,
+import {
+  isGatewayProvider,
+  type GatewayProvider,
+  type PrivateEndpointIdentity,
+  type PrivateRouteBinding,
 } from "./types.js";
 
 type HelperRecord = {
   client: ClaudeNativeHelperClientLike;
   activeAlias: string;
+  sourceProvider: GatewayProvider;
   activeGeneration: string;
   prepared?: Readonly<{ alias: string; generation: string }>;
   retiredGeneration?: string;
@@ -116,9 +119,22 @@ export class ClaudeNativeHelperSupervisor {
     return this.#helpersByAlias.size;
   }
 
-  async advertise(input: Readonly<{ alias: string; cwd: string }>): Promise<void> {
+  async advertise(input: Readonly<{
+    alias: string;
+    sourceProvider: GatewayProvider;
+    cwd: string;
+  }>): Promise<void> {
     this.#assertOpen();
-    if (this.#helpersByAlias.has(input.alias)) return;
+    if (!isGatewayProvider(input.sourceProvider)) {
+      throw fault("PROVENANCE_ENVELOPE_INVALID");
+    }
+    const incumbent = this.#helpersByAlias.get(input.alias);
+    if (incumbent !== undefined) {
+      if (incumbent.sourceProvider !== input.sourceProvider) {
+        throw fault("PROVENANCE_ENVELOPE_INVALID");
+      }
+      return;
+    }
     if (this.#helpersByAlias.size >= this.#maxHelpers) {
       throw fault("CLAUDE_NATIVE_HELPER_CAPACITY", true);
     }
@@ -150,6 +166,7 @@ export class ClaudeNativeHelperSupervisor {
     record = {
       client,
       activeAlias: input.alias,
+      sourceProvider: input.sourceProvider,
       activeGeneration: client.generation,
       authorizedRoutes: new Map(),
       closing: false,
@@ -207,6 +224,7 @@ export class ClaudeNativeHelperSupervisor {
 
   async dispatch(input: Readonly<{
     sourceAlias: string;
+    sourceProvider: GatewayProvider;
     targetAlias: string;
     conversationId: string;
     selectedAlias?: string;
@@ -222,7 +240,7 @@ export class ClaudeNativeHelperSupervisor {
     if (
       typeof input.sourceAlias !== "string" ||
       !PUBLIC_ALIAS.test(input.sourceAlias) ||
-      !input.sourceAlias.startsWith("codex-") ||
+      !isGatewayProvider(input.sourceProvider) ||
       typeof input.targetAlias !== "string" ||
       !PUBLIC_ALIAS.test(input.targetAlias) ||
       typeof input.conversationId !== "string" ||
@@ -240,6 +258,9 @@ export class ClaudeNativeHelperSupervisor {
     const helper = this.#helpersByAlias.get(input.sourceAlias);
     if (helper === undefined || helper.closing) {
       return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE" };
+    }
+    if (helper.sourceProvider !== input.sourceProvider) {
+      return { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" };
     }
     if (input.authorization === "selected_route") {
       if (
@@ -273,6 +294,7 @@ export class ClaudeNativeHelperSupervisor {
           authorization: input.authorization,
           messageId: input.messageId,
           sourceAlias: helper.activeAlias,
+          sourceProvider: helper.sourceProvider,
           targetAlias: input.targetAlias,
           conversationId: input.conversationId,
           text: input.text,

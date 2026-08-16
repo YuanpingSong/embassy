@@ -20,8 +20,8 @@ export const cliCopyZhCn = {
   unregister-codex       注销当前 Codex 任务
   select-claude          选择已发现的 Claude 会话
   unselect-claude        清除 Claude 选择
-  pair                   添加一条 Claude↔Codex 同意边
-  unpair                 移除一条 Claude↔Codex 同意边
+  pair [--from <别名> --to <别名>] 添加一条跨提供商同意边
+  unpair [--from <别名> --to <别名>] 移除一条跨提供商同意边
   send-to-claude         将标准输入发送到所选 Claude 路由
   send-to-codex          将标准输入发送到已注册 Codex 路由
   reply                  使用会话令牌回复

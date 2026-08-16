@@ -90,35 +90,6 @@ namespace Embassy {
     );
   }
 
-  function CompatStatusCard(
-    props: Readonly<{ compatibility: CompatibilityState | undefined }>,
-  ): React.ReactElement {
-    const t = useT();
-    const compatibility = props.compatibility;
-    if (compatibility === undefined) {
-      return (
-        <StatusCard
-          label={t("app.overview.compat")}
-          detail={undefined}
-          chip={
-            <span className="chip chip--small" data-kind="inert">
-              {t("app.overview.connectorMissing")}
-            </span>
-          }
-        />
-      );
-    }
-    return (
-      <StatusCard
-        label={t("app.overview.compat")}
-        detail={t(`compatibility.meaning.${camelCaseToken(compatibility)}`)}
-        chip={
-          <StateChip domain="compatibility" state={compatibility} small />
-        }
-      />
-    );
-  }
-
   type ExchangeNodeProps = Readonly<{
     title: string;
     sub: string;
@@ -215,9 +186,7 @@ namespace Embassy {
   ): readonly string[] {
     const parts: string[] = [];
     if (item.provider !== undefined) {
-      parts.push(
-        item.provider === "claude" ? t("provider.claude") : t("provider.codex"),
-      );
+      parts.push(t(`provider.${item.provider}`));
     }
     if (item.alias !== undefined) parts.push(item.alias);
     if (item.host !== undefined) parts.push(item.host);
@@ -321,38 +290,10 @@ namespace Embassy {
   export function OverviewTab(props: OverviewTabProps): React.ReactElement {
     const t = useT();
     const { data, onViewDeliveries } = props;
-    const strip = data.statusStrip;
-    const queueOut = data.queueClaudeToCodex;
-    const queueIn = data.queueCodexToClaude;
     const openInbound = data.inboundMode === "open";
-    const hasPair =
-      data.graph.pairCount > 0 || data.graph.pairCountIsLowerBound;
-    // Queued work is shown even without a ready pair — hiding a non-empty
-    // queue behind the "no pair" state would conceal the stall it explains.
-    // The board still renders exactly three columns (claude · middle · codex):
-    // edges win the middle when there is anything to show, and the "no pair"
-    // explanation moves to the notes under the board so the codex node never
-    // slides off centre.
-    const showEdges = hasPair || queueOut.depth > 0 || queueIn.depth > 0;
-    const nextActionLine = (
-      who: string,
-      action: DashboardNextAction,
-    ): string | null =>
-      action === "none"
-        ? null
-        : `${t("next.label")} · ${who}: ${t(
-            window.EMBASSY_BOOT.semantics.nextActionCopyKeys[action],
-          )}`;
-    const boardNotes: readonly string[] = [
-      !openInbound && !hasPair && showEdges
-        ? `${t("app.overview.noPair.title")} — ${t("app.overview.noPair.body")}`
-        : null,
-      data.degradedPairCopyKey === undefined
-        ? null
-        : t(data.degradedPairCopyKey),
-      nextActionLine(t("provider.claude"), data.exchange.claude.nextAction),
-      nextActionLine(t("provider.codex"), data.exchange.codex.nextAction),
-    ].filter((line): line is string => line !== null);
+    const hasConsentEdge =
+      data.graph.consentEdgeCount > 0 ||
+      data.graph.consentEdgeCountIsLowerBound;
     const showAttention =
       data.attention.length > 0 || data.attentionOmitted > 0;
     const maxPulse = data.pulse.bars.reduce(
@@ -366,8 +307,6 @@ namespace Embassy {
       [onViewDeliveries],
     );
 
-    // Each section is a named region labelled by its own heading, so the
-    // panel is navigable by landmark and by heading alike.
     const idPrefix = React.useId();
     const stripId = `${idPrefix}-strip`;
     const exchangeId = `${idPrefix}-exchange`;
@@ -383,17 +322,15 @@ namespace Embassy {
           <div className="status-strip">
             <HealthStatusCard
               label={t("app.overview.broker")}
-              health={strip.broker}
+              health={data.statusStrip.broker}
             />
-            <HealthStatusCard
-              label={t("app.overview.claudeConn")}
-              health={strip.claudeConnector}
-            />
-            <HealthStatusCard
-              label={t("app.overview.codexConn")}
-              health={strip.codexConnector}
-            />
-            <CompatStatusCard compatibility={strip.compatibility} />
+            {data.statusStrip.providers.map(({ provider, health }) => (
+              <HealthStatusCard
+                key={provider}
+                label={t(`provider.${provider}`)}
+                health={health}
+              />
+            ))}
           </div>
         </section>
 
@@ -421,73 +358,37 @@ namespace Embassy {
               {t(
                 openInbound
                   ? "inbound.open.body"
-                  : hasPair
+                  : hasConsentEdge
                     ? "inbound.paired.body"
                     : "inbound.noPair.body",
               )}
             </p>
           </div>
           <div className="exchange-board">
-            <ExchangeNode
-              title={t("app.overview.node.claude.title")}
-              sub={t("app.overview.node.claude.sub")}
-              party={data.exchange.claude}
-              countLine={t("exchange.count.claude", {
-                ready: data.exchange.claude.ready,
-                selectable: data.exchange.claude.selectable ?? "—",
-                total: data.exchange.claude.total,
-              })}
-            />
-            {showEdges ? (
-              <div className="exchange-edges">
-                <ExchangeEdge
-                  direction="out"
-                  label={t("app.overview.queueC2x")}
-                  queue={queueOut}
-                />
-                <ExchangeEdge
-                  direction="in"
-                  label={t("app.overview.queueX2c")}
-                  queue={queueIn}
-                />
-              </div>
-            ) : (
-              <div className="no-pair">
-                <span className="no-pair__label">
-                  {t(
-                    openInbound
-                      ? "inbound.open.badge"
-                      : "app.overview.noPair.title",
-                  )}
-                </span>
-                <span className="no-pair__body">
-                  {t(
-                    openInbound
-                      ? "inbound.open.body"
-                      : "app.overview.noPair.body",
-                  )}
-                </span>
-              </div>
-            )}
-            <ExchangeNode
-              title={t("app.overview.node.codex.title")}
-              sub={t("app.overview.node.codex.sub")}
-              party={data.exchange.codex}
-              countLine={t("app.overview.count.codex", {
-                ready: data.exchange.codex.ready,
-                total: data.exchange.codex.total,
-                monitorOnly: data.exchange.codex.monitorOnly ?? 0,
-              })}
-            />
+            {data.exchange.parties.map((party) => (
+              <ExchangeNode
+                key={party.kind}
+                title={t(`provider.${party.kind}`)}
+                sub={party.kind}
+                party={party}
+                countLine={`${party.ready}/${party.total}`}
+              />
+            ))}
           </div>
-          {boardNotes.length === 0 ? null : (
-            <div className="exchange-notes stack-sm">
-              {boardNotes.map((line) => (
-                <p className="text-xs text-body-muted" key={line}>
-                  {line}
-                </p>
-              ))}
-            </div>
+          <div className="exchange-edges">
+            {data.providerQueues.map(({ provider, queue }) => (
+              <ExchangeEdge
+                key={provider}
+                direction="in"
+                label={t(`provider.${provider}`)}
+                queue={queue}
+              />
+            ))}
+          </div>
+          {data.degradedConsentEdgeCopyKey === undefined ? null : (
+            <p className="text-xs text-body-muted">
+              {t(data.degradedConsentEdgeCopyKey)}
+            </p>
           )}
         </section>
 

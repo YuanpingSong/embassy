@@ -9,7 +9,7 @@ export const dashboardCopyEn = {
   "brand.eyebrow": "Local agent exchange",
   "brand.title": "Embassy",
   "brand.subtitle":
-    "A point-in-time, metadata-only register of routes between Claude Code and Codex.",
+    "A point-in-time, metadata-only register of routes between local agent providers.",
   "snapshot.asOf": "Snapshot {time}",
   "snapshot.static":
     "This file does not update itself. If the broker is not running, run embassy serve first. Then run embassy refresh-dashboard and reload — or run embassy dashboard --live for a streaming view.",
@@ -17,21 +17,22 @@ export const dashboardCopyEn = {
   "overall.setup": "Setup incomplete",
   "overall.attention": "Needs attention",
   "exchange.eyebrow": "Exchange board",
-  "exchange.title": "Two directions, two explicit boundaries",
+  "exchange.title": "Provider routes and explicit boundaries",
   "exchange.note":
-    "Each consent edge names one Claude session and one Codex task. Native discovery remains machine-wide; permission does not.",
+    "Each consent edge names two verified provider endpoints. Native discovery remains machine-wide; permission does not.",
   "inbound.paired.badge": "Paired inbound",
   "inbound.paired.body":
-    "Each registered Codex task accepts messages only across its explicit Claude consent edges.",
+    "Each registered endpoint accepts messages only across its explicit consent edges.",
   "inbound.open.badge": "Open inbound",
   "inbound.open.body":
-    "Any live Claude session under this OS user may initiate inbound work; explicit Codex sends still require an edge.",
+    "Any live same-user endpoint allowed by the provider may initiate inbound work; explicit sends still require an edge.",
   "inbound.noPair.body":
     "No consent edge exists; paired-mode endpoints refuse unpaired senders.",
   "exchange.claude.title": "Claude sessions",
   "exchange.claude.note": "Consent-edge endpoints",
   "exchange.codex.title": "Codex tasks",
   "exchange.codex.note": "Consent-edge endpoints",
+  "exchange.provider.note": "Consent-edge endpoints",
   "exchange.pouch.title": "Local pouch",
   "exchange.pouch.empty": "Queue clear",
   "exchange.pouch.queued": "{count} queued",
@@ -39,6 +40,7 @@ export const dashboardCopyEn = {
   "exchange.count.claude":
     "{ready} selected · {selectable} selectable · {total} discovered",
   "exchange.count.codex": "{ready} ready · {total} registered",
+  "app.overview.count.provider": "{ready} ready · {total} registered",
   "status.ready": "Ready",
   "status.busy": "Busy",
   "status.waiting": "Waiting",
@@ -56,17 +58,15 @@ export const dashboardCopyEn = {
   "next.selectClaude":
     "Run embassy select-claude --alias <alias> to choose a visible session explicitly.",
   "next.pairRoutes":
-    "Create an explicit edge with embassy pair --claude <alias> --codex <alias>.",
+    "Create an explicit edge with embassy pair --from <alias> --to <alias>.",
   "next.restoreClaude":
     "Refresh discovery, then explicitly select the current Claude alias if it is not restored.",
   "next.repairClaude":
-    "No compatible, live, collision-free session is selectable. Resolve the issue shown in Sessions & routes, then refresh discovery.",
+    "No live, collision-free session is selectable. Resolve the issue shown in Sessions & routes, then refresh discovery.",
   "next.registerCodex":
     "Inside the Codex task, run embassy register-codex --alias codex-<name>@<host>.",
   "next.restoreCodex":
     "Re-run embassy register-codex --alias <alias> inside that exact Codex task.",
-  "next.reviewCompatibility":
-    "Run embassy refresh-dashboard, then review Provider compatibility; discovery or registration cannot remove this write fence.",
   "attention.eyebrow": "Needs attention",
   "attention.title": "Resolve before sending",
   "attention.count": "{count} active",
@@ -140,14 +140,9 @@ export const dashboardCopyEn = {
     "Inspect the recipient before retrying; a retry could duplicate the message.",
   "guidance.degraded.title": "The exchange is degraded",
   "guidance.degraded.body":
-    "Embassy retained a normalized compatibility or connector warning.",
+    "Embassy retained a normalized connector warning.",
   "guidance.degraded.action":
     "Run embassy status. If a broker restart is necessary, queued mail survives and resumes exactly once; only a write in flight at the crash settles ambiguous.",
-  "guidance.providerIncompatible.title": "Provider build is write-fenced",
-  "guidance.providerIncompatible.body":
-    "Embassy kept the broker and the other provider running. Provider compatibility names the bounded version evidence, this release's tested build, and the supported major.",
-  "guidance.providerIncompatible.action":
-    "Run embassy refresh-dashboard, then review Provider compatibility. For an unsupported major, install an Embassy release that supports it; this broker remains running in the meantime.",
   "guidance.generic.title": "Embassy reported a normalized alert",
   "guidance.generic.body":
     "This safe code has no automatic repair mapped in the dashboard.",
@@ -213,8 +208,6 @@ export const dashboardCopyEn = {
   "watches.reason.pairRemoved": "consent edge removed",
   "watches.reason.endpointRetired": "endpoint retired",
   "watches.reason.trackingDisabled": "tracking disabled",
-  "watches.reason.legacyUpgrade": "closed during the v1.4 state upgrade",
-  "watches.reason.legacyDone": "legacy completion; actor unavailable",
   "activity.eyebrow": "Activity ledger",
   "activity.title": "Recent delivery evidence",
   "activity.note": "Bodies and provider internals are never included.",
@@ -230,10 +223,14 @@ export const dashboardCopyEn = {
   "activity.history.many": "{count} stages",
   "activity.meaning.delivered":
     "Reached its terminal delivered state. This does not mean the model read or acted on it.",
-  "activity.meaning.delivered.codexToClaude":
+  "activity.meaning.delivered.toClaude":
     "Embassy wrote the message to Claude's native mailbox immediately; it did not wait for the route to become idle. This does not mean the model read or acted on it.",
-  "activity.meaning.delivered.claudeToCodex":
+  "activity.meaning.delivered.toCodex":
     "Codex App Server accepted the turn. This does not mean the model completed or acted on it.",
+  "activity.meaning.delivered.toDeepSeek":
+    "DeepSeek accepted the delivery. This does not mean the model completed or acted on it.",
+  "activity.meaning.delivered.toGrok":
+    "Grok Build accepted the delivery. This does not mean the model completed or acted on it.",
   "activity.meaning.unconfirmed":
     "The transport write completed, but terminal native evidence was unavailable. Inspect the recipient before retrying.",
   "activity.meaning.ambiguous":
@@ -295,7 +292,6 @@ export const dashboardCopyEn = {
   "column.host": "Host",
   "column.provider": "Provider",
   "column.state": "State",
-  "column.compatibility": "Compatibility",
   "column.selection": "Selection",
   "column.validation": "Validation",
   "status.validated": "Validated",
@@ -303,27 +299,11 @@ export const dashboardCopyEn = {
   "column.queue": "Queue",
   "column.observed": "Observed",
   "column.issue": "Issue",
-  "diagnostics.title": "Compatibility & system details",
+  "diagnostics.title": "System details",
   "diagnostics.note": "Pinned protocols, counters, and bounded-display notes",
   "diagnostics.connectors": "Connectors",
   "diagnostics.connectors.empty": "No connector metadata is available.",
   "diagnostics.connectors.caption": "Local provider connector status",
-  "diagnostics.compatibilityChecks": "Provider compatibility",
-  "diagnostics.compatibilityChecks.empty": "No provider compatibility status is available.",
-  "diagnostics.compatibilityChecks.caption": "Automatic provider compatibility status",
-  "diagnostics.version": "Version",
-  "diagnostics.testedVersion": "Tested by this release",
-  "diagnostics.supportedMajor": "Supported major",
-  "diagnostics.tier": "Tier",
-  "diagnostics.checkedAt": "Checked",
-  "diagnostics.failure": "Failure",
-  "compatibilityTier.certified": "Supported",
-  "compatibilityTier.schema_attested":
-    "Live schema probes passed; build not tested by this release",
-  "compatibilityTier.schema_attested.writesCovered":
-    "Live read and write probes passed; build not tested by this release",
-  "compatibilityTier.incompatible": "Incompatible",
-  "compatibilityTier.notDetected": "Not detected",
   "diagnostics.registry.title": "Registry observation",
   "diagnostics.registry.entriesScanned": "Entries scanned",
   "diagnostics.registry.parseableRecords":
@@ -357,7 +337,7 @@ export const dashboardCopyEn = {
   "diagnostics.omissions.connectors": "{count} connectors",
   "diagnostics.omissions.peers": "{count} sessions",
   "diagnostics.omissions.routes": "{count} routes",
-  "diagnostics.omissions.pairs": "{count} consent edges",
+  "diagnostics.omissions.consentEdges": "{count} consent edges",
   "diagnostics.omissions.progressWatches": "{count} progress watches",
   "diagnostics.omissions.upstreamProgressWatchEvents":
     "{count} watch events before dashboard projection",
@@ -375,61 +355,43 @@ export const dashboardCopyEn = {
   "provider.claude": "Claude",
   "provider.codex": "Codex",
   "provider.deepseek": "DeepSeek",
+  "provider.grok": "Grok Build",
   "health.offline": "Offline",
   "health.connecting": "Connecting",
   "health.healthy": "Healthy",
   "health.degraded": "Degraded",
-  "health.incompatible": "Incompatible",
   "health.meaning.healthy": "Connected and exchanging heartbeats.",
   "health.meaning.connecting": "Establishing the local connection.",
   "health.meaning.degraded": "Connected with retained warnings.",
   "health.meaning.offline": "Not reachable on this machine.",
-  "health.meaning.incompatible":
-    "Required compatibility evidence is missing or failed; inspect Provider compatibility.",
-  "compatibility.unknown": "Unknown",
-  "compatibility.compatible": "Compatible",
-  "compatibility.incompatible": "Incompatible",
-  "compatibility.expired": "Expired",
-  "compatibility.meaning.compatible":
-    "Required compatibility evidence passed.",
-  "compatibility.meaning.unknown": "Not yet verified.",
-  "compatibility.meaning.expired": "Verification lapsed; re-observe.",
-  "compatibility.meaning.incompatible":
-    "Required compatibility evidence is missing or failed; inspect Provider compatibility.",
   "route.stale": "Stale",
   "route.idle": "Idle",
   "route.busy": "Busy",
   "route.awaitingApproval": "Awaiting approval",
   "route.offline": "Offline",
-  "route.incompatible": "Incompatible",
   "route.disabled": "Disabled",
-  "route.meaning.idle": "Enabled, compatible, and ready to carry messages.",
+  "route.meaning.idle": "Enabled and ready to carry messages.",
   "route.meaning.busy": "Claude-bound messages still write to the native mailbox immediately; ordinary Codex-bound messages queue for idle.",
   "route.meaning.awaitingApproval":
     "Waiting on the provider's native approval.",
   "route.meaning.stale": "No current endpoint proof; refresh and restore it.",
   "route.meaning.offline": "The route's connector is unreachable.",
-  "route.meaning.incompatible": "Protocol versions do not match.",
   "route.meaning.disabled": "Administratively disabled; not a fault.",
   "peer.idle": "Idle",
   "peer.busy": "Busy",
   "peer.awaitingApproval": "Awaiting approval",
   "peer.offline": "Offline",
-  "peer.incompatible": "Incompatible",
   "peer.meaning.idle": "Live and selectable.",
   "peer.meaning.busy": "Live but mid-turn.",
   "peer.meaning.awaitingApproval": "Waiting on native approval.",
   "peer.meaning.offline":
     "Discovered earlier, not currently live — a candidate, not an error.",
-  "peer.meaning.incompatible": "Cannot be selected: incompatible protocol.",
   "peer.reason.aliasCollision":
     "Alias collision: rename one Claude session, then refresh discovery.",
   "peer.reason.sessionCollision":
     "Session identity collision: close the duplicate session record, then refresh discovery.",
   "peer.reason.discoveryIncomplete":
     "Discovery was incomplete. Refresh after Claude Code finishes publishing its session inventory.",
-  "peer.reason.incompatible":
-    "This session is not compatible with the pinned Embassy protocol.",
   "peer.reason.offline": "This session is not currently live.",
   "time.atSnapshot": "At snapshot",
   "time.beforeSnapshot": "{age} before snapshot",
@@ -521,14 +483,13 @@ export const dashboardCopyEn = {
   "app.overview.broker": "Broker",
   "app.overview.claudeConn": "Claude connector",
   "app.overview.codexConn": "Codex connector",
-  "app.overview.compat": "Compatibility",
   "app.overview.connectorMissing": "No connector reported",
   "app.overview.node.claude.title": "claude",
   "app.overview.node.claude.sub": "sessions",
   "app.overview.node.codex.title": "codex",
   "app.overview.node.codex.sub": "tasks",
   "app.overview.count.codex":
-    "{ready} ready · {total} registered · {monitorOnly} monitor-only",
+    "{ready} ready · {total} registered",
   "app.overview.noPair.title": "No consent edge",
   "app.overview.noPair.body":
     "Paired inbound accepts only senders connected to a registered Codex task by an explicit edge; Codex routes only along explicit edges.",
@@ -550,6 +511,9 @@ export const dashboardCopyEn = {
   "app.deliveries.dir.label": "Direction",
   "app.deliveries.dir.all": "All",
   "app.deliveries.dir.codexToClaude": "Claude ← Codex",
+  "app.deliveries.fromProvider": "From provider",
+  "app.deliveries.toProvider": "To provider",
+  "app.deliveries.providerAll": "All providers",
   "app.deliveries.view.label": "View",
   "app.deliveries.view.byRoute": "By route pair",
   "app.deliveries.view.flat": "Flat list",
@@ -576,6 +540,9 @@ export const dashboardCopyEn = {
   "app.routes.codexRoutes": "Codex tasks",
   "app.routes.pairs": "Consent edges",
   "app.routes.pairDescription": "Consent edge: {claude} ↔ {codex}",
+  "app.routes.unpairedProvider": "{provider}: {count} ready without an edge",
+  "app.routes.consentEndpoint": "{provider} · {alias}",
+  "app.routes.consentEdge": "{left} ↔ {right}",
   "app.routes.pairState.degraded": "Degraded",
   "app.routes.pairState.unavailable": "Unavailable",
   "app.routes.pairDegradedReason":
@@ -602,8 +569,6 @@ export const dashboardCopyEn = {
     "Re-read local discovery and rewrite the static dashboard file.",
   "app.routes.removeStaleCodex.consequence":
     "Remove only {alias} if the broker confirms that the registration is stale and its endpoint generation is dead. Its consent edges are removed; a live registration is never touched.",
-  "app.routes.monitorOnlyReason":
-    "Monitor only — writes are disabled for this route by CODEX_WRITES_DISABLED.",
   "app.routes.noPeers": "No Claude session was discovered in this snapshot.",
   "app.routes.noCodex": "No Codex task is registered.",
   "app.routes.successions": "Succession history",
@@ -616,7 +581,6 @@ export const dashboardCopyEn = {
   "app.routes.queueDepth": "Queue depth",
   "app.routes.counters": "Route counters",
   "app.routes.registered": "registered",
-  "app.routes.monitorOnly": "monitor-only",
   "app.routes.registerHint":
     "Registration is not a button: it must run inside the Codex task to inherit its identity. Ask your agent to run:",
   "app.routes.noPairInline":
@@ -648,15 +612,13 @@ export const dashboardCopyEn = {
     "Nothing in this window. Events appear as the broker produces them; try",
   "app.diag.versions": "Connector protocols",
   "app.diag.versions.caption":
-    "Local connectors with protocol and compatibility state",
+    "Local connectors with observed protocol state",
   "app.diag.col.provider": "Provider",
   "app.diag.col.host": "Host",
   "app.diag.col.protocol": "Protocol",
   "app.diag.col.version": "Version",
-  "app.diag.col.compat": "Compatibility",
   "app.diag.versions.rangeAbsent":
-    "Connector rows show observed protocol tokens. Provider compatibility below shows the observed version, this release's tested build, the supported major, and probe results.",
-  "app.diag.providerCompatibility.title": "Provider compatibility",
+    "Connector rows show observed protocol tokens and current health.",
   "app.diag.lease.title": "Lease / instance",
   "app.diag.lease.absent":
     "Lease state is not carried by the live contract. Read the local posture with the command below.",

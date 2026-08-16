@@ -19,7 +19,7 @@
 // real programmatic association rather than a `<caption>` orphaned from a
 // table this list is not.
 namespace Embassy {
-  type DirectionFilter = "all" | MessageDirection;
+  type ProviderFilter = "all" | GatewayProvider;
   type StateFilter = "all" | DeliveryState;
   type ViewMode = "byRoute" | "flat";
 
@@ -51,26 +51,6 @@ namespace Embassy {
     : "tab-deliveries: DELIVERY_STATE_FILTERS is missing a DeliveryState";
 
   const DELIVERY_STATE_FILTERS_COVER_THE_UNION: DeliveryStateCoverage = true;
-
-  const DIRECTION_FILTERS: readonly MessageDirection[] = [
-    "claude_to_codex",
-    "codex_to_claude",
-  ];
-
-  const DIRECTION_COPY_KEYS: Readonly<Record<MessageDirection, string>> = {
-    claude_to_codex: "direction.claudeToCodex",
-    codex_to_claude: "direction.codexToClaude",
-  };
-
-  /**
-   * The two directional filter pills read Claude-first (`Claude → Codex` /
-   * `Claude ← Codex`) so they align on the same subject; the detail rail keeps
-   * the neutral `direction.*` phrasing shared with the other surfaces.
-   */
-  const DIRECTION_PILL_COPY_KEYS: Readonly<Record<MessageDirection, string>> = {
-    claude_to_codex: "direction.claudeToCodex",
-    codex_to_claude: "app.deliveries.dir.codexToClaude",
-  };
 
   /** Teaching command for both empty states (a real CLI verb; body on stdin). */
   const SEND_TO_CODEX_CMD = "embassy send-to-codex --from <alias> --to <alias>";
@@ -308,7 +288,7 @@ namespace Embassy {
             {group.steer === true ? " · STEER" : ""}
           </span>
           <div className="detail-pane__sub">
-            {props.view.routePair} · {t(DIRECTION_COPY_KEYS[group.direction])}
+            {props.view.routePair} · {t(`provider.${props.view.sourceProvider}`)} → {t(`provider.${props.view.targetProvider}`)}
           </div>
         </div>
 
@@ -451,8 +431,6 @@ namespace Embassy {
     pair_removed: "watches.reason.pairRemoved",
     endpoint_retired: "watches.reason.endpointRetired",
     tracking_disabled: "watches.reason.trackingDisabled",
-    legacy_upgrade: "watches.reason.legacyUpgrade",
-    legacy_done: "watches.reason.legacyDone",
   };
 
   function ProgressWatchRegister(
@@ -524,8 +502,10 @@ namespace Embassy {
     const [locale] = useLocale();
     const captionId = React.useId();
     const searchId = React.useId();
-    const [directionFilter, setDirectionFilter] =
-      React.useState<DirectionFilter>("all");
+    const [fromProvider, setFromProvider] =
+      React.useState<ProviderFilter>("all");
+    const [toProvider, setToProvider] =
+      React.useState<ProviderFilter>("all");
     const [stateFilter, setStateFilter] = React.useState<StateFilter>("all");
     const [viewMode, setViewMode] = React.useState<ViewMode>("byRoute");
     const [query, setQuery] = React.useState("");
@@ -560,12 +540,11 @@ namespace Embassy {
       () =>
         groups.filter(
           (view) =>
-            (directionFilter === "all" ||
-              view.group.direction === directionFilter) &&
+            adapter.matchesProviderFilters(view, fromProvider, toProvider) &&
             (stateFilter === "all" || view.group.state === stateFilter) &&
             matchesQuery(view, needle),
         ),
-      [groups, directionFilter, stateFilter, needle],
+      [groups, fromProvider, toProvider, stateFilter, needle],
     );
     const pairs = React.useMemo<readonly RoutePairGroup[]>(
       () => groupByRoutePair(filtered),
@@ -711,31 +690,42 @@ namespace Embassy {
 
           <div className="filters">
             <div className="filter-group">
-              <MonoLabel>{t("app.deliveries.dir.label")}</MonoLabel>
+              <MonoLabel>{t("app.deliveries.fromProvider")}</MonoLabel>
               <div
                 className="pill-row"
                 role="group"
-                aria-label={t("app.deliveries.dir.label")}
+                aria-label={t("app.deliveries.fromProvider")}
               >
                 <FilterPill
-                  active={directionFilter === "all"}
+                  active={fromProvider === "all"}
                   onClick={() => {
-                    setDirectionFilter("all");
+                    setFromProvider("all");
                   }}
                 >
-                  {t("app.deliveries.dir.all")}
+                  {t("app.deliveries.providerAll")}
                 </FilterPill>
-                {/* Exclusive radios: re-clicking the active direction is a
-                    no-op, only the state pills toggle back to `all`. */}
-                {DIRECTION_FILTERS.map((direction) => (
+                {GATEWAY_PROVIDERS.map((provider) => (
                   <FilterPill
-                    key={direction}
-                    active={directionFilter === direction}
+                    key={provider}
+                    active={fromProvider === provider}
                     onClick={() => {
-                      setDirectionFilter(direction);
+                      setFromProvider(provider);
                     }}
                   >
-                    {t(DIRECTION_PILL_COPY_KEYS[direction])}
+                    {t(`provider.${provider}`)}
+                  </FilterPill>
+                ))}
+              </div>
+            </div>
+            <div className="filter-group">
+              <MonoLabel>{t("app.deliveries.toProvider")}</MonoLabel>
+              <div className="pill-row" role="group" aria-label={t("app.deliveries.toProvider")}>
+                <FilterPill active={toProvider === "all"} onClick={() => { setToProvider("all"); }}>
+                  {t("app.deliveries.providerAll")}
+                </FilterPill>
+                {GATEWAY_PROVIDERS.map((provider) => (
+                  <FilterPill key={provider} active={toProvider === provider} onClick={() => { setToProvider(provider); }}>
+                    {t(`provider.${provider}`)}
                   </FilterPill>
                 ))}
               </div>

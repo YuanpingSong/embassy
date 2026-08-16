@@ -82,69 +82,13 @@ test("dashboard remedies describe durable queues and bounded body visibility", (
   assert.equal(dashboardCopyKeys.includes("live.action.unselect" as never), false);
 });
 
-test("compatibility meanings describe the evidence ladder in both locales", () => {
-  assert.match(
-    dashboardCopyEn["compatibility.meaning.compatible"],
-    /required compatibility evidence passed/i,
-  );
-  assert.match(
-    dashboardCopyEn["compatibility.meaning.incompatible"],
-    /evidence is missing or failed.*Provider compatibility/i,
-  );
-  assert.match(
-    dashboardCopyEn["app.diag.versions.rangeAbsent"],
-    /observed version.*tested build.*supported major.*probe results/i,
-  );
-  assert.equal(
-    /pinned range|outside the supported range|version handshake/i.test(
-      [
-        dashboardCopyEn["health.meaning.incompatible"],
-        dashboardCopyEn["compatibility.meaning.compatible"],
-        dashboardCopyEn["compatibility.meaning.incompatible"],
-      ].join(" "),
-    ),
-    false,
-  );
-
-  assert.match(
-    dashboardCopyZhCn["compatibility.meaning.compatible"],
-    /必需的兼容性证据已通过/u,
-  );
-  assert.match(
-    dashboardCopyZhCn["compatibility.meaning.incompatible"],
-    /缺少.*兼容性证据.*提供方兼容性/u,
-  );
-  assert.match(
-    dashboardCopyZhCn["app.diag.versions.rangeAbsent"],
-    /已观察版本.*测试的构建.*受支持主版本.*探测结果/u,
-  );
-  assert.equal(
-    /固定的版本范围|超出受支持的版本范围|版本握手/u.test(
-      [
-        dashboardCopyZhCn["health.meaning.incompatible"],
-        dashboardCopyZhCn["compatibility.meaning.compatible"],
-        dashboardCopyZhCn["compatibility.meaning.incompatible"],
-      ].join(" "),
-    ),
-    false,
-  );
-});
-
 test("progress-watch history copy names who settled it and why", () => {
   assert.equal(dashboardCopyEn["watches.actor.owner"], "Owner");
   assert.equal(dashboardCopyEn["watches.actor.worker"], "Worker");
   assert.equal(dashboardCopyEn["watches.reason.done"], "exact DONE:");
-  assert.match(
-    dashboardCopyEn["watches.reason.legacyDone"],
-    /actor unavailable/,
-  );
   assert.equal(dashboardCopyZhCn["watches.actor.owner"], "所有者");
   assert.equal(dashboardCopyZhCn["watches.actor.worker"], "工作方");
   assert.equal(dashboardCopyZhCn["watches.reason.done"], "精确的 DONE:");
-  assert.match(
-    dashboardCopyZhCn["watches.reason.legacyDone"],
-    /行为方不可用/,
-  );
   assert.match(
     dashboardCopyEn["watches.note"],
     /either participant reports exact DONE:/,
@@ -314,11 +258,11 @@ test("information architecture is ordered and calm when no alert exists", () => 
   const diagnostics = html.indexOf('class="section diagnostics"');
   assert.ok(exchange > 0 && transit > exchange && activity > transit && sessions > activity && diagnostics > sessions);
   assert.equal(html.includes('id="attention-title"'), false);
-  assert.match(html, /Two directions, two explicit boundaries/);
+  assert.match(html, /Provider routes and explicit boundaries/);
   assert.match(html, /Claude sessions/);
   assert.match(html, /Local pouch/);
   assert.match(html, /Codex tasks/);
-  assert.match(html, /Compatibility &amp; system details/);
+  assert.match(html, /System details/);
   assert.match(html, /<details class="section diagnostics"/);
 });
 
@@ -473,7 +417,6 @@ test("dense dashboard projections remain independently bounded in both locales",
     provider: "claude" as const,
     host: "host.local",
     state: "idle" as const,
-    compatibility: "compatible" as const,
     validated: true,
     selected: index === 0,
   }));

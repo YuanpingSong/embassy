@@ -42,14 +42,14 @@ function capture(): Capture {
 
 function emptySnapshot(): GatewayPublicSnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: "2026-08-08T12:00:00.000Z",
     inboundMode: "paired",
     health: "healthy",
     connectors: [],
     availablePeers: [],
     routes: [],
-    pairs: [],
+    consentEdges: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -70,7 +70,7 @@ function emptySnapshot(): GatewayPublicSnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      pairs: 0,
+      consentEdges: 0,
       messages: 0,
       alerts: 0,
     },
@@ -471,16 +471,14 @@ test("live dashboard actions forward only the four closed control methods", asyn
   assert.deepEqual(
     await actions.execute({
       action: "pair",
-      claudeAlias: "claude-reviewer@this-mac",
-      codexAlias: "codex-builder@this-mac",
+      aliases: ["claude-reviewer@this-mac", "codex-builder@this-mac"],
     }),
     { ok: true, code: "ok" },
   );
   assert.deepEqual(
     await actions.execute({
       action: "unpair",
-      claudeAlias: "claude-reviewer@this-mac",
-      codexAlias: "codex-builder@this-mac",
+      aliases: ["grok-builder@this-mac", "dsh-reviewer@this-mac"],
     }),
     { ok: false, code: "busy" },
   );
@@ -502,8 +500,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
         protocolVersion: 1,
         method: "pair",
         params: {
-          claudeAlias: "claude-reviewer@this-mac",
-          codexAlias: "codex-builder@this-mac",
+          aliases: ["claude-reviewer@this-mac", "codex-builder@this-mac"],
         },
       },
     },
@@ -513,8 +510,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
         protocolVersion: 1,
         method: "unpair",
         params: {
-          claudeAlias: "claude-reviewer@this-mac",
-          codexAlias: "codex-builder@this-mac",
+          aliases: ["grok-builder@this-mac", "dsh-reviewer@this-mac"],
         },
       },
     },

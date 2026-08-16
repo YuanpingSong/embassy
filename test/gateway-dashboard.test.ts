@@ -8,15 +8,6 @@ import {
   DASHBOARD_MODEL_LIMITS,
 } from "../src/gateway/dashboard-model.js";
 import { dashboardFixture, routeCounters } from "./dashboard-fixture.js";
-import {
-  certifiedCompatibilityVersions,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-  UNKNOWN_COMPATIBILITY_VERSION,
-  type CompatibilityProbeResult,
-  type CompatibilitySurfaceDefinition,
-} from "../src/gateway/compatibility.js";
-import { projectPublicCompatibilityCheck } from "../src/gateway/types.js";
 
 test("static projection never materializes message bodies while live projection does", () => {
   const snapshot = dashboardFixture();
@@ -117,334 +108,6 @@ test("activity projection distinguishes automatic endpoint refresh from operator
   assert.match(zh, /操作者[\s\S]*已移除陈旧的 Codex 注册/u);
 });
 
-test("diagnostics reduce compatibility to automatic provider safety rows", () => {
-  const snapshot = dashboardFixture();
-  snapshot.compatibilityChecks = (["claude", "codex"] as const).map(
-    (surface) => {
-      const probes: CompatibilityProbeResult[] = compatibilityProbeNames[
-        surface
-      ].map((name) => ({
-        name,
-        outcome: "pass" as const,
-      }));
-      if (surface === "claude") {
-        probes[2] = {
-          name: "registry_schema",
-          outcome: "fail",
-          safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
-        };
-      }
-      return projectPublicCompatibilityCheck(
-        evaluateCompatibilityAttestation({
-          surface,
-          version: certifiedCompatibilityVersions[surface][0]!,
-          checkedAt: "2026-08-08T11:58:00.000Z",
-          certifiedVersions: certifiedCompatibilityVersions[surface],
-          probes,
-        }),
-      );
-    },
-  );
-  snapshot.alerts = [
-    {
-      code: "COMPATIBILITY_CERTIFICATION_FAILED",
-      severity: "error",
-      timestamp: "2026-08-08T11:59:00.000Z",
-      provider: "claude",
-      host: "this-mac",
-    },
-  ];
-  const model = buildDashboardViewModel(snapshot);
-  assert.deepEqual(model.compatibilityChecks[0], {
-    surface: "claude",
-    version: certifiedCompatibilityVersions.claude[0],
-    testedVersion: certifiedCompatibilityVersions.claude[0],
-    supportedMajor: "2",
-    tier: "incompatible",
-    writesCovered: false,
-    checkedAt: "2026-08-08T11:58:00.000Z",
-    failure: "registry_schema",
-    safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
-  });
-  assert.equal(
-    model.attention.some(
-      (item) => item.code === "COMPATIBILITY_CERTIFICATION_FAILED",
-    ),
-    false,
-  );
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /Provider compatibility/);
-  assert.match(en, /Automatic provider compatibility status/);
-  assert.match(en, /Tested by this release/);
-  assert.match(en, /Supported major/);
-  assert.match(en, /Failure/);
-  assert.match(en, /CLAUDE_REGISTRY_SCHEMA_REJECTED/);
-  assert.equal(en.includes("Live certification"), false);
-  assert.equal(en.includes("fail / wire"), false);
-  assert.equal(en.includes("COMPATIBILITY_CERTIFICATION_FAILED"), false);
-  assert.match(zh, /提供方兼容性/);
-  assert.equal(zh.includes("实时认证"), false);
-});
-
-test("an absent optional compatibility surface renders quietly in both locales", () => {
-  const snapshot = dashboardFixture();
-  snapshot.compatibilityChecks = (snapshot.compatibilityChecks ?? []).filter(
-    ({ surface }) => surface === "claude",
-  );
-  const definitions = [
-    { surface: "claude", required: true },
-    { surface: "codex", required: false },
-  ] as const satisfies readonly CompatibilitySurfaceDefinition[];
-  const model = buildDashboardViewModel(snapshot, {
-    compatibilitySurfaceDefinitions: definitions,
-  });
-  assert.deepEqual(model.compatibilityChecks.at(-1), {
-    surface: "codex",
-    notDetected: true,
-  });
-  assert.equal(
-    model.attention.some(({ provider }) => provider === "codex"),
-    false,
-  );
-  const en = renderDashboardHtml(snapshot, {
-    locale: "en",
-    compatibilitySurfaceDefinitions: definitions,
-  });
-  const zh = renderDashboardHtml(snapshot, {
-    locale: "zh-CN",
-    compatibilitySurfaceDefinitions: definitions,
-  });
-  assert.match(en, /Codex[\s\S]*Not detected/u);
-  assert.match(zh, /Codex[\s\S]*未检测到/u);
-  assert.doesNotMatch(en, /Codex[\s\S]*COMPAT_PROVIDER_UNAVAILABLE/u);
-});
-
-test("detected DeepSeek renders quarantined without provider degradation", () => {
-  const snapshot = dashboardFixture();
-  snapshot.compatibilityChecks = [
-    ...(snapshot.compatibilityChecks ?? []),
-    projectPublicCompatibilityCheck(evaluateCompatibilityAttestation({
-      surface: "deepseek",
-      version: UNKNOWN_COMPATIBILITY_VERSION,
-      checkedAt: "2026-08-16T12:00:00.000Z",
-      certifiedVersions: [],
-      probes: compatibilityProbeNames.deepseek.map((name) =>
-        name === "version"
-          ? { name, outcome: "fail", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE" }
-          : { name, outcome: "pass" }),
-    })),
-  ];
-  const model = buildDashboardViewModel(snapshot);
-  const deepseek = model.compatibilityChecks.find(({ surface }) => surface === "deepseek");
-  assert.deepEqual(deepseek, {
-    surface: "deepseek", version: "unknown", tier: "incompatible",
-    writesCovered: false, checkedAt: "2026-08-16T12:00:00.000Z",
-    failure: "version", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE",
-  });
-  assert.equal(model.overall, "ready");
-  assert.equal(model.attention.some(({ provider }) => provider === ("deepseek" as never)), false);
-  assert.match(renderDashboardHtml(snapshot, { locale: "en" }),
-    /DeepSeek[\s\S]*unknown[\s\S]*Incompatible[\s\S]*DEEPSEEK_HARNESS_VERSION_UNPARSEABLE/u);
-  assert.match(renderDashboardHtml(snapshot, { locale: "zh-CN" }),
-    /DeepSeek[\s\S]*unknown[\s\S]*不兼容[\s\S]*DEEPSEEK_HARNESS_VERSION_UNPARSEABLE/u);
-});
-
-test("unsupported provider majors name bounded evidence while the broker stays usable", () => {
-  const snapshot = dashboardFixture();
-  snapshot.health = "degraded";
-  snapshot.connectors[0] = {
-    ...snapshot.connectors[0]!,
-    health: "degraded",
-    compatibility: "incompatible",
-    safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
-  };
-  const probes: CompatibilityProbeResult[] = compatibilityProbeNames.claude.map(
-    (name) => ({
-      name,
-      outcome: name === "version" ? "fail" : "pass",
-      ...(name === "version"
-        ? { safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED" }
-        : {}),
-    }),
-  );
-  snapshot.compatibilityChecks = [
-    projectPublicCompatibilityCheck(
-      evaluateCompatibilityAttestation({
-        surface: "claude",
-        version: "3.0.0",
-        checkedAt: "2026-08-08T11:58:00.000Z",
-        certifiedVersions: certifiedCompatibilityVersions.claude,
-        probes,
-      }),
-    ),
-  ];
-  snapshot.alerts = [
-    {
-      code: "CLAUDE_PEER_VERSION_UNSUPPORTED",
-      severity: "error",
-      timestamp: "2026-08-08T11:58:00.000Z",
-      provider: "claude",
-      host: "this-mac",
-    },
-  ];
-
-  const model = buildDashboardViewModel(snapshot);
-  assert.deepEqual(model.compatibilityChecks[0], {
-    surface: "claude",
-    version: "3.0.0",
-    testedVersion: "2.1.227",
-    supportedMajor: "2",
-    tier: "incompatible",
-    writesCovered: false,
-    checkedAt: "2026-08-08T11:58:00.000Z",
-    failure: "version",
-    safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
-  });
-  assert.equal(
-    model.attention.some(
-      (item) => item.guidance === "provider_incompatible",
-    ),
-    true,
-  );
-  assert.equal(model.exchange.claude.nextAction, "review_compatibility");
-  assert.equal(model.exchange.claude.ready, 0);
-  assert.equal(model.pairs[0]?.state, "degraded");
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /Provider build is write-fenced/);
-  assert.match(en, /3\.0\.0[\s\S]*2\.1\.227[\s\S]*>2</u);
-  assert.equal(en.includes("embassy health"), false);
-  assert.equal(en.includes("Start or keep a Claude Code session running"), false);
-  assert.equal(en.includes("Refresh discovery"), false);
-  assert.equal(en.includes("Restart only when"), false);
-  assert.match(zh, /提供方构建已禁止写入/);
-  assert.match(zh, /3\.0\.0[\s\S]*2\.1\.227/u);
-});
-
-test("monitor-only Codex is non-ready everywhere without registration retry advice", () => {
-  const snapshot = dashboardFixture();
-  const codexRoute = snapshot.routes.find((route) => route.provider === "codex");
-  assert.ok(codexRoute);
-  codexRoute.safeErrorCode = "CODEX_WRITES_DISABLED";
-
-  const model = buildDashboardViewModel(snapshot);
-  assert.equal(model.overall, "attention");
-  assert.equal(model.exchange.codex.status, "attention");
-  assert.equal(model.exchange.codex.ready, 0);
-  assert.equal(model.exchange.codex.monitorOnly, 1);
-  assert.equal(model.exchange.codex.nextAction, "review_compatibility");
-  assert.equal(model.graph.readyPairCount, 0);
-  assert.equal(model.pairs[0]?.state, "degraded");
-  assert.equal(
-    model.attention.some((item) => item.guidance === "route_stale"),
-    false,
-  );
-
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, />Needs attention</);
-  assert.match(en, /1 monitor-only/);
-  assert.match(en, /Monitor only — writes are disabled/);
-  assert.match(en, /discovery or registration cannot remove this write fence/);
-  assert.equal(en.includes("Re-run embassy register-codex"), false);
-  assert.match(zh, />需要处理</);
-  assert.match(zh, /仅监控 1/);
-  assert.match(zh, /仅监控——此路由因 CODEX_WRITES_DISABLED 而停用写入/);
-  assert.equal(zh.includes("重新运行 embassy register-codex"), false);
-});
-
-test("provider quarantine owns recovery and suppresses normal-route noise", () => {
-  const snapshot = dashboardFixture();
-  snapshot.health = "degraded";
-  const claudeConnector = snapshot.connectors.find(
-    (connector) => connector.provider === "claude",
-  );
-  const claudeRoute = snapshot.routes.find((route) => route.provider === "claude");
-  assert.ok(claudeConnector);
-  assert.ok(claudeRoute);
-  claudeConnector.health = "degraded";
-  claudeConnector.compatibility = "incompatible";
-  claudeConnector.safeErrorCode = "CLAUDE_MESSAGING_SOCKET_SCHEMA_REJECTED";
-  claudeRoute.enabled = false;
-  claudeRoute.state = "incompatible";
-  claudeRoute.compatibility = "incompatible";
-  claudeRoute.safeErrorCode = "CLAUDE_MESSAGING_SOCKET_SCHEMA_REJECTED";
-  snapshot.availablePeers = [];
-  snapshot.alerts = [{
-    code: "CLAUDE_MESSAGING_SOCKET_SCHEMA_REJECTED",
-    severity: "warning",
-    timestamp: "2026-08-08T11:58:00.000Z",
-    provider: "claude",
-    host: "this-mac",
-  }];
-
-  const model = buildDashboardViewModel(snapshot);
-  assert.equal(model.exchange.claude.status, "attention");
-  assert.equal(model.exchange.claude.ready, 0);
-  assert.equal(model.exchange.claude.nextAction, "review_compatibility");
-  assert.equal(model.pairs[0]?.state, "degraded");
-  assert.deepEqual(
-    model.attention.map((item) => item.guidance),
-    ["provider_incompatible"],
-  );
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  assert.match(en, /Provider build is write-fenced/);
-  assert.equal(en.includes("Start or keep a Claude Code session running"), false);
-  assert.equal(en.includes("Refresh discovery"), false);
-  assert.equal(en.includes("Restart only when"), false);
-
-  const codexConnector = snapshot.connectors.find(
-    (connector) => connector.provider === "codex",
-  );
-  const codexRoute = snapshot.routes.find((route) => route.provider === "codex");
-  assert.ok(codexConnector);
-  assert.ok(codexRoute);
-  codexConnector.health = "degraded";
-  codexConnector.compatibility = "incompatible";
-  codexConnector.safeErrorCode = "CODEX_INITIALIZE_SCHEMA_REJECTED";
-  codexRoute.enabled = false;
-  codexRoute.state = "incompatible";
-  codexRoute.compatibility = "incompatible";
-  codexRoute.safeErrorCode = "CODEX_INITIALIZE_SCHEMA_REJECTED";
-  snapshot.alerts.push({
-    code: "CODEX_INITIALIZE_SCHEMA_REJECTED",
-    severity: "warning",
-    timestamp: "2026-08-08T11:58:01.000Z",
-    provider: "codex",
-    host: "this-mac",
-  });
-
-  const both = buildDashboardViewModel(snapshot);
-  assert.equal(both.overall, "attention");
-  assert.equal(both.exchange.claude.status, "attention");
-  assert.equal(both.exchange.codex.status, "attention");
-  assert.equal(both.graph.readyPairCount, 0);
-  assert.equal(
-    both.attention.filter((item) => item.guidance === "provider_incompatible")
-      .length,
-    2,
-  );
-  assert.equal(
-    both.attention.some((item) => item.guidance === "degraded"),
-    false,
-  );
-
-  const probes: CompatibilityProbeResult[] = compatibilityProbeNames.codex
-    .map((name) => ({ name, outcome: "pass" }));
-  probes.push({ name: "write_attestation", outcome: "pass" });
-  snapshot.compatibilityChecks = [projectPublicCompatibilityCheck(evaluateCompatibilityAttestation({
-    surface: "codex", version: "0.147.1", checkedAt: "2026-08-08T11:58:00.000Z",
-    certifiedVersions: certifiedCompatibilityVersions.codex, probes,
-  }))];
-  const writeAttested = buildDashboardViewModel(snapshot);
-  assert.equal(writeAttested.compatibilityChecks[0]?.writesCovered, true);
-  assert.equal(writeAttested.attention.some((item) =>
-    item.provider === "codex" && item.guidance === "provider_incompatible"), false);
-  assert.match(renderDashboardHtml(snapshot, { locale: "en" }), /Live read and write probes passed/);
-  assert.match(renderDashboardHtml(snapshot, { locale: "zh-CN" }), /实时读写探测通过/);
-});
-
 test("registry evidence stays connector-scoped and raises one honest warning", () => {
   const rejected = dashboardFixture();
   const claude = rejected.connectors.find(
@@ -489,7 +152,6 @@ test("registry evidence stays connector-scoped and raises one honest warning", (
     rejectedCodesOmitted: 0,
   };
   claude.health = "degraded";
-  claude.compatibility = "incompatible";
   claude.safeErrorCode = "CLAUDE_REGISTRY_UNAVAILABLE";
   const unavailableModel = buildDashboardViewModel(rejected);
   assert.deepEqual(
@@ -581,7 +243,7 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       workerAlias: "codex-reviewer@this-mac",
       kind: "settled",
       actor: "unknown",
-      reason: "legacy_done",
+      reason: "done",
     },
     {
       sequence: 11,
@@ -650,7 +312,7 @@ test("progress watches project bounded countdowns, attention, and bilingual meta
       reason,
     })),
     [
-      { kind: "settled", actor: "unknown", reason: "legacy_done" },
+      { kind: "settled", actor: "unknown", reason: "done" },
       { kind: "settled", actor: "owner", reason: "done" },
       { kind: "settled", actor: "worker", reason: "done" },
       { kind: "settled", actor: "operator", reason: "pair_removed" },
@@ -698,7 +360,6 @@ test("view model derives deterministic route and global queue ages from generate
     host: "this-mac",
     enabled: true,
     state: "busy",
-    compatibility: "compatible",
     busyPolicy: "queue",
     queueDepth: 1,
     oldestQueuedAt: "2026-08-08T11:59:50.000Z",
@@ -728,7 +389,7 @@ test("malformed, future, and empty-route queue timestamps never leak or become i
     { ...snapshot.routes[1]!, alias: "codex-future@this-mac", oldestQueuedAt: "2026-08-08T12:00:00.001Z" },
     { ...snapshot.routes[1]!, alias: "codex-empty@this-mac", queueDepth: 0, oldestQueuedAt: "2026-08-01T00:00:00.000Z" },
   ];
-  snapshot.pairs = [];
+  snapshot.consentEdges = [];
   const model = buildDashboardViewModel(snapshot);
   assert.equal(model.transit.queuedMessages, 6);
   assert.equal(model.transit.oldestQueueAgeMs, undefined);
@@ -793,23 +454,22 @@ test("a durable pair stays visible and degraded when its Codex route needs re-ob
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
     state: "stale",
-    compatibility: "expired",
     safeErrorCode: "REOBSERVATION_REQUIRED",
   };
   const model = buildDashboardViewModel(snapshot);
   assert.equal(model.overall, "attention");
-  assert.equal(model.graph.pairCount, 1);
-  assert.equal(model.graph.readyPairCount, 0);
-  assert.equal(model.graph.unpairedReadyClaude, 0);
-  assert.equal(model.graph.unpairedReadyCodex, 0);
-  assert.equal(model.pairs[0]?.state, "degraded");
-  assert.equal(model.exchange.claude.nextAction, "none");
-  assert.equal(model.exchange.codex.nextAction, "restore_codex");
+  assert.equal(model.graph.consentEdgeCount, 1);
+  assert.equal(model.graph.readyConsentEdgeCount, 0);
+  assert.equal(model.graph.unpairedReadyByProvider.claude, 0);
+  assert.equal(model.graph.unpairedReadyByProvider.codex, 0);
+  assert.equal(model.consentEdges[0]?.state, "degraded");
+  assert.equal(model.exchange.parties[0]?.nextAction, "none");
+  assert.equal(model.exchange.parties[1]?.nextAction, "restore_codex");
   assert.equal(model.attention.length, 1);
   assert.equal(model.attention[0]?.kind, "route");
   assert.equal(model.attention[0]?.guidance, "codex_reactivation_required");
   const html = renderDashboardHtml(snapshot);
-  assert.match(html, /Consent edge: claude-advisor@this-mac ↔ codex-reviewer@this-mac/);
+  assert.match(html, /Claude · claude-advisor@this-mac ↔ Codex · codex-reviewer@this-mac/);
   assert.match(html, /Consent edge retained; one or both routes need attention/);
   assert.match(html, /Saved Codex route is not live/);
   assert.match(html, /saved Codex route has no current live endpoint proof/);
@@ -830,10 +490,10 @@ test("a durable pair stays visible with an unavailable reason when one saved rou
 
   const model = buildDashboardViewModel(snapshot);
   assert.equal(model.overall, "attention");
-  assert.equal(model.graph.pairCount, 1);
-  assert.equal(model.graph.readyPairCount, 0);
-  assert.equal(model.pairs[0]?.state, "unavailable");
-  assert.equal(model.exchange.codex.nextAction, "register_codex");
+  assert.equal(model.graph.consentEdgeCount, 1);
+  assert.equal(model.graph.readyConsentEdgeCount, 0);
+  assert.equal(model.consentEdges[0]?.state, "unavailable");
+  assert.equal(model.exchange.parties[1]?.nextAction, "register_codex");
   assert.equal(model.attention.length, 1);
   assert.deepEqual(model.attention[0], {
     kind: "route",
@@ -846,7 +506,7 @@ test("a durable pair stays visible with an unavailable reason when one saved rou
 
   const en = renderDashboardHtml(snapshot);
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /Consent edge: claude-advisor@this-mac ↔ codex-reviewer@this-mac/);
+  assert.match(en, /Claude · claude-advisor@this-mac ↔ Codex · codex-reviewer@this-mac/);
   assert.match(en, /Consent edge retained; one or both saved route records are unavailable in this snapshot/);
   assert.match(en, /Consent edge endpoint unavailable/);
   assert.match(en, /Run embassy refresh-dashboard first/);
@@ -863,7 +523,6 @@ test("Codex restart alerts for one route coalesce into one human condition", () 
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
     state: "stale",
-    compatibility: "expired",
     safeErrorCode: "REOBSERVATION_REQUIRED",
   };
   snapshot.alerts = [
@@ -933,7 +592,6 @@ test("route-derived reactivation guidance requires an actually stale Codex route
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
     state: "offline",
-    compatibility: "expired",
     safeErrorCode: "REOBSERVATION_REQUIRED",
   };
 
@@ -960,7 +618,6 @@ test("aged Codex staleness points at Desktop while the recovery burst remains tr
   const route = snapshot.routes.find((candidate) => candidate.provider === "codex");
   assert.ok(route);
   route.state = "stale";
-  route.compatibility = "expired";
   route.safeErrorCode = "CODEX_ROUTE_STALE";
   route.lastSeenAt = "2026-08-08T11:59:59.000Z";
   snapshot.alerts = [{
@@ -984,13 +641,11 @@ test("aged Codex staleness points at Desktop while the recovery burst remains tr
   );
   assert.ok(connector);
   connector.health = "degraded";
-  connector.compatibility = "expired";
   assert.equal(
     buildDashboardViewModel(snapshot).attention[0]?.guidance,
     "codex_stale",
   );
   connector.health = "healthy";
-  connector.compatibility = "compatible";
   const model = buildDashboardViewModel(snapshot);
   assert.equal(
     model.attention[0]?.guidance,
@@ -1007,7 +662,7 @@ test("aged Codex staleness points at Desktop while the recovery burst remains tr
   assert.equal(en.includes("Re-run register-codex"), false);
 });
 
-test("an aged Claude mailbox write surfaces one notice only while its exact recipient is unobserved", () => {
+test("any provider-to-Claude mailbox write surfaces one notice while its recipient is unobserved", () => {
   const snapshot = dashboardFixture();
   snapshot.routes[0] = {
     ...snapshot.routes[0]!,
@@ -1018,6 +673,7 @@ test("an aged Claude mailbox write surfaces one notice only while its exact reci
   const mailboxWrite = snapshot.messages.find(
     (message) => message.messageIdSuffix === "c0ffee",
   )!;
+  mailboxWrite.direction = "deepseek_to_claude";
   mailboxWrite.state = "delivered";
   mailboxWrite.timestamp = "2026-08-08T11:57:00.000Z";
   snapshot.alerts = [
@@ -1149,7 +805,7 @@ test("Codex succession alerts distinguish a busy boundary from manual recovery",
 test("first-run exchange board gives truthful paired setup actions", () => {
   const snapshot = dashboardFixture();
   snapshot.routes = [];
-  snapshot.pairs = [];
+  snapshot.consentEdges = [];
   snapshot.availablePeers = snapshot.availablePeers.map((peer) => ({
     ...peer,
     selected: false,
@@ -1157,7 +813,7 @@ test("first-run exchange board gives truthful paired setup actions", () => {
   const visiblePeers = renderDashboardHtml(snapshot);
   assert.match(
     visiblePeers,
-    /embassy pair --claude &lt;alias&gt; --codex &lt;alias&gt;/,
+    /embassy pair --from &lt;alias&gt; --to &lt;alias&gt;/,
   );
   assert.match(visiblePeers, /embassy register-codex --alias codex-&lt;name&gt;@&lt;host&gt;/);
 
@@ -1174,16 +830,16 @@ test("first-run exchange board gives truthful paired setup actions", () => {
   assert.match(openInbound, /Open inbound/);
   assert.match(
     openInbound,
-    /Any live Claude session under this OS user may initiate inbound work/,
+    /Any live same-user endpoint allowed by the provider may initiate inbound work/,
   );
   assert.match(openInbound, /data-inbound-mode="open"/);
 });
 
-test("dashboard projects explicit consent edges and graph readiness", () => {
+test("dashboard projects all-provider consent edges, directions, and declared provider identity", () => {
   const snapshot = dashboardFixture();
   snapshot.routes.push({
     ...snapshot.routes[0]!,
-    alias: "claude-reviewer@this-mac",
+    alias: "codex-misleading@this-mac",
     state: "idle",
   });
   const staleCodexRoute = {
@@ -1194,65 +850,67 @@ test("dashboard projects explicit consent edges and graph readiness", () => {
   };
   delete staleCodexRoute.oldestQueuedAt;
   snapshot.routes.push(staleCodexRoute);
-  snapshot.pairs.push({
-    claudeAlias: "claude-reviewer@this-mac",
-    codexAlias: "codex-builder@this-mac",
+  snapshot.routes.push(
+    { ...snapshot.routes[0]!, alias: "dsh-builder@this-mac", provider: "deepseek", state: "idle" },
+    { ...snapshot.routes[0]!, alias: "grok-builder@this-mac", provider: "grok", state: "idle" },
+  );
+  snapshot.consentEdges.push({
+    endpoints: [
+      { alias: "codex-misleading@this-mac", provider: "claude" },
+      { alias: "codex-builder@this-mac", provider: "codex" },
+    ],
     host: "this-mac",
     counters: routeCounters({ accepted: 1, failed: 1 }),
+  }, {
+    endpoints: [
+      { alias: "dsh-builder@this-mac", provider: "deepseek" },
+      { alias: "grok-builder@this-mac", provider: "grok" },
+    ],
+    host: "this-mac",
+    counters: routeCounters({ accepted: 1, delivered: 1 }),
   });
-  snapshot.truncation.pairs = 2;
+  snapshot.messages.push({
+    sequence: 5,
+    timestamp: "2026-08-08T12:00:00.000Z",
+    messageIdSuffix: "d33f00",
+    direction: "deepseek_to_grok",
+    sourceAlias: "dsh-builder@this-mac",
+    targetAlias: "grok-builder@this-mac",
+    state: "delivered",
+    bytes: 42,
+  });
+  snapshot.truncation.consentEdges = 2;
 
   const model = buildDashboardViewModel(snapshot);
-  assert.deepEqual(
-    model.pairs.map(({ claudeAlias, codexAlias, state }) => ({
-      claudeAlias,
-      codexAlias,
-      state,
-    })),
-    [
-      {
-        claudeAlias: "claude-advisor@this-mac",
-        codexAlias: "codex-reviewer@this-mac",
-        state: "ready",
-      },
-      {
-        claudeAlias: "claude-reviewer@this-mac",
-        codexAlias: "codex-builder@this-mac",
-        state: "degraded",
-      },
-    ],
-  );
+  assert.deepEqual(model.consentEdges.map(({ state }) => state), ["ready", "degraded", "ready"]);
   assert.deepEqual(model.graph, {
-    pairCount: 2,
-    readyPairCount: 1,
-    pairCountIsLowerBound: true,
-    unpairedReadyClaude: 0,
-    unpairedReadyCodex: 0,
+    consentEdgeCount: 3,
+    readyConsentEdgeCount: 2,
+    consentEdgeCountIsLowerBound: true,
+    unpairedReadyByProvider: { claude: 0, codex: 0, deepseek: 0, grok: 0 },
   });
-  assert.equal(model.omissions.pairs, 2);
   const html = renderDashboardHtml(snapshot);
-  assert.match(html, /Consent edge: claude-advisor@this-mac ↔ codex-reviewer@this-mac/);
-  assert.match(html, /Consent edge: claude-reviewer@this-mac ↔ codex-builder@this-mac/);
-  assert.match(html, /Ready: At least 1 · Consent edges: At least 4/);
+  assert.match(html, /Claude · codex-misleading@this-mac ↔ Codex · codex-builder@this-mac/);
+  assert.match(html, /DeepSeek → Grok Build[\s\S]*DeepSeek · dsh-builder@this-mac ↔ Grok Build · grok-builder@this-mac/u);
+  assert.match(html, /Ready: At least 2 · Consent edges: At least 5/);
   assert.match(html, /2 additional consent edges are omitted/);
 });
 
-test("pair truncation remains evidence of consent even when every edge row is omitted", () => {
+test("consent-edge truncation remains evidence of consent when every row is omitted", () => {
   const snapshot = dashboardFixture();
-  snapshot.pairs = [];
-  snapshot.truncation.pairs = 1;
+  snapshot.consentEdges = [];
+  snapshot.truncation.consentEdges = 1;
 
   const model = buildDashboardViewModel(snapshot);
   assert.deepEqual(model.graph, {
-    pairCount: 0,
-    readyPairCount: 0,
-    pairCountIsLowerBound: true,
-    unpairedReadyClaude: 1,
-    unpairedReadyCodex: 1,
+    consentEdgeCount: 0,
+    readyConsentEdgeCount: 0,
+    consentEdgeCountIsLowerBound: true,
+    unpairedReadyByProvider: { claude: 1, codex: 1, deepseek: 0, grok: 0 },
   });
   assert.equal(model.overall, "ready");
-  assert.equal(model.exchange.claude.nextAction, "none");
-  assert.equal(model.exchange.codex.nextAction, "none");
+  assert.equal(model.exchange.parties[0]?.nextAction, "none");
+  assert.equal(model.exchange.parties[1]?.nextAction, "none");
 
   const html = renderDashboardHtml(snapshot);
   assert.match(html, /Ready: At least 0 · Consent edges: At least 1/);
@@ -1266,7 +924,6 @@ test("a fresh Codex task remains pairable beside an existing degraded edge", () 
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
     state: "stale",
-    compatibility: "expired",
     safeErrorCode: "REOBSERVATION_REQUIRED",
   };
   const { oldestQueuedAt: _oldestQueuedAt, ...freshCodex } =
@@ -1279,14 +936,14 @@ test("a fresh Codex task remains pairable beside an existing degraded edge", () 
   });
 
   const model = buildDashboardViewModel(snapshot);
-  assert.equal(model.pairs[0]?.state, "degraded");
-  assert.equal(model.graph.unpairedReadyCodex, 1);
-  assert.equal(model.exchange.codex.nextAction, "pair_routes");
+  assert.equal(model.consentEdges[0]?.state, "degraded");
+  assert.equal(model.graph.unpairedReadyByProvider.codex, 1);
+  assert.equal(model.exchange.parties[1]?.nextAction, "pair_routes");
   const html = renderDashboardHtml(snapshot);
   assert.equal(html.includes("No consent edge exists"), false);
   assert.match(
     html,
-    /0 ready Claude endpoints and 1 ready Codex endpoints have no consent edge/,
+    /Claude: 0 ready without an edge · Codex: 1 ready without an edge/,
   );
 });
 
@@ -1313,7 +970,7 @@ test("unpaired sender refusal is neutral and explains the pairing boundary", () 
   );
 });
 
-test("only compatible live collision-free peers drive the select call to action", () => {
+test("only validated live collision-free peers drive the select call to action", () => {
   const snapshot = dashboardFixture();
   snapshot.routes = snapshot.routes.filter((route) => route.provider === "codex");
   snapshot.availablePeers = [
@@ -1321,8 +978,7 @@ test("only compatible live collision-free peers drive the select call to action"
       alias: "claude-collision@this-mac",
       provider: "claude",
       host: "this-mac",
-      state: "incompatible",
-      compatibility: "incompatible",
+      state: "idle",
       validated: false,
       selected: false,
       safeErrorCode: "PEER_ALIAS_COLLISION",
@@ -1331,8 +987,7 @@ test("only compatible live collision-free peers drive the select call to action"
       alias: "claude-session@this-mac",
       provider: "claude",
       host: "this-mac",
-      state: "incompatible",
-      compatibility: "incompatible",
+      state: "idle",
       validated: false,
       selected: false,
       safeErrorCode: "PEER_SESSION_COLLISION",
@@ -1341,8 +996,7 @@ test("only compatible live collision-free peers drive the select call to action"
       alias: "claude-incomplete@this-mac",
       provider: "claude",
       host: "this-mac",
-      state: "incompatible",
-      compatibility: "incompatible",
+      state: "idle",
       validated: false,
       selected: false,
       safeErrorCode: "PEER_DISCOVERY_INCOMPLETE",
@@ -1352,14 +1006,13 @@ test("only compatible live collision-free peers drive the select call to action"
       provider: "claude",
       host: "this-mac",
       state: "offline",
-      compatibility: "compatible",
       validated: false,
       selected: false,
     },
   ];
   const model = buildDashboardViewModel(snapshot);
-  assert.equal(model.exchange.claude.selectable, 0);
-  assert.equal(model.exchange.claude.nextAction, "repair_claude_inventory");
+  assert.equal(model.exchange.parties[0]?.selectable, 0);
+  assert.equal(model.exchange.parties[0]?.nextAction, "repair_claude_inventory");
   assert.equal(model.peers.every((peer) => !peer.selectable), true);
   const html = renderDashboardHtml(snapshot);
   assert.equal(html.includes("embassy select-claude --alias"), false);
@@ -1473,7 +1126,6 @@ test("Chinese copy distinguishes static snapshots, stale routes, and expired del
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
     state: "stale",
-    compatibility: "expired",
   };
   snapshot.messages = [
     {
@@ -1485,7 +1137,6 @@ test("Chinese copy distinguishes static snapshots, stale routes, and expired del
   assert.equal(html.includes("即时"), false);
   assert.match(html, /一个时间点/);
   assert.match(html, /需要重新观察/);
-  assert.match(html, /兼容性观察已失效/);
   assert.match(html, /已超出投递期限/);
 });
 
@@ -1496,12 +1147,11 @@ test("invalid available-peer inventory is rejected as a whole", () => {
     provider: "codex",
     host: "this-mac",
     state: "idle",
-    compatibility: "compatible",
     validated: true,
     selected: false,
   }];
   const model = buildDashboardViewModel(snapshot);
   assert.deepEqual(model.peers, []);
-  assert.equal(model.exchange.claude.total, 0);
+  assert.equal(model.exchange.parties[0]?.total, 0);
   assert.equal(renderDashboardHtml(snapshot).includes("codex-impostor@this-mac"), false);
 });

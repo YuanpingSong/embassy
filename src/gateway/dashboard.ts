@@ -15,7 +15,6 @@ import {
   type DashboardCopyKey,
   type DashboardLocale,
 } from "./dashboard-copy.js";
-import type { CompatibilitySurface } from "./compatibility.js";
 import {
   buildDashboardViewModel,
   DASHBOARD_MODEL_LIMITS,
@@ -26,12 +25,11 @@ import {
   type DashboardAttentionItem,
   type DashboardExchangeParty,
   type DashboardMessageGroup,
-  type DashboardModelOptions,
   type DashboardTone,
   type DashboardViewModel,
 } from "./dashboard-model.js";
+import { gatewayProviderDisplayNames, parseDirection } from "./types.js";
 import type {
-  CompatibilityState,
   ConnectorHealth,
   DeliveryState,
   GatewayProvider,
@@ -60,9 +58,6 @@ export type DashboardRenderOptions = {
   locale?: DashboardLocale;
   /** Deprecated and ignored: v1 snapshots are deliberately inert. */
   refreshSeconds?: number;
-  /** Test-only surface inventory; production uses the declared registry. */
-  compatibilitySurfaceDefinitions?:
-    DashboardModelOptions["compatibilitySurfaceDefinitions"];
 };
 
 const HTML_ESCAPE_PATTERN = /[&<>"']/g;
@@ -214,10 +209,6 @@ function toneForHealth(health: ConnectorHealth): DashboardTone {
   return dashboardTone("health", health);
 }
 
-function toneForCompatibility(compatibility: CompatibilityState): DashboardTone {
-  return dashboardTone("compatibility", compatibility);
-}
-
 function toneForRoute(state: RouteState): DashboardTone {
   return dashboardTone("route", state);
 }
@@ -274,6 +265,16 @@ function nextActionLabel(
 
 function renderParty(context: RenderContext, party: DashboardExchangeParty): string {
   const isClaude = party.kind === "claude";
+  const title = party.kind === "claude"
+    ? t(context, "exchange.claude.title")
+    : party.kind === "codex"
+      ? t(context, "exchange.codex.title")
+      : gatewayProviderDisplayNames[party.kind];
+  const note = party.kind === "claude"
+    ? t(context, "exchange.claude.note")
+    : party.kind === "codex"
+      ? t(context, "exchange.codex.note")
+      : t(context, "exchange.provider.note");
   const ready = renderCount(context, party.ready, party.countIsLowerBound);
   const total = renderCount(context, party.total, party.countIsLowerBound);
   const selectable = renderCount(
@@ -283,12 +284,11 @@ function renderParty(context: RenderContext, party: DashboardExchangeParty): str
   );
   return `<article class="exchange-party exchange-party--${party.kind}" data-semantic-party="${party.kind}">
     <div class="party-heading">
-      <div><h3>${t(context, isClaude ? "exchange.claude.title" : "exchange.codex.title")}</h3><p>${t(context, isClaude ? "exchange.claude.note" : "exchange.codex.note")}</p></div>
+      <div><h3>${title}</h3><p>${note}</p></div>
       ${statusPill(partyStatusLabel(context, party.status), toneForParty(party.status))}
     </div>
-    <p class="party-count">${t(context, isClaude ? "exchange.count.claude" : "app.overview.count.codex", { ready, selectable, total, monitorOnly: party.monitorOnly ?? 0 })}</p>
+    <p class="party-count">${t(context, isClaude ? "exchange.count.claude" : "app.overview.count.provider", { ready, selectable, total })}</p>
     ${party.primaryAlias === undefined ? "" : `<p class="party-alias">${escapeDashboardHtml(party.primaryAlias)}</p>`}
-    ${party.monitorOnly === undefined ? "" : `<p class="cell-note">${t(context, "app.routes.monitorOnlyReason")}</p>`}
     <p class="next-action"><strong>${t(context, "next.label")}:</strong> ${nextActionLabel(context, party.nextAction)}</p>
   </article>`;
 }
@@ -297,56 +297,65 @@ function renderPairGraph(context: RenderContext): string {
   const graph = context.model.graph;
   const locallyOmittedPairs = Math.max(
     0,
-    graph.pairCount - context.model.pairs.length,
+    graph.consentEdgeCount - context.model.consentEdges.length,
   );
   const upstreamOmittedPairs = Math.max(
     0,
-    context.model.omissions.pairs - locallyOmittedPairs,
+    context.model.omissions.consentEdges - locallyOmittedPairs,
   );
-  const knownPairCount = graph.pairCount + upstreamOmittedPairs;
+  const knownPairCount = graph.consentEdgeCount + upstreamOmittedPairs;
   const summary = t(context, "app.routes.pairSummary", {
     ready: renderCount(
       context,
-      graph.readyPairCount,
-      graph.pairCountIsLowerBound,
+      graph.readyConsentEdgeCount,
+      graph.consentEdgeCountIsLowerBound,
     ),
-    total: renderCount(context, knownPairCount, graph.pairCountIsLowerBound),
+    total: renderCount(context, knownPairCount, graph.consentEdgeCountIsLowerBound),
   });
-  const unpaired = t(context, "app.routes.unpairedSummary", {
-    claude: String(graph.unpairedReadyClaude),
-    codex: String(graph.unpairedReadyCodex),
-  });
+  const unpaired = context.model.exchange.parties.map((party) =>
+    t(context, "app.routes.unpairedProvider", {
+      provider: gatewayProviderDisplayNames[party.kind],
+      count: String(graph.unpairedReadyByProvider[party.kind]),
+    })
+  ).join(" · ");
   const hasPairEvidence =
-    graph.pairCount > 0 || graph.pairCountIsLowerBound;
-  const rows = context.model.pairs.length === 0 && !hasPairEvidence
+    graph.consentEdgeCount > 0 || graph.consentEdgeCountIsLowerBound;
+  const rows = context.model.consentEdges.length === 0 && !hasPairEvidence
     ? `<p class="quiet">${t(context, "app.routes.noPairInline")}</p>`
-    : `<ul class="pair-list">${context.model.pairs.map((pair) => {
-        const label = t(context, "app.routes.pairDescription", {
-          claude: escapeDashboardHtml(pair.claudeAlias),
-          codex: escapeDashboardHtml(pair.codexAlias),
+    : `<ul class="pair-list">${context.model.consentEdges.map((edge) => {
+        const [left, right] = edge.endpoints;
+        const label = t(context, "app.routes.consentEdge", {
+          left: t(context, "app.routes.consentEndpoint", {
+            provider: gatewayProviderDisplayNames[left.provider],
+            alias: escapeDashboardHtml(left.alias),
+          }),
+          right: t(context, "app.routes.consentEndpoint", {
+            provider: gatewayProviderDisplayNames[right.provider],
+            alias: escapeDashboardHtml(right.alias),
+          }),
         });
-        const stateLabel = pair.state === "ready"
+        const stateLabel = edge.state === "ready"
           ? t(context, "status.ready")
           : t(
               context,
-              pair.state === "degraded"
+              edge.state === "degraded"
                 ? "app.routes.pairState.degraded"
                 : "app.routes.pairState.unavailable",
             );
-        const tone: DashboardTone = pair.state === "ready"
+        const tone: DashboardTone = edge.state === "ready"
           ? "good"
-          : pair.state === "degraded"
+          : edge.state === "degraded"
             ? "warning"
             : "danger";
-        const reason = pair.state === "ready"
+        const reason = edge.state === "ready"
           ? ""
-          : `<small>${t(context, pair.state === "degraded" ? "app.routes.pairDegradedReason" : "app.routes.pairUnavailableReason")}</small>`;
+          : `<small>${t(context, edge.state === "degraded" ? "app.routes.pairDegradedReason" : "app.routes.pairUnavailableReason")}</small>`;
         return `<li><span>${label}${reason}</span>${statusPill(stateLabel, tone)}</li>`;
       }).join("")}</ul>`;
-  const omitted = context.model.omissions.pairs === 0
+  const omitted = context.model.omissions.consentEdges === 0
     ? ""
     : `<p class="quiet">${t(context, "app.omitted.pairs", {
-        count: String(context.model.omissions.pairs),
+        count: String(context.model.omissions.consentEdges),
       })}</p>`;
   return `<section class="pair-graph" aria-labelledby="pair-graph-title">
     <div class="pair-graph__heading"><h3 id="pair-graph-title">${t(context, "app.routes.pairs")}</h3><strong>${summary}</strong></div>
@@ -372,11 +381,14 @@ function renderExchange(context: RenderContext): string {
       });
   const paired = context.model.inboundMode === "paired";
   const hasPair =
-    context.model.graph.pairCount > 0 ||
-    context.model.graph.pairCountIsLowerBound;
+    context.model.graph.consentEdgeCount > 0 ||
+    context.model.graph.consentEdgeCountIsLowerBound;
   const policyBody = paired
     ? t(context, hasPair ? "inbound.paired.body" : "inbound.noPair.body")
     : t(context, "inbound.open.body");
+  const directionParties = context.model.exchange.parties.length === 2
+    ? [...context.model.exchange.parties].reverse()
+    : context.model.exchange.parties;
   return `<section class="section exchange" aria-labelledby="exchange-title">
     <div class="section-heading">
       <div><p class="eyebrow">${t(context, "exchange.eyebrow")}</p><h2 id="exchange-title">${t(context, "exchange.title")}</h2></div>
@@ -392,8 +404,8 @@ function renderExchange(context: RenderContext): string {
       )}
       <p>${policyBody}</p>
     </div>
-    <div class="exchange-board">
-      ${renderParty(context, context.model.exchange.claude)}
+    <div class="exchange-board${context.model.exchange.parties.length > 2 ? " exchange-board--many" : ""}">
+      ${renderParty(context, context.model.exchange.parties[0]!)}
       <div class="pouch" aria-label="${t(context, "exchange.pouch.title")}">
         <span class="pouch__line" aria-hidden="true"></span>
         <div class="seal-mark" aria-hidden="true"><span></span></div>
@@ -401,9 +413,9 @@ function renderExchange(context: RenderContext): string {
         <strong>${pouch}</strong>
         ${age === undefined ? "" : `<small>${t(context, "exchange.pouch.oldest", { age })}</small>`}
       </div>
-      ${renderParty(context, context.model.exchange.codex)}
+      ${context.model.exchange.parties.slice(1).map((party) => renderParty(context, party)).join("")}
     </div>
-    <div class="direction-key" aria-label="${t(context, "exchange.title")}"><span>Codex → Claude</span><span>Claude → Codex</span></div>
+    <div class="direction-key" aria-label="${t(context, "exchange.title")}">${directionParties.flatMap((source) => context.model.exchange.parties.filter((target) => target.kind !== source.kind).map((target) => `<span>${gatewayProviderDisplayNames[source.kind]} → ${gatewayProviderDisplayNames[target.kind]}</span>`)).join("")}</div>
     ${renderPairGraph(context)}
   </section>`;
 }
@@ -512,7 +524,7 @@ function renderActivity(context: RenderContext): string {
         .map(
           (message) => `<tr data-dashboard-row="message-summary" data-delivery-state="${message.state}">
             <td data-label="${t(context, "activity.column.updated")}">${renderTimestampAtSnapshot(context, message.timestamp)}</td>
-            <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${t(context, message.direction === "claude_to_codex" ? "direction.claudeToCodex" : "direction.codexToClaude")}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
+            <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${directionLabel(message.direction)}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
             <td data-label="${t(context, "activity.column.id")}"><code>…${message.messageIdSuffix ?? "—"}</code>${message.conversationIdSuffix === undefined ? "" : `<span class="cell-note"><code>conv …${escapeDashboardHtml(message.conversationIdSuffix)}</code></span>`}</td>
             <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state, message.safeErrorCode))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction, message.safeErrorCode) as DashboardCopyKey)}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
             <td data-label="${t(context, "activity.column.elapsed")}" class="numeric">${formatDuration(message.latencyMs)}</td>
@@ -572,18 +584,21 @@ function renderProgressWatches(context: RenderContext): string {
 }
 
 function providerLabel(
-  context: RenderContext,
-  provider: GatewayProvider | CompatibilitySurface,
+  _context: RenderContext,
+  provider: GatewayProvider,
 ): string {
-  return t(context, `provider.${provider}` as DashboardCopyKey);
+  return gatewayProviderDisplayNames[provider];
+}
+
+function directionLabel(direction: DashboardMessageGroup["direction"]): string {
+  const parsed = parseDirection(direction);
+  return parsed === undefined
+    ? direction
+    : `${gatewayProviderDisplayNames[parsed.sourceProvider]} → ${gatewayProviderDisplayNames[parsed.targetProvider]}`;
 }
 
 function healthLabel(context: RenderContext, health: ConnectorHealth): string {
   return t(context, `health.${health}` as DashboardCopyKey);
-}
-
-function compatibilityLabel(context: RenderContext, compatibility: CompatibilityState): string {
-  return t(context, `compatibility.${compatibility}` as DashboardCopyKey);
 }
 
 function routeStateLabel(context: RenderContext, state: RouteState): string {
@@ -609,45 +624,29 @@ function peerSelectionGuidance(
           ? "peer.reason.discoveryIncomplete"
           : guidance === "offline"
             ? "peer.reason.offline"
-            : "peer.reason.incompatible";
+            : "peer.reason.offline";
   return t(context, key);
 }
 
 function renderSessions(context: RenderContext): string {
   const peerRows = context.model.peers.length === 0
     ? `<tr class="empty-row"><td colspan="7">${t(context, "sessions.peers.empty")}</td></tr>`
-    : context.model.peers.map((peer) => `<tr><th scope="row" data-label="${t(context, "column.alias")}">${escapeDashboardHtml(peer.alias)}</th><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(peer.host)}</td><td data-label="${t(context, "column.state")}">${statusPill(peerStateLabel(context, peer.state), toneForPeer(peer.state))}</td><td data-label="${t(context, "column.compatibility")}">${statusPill(compatibilityLabel(context, peer.compatibility), toneForCompatibility(peer.compatibility))}</td><td data-label="${t(context, "column.validation")}">${statusPill(t(context, peer.validated ? "status.validated" : "status.validationRejected"), peer.validated ? "good" : "warning")}</td><td data-label="${t(context, "column.selection")}">${peer.selectable ? statusPill(t(context, peer.selected ? "status.selected" : "status.available"), peer.selected ? "good" : "quiet") : `${statusPill(t(context, "status.notSelectable"), "warning")}${peer.selectionGuidance === undefined ? "" : `<span class="cell-note">${peerSelectionGuidance(context, peer.selectionGuidance)}</span>`}`}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, peer.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${peer.safeErrorCode === undefined ? "—" : `<code>${peer.safeErrorCode}</code>`}</td></tr>`).join("");
+    : context.model.peers.map((peer) => `<tr><th scope="row" data-label="${t(context, "column.alias")}">${escapeDashboardHtml(peer.alias)}</th><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(peer.host)}</td><td data-label="${t(context, "column.state")}">${statusPill(peerStateLabel(context, peer.state), toneForPeer(peer.state))}</td><td data-label="${t(context, "column.validation")}">${statusPill(t(context, peer.validated ? "status.validated" : "status.validationRejected"), peer.validated ? "good" : "warning")}</td><td data-label="${t(context, "column.selection")}">${peer.selectable ? statusPill(t(context, peer.selected ? "status.selected" : "status.available"), peer.selected ? "good" : "quiet") : `${statusPill(t(context, "status.notSelectable"), "warning")}${peer.selectionGuidance === undefined ? "" : `<span class="cell-note">${peerSelectionGuidance(context, peer.selectionGuidance)}</span>`}`}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, peer.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${peer.safeErrorCode === undefined ? "—" : `<code>${peer.safeErrorCode}</code>`}</td></tr>`).join("");
   const routeRows = context.model.routes.length === 0
-    ? `<tr class="empty-row"><td colspan="8">${t(context, "sessions.routes.empty")}</td></tr>`
-    : context.model.routes.map((route) => `<tr><th scope="row" data-label="${t(context, "column.alias")}">${escapeDashboardHtml(route.alias)}</th><td data-label="${t(context, "column.provider")}">${providerLabel(context, route.provider)}</td><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(route.host)}</td><td data-label="${t(context, "column.state")}">${statusPill(routeStateLabel(context, route.enabled ? route.state : "disabled"), toneForRoute(route.enabled ? route.state : "disabled"))}</td><td data-label="${t(context, "column.compatibility")}">${statusPill(compatibilityLabel(context, route.compatibility), toneForCompatibility(route.compatibility))}</td><td data-label="${t(context, "column.queue")}">${formatInteger(route.queueDepth)}${route.queueAgeMs === undefined ? "" : `<span class="cell-note">${escapeDashboardHtml(formatQueueAge(route.queueAgeMs, context.locale) ?? "")}</span>`}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, route.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${route.safeErrorCode === undefined ? "—" : `<code>${route.safeErrorCode}</code>`}</td></tr>`).join("");
+    ? `<tr class="empty-row"><td colspan="7">${t(context, "sessions.routes.empty")}</td></tr>`
+    : context.model.routes.map((route) => `<tr><th scope="row" data-label="${t(context, "column.alias")}">${escapeDashboardHtml(route.alias)}</th><td data-label="${t(context, "column.provider")}">${providerLabel(context, route.provider)}</td><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(route.host)}</td><td data-label="${t(context, "column.state")}">${statusPill(routeStateLabel(context, route.enabled ? route.state : "disabled"), toneForRoute(route.enabled ? route.state : "disabled"))}</td><td data-label="${t(context, "column.queue")}">${formatInteger(route.queueDepth)}${route.queueAgeMs === undefined ? "" : `<span class="cell-note">${escapeDashboardHtml(formatQueueAge(route.queueAgeMs, context.locale) ?? "")}</span>`}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, route.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${route.safeErrorCode === undefined ? "—" : `<code>${route.safeErrorCode}</code>`}</td></tr>`).join("");
   return `<section class="section" aria-labelledby="sessions-title">
     <div class="section-heading"><div><p class="eyebrow">${t(context, "sessions.eyebrow")}</p><h2 id="sessions-title">${t(context, "sessions.title")}</h2></div><p>${t(context, "sessions.note")}</p></div>
     <div class="register-grid">
-      <section aria-labelledby="peers-title"><h3 id="peers-title">${t(context, "sessions.peers.title")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="peers-title"><table class="responsive-table"><caption>${t(context, "sessions.peers.caption")}</caption><thead><tr><th>${t(context, "column.alias")}</th><th>${t(context, "column.host")}</th><th>${t(context, "column.state")}</th><th>${t(context, "column.compatibility")}</th><th>${t(context, "column.validation")}</th><th>${t(context, "column.selection")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${peerRows}</tbody></table></div></section>
-      <section aria-labelledby="routes-title"><h3 id="routes-title">${t(context, "sessions.routes.title")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="routes-title"><table class="responsive-table"><caption>${t(context, "sessions.routes.caption")}</caption><thead><tr><th>${t(context, "column.alias")}</th><th>${t(context, "column.provider")}</th><th>${t(context, "column.host")}</th><th>${t(context, "column.state")}</th><th>${t(context, "column.compatibility")}</th><th>${t(context, "column.queue")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${routeRows}</tbody></table></div></section>
+      <section aria-labelledby="peers-title"><h3 id="peers-title">${t(context, "sessions.peers.title")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="peers-title"><table class="responsive-table"><caption>${t(context, "sessions.peers.caption")}</caption><thead><tr><th>${t(context, "column.alias")}</th><th>${t(context, "column.host")}</th><th>${t(context, "column.state")}</th><th>${t(context, "column.validation")}</th><th>${t(context, "column.selection")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${peerRows}</tbody></table></div></section>
+      <section aria-labelledby="routes-title"><h3 id="routes-title">${t(context, "sessions.routes.title")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="routes-title"><table class="responsive-table"><caption>${t(context, "sessions.routes.caption")}</caption><thead><tr><th>${t(context, "column.alias")}</th><th>${t(context, "column.provider")}</th><th>${t(context, "column.host")}</th><th>${t(context, "column.state")}</th><th>${t(context, "column.queue")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${routeRows}</tbody></table></div></section>
     </div>
   </section>`;
 }
 
 function renderDiagnostics(context: RenderContext): string {
-  const compatibilityRows = context.model.compatibilityChecks.length === 0
-    ? `<tr class="empty-row"><td colspan="8">${t(context, "diagnostics.compatibilityChecks.empty")}</td></tr>`
-    : context.model.compatibilityChecks.map((check) => {
-        if ("notDetected" in check) {
-          return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td colspan="7">${statusPill(t(context, "compatibilityTier.notDetected"), "quiet")}</td></tr>`;
-        }
-        const tone = check.tier === "certified"
-          ? "good"
-          : check.tier === "schema_attested"
-            ? "info"
-            : "danger";
-        const tierKey = check.tier === "schema_attested" && check.writesCovered
-          ? "compatibilityTier.schema_attested.writesCovered"
-          : `compatibilityTier.${check.tier}` as DashboardCopyKey;
-        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td data-label="${t(context, "diagnostics.version")}"><code>${escapeDashboardHtml(check.version)}</code></td><td data-label="${t(context, "diagnostics.testedVersion")}">${check.testedVersion === undefined ? "—" : `<code>${escapeDashboardHtml(check.testedVersion)}</code>`}</td><td data-label="${t(context, "diagnostics.supportedMajor")}">${check.supportedMajor === undefined ? "—" : `<code>${escapeDashboardHtml(check.supportedMajor)}</code>`}</td><td data-label="${t(context, "diagnostics.tier")}">${statusPill(t(context, tierKey), tone)}</td><td data-label="${t(context, "diagnostics.checkedAt")}">${renderTimestampAtSnapshot(context, check.checkedAt)}</td><td data-label="${t(context, "diagnostics.failure")}">${check.failure === undefined ? "—" : `<code>${escapeDashboardHtml(check.failure)}</code>`}</td><td data-label="${t(context, "column.issue")}">${check.safeErrorCode === undefined ? "—" : `<code>${check.safeErrorCode}</code>`}</td></tr>`;
-      }).join("");
   const connectorRows = context.model.connectors.length === 0
-    ? `<tr class="empty-row"><td colspan="8">${t(context, "diagnostics.connectors.empty")}</td></tr>`
+    ? `<tr class="empty-row"><td colspan="7">${t(context, "diagnostics.connectors.empty")}</td></tr>`
     : context.model.connectors.map((connector) => {
         const observation = connector.registry;
         let registry = "—";
@@ -668,14 +667,14 @@ function renderDiagnostics(context: RenderContext): string {
             : `<span class="cell-note">${t(context, "diagnostics.registry.rejectedCodesOmitted", { count: formatInteger(observation.rejectedCodesOmitted) })}</span>`;
           registry = `${statusPill(t(context, stateKey), observation.parseableRecordSeenSinceBoot ? "good" : "warning")}<span class="cell-note">${t(context, "diagnostics.registry.entriesScanned")}: ${formatInteger(observation.entriesScanned)} · ${t(context, "diagnostics.registry.parseableRecords")}: ${formatInteger(observation.parseableRecords)}</span><span class="cell-note">${t(context, "diagnostics.registry.rejected")}: ${rejected}</span>${omitted}`;
         }
-        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, connector.provider)}</th><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(connector.host)}</td><td data-label="${t(context, "diagnostics.health")}">${statusPill(healthLabel(context, connector.health), toneForHealth(connector.health))}</td><td data-label="${t(context, "column.compatibility")}">${statusPill(compatibilityLabel(context, connector.compatibility), toneForCompatibility(connector.compatibility))}</td><td data-label="${t(context, "diagnostics.protocol")}"><code>${escapeDashboardHtml([connector.protocol, connector.protocolVersion].filter(Boolean).join(" ") || "—")}</code></td><td data-label="${t(context, "diagnostics.registry.title")}">${registry}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, connector.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${connector.safeErrorCode === undefined ? "—" : `<code>${connector.safeErrorCode}</code>`}</td></tr>`;
+        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, connector.provider)}</th><td data-label="${t(context, "column.host")}">${escapeDashboardHtml(connector.host)}</td><td data-label="${t(context, "diagnostics.health")}">${statusPill(healthLabel(context, connector.health), toneForHealth(connector.health))}</td><td data-label="${t(context, "diagnostics.protocol")}"><code>${escapeDashboardHtml([connector.protocol, connector.protocolVersion].filter(Boolean).join(" ") || "—")}</code></td><td data-label="${t(context, "diagnostics.registry.title")}">${registry}</td><td data-label="${t(context, "column.observed")}">${renderTimestampAtSnapshot(context, connector.lastSeenAt)}</td><td data-label="${t(context, "column.issue")}">${connector.safeErrorCode === undefined ? "—" : `<code>${connector.safeErrorCode}</code>`}</td></tr>`;
       }).join("");
   const omissions = context.model.omissions;
   const omissionEntries: readonly [number, DashboardCopyKey][] = [
     [omissions.connectors, "diagnostics.omissions.connectors"],
     [omissions.availablePeers, "diagnostics.omissions.peers"],
     [omissions.routes, "diagnostics.omissions.routes"],
-    [omissions.pairs, "diagnostics.omissions.pairs"],
+    [omissions.consentEdges, "diagnostics.omissions.consentEdges"],
     [omissions.progressWatches, "diagnostics.omissions.progressWatches"],
     [
       omissions.upstreamProgressWatchEvents,
@@ -723,8 +722,7 @@ function renderDiagnostics(context: RenderContext): string {
     <summary><h2 id="diagnostics-title"><span class="disclosure-icon" aria-hidden="true"><span class="disclosure-icon__closed">+</span><span class="disclosure-icon__open">−</span></span>${t(context, "diagnostics.title")}</h2></summary>
     <div class="diagnostics__body">
       <p id="diagnostics-note" class="diagnostics__note">${t(context, "diagnostics.note")}</p>
-      <section aria-labelledby="compatibility-checks-title"><h3 id="compatibility-checks-title">${t(context, "diagnostics.compatibilityChecks")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="compatibility-checks-title"><table class="responsive-table"><caption>${t(context, "diagnostics.compatibilityChecks.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "diagnostics.version")}</th><th>${t(context, "diagnostics.testedVersion")}</th><th>${t(context, "diagnostics.supportedMajor")}</th><th>${t(context, "diagnostics.tier")}</th><th>${t(context, "diagnostics.checkedAt")}</th><th>${t(context, "diagnostics.failure")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${compatibilityRows}</tbody></table></div></section>
-      <section aria-labelledby="connectors-title"><h3 id="connectors-title">${t(context, "diagnostics.connectors")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="connectors-title"><table class="responsive-table"><caption>${t(context, "diagnostics.connectors.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "column.host")}</th><th>${t(context, "diagnostics.health")}</th><th>${t(context, "column.compatibility")}</th><th>${t(context, "diagnostics.protocol")}</th><th>${t(context, "diagnostics.registry.title")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${connectorRows}</tbody></table></div></section>
+      <section aria-labelledby="connectors-title"><h3 id="connectors-title">${t(context, "diagnostics.connectors")}</h3><div class="table-wrap" tabindex="0" role="region" aria-labelledby="connectors-title"><table class="responsive-table"><caption>${t(context, "diagnostics.connectors.caption")}</caption><thead><tr><th>${t(context, "column.provider")}</th><th>${t(context, "column.host")}</th><th>${t(context, "diagnostics.health")}</th><th>${t(context, "diagnostics.protocol")}</th><th>${t(context, "diagnostics.registry.title")}</th><th>${t(context, "column.observed")}</th><th>${t(context, "column.issue")}</th></tr></thead><tbody>${connectorRows}</tbody></table></div></section>
       ${deadlineSection}
       <section aria-labelledby="accounting-title"><h3 id="accounting-title">${t(context, "diagnostics.accounting")}</h3><dl class="accounting"><div><dt>${t(context, "diagnostics.accepted")}</dt><dd>${formatInteger(accounting.accepted)}</dd></div><div><dt>${t(context, "diagnostics.duplicates")}</dt><dd>${formatInteger(accounting.duplicates)}</dd></div><div><dt>${t(context, "diagnostics.delivered")}</dt><dd>${formatInteger(accounting.delivered)}</dd></div><div><dt>${t(context, "diagnostics.unconfirmed")}</dt><dd>${formatInteger(accounting.unconfirmed)}</dd></div><div><dt>${t(context, "diagnostics.ambiguous")}</dt><dd>${formatInteger(accounting.ambiguous)}</dd></div><div><dt>${t(context, "diagnostics.failed")}</dt><dd>${formatInteger(accounting.failed)}</dd></div><div><dt>${t(context, "diagnostics.expired")}</dt><dd>${formatInteger(accounting.expired)}</dd></div><div><dt>${t(context, "diagnostics.cancelled")}</dt><dd>${formatInteger(accounting.cancelled)}</dd></div><div><dt>${t(context, "diagnostics.abandoned")}</dt><dd>${formatInteger(accounting.abandoned)}</dd></div><div><dt>${t(context, "diagnostics.rejected")}</dt><dd>${formatInteger(accounting.rejected)}</dd></div><div><dt>${t(context, "diagnostics.bytesAccepted")}</dt><dd>${formatBytes(accounting.bytesAccepted)}</dd></div><div><dt>${t(context, "diagnostics.queuedBytes")}</dt><dd>${formatBytes(accounting.queuedBytes)}</dd></div></dl></section>
       <p class="omissions"><strong>${t(context, "diagnostics.omissions")}:</strong> ${omissionText}</p>
@@ -802,6 +800,9 @@ const DASHBOARD_STYLES = `
     .section-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(14rem, .72fr); gap: 2rem; align-items: end; margin-bottom: 1.25rem; }
     .section-heading > p { margin: 0; color: var(--muted); font-size: .88rem; }
     .exchange-board { display: grid; grid-template-columns: minmax(0, 1fr) minmax(11rem, .38fr) minmax(0, 1fr); align-items: stretch; border: 1px solid var(--ink); background: var(--sheet); }
+    .exchange-board--many { grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+    .exchange-board--many .exchange-party { order: 1; border: 0; border-right: 1px solid var(--hairline); }
+    .exchange-board--many .pouch { order: 2; grid-column: 1 / -1; border-top: 1px solid var(--hairline); }
     .inbound-policy { display: flex; align-items: center; gap: .75rem; margin: 0 0 1rem; padding: .65rem .8rem; border: 1px solid var(--hairline); background: var(--paper-deep); }
     .inbound-policy p { margin: 0; }
     .inbound-policy[data-inbound-mode="open"] { border-color: var(--warning); background: var(--warning-soft); }
@@ -932,14 +933,7 @@ export function renderGatewayDashboard(
   const context: RenderContext = {
     locale,
     copy: getDashboardCopy(locale),
-    model: buildDashboardViewModel(snapshot, {
-      ...(options.compatibilitySurfaceDefinitions === undefined
-        ? {}
-        : {
-            compatibilitySurfaceDefinitions:
-              options.compatibilitySurfaceDefinitions,
-          }),
-    }),
+    model: buildDashboardViewModel(snapshot),
   };
   const languageFile = locale === "en" ? DASHBOARD_FILE_NAME : DASHBOARD_ZH_CN_FILE_NAME;
   const generatedAt = context.model.generatedAt === undefined

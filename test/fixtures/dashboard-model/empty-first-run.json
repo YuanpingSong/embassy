@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedAt": "2026-08-08T09:30:00.000Z",
   "inboundMode": "paired",
   "health": "connecting",
   "overall": "setup",
   "exchange": {
-    "claude": {
+    "parties": [{
       "kind": "claude",
       "status": "missing",
       "total": 0,
@@ -13,15 +13,14 @@
       "selectable": 0,
       "countIsLowerBound": false,
       "nextAction": "discover_claude"
-    },
-    "codex": {
+    }, {
       "kind": "codex",
       "status": "missing",
       "total": 0,
       "ready": 0,
       "countIsLowerBound": false,
       "nextAction": "register_codex"
-    },
+    }],
     "queuedMessages": 0,
     "queueCountIsLowerBound": false
   },
@@ -35,13 +34,17 @@
   "activity": [],
   "peers": [],
   "routes": [],
-  "pairs": [],
+  "consentEdges": [],
   "graph": {
-    "pairCount": 0,
-    "readyPairCount": 0,
-    "pairCountIsLowerBound": false,
-    "unpairedReadyClaude": 0,
-    "unpairedReadyCodex": 0
+    "consentEdgeCount": 0,
+    "readyConsentEdgeCount": 0,
+    "consentEdgeCountIsLowerBound": false,
+    "unpairedReadyByProvider": {
+      "claude": 0,
+      "codex": 0,
+      "deepseek": 0,
+      "grok": 0
+    }
   },
   "connectors": [],
   "accounting": {
@@ -62,7 +65,7 @@
     "connectors": 0,
     "availablePeers": 0,
     "routes": 0,
-    "pairs": 0,
+    "consentEdges": 0,
     "upstreamMessageEvents": 0,
     "messageGroups": 0,
     "messageEvents": 0,

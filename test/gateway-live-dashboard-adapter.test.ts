@@ -29,7 +29,6 @@ import {
   type DashboardViewModel,
 } from "../src/gateway/dashboard-model.js";
 import type {
-  CompatibilityState,
   ConnectorHealth,
   DeliveryState,
   GatewayProvider,
@@ -259,33 +258,6 @@ function loadBundle(): LoadedBundle {
 const bundle = loadBundle();
 const { adapter } = bundle.Embassy;
 
-function renderStubText(node: unknown): string {
-  if (node === null || node === undefined || typeof node === "boolean") {
-    return "";
-  }
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node);
-  }
-  if (Array.isArray(node)) return node.map(renderStubText).join(" ");
-  if (typeof node !== "object") return "";
-  const element = node as Readonly<{
-    $$stub?: string;
-    type?: unknown;
-    props?: Record<string, unknown>;
-    children?: readonly unknown[];
-  }>;
-  if (element.$$stub !== "element") return "";
-  if (typeof element.type === "function") {
-    return renderStubText(
-      element.type({
-        ...(element.props ?? {}),
-        children: element.children,
-      }),
-    );
-  }
-  return renderStubText(element.children ?? []);
-}
-
 // ---------------------------------------------------------------------------
 // Fixtures and helpers
 // ---------------------------------------------------------------------------
@@ -298,7 +270,7 @@ function fixture(name: string): DashboardViewModel {
 const HEALTHY = fixture("healthy-exchange");
 const DEGRADED = fixture("degraded-queue");
 const EMPTY = fixture("empty-first-run");
-const SUCCESSION = fixture("succession-monitor-only");
+const SUCCESSION = fixture("succession-generation");
 
 /** Re-materializes a vm-realm value in this realm so deepEqual can run. */
 function plain<Value>(value: Value): Value {
@@ -367,9 +339,8 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
     "routeOldestAgeMs",
     "pulse",
     "worstConnectorHealth",
-    "worstCompatibility",
+    "matchesProviderFilters",
     "extractSuccessions",
-    "isMonitorOnly",
     "hasLifecycleTruncation",
     "deliveriesTruncated",
     "deliveryGroupKey",
@@ -395,10 +366,6 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
   assert.match(
     bundle.source,
     /settled:\s*"watches\.event\.settled"/u,
-  );
-  assert.match(
-    bundle.source,
-    /legacy_done:\s*"watches\.reason\.legacyDone"/u,
   );
 });
 
@@ -506,7 +473,7 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     ["healthy-exchange", HEALTHY],
     ["degraded-queue", DEGRADED],
     ["empty-first-run", EMPTY],
-    ["succession-monitor-only", SUCCESSION],
+    ["succession-generation", SUCCESSION],
   ];
   const topLevelKeys = [
     "schemaVersion",
@@ -519,7 +486,7 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     "activity",
     "peers",
     "routes",
-    "pairs",
+    "consentEdges",
     "graph",
     "connectors",
     "accounting",
@@ -529,7 +496,7 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     "connectors",
     "availablePeers",
     "routes",
-    "pairs",
+    "consentEdges",
     "upstreamMessageEvents",
     "messageGroups",
     "messageEvents",
@@ -537,7 +504,7 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     "attentionItems",
   ];
   for (const [name, model] of models) {
-    assert.equal(model.schemaVersion, 1, `${name} schemaVersion`);
+    assert.equal(model.schemaVersion, 2, `${name} schemaVersion`);
     const record = model as unknown as Record<string, unknown>;
     for (const key of topLevelKeys) {
       assert.ok(key in record, `${name} is missing ${key}`);
@@ -578,10 +545,6 @@ test("fixtures only use real protocol tokens (no chip falls back to unknown)", (
     }
     for (const connector of model.connectors) {
       assert.notEqual(bundle.Embassy.healthChipKind(connector.health), "unknown");
-      assert.notEqual(
-        bundle.Embassy.compatibilityChipKind(connector.compatibility),
-        "unknown",
-      );
     }
     for (const item of model.attention) {
       assert.notEqual(bundle.Embassy.severityChipKind(item.severity), "unknown");
@@ -784,7 +747,7 @@ test("pulse count is a lower bound when groups or upstream events were dropped",
 });
 
 // ---------------------------------------------------------------------------
-// §7.3 — worst-of connector / compatibility derivations
+// §7.3 — worst-of connector derivations
 // ---------------------------------------------------------------------------
 
 test("worstConnectorHealth picks the worst per provider", () => {
@@ -801,18 +764,17 @@ test("worstConnectorHealth is undefined when no connector of the provider is obs
   assert.equal(adapter.worstConnectorHealth(EMPTY, "codex"), undefined);
 });
 
-test("worstConnectorHealth honors the offline < incompatible < degraded < connecting < healthy order", () => {
+test("worstConnectorHealth honors the offline < degraded < connecting < healthy order", () => {
   const model = mutableClone(EMPTY);
   const template = {
     provider: "claude" as GatewayProvider,
     host: "this-mac",
-    compatibility: "compatible" as CompatibilityState,
+    health: "healthy" as ConnectorHealth,
   };
   const order: ConnectorHealth[] = [
     "healthy",
     "connecting",
     "degraded",
-    "incompatible",
     "offline",
   ];
   for (let index = 0; index < order.length; index += 1) {
@@ -831,62 +793,9 @@ test("worstConnectorHealth honors the offline < incompatible < degraded < connec
   }
 });
 
-test("worstCompatibility spans every connector regardless of provider", () => {
-  assert.equal(adapter.worstCompatibility(HEALTHY), "compatible");
-  assert.equal(adapter.worstCompatibility(DEGRADED), "expired");
-  assert.equal(adapter.worstCompatibility(SUCCESSION), "unknown");
-  assert.equal(adapter.worstCompatibility(EMPTY), undefined);
-
-  const incompatible = mutableClone(SUCCESSION);
-  incompatible.connectors = incompatible.connectors.map((connector, index) =>
-    index === 0 ? { ...connector, compatibility: "incompatible" } : connector,
-  );
-  assert.equal(adapter.worstCompatibility(incompatible), "incompatible");
-});
-
 // ---------------------------------------------------------------------------
-// §7.3 — monitor-only, successions, routes props
+// §7.3 — successions and routes props
 // ---------------------------------------------------------------------------
-
-test("monitor-only is driven by CODEX_WRITES_DISABLED", () => {
-  const routes = adapter.routesProps(SUCCESSION, GENERATED_MS).codexRoutes;
-  assert.deepEqual(
-    plain(routes).map((view) => [view.route.alias, view.monitorOnly]),
-    [
-      ["codex-legacy@this-mac", false],
-      ["codex-builder@this-mac", true],
-    ],
-  );
-  const gated = SUCCESSION.routes.find(
-    (route) => route.safeErrorCode === "CODEX_WRITES_DISABLED",
-  ) as DashboardRouteRow;
-  assert.equal(adapter.isMonitorOnly(gated), true);
-  // A different safe code on the same route is not a write gate.
-  assert.equal(
-    adapter.isMonitorOnly({ ...gated, safeErrorCode: "CODEX_ROUTE_STALE" }),
-    false,
-  );
-  assert.equal(
-    adapter.isMonitorOnly({ ...gated, safeErrorCode: undefined }),
-    false,
-  );
-});
-
-test("real monitor-only model stays non-ready in the live overview", () => {
-  const snapshot = dashboardFixture();
-  const codex = snapshot.routes.find((route) => route.provider === "codex");
-  assert.ok(codex);
-  codex.safeErrorCode = "CODEX_WRITES_DISABLED";
-  const model = buildDashboardViewModel(snapshot);
-  const overview = adapter.overviewProps(model, GENERATED_MS);
-  assert.equal(overview.overall, "attention");
-  assert.equal(overview.exchange.codex.status, "attention");
-  assert.equal(overview.exchange.codex.ready, 0);
-  assert.equal(overview.exchange.codex.monitorOnly, 1);
-  assert.equal(overview.exchange.codex.nextAction, "review_compatibility");
-  assert.equal(overview.graph.readyPairCount, 0);
-  assert.equal(overview.degradedPairCopyKey, "app.overview.degradedEdge");
-});
 
 test("stale-registration recovery is offered only on stale Codex rows", () => {
   const staleCodex = DEGRADED.routes.find(
@@ -917,21 +826,42 @@ test("stale-registration recovery is offered only on stale Codex rows", () => {
   assert.match(bundle.source, /remove_stale_codex_registration/u);
 });
 
-test("routesProps keeps the server's route order and drops claude routes", () => {
+test("consent-edge candidates require enabled observed routes", () => {
+  const route = DEGRADED.routes.find((candidate) => candidate.state === "idle") as DashboardRouteRow;
+  assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate(route), true);
+  assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, state: "awaiting_approval" }), true);
+  assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, enabled: false }), false);
+  assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, state: "stale" }), false);
+});
+
+test("routesProps keeps every provider route in server order", () => {
   const data = adapter.routesProps(DEGRADED, GENERATED_MS);
   assert.equal(data.inboundMode, "paired");
   assert.deepEqual(
-    plain(data.codexRoutes).map((view) => view.route.alias),
-    ["codex-builder@this-mac", "codex-reviewer@this-mac"],
+    plain(data.routes).map((view) => view.route.alias),
+    DEGRADED.routes.map((route) => route.alias),
   );
   assert.equal(data.routesOmitted, 1);
   assert.equal(data.peersOmitted, 3);
   assert.equal(data.peers.length, 2);
-  assert.equal(data.graph.readyPairCount, 0);
-  assert.equal(data.pairs.length, 1);
-  assert.equal(data.pairsOmitted, 2);
-  assert.equal(at(data.codexRoutes, 0).oldestAgeMs, 450_000);
-  assert.equal(at(data.codexRoutes, 1).oldestAgeMs, undefined);
+  assert.equal(data.graph.readyConsentEdgeCount, 0);
+  assert.equal(data.consentEdges.length, 1);
+  assert.equal(data.consentEdgesOmitted, 2);
+});
+
+test("routesProps trusts explicit DeepSeek/Grok edge provenance over aliases", () => {
+  const model = mutableClone(HEALTHY);
+  model.consentEdges = [{
+    ...at(model.consentEdges, 0),
+    endpoints: [
+      { alias: "claude-looking@this-mac", provider: "deepseek" },
+      { alias: "codex-looking@this-mac", provider: "grok" },
+    ],
+  }];
+  assert.deepEqual(
+    plain(adapter.routesProps(model, GENERATED_MS).consentEdges[0]?.endpoints),
+    plain(model.consentEdges[0]?.endpoints),
+  );
 });
 
 test("overview and routes preserve the explicit open-inbound policy", () => {
@@ -1021,7 +951,6 @@ test("registry-unavailable evidence reaches live attention exactly once", () => 
   );
   assert.ok(claude);
   claude.health = "degraded";
-  claude.compatibility = "incompatible";
   claude.safeErrorCode = "CLAUDE_REGISTRY_UNAVAILABLE";
   claude.registry = {
     entriesScanned: 0,
@@ -1120,6 +1049,24 @@ test("deliveriesGroups renders model.activity verbatim, in server order", () => 
     at(groups, 0).routePair,
     "claude-advisor@this-mac → codex-builder@this-mac",
   );
+});
+
+test("delivery provider filters compose from and to without reading aliases", () => {
+  const base = at(HEALTHY.activity, 0);
+  const model = withActivity(HEALTHY, [
+    { ...base, direction: "deepseek_to_grok", sourceAlias: "claude-looking", targetAlias: "codex-looking" },
+    { ...base, direction: "deepseek_to_codex", sourceAlias: "grok-looking", targetAlias: "claude-looking" },
+    { ...base, direction: "claude_to_grok", sourceAlias: "codex-looking", targetAlias: "deepseek-looking" },
+    { ...base, direction: "codex_to_claude", sourceAlias: "deepseek-looking", targetAlias: "grok-looking" },
+  ]);
+  const views = adapter.deliveriesGroups(model);
+  const matches = (from: "all" | GatewayProvider, to: "all" | GatewayProvider) =>
+    views.filter((view) => adapter.matchesProviderFilters(view, from, to)).length;
+  assert.equal(matches("all", "all"), 4);
+  assert.equal(matches("deepseek", "all"), 2);
+  assert.equal(matches("all", "grok"), 2);
+  assert.equal(matches("deepseek", "grok"), 1);
+  assert.equal(matches("codex", "grok"), 0);
 });
 
 test("deliveryGroupKey uses the suffix, or the first retained sequence when absent", () => {
@@ -1390,7 +1337,6 @@ test("unknown tokens fall back loudly, never to inert", () => {
   assert.equal(bundle.Embassy.routeChipKind("paired"), "unknown");
   assert.equal(bundle.Embassy.peerChipKind("selected"), "unknown");
   assert.equal(bundle.Embassy.healthChipKind("ok"), "unknown");
-  assert.equal(bundle.Embassy.compatibilityChipKind("pinned"), "unknown");
   assert.equal(bundle.Embassy.severityChipKind("critical"), "unknown");
   assert.equal(bundle.Embassy.connectionChipKind("reconnecting"), "unknown");
   assert.equal(
@@ -1444,11 +1390,19 @@ test("abandoned annotation is selected by safeErrorCode (H4)", () => {
 test("delivered hover meaning localizes by direction, other states do not", () => {
   assert.equal(
     bundle.Embassy.deliveryMeaningKey("delivered", "codex_to_claude"),
-    "activity.meaning.delivered.codexToClaude",
+    "activity.meaning.delivered.toClaude",
   );
   assert.equal(
     bundle.Embassy.deliveryMeaningKey("delivered", "claude_to_codex"),
-    "activity.meaning.delivered.claudeToCodex",
+    "activity.meaning.delivered.toCodex",
+  );
+  assert.equal(
+    bundle.Embassy.deliveryMeaningKey("delivered", "grok_to_deepseek"),
+    "activity.meaning.delivered.toDeepSeek",
+  );
+  assert.equal(
+    bundle.Embassy.deliveryMeaningKey("delivered", "deepseek_to_grok"),
+    "activity.meaning.delivered.toGrok",
   );
   assert.equal(
     bundle.Embassy.deliveryMeaningKey("delivered"),
@@ -1459,10 +1413,6 @@ test("delivered hover meaning localizes by direction, other states do not", () =
     "route.meaning.awaitingApproval",
   );
   assert.equal(bundle.Embassy.meaningKeyFor("peer", "offline"), "peer.meaning.offline");
-  assert.equal(
-    bundle.Embassy.meaningKeyFor("compatibility", "expired"),
-    "compatibility.meaning.expired",
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1474,18 +1424,19 @@ test("overviewProps composes the status strip, queues and attention", () => {
   const data = adapter.overviewProps(DEGRADED, nowMs);
   assert.equal(data.generatedAt, "2026-08-08T12:00:00.000Z");
   assert.equal(data.overall, "attention");
-  assert.deepEqual(plain(data.statusStrip), {
-    broker: "degraded",
-    claudeConnector: "degraded",
-    codexConnector: "offline",
-    compatibility: "expired",
-  });
-  assert.equal(data.queueClaudeToCodex.depth, 5);
-  assert.equal(data.queueClaudeToCodex.oldestAgeMs, 480_000);
-  assert.equal(data.queueCodexToClaude.depth, 2);
-  assert.equal(data.queueCodexToClaude.oldestAgeMs, 210_000);
-  assert.equal(data.graph.readyPairCount, 0);
-  assert.equal(data.degradedPairCopyKey, "app.overview.degradedEdges");
+  assert.equal(data.statusStrip.broker, "degraded");
+  assert.deepEqual(
+    plain(data.statusStrip.providers).map((row) => [row.provider, row.health]),
+    [["claude", "degraded"], ["codex", "offline"], ["deepseek", undefined], ["grok", undefined]],
+  );
+  const queues = new Map(data.providerQueues.map((row) => [row.provider, row.queue]));
+  assert.equal(queues.get("codex")?.depth, 5);
+  assert.equal(queues.get("codex")?.oldestAgeMs, 480_000);
+  assert.equal(queues.get("claude")?.depth, 2);
+  assert.equal(queues.get("claude")?.oldestAgeMs, 210_000);
+  assert.equal(queues.get("deepseek")?.depth, 0);
+  assert.equal(data.graph.readyConsentEdgeCount, 0);
+  assert.equal(data.degradedConsentEdgeCopyKey, "app.overview.degradedEdges");
   assert.equal(data.attention.length, 4);
   assert.equal(data.attentionOmitted, 5);
   assert.equal(data.pulse.total, 3);
@@ -1496,40 +1447,39 @@ test("overviewProps composes the status strip, queues and attention", () => {
 
 test("overviewProps on a healthy exchange reports no attention and a live pair", () => {
   const data = adapter.overviewProps(HEALTHY, GENERATED_MS);
-  assert.deepEqual(plain(data.statusStrip), {
-    broker: "healthy",
-    claudeConnector: "healthy",
-    codexConnector: "healthy",
-    compatibility: "compatible",
-  });
-  assert.equal(data.graph.readyPairCount, 1);
-  assert.equal(data.degradedPairCopyKey, undefined);
+  assert.equal(data.statusStrip.broker, "healthy");
+  assert.deepEqual(
+    plain(data.statusStrip.providers).map((row) => row.provider),
+    ["claude", "codex", "deepseek", "grok"],
+  );
+  assert.equal(data.graph.readyConsentEdgeCount, 1);
+  assert.equal(data.degradedConsentEdgeCopyKey, undefined);
   assert.equal(data.attention.length, 0);
   assert.equal(data.attentionOmitted, 0);
   assert.equal(data.pulse.total, 2);
   assert.equal(data.pulse.isLowerBound, false);
-  assert.equal(data.queueClaudeToCodex.depth, 0);
-  assert.equal(data.queueCodexToClaude.oldestAgeMs, undefined);
+  assert.equal(data.providerQueues.every((row) => row.queue.depth === 0), true);
+  assert.equal(data.providerQueues.every((row) => row.queue.oldestAgeMs === undefined), true);
 });
 
-test("overview pair note distinguishes one degraded edge from several", () => {
+test("overview consent-edge note distinguishes one degraded edge from several", () => {
   const mixed = mutableClone(HEALTHY);
   mixed.graph = {
     ...mixed.graph,
-    pairCount: 2,
-    readyPairCount: 1,
+    consentEdgeCount: 2,
+    readyConsentEdgeCount: 1,
   };
   assert.equal(
-    adapter.overviewProps(mixed, GENERATED_MS).degradedPairCopyKey,
+    adapter.overviewProps(mixed, GENERATED_MS).degradedConsentEdgeCopyKey,
     "app.overview.degradedEdge",
   );
 
   mixed.graph = {
     ...mixed.graph,
-    pairCount: 3,
+    consentEdgeCount: 3,
   };
   assert.equal(
-    adapter.overviewProps(mixed, GENERATED_MS).degradedPairCopyKey,
+    adapter.overviewProps(mixed, GENERATED_MS).degradedConsentEdgeCopyKey,
     "app.overview.degradedEdges",
   );
 });
@@ -1542,98 +1492,8 @@ test("diagnosticsProps forwards counters, omissions and queue pressure", () => {
   assert.equal(data.expiredCount, 3);
   assert.equal(data.queuedMessages, 7);
   assert.equal(data.queueCountIsLowerBound, true);
-  assert.deepEqual(plain(data.compatibilityChecks), []);
   assert.deepEqual(plain(data.accounting), plain(DEGRADED.accounting));
   assert.deepEqual(plain(data.omissions), plain(DEGRADED.omissions));
-});
-
-test("diagnosticsProps forwards automatic provider compatibility rows", () => {
-  const model = mutableClone(DEGRADED);
-  model.compatibilityChecks = [
-    {
-      surface: "claude",
-      version: "2.1.226",
-      testedVersion: "2.1.227",
-      supportedMajor: "2",
-      tier: "certified",
-      writesCovered: false,
-      checkedAt: "2026-08-09T12:00:00.000Z",
-    },
-    {
-      surface: "codex",
-      version: "0.148.0",
-      testedVersion: "0.147.0",
-      supportedMajor: "0",
-      tier: "schema_attested",
-      writesCovered: false,
-      checkedAt: "2026-08-09T12:00:01.000Z",
-      failure: "thread/loaded/list",
-      safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",
-    },
-  ];
-  assert.deepEqual(
-    plain(adapter.diagnosticsProps(model).compatibilityChecks),
-    plain(model.compatibilityChecks),
-  );
-});
-
-test("diagnosticsProps preserves a quiet optional-surface absence row", () => {
-  const model = buildDashboardViewModel(dashboardFixture(), {
-    compatibilitySurfaceDefinitions: [
-      { surface: "claude", required: true },
-      { surface: "codex", required: false },
-    ],
-  });
-  assert.deepEqual(
-    plain(adapter.diagnosticsProps(model).compatibilityChecks.at(-1)),
-    { surface: "codex", notDetected: true },
-  );
-  const contexts = (bundle.context.React as {
-    __contexts: Record<string, unknown>[];
-  }).__contexts;
-  assert.equal(contexts.length, 1);
-  contexts[0]!._currentValue = {
-    locale: "en",
-    setLocale: () => undefined,
-    t: (key: string) =>
-      key === "compatibilityTier.notDetected" ? "Not detected" : key,
-  };
-  const diagnosticsTab = (bundle.context.Embassy as Record<string, unknown>)[
-    "DiagnosticsTab"
-  ] as (props: unknown) => unknown;
-  const renderedText = renderStubText(
-    diagnosticsTab({ data: adapter.diagnosticsProps(model) }),
-  );
-  assert.match(renderedText, /Not detected/u);
-  assert.doesNotMatch(renderedText, /COMPAT_PROVIDER_UNAVAILABLE/u);
-});
-
-test("live diagnostics renders detected DeepSeek quarantine evidence", () => {
-  const model = mutableClone(buildDashboardViewModel(dashboardFixture()));
-  model.compatibilityChecks = [{
-    surface: "deepseek", version: "unknown", tier: "incompatible",
-    writesCovered: false, checkedAt: "2026-08-16T12:00:00.000Z",
-    failure: "version", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE",
-  }];
-  const contexts = (bundle.context.React as {
-    __contexts: Record<string, unknown>[];
-  }).__contexts;
-  contexts[0]!._currentValue = {
-    locale: "en",
-    setLocale: () => undefined,
-    t: (key: string) => ({
-      "provider.deepseek": "DeepSeek",
-      "compatibilityTier.incompatible": "Incompatible",
-    })[key] ?? key,
-  };
-  const diagnosticsTab = (bundle.context.Embassy as Record<string, unknown>)[
-    "DiagnosticsTab"
-  ] as (props: unknown) => unknown;
-  const renderedText = renderStubText(
-    diagnosticsTab({ data: adapter.diagnosticsProps(model) }),
-  );
-  assert.match(renderedText,
-    /DeepSeek[\s\S]*unknown[\s\S]*Incompatible[\s\S]*DEEPSEEK_HARNESS_VERSION_UNPARSEABLE/u);
 });
 
 test("diagnosticsProps preserves bounded connector registry evidence", () => {
@@ -1671,22 +1531,24 @@ test("diagnosticsProps preserves bounded connector registry evidence", () => {
 test("empty peers, routes, connectors and activity produce empty props, never a throw", () => {
   const nowMs = ms("2026-08-08T09:30:45.000Z");
   const overview = adapter.overviewProps(EMPTY, nowMs);
-  assert.deepEqual(plain(overview.statusStrip), { broker: "connecting" });
-  assert.equal(overview.statusStrip.claudeConnector, undefined);
-  assert.equal(overview.statusStrip.codexConnector, undefined);
-  assert.equal(overview.statusStrip.compatibility, undefined);
+  assert.equal(overview.statusStrip.broker, "connecting");
+  assert.deepEqual(
+    plain(overview.statusStrip.providers).map((row) => [row.provider, row.health]),
+    [["claude", undefined], ["codex", undefined], ["deepseek", undefined], ["grok", undefined]],
+  );
   assert.equal(overview.attention.length, 0);
   assert.equal(overview.attentionOmitted, 0);
-  assert.equal(overview.graph.readyPairCount, 0);
+  assert.equal(overview.graph.readyConsentEdgeCount, 0);
   assert.equal(overview.pulse.total, 0);
   assert.equal(overview.pulse.bars.length, 8);
   assert.equal(overview.pulse.isLowerBound, false);
-  assert.equal(overview.queueClaudeToCodex.depth, 0);
-  assert.equal(overview.queueCodexToClaude.depth, 0);
+  assert.equal(overview.providerQueues.length, 4);
+  assert.equal(overview.providerQueues.every((row) => row.queue.depth === 0), true);
 
   const routes = adapter.routesProps(EMPTY, nowMs);
   assert.equal(routes.peers.length, 0);
-  assert.equal(routes.codexRoutes.length, 0);
+  assert.equal(routes.routes.length, 0);
+  assert.equal(routes.consentEdges.length, 0);
   assert.equal(routes.successions.length, 0);
   assert.equal(routes.peersOmitted, 0);
   assert.equal(routes.routesOmitted, 0);
@@ -1697,7 +1559,6 @@ test("empty peers, routes, connectors and activity produce empty props, never a 
 
   const diagnostics = adapter.diagnosticsProps(EMPTY);
   assert.equal(diagnostics.connectors.length, 0);
-  assert.equal(diagnostics.compatibilityChecks.length, 0);
   assert.equal(diagnostics.expiredCount, 0);
   assert.equal(diagnostics.queuedMessages, 0);
 });

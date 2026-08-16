@@ -161,12 +161,12 @@ export function loadGatewayConfig(
       2,
       gatewayPublicSnapshotLimits.routes,
     ),
-    maxPairs: boundedInteger(
+    maxConsentEdges: boundedInteger(
       "EMBASSY_MAX_PAIRS",
       env.EMBASSY_MAX_PAIRS,
       128,
       1,
-      gatewayPublicSnapshotLimits.pairs,
+      gatewayPublicSnapshotLimits.consentEdges,
     ),
     maxWatches: boundedInteger(
       "EMBASSY_MAX_WATCHES",
@@ -276,7 +276,7 @@ export function loadGatewayConfig(
     limits.eventCapacity * 512 +
     limits.dedupeCapacity * 384 +
     limits.maxRoutes * 1_024 +
-    limits.maxPairs * 512 +
+    limits.maxConsentEdges * 512 +
     (limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY) * 768 +
     limits.maxQueueMessages * 512 +
     limits.maxRoutes * 256;

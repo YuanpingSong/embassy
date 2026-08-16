@@ -2,18 +2,15 @@ import type {
   ProgressWatch,
   ProgressWatchJournalEvent,
 } from "./progress-watch-machine.js";
-import {
-  certifiedCompatibilityVersions,
-  compatibilityCoversWrites,
-  compatibilitySurfaces,
-  isCompatibilityAttestation,
-  type CompatibilityAttestation,
-  type CompatibilitySurface,
-} from "./compatibility.js";
 
-export const gatewayProviders = ["codex", "claude"] as const;
+export const gatewayProviders = ["claude", "codex", "deepseek", "grok"] as const;
 
 export type GatewayProvider = (typeof gatewayProviders)[number];
+
+export const gatewayProviderDisplayNames = Object.freeze({ claude: "Claude", codex: "Codex", deepseek: "DeepSeek", grok: "Grok Build" } satisfies Readonly<Record<GatewayProvider, string>>);
+
+/** Registration syntax only; route bindings, never prefixes, prove providers. */
+export const gatewayRegistrationIngressPrefixes = Object.freeze({ claude: undefined, codex: "codex-", deepseek: "dsh-", grok: "grok-" } satisfies Readonly<Record<GatewayProvider, string | undefined>>);
 
 export const gatewayInboundModes = ["paired", "open"] as const;
 
@@ -24,19 +21,9 @@ export const connectorHealthStates = [
   "connecting",
   "healthy",
   "degraded",
-  "incompatible",
 ] as const;
 
 export type ConnectorHealth = (typeof connectorHealthStates)[number];
-
-export const compatibilityStates = [
-  "unknown",
-  "compatible",
-  "incompatible",
-  "expired",
-] as const;
-
-export type CompatibilityState = (typeof compatibilityStates)[number];
 
 export const routeStates = [
   "stale",
@@ -44,7 +31,6 @@ export const routeStates = [
   "busy",
   "awaiting_approval",
   "offline",
-  "incompatible",
   "disabled",
 ] as const;
 
@@ -58,12 +44,50 @@ export const routeRegistrationModes = [
 export type RouteRegistrationMode =
   (typeof routeRegistrationModes)[number];
 
-export const messageDirections = [
-  "codex_to_claude",
-  "claude_to_codex",
-] as const;
+export type MessageDirection = { [Source in GatewayProvider]: `${Source}_to_${Exclude<GatewayProvider, Source>}` }[GatewayProvider];
 
-export type MessageDirection = (typeof messageDirections)[number];
+export type ParsedMessageDirection = Readonly<{ sourceProvider: GatewayProvider; targetProvider: GatewayProvider }>;
+
+export const isGatewayProvider = (value: unknown): value is GatewayProvider =>
+  typeof value === "string" && (gatewayProviders as readonly string[]).includes(value);
+
+export function directionId(
+  sourceProvider: GatewayProvider,
+  targetProvider: GatewayProvider,
+): MessageDirection {
+  if (sourceProvider === targetProvider) {
+    throw new RangeError("SAME_PROVIDER_DIRECTION");
+  }
+  return `${sourceProvider}_to_${targetProvider}` as MessageDirection;
+}
+
+export const messageDirections = Object.freeze(gatewayProviders.flatMap(
+  (sourceProvider) => gatewayProviders.filter((targetProvider) => targetProvider !== sourceProvider)
+    .map((targetProvider) => directionId(sourceProvider, targetProvider)),
+)) as readonly MessageDirection[];
+
+export function parseDirection(
+  value: unknown,
+): ParsedMessageDirection | undefined {
+  if (typeof value !== "string") return undefined;
+  const separator = value.indexOf("_to_");
+  if (separator < 1 || separator !== value.lastIndexOf("_to_")) {
+    return undefined;
+  }
+  const sourceProvider = value.slice(0, separator);
+  const targetProvider = value.slice(separator + 4);
+  if (
+    !isGatewayProvider(sourceProvider) ||
+    !isGatewayProvider(targetProvider) ||
+    sourceProvider === targetProvider
+  ) {
+    return undefined;
+  }
+  return { sourceProvider, targetProvider };
+}
+
+export const isMessageDirection = (value: unknown): value is MessageDirection =>
+  parseDirection(value) !== undefined;
 
 export const deliveryStates = [
   "queued",
@@ -103,11 +127,10 @@ export type BusyPolicy = "queue";
 /** Canonical closed-array bounds shared by store projections and control/UI. */
 export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64,
-  compatibilityChecks: compatibilitySurfaces.length,
   registryRejectionCodes: 32,
   availablePeers: 256,
   routes: 256,
-  pairs: 256,
+  consentEdges: 256,
   progressWatches: 64,
   progressWatchEvents: 256,
   activityEvents: 256,
@@ -157,7 +180,6 @@ export type GatewayRouteRecord = {
   registrationMode: RouteRegistrationMode;
   enabled: boolean;
   state: RouteState;
-  compatibility: CompatibilityState;
   busyPolicy: BusyPolicy;
   registeredAt: string;
   updatedAt: string;
@@ -172,11 +194,11 @@ export type GatewayRouteRecord = {
  * display coordinates; the private leases prevent an alias from silently
  * retargeting an existing permission edge.
  */
-export type GatewayPairRecord = {
-  claudeAlias: string;
-  codexAlias: string;
-  claudeOwnerLease: string;
-  codexOwnerLease: string;
+export type GatewayConsentEndpoint = Readonly<{ alias: string; provider: GatewayProvider; ownerLease: string }>;
+
+export type GatewayConsentEdgeRecord = {
+  /** Canonical order: provider order first, then alias. */
+  endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint];
   createdAt: string;
   updatedAt: string;
   counters: RouteCounters;
@@ -192,7 +214,6 @@ export type GatewayPrivateRouteInspection = {
   registrationMode: RouteRegistrationMode;
   enabled: boolean;
   state: RouteState;
-  compatibility: CompatibilityState;
   safeErrorCode?: string;
 };
 
@@ -201,7 +222,6 @@ export type ConnectorRecord = {
   hostId: string;
   endpointGeneration: string;
   health: ConnectorHealth;
-  compatibility: CompatibilityState;
   protocol: string;
   protocolVersion: string;
   updatedAt: string;
@@ -323,12 +343,12 @@ export type CodexOrphanRemovalJournalEvent = {
 export const CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY = 256;
 
 export type GatewayPersistedState = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   createdAt: string;
   updatedAt: string;
   eventSequence: number;
   routes: GatewayRouteRecord[];
-  pairs: GatewayPairRecord[];
+  consentEdges: GatewayConsentEdgeRecord[];
   connectors: ConnectorRecord[];
   queue: QueuedMessageMetadata[];
   inFlight: InFlightMessageMetadata[];
@@ -339,8 +359,6 @@ export type GatewayPersistedState = {
   watchSequence: number;
   progressWatches: ProgressWatch[];
   progressWatchEvents: ProgressWatchJournalEvent[];
-  /** Bounded, body-free probe evidence keyed by provider surface and version. */
-  compatibilityAttestations: CompatibilityAttestation[];
   /** Monotonic sequence for the bounded private endpoint-refresh journal. */
   codexEndpointRefreshSequence: number;
   /** Strictly private route-lifecycle evidence; never publicly projected. */
@@ -359,7 +377,6 @@ export type PublicRouteSnapshot = {
   host: string;
   enabled: boolean;
   state: RouteState;
-  compatibility: CompatibilityState;
   busyPolicy: BusyPolicy;
   lastSeenAt?: string;
   queueDepth: number;
@@ -370,9 +387,11 @@ export type PublicRouteSnapshot = {
 };
 
 /** Metadata-only public consent edge. Private route authority is omitted. */
-export type PublicPairSnapshot = {
-  claudeAlias: string;
-  codexAlias: string;
+export type PublicConsentEndpointSnapshot = Readonly<{ alias: string; provider: GatewayProvider }>;
+
+export type PublicConsentEdgeSnapshot = {
+  /** Canonical order matching the private consent edge. */
+  endpoints: readonly [PublicConsentEndpointSnapshot, PublicConsentEndpointSnapshot];
   host: string;
   counters: RouteCounters;
 };
@@ -381,82 +400,12 @@ export type PublicConnectorSnapshot = {
   provider: GatewayProvider;
   host: string;
   health: ConnectorHealth;
-  compatibility: CompatibilityState;
   protocol: string;
   protocolVersion: string;
   lastSeenAt?: string;
   safeErrorCode?: string;
   registry?: PublicRegistryObservationSnapshot;
 };
-
-/**
- * Public compatibility evidence adds this release's comparison point without
- * changing the persisted attestation schema.
- */
-export type PublicCompatibilityCheckSnapshot = CompatibilityAttestation &
-  Readonly<{
-    testedVersion?: string;
-    supportedMajor?: string;
-    writesCovered: boolean;
-  }>;
-
-function publicCompatibilityReference(
-  surface: CompatibilitySurface,
-): Readonly<{ testedVersion: string; supportedMajor: string }> | undefined {
-  const testedVersion = certifiedCompatibilityVersions[surface][0];
-  if (testedVersion === undefined) return undefined;
-  const separator = testedVersion.indexOf(".");
-  if (separator < 1) return undefined;
-  return {
-    testedVersion,
-    supportedMajor: testedVersion.slice(0, separator),
-  };
-}
-
-export function projectPublicCompatibilityCheck(
-  attestation: CompatibilityAttestation,
-): PublicCompatibilityCheckSnapshot {
-  const reference = publicCompatibilityReference(attestation.surface);
-  return {
-    ...attestation,
-    probes: attestation.probes.map((probe) => ({ ...probe })),
-    ...(reference === undefined ? {} : reference),
-    writesCovered: compatibilityCoversWrites(attestation),
-  };
-}
-
-export function isPublicCompatibilityCheckSnapshot(
-  value: unknown,
-): value is PublicCompatibilityCheckSnapshot {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const candidate = value as Record<string, unknown>;
-  const hasTestedVersion = Object.hasOwn(candidate, "testedVersion");
-  const hasSupportedMajor = Object.hasOwn(candidate, "supportedMajor");
-  if (
-    hasTestedVersion !== hasSupportedMajor ||
-    !Object.hasOwn(candidate, "writesCovered") ||
-    (hasTestedVersion && typeof candidate.testedVersion !== "string") ||
-    (hasSupportedMajor && typeof candidate.supportedMajor !== "string") ||
-    typeof candidate.writesCovered !== "boolean"
-  ) {
-    return false;
-  }
-  const {
-    testedVersion: _testedVersion,
-    supportedMajor: _supportedMajor,
-    writesCovered: _writesCovered,
-    ...attestation
-  } = candidate;
-  if (!isCompatibilityAttestation(attestation)) return false;
-  const reference = publicCompatibilityReference(attestation.surface);
-  return (
-    (reference === undefined
-      ? !hasTestedVersion
-      : candidate.testedVersion === reference.testedVersion &&
-        candidate.supportedMajor === reference.supportedMajor) &&
-    candidate.writesCovered === compatibilityCoversWrites(attestation)
-  );
-}
 
 /**
  * Bounded, native-ID-free evidence attached to one Claude connector. Counts
@@ -477,7 +426,6 @@ export const publicAvailablePeerStates = [
   "busy",
   "awaiting_approval",
   "offline",
-  "incompatible",
 ] as const;
 
 export type PublicAvailablePeerState =
@@ -494,7 +442,6 @@ export type PublicAvailablePeerSnapshot = {
   provider: GatewayProvider;
   host: string;
   state: PublicAvailablePeerState;
-  compatibility: CompatibilityState;
   /** True only when this row passed the provider's strict selectable-peer checks. */
   validated: boolean;
   selected: boolean;
@@ -580,7 +527,6 @@ export function isPublicAvailablePeerSnapshot(
     "provider",
     "host",
     "state",
-    "compatibility",
     "validated",
     "selected",
   ];
@@ -601,10 +547,6 @@ export function isPublicAvailablePeerSnapshot(
     candidate.provider !== "claude" ||
     typeof candidate.state !== "string" ||
     !(publicAvailablePeerStates as readonly string[]).includes(candidate.state) ||
-    typeof candidate.compatibility !== "string" ||
-    !(compatibilityStates as readonly string[]).includes(
-      candidate.compatibility,
-    ) ||
     typeof candidate.validated !== "boolean" ||
     typeof candidate.selected !== "boolean"
   ) {
@@ -731,22 +673,19 @@ export type PublicProgressWatchEventSnapshot = {
     | "idle_timeout"
     | "pair_removed"
     | "endpoint_retired"
-    | "tracking_disabled"
-    | "legacy_upgrade"
-    | "legacy_done";
+    | "tracking_disabled";
 };
 
 export type GatewayPublicSnapshot = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
   /** Launch-time Claude-to-Codex consent policy; paired is the safe default. */
   inboundMode: GatewayInboundMode;
   health: ConnectorHealth;
   connectors: PublicConnectorSnapshot[];
-  compatibilityChecks?: PublicCompatibilityCheckSnapshot[];
   availablePeers: PublicAvailablePeerSnapshot[];
   routes: PublicRouteSnapshot[];
-  pairs: PublicPairSnapshot[];
+  consentEdges: PublicConsentEdgeSnapshot[];
   progressWatches?: PublicProgressWatchSnapshot[];
   progressWatchEvents?: PublicProgressWatchEventSnapshot[];
   activityEvents?: PublicGatewayActivityEvent[];
@@ -759,10 +698,9 @@ export type GatewayPublicSnapshot = {
 
 export type GatewaySnapshotTruncation = {
   connectors: number;
-  compatibilityChecks?: number;
   availablePeers: number;
   routes: number;
-  pairs: number;
+  consentEdges: number;
   progressWatches?: number;
   progressWatchEvents?: number;
   activityEvents?: number;
@@ -779,7 +717,7 @@ function severityPriority(severity: AlertSeverity): number {
 function routePriority(state: RouteState): number {
   if (state === "busy" || state === "awaiting_approval") return 0;
   if (state === "idle") return 1;
-  if (state === "offline" || state === "incompatible") return 2;
+  if (state === "offline") return 2;
   if (state === "stale") return 3;
   return 4;
 }
@@ -787,15 +725,13 @@ function routePriority(state: RouteState): number {
 function connectorPriority(health: ConnectorHealth): number {
   if (health === "healthy" || health === "connecting") return 0;
   if (health === "degraded") return 1;
-  if (health === "incompatible") return 2;
-  return 3;
+  return 2;
 }
 
 function peerPriority(state: PublicAvailablePeerState): number {
   if (state === "busy" || state === "awaiting_approval") return 0;
   if (state === "idle") return 1;
-  if (state === "incompatible") return 2;
-  return 3;
+  return 2;
 }
 
 function snapshotBytes(snapshot: GatewayPublicSnapshot): number {
@@ -836,20 +772,15 @@ export function projectGatewayPublicSnapshot(
               },
             }),
       })),
-    ...(snapshot.compatibilityChecks === undefined
-      ? {}
-      : {
-          compatibilityChecks: snapshot.compatibilityChecks.slice(
-            0,
-            gatewayPublicSnapshotLimits.compatibilityChecks,
-          ),
-        }),
     availablePeers: snapshot.availablePeers.slice(
       0,
       gatewayPublicSnapshotLimits.availablePeers,
     ),
     routes: snapshot.routes.slice(0, gatewayPublicSnapshotLimits.routes),
-    pairs: snapshot.pairs.slice(0, gatewayPublicSnapshotLimits.pairs),
+    consentEdges: snapshot.consentEdges.slice(
+      0,
+      gatewayPublicSnapshotLimits.consentEdges,
+    ),
     ...(snapshot.progressWatches === undefined
       ? {}
       : {
@@ -879,17 +810,6 @@ export function projectGatewayPublicSnapshot(
       connectors:
         snapshot.truncation.connectors +
         Math.max(0, snapshot.connectors.length - gatewayPublicSnapshotLimits.connectors),
-      ...(snapshot.compatibilityChecks === undefined
-        ? {}
-        : {
-            compatibilityChecks:
-              (snapshot.truncation.compatibilityChecks ?? 0) +
-              Math.max(
-                0,
-                snapshot.compatibilityChecks.length -
-                  gatewayPublicSnapshotLimits.compatibilityChecks,
-              ),
-          }),
       availablePeers:
         snapshot.truncation.availablePeers +
         Math.max(
@@ -899,9 +819,13 @@ export function projectGatewayPublicSnapshot(
       routes:
         snapshot.truncation.routes +
         Math.max(0, snapshot.routes.length - gatewayPublicSnapshotLimits.routes),
-      pairs:
-        snapshot.truncation.pairs +
-        Math.max(0, snapshot.pairs.length - gatewayPublicSnapshotLimits.pairs),
+      consentEdges:
+        snapshot.truncation.consentEdges +
+        Math.max(
+          0,
+          snapshot.consentEdges.length -
+            gatewayPublicSnapshotLimits.consentEdges,
+        ),
       ...(snapshot.progressWatches === undefined
         ? {}
         : {
@@ -1084,16 +1008,22 @@ export function projectGatewayPublicSnapshot(
     return left.alias.localeCompare(right.alias);
   });
   const routeOmissions = projected.truncation.routes;
-  const pairs = [...projected.pairs].sort((left, right) =>
-    `${left.claudeAlias}\0${left.codexAlias}`.localeCompare(
-      `${right.claudeAlias}\0${right.codexAlias}`,
-    ),
+  const consentEdges = [...projected.consentEdges].sort((left, right) =>
+    left.endpoints
+      .map((endpoint) => `${endpoint.provider}\0${endpoint.alias}`)
+      .join("\0")
+      .localeCompare(
+        right.endpoints
+          .map((endpoint) => `${endpoint.provider}\0${endpoint.alias}`)
+          .join("\0"),
+      ),
   );
-  const pairOmissions = projected.truncation.pairs;
+  const consentEdgeOmissions = projected.truncation.consentEdges;
   if (
-    retainUntilFit(pairs.length, (retained) => {
-      projected.pairs = pairs.slice(0, retained);
-      projected.truncation.pairs = pairOmissions + pairs.length - retained;
+    retainUntilFit(consentEdges.length, (retained) => {
+      projected.consentEdges = consentEdges.slice(0, retained);
+      projected.truncation.consentEdges =
+        consentEdgeOmissions + consentEdges.length - retained;
     })
   ) {
     return projected;
@@ -1148,13 +1078,11 @@ export type RegisterRouteInput = {
   binding: PrivateRouteBinding;
   registrationMode: RouteRegistrationMode;
   state?: "idle" | "busy" | "awaiting_approval";
-  compatibility?: "compatible";
 };
 
 export type ObserveConnectorInput = {
   identity: PrivateEndpointIdentity;
   health: Exclude<ConnectorHealth, "offline">;
-  compatibility: CompatibilityState;
   protocol: string;
   protocolVersion: string;
   safeErrorCode?: string;
@@ -1164,13 +1092,11 @@ export type ObserveRouteInput =
   | {
       binding: PrivateRouteBinding;
       state: "idle" | "busy" | "awaiting_approval";
-      compatibility: "compatible";
       safeErrorCode?: string;
     }
   | {
       binding: PrivateRouteBinding;
       state: "stale";
-      compatibility: "expired";
       safeErrorCode: string;
     };
 
@@ -1230,9 +1156,8 @@ export type RemoveStaleCodexOrphanResult = {
   alias: string;
   /** Private result used only to reconcile in-process service bindings. */
   binding: PrivateRouteBinding;
-  removedPairs: Array<{
-    claudeAlias: string;
-    codexAlias: string;
+  removedEdges: Array<{
+    aliases: readonly [string, string];
   }>;
 };
 
@@ -1365,7 +1290,7 @@ export type RequeueInFlightMessageResult =
 
 export type GatewayStoreLimits = {
   maxRoutes: number;
-  maxPairs: number;
+  maxConsentEdges: number;
   /** Omitted injected-test configs use the production default of 32. */
   maxWatches?: number;
   eventCapacity: number;

@@ -16,12 +16,6 @@ import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import { isCodexRegistrationGeneration } from "./codex-registration-generation.js";
-import {
-  compatibilityCacheKey,
-  isPersistedCompatibilityAttestation,
-  type CompatibilityAttestation,
-  type CompatibilitySurface,
-} from "./compatibility.js";
 import type { GatewayConfig } from "./config.js";
 import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
@@ -41,12 +35,14 @@ import {
 import {
   CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY,
   CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY,
-  compatibilityStates,
   connectorHealthStates,
+  directionId,
   deliveryStates,
   gatewayPublicSnapshotLimits,
   gatewayProviders,
+  gatewayRegistrationIngressPrefixes,
   messageDirections,
+  parseDirection,
   projectGatewayPublicSnapshot,
   routeRegistrationModes,
   routeStates,
@@ -61,7 +57,9 @@ import {
   type EnqueueNativeIngressInput,
   type EnqueueNativeReplyInput,
   type GatewayAccounting,
-  type GatewayPairRecord,
+  type GatewayConsentEdgeRecord,
+  type GatewayConsentEndpoint,
+  type GatewayProvider,
   type GatewayPersistedState,
   type GatewayPrivateRouteInspection,
   type GatewayPublicSnapshot,
@@ -69,13 +67,14 @@ import {
   type GatewayStoreDependencies,
   type InFlightMessageMetadata,
   type InFlightMessageProgressState,
+  type MessageDirection,
   type NormalizedMessageEvent,
   type ObserveConnectorInput,
   type ObserveRouteInput,
   type PrivateEndpointIdentity,
   type PrivateRouteBinding,
   type PublicConnectorSnapshot,
-  type PublicPairSnapshot,
+  type PublicConsentEdgeSnapshot,
   type PublicProgressWatchEventSnapshot,
   type PublicProgressWatchSnapshot,
   type PublicRouteSnapshot,
@@ -106,7 +105,6 @@ const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
 export const GATEWAY_MAX_STATE_FILE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RETAINED_BODY_BYTES = 1 * 1024 * 1024;
-const COMPATIBILITY_ATTESTATION_CAPACITY = 16;
 const ALIAS_PATTERN =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -135,7 +133,6 @@ class PostRenamePersistenceError extends BridgeError {
 
 const PROVIDERS = new Set<string>(gatewayProviders);
 const CONNECTOR_HEALTH = new Set<string>(connectorHealthStates);
-const COMPATIBILITY = new Set<string>(compatibilityStates);
 const ROUTE_STATES = new Set<string>(routeStates);
 const REGISTRATION_MODES = new Set<string>(routeRegistrationModes);
 const DIRECTIONS = new Set<string>(messageDirections);
@@ -192,19 +189,18 @@ export type ReplaceClaudeSelectionInput = Readonly<{
   inFlightSettlements?: readonly RouteInFlightSettlementInput[];
 }>;
 
-export type GatewayPairInput = Readonly<{
-  claudeAlias: string;
-  codexAlias: string;
+export type GatewayConsentEdgeInput = Readonly<{
+  aliases: readonly [string, string];
 }>;
 
-export type UnpairRoutesInput = GatewayPairInput &
+export type RemoveConsentEdgeInput = GatewayConsentEdgeInput &
   Readonly<{
     inFlightSettlements?: readonly RouteInFlightSettlementInput[];
   }>;
 
-export type UnpairRoutesResult = Readonly<{
+export type RemoveConsentEdgeResult = Readonly<{
   settlements: readonly TerminalMessageSettlement[];
-  claudeRouteUnreferenced: boolean;
+  unreferencedAliases: readonly string[];
 }>;
 
 export const codexSuccessionJournalStages = [
@@ -506,7 +502,6 @@ function isRouteRecord(value: unknown): value is GatewayRouteRecord {
         "registrationMode",
         "enabled",
         "state",
-        "compatibility",
         "busyPolicy",
         "registeredAt",
         "updatedAt",
@@ -527,8 +522,6 @@ function isRouteRecord(value: unknown): value is GatewayRouteRecord {
     typeof value.enabled === "boolean" &&
     typeof value.state === "string" &&
     ROUTE_STATES.has(value.state) &&
-    typeof value.compatibility === "string" &&
-    COMPATIBILITY.has(value.compatibility) &&
     value.busyPolicy === "queue" &&
     isIsoTimestamp(value.registeredAt) &&
     isIsoTimestamp(value.updatedAt) &&
@@ -539,24 +532,23 @@ function isRouteRecord(value: unknown): value is GatewayRouteRecord {
   );
 }
 
-function isPairRecord(value: unknown): value is GatewayPairRecord {
+function isConsentEndpoint(value: unknown): boolean {
   return (
     isObject(value) &&
-    hasOnlyKeys(value, [
-      "claudeAlias",
-      "codexAlias",
-      "claudeOwnerLease",
-      "codexOwnerLease",
-      "createdAt",
-      "updatedAt",
-      "counters",
-    ]) &&
-    typeof value.claudeAlias === "string" &&
-    ALIAS_PATTERN.test(value.claudeAlias) &&
-    typeof value.codexAlias === "string" &&
-    ALIAS_PATTERN.test(value.codexAlias) &&
-    isPrivateToken(value.claudeOwnerLease) &&
-    isPrivateToken(value.codexOwnerLease) &&
+    hasOnlyKeys(value, ["alias", "provider", "ownerLease"]) &&
+    typeof value.alias === "string" && ALIAS_PATTERN.test(value.alias) &&
+    typeof value.provider === "string" && PROVIDERS.has(value.provider) &&
+    isPrivateToken(value.ownerLease)
+  );
+}
+
+function isConsentEdgeRecord(value: unknown): value is GatewayConsentEdgeRecord {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, ["endpoints", "createdAt", "updatedAt", "counters"]) &&
+    Array.isArray(value.endpoints) &&
+    value.endpoints.length === 2 &&
+    value.endpoints.every(isConsentEndpoint) &&
     isIsoTimestamp(value.createdAt) &&
     isIsoTimestamp(value.updatedAt) &&
     isRouteCounters(value.counters)
@@ -577,28 +569,23 @@ function progressWatchPairKey(
     .join("\0");
 }
 
-function progressWatchMatchesPair(
+function progressWatchMatchesConsentEdge(
   watch: Pick<
     ProgressWatch,
     "ownerAlias" | "ownerLease" | "workerAlias" | "workerLease"
   >,
-  pair: Pick<
-    GatewayPairRecord,
-    | "claudeAlias"
-    | "codexAlias"
-    | "claudeOwnerLease"
-    | "codexOwnerLease"
-  >,
+  pair: GatewayConsentEdgeRecord,
 ): boolean {
+  const [left, right] = pair.endpoints;
   return (
-    (watch.ownerAlias === pair.claudeAlias &&
-      watch.ownerLease === pair.claudeOwnerLease &&
-      watch.workerAlias === pair.codexAlias &&
-      watch.workerLease === pair.codexOwnerLease) ||
-    (watch.ownerAlias === pair.codexAlias &&
-      watch.ownerLease === pair.codexOwnerLease &&
-      watch.workerAlias === pair.claudeAlias &&
-      watch.workerLease === pair.claudeOwnerLease)
+    (watch.ownerAlias === left.alias &&
+      watch.ownerLease === left.ownerLease &&
+      watch.workerAlias === right.alias &&
+      watch.workerLease === right.ownerLease) ||
+    (watch.ownerAlias === right.alias &&
+      watch.ownerLease === right.ownerLease &&
+      watch.workerAlias === left.alias &&
+      watch.workerLease === left.ownerLease)
   );
 }
 
@@ -852,12 +839,11 @@ function isProgressWatchJournalEvent(
   }
   if (
     value.reason === "idle_timeout" ||
-    value.reason === "tracking_disabled" ||
-    value.reason === "legacy_upgrade"
+    value.reason === "tracking_disabled"
   ) {
     return value.actor === "gateway";
   }
-  return value.reason === "legacy_done" && value.actor === "unknown";
+  return false;
 }
 
 function isConnectorRecord(value: unknown): value is ConnectorRecord {
@@ -870,7 +856,6 @@ function isConnectorRecord(value: unknown): value is ConnectorRecord {
         "hostId",
         "endpointGeneration",
         "health",
-        "compatibility",
         "protocol",
         "protocolVersion",
         "updatedAt",
@@ -888,8 +873,6 @@ function isConnectorRecord(value: unknown): value is ConnectorRecord {
     }) &&
     typeof value.health === "string" &&
     CONNECTOR_HEALTH.has(value.health) &&
-    typeof value.compatibility === "string" &&
-    COMPATIBILITY.has(value.compatibility) &&
     typeof value.protocol === "string" &&
     PROTOCOL_PATTERN.test(value.protocol) &&
     typeof value.protocolVersion === "string" &&
@@ -1062,531 +1045,6 @@ function isAccounting(value: unknown): value is GatewayAccounting {
   return Object.values(value).every(isNonNegativeInteger);
 }
 
-const PRE_UNCONFIRMED_ROUTE_COUNTER_KEYS = [
-  "accepted",
-  "delivered",
-  "failed",
-  "ambiguous",
-  "expired",
-  "cancelled",
-  "abandoned",
-  "rejected",
-  "bytesAccepted",
-] as const;
-
-const PRE_UNCONFIRMED_ACCOUNTING_KEYS = [
-  "accepted",
-  "duplicates",
-  "delivered",
-  "failed",
-  "ambiguous",
-  "expired",
-  "cancelled",
-  "abandoned",
-  "rejected",
-  "bytesAccepted",
-  "queuedBytes",
-] as const;
-
-/**
- * One narrow migration for unpublished dogfood state created before the
- * `unconfirmed` terminal outcome existed. Atomic state replacement means a
- * valid old file has either every old counter shape or none of them; mixed or
- * otherwise unfamiliar shapes continue to fail strict validation.
- */
-function migratePreUnconfirmedCounters(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !isObject(value.accounting) ||
-    !hasOnlyKeys(value.accounting, PRE_UNCONFIRMED_ACCOUNTING_KEYS) ||
-    Object.hasOwn(value.accounting, "unconfirmed") ||
-    !Array.isArray(value.routes) ||
-    !value.routes.every(
-      (route) =>
-        isObject(route) &&
-        isObject(route.counters) &&
-        hasOnlyKeys(route.counters, PRE_UNCONFIRMED_ROUTE_COUNTER_KEYS) &&
-        !Object.hasOwn(route.counters, "unconfirmed"),
-    )
-  ) {
-    return value;
-  }
-  return {
-    ...value,
-    accounting: { ...value.accounting, unconfirmed: 0 },
-    routes: value.routes.map((route) => {
-      const record = route as Record<string, unknown>;
-      return {
-        ...record,
-        counters: {
-          ...(record.counters as Record<string, unknown>),
-          unconfirmed: 0,
-        },
-      };
-    }),
-  };
-}
-
-const PRE_SUCCESSION_JOURNAL_STATE_KEYS = [
-  "schemaVersion",
-  "createdAt",
-  "updatedAt",
-  "eventSequence",
-  "routes",
-  "connectors",
-  "queue",
-  "inFlight",
-  "events",
-  "dedupe",
-  "rateBuckets",
-  "accounting",
-] as const;
-
-/** Add the nullable internal journal to exact legacy v1 state only. */
-function migratePreSuccessionJournal(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !hasOnlyKeys(value, PRE_SUCCESSION_JOURNAL_STATE_KEYS)
-  ) {
-    return value;
-  }
-  return { ...value, codexSuccession: null };
-}
-
-const PRE_PAIR_GRAPH_STATE_KEYS = [
-  ...PRE_SUCCESSION_JOURNAL_STATE_KEYS,
-  "codexSuccession",
-] as const;
-
-/**
- * Preserve the old explicit singleton-selection consent when adding the pair
- * graph. This migration accepts only the exact prior v1 top-level shape; final
- * state validation still proves every route, lease, host, and edge.
- */
-function migratePrePairGraph(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !hasOnlyKeys(value, PRE_PAIR_GRAPH_STATE_KEYS) ||
-    !Array.isArray(value.routes) ||
-    !isIsoTimestamp(value.updatedAt)
-  ) {
-    return value;
-  }
-  const routes = value.routes.filter(isObject);
-  const claudeRoutes = routes.filter(
-    (route) =>
-      route.registrationMode === "selected_live_peer" &&
-      isObject(route.binding) &&
-      route.binding.provider === "claude",
-  );
-  const codexRoutes = routes.filter(
-    (route) =>
-      route.registrationMode === "explicit_opt_in" &&
-      isObject(route.binding) &&
-      route.binding.provider === "codex",
-  );
-  const pairs: GatewayPairRecord[] = [];
-  for (const claude of claudeRoutes) {
-    for (const codex of codexRoutes) {
-      const claudeBinding = claude.binding as Record<string, unknown>;
-      const codexBinding = codex.binding as Record<string, unknown>;
-      if (
-        claudeBinding.hostId !== codexBinding.hostId ||
-        typeof claude.alias !== "string" ||
-        typeof codex.alias !== "string" ||
-        typeof claudeBinding.ownerLease !== "string" ||
-        typeof codexBinding.ownerLease !== "string"
-      ) {
-        continue;
-      }
-      pairs.push({
-        claudeAlias: claude.alias,
-        codexAlias: codex.alias,
-        claudeOwnerLease: claudeBinding.ownerLease,
-        codexOwnerLease: codexBinding.ownerLease,
-        createdAt: value.updatedAt,
-        updatedAt: value.updatedAt,
-        counters: emptyCounters(),
-      });
-    }
-  }
-  if (pairs.length > 256) return value;
-  return { ...value, pairs };
-}
-
-const PRE_PROGRESS_WATCH_STATE_KEYS = [
-  ...PRE_PAIR_GRAPH_STATE_KEYS,
-  "pairs",
-] as const;
-
-/** Add empty opt-in watch state to the exact preceding v1 schema only. */
-function migratePreProgressWatches(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !hasOnlyKeys(value, PRE_PROGRESS_WATCH_STATE_KEYS)
-  ) {
-    return value;
-  }
-  return {
-    ...value,
-    watchSequence: 0,
-    progressWatches: [],
-    progressWatchEvents: [],
-  };
-}
-
-const PRE_COMPATIBILITY_ATTESTATION_STATE_KEYS = [
-  ...PRE_PROGRESS_WATCH_STATE_KEYS,
-  "watchSequence",
-  "progressWatches",
-  "progressWatchEvents",
-] as const;
-
-/** Add an empty compatibility cache to the exact preceding v1 schema only. */
-function migratePreCompatibilityAttestations(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !hasOnlyKeys(value, PRE_COMPATIBILITY_ATTESTATION_STATE_KEYS)
-  ) {
-    return value;
-  }
-  return { ...value, compatibilityAttestations: [] };
-}
-
-const PRE_CODEX_ENDPOINT_REFRESH_STATE_KEYS = [
-  ...PRE_COMPATIBILITY_ATTESTATION_STATE_KEYS,
-  "compatibilityAttestations",
-] as const;
-
-/** Add an empty bounded private endpoint-refresh journal to exact legacy v1. */
-function migratePreCodexEndpointRefreshJournal(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !hasOnlyKeys(value, PRE_CODEX_ENDPOINT_REFRESH_STATE_KEYS)
-  ) {
-    return value;
-  }
-  return {
-    ...value,
-    codexEndpointRefreshSequence: 0,
-    codexEndpointRefreshEvents: [],
-  };
-}
-
-const PRE_CODEX_ORPHAN_REMOVAL_STATE_KEYS = [
-  ...PRE_CODEX_ENDPOINT_REFRESH_STATE_KEYS,
-  "codexEndpointRefreshSequence",
-  "codexEndpointRefreshEvents",
-] as const;
-
-/** Add an empty private orphan-removal journal to exact preceding v1 state. */
-function migratePreCodexOrphanRemovalJournal(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !hasOnlyKeys(value, PRE_CODEX_ORPHAN_REMOVAL_STATE_KEYS)
-  ) {
-    return value;
-  }
-  return {
-    ...value,
-    codexOrphanRemovalSequence: 0,
-    codexOrphanRemovalEvents: [],
-  };
-}
-
-/**
- * v1.2.0 persisted hop counters on queue, in-flight, and event rows. Hop
- * policy no longer exists; accept only the old bounded shape and discard the
- * obsolete field before strict current-schema validation and persistence.
- */
-function migrateLegacyHopCounts(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !Array.isArray(value.queue) ||
-    !Array.isArray(value.inFlight) ||
-    !Array.isArray(value.events)
-  ) {
-    return value;
-  }
-  const strip = (entry: unknown): unknown => {
-    if (!isObject(entry) || !Object.hasOwn(entry, "hopCount")) return entry;
-    if (!isNonNegativeInteger(entry.hopCount) || entry.hopCount > 64) {
-      return entry;
-    }
-    const { hopCount: _legacyHopCount, ...current } = entry;
-    return current;
-  };
-  return {
-    ...value,
-    queue: value.queue.map(strip),
-    inFlight: value.inFlight.map(strip),
-    events: value.events.map(strip),
-  };
-}
-
-function isLegacyCompatibilityCertification(value: unknown): boolean {
-  if (!isObject(value)) return false;
-  const required = ["depth", "outcome", "certifiedAt"] as const;
-  if (!hasOnlyKeys(value, required, ["safeErrorCode"])) return false;
-  if (
-    (value.depth !== "wire" &&
-      value.depth !== "thread_ops" &&
-      value.depth !== "turn") ||
-    (value.outcome !== "pass" && value.outcome !== "fail") ||
-    !isIsoTimestamp(value.certifiedAt) ||
-    new Date(Date.parse(value.certifiedAt)).toISOString() !==
-      value.certifiedAt ||
-    (value.safeErrorCode !== undefined && !isSafeCode(value.safeErrorCode))
-  ) {
-    return false;
-  }
-  return (value.outcome === "pass") === (value.safeErrorCode === undefined);
-}
-
-/**
- * v1.1-v1.2 compatibility rows could contain manual live-certification
- * evidence. Discard only an exact old certification, retain the automatic
- * bounded probes as schema-attested evidence, and leave malformed rows
- * untouched for strict state validation to reject.
- */
-function migrateLegacyCompatibilityCertifications(value: unknown): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !Array.isArray(value.compatibilityAttestations)
-  ) {
-    return value;
-  }
-  let changed = false;
-  const compatibilityAttestations = value.compatibilityAttestations.map(
-    (entry) => {
-      let candidate = entry;
-      if (
-        isObject(entry) &&
-        Object.hasOwn(entry, "certification") &&
-        isLegacyCompatibilityCertification(entry.certification)
-      ) {
-        const { certification: _legacyCertification, ...current } = entry;
-        candidate =
-          current.tier === "certified"
-            ? { ...current, tier: "schema_attested" }
-            : current;
-      }
-      if (!isPersistedCompatibilityAttestation(candidate)) return entry;
-      if (candidate !== entry) changed = true;
-      return candidate;
-    },
-  );
-  return changed ? { ...value, compatibilityAttestations } : value;
-}
-
-function legacyProgressWatchGraphIsValid(
-  value: unknown,
-  watches: readonly LegacyV14ProgressWatch[],
-): boolean {
-  if (
-    !isObject(value) ||
-    !Array.isArray(value.routes) ||
-    !value.routes.every(isRouteRecord) ||
-    !Array.isArray(value.pairs) ||
-    value.pairs.length > 256 ||
-    !value.pairs.every(isPairRecord) ||
-    new Set(watches.map((watch) => watch.conversationId)).size !==
-      watches.length ||
-    new Set(watches.map(progressWatchPairKey)).size !== watches.length
-  ) {
-    return false;
-  }
-  const routes = value.routes as GatewayRouteRecord[];
-  const pairs = value.pairs as GatewayPairRecord[];
-  for (const watch of watches) {
-    const owner = routes.find(
-      (route) =>
-        route.alias === watch.ownerAlias &&
-        route.binding.ownerLease === watch.ownerLease,
-    );
-    const worker = routes.find(
-      (route) =>
-        route.alias === watch.workerAlias &&
-        route.binding.ownerLease === watch.workerLease,
-    );
-    if (
-      owner === undefined ||
-      worker === undefined ||
-      owner.binding.provider === worker.binding.provider ||
-      owner.binding.hostId !== worker.binding.hostId
-    ) {
-      return false;
-    }
-    const claude = owner.binding.provider === "claude" ? owner : worker;
-    const codex = owner.binding.provider === "codex" ? owner : worker;
-    if (
-      !pairs.some(
-        (pair) =>
-          pair.claudeAlias === claude.alias &&
-          pair.codexAlias === codex.alias &&
-          pair.claudeOwnerLease === claude.binding.ownerLease &&
-          pair.codexOwnerLease === codex.binding.ownerLease,
-      )
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function mapLegacyProgressWatchEvent(
-  event: LegacyV14ProgressWatchJournalEvent,
-): PendingProgressWatchJournalEvent | undefined {
-  const base = {
-    timestamp: event.timestamp,
-    conversationId: event.conversationId,
-    ownerAlias: event.ownerAlias,
-    workerAlias: event.workerAlias,
-  } as const;
-  switch (event.kind) {
-    case "opened":
-      return { ...base, kind: "opened", actor: "owner" };
-    case "replaced":
-      // v1.4 used this kind for both owner replacement and an automatic
-      // duplicate migration. Its actor cannot be reconstructed honestly.
-      return { ...base, kind: "replaced", actor: "unknown" };
-    case "worker_reported_complete":
-      return { ...base, kind: "settled", actor: "worker", reason: "done" };
-    case "done":
-      return {
-        ...base,
-        kind: "settled",
-        actor: "unknown",
-        reason: "legacy_done",
-      };
-    case "unresponsive":
-      return {
-        ...base,
-        kind: "settled",
-        actor: "gateway",
-        reason: "idle_timeout",
-      };
-    case "pair_removed":
-      return {
-        ...base,
-        kind: "settled",
-        actor: "operator",
-        reason: "pair_removed",
-      };
-    case "endpoint_retired":
-      return {
-        ...base,
-        kind: "settled",
-        actor: "gateway",
-        reason: "endpoint_retired",
-      };
-    case "disabled":
-      return {
-        ...base,
-        kind: "settled",
-        actor: "gateway",
-        reason: "tracking_disabled",
-      };
-    case "activity":
-    case "nudge":
-    case "capability_degraded":
-    case "conversation_rebound":
-      return undefined;
-  }
-}
-
-/**
- * v1.4.x watches carried capability and phase state that no longer has product
- * meaning. Strictly recognize the complete old graph, preserve representable
- * history, and settle every live row once at upgrade. Rebase the bounded
- * private sequence so a historical counter cannot make the new format fatal.
- */
-function migrateV14ProgressWatchState(
-  value: unknown,
-  migratedAt: string,
-): unknown {
-  if (
-    !isObject(value) ||
-    value.schemaVersion !== 1 ||
-    !isIsoTimestamp(value.updatedAt) ||
-    !isIsoTimestamp(migratedAt) ||
-    !isNonNegativeInteger(value.watchSequence) ||
-    !Array.isArray(value.progressWatches) ||
-    !Array.isArray(value.progressWatchEvents)
-  ) {
-    return value;
-  }
-  const hasLegacyRows =
-    value.progressWatches.some(isLegacyV14ProgressWatch) ||
-    value.progressWatchEvents.some(isLegacyV14ProgressWatchJournalEvent);
-  if (!hasLegacyRows) return value;
-  if (
-    value.progressWatches.length > PROGRESS_WATCH_HARD_CAPACITY ||
-    !value.progressWatches.every(isLegacyV14ProgressWatch) ||
-    value.progressWatchEvents.length > gatewayPublicSnapshotLimits.messages ||
-    !value.progressWatchEvents.every(
-      isLegacyV14ProgressWatchJournalEvent,
-    )
-  ) {
-    return value;
-  }
-  const watches = value.progressWatches as LegacyV14ProgressWatch[];
-  const legacyEvents =
-    value.progressWatchEvents as LegacyV14ProgressWatchJournalEvent[];
-  const watchSequence = value.watchSequence as number;
-  if (
-    !legacyProgressWatchGraphIsValid(value, watches) ||
-    legacyEvents.some(
-      (event, index) =>
-        event.sequence > watchSequence ||
-        (index > 0 && event.sequence <= legacyEvents[index - 1]!.sequence),
-    )
-  ) {
-    return value;
-  }
-  const pending: PendingProgressWatchJournalEvent[] = [];
-  for (const event of legacyEvents) {
-    const mapped = mapLegacyProgressWatchEvent(event);
-    if (mapped !== undefined) pending.push(mapped);
-  }
-  const settlements = watches.map(
-    (watch): PendingProgressWatchJournalEvent => ({
-      timestamp: migratedAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "settled",
-      actor: "gateway",
-      reason: "legacy_upgrade",
-    }),
-  );
-  const retainedHistoryCount =
-    gatewayPublicSnapshotLimits.messages - settlements.length;
-  const retained = [
-    ...pending.slice(Math.max(0, pending.length - retainedHistoryCount)),
-    ...settlements,
-  ];
-  const progressWatchEvents = retained.map((event, index) => ({
-    ...event,
-    sequence: index + 1,
-  }));
-  return {
-    ...value,
-    watchSequence: progressWatchEvents.length,
-    progressWatches: [],
-    progressWatchEvents,
-  };
-}
-
 function isPersistedState(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
@@ -1596,7 +1054,7 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       "updatedAt",
       "eventSequence",
       "routes",
-      "pairs",
+      "consentEdges",
       "connectors",
       "queue",
       "inFlight",
@@ -1607,14 +1065,13 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
       "watchSequence",
       "progressWatches",
       "progressWatchEvents",
-      "compatibilityAttestations",
       "codexEndpointRefreshSequence",
       "codexEndpointRefreshEvents",
       "codexOrphanRemovalSequence",
       "codexOrphanRemovalEvents",
       "codexSuccession",
     ]) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     !isIsoTimestamp(value.createdAt) ||
     !isIsoTimestamp(value.updatedAt) ||
     !isNonNegativeInteger(value.eventSequence) ||
@@ -1623,21 +1080,15 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     !isNonNegativeInteger(value.codexOrphanRemovalSequence) ||
     !Array.isArray(value.routes) ||
     !value.routes.every(isRouteRecord) ||
-    !Array.isArray(value.pairs) ||
-    value.pairs.length > 256 ||
-    !value.pairs.every(isPairRecord) ||
+    !Array.isArray(value.consentEdges) ||
+    value.consentEdges.length > gatewayPublicSnapshotLimits.consentEdges ||
+    !value.consentEdges.every(isConsentEdgeRecord) ||
     !Array.isArray(value.progressWatches) ||
     value.progressWatches.length > PROGRESS_WATCH_HARD_CAPACITY ||
     !value.progressWatches.every(isProgressWatch) ||
     !Array.isArray(value.progressWatchEvents) ||
     value.progressWatchEvents.length > gatewayPublicSnapshotLimits.messages ||
     !value.progressWatchEvents.every(isProgressWatchJournalEvent) ||
-    !Array.isArray(value.compatibilityAttestations) ||
-    value.compatibilityAttestations.length >
-      COMPATIBILITY_ATTESTATION_CAPACITY ||
-    !value.compatibilityAttestations.every(
-      isPersistedCompatibilityAttestation,
-    ) ||
     !Array.isArray(value.codexEndpointRefreshEvents) ||
     value.codexEndpointRefreshEvents.length >
       CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY ||
@@ -1699,12 +1150,6 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     candidate.progressWatches.map(progressWatchPairKey),
   );
   if (watchPairKeys.size !== candidate.progressWatches.length) return false;
-  const compatibilityKeys = candidate.compatibilityAttestations.map(
-    compatibilityCacheKey,
-  );
-  if (new Set(compatibilityKeys).size !== compatibilityKeys.length) {
-    return false;
-  }
   for (const watch of candidate.progressWatches) {
     const owner = candidate.routes.find(
       (route) =>
@@ -1724,20 +1169,13 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     ) {
       return false;
     }
-    const pairAliases = pairAliasesForRoutes(owner, worker);
+    const endpoints = canonicalConsentEndpoints(owner, worker);
     if (
-      !candidate.pairs.some(
-        (pair) =>
-          pair.claudeAlias === pairAliases.claudeAlias &&
-          pair.codexAlias === pairAliases.codexAlias &&
-          pair.claudeOwnerLease ===
-            (owner.binding.provider === "claude"
-              ? owner.binding.ownerLease
-              : worker.binding.ownerLease) &&
-          pair.codexOwnerLease ===
-            (owner.binding.provider === "codex"
-              ? owner.binding.ownerLease
-              : worker.binding.ownerLease),
+      !candidate.consentEdges.some(
+        (edge) => edge.endpoints.every((endpoint, index) =>
+          endpoint.alias === endpoints[index]!.alias &&
+          endpoint.provider === endpoints[index]!.provider &&
+          endpoint.ownerLease === endpoints[index]!.ownerLease),
       )
     ) {
       return false;
@@ -1759,18 +1197,19 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
   const routeByAlias = new Map(
     candidate.routes.map((route) => [route.alias, route]),
   );
-  const pairKeys = candidate.pairs.map(
-    (pair) => `${pair.claudeAlias}\0${pair.codexAlias}`,
-  );
-  const pairsValid = candidate.pairs.every((pair) => {
-    const claude = routeByAlias.get(pair.claudeAlias);
-    const codex = routeByAlias.get(pair.codexAlias);
+  const edgeKeys = candidate.consentEdges.map((edge) => consentEdgeKey(edge.endpoints));
+  const edgesValid = candidate.consentEdges.every((edge) => {
+    const [leftEndpoint, rightEndpoint] = edge.endpoints;
+    const left = routeByAlias.get(leftEndpoint.alias);
+    const right = routeByAlias.get(rightEndpoint.alias);
     return (
-      claude?.binding.provider === "claude" &&
-      codex?.binding.provider === "codex" &&
-      claude.binding.hostId === codex.binding.hostId &&
-      claude.binding.ownerLease === pair.claudeOwnerLease &&
-      codex.binding.ownerLease === pair.codexOwnerLease
+      compareConsentEndpoints(leftEndpoint, rightEndpoint) < 0 &&
+      left?.binding.provider === leftEndpoint.provider &&
+      right?.binding.provider === rightEndpoint.provider &&
+      left.binding.provider !== right.binding.provider &&
+      left.binding.hostId === right.binding.hostId &&
+      left.binding.ownerLease === leftEndpoint.ownerLease &&
+      right.binding.ownerLease === rightEndpoint.ownerLease
     );
   });
   const claudeConnectorHosts = new Set(
@@ -1781,31 +1220,30 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
   const aliasHost = (alias: string): string =>
     alias.slice(alias.lastIndexOf("@") + 1);
   const isValidPersistedMessagePair = (message: {
-    direction: "codex_to_claude" | "claude_to_codex";
+    direction: MessageDirection;
     sourceAlias: string;
     targetAlias: string;
     pair?: true;
   }): boolean => {
     const source = routeByAlias.get(message.sourceAlias);
     const target = routeByAlias.get(message.targetAlias);
-    const routeShapeValid =
-      message.direction === "codex_to_claude"
-        ? source?.binding.provider === "codex" &&
-          ((target?.binding.provider === "claude" &&
-            target.binding.hostId === source.binding.hostId) ||
-            (target === undefined &&
-              claudeConnectorHosts.has(source.binding.hostId) &&
-              aliasHost(message.targetAlias) === source.binding.hostId))
-        : target?.binding.provider === "codex" &&
-          ((source?.binding.provider === "claude" &&
-            source.binding.hostId === target.binding.hostId) ||
-            (source === undefined &&
-              claudeConnectorHosts.has(target.binding.hostId) &&
-              aliasHost(message.sourceAlias) === target.binding.hostId));
+    const parsed = parseDirection(message.direction);
+    if (parsed === undefined) return false;
+    const sourceValid = source?.binding.provider === parsed.sourceProvider ||
+      (source === undefined && parsed.sourceProvider === "claude" && target !== undefined &&
+        claudeConnectorHosts.has(target.binding.hostId) &&
+        aliasHost(message.sourceAlias) === target.binding.hostId);
+    const targetValid = target?.binding.provider === parsed.targetProvider ||
+      (target === undefined && parsed.targetProvider === "claude" && source !== undefined &&
+        claudeConnectorHosts.has(source.binding.hostId) &&
+        aliasHost(message.targetAlias) === source.binding.hostId);
+    const routeShapeValid = sourceValid && targetValid &&
+      (source === undefined || target === undefined ||
+        source.binding.hostId === target.binding.hostId);
     return (
       routeShapeValid &&
       (message.pair !== true ||
-        candidate.pairs.some((pair) => pairMatchesMessage(pair, message)))
+        candidate.consentEdges.some((edge) => consentEdgeMatchesMessage(edge, message)))
     );
   };
   const sequencesStrictlyIncrease = candidate.events.every(
@@ -1848,8 +1286,8 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
         );
   return (
     aliases.size === candidate.routes.length &&
-    new Set(pairKeys).size === pairKeys.length &&
-    pairsValid &&
+    new Set(edgeKeys).size === edgeKeys.length &&
+    edgesValid &&
     routeTargets.size === candidate.routes.length &&
     ownerLeases.size === candidate.routes.length &&
     connectorKeys.size === candidate.connectors.length &&
@@ -1869,10 +1307,12 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
     candidate.routes.every(
       (route) =>
         route.alias.endsWith(`@${route.binding.hostId}`) &&
-        ((route.binding.provider === "codex" &&
-          route.registrationMode === "explicit_opt_in") ||
-          (route.binding.provider === "claude" &&
-            route.registrationMode === "selected_live_peer")) &&
+        ((route.binding.provider === "claude" &&
+          route.registrationMode === "selected_live_peer") ||
+          (route.binding.provider !== "claude" &&
+            route.registrationMode === "explicit_opt_in")) &&
+        (gatewayRegistrationIngressPrefixes[route.binding.provider] === undefined ||
+          route.alias.startsWith(gatewayRegistrationIngressPrefixes[route.binding.provider]!)) &&
         route.queueDepth ===
           candidate.queue.filter((item) => item.targetAlias === route.alias)
             .length,
@@ -1890,7 +1330,6 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
         aliases.has(bucket.sourceAlias) ||
         candidate.routes.some(
           (route) =>
-            route.binding.provider === "codex" &&
             claudeConnectorHosts.has(route.binding.hostId) &&
             route.binding.hostId === aliasHost(bucket.sourceAlias),
         ),
@@ -2145,70 +1584,73 @@ function renameRateBucket(
   );
 }
 
-function pairKey(claudeAlias: string, codexAlias: string): string {
-  return `${claudeAlias}\0${codexAlias}`;
+function compareConsentEndpoints(left: Pick<GatewayConsentEndpoint, "alias" | "provider">,
+  right: Pick<GatewayConsentEndpoint, "alias" | "provider">): number {
+  return gatewayProviders.indexOf(left.provider) -
+    gatewayProviders.indexOf(right.provider) || left.alias.localeCompare(right.alias);
 }
 
-function pairAliasesForRoutes(
+function canonicalConsentEndpoints(
   source: GatewayRouteRecord,
   target: GatewayRouteRecord,
-): GatewayPairInput {
-  if (
-    source.binding.provider === "claude" &&
-    target.binding.provider === "codex"
-  ) {
-    return { claudeAlias: source.alias, codexAlias: target.alias };
-  }
-  if (
-    source.binding.provider === "codex" &&
-    target.binding.provider === "claude"
-  ) {
-    return { claudeAlias: target.alias, codexAlias: source.alias };
-  }
-  throw new BridgeError(
-    "INVALID_GATEWAY_ROUTE_PAIR",
-    "Gateway pairs must connect one Claude route and one Codex route.",
-  );
+): readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] {
+  const endpoints: [GatewayConsentEndpoint, GatewayConsentEndpoint] = [
+    { alias: source.alias, provider: source.binding.provider,
+      ownerLease: source.binding.ownerLease },
+    { alias: target.alias, provider: target.binding.provider,
+      ownerLease: target.binding.ownerLease },
+  ];
+  endpoints.sort(compareConsentEndpoints);
+  return endpoints;
 }
 
-function pairMatchesMessage(
-  pair: GatewayPairInput,
+function consentEdgeKey(endpoints: readonly [
+  Pick<GatewayConsentEndpoint, "alias" | "provider">,
+  Pick<GatewayConsentEndpoint, "alias" | "provider">,
+]): string {
+  return endpoints.map(({ provider, alias }) => `${provider}\0${alias}`).join("\0");
+}
+
+function consentEdgeMatchesMessage(
+  pair: GatewayConsentEdgeRecord | GatewayConsentEdgeInput,
   message: Pick<
     QueuedMessageMetadata,
     "sourceAlias" | "targetAlias" | "pair"
   >,
 ): boolean {
-  return (
-    message.pair === true &&
-    ((message.sourceAlias === pair.claudeAlias &&
-      message.targetAlias === pair.codexAlias) ||
-      (message.sourceAlias === pair.codexAlias &&
-        message.targetAlias === pair.claudeAlias))
-  );
+  const aliases = "endpoints" in pair
+    ? pair.endpoints.map((endpoint) => endpoint.alias)
+    : pair.aliases;
+  return message.pair === true &&
+    ((message.sourceAlias === aliases[0] && message.targetAlias === aliases[1]) ||
+      (message.sourceAlias === aliases[1] && message.targetAlias === aliases[0]));
 }
 
-function findPairForMessage(
+function findConsentEdgeForMessage(
   state: GatewayPersistedState,
   message: Pick<QueuedMessageMetadata, "sourceAlias" | "targetAlias">,
-): GatewayPairRecord | undefined {
-  return state.pairs.find((pair) => pairMatchesMessage(pair, message));
+): GatewayConsentEdgeRecord | undefined {
+  return state.consentEdges.find((edge) => consentEdgeMatchesMessage(edge, message));
 }
 
-function renamePairAlias(
+function renameConsentEdgeAlias(
   state: GatewayPersistedState,
   previousAlias: string,
   newAlias: string,
   now: Date,
 ): void {
   if (previousAlias === newAlias) return;
-  for (const pair of state.pairs) {
-    if (pair.claudeAlias === previousAlias) pair.claudeAlias = newAlias;
-    if (pair.codexAlias === previousAlias) pair.codexAlias = newAlias;
-    if (
-      pair.claudeAlias === newAlias ||
-      pair.codexAlias === newAlias
-    ) {
-      pair.updatedAt = now.toISOString();
+  for (const edge of state.consentEdges) {
+    const endpoint = edge.endpoints.find(({ alias }) => alias === previousAlias);
+    if (endpoint !== undefined) {
+      const renamed = edge.endpoints.map((candidate) =>
+        candidate.alias === previousAlias
+          ? { ...candidate, alias: newAlias }
+          : candidate,
+      ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
+      renamed.sort(compareConsentEndpoints);
+      edge.endpoints = renamed;
+      edge.updatedAt = now.toISOString();
     }
   }
 }
@@ -2228,13 +1670,12 @@ function renameProgressWatchAlias(
   );
 }
 
-function removePairsForAliases(
+function removeConsentEdgesForAliases(
   state: GatewayPersistedState,
   aliases: ReadonlySet<string>,
 ): void {
-  state.pairs = state.pairs.filter(
-    (pair) =>
-      !aliases.has(pair.claudeAlias) && !aliases.has(pair.codexAlias),
+  state.consentEdges = state.consentEdges.filter(
+    (edge) => !edge.endpoints.some(({ alias }) => aliases.has(alias)),
   );
 }
 
@@ -2259,29 +1700,20 @@ function routeTerminationMatches(
 function directionFor(
   source: GatewayRouteRecord,
   target: GatewayRouteRecord,
-): "codex_to_claude" | "claude_to_codex" {
-  if (
-    source.binding.provider === "codex" &&
-    target.binding.provider === "claude"
-  ) {
-    return "codex_to_claude";
-  }
-  if (
-    source.binding.provider === "claude" &&
-    target.binding.provider === "codex"
-  ) {
-    return "claude_to_codex";
+): MessageDirection {
+  if (source.binding.provider !== target.binding.provider) {
+    return directionId(source.binding.provider, target.binding.provider);
   }
   throw new BridgeError(
     "INVALID_GATEWAY_ROUTE_PAIR",
-    "Gateway messages must cross from one provider to the other.",
+    "Gateway messages must cross between distinct providers.",
   );
 }
 
 type ResolvedEnqueueSides = {
   sourceAlias: string;
   targetAlias: string;
-  direction: "codex_to_claude" | "claude_to_codex";
+  direction: MessageDirection;
   pair?: true;
   transientTarget?: true;
   sourceRoute?: GatewayRouteRecord;
@@ -2301,11 +1733,7 @@ export class GatewayStore {
   private state: GatewayPersistedState | undefined;
   private lockHandle: FileHandle | undefined;
   private lockToken: string | undefined;
-  /**
-   * Startup admission may exercise migrated state in memory, but it must not
-   * strand an older binary by rewriting the durable schema before every
-   * provider and control-socket readiness check has passed.
-   */
+  /** Startup may defer the first native-v2 persistence until admission passes. */
   private persistenceDeferred = false;
 
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
@@ -2336,12 +1764,12 @@ export class GatewayStore {
         const now = this.now();
         const loaded = await this.loadStateFile(now);
         this.state = loaded ?? {
-          schemaVersion: 1,
+          schemaVersion: 2,
           createdAt: now.toISOString(),
           updatedAt: now.toISOString(),
           eventSequence: 0,
           routes: [],
-          pairs: [],
+          consentEdges: [],
           connectors: [],
           queue: [],
           inFlight: [],
@@ -2352,17 +1780,16 @@ export class GatewayStore {
           watchSequence: 0,
           progressWatches: [],
           progressWatchEvents: [],
-          compatibilityAttestations: [],
           codexEndpointRefreshSequence: 0,
           codexEndpointRefreshEvents: [],
           codexOrphanRemovalSequence: 0,
           codexOrphanRemovalEvents: [],
           codexSuccession: null,
         };
-        if (this.state.pairs.length > this.config.limits.maxPairs) {
+        if (this.state.consentEdges.length > this.config.limits.maxConsentEdges) {
           throw new BridgeError(
-            "PAIR_CAPACITY_REACHED",
-            "The durable pair inventory exceeds the configured bound.",
+            "CONSENT_EDGE_CAPACITY_REACHED",
+            "The durable consent-edge inventory exceeds the configured bound.",
           );
         }
         if (
@@ -2439,7 +1866,6 @@ export class GatewayStore {
       const observed: ConnectorRecord = {
         ...input.identity,
         health: input.health,
-        compatibility: input.compatibility,
         protocol: input.protocol,
         protocolVersion: input.protocolVersion,
         updatedAt: now.toISOString(),
@@ -2448,7 +1874,10 @@ export class GatewayStore {
       };
       if (existingIndex >= 0) state.connectors[existingIndex] = observed;
       else {
-        if (state.connectors.length >= this.config.allowedHosts.length * 2) {
+        if (
+          state.connectors.length >=
+          this.config.allowedHosts.length * gatewayProviders.length
+        ) {
           throw new BridgeError(
             "CONNECTOR_CAPACITY_REACHED",
             "The bounded provider and host connector registry is full.",
@@ -2498,7 +1927,6 @@ export class GatewayStore {
       for (const route of state.routes) {
         if (!sameEndpoint(route.binding, identity)) continue;
         route.state = route.enabled ? "stale" : "disabled";
-        route.compatibility = "expired";
         route.updatedAt = now.toISOString();
         route.safeErrorCode = safeErrorCode;
       }
@@ -2548,7 +1976,6 @@ export class GatewayStore {
         }
         byAlias.enabled = true;
         byAlias.state = input.state ?? "idle";
-        byAlias.compatibility = "compatible";
         byAlias.updatedAt = now.toISOString();
         byAlias.lastSeenAt = now.toISOString();
         delete byAlias.safeErrorCode;
@@ -2583,7 +2010,6 @@ export class GatewayStore {
         registrationMode: input.registrationMode,
         enabled: true,
         state: input.state ?? "idle",
-        compatibility: "compatible",
         busyPolicy: "queue",
         registeredAt: now.toISOString(),
         updatedAt: now.toISOString(),
@@ -2707,7 +2133,7 @@ export class GatewayStore {
         settlementPlan,
       );
       state.routes = state.routes.filter((route) => !retired.includes(route));
-      removePairsForAliases(state, retiredAliases);
+      removeConsentEdgesForAliases(state, retiredAliases);
       state.rateBuckets = state.rateBuckets.filter(
         (bucket) => !retiredAliases.has(bucket.sourceAlias),
       );
@@ -2723,7 +2149,6 @@ export class GatewayStore {
         retained.binding = { ...replacement.binding };
         retained.enabled = true;
         retained.state = replacement.state ?? "idle";
-        retained.compatibility = "compatible";
         retained.updatedAt = now.toISOString();
         retained.lastSeenAt = now.toISOString();
         delete retained.safeErrorCode;
@@ -2745,7 +2170,7 @@ export class GatewayStore {
             }
           }
           renameRateBucket(state, previousAlias, replacement.alias);
-          renamePairAlias(state, previousAlias, replacement.alias, now);
+          renameConsentEdgeAlias(state, previousAlias, replacement.alias, now);
           renameProgressWatchAlias(
             state,
             previousAlias,
@@ -2766,7 +2191,6 @@ export class GatewayStore {
           registrationMode: replacement.registrationMode,
           enabled: true,
           state: replacement.state ?? "idle",
-          compatibility: "compatible",
           busyPolicy: "queue",
           registeredAt: now.toISOString(),
           updatedAt: now.toISOString(),
@@ -2833,7 +2257,6 @@ export class GatewayStore {
         );
       }
       route.state = input.state;
-      route.compatibility = input.compatibility;
       route.lastSeenAt = now.toISOString();
       route.updatedAt = now.toISOString();
       if (input.safeErrorCode) route.safeErrorCode = input.safeErrorCode;
@@ -2873,7 +2296,6 @@ export class GatewayStore {
         inFlightSettlements,
       );
       route.state = "stale";
-      route.compatibility = "expired";
       route.updatedAt = now.toISOString();
       route.safeErrorCode = safeErrorCode;
       return this.terminateAffectedMessages(
@@ -3002,7 +2424,6 @@ export class GatewayStore {
       route.binding = { ...input.newBinding };
       route.alias = newAlias;
       route.state = input.state ?? "idle";
-      route.compatibility = "compatible";
       route.updatedAt = now.toISOString();
       route.lastSeenAt = now.toISOString();
       delete route.safeErrorCode;
@@ -3022,7 +2443,7 @@ export class GatewayStore {
           }
         }
         renameRateBucket(state, previousAlias, newAlias);
-        renamePairAlias(state, previousAlias, newAlias, now);
+        renameConsentEdgeAlias(state, previousAlias, newAlias, now);
       }
       if (input.journalReason === "boot_reactivation") {
         this.appendCodexEndpointRefreshEvent(state, {
@@ -3184,7 +2605,6 @@ export class GatewayStore {
           endpointGeneration: input.newEndpoint.endpointGeneration,
         };
         replacement.route.state = replacement.state;
-        replacement.route.compatibility = "compatible";
         replacement.route.updatedAt = now.toISOString();
         replacement.route.lastSeenAt = now.toISOString();
         delete replacement.route.safeErrorCode;
@@ -3223,15 +2643,9 @@ export class GatewayStore {
       const route = this.requireStaleCodexOrphan(state, input.alias);
 
       const aliases = new Set([route.alias]);
-      const removedPairs = state.pairs
-        .filter(
-          (pair) =>
-            pair.claudeAlias === route.alias || pair.codexAlias === route.alias,
-        )
-        .map((pair) => ({
-          claudeAlias: pair.claudeAlias,
-          codexAlias: pair.codexAlias,
-        }));
+      const removedEdges = state.consentEdges
+        .filter((edge) => edge.endpoints.some(({ alias }) => alias === route.alias))
+        .map((edge) => ({ aliases: edge.endpoints.map(({ alias }) => alias) as [string, string] }));
       if (state.codexOrphanRemovalSequence >= Number.MAX_SAFE_INTEGER) {
         throw new BridgeError(
           "CODEX_ORPHAN_REMOVAL_SEQUENCE_EXHAUSTED",
@@ -3240,7 +2654,7 @@ export class GatewayStore {
       }
       this.settleProgressWatchesForAliases(state, aliases, now);
       state.routes = state.routes.filter((candidate) => candidate !== route);
-      removePairsForAliases(state, aliases);
+      removeConsentEdgesForAliases(state, aliases);
       state.rateBuckets = state.rateBuckets.filter(
         (bucket) => bucket.sourceAlias !== route.alias,
       );
@@ -3257,7 +2671,7 @@ export class GatewayStore {
       return {
         alias: route.alias,
         binding: { ...route.binding },
-        removedPairs,
+        removedEdges,
       };
     });
   }
@@ -3316,7 +2730,7 @@ export class GatewayStore {
         settlementPlan,
       );
       state.routes = state.routes.filter((candidate) => candidate !== route);
-      removePairsForAliases(state, aliases);
+      removeConsentEdgesForAliases(state, aliases);
       const remainingCodexHosts = new Set(
         state.routes
           .filter((candidate) => candidate.binding.provider === "codex")
@@ -3380,7 +2794,7 @@ export class GatewayStore {
         if (record.targetAlias === alias) record.targetAlias = newAlias;
       }
       renameRateBucket(state, alias, newAlias);
-      renamePairAlias(state, alias, newAlias, now);
+      renameConsentEdgeAlias(state, alias, newAlias, now);
       renameProgressWatchAlias(state, alias, newAlias);
     });
   }
@@ -3440,7 +2854,6 @@ export class GatewayStore {
         registrationMode: route.registrationMode,
         enabled: route.enabled,
         state: route.state,
-        compatibility: route.compatibility,
         ...(route.safeErrorCode === undefined
           ? {}
           : { safeErrorCode: route.safeErrorCode }),
@@ -3548,7 +2961,6 @@ export class GatewayStore {
           registrationMode: route.registrationMode,
           enabled: route.enabled,
           state: route.state,
-          compatibility: route.compatibility,
         }));
     });
   }
@@ -3717,7 +3129,6 @@ export class GatewayStore {
         journal.new,
         now,
         input.state,
-        "compatible",
       );
       state.codexSuccession = { ...journal, stage: "activated" };
     });
@@ -3864,43 +3275,44 @@ export class GatewayStore {
           registrationMode: route.registrationMode,
           enabled: route.enabled,
           state: route.state,
-          compatibility: route.compatibility,
         }));
     });
   }
 
-  /** Create one explicit, durable Claude↔Codex consent edge. */
-  async pairRoutes(input: GatewayPairInput): Promise<{ created: boolean }> {
+  /** Create one explicit, durable consent edge between distinct providers. */
+  async addConsentEdge(
+    input: GatewayConsentEdgeInput,
+  ): Promise<{ created: boolean }> {
     return this.mutate(async (state, now) => {
-      const { claude, codex } = this.requirePairRoutes(state, input);
-      const existing = state.pairs.find(
-        (pair) =>
-          pair.claudeAlias === claude.alias && pair.codexAlias === codex.alias,
+      const [left, right] = this.requireConsentEdgeRoutes(state, input);
+      const endpoints = canonicalConsentEndpoints(left, right);
+      const key = consentEdgeKey(endpoints);
+      const existing = state.consentEdges.find(
+        (edge) => consentEdgeKey(edge.endpoints) === key,
       );
       if (existing !== undefined) {
         if (
-          existing.claudeOwnerLease !== claude.binding.ownerLease ||
-          existing.codexOwnerLease !== codex.binding.ownerLease
+          existing.endpoints.some(
+            (endpoint, index) =>
+              endpoint.ownerLease !== endpoints[index]!.ownerLease,
+          )
         ) {
           throw new BridgeError(
-            "PAIR_AUTHORITY_MISMATCH",
-            "The pair aliases no longer match their exact route authorities.",
+            "CONSENT_EDGE_AUTHORITY_MISMATCH",
+            "The edge aliases no longer match their exact route authorities.",
           );
         }
         return { created: false };
       }
-      if (state.pairs.length >= this.config.limits.maxPairs) {
+      if (state.consentEdges.length >= this.config.limits.maxConsentEdges) {
         throw new BridgeError(
-          "PAIR_CAPACITY_REACHED",
-          "The bounded permission graph cannot accept another pair.",
+          "CONSENT_EDGE_CAPACITY_REACHED",
+          "The bounded permission graph cannot accept another consent edge.",
           true,
         );
       }
-      state.pairs.push({
-        claudeAlias: claude.alias,
-        codexAlias: codex.alias,
-        claudeOwnerLease: claude.binding.ownerLease,
-        codexOwnerLease: codex.binding.ownerLease,
+      state.consentEdges.push({
+        endpoints,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         counters: emptyCounters(),
@@ -3910,16 +3322,14 @@ export class GatewayStore {
   }
 
   /** Bounded metadata-only graph inventory for controller inference. */
-  async inspectPairs(): Promise<GatewayPairInput[]> {
+  async inspectConsentEdges(): Promise<GatewayConsentEdgeInput[]> {
     return this.mutex.run("gateway", async () => {
       const state = this.requireState();
-      return state.pairs
-        .map(({ claudeAlias, codexAlias }) => ({ claudeAlias, codexAlias }))
-        .sort((left, right) =>
-          pairKey(left.claudeAlias, left.codexAlias).localeCompare(
-            pairKey(right.claudeAlias, right.codexAlias),
-          ),
-        );
+      return state.consentEdges
+        .map(({ endpoints }) => ({
+          aliases: endpoints.map(({ alias }) => alias) as [string, string],
+        }))
+        .sort((left, right) => left.aliases.join("\0").localeCompare(right.aliases.join("\0")));
     });
   }
 
@@ -3973,13 +3383,13 @@ export class GatewayStore {
               watch.workerAlias === input.sourceAlias)),
       );
       if (watch === undefined) return { markerActive: false };
-      const hasExactPair = state.pairs.some(
+      const hasExactPair = state.consentEdges.some(
         (candidate) =>
-          pairMatchesMessage(candidate, {
+          consentEdgeMatchesMessage(candidate, {
             sourceAlias: input.sourceAlias,
             targetAlias: input.targetAlias,
             pair: true,
-          }) && progressWatchMatchesPair(watch, candidate),
+          }) && progressWatchMatchesConsentEdge(watch, candidate),
       );
       if (!hasExactPair) return { markerActive: false };
       return {
@@ -3988,68 +3398,6 @@ export class GatewayStore {
           watch.ownerAlias === input.sourceAlias &&
           watch.workerAlias === input.targetAlias,
       };
-    });
-  }
-
-  // TODO(emb-68): delete these inert legacy-schema shims with the coordinated
-  // state/public compatibility shadow. No runtime authority path calls them.
-  async inspectCompatibilityAttestation(
-    surface: CompatibilitySurface,
-    version: string,
-  ): Promise<CompatibilityAttestation | undefined> {
-    return this.mutex.run("gateway", async () => {
-      const attestation = this.requireState().compatibilityAttestations.find(
-        (candidate) =>
-          candidate.surface === surface && candidate.version === version,
-      );
-      return attestation === undefined
-        ? undefined
-        : structuredClone(attestation);
-    });
-  }
-
-  async inspectCompatibilityAttestations(): Promise<
-    CompatibilityAttestation[]
-  > {
-    return this.mutex.run("gateway", async () =>
-      this.requireState().compatibilityAttestations
-        .map((attestation) => structuredClone(attestation))
-        .sort((left, right) =>
-          compatibilityCacheKey(left).localeCompare(
-            compatibilityCacheKey(right),
-          ),
-        ),
-    );
-  }
-
-  async recordCompatibilityAttestation(
-    attestation: CompatibilityAttestation,
-  ): Promise<void> {
-    if (!isPersistedCompatibilityAttestation(attestation)) {
-      throw new BridgeError(
-        "COMPAT_ATTESTATION_INVALID",
-        "Legacy compatibility evidence failed strict persisted-schema validation.",
-      );
-    }
-    await this.mutate(async (state) => {
-      const key = compatibilityCacheKey(attestation);
-      const index = state.compatibilityAttestations.findIndex(
-        (candidate) => compatibilityCacheKey(candidate) === key,
-      );
-      if (index >= 0) {
-        state.compatibilityAttestations[index] = structuredClone(attestation);
-        return;
-      }
-      if (
-        state.compatibilityAttestations.length >=
-        COMPATIBILITY_ATTESTATION_CAPACITY
-      ) {
-        state.compatibilityAttestations.sort((left, right) =>
-          left.checkedAt.localeCompare(right.checkedAt),
-        );
-        state.compatibilityAttestations.shift();
-      }
-      state.compatibilityAttestations.push(structuredClone(attestation));
     });
   }
 
@@ -4174,18 +3522,18 @@ export class GatewayStore {
     });
   }
 
-  async hasPair(input: GatewayPairInput): Promise<boolean> {
+  async hasConsentEdge(input: GatewayConsentEdgeInput): Promise<boolean> {
     return this.mutex.run("gateway", async () => {
       const state = this.requireState();
       try {
-        const { claude, codex } = this.requirePairRoutes(state, input, false);
-        return state.pairs.some(
-          (pair) =>
-            pair.claudeAlias === claude.alias &&
-            pair.codexAlias === codex.alias &&
-            pair.claudeOwnerLease === claude.binding.ownerLease &&
-            pair.codexOwnerLease === codex.binding.ownerLease,
-        );
+        const [left, right] = this.requireConsentEdgeRoutes(state, input, false);
+        const endpoints = canonicalConsentEndpoints(left, right);
+        return state.consentEdges.some((edge) => edge.endpoints.every(
+          (endpoint, index) =>
+            endpoint.alias === endpoints[index]!.alias &&
+            endpoint.provider === endpoints[index]!.provider &&
+            endpoint.ownerLease === endpoints[index]!.ownerLease,
+        ));
       } catch (error) {
         if (error instanceof BridgeError) return false;
         throw error;
@@ -4193,49 +3541,53 @@ export class GatewayStore {
     });
   }
 
-  async inspectAffectedPairInFlightMessages(
-    input: GatewayPairInput,
+  async inspectAffectedConsentEdgeInFlightMessages(
+    input: GatewayConsentEdgeInput,
   ): Promise<AffectedInFlightMessageInspection[]> {
     return this.mutex.run("gateway", async () => {
       const state = this.requireState();
-      const { claude, codex } = this.requirePairRoutes(state, input, false);
-      this.requireExactPair(state, claude, codex);
+      const routes = this.requireConsentEdgeRoutes(state, input, false);
+      const edge = this.requireExactConsentEdge(state, ...routes);
       return state.inFlight
-        .filter((item) => pairMatchesMessage(input, item))
+        .filter((item) => consentEdgeMatchesMessage(edge, item))
         .map(({ messageId, deadlineAt }) => ({ messageId, deadlineAt }));
     });
   }
 
   /**
    * Remove exactly one consent edge and settle only work owned by that edge.
-   * Adjacent pairs, terminal token metadata, and unrelated messages survive.
+   * Adjacent edges, terminal token metadata, and unrelated messages survive.
    */
-  async unpairRoutes(input: UnpairRoutesInput): Promise<UnpairRoutesResult> {
+  async removeConsentEdge(
+    input: RemoveConsentEdgeInput,
+  ): Promise<RemoveConsentEdgeResult> {
     return this.mutate(async (state, now) => {
-      const { claude, codex } = this.requirePairRoutes(state, input, false);
-      const pair = this.requireExactPair(state, claude, codex);
-      const plan = this.validateAffectedPairInFlightSettlements(
+      const routes = this.requireConsentEdgeRoutes(state, input, false);
+      const pair = this.requireExactConsentEdge(state, ...routes);
+      const plan = this.validateAffectedConsentEdgeInFlightSettlements(
         state,
         pair,
         input.inFlightSettlements ?? [],
       );
-      this.settleProgressWatchesForPair(state, pair, now);
-      const settlements = this.terminateAffectedPairMessages(
+      this.settleProgressWatchesForConsentEdge(state, pair, now);
+      const settlements = this.terminateAffectedConsentEdgeMessages(
         state,
         pair,
         now,
         "PAIR_REMOVED",
         plan,
       );
-      state.pairs = state.pairs.filter((candidate) => candidate !== pair);
+      state.consentEdges = state.consentEdges.filter((candidate) => candidate !== pair);
       state.dedupe = state.dedupe.filter(
-        (record) => !pairMatchesMessage(pair, record),
+        (record) => !consentEdgeMatchesMessage(pair, record),
       );
       return {
         settlements,
-        claudeRouteUnreferenced: !state.pairs.some(
-          (candidate) => candidate.claudeAlias === pair.claudeAlias,
-        ),
+        unreferencedAliases: pair.endpoints
+          .filter(({ alias }) => !state.consentEdges.some((edge) =>
+            edge.endpoints.some((endpoint) => endpoint.alias === alias),
+          ))
+          .map(({ alias }) => alias),
       };
     });
   }
@@ -4282,12 +3634,7 @@ export class GatewayStore {
         targetRoute: target,
       };
       try {
-        const pairAliases = pairAliasesForRoutes(source, target);
-        this.requireExactPair(
-          state,
-          pairAliases.claudeAlias === source.alias ? source : target,
-          pairAliases.codexAlias === source.alias ? source : target,
-        );
+        this.requireExactConsentEdge(state, source, target);
         sides.pair = true;
       } catch (error) {
         if (error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED") {
@@ -4319,13 +3666,8 @@ export class GatewayStore {
   ): Promise<EnqueueMessageResult> {
     return this.mutate(async (state, now) => {
       const target = this.requireAvailableRoute(state, input.targetAlias);
-      if (target.binding.provider !== "codex") {
-        throw new BridgeError(
-          "INVALID_NATIVE_INGRESS_TARGET",
-          "Native Claude ingress requires an explicitly registered Codex target.",
-        );
-      }
       this.validateTransientNativeClaudePeer(state, input.source, target);
+      const direction = directionId("claude", target.binding.provider);
       const selectedClaude = state.routes.find(
         (route) =>
           route.alias === input.source.alias &&
@@ -4338,14 +3680,14 @@ export class GatewayStore {
       const pair =
         selectedClaude === undefined
           ? undefined
-          : state.pairs.find(
-              (candidate) =>
-                candidate.claudeAlias === selectedClaude.alias &&
-                candidate.codexAlias === target.alias &&
-                candidate.claudeOwnerLease ===
-                  selectedClaude.binding.ownerLease &&
-                candidate.codexOwnerLease === target.binding.ownerLease,
-            );
+          : (() => {
+              try {
+                return this.requireExactConsentEdge(state, selectedClaude, target);
+              } catch (error) {
+                if (error instanceof BridgeError) return undefined;
+                throw error;
+              }
+            })();
       if (
         input.authorizedPairTeardownReply === true &&
         selectedClaude === undefined
@@ -4369,7 +3711,7 @@ export class GatewayStore {
             {
               sourceAlias: input.source.alias,
               targetAlias: target.alias,
-              direction: "claude_to_codex",
+              direction,
               targetRoute: target,
             },
             bytes,
@@ -4380,13 +3722,13 @@ export class GatewayStore {
           );
           throw new BridgeError(
             "SENDER_NOT_PAIRED",
-            "The native Claude sender is not the exact session paired with this Codex task.",
+            "The native Claude sender does not share exact consent with this route.",
           );
       }
       return this.enqueueResolvedMessage(state, now, input, {
         sourceAlias: input.source.alias,
         targetAlias: target.alias,
-        direction: "claude_to_codex",
+        direction,
         targetRoute: target,
         ...(pair === undefined ? {} : { pair: true as const }),
       });
@@ -4394,7 +3736,7 @@ export class GatewayStore {
   }
 
   /**
-   * Queue a correlated Codex reply for a caller-attested transient Claude
+   * Queue a correlated provider reply for a caller-attested transient Claude
    * peer. The service owns conversation correlation and the live dispatch
    * capability; the store retains only bounded public-alias metadata.
    */
@@ -4403,35 +3745,29 @@ export class GatewayStore {
   ): Promise<EnqueueMessageResult> {
     return this.mutate(async (state, now) => {
       const source = this.requireAvailableRoute(state, input.sourceAlias);
-      if (source.binding.provider !== "codex") {
-        throw new BridgeError(
-          "INVALID_NATIVE_REPLY_SOURCE",
-          "A native Claude reply requires an explicitly registered Codex source.",
-        );
-      }
       this.validateTransientNativeClaudePeer(state, input.target, source);
-      if (input.pair === true) {
-        const target = state.routes.find(
-          (route) =>
+      const target = input.pair === true
+        ? state.routes.find((route) =>
             route.alias === input.target.alias &&
             route.binding.provider === "claude" &&
-            sameBinding(route.binding, input.target.binding),
-        );
+            sameBinding(route.binding, input.target.binding))
+        : undefined;
+      if (input.pair === true) {
         if (target === undefined) {
           throw new BridgeError(
             "SENDER_NOT_PAIRED",
             "The correlated reply no longer has its exact paired Claude route.",
           );
         }
-        this.requireExactPair(state, target, source);
+        this.requireExactConsentEdge(state, target, source);
       }
       return this.enqueueResolvedMessage(state, now, input, {
         sourceAlias: source.alias,
         targetAlias: input.target.alias,
-        direction: "codex_to_claude",
+        direction: directionId(source.binding.provider, "claude"),
         sourceRoute: source,
-        ...(input.pair === true
-          ? { pair: true as const }
+        ...(target !== undefined
+          ? { pair: true as const, targetRoute: target }
           : { transientTarget: true as const }),
       });
     });
@@ -4842,7 +4178,6 @@ export class GatewayStore {
           provider: connector.provider,
           host: connector.hostId,
           health: connector.health,
-          compatibility: connector.compatibility,
           protocol: connector.protocol,
           protocolVersion: connector.protocolVersion,
           ...(connector.lastSeenAt ? { lastSeenAt: connector.lastSeenAt } : {}),
@@ -4874,7 +4209,6 @@ export class GatewayStore {
             host: route.binding.hostId,
             enabled: route.enabled,
             state: route.state,
-            compatibility: route.compatibility,
             busyPolicy: route.busyPolicy,
             ...(route.lastSeenAt ? { lastSeenAt: route.lastSeenAt } : {}),
             queueDepth: route.queueDepth,
@@ -4886,17 +4220,17 @@ export class GatewayStore {
           };
         })
         .sort((left, right) => left.alias.localeCompare(right.alias));
-      const pairs: PublicPairSnapshot[] = state.pairs
-        .map((pair) => ({
-          claudeAlias: pair.claudeAlias,
-          codexAlias: pair.codexAlias,
-          host: pair.claudeAlias.slice(pair.claudeAlias.lastIndexOf("@") + 1),
-          counters: { ...pair.counters },
+      const consentEdges: PublicConsentEdgeSnapshot[] = state.consentEdges
+        .map((edge) => ({
+          endpoints: edge.endpoints.map(({ alias, provider }) => ({ alias, provider })) as [
+            { alias: string; provider: GatewayProvider },
+            { alias: string; provider: GatewayProvider },
+          ],
+          host: edge.endpoints[0].alias.slice(edge.endpoints[0].alias.lastIndexOf("@") + 1),
+          counters: { ...edge.counters },
         }))
         .sort((left, right) =>
-          `${left.claudeAlias}\0${left.codexAlias}`.localeCompare(
-            `${right.claudeAlias}\0${right.codexAlias}`,
-          ),
+          consentEdgeKey(left.endpoints).localeCompare(consentEdgeKey(right.endpoints)),
         );
       const progressWatches: PublicProgressWatchSnapshot[] =
         state.progressWatches
@@ -4998,14 +4332,14 @@ export class GatewayStore {
           );
         });
       return projectGatewayPublicSnapshot({
-        schemaVersion: 1,
+        schemaVersion: 2,
         generatedAt: now.toISOString(),
         inboundMode: this.config.inboundMode,
         health,
         connectors,
         availablePeers: [],
         routes,
-        pairs,
+        consentEdges,
         progressWatches,
         progressWatchEvents,
         deadlinePressure: {
@@ -5026,7 +4360,7 @@ export class GatewayStore {
           connectors: 0,
           availablePeers: 0,
           routes: 0,
-          pairs: 0,
+          consentEdges: 0,
           progressWatches: 0,
           progressWatchEvents: 0,
           messages: 0,
@@ -5239,7 +4573,6 @@ export class GatewayStore {
     identity: CodexSuccessionStoreIdentity,
     now: Date,
     routeState: "idle" | "busy" | "awaiting_approval" | "stale",
-    compatibility: "compatible" | "expired",
   ): void {
     const oldAlias = route.alias;
     const affectedAliases = new Set([oldAlias, identity.alias]);
@@ -5249,7 +4582,6 @@ export class GatewayStore {
     route.registrationMode = "explicit_opt_in";
     route.enabled = true;
     route.state = routeState;
-    route.compatibility = compatibility;
     route.registeredAt = now.toISOString();
     route.updatedAt = now.toISOString();
     route.queueDepth = 0;
@@ -5273,7 +4605,7 @@ export class GatewayStore {
         bucket.sourceAlias !== oldAlias &&
         bucket.sourceAlias !== identity.alias,
     );
-    removePairsForAliases(state, affectedAliases);
+    removeConsentEdgesForAliases(state, affectedAliases);
   }
 
   private assertAllowedIdentity(identity: PrivateEndpointIdentity): void {
@@ -5329,15 +4661,23 @@ export class GatewayStore {
         "The public alias host must match the allowlisted private route host.",
       );
     }
+    const requiredPrefix =
+      gatewayRegistrationIngressPrefixes[input.binding.provider];
+    if (requiredPrefix !== undefined && !input.alias.startsWith(requiredPrefix)) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_ALIAS",
+        `The ${input.binding.provider} registration alias must use its required ingress prefix.`,
+      );
+    }
     if (
-      (input.binding.provider === "codex" &&
-        input.registrationMode !== "explicit_opt_in") ||
       (input.binding.provider === "claude" &&
-        input.registrationMode !== "selected_live_peer")
+        input.registrationMode !== "selected_live_peer") ||
+      (input.binding.provider !== "claude" &&
+        input.registrationMode !== "explicit_opt_in")
     ) {
       throw new BridgeError(
         "ROUTE_OPT_IN_REQUIRED",
-        "Codex routes require explicit self opt-in and Claude routes require a selected live peer.",
+        "Non-Claude routes require explicit opt-in and Claude routes require a selected live peer.",
       );
     }
   }
@@ -5452,22 +4792,21 @@ export class GatewayStore {
     return route;
   }
 
-  private requirePairRoutes(
+  private requireConsentEdgeRoutes(
     state: GatewayPersistedState,
-    input: GatewayPairInput,
+    input: GatewayConsentEdgeInput,
     requireAvailable = true,
-  ): { claude: GatewayRouteRecord; codex: GatewayRouteRecord } {
+  ): readonly [GatewayRouteRecord, GatewayRouteRecord] {
     if (
       !isObject(input) ||
-      typeof input.claudeAlias !== "string" ||
-      typeof input.codexAlias !== "string" ||
-      !ALIAS_PATTERN.test(input.claudeAlias) ||
-      !ALIAS_PATTERN.test(input.codexAlias) ||
-      input.claudeAlias === input.codexAlias
+      !Array.isArray(input.aliases) ||
+      input.aliases.length !== 2 ||
+      input.aliases.some((alias) => typeof alias !== "string" || !ALIAS_PATTERN.test(alias)) ||
+      input.aliases[0] === input.aliases[1]
     ) {
       throw new BridgeError(
-        "INVALID_GATEWAY_PAIR",
-        "A pair requires distinct normalized Claude and Codex aliases.",
+        "INVALID_CONSENT_EDGE",
+        "A consent edge requires two distinct normalized aliases.",
       );
     }
     const resolve = (alias: string): GatewayRouteRecord => {
@@ -5475,43 +4814,39 @@ export class GatewayStore {
       const route = state.routes.find((candidate) => candidate.alias === alias);
       if (route === undefined) {
         throw new BridgeError(
-          "PAIR_ROUTE_NOT_FOUND",
-          "The pair references a route that is not registered.",
+          "CONSENT_EDGE_ROUTE_NOT_FOUND",
+          "The consent edge references a route that is not registered.",
         );
       }
       return route;
     };
-    const claude = resolve(input.claudeAlias);
-    const codex = resolve(input.codexAlias);
+    const left = resolve(input.aliases[0]);
+    const right = resolve(input.aliases[1]);
     if (
-      claude.binding.provider !== "claude" ||
-      claude.registrationMode !== "selected_live_peer" ||
-      codex.binding.provider !== "codex" ||
-      codex.registrationMode !== "explicit_opt_in" ||
-      claude.binding.hostId !== codex.binding.hostId
+      left.binding.provider === right.binding.provider ||
+      left.binding.hostId !== right.binding.hostId
     ) {
       throw new BridgeError(
-        "INVALID_GATEWAY_PAIR",
-        "A pair must connect one selected Claude route and one registered Codex route on the same host.",
+        "INVALID_CONSENT_EDGE",
+        "A consent edge must connect distinct providers on the same host.",
       );
     }
-    return { claude, codex };
+    return [left, right];
   }
 
-  private requireExactPair(
+  private requireExactConsentEdge(
     state: GatewayPersistedState,
-    claude: GatewayRouteRecord,
-    codex: GatewayRouteRecord,
-  ): GatewayPairRecord {
-    const pair = state.pairs.find(
-      (candidate) =>
-        candidate.claudeAlias === claude.alias &&
-        candidate.codexAlias === codex.alias,
+    left: GatewayRouteRecord,
+    right: GatewayRouteRecord,
+  ): GatewayConsentEdgeRecord {
+    const endpoints = canonicalConsentEndpoints(left, right);
+    const pair = state.consentEdges.find(
+      (candidate) => consentEdgeKey(candidate.endpoints) === consentEdgeKey(endpoints),
     );
     if (
       pair === undefined ||
-      pair.claudeOwnerLease !== claude.binding.ownerLease ||
-      pair.codexOwnerLease !== codex.binding.ownerLease
+      pair.endpoints.some((endpoint, index) =>
+        endpoint.ownerLease !== endpoints[index]!.ownerLease)
     ) {
       throw new BridgeError(
         "SENDER_NOT_PAIRED",
@@ -5524,7 +4859,7 @@ export class GatewayStore {
   private validateTransientNativeClaudePeer(
     state: GatewayPersistedState,
     peer: TransientNativeClaudePeer,
-    codexRoute: GatewayRouteRecord,
+    route: GatewayRouteRecord,
   ): void {
     if (
       !isObject(peer) ||
@@ -5542,14 +4877,14 @@ export class GatewayStore {
     this.assertAllowedIdentity(endpointOf(peer.binding));
     const aliasHost = peer.alias.slice(peer.alias.lastIndexOf("@") + 1);
     if (
-      codexRoute.binding.provider !== "codex" ||
+      route.binding.provider === "claude" ||
       aliasHost !== peer.binding.hostId ||
-      peer.binding.hostId !== codexRoute.binding.hostId ||
-      peer.alias === codexRoute.alias
+      peer.binding.hostId !== route.binding.hostId ||
+      peer.alias === route.alias
     ) {
       throw new BridgeError(
         "NATIVE_PEER_SCOPE_MISMATCH",
-        "The transient Claude peer and registered Codex route must have distinct aliases on the same allowlisted host.",
+        "The transient Claude peer and registered route must be distinct providers on the same allowlisted host.",
       );
     }
     const connector = state.connectors.find((candidate) =>
@@ -5814,7 +5149,7 @@ export class GatewayStore {
     this.transientBodies.set(messageId, input.body);
     state.accounting.accepted += 1;
     state.accounting.bytesAccepted += bytes;
-    const pair = findPairForMessage(state, metadata);
+    const pair = findConsentEdgeForMessage(state, metadata);
     if (pair !== undefined) {
       pair.counters.accepted += 1;
       pair.counters.bytesAccepted += bytes;
@@ -5931,7 +5266,7 @@ export class GatewayStore {
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
     state.accounting.rejected += 1;
     if (sides.sourceRoute) sides.sourceRoute.counters.rejected += 1;
-    const pair = findPairForMessage(state, sides);
+    const pair = findConsentEdgeForMessage(state, sides);
     if (pair !== undefined) {
       pair.counters.rejected += 1;
       pair.updatedAt = now.toISOString();
@@ -6080,7 +5415,7 @@ export class GatewayStore {
 
     const pair =
       sides.pair === true
-        ? state.pairs.find((candidate) => pairMatchesMessage(candidate, sides))
+        ? state.consentEdges.find((candidate) => consentEdgeMatchesMessage(candidate, sides))
         : undefined;
     const index = state.progressWatches.findIndex(
       (watch) => watch.conversationId === activity.conversationId,
@@ -6089,7 +5424,7 @@ export class GatewayStore {
     if (existing !== undefined) {
       if (
         pair === undefined ||
-        !progressWatchMatchesPair(existing, pair) ||
+        !progressWatchMatchesConsentEdge(existing, pair) ||
         !(
           (sides.sourceAlias === existing.ownerAlias &&
             sides.targetAlias === existing.workerAlias) ||
@@ -6149,14 +5484,12 @@ export class GatewayStore {
       conversationId: activity.conversationId,
       ownerAlias: sides.sourceAlias,
       workerAlias: sides.targetAlias,
-      ownerLease:
-        sides.sourceAlias === pair.claudeAlias
-          ? pair.claudeOwnerLease
-          : pair.codexOwnerLease,
-      workerLease:
-        sides.targetAlias === pair.claudeAlias
-          ? pair.claudeOwnerLease
-          : pair.codexOwnerLease,
+      ownerLease: pair.endpoints.find(
+        ({ alias }) => alias === sides.sourceAlias,
+      )!.ownerLease,
+      workerLease: pair.endpoints.find(
+        ({ alias }) => alias === sides.targetAlias,
+      )!.ownerLease,
       idleMs: activity.openIdleMs,
       at: now.getTime(),
     });
@@ -6222,11 +5555,11 @@ export class GatewayStore {
   private installProgressWatch(
     state: GatewayPersistedState,
     watch: ProgressWatch,
-    pair: GatewayPairRecord,
+    pair: GatewayConsentEdgeRecord,
     now: Date,
   ): void {
     const replacedIndex = state.progressWatches.findIndex((candidate) =>
-      progressWatchMatchesPair(candidate, pair),
+      progressWatchMatchesConsentEdge(candidate, pair),
     );
     if (
       replacedIndex < 0 &&
@@ -6322,15 +5655,15 @@ export class GatewayStore {
     state.progressWatches = retained;
   }
 
-  private settleProgressWatchesForPair(
+  private settleProgressWatchesForConsentEdge(
     state: GatewayPersistedState,
-    pair: GatewayPairRecord,
+    pair: GatewayConsentEdgeRecord,
     now: Date,
   ): void {
     const retained: ProgressWatch[] = [];
     const events: PendingProgressWatchJournalEvent[] = [];
     for (const watch of state.progressWatches) {
-      if (!progressWatchMatchesPair(watch, pair)) {
+      if (!progressWatchMatchesConsentEdge(watch, pair)) {
         retained.push(watch);
         continue;
       }
@@ -6364,7 +5697,7 @@ export class GatewayStore {
   ): TerminalMessageSettlement {
     const counterKey = deliveryState;
     state.accounting[counterKey] += 1;
-    const pair = findPairForMessage(state, metadata);
+    const pair = findConsentEdgeForMessage(state, metadata);
     if (pair !== undefined) {
       pair.counters[counterKey] += 1;
       pair.updatedAt = now.toISOString();
@@ -6447,9 +5780,9 @@ export class GatewayStore {
     return byMessageId;
   }
 
-  private validateAffectedPairInFlightSettlements(
+  private validateAffectedConsentEdgeInFlightSettlements(
     state: GatewayPersistedState,
-    pair: GatewayPairInput,
+    pair: GatewayConsentEdgeInput | GatewayConsentEdgeRecord,
     requested: readonly RouteInFlightSettlementInput[],
   ): ReadonlyMap<string, RouteInFlightSettlementInput> {
     if (requested.length > this.config.limits.maxInFlightMessages) {
@@ -6460,7 +5793,7 @@ export class GatewayStore {
     }
     const affectedIds = new Set(
       state.inFlight
-        .filter((item) => pairMatchesMessage(pair, item))
+        .filter((item) => consentEdgeMatchesMessage(pair, item))
         .map((item) => item.messageId),
     );
     const byMessageId = new Map<string, RouteInFlightSettlementInput>();
@@ -6564,9 +5897,9 @@ export class GatewayStore {
     return settlements;
   }
 
-  private terminateAffectedPairMessages(
+  private terminateAffectedConsentEdgeMessages(
     state: GatewayPersistedState,
-    pair: GatewayPairInput,
+    pair: GatewayConsentEdgeInput | GatewayConsentEdgeRecord,
     now: Date,
     safeErrorCode: string,
     inFlightSettlements: ReadonlyMap<
@@ -6575,9 +5908,9 @@ export class GatewayStore {
     >,
   ): TerminalMessageSettlement[] {
     const settlements: TerminalMessageSettlement[] = [];
-    const queued = state.queue.filter((item) => pairMatchesMessage(pair, item));
+    const queued = state.queue.filter((item) => consentEdgeMatchesMessage(pair, item));
     state.queue = state.queue.filter(
-      (item) => !pairMatchesMessage(pair, item),
+      (item) => !consentEdgeMatchesMessage(pair, item),
     );
     for (const item of queued) {
       this.transientBodies.delete(item.messageId);
@@ -6598,10 +5931,10 @@ export class GatewayStore {
       );
     }
     const inFlight = state.inFlight.filter((item) =>
-      pairMatchesMessage(pair, item),
+      consentEdgeMatchesMessage(pair, item),
     );
     state.inFlight = state.inFlight.filter(
-      (item) => !pairMatchesMessage(pair, item),
+      (item) => !consentEdgeMatchesMessage(pair, item),
     );
     for (const item of inFlight) {
       const requested = inFlightSettlements.get(item.messageId);
@@ -6661,13 +5994,11 @@ export class GatewayStore {
     }
     for (const connector of state.connectors) {
       connector.health = "offline";
-      connector.compatibility = "expired";
       connector.updatedAt = now.toISOString();
       connector.safeErrorCode = "REOBSERVATION_REQUIRED";
     }
     for (const route of state.routes) {
       route.state = route.enabled ? "stale" : "disabled";
-      route.compatibility = "expired";
       route.updatedAt = now.toISOString();
       route.safeErrorCode = "REOBSERVATION_REQUIRED";
       route.queueDepth = 0;
@@ -6749,7 +6080,6 @@ export class GatewayStore {
       journal.new,
       now,
       "stale",
-      "expired",
     );
     state.codexSuccession = {
       ...journal,
@@ -7072,7 +6402,7 @@ export class GatewayStore {
   }
 
   private async loadStateFile(
-    now: Date,
+    _now: Date,
   ): Promise<GatewayPersistedState | undefined> {
     let body: string;
     try {
@@ -7095,19 +6425,6 @@ export class GatewayStore {
         "The gateway controller state is not valid JSON.",
       );
     }
-    parsed = migratePreUnconfirmedCounters(parsed);
-    parsed = migratePreSuccessionJournal(parsed);
-    parsed = migratePrePairGraph(parsed);
-    parsed = migratePreProgressWatches(parsed);
-    parsed = migratePreCompatibilityAttestations(parsed);
-    parsed = migratePreCodexEndpointRefreshJournal(parsed);
-    parsed = migratePreCodexOrphanRemovalJournal(parsed);
-    parsed = migrateLegacyHopCounts(parsed);
-    parsed = migrateLegacyCompatibilityCertifications(parsed);
-    parsed = migrateV14ProgressWatchState(
-      parsed,
-      now.toISOString(),
-    );
     if (!isPersistedState(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",
@@ -7118,7 +6435,9 @@ export class GatewayStore {
       parsed.routes.some((route) => !this.config.allowedHosts.includes(route.binding.hostId)) ||
       parsed.connectors.some((connector) => !this.config.allowedHosts.includes(connector.hostId)) ||
       parsed.routes.length > this.config.limits.maxRoutes ||
-      parsed.connectors.length > this.config.allowedHosts.length * 2 ||
+      parsed.connectors.length >
+        this.config.allowedHosts.length * gatewayProviders.length ||
+      parsed.consentEdges.length > this.config.limits.maxConsentEdges ||
       parsed.rateBuckets.length > this.config.limits.maxRoutes ||
       parsed.progressWatches.length >
         (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY) ||

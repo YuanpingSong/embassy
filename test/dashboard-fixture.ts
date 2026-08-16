@@ -2,7 +2,7 @@ import type { GatewayPublicSnapshot } from "../src/gateway/types.js";
 
 export function dashboardFixture(): GatewayPublicSnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: "2026-08-08T12:00:00.000Z",
     inboundMode: "paired",
     health: "healthy",
@@ -11,7 +11,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         provider: "claude",
         host: "this-mac",
         health: "healthy",
-        compatibility: "compatible",
         protocol: "peer/1",
         protocolVersion: "1",
         lastSeenAt: "2026-08-08T11:59:58.000Z",
@@ -20,7 +19,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         provider: "codex",
         host: "this-mac",
         health: "healthy",
-        compatibility: "compatible",
         protocol: "app-server/1",
         protocolVersion: "0.147.0",
         lastSeenAt: "2026-08-08T11:59:59.000Z",
@@ -32,7 +30,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         provider: "claude",
         host: "this-mac",
         state: "busy",
-        compatibility: "compatible",
         validated: true,
         selected: true,
         lastSeenAt: "2026-08-08T11:59:58.000Z",
@@ -42,7 +39,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         provider: "claude",
         host: "this-mac",
         state: "idle",
-        compatibility: "compatible",
         validated: true,
         selected: false,
         lastSeenAt: "2026-08-08T11:59:57.000Z",
@@ -55,7 +51,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         host: "this-mac",
         enabled: true,
         state: "busy",
-        compatibility: "compatible",
         busyPolicy: "queue",
         lastSeenAt: "2026-08-08T11:59:58.000Z",
         queueDepth: 0,
@@ -67,7 +62,6 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         host: "this-mac",
         enabled: true,
         state: "idle",
-        compatibility: "compatible",
         busyPolicy: "queue",
         lastSeenAt: "2026-08-08T11:59:59.000Z",
         queueDepth: 2,
@@ -75,10 +69,12 @@ export function dashboardFixture(): GatewayPublicSnapshot {
         counters: routeCounters({ accepted: 4, delivered: 3 }),
       },
     ],
-    pairs: [
+    consentEdges: [
       {
-        claudeAlias: "claude-advisor@this-mac",
-        codexAlias: "codex-reviewer@this-mac",
+        endpoints: [
+          { alias: "claude-advisor@this-mac", provider: "claude" },
+          { alias: "codex-reviewer@this-mac", provider: "codex" },
+        ],
         host: "this-mac",
         counters: routeCounters({ accepted: 4, delivered: 3 }),
       },
@@ -180,7 +176,7 @@ export function dashboardFixture(): GatewayPublicSnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      pairs: 0,
+      consentEdges: 0,
       activityEvents: 0,
       messages: 0,
       alerts: 0,

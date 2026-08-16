@@ -26,12 +26,6 @@ import {
   gatewayCliExitCodes,
   runGatewayCli,
 } from "../src/gateway/cli.js";
-import {
-  certifiedCompatibilityVersions,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-} from "../src/gateway/compatibility.js";
-import { projectPublicCompatibilityCheck } from "../src/gateway/types.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
@@ -124,6 +118,7 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.match(help, /wait-delivery/);
     assert.match(help, /untrack/);
     assert.match(help, /dashboard --live \[--port <n>\]/);
+    assert.match(help, /pair \[--from <[^>]+> --to <[^>]+>\]/);
     assert.match(help, /--port <n>.*1024.*65535.*41961/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.equal(stderr.chunks.join(""), "");
@@ -182,14 +177,14 @@ test("an npm-style symlink invokes the installed CLI", async () => {
 
 function emptySnapshot(): GatewaySnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: "2026-08-07T12:34:56.000Z",
     inboundMode: "paired" as const,
     health: "healthy",
     connectors: [],
     availablePeers: [],
     routes: [],
-    pairs: [],
+    consentEdges: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -210,7 +205,7 @@ function emptySnapshot(): GatewaySnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      pairs: 0,
+      consentEdges: 0,
       messages: 0,
       alerts: 0,
     },
@@ -288,20 +283,6 @@ test("all client commands use one private control socket and expose only normali
   const deliveryStatuses: string[] = [];
   const untracked: string[] = [];
   const statusSnapshot = emptySnapshot();
-  statusSnapshot.compatibilityChecks = [
-    projectPublicCompatibilityCheck(
-      evaluateCompatibilityAttestation({
-        surface: "claude",
-        version: "2.1.228",
-        checkedAt: NOW,
-        certifiedVersions: certifiedCompatibilityVersions.claude,
-        probes: compatibilityProbeNames.claude.map((name) => ({
-          name,
-          outcome: "pass" as const,
-        })),
-      }),
-    ),
-  ];
   const handlers: GatewayControlHandlers = {
     health: () => ({ status: "ok", revision: 1 }),
     registerCodex: (params) => {
@@ -466,6 +447,26 @@ test("all client commands use one private control socket and expose only normali
     },
     {
       argv: [
+        "pair",
+        "--from",
+        "grok-builder@this-mac",
+        "--to",
+        "dsh-reviewer@this-mac",
+      ],
+      env: {},
+    },
+    {
+      argv: [
+        "unpair",
+        "--from",
+        "codex-misleading@this-mac",
+        "--to",
+        "claude-misleading@this-mac",
+      ],
+      env: {},
+    },
+    {
+      argv: [
         "send-to-claude",
         "--from",
         "codex-reviewer@this-mac",
@@ -546,11 +547,6 @@ test("all client commands use one private control socket and expose only normali
       command: string;
       result?: {
         deliveryToken?: string;
-        compatibilityChecks?: Array<{
-          version: string;
-          testedVersion: string;
-          supportedMajor: string;
-        }>;
       };
     };
     assert.equal(parsed.ok, true);
@@ -568,24 +564,6 @@ test("all client commands use one private control socket and expose only normali
       current.argv[0] === "reply"
     ) {
       assert.equal(parsed.result?.deliveryToken, DELIVERY_TOKEN);
-    }
-    if (current.argv[0] === "status") {
-      assert.deepEqual(parsed.result?.compatibilityChecks, [
-        {
-          schemaVersion: 1,
-          surface: "claude",
-          version: "2.1.228",
-          tier: "schema_attested",
-          checkedAt: NOW,
-          probes: compatibilityProbeNames.claude.map((name) => ({
-            name,
-            outcome: "pass",
-          })),
-          testedVersion: "2.1.227",
-          supportedMajor: "2",
-          writesCovered: false,
-        },
-      ]);
     }
   }
 
@@ -615,8 +593,20 @@ test("all client commands use one private control socket and expose only normali
       codexAlias: "codex-reviewer@this-mac",
       codexThreadId: THREAD_ID,
     },
+    {
+      aliases: ["grok-builder@this-mac", "dsh-reviewer@this-mac"],
+    },
   ]);
-  assert.deepEqual(unpairs, pairs);
+  assert.deepEqual(unpairs, [
+    {
+      claudeAlias: "advisor@this-mac",
+      codexAlias: "codex-reviewer@this-mac",
+      codexThreadId: THREAD_ID,
+    },
+    {
+      aliases: ["codex-misleading@this-mac", "claude-misleading@this-mac"],
+    },
+  ]);
   assert.deepEqual(deliveryStatuses, [DELIVERY_TOKEN, DELIVERY_TOKEN]);
   assert.deepEqual(untracked, [CONVERSATION_ID]);
   assert.deepEqual(sendsToClaude, [
@@ -1583,6 +1573,22 @@ test("identity, stdin, and argument failures happen before any control request",
       argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: {},
       code: "CODEX_IDENTITY_REQUIRED",
+    },
+    {
+      argv: [
+        "pair",
+        "--claude",
+        "advisor@this-mac",
+        "--to",
+        "dsh-reviewer@this-mac",
+      ],
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      argv: ["pair", "--from", "grok@this-mac", "--to", "grok@other-mac"],
+      env: {},
+      code: "INVALID_ARGUMENTS",
     },
     {
       argv: [

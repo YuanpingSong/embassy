@@ -135,9 +135,7 @@ namespace Embassy {
   function alertScope(item: DashboardAttentionItem, t: Translate): string {
     const parts: string[] = [];
     if (item.provider !== undefined) {
-      parts.push(
-        t(item.provider === "claude" ? "provider.claude" : "provider.codex"),
-      );
+      parts.push(t(`provider.${item.provider}`));
     }
     if (item.alias !== undefined) parts.push(item.alias);
     if (item.host !== undefined) parts.push(item.host);

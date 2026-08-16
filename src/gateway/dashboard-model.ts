@@ -1,17 +1,11 @@
 import {
   arePublicAvailablePeerSnapshots,
-  isPublicCompatibilityCheckSnapshot,
+  gatewayProviders,
   isPublicRegistryObservationSnapshot,
+  parseDirection,
 } from "./types.js";
-import {
-  compatibilitySurfaceDefinitions,
-  type CompatibilityTier,
-  type CompatibilitySurface,
-  type CompatibilitySurfaceDefinition,
-} from "./compatibility.js";
 import type {
   AlertSeverity,
-  CompatibilityState,
   ConnectorHealth,
   DeliveryState,
   GatewayProvider,
@@ -26,7 +20,7 @@ export const DASHBOARD_MODEL_LIMITS = Object.freeze({
   connectors: 16,
   availablePeers: 64,
   routes: 128,
-  pairs: 64,
+  consentEdges: 64,
   messages: 50,
   messageEvents: 60,
   progressWatches: 64,
@@ -45,18 +39,16 @@ export type DashboardNextAction =
   | "repair_claude_inventory"
   | "register_codex"
   | "restore_codex"
-  | "review_compatibility"
   | "none";
 
 export type DashboardExchangeParty = Readonly<{
-  kind: "claude" | "codex";
+  kind: GatewayProvider;
   status: "ready" | "busy" | "waiting" | "missing" | "attention";
   total: number;
   ready: number;
   selectable?: number | undefined;
   countIsLowerBound: boolean;
   primaryAlias?: string | undefined;
-  monitorOnly?: number | undefined;
   nextAction: DashboardNextAction;
 }>;
 
@@ -89,7 +81,6 @@ export type DashboardAttentionItem = Readonly<{
     | "progress_watch"
     | "registry_empty"
     | "registry_rejected"
-    | "provider_incompatible"
     | "generic";
 }>;
 
@@ -119,8 +110,6 @@ export type DashboardProgressWatchEventRow = Readonly<{
     | "pair_removed"
     | "endpoint_retired"
     | "tracking_disabled"
-    | "legacy_upgrade"
-    | "legacy_done"
     | undefined;
 }>;
 
@@ -185,7 +174,6 @@ export type DashboardPeerRow = Readonly<{
   alias: string;
   host: string;
   state: PublicAvailablePeerState;
-  compatibility: CompatibilityState;
   validated: boolean;
   selected: boolean;
   selectable: boolean;
@@ -193,7 +181,6 @@ export type DashboardPeerRow = Readonly<{
     | "alias_collision"
     | "session_collision"
     | "discovery_incomplete"
-    | "incompatible"
     | "offline"
     | undefined;
   lastSeenAt?: string | undefined;
@@ -206,7 +193,6 @@ export type DashboardRouteRow = Readonly<{
   host: string;
   enabled: boolean;
   state: RouteState;
-  compatibility: CompatibilityState;
   queueDepth: number;
   oldestQueuedAt?: string | undefined;
   queueAgeMs?: number | undefined;
@@ -215,64 +201,34 @@ export type DashboardRouteRow = Readonly<{
   safeErrorCode?: string | undefined;
 }>;
 
-export type DashboardPairRow = Readonly<{
-  claudeAlias: string;
-  codexAlias: string;
+export type DashboardConsentEndpoint = Readonly<{
+  alias: string;
+  provider: GatewayProvider;
+}>;
+
+export type DashboardConsentEdgeRow = Readonly<{
+  endpoints: readonly [DashboardConsentEndpoint, DashboardConsentEndpoint];
   host: string;
   state: "ready" | "degraded" | "unavailable";
   counters: RouteCounters;
 }>;
 
 export type DashboardGraphFacts = Readonly<{
-  pairCount: number;
-  readyPairCount: number;
-  pairCountIsLowerBound: boolean;
-  unpairedReadyClaude: number;
-  unpairedReadyCodex: number;
+  consentEdgeCount: number;
+  readyConsentEdgeCount: number;
+  consentEdgeCountIsLowerBound: boolean;
+  unpairedReadyByProvider: Readonly<Record<GatewayProvider, number>>;
 }>;
 
 export type DashboardConnectorRow = Readonly<{
   provider: GatewayProvider;
   host: string;
   health: ConnectorHealth;
-  compatibility: CompatibilityState;
   protocol?: string | undefined;
   protocolVersion?: string | undefined;
   lastSeenAt?: string | undefined;
   safeErrorCode?: string | undefined;
   registry?: DashboardRegistryObservation | undefined;
-}>;
-
-type DashboardDetectedCompatibilityCheckRow = Readonly<{
-  surface: CompatibilitySurface;
-  version: string;
-  testedVersion?: string;
-  supportedMajor?: string;
-  tier: CompatibilityTier;
-  writesCovered: boolean;
-  checkedAt: string;
-  failure?: string | undefined;
-  safeErrorCode?: string | undefined;
-}>;
-
-export type DashboardCompatibilityCheckRow =
-  | DashboardDetectedCompatibilityCheckRow
-  | Readonly<{
-      surface: CompatibilitySurface;
-      notDetected: true;
-      version?: never;
-      testedVersion?: never;
-      supportedMajor?: never;
-      tier?: never;
-      writesCovered?: never;
-      checkedAt?: never;
-      failure?: never;
-      safeErrorCode?: never;
-    }>;
-
-export type DashboardModelOptions = Readonly<{
-  /** Test-only surface inventory; production uses the declared registry. */
-  compatibilitySurfaceDefinitions?: readonly CompatibilitySurfaceDefinition[];
 }>;
 
 export type DashboardRegistryObservation = Readonly<{
@@ -290,7 +246,7 @@ export type DashboardOmissions = Readonly<{
   connectors: number;
   availablePeers: number;
   routes: number;
-  pairs: number;
+  consentEdges: number;
   progressWatches: number;
   upstreamProgressWatchEvents: number;
   progressWatchEvents: number;
@@ -304,14 +260,13 @@ export type DashboardOmissions = Readonly<{
 }>;
 
 export type DashboardViewModel = Readonly<{
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt?: string | undefined;
   inboundMode: "paired" | "open";
   health: ConnectorHealth;
   overall: "ready" | "setup" | "attention";
   exchange: Readonly<{
-    claude: DashboardExchangeParty;
-    codex: DashboardExchangeParty;
+    parties: readonly DashboardExchangeParty[];
     queuedMessages: number;
     queueCountIsLowerBound: boolean;
     oldestQueueAgeMs?: number | undefined;
@@ -330,12 +285,11 @@ export type DashboardViewModel = Readonly<{
   brokerActivity: readonly DashboardActivityEventRow[];
   peers: readonly DashboardPeerRow[];
   routes: readonly DashboardRouteRow[];
-  pairs: readonly DashboardPairRow[];
+  consentEdges: readonly DashboardConsentEdgeRow[];
   watches: readonly DashboardProgressWatchRow[];
   watchEvents: readonly DashboardProgressWatchEventRow[];
   graph: DashboardGraphFacts;
   connectors: readonly DashboardConnectorRow[];
-  compatibilityChecks: readonly DashboardCompatibilityCheckRow[];
   accounting: GatewayPublicSnapshot["accounting"];
   deadlinePressure?: GatewayPublicSnapshot["deadlinePressure"];
   omissions: DashboardOmissions;
@@ -360,7 +314,6 @@ export type DashboardSemanticDomain =
   | "route"
   | "peer"
   | "health"
-  | "compatibility"
   | "overall"
   | "party"
   | "severity"
@@ -397,7 +350,6 @@ const statePresentation = {
     busy: { tone: "info", chip: "active" },
     awaiting_approval: { tone: "warning", chip: "warning" },
     offline: { tone: "danger", chip: "failure" },
-    incompatible: { tone: "danger", chip: "failure" },
     disabled: { tone: "quiet", chip: "inert" },
   }),
   peer: presentation<PublicAvailablePeerState>({
@@ -405,20 +357,12 @@ const statePresentation = {
     busy: { tone: "info", chip: "active" },
     awaiting_approval: { tone: "warning", chip: "warning" },
     offline: { tone: "danger", chip: "inert" },
-    incompatible: { tone: "danger", chip: "failure" },
   }),
   health: presentation<ConnectorHealth>({
     healthy: { tone: "good", chip: "positive" },
     connecting: { tone: "info", chip: "progress" },
     degraded: { tone: "warning", chip: "warning" },
     offline: { tone: "danger", chip: "failure" },
-    incompatible: { tone: "danger", chip: "failure" },
-  }),
-  compatibility: presentation<CompatibilityState>({
-    compatible: { tone: "good", chip: "positive" },
-    unknown: { tone: "quiet", chip: "inert" },
-    expired: { tone: "warning", chip: "warning" },
-    incompatible: { tone: "danger", chip: "failure" },
   }),
   overall: presentation<DashboardViewModel["overall"]>({
     ready: { tone: "good", chip: "positive" },
@@ -467,7 +411,6 @@ const guidanceCopyKeys = {
   progress_watch: "progressWatch",
   registry_empty: "registryEmpty",
   registry_rejected: "registryRejected",
-  provider_incompatible: "providerIncompatible",
   generic: "generic",
 } as const satisfies Record<DashboardAttentionItem["guidance"], string>;
 
@@ -479,7 +422,6 @@ const nextActionCopyKeys = {
   repair_claude_inventory: "next.repairClaude",
   register_codex: "next.registerCodex",
   restore_codex: "next.restoreCodex",
-  review_compatibility: "next.reviewCompatibility",
   none: "next.none",
 } as const satisfies Record<DashboardNextAction, string>;
 
@@ -505,7 +447,6 @@ const attentionCommands = {
   progress_watch: "embassy status",
   registry_empty: "embassy refresh-dashboard",
   registry_rejected: "embassy status",
-  provider_incompatible: "embassy refresh-dashboard",
   generic: "embassy status",
 } as const satisfies Record<DashboardAttentionItem["guidance"], string>;
 
@@ -528,8 +469,8 @@ const deliveryMeaningKeys = {
 /** JSON-safe semantics embedded once in the live dashboard boot payload. */
 export const DASHBOARD_SEMANTICS = Object.freeze({
   statePresentation,
-  deliveryChipByDirection: {
-    delivered: { codex_to_claude: "qualified" },
+  deliveryChipByTargetProvider: {
+    delivered: { claude: "qualified" },
   },
   deliveryChipBySafeErrorCode: {
     rejected: { SENDER_NOT_PAIRED: "inert" },
@@ -545,9 +486,11 @@ export const DASHBOARD_SEMANTICS = Object.freeze({
     codex_succession_recovery: "<old>",
   },
   deliveryMeaningKeys,
-  deliveryMeaningByDirection: {
-    codex_to_claude: "activity.meaning.delivered.codexToClaude",
-    claude_to_codex: "activity.meaning.delivered.claudeToCodex",
+  deliveryMeaningByTargetProvider: {
+    claude: "activity.meaning.delivered.toClaude",
+    codex: "activity.meaning.delivered.toCodex",
+    deepseek: "activity.meaning.delivered.toDeepSeek",
+    grok: "activity.meaning.delivered.toGrok",
   },
   deliveryMeaningBySafeErrorCode: {
     SENDER_NOT_PAIRED: "activity.meaning.senderNotPaired",
@@ -582,15 +525,16 @@ export function dashboardChipKind(
     const byCode = DASHBOARD_SEMANTICS.deliveryChipBySafeErrorCode as Readonly<
       Record<string, Readonly<Record<string, DashboardChipKind>>>
     >;
-    const byDirection = DASHBOARD_SEMANTICS.deliveryChipByDirection as Readonly<
-      Record<string, Readonly<Record<string, DashboardChipKind>>>
+    const byTarget = DASHBOARD_SEMANTICS.deliveryChipByTargetProvider as Readonly<
+      Record<string, Readonly<Partial<Record<GatewayProvider, DashboardChipKind>>>>
     >;
     if (safeErrorCode !== undefined) {
       const override = byCode[state]?.[safeErrorCode];
       if (override !== undefined) return override;
     }
     if (direction !== undefined) {
-      const override = byDirection[state]?.[direction];
+      const target = parseDirection(direction)?.targetProvider;
+      const override = target === undefined ? undefined : byTarget[state]?.[target];
       if (override !== undefined) return override;
     }
   }
@@ -621,7 +565,10 @@ export function deliveryMeaningKey(
     return DASHBOARD_SEMANTICS.deliveryMeaningBySafeErrorCode.SENDER_NOT_PAIRED;
   }
   if (state === "delivered" && direction !== undefined) {
-    return DASHBOARD_SEMANTICS.deliveryMeaningByDirection[direction];
+    const target = parseDirection(direction)?.targetProvider;
+    if (target !== undefined) {
+      return DASHBOARD_SEMANTICS.deliveryMeaningByTargetProvider[target];
+    }
   }
   if (state === "abandoned" && safeErrorCode !== undefined) {
     const byCode = DASHBOARD_SEMANTICS.deliveryMeaningBySafeErrorCode as Readonly<
@@ -721,23 +668,19 @@ function normalizedCounters(counters: Partial<RouteCounters> | undefined): Route
 
 export function buildDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
-  options: DashboardModelOptions = {},
 ): DashboardViewModel {
-  return buildProjectedDashboardViewModel(snapshot, false, options);
+  return buildProjectedDashboardViewModel(snapshot, false);
 }
 
 export function buildLiveDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
-  options: DashboardModelOptions = {},
 ): LiveDashboardViewModel {
-  return buildProjectedDashboardViewModel(snapshot, true, options);
+  return buildProjectedDashboardViewModel(snapshot, true);
 }
 
 function routeIsReady(route: DashboardRouteRow): boolean {
   return (
     route.enabled &&
-    route.safeErrorCode !== "CODEX_WRITES_DISABLED" &&
-    route.compatibility === "compatible" &&
     (route.state === "idle" || route.state === "busy")
   );
 }
@@ -751,13 +694,6 @@ function peerSelectionGuidance(
     return "discovery_incomplete";
   }
   if (peer.state === "offline") return "offline";
-  if (
-    peer.state === "incompatible" ||
-    peer.compatibility !== "compatible" ||
-    peer.safeErrorCode !== undefined
-  ) {
-    return "incompatible";
-  }
   return undefined;
 }
 
@@ -781,10 +717,10 @@ function partyStatus(
 }
 
 function routePriority(route: DashboardRouteRow): number {
-  if (!route.enabled || route.state === "offline" || route.state === "incompatible") {
+  if (!route.enabled || route.state === "offline") {
     return 0;
   }
-  if (route.state === "stale" || route.compatibility !== "compatible") return 1;
+  if (route.state === "stale") return 1;
   if (route.state === "awaiting_approval") return 2;
   if (route.state === "busy") return 3;
   return 4;
@@ -812,8 +748,7 @@ function needsCodexAppReconnect(
     (connector) =>
       connector.provider === "codex" &&
       connector.host === route.host &&
-      connector.health === "healthy" &&
-      connector.compatibility === "compatible",
+      connector.health === "healthy",
   );
 }
 
@@ -858,14 +793,6 @@ function guidanceFor(
     case "ADAPTER_DEGRADED":
     case "ROUTE_DEGRADED":
       return "degraded";
-    case "CLAUDE_PEER_VERSION_UNSUPPORTED":
-    case "CLAUDE_VERSION_UNPARSEABLE":
-    case "CLAUDE_VERSION_CHECK_FAILED":
-    case "CLAUDE_VERSION_EVIDENCE_CONFLICT":
-    case "CLAUDE_VERSION_EVIDENCE_TOO_LARGE":
-    case "CODEX_APP_SERVER_VERSION_UNSUPPORTED":
-    case "CODEX_APP_SERVER_VERSION_UNPARSEABLE":
-      return "provider_incompatible";
     default:
       return "generic";
   }
@@ -1074,42 +1001,18 @@ function buildMessageGroups(
 function buildProjectedDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
   includeBodies: boolean,
-  options: DashboardModelOptions,
 ): LiveDashboardViewModel {
-  const surfaceDefinitions =
-    options.compatibilitySurfaceDefinitions ?? compatibilitySurfaceDefinitions;
   const generatedAt = normalizedTimestamp(snapshot.generatedAt);
   const inboundMode = snapshot.inboundMode === "open" ? "open" : "paired";
   const validPeers = arePublicAvailablePeerSnapshots(snapshot.availablePeers)
     ? snapshot.availablePeers
     : [];
-  const writesCoveredProviders = new Set(
-    (Array.isArray(snapshot.compatibilityChecks)
-      ? snapshot.compatibilityChecks.filter(isPublicCompatibilityCheckSnapshot)
-      : []).filter((check) => check.writesCovered).map((check) => check.surface),
-  );
-  const quarantinedProviders = new Set<GatewayProvider>([
-    ...snapshot.connectors
-      .filter((connector) => connector.compatibility === "incompatible")
-      .map((connector) => connector.provider),
-    ...(Array.isArray(snapshot.compatibilityChecks)
-      ? snapshot.compatibilityChecks
-          .filter(isPublicCompatibilityCheckSnapshot)
-          .filter((check) => check.tier === "incompatible")
-          .flatMap((check) =>
-            check.surface === "claude" || check.surface === "codex"
-              ? [check.surface]
-              : [],
-          )
-      : []),
-  ]);
   const peers = validPeers
     .map(
       (peer): DashboardPeerRow => ({
         alias: boundedText(peer.alias),
         host: boundedText(peer.host),
         state: peer.state,
-        compatibility: peer.compatibility,
         validated: peer.validated,
         selected: peer.selected,
         selectable: peerIsSelectable(peer),
@@ -1166,7 +1069,6 @@ function buildProjectedDashboardViewModel(
       host: boundedText(route.host),
       enabled: Boolean(route.enabled),
       state: route.state,
-      compatibility: route.compatibility,
       queueDepth: depth,
       ...(oldestQueuedAt === undefined ? {} : { oldestQueuedAt }),
       ...(age === undefined ? {} : { queueAgeMs: age }),
@@ -1186,37 +1088,40 @@ function buildProjectedDashboardViewModel(
     )
     .slice(0, DASHBOARD_MODEL_LIMITS.routes);
 
-  const routeByAlias = new Map(allRoutes.map((route) => [route.alias, route]));
-  const allPairs = snapshot.pairs
-    .map((pair): DashboardPairRow => {
-      const claudeAlias = boundedText(pair.claudeAlias);
-      const codexAlias = boundedText(pair.codexAlias);
-      const claudeRoute = routeByAlias.get(claudeAlias);
-      const codexRoute = routeByAlias.get(codexAlias);
-      const bothPresent = claudeRoute !== undefined && codexRoute !== undefined;
+  const routeByEndpoint = new Map(
+    allRoutes.map((route) => [`${route.provider}\0${route.alias}`, route]),
+  );
+  const allConsentEdges = snapshot.consentEdges
+    .map((edge): DashboardConsentEdgeRow => {
+      const endpoints = edge.endpoints.map((endpoint) => ({
+        alias: boundedText(endpoint.alias),
+        provider: endpoint.provider,
+      })) as [DashboardConsentEndpoint, DashboardConsentEndpoint];
+      const routes = endpoints.map((endpoint) =>
+        routeByEndpoint.get(`${endpoint.provider}\0${endpoint.alias}`)
+      );
+      const bothPresent = routes.every((route) => route !== undefined);
       return {
-        claudeAlias,
-        codexAlias,
-        host: boundedText(pair.host),
+        endpoints,
+        host: boundedText(edge.host),
         state:
           bothPresent &&
-          !quarantinedProviders.has("claude") &&
-          !quarantinedProviders.has("codex") &&
-          routeIsReady(claudeRoute) &&
-          routeIsReady(codexRoute)
+          routes.every((route) => route !== undefined && routeIsReady(route))
             ? "ready"
             : bothPresent
               ? "degraded"
               : "unavailable",
-        counters: normalizedCounters(pair.counters),
+        counters: normalizedCounters(edge.counters),
       };
     })
     .sort(
       (left, right) =>
-        compareText(left.claudeAlias, right.claudeAlias) ||
-        compareText(left.codexAlias, right.codexAlias),
+        compareText(left.endpoints[0].provider, right.endpoints[0].provider) ||
+        compareText(left.endpoints[0].alias, right.endpoints[0].alias) ||
+        compareText(left.endpoints[1].provider, right.endpoints[1].provider) ||
+        compareText(left.endpoints[1].alias, right.endpoints[1].alias),
     );
-  const pairs = allPairs.slice(0, DASHBOARD_MODEL_LIMITS.pairs);
+  const consentEdges = allConsentEdges.slice(0, DASHBOARD_MODEL_LIMITS.consentEdges);
 
   const allWatches: DashboardProgressWatchRow[] = (
     snapshot.progressWatches ?? []
@@ -1300,7 +1205,6 @@ function buildProjectedDashboardViewModel(
         provider: connector.provider,
         host: boundedText(connector.host),
         health: connector.health,
-        compatibility: connector.compatibility,
         ...(safeProtocol(connector.protocol) === undefined
           ? {}
           : { protocol: safeProtocol(connector.protocol) }),
@@ -1331,47 +1235,6 @@ function buildProjectedDashboardViewModel(
       compareText(`${left.provider}\0${left.host}`, `${right.provider}\0${right.host}`),
     )
     .slice(0, DASHBOARD_MODEL_LIMITS.connectors);
-  const detectedCompatibilityChecks = (
-    Array.isArray(snapshot.compatibilityChecks)
-      ? snapshot.compatibilityChecks.filter(isPublicCompatibilityCheckSnapshot)
-      : []
-  )
-    .map((attestation): DashboardCompatibilityCheckRow => {
-      const failed = attestation.probes.find(
-        (probe) => probe.outcome === "fail",
-      );
-      const issue = safeCode(attestation.safeErrorCode);
-      return {
-        surface: attestation.surface,
-        version: boundedText(attestation.version),
-        ...(attestation.testedVersion === undefined
-          ? {}
-          : { testedVersion: boundedText(attestation.testedVersion) }),
-        ...(attestation.supportedMajor === undefined
-          ? {}
-          : { supportedMajor: boundedText(attestation.supportedMajor) }),
-        tier: attestation.tier,
-        writesCovered: attestation.writesCovered,
-        checkedAt: attestation.checkedAt,
-        ...(failed === undefined ? {} : { failure: failed.name }),
-        ...(issue === undefined ? {} : { safeErrorCode: issue }),
-      };
-    })
-    .sort((left, right) => compareText(left.surface, right.surface));
-  const detectedSurfaces = new Set(
-    detectedCompatibilityChecks.map(({ surface }) => surface),
-  );
-  const compatibilityChecks: DashboardCompatibilityCheckRow[] = [
-    ...detectedCompatibilityChecks,
-    ...surfaceDefinitions
-      .filter(
-        ({ required, surface }) => !required && !detectedSurfaces.has(surface),
-      )
-      .map(({ surface }) => ({ surface, notDetected: true as const })),
-  ]
-    .sort((left, right) => compareText(left.surface, right.surface))
-    .slice(0, surfaceDefinitions.length);
-
   const messages = buildMessageGroups(snapshot.messages, includeBodies);
   const queuedMessages = allRoutes.reduce(
     (total, route) => boundedAdd(total, route.queueDepth),
@@ -1388,90 +1251,146 @@ function buildProjectedDashboardViewModel(
   const oldest = queuedWithAge[0];
   const activeDeliveries = messages.activeGroups;
 
-  const claudeRoutes = allRoutes.filter((route) => route.provider === "claude");
-  const codexRoutes = allRoutes.filter((route) => route.provider === "codex");
-  const monitorOnlyCodexRoutes = codexRoutes.filter(
-    (route) => route.safeErrorCode === "CODEX_WRITES_DISABLED",
-  );
-  const routeIsExchangeReady = (route: DashboardRouteRow): boolean =>
-    !quarantinedProviders.has(route.provider) && routeIsReady(route);
-  const readyClaude = claudeRoutes.filter(routeIsExchangeReady).length;
-  const readyCodex = codexRoutes.filter(routeIsExchangeReady).length;
-  const readyPairs = allPairs.filter((pair) => pair.state === "ready");
-  const pairedClaude = new Set(allPairs.map((pair) => pair.claudeAlias));
-  const pairedCodex = new Set(allPairs.map((pair) => pair.codexAlias));
-  const readyPairedClaude = claudeRoutes.some(
-    (route) => routeIsExchangeReady(route) && pairedClaude.has(route.alias),
-  );
-  const readyPairedCodex = codexRoutes.some(
-    (route) => routeIsExchangeReady(route) && pairedCodex.has(route.alias),
-  );
-  const pairCountIsLowerBound =
-    (normalizedInteger(snapshot.truncation.pairs) ?? 0) > 0;
-  const hasPairEvidence = allPairs.length > 0 || pairCountIsLowerBound;
+  const routesByProvider = Object.fromEntries(
+    gatewayProviders.map((provider) => [
+      provider,
+      allRoutes.filter((route) => route.provider === provider),
+    ]),
+  ) as Record<GatewayProvider, DashboardRouteRow[]>;
+  const readyByProvider = Object.fromEntries(
+    gatewayProviders.map((provider) => [
+      provider,
+      routesByProvider[provider].filter(routeIsReady).length,
+    ]),
+  ) as Record<GatewayProvider, number>;
+  const pairedAliasesByProvider = Object.fromEntries(
+    gatewayProviders.map((provider) => [provider, new Set<string>()]),
+  ) as Record<GatewayProvider, Set<string>>;
+  for (const edge of allConsentEdges) {
+    for (const endpoint of edge.endpoints) {
+      pairedAliasesByProvider[endpoint.provider].add(endpoint.alias);
+    }
+  }
+  const readyConsentEdges = allConsentEdges.filter((edge) => edge.state === "ready");
+  const consentEdgeCountIsLowerBound =
+    (normalizedInteger(snapshot.truncation.consentEdges) ?? 0) > 0;
+  const hasConsentEvidence =
+    allConsentEdges.length > 0 || consentEdgeCountIsLowerBound;
   const graph: DashboardGraphFacts = {
-    pairCount: allPairs.length,
-    readyPairCount: readyPairs.length,
-    pairCountIsLowerBound,
-    unpairedReadyClaude: claudeRoutes.filter(
-      (route) => routeIsExchangeReady(route) && !pairedClaude.has(route.alias),
-    ).length,
-    unpairedReadyCodex: codexRoutes.filter(
-      (route) => routeIsExchangeReady(route) && !pairedCodex.has(route.alias),
-    ).length,
+    consentEdgeCount: allConsentEdges.length,
+    readyConsentEdgeCount: readyConsentEdges.length,
+    consentEdgeCountIsLowerBound,
+    unpairedReadyByProvider: Object.fromEntries(
+      gatewayProviders.map((provider) => [
+        provider,
+        routesByProvider[provider].filter(
+          (route) => routeIsReady(route) &&
+            !pairedAliasesByProvider[provider].has(route.alias),
+        ).length,
+      ]),
+    ) as Record<GatewayProvider, number>,
   };
   const selectedPeers = validPeers.filter(
     (peer) => peer.selected && peerIsSelectable(peer),
   );
   const selectablePeers = validPeers.filter(peerIsSelectable);
-  const selectedClaudeCount = quarantinedProviders.has("claude")
-    ? 0
-    : Math.max(selectedPeers.length, readyClaude);
-  const claudeStatus = partyStatus(claudeRoutes, readyClaude);
-  const codexStatus = partyStatus(codexRoutes, readyCodex);
+  const selectedClaudeCount = Math.max(
+    selectedPeers.filter((peer) => peer.provider === "claude").length,
+    readyByProvider.claude,
+  );
+  const readyPairedByProvider = Object.fromEntries(
+    gatewayProviders.map((provider) => [
+      provider,
+      routesByProvider[provider].some(
+        (route) => routeIsReady(route) &&
+          pairedAliasesByProvider[provider].has(route.alias),
+      ),
+    ]),
+  ) as Record<GatewayProvider, boolean>;
   const claudeNextAction: DashboardNextAction =
-    quarantinedProviders.has("claude")
-      ? "review_compatibility"
-      : selectedClaudeCount > 0 &&
-    (readyPairedClaude || (pairCountIsLowerBound && readyClaude > 0))
+    selectedClaudeCount > 0 &&
+    (readyPairedByProvider.claude ||
+      (consentEdgeCountIsLowerBound && readyByProvider.claude > 0))
       ? "none"
-      : readyClaude > 0
+      : readyByProvider.claude > 0
         ? "pair_routes"
         : validPeers.length === 0
           ? "discover_claude"
           : selectablePeers.length > 0
-            ? !hasPairEvidence
+            ? !hasConsentEvidence
               ? "pair_routes"
               : "restore_claude"
             : selectedPeers.length > 0
               ? "restore_claude"
               : "repair_claude_inventory";
   const codexNextAction: DashboardNextAction =
-    quarantinedProviders.has("codex") || monitorOnlyCodexRoutes.length > 0
-      ? "review_compatibility"
-      : readyPairedCodex || (pairCountIsLowerBound && readyCodex > 0)
+    readyPairedByProvider.codex ||
+    (consentEdgeCountIsLowerBound && readyByProvider.codex > 0)
       ? "none"
-      : readyCodex > 0
+      : readyByProvider.codex > 0
         ? "pair_routes"
-        : codexRoutes.length === 0
+        : routesByProvider.codex.length === 0
           ? "register_codex"
           : "restore_codex";
+  const parties = gatewayProviders
+    .filter((provider) =>
+      provider === "claude" ||
+      provider === "codex" ||
+      routesByProvider[provider].length > 0 ||
+      pairedAliasesByProvider[provider].size > 0 ||
+      snapshot.connectors.some((connector) => connector.provider === provider),
+    )
+    .map((provider): DashboardExchangeParty => {
+      const providerPeers = validPeers.filter((peer) => peer.provider === provider);
+      const providerRoutes = routesByProvider[provider];
+      const ready = provider === "claude"
+        ? selectedClaudeCount
+        : readyByProvider[provider];
+      const nextAction: DashboardNextAction = provider === "claude"
+        ? claudeNextAction
+        : provider === "codex"
+          ? codexNextAction
+          : readyPairedByProvider[provider]
+            ? "none"
+            : ready > 0
+              ? "pair_routes"
+              : "none";
+      return {
+        kind: provider,
+        status:
+          provider === "claude" && ready > 0 && partyStatus(providerRoutes, ready) === "missing"
+            ? "attention"
+            : partyStatus(providerRoutes, ready),
+        total: provider === "claude" ? providerPeers.length : providerRoutes.length,
+        ready,
+        ...(provider === "claude"
+          ? { selectable: selectablePeers.filter((peer) => peer.provider === provider).length }
+          : {}),
+        countIsLowerBound:
+          (normalizedInteger(snapshot.truncation.routes) ?? 0) > 0 ||
+          (provider === "claude" &&
+            (normalizedInteger(snapshot.truncation.availablePeers) ?? 0) > 0),
+        ...(providerPeers.find((peer) => peer.selected)?.alias === undefined
+          ? providerRoutes[0]?.alias === undefined
+            ? {}
+            : { primaryAlias: boundedText(providerRoutes[0].alias) }
+          : { primaryAlias: boundedText(providerPeers.find((peer) => peer.selected)!.alias) }),
+        nextAction,
+      };
+    });
 
   const explicitAlerts = coalesceCodexReactivationAlerts(
     snapshot.alerts
-      .filter((alert) => alert.code !== "COMPATIBILITY_CERTIFICATION_FAILED")
       .map((alert): DashboardAttentionItem => {
         const code = safeCode(alert.code);
-        const providerWritesCovered =
-          (alert.provider === "claude" || alert.provider === "codex") &&
-          writesCoveredProviders.has(alert.provider);
         const route =
-          code === "QUEUE_STALLED" && typeof alert.alias === "string"
-            ? routeByAlias.get(alert.alias)
+          code === "QUEUE_STALLED" && typeof alert.alias === "string" &&
+            alert.provider !== undefined
+            ? routeByEndpoint.get(`${alert.provider}\0${alert.alias}`)
             : undefined;
         const alertRoute =
-          typeof alert.alias === "string"
-            ? routeByAlias.get(alert.alias)
+          typeof alert.alias === "string" && alert.provider !== undefined
+            ? routeByEndpoint.get(`${alert.provider}\0${alert.alias}`)
             : undefined;
         return {
           kind: "alert",
@@ -1485,9 +1404,7 @@ function buildProjectedDashboardViewModel(
           ...(normalizedTimestamp(alert.timestamp) === undefined
             ? {}
             : { timestamp: normalizedTimestamp(alert.timestamp) }),
-          ...(alert.provider === "claude" || alert.provider === "codex"
-            ? { provider: alert.provider }
-            : {}),
+          ...(alert.provider === undefined ? {} : { provider: alert.provider }),
           ...(typeof alert.alias === "string"
             ? { alias: boundedText(alert.alias) }
             : {}),
@@ -1507,14 +1424,7 @@ function buildProjectedDashboardViewModel(
             alertRoute !== undefined &&
             needsCodexAppReconnect(alertRoute, connectors, generatedAt)
               ? "codex_app_reconnect_required"
-              : !providerWritesCovered &&
-                  alert.provider !== undefined &&
-                  quarantinedProviders.has(alert.provider)
-                ? "provider_incompatible"
-                : providerWritesCovered &&
-                    guidanceFor(code, alert.provider) === "provider_incompatible"
-                  ? "degraded"
-                  : guidanceFor(code, alert.provider),
+              : guidanceFor(code, alert.provider),
         };
       }),
     allRoutes,
@@ -1524,14 +1434,11 @@ function buildProjectedDashboardViewModel(
   );
   const attentionCandidates: DashboardAttentionItem[] = [...explicitAlerts];
   const unavailableConsentEdgeScopes = new Set<string>();
-  for (const pair of allPairs) {
-    if (pair.state !== "unavailable") continue;
-    for (const endpoint of [
-      { provider: "claude" as const, alias: pair.claudeAlias },
-      { provider: "codex" as const, alias: pair.codexAlias },
-    ]) {
-      if (routeByAlias.has(endpoint.alias)) continue;
-      const scope = `${endpoint.provider}\0${endpoint.alias}\0${pair.host}`;
+  for (const edge of allConsentEdges) {
+    if (edge.state !== "unavailable") continue;
+    for (const endpoint of edge.endpoints) {
+      if (routeByEndpoint.has(`${endpoint.provider}\0${endpoint.alias}`)) continue;
+      const scope = `${endpoint.provider}\0${endpoint.alias}\0${edge.host}`;
       if (unavailableConsentEdgeScopes.has(scope)) continue;
       unavailableConsentEdgeScopes.add(scope);
       attentionCandidates.push({
@@ -1539,7 +1446,7 @@ function buildProjectedDashboardViewModel(
         severity: "warning",
         provider: endpoint.provider,
         alias: endpoint.alias,
-        host: pair.host,
+        host: edge.host,
         guidance: "consent_edge_unavailable",
       });
     }
@@ -1547,7 +1454,7 @@ function buildProjectedDashboardViewModel(
   for (const route of allRoutes) {
     const writes = messages.groups.filter(
       ({ direction, targetAlias, state, timestamp }) =>
-        direction === "codex_to_claude" &&
+        parseDirection(direction)?.targetProvider === "claude" &&
         targetAlias === route.alias && state === "delivered" &&
         timestamp !== undefined,
     );
@@ -1599,11 +1506,7 @@ function buildProjectedDashboardViewModel(
     ),
   );
   for (const route of allRoutes) {
-    if (
-      routeIsReady(route) ||
-      quarantinedProviders.has(route.provider) ||
-      route.safeErrorCode === "CODEX_WRITES_DISABLED"
-    ) {
+    if (routeIsReady(route)) {
       continue;
     }
     const scope = `${route.provider}\0${route.alias}\0${route.host}`;
@@ -1611,10 +1514,7 @@ function buildProjectedDashboardViewModel(
     attentionCandidates.push({
       kind: "route",
       ...(route.safeErrorCode === undefined ? {} : { code: route.safeErrorCode }),
-      severity:
-        route.state === "offline" || route.state === "incompatible"
-          ? "error"
-          : "warning",
+      severity: route.state === "offline" ? "error" : "warning",
       ...(route.lastSeenAt === undefined ? {} : { timestamp: route.lastSeenAt }),
       provider: route.provider,
       alias: route.alias,
@@ -1633,12 +1533,7 @@ function buildProjectedDashboardViewModel(
     representedScopes.add(scope);
   }
   for (const connector of connectors) {
-    if (
-      (connector.health === "healthy" &&
-        connector.compatibility === "compatible")
-    ) {
-      continue;
-    }
+    if (connector.health === "healthy") continue;
     const scope = `${connector.provider}\0\0${connector.host}`;
     if (representedScopes.has(scope)) continue;
     attentionCandidates.push({
@@ -1655,17 +1550,7 @@ function buildProjectedDashboardViewModel(
       guidance:
         connector.health === "offline"
           ? "connector_offline"
-          : !writesCoveredProviders.has(connector.provider) &&
-              (quarantinedProviders.has(connector.provider) ||
-              connector.safeErrorCode === "CLAUDE_PEER_VERSION_UNSUPPORTED" ||
-              connector.safeErrorCode === "CLAUDE_VERSION_UNPARSEABLE" ||
-              connector.safeErrorCode === "CLAUDE_VERSION_CHECK_FAILED" ||
-              connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_CONFLICT" ||
-              connector.safeErrorCode === "CLAUDE_VERSION_EVIDENCE_TOO_LARGE" ||
-              connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNSUPPORTED" ||
-              connector.safeErrorCode === "CODEX_APP_SERVER_VERSION_UNPARSEABLE")
-            ? "provider_incompatible"
-            : "degraded",
+          : "degraded",
     });
     representedScopes.add(scope);
   }
@@ -1713,10 +1598,7 @@ function buildProjectedDashboardViewModel(
     });
   }
   if (
-    (snapshot.health === "degraded" ||
-      snapshot.health === "offline" ||
-      snapshot.health === "incompatible") &&
-    !(snapshot.health === "degraded" && quarantinedProviders.size > 0) &&
+    (snapshot.health === "degraded" || snapshot.health === "offline") &&
     !attentionCandidates.some((item) => item.kind === "broker")
   ) {
     attentionCandidates.push({
@@ -1728,12 +1610,12 @@ function buildProjectedDashboardViewModel(
   }
   const attention = attentionCandidates.slice(0, DASHBOARD_MODEL_LIMITS.alerts);
 
-  const setupComplete = hasPairEvidence;
-  const hasDegradedPair = allPairs.some((pair) => pair.state !== "ready");
+  const setupComplete = hasConsentEvidence;
+  const hasDegradedConsentEdge = allConsentEdges.some((edge) => edge.state !== "ready");
   const overall =
     attentionCandidates.length > 0 ||
     (normalizedInteger(snapshot.truncation.alerts) ?? 0) > 0 ||
-    hasDegradedPair
+    hasDegradedConsentEdge
       ? "attention"
       : setupComplete
         ? "ready"
@@ -1751,9 +1633,9 @@ function buildProjectedDashboardViewModel(
       normalizedInteger(snapshot.truncation.routes) ?? 0,
       Math.max(0, allRoutes.length - DASHBOARD_MODEL_LIMITS.routes),
     ),
-    pairs: boundedAdd(
-      normalizedInteger(snapshot.truncation.pairs) ?? 0,
-      Math.max(0, allPairs.length - DASHBOARD_MODEL_LIMITS.pairs),
+    consentEdges: boundedAdd(
+      normalizedInteger(snapshot.truncation.consentEdges) ?? 0,
+      Math.max(0, allConsentEdges.length - DASHBOARD_MODEL_LIMITS.consentEdges),
     ),
     progressWatches: boundedAdd(
       normalizedInteger(snapshot.truncation.progressWatches) ?? 0,
@@ -1783,46 +1665,13 @@ function buildProjectedDashboardViewModel(
   };
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ...(generatedAt === undefined ? {} : { generatedAt }),
     inboundMode,
     health: snapshot.health,
     overall,
     exchange: {
-      claude: {
-        kind: "claude",
-        status:
-          selectedClaudeCount > 0 && claudeStatus === "missing"
-            ? "attention"
-            : claudeStatus,
-        total: validPeers.length,
-        ready: selectedClaudeCount,
-        selectable: selectablePeers.length,
-        countIsLowerBound:
-          (normalizedInteger(snapshot.truncation.availablePeers) ?? 0) > 0 ||
-          (normalizedInteger(snapshot.truncation.routes) ?? 0) > 0,
-        ...(selectedPeers[0]?.alias === undefined
-          ? claudeRoutes[0]?.alias === undefined
-            ? {}
-            : { primaryAlias: boundedText(claudeRoutes[0].alias) }
-          : { primaryAlias: boundedText(selectedPeers[0].alias) }),
-        nextAction: claudeNextAction,
-      },
-      codex: {
-        kind: "codex",
-        status: codexStatus,
-        total: codexRoutes.length,
-        ready: readyCodex,
-        ...(monitorOnlyCodexRoutes.length === 0
-          ? {}
-          : { monitorOnly: monitorOnlyCodexRoutes.length }),
-        countIsLowerBound:
-          (normalizedInteger(snapshot.truncation.routes) ?? 0) > 0,
-        ...(codexRoutes[0]?.alias === undefined
-          ? {}
-          : { primaryAlias: codexRoutes[0].alias }),
-        nextAction: codexNextAction,
-      },
+      parties,
       queuedMessages,
       queueCountIsLowerBound:
         (normalizedInteger(snapshot.truncation.routes) ?? 0) > 0,
@@ -1852,12 +1701,11 @@ function buildProjectedDashboardViewModel(
     brokerActivity,
     peers,
     routes,
-    pairs,
+    consentEdges,
     watches,
     watchEvents,
     graph,
     connectors,
-    compatibilityChecks,
     accounting: {
       accepted: normalizedInteger(snapshot.accounting.accepted) ?? 0,
       duplicates: normalizedInteger(snapshot.accounting.duplicates) ?? 0,

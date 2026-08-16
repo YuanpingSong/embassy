@@ -37,6 +37,7 @@ export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({
   messageVersion: 1,
 });
 const EMBASSY_ADVERTISEMENT_VERSION = 1;
+const EMBASSY_SOURCE_NAME_PATTERN = /^(?:codex-|dsh-|grok-)/;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -600,7 +601,7 @@ function parseRegistryRecord(
     value.embassyAdvertisementVersion === EMBASSY_ADVERTISEMENT_VERSION &&
     isCompatibilityVersionEvidence(value.version) &&
     typeof value.name === "string" &&
-    value.name.startsWith("codex-") &&
+    EMBASSY_SOURCE_NAME_PATTERN.test(value.name) &&
     ALIAS_PATTERN.test(value.name) &&
     value.kind === "interactive" &&
     value.entrypoint === "cli" &&
@@ -2361,7 +2362,7 @@ export class ClaudePeerListener {
       record.peerProtocol === CLAUDE_PEER_COMPATIBILITY.peerProtocol &&
       record.kind === "interactive" &&
       record.entrypoint === "cli" &&
-      record.name.startsWith("codex-") &&
+      EMBASSY_SOURCE_NAME_PATTERN.test(record.name) &&
       ALIAS_PATTERN.test(record.name)
     );
   }
@@ -2585,10 +2586,10 @@ export class ClaudePeerListener {
     name: string,
     cwd: string,
   ): AdvertisedCodexRegistryRecord {
-    if (!name.startsWith("codex-") || !ALIAS_PATTERN.test(name)) {
+    if (!EMBASSY_SOURCE_NAME_PATTERN.test(name) || !ALIAS_PATTERN.test(name)) {
       throw new BridgeError(
         "INVALID_CODEX_PEER_NAME",
-        "A native Codex peer name must start with codex-.",
+        "A native source peer name must use its provider prefix.",
       );
     }
     if (!path.isAbsolute(cwd) || cwd.includes("\0")) {

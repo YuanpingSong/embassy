@@ -68,7 +68,7 @@ test("real-PID helpers own independent native records and exact cleanup", async 
     socketDir,
   } as const;
   const exits: number[] = [];
-  const start = async (alias: string) =>
+  const start = async (alias: string, sourceProvider: "codex" | "deepseek" = "codex") =>
     await ClaudeNativeHelperClient.start({
       entryPath,
       runtime,
@@ -76,7 +76,7 @@ test("real-PID helpers own independent native records and exact cleanup", async 
       locale: "en",
       deliveryNotices: "merged",
       maxPendingMessages: 8,
-      registration: { alias, cwd: root },
+      registration: { alias, sourceProvider, cwd: root },
       callbacks: {
         onEvent: () => undefined,
         onExit: () => exits.push(1),
@@ -86,7 +86,7 @@ test("real-PID helpers own independent native records and exact cleanup", async 
   let second: ClaudeNativeHelperClient | undefined;
   try {
     first = await start("codex-first@this-mac");
-    second = await start("codex-second@this-mac");
+    second = await start("dsh-second@this-mac", "deepseek");
     assert.notEqual(first.pid, second.pid);
     assert.notEqual(first.pid, process.pid);
     assert.notEqual(first.generation, second.generation);
@@ -103,7 +103,7 @@ test("real-PID helpers own independent native records and exact cleanup", async 
     assert.equal(firstRecord.name, "codex-first");
     assert.equal(firstRecord.messagingSocketPath, firstSocketPath);
     assert.equal(secondRecord.pid, second.pid);
-    assert.equal(secondRecord.name, "codex-second");
+    assert.equal(secondRecord.name, "dsh-second");
     assert.equal(secondRecord.messagingSocketPath, secondSocketPath);
 
     await first.request({
@@ -137,7 +137,7 @@ test("real-PID helpers own independent native records and exact cleanup", async 
 class FakeHelperClient implements ClaudeNativeHelperClientLike {
   readonly commands: ClaudeNativeHelperCommand[] = [];
   readonly pid: number;
-  readonly registration: Readonly<{ alias: string; cwd: string }>;
+  readonly registration: ClaudeNativeHelperClientLike["registration"];
   generation: string;
   closed = false;
 
@@ -246,10 +246,12 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
   try {
     await supervisor.advertise({
       alias: "codex-first@this-mac",
+      sourceProvider: "codex",
       cwd: "/workspace/first",
     });
     await supervisor.advertise({
       alias: "codex-second@this-mac",
+      sourceProvider: "codex",
       cwd: "/workspace/second",
     });
     assert.equal(supervisor.size, 2);
@@ -293,6 +295,7 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
     const deadlineAt = new Date(Date.now() + 30_000).toISOString();
     const dispatched = await supervisor.dispatch({
       sourceAlias: "codex-first@this-mac",
+      sourceProvider: "codex",
       targetAlias: "claude-first@this-mac",
       conversationId: "conv_0123456789abcdef",
       selectedAlias: "claude-first@this-mac",
@@ -325,6 +328,7 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       authorization: "selected_route",
       messageId: "gateway-message-first",
       sourceAlias: "codex-first@this-mac",
+      sourceProvider: "codex",
       targetAlias: "claude-first@this-mac",
       conversationId: "conv_0123456789abcdef",
       text: "outbound body",
@@ -353,6 +357,50 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
 });
 
 test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
+  const initialization = {
+    protocolVersion: 1,
+    type: "initialize",
+    requestId: "request_0123456789",
+    runtime: {
+      claudeExecutable: "/usr/bin/false",
+      claudeCodeVersion: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      sessionsDir: "/tmp/sessions",
+      socketDir: "/tmp/sockets",
+    },
+    hostId: "this-mac",
+    locale: "en",
+    deliveryNotices: "merged",
+    maxPendingMessages: 8,
+    registration: {
+      alias: "dsh-builder@this-mac",
+      sourceProvider: "deepseek",
+      cwd: "/workspace/deepseek",
+    },
+  } as const;
+  assert.equal(isClaudeNativeHelperParentMessage(initialization), true);
+  assert.equal(
+    isClaudeNativeHelperParentMessage({
+      ...initialization,
+      registration: {
+        ...initialization.registration,
+        sourceProvider: "unknown",
+      },
+    }),
+    false,
+  );
+  const {
+    sourceProvider: _omittedRegistrationProvider,
+    ...registrationWithoutProvider
+  } = initialization.registration;
+  assert.equal(_omittedRegistrationProvider, "deepseek");
+  assert.equal(
+    isClaudeNativeHelperParentMessage({
+      ...initialization,
+      registration: registrationWithoutProvider,
+    }),
+    false,
+  );
+
   const command = {
     method: "dispatch",
     binding: {
@@ -365,6 +413,7 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
     authorization: "selected_route",
     messageId: "gateway-message-first",
     sourceAlias: "codex-first@this-mac",
+    sourceProvider: "codex",
     targetAlias: "claude-first@this-mac",
     conversationId: "conv_0123456789abcdef",
     text: "x".repeat(16 * 1024),
@@ -387,7 +436,7 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
   assert.doesNotThrow(() => assertClaudeNativeHelperIpcSize(escapedMaximum));
 
   for (const invalid of [
-    { ...command, sourceAlias: "claude-first@this-mac" },
+    { ...command, sourceProvider: "unknown" },
     { ...command, targetAlias: "not an alias" },
     { ...command, conversationId: "conv_short" },
     { ...command, text: "x".repeat(16 * 1024 + 1) },
@@ -407,6 +456,112 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
     }),
     false,
   );
+  const { sourceProvider: _omittedProvider, ...missingProvider } = command;
+  assert.equal(_omittedProvider, "codex");
+  assert.equal(
+    isClaudeNativeHelperParentMessage({
+      ...parent,
+      command: missingProvider,
+    }),
+    false,
+  );
+});
+
+test("supervisor binds every helper write to its exact alias and provider", async () => {
+  const clients: FakeHelperClient[] = [];
+  const supervisor = new ClaudeNativeHelperSupervisor({
+    identity: {
+      provider: "claude",
+      hostId: "this-mac",
+      endpointGeneration: "claude_generation",
+    },
+    runtime: {
+      claudeExecutable: "/usr/bin/false",
+      claudeCodeVersion: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      sessionsDir: "/tmp/sessions",
+      socketDir: "/tmp/sockets",
+    },
+    locale: "en",
+    deliveryNotices: "merged",
+    maxPendingMessages: 8,
+    maxHelpers: 4,
+    callbacks: () => undefined,
+    factory: async (options) => {
+      const client = new FakeHelperClient(options, clients.length + 1);
+      clients.push(client);
+      return client;
+    },
+  });
+  const binding = {
+    provider: "claude",
+    hostId: "this-mac",
+    routeHandle: "00000000-0000-7000-8000-000000000111",
+    ownerLease: "lease-first",
+    endpointGeneration: "claude_generation",
+  } as const;
+  const sources = [
+    { alias: "dsh-builder@this-mac", provider: "deepseek" },
+    { alias: "grok-builder@this-mac", provider: "grok" },
+    { alias: "codex-shaped@this-mac", provider: "claude" },
+    { alias: "dsh-shaped@this-mac", provider: "claude" },
+  ] as const;
+  try {
+    for (const source of sources) {
+      await supervisor.advertise({
+        alias: source.alias,
+        sourceProvider: source.provider,
+        cwd: `/workspace/${source.alias.slice(0, source.alias.indexOf("@"))}`,
+      });
+    }
+
+    const deadlineAt = new Date(Date.now() + 30_000).toISOString();
+    for (const [index, source] of sources.entries()) {
+      assert.deepEqual(
+        await supervisor.dispatch({
+          sourceAlias: source.alias,
+          sourceProvider: source.provider,
+          targetAlias: "claude-first@this-mac",
+          conversationId: "conv_0123456789abcdef",
+          selectedAlias: "claude-first@this-mac",
+          stateRoot: "/state",
+          binding,
+          authorization: "selected_route",
+          messageId: `gateway-provider-bound-${index}`,
+          text: "outbound body",
+          expectsReply: false,
+          deadlineAt,
+        }),
+        { state: "pending" },
+      );
+      const sent = clients[index]!.commands.at(-1);
+      assert.equal(sent?.method, "dispatch");
+      if (sent?.method !== "dispatch") assert.fail("expected dispatch command");
+      assert.equal(sent.sourceAlias, source.alias);
+      assert.equal(sent.sourceProvider, source.provider);
+    }
+
+    const deepseekCommands = clients[0]!.commands.length;
+    assert.deepEqual(
+      await supervisor.dispatch({
+        sourceAlias: "dsh-builder@this-mac",
+        sourceProvider: "grok",
+        targetAlias: "claude-first@this-mac",
+        conversationId: "conv_0123456789abcdef",
+        selectedAlias: "claude-first@this-mac",
+        stateRoot: "/state",
+        binding,
+        authorization: "selected_route",
+        messageId: "gateway-provider-mismatch",
+        text: "must not be written",
+        expectsReply: false,
+        deadlineAt,
+      }),
+      { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" },
+    );
+    assert.equal(clients[0]!.commands.length, deepseekCommands);
+  } finally {
+    await supervisor.close();
+  }
 });
 
 test("supervisor carries only the activated source alias and exact selected target", async () => {
@@ -444,6 +599,7 @@ test("supervisor carries only the activated source alias and exact selected targ
   try {
     await supervisor.advertise({
       alias: "codex-old@this-mac",
+      sourceProvider: "codex",
       cwd: "/workspace/old",
     });
     await supervisor.prepareGeneration({
@@ -463,6 +619,7 @@ test("supervisor carries only the activated source alias and exact selected targ
 
     const dispatch = {
       sourceAlias: "codex-new@this-mac",
+      sourceProvider: "codex",
       targetAlias: "claude-first@this-mac",
       conversationId: "conv_0123456789abcdef",
       selectedAlias: "claude-first@this-mac",
@@ -536,6 +693,7 @@ test("supervisor carries only the activated source alias and exact selected targ
     assert.deepEqual(
       await supervisor.dispatch({
         sourceAlias: dispatch.sourceAlias,
+        sourceProvider: dispatch.sourceProvider,
         targetAlias: dispatch.targetAlias,
         conversationId: dispatch.conversationId,
         binding,

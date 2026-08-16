@@ -161,18 +161,8 @@ test("journal inventory records only open, replace, and attributed settlement", 
       actor: "worker",
       reason: "done",
     },
-    {
-      sequence: 3,
-      timestamp: new Date(START + 2).toISOString(),
-      conversationId: initial().conversationId,
-      ownerAlias: initial().ownerAlias,
-      workerAlias: initial().workerAlias,
-      kind: "settled",
-      actor: "unknown",
-      reason: "legacy_done",
-    },
   ];
-  assert.equal(valid.length, 3);
+  assert.equal(valid.length, 2);
   assert.deepEqual(progressWatchJournalKinds, ["opened", "replaced", "settled"]);
 });
 

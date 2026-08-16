@@ -15,6 +15,8 @@ import {
   type GatewaySendResult,
   type GatewaySnapshotObservation,
   type PairParams,
+  pairParamAliases,
+  pairParamThreadAttestation,
   type ReplyParams,
   type SelectClaudeParams,
   type UnregisterCodexParams,
@@ -59,10 +61,11 @@ import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
   arePublicAvailablePeerSnapshots,
+  directionId, parseDirection,
   projectGatewayPublicSnapshot,
-  type CompatibilityState,
   type EnqueueMessageInput,
   type GatewayPrivateRouteInspection,
+  type GatewayProvider,
   type GatewayPublicSnapshot,
   type GatewayActivityAction,
   type GatewayActivityKind,
@@ -167,7 +170,6 @@ export type GatewayAdapterDiscovery = {
   routeHandle: string;
   kind: "interactive";
   state: GatewayAdapterRouteState;
-  compatibility: "compatible";
 };
 
 /**
@@ -252,7 +254,6 @@ export type GatewayAdapterCallbacks = {
 
 export type GatewayAdapterStart = {
   health: "healthy" | "degraded";
-  compatibility: CompatibilityState;
   safeErrorCode?: string;
 };
 
@@ -274,6 +275,7 @@ export type GatewayAdapterDispatchResult =
  */
 export type GatewayAdapterDispatchInput = {
   sourceAlias: string;
+  sourceProvider: GatewayProvider;
   targetAlias: string;
   conversationId: string;
   binding: PrivateRouteBinding;
@@ -323,12 +325,13 @@ export interface GatewayProviderAdapter {
   ): Promise<void>;
   /** Converts a UDS connect-back capability to an exact already-observed handle. */
   resolveReplyAddress?(address: string): Promise<{ routeHandle: string }>;
-  advertiseNativeCodexPeer?(input: {
+  advertiseNativeSourcePeer?(input: {
     alias: string;
+    sourceProvider: GatewayProvider;
     cwd: string;
   }): Promise<void>;
-  unadvertiseNativeCodexPeer?(alias: string): Promise<void>;
-  updateNativeCodexPeerStatus?(
+  unadvertiseNativeSourcePeer?(alias: string): Promise<void>;
+  updateNativeSourcePeerStatus?(
     alias: string,
     status: "idle" | "busy" | "waiting",
   ): Promise<void>;
@@ -438,6 +441,7 @@ type MessageContext = {
   sequence: number;
   targetBindingKey: string;
   nativeReplyBinding?: PrivateRouteBinding;
+  sourceBinding?: PrivateRouteBinding;
   authorization: "selected_route" | "native_reply";
   targetAlias: string;
   deadlineAt: string;
@@ -599,7 +603,7 @@ function endpointRefreshCallbackKey(
   });
 }
 
-function stableLease(provider: "codex" | "claude", value: string): string {
+function stableLease(provider: GatewayProvider, value: string): string {
   return `lease_${createHash("sha256").update(provider).update("\0").update(value).digest("base64url")}`;
 }
 
@@ -870,7 +874,6 @@ export class GatewayService {
         await this.store.observeConnector({
           identity: adapter.identity,
           health: observation.health,
-          compatibility: observation.compatibility,
           protocol: adapter.protocol,
           protocolVersion: adapter.protocolVersion,
           ...(observation.safeErrorCode === undefined
@@ -1133,7 +1136,7 @@ export class GatewayService {
           {
             kind: "pairing",
             action: "routes_paired",
-            aliases: [params.claudeAlias, params.codexAlias],
+            aliases: [...pairParamAliases(params)],
           },
         ),
       unpair: async (params) =>
@@ -1142,7 +1145,7 @@ export class GatewayService {
           {
             kind: "pairing",
             action: "routes_unpaired",
-            aliases: [params.claudeAlias, params.codexAlias],
+            aliases: [...pairParamAliases(params)],
           },
         ),
       listSnapshot: async () => (await this.observeSnapshot()).snapshot,
@@ -1928,7 +1931,7 @@ export class GatewayService {
     }
   }
 
-  private adapter(provider: "codex" | "claude", host: string): GatewayProviderAdapter {
+  private adapter(provider: GatewayProvider, host: string): GatewayProviderAdapter {
     const adapter = this.adapters.find(
       (candidate) => candidate.identity.provider === provider && candidate.identity.hostId === host,
     );
@@ -2090,7 +2093,7 @@ export class GatewayService {
             bindingKey(afterStaging.binding) === bindingKey(binding);
         }
         advertiseAttempted = true;
-        const advertise = claudeAdapter.advertiseNativeCodexPeer;
+        const advertise = claudeAdapter.advertiseNativeSourcePeer;
         if (advertise === undefined) {
           throw new BridgeError(
             "CODEX_BOOT_REACTIVATION_UNAVAILABLE",
@@ -2099,9 +2102,10 @@ export class GatewayService {
         }
         await advertise.call(claudeAdapter, {
           alias: route.alias,
+          sourceProvider: "codex",
           cwd: this.nativePeerCwd,
         });
-        await claudeAdapter.updateNativeCodexPeerStatus?.(
+        await claudeAdapter.updateNativeSourcePeerStatus?.(
           route.alias,
           selected.state === "idle"
             ? "idle"
@@ -2166,7 +2170,7 @@ export class GatewayService {
         let cleanupFailed = false;
         if (advertiseAttempted) {
           await claudeAdapter
-            .unadvertiseNativeCodexPeer?.(route.alias)
+            .unadvertiseNativeSourcePeer?.(route.alias)
             .catch(() => {
               cleanupFailed = true;
             });
@@ -2805,7 +2809,7 @@ export class GatewayService {
           effect.registration.alias,
           Object.freeze({ ...effect.registration }),
         );
-        await claudeAdapter.updateNativeCodexPeerStatus?.(
+        await claudeAdapter.updateNativeSourcePeerStatus?.(
           effect.registration.alias,
           state === "idle"
             ? "idle"
@@ -2992,10 +2996,10 @@ export class GatewayService {
           );
         }
         const results = await Promise.allSettled([
-          claudeAdapter.unadvertiseNativeCodexPeer?.(
+          claudeAdapter.unadvertiseNativeSourcePeer?.(
             execution.oldRegistration.alias,
           ),
-          claudeAdapter.unadvertiseNativeCodexPeer?.(
+          claudeAdapter.unadvertiseNativeSourcePeer?.(
             execution.newRegistration.alias,
           ),
           codexAdapter.releaseRoute?.(execution.oldRegistration.threadId),
@@ -3487,15 +3491,16 @@ export class GatewayService {
     try {
       this.rememberBinding(params.alias, binding, registered.state);
       const claudeAdapter = this.adapter("claude", params.hostId);
-      const advertise = claudeAdapter.advertiseNativeCodexPeer;
+      const advertise = claudeAdapter.advertiseNativeSourcePeer;
       if (advertise !== undefined) {
         advertiseAttempted = true;
         await advertise.call(claudeAdapter, {
           alias: params.alias,
+          sourceProvider: "codex",
           cwd: this.nativePeerCwd,
         });
       }
-      await claudeAdapter.updateNativeCodexPeerStatus?.(
+      await claudeAdapter.updateNativeSourcePeerStatus?.(
         params.alias,
         registered.state === "idle"
           ? "idle"
@@ -3634,7 +3639,7 @@ export class GatewayService {
       });
     if (advertiseAttempted) {
       await this.adapter("claude", params.hostId)
-        .unadvertiseNativeCodexPeer?.(params.alias)
+        .unadvertiseNativeSourcePeer?.(params.alias)
         .catch(() => {
           cleanupFailed = true;
         });
@@ -3671,7 +3676,7 @@ export class GatewayService {
     }
     this.forgetBinding(params.alias);
     await this.adapter("claude", host)
-      .unadvertiseNativeCodexPeer?.(params.alias)
+      .unadvertiseNativeSourcePeer?.(params.alias)
       .catch(() => {
         this.dashboardHealthy = false;
       });
@@ -3944,7 +3949,7 @@ export class GatewayService {
       await this.requireUnchangedStaleCodexOrphan(alias, binding);
 
       if (nativeGeneration !== undefined) {
-        const unadvertise = claudeAdapter.unadvertiseNativeCodexPeer;
+        const unadvertise = claudeAdapter.unadvertiseNativeSourcePeer;
         if (unadvertise === undefined) {
           throw new BridgeError(
             "CODEX_ORPHAN_NATIVE_IDENTITY_UNPROVEN",
@@ -4200,8 +4205,7 @@ export class GatewayService {
           alias,
           provider: "claude",
           host: row.adapter.identity.hostId,
-          state: "incompatible",
-          compatibility: "incompatible",
+          state: "offline",
           validated: false,
           selected: false,
           safeErrorCode: row.safeErrorCode,
@@ -4220,7 +4224,6 @@ export class GatewayService {
         provider: "claude",
         host: row.adapter.identity.hostId,
         state: row.peer.state,
-        compatibility: row.peer.compatibility,
         validated: true,
         selected,
       });
@@ -4229,7 +4232,6 @@ export class GatewayService {
         await this.store.observeRoute({
           binding: selectedBinding,
           state: row.peer.state,
-          compatibility: "compatible",
         });
       }
     }
@@ -4430,7 +4432,6 @@ export class GatewayService {
         binding,
         registrationMode: "selected_live_peer",
         state: selected.state,
-        compatibility: "compatible",
       });
       this.rememberBinding(candidate.alias, binding, selected.state);
     } catch (error) {
@@ -4499,7 +4500,6 @@ export class GatewayService {
           binding,
           registrationMode: "selected_live_peer",
           state: selectedState,
-          compatibility: "compatible",
         },
         inFlightSettlements,
       });
@@ -4593,12 +4593,14 @@ export class GatewayService {
     return candidate.alias;
   }
 
-  private assertCodexPairCaller(params: PairParams): void {
-    const binding = this.routeBindings.get(params.codexAlias);
+  private assertPairThreadAttestation(params: PairParams): void {
+    const attestation = pairParamThreadAttestation(params);
+    const legacyAlias = "codexAlias" in params ? params.codexAlias : undefined;
+    if (attestation === undefined && legacyAlias === undefined) return;
+    const binding = this.routeBindings.get(attestation?.alias ?? legacyAlias!);
     if (
       binding?.provider !== "codex" ||
-      (params.codexThreadId !== undefined &&
-        binding.routeHandle !== params.codexThreadId)
+      (attestation !== undefined && binding.routeHandle !== attestation.threadId)
     ) {
       throw new BridgeError(
         "CODEX_CALLER_MISMATCH",
@@ -4608,47 +4610,80 @@ export class GatewayService {
   }
 
   private async pairRoutes(params: PairParams): Promise<void> {
-    this.assertCodexPairCaller(params);
-    await this.selectAndPairClaude(params.claudeAlias, params.codexAlias);
+    this.assertPairThreadAttestation(params);
+    if ("claudeAlias" in params) {
+      await this.selectAndPairClaude(params.claudeAlias, params.codexAlias);
+      return;
+    }
+    await this.assertLiveConsentEndpoints(params.aliases);
+    const added = await this.store.addConsentEdge({ aliases: params.aliases });
+    if (added.created) await this.changed();
+    else await this.publish();
   }
 
   private async unpairRoutes(params: PairParams): Promise<void> {
-    this.assertCodexPairCaller(params);
-    const selected = await this.selectedClaudeRoute(params.claudeAlias);
-    await this.unpairClaudeRoute(selected, params.codexAlias);
+    this.assertPairThreadAttestation(params);
+    const aliases = pairParamAliases(params);
+    if (!("claudeAlias" in params)) await this.assertLiveConsentEndpoints(aliases);
+    await this.removeConsentEdge(aliases);
   }
 
-  private async unpairClaudeRoute(
-    selected: GatewayPrivateRouteInspection,
-    codexAlias: string,
+  private async assertLiveConsentEndpoints(
+    aliases: readonly [string, string],
+  ): Promise<readonly [GatewayPrivateRouteInspection, GatewayPrivateRouteInspection]> {
+    const routes = await Promise.all(aliases.map((alias) => this.store.inspectPrivateRoute(alias)));
+    if (routes[0] === undefined || routes[1] === undefined) {
+      throw new BridgeError("CONSENT_EDGE_ROUTE_NOT_FOUND", "Both consent endpoints must be registered.");
+    }
+    for (const route of routes as GatewayPrivateRouteInspection[]) {
+      const live = this.routeBindings.get(route.alias);
+      if (
+        !route.enabled ||
+        route.state === "stale" ||
+        live === undefined ||
+        bindingKey(live) !== bindingKey(route.binding) ||
+        this.adapter(route.binding.provider, route.binding.hostId).identity.endpointGeneration !==
+          route.binding.endpointGeneration
+      ) {
+        throw new BridgeError("ROUTE_UNAVAILABLE", "Both consent endpoints must be exact positively observed live routes.");
+      }
+    }
+    if (routes[0].binding.provider === routes[1].binding.provider || routes[0].binding.hostId !== routes[1].binding.hostId) {
+      throw new BridgeError("INVALID_CONSENT_EDGE", "A consent edge must connect distinct providers on the same host.");
+    }
+    return routes as [GatewayPrivateRouteInspection, GatewayPrivateRouteInspection];
+  }
+
+  private async removeConsentEdge(
+    aliases: readonly [string, string],
   ): Promise<void> {
     await this.drainPreDeadlineDeliveryCallbacksLocked();
-    const pair = {
-      claudeAlias: selected.alias,
-      codexAlias,
-    } as const;
+    const routes = await Promise.all(aliases.map((alias) => this.store.inspectPrivateRoute(alias)));
+    const edge = { aliases } as const;
     const inFlightSettlements =
-      await this.planPairInFlightSettlementsLocked(pair, {
+      await this.planConsentEdgeInFlightSettlementsLocked(edge, {
         unwrittenOutcome: "cancelled",
         safeErrorCode: "PAIR_REMOVED",
       });
-    const result = await this.store.unpairRoutes({
-      ...pair,
+    const result = await this.store.removeConsentEdge({
+      ...edge,
       inFlightSettlements,
     });
     for (const settlement of result.settlements) {
       await this.applyTerminalSettlementLocked(settlement);
     }
-    this.purgePairCapabilitiesLocked(pair);
-    if (result.claudeRouteUnreferenced) {
+    this.purgeConsentEdgeCapabilitiesLocked(aliases);
+    for (const alias of result.unreferencedAliases) {
+      const selected = routes.find((route) => route?.alias === alias);
+      if (selected?.binding.provider !== "claude" || selected.registrationMode !== "selected_live_peer") continue;
       const settlements = await this.store.unregisterRoute(
-        selected.alias,
+        alias,
         selected.binding.ownerLease,
       );
       for (const settlement of settlements) {
         await this.applyTerminalSettlementLocked(settlement);
       }
-      this.forgetBinding(selected.alias);
+      this.forgetBinding(alias);
       await this.adapters
         .find(
           (adapter) =>
@@ -4660,7 +4695,7 @@ export class GatewayService {
           this.dashboardHealthy = false;
         });
       this.availablePeers = this.availablePeers.map((peer) =>
-        peer.alias === selected.alias ? { ...peer, selected: false } : peer,
+        peer.alias === alias ? { ...peer, selected: false } : peer,
       );
     }
     await this.changed();
@@ -4732,10 +4767,7 @@ export class GatewayService {
     }
     let paired: { created: boolean };
     try {
-      paired = await this.store.pairRoutes({
-        claudeAlias: candidate.alias,
-        codexAlias,
-      });
+      paired = await this.store.addConsentEdge({ aliases: [candidate.alias, codexAlias] });
     } catch (error) {
       if (
         !alreadyLive &&
@@ -4777,7 +4809,7 @@ export class GatewayService {
   private async unselectClaude(params: SelectClaudeParams): Promise<void> {
     const codexAlias = await this.inferCodexAlias(params.codexThreadId);
     const selected = await this.selectedClaudeRoute(params.alias);
-    await this.unpairClaudeRoute(selected, codexAlias);
+    await this.removeConsentEdge([selected.alias, codexAlias]);
   }
 
   private async selectedClaudeRoute(
@@ -4808,7 +4840,6 @@ export class GatewayService {
         binding,
         registrationMode: binding.provider === "codex" ? "explicit_opt_in" : "selected_live_peer",
         state,
-        compatibility: "compatible",
       });
     } catch (error) {
       if (!(error instanceof BridgeError) || error.code !== "ROUTE_ALIAS_COLLISION") throw error;
@@ -4894,14 +4925,12 @@ export class GatewayService {
     await this.store.observeConnector({
       identity: adapter.identity,
       health: "healthy",
-      compatibility: "compatible",
       protocol: adapter.protocol,
       protocolVersion: adapter.protocolVersion,
     });
     await this.store.observeRoute({
       binding,
       state,
-      compatibility: "compatible",
     });
     return binding;
   }
@@ -5348,15 +5377,15 @@ export class GatewayService {
     });
   }
 
-  private async planPairInFlightSettlementsLocked(
-    pair: { claudeAlias: string; codexAlias: string },
+  private async planConsentEdgeInFlightSettlementsLocked(
+    edge: { aliases: readonly [string, string] },
     input: {
       unwrittenOutcome: "cancelled" | "failed";
       safeErrorCode: string;
     },
   ): Promise<RouteInFlightSettlementInput[]> {
     const affected =
-      await this.store.inspectAffectedPairInFlightMessages(pair);
+      await this.store.inspectAffectedConsentEdgeInFlightMessages(edge);
     const observedAt = this.now().getTime();
     return affected.map(({ messageId }) => {
       const tracker = this.deliveryTrackers.get(messageId);
@@ -5402,13 +5431,11 @@ export class GatewayService {
     });
   }
 
-  private purgePairCapabilitiesLocked(pair: {
-    claudeAlias: string;
-    codexAlias: string;
-  }): void {
+  private purgeConsentEdgeCapabilitiesLocked(
+    aliases: readonly [string, string],
+  ): void {
     const matches = (sourceAlias: string, targetAlias: string): boolean =>
-      (sourceAlias === pair.claudeAlias && targetAlias === pair.codexAlias) ||
-      (sourceAlias === pair.codexAlias && targetAlias === pair.claudeAlias);
+      aliases.includes(sourceAlias) && aliases.includes(targetAlias);
     const conversationIds = new Set<string>();
     for (const [conversationId, conversation] of this.conversations) {
       if (
@@ -6404,17 +6431,19 @@ export class GatewayService {
   private async enqueueObservedClaudeReplyAfterRouteTeardownLocked(
     conversation: Conversation,
     sourceBinding: PrivateRouteBinding,
+    expectedTargetBinding: PrivateRouteBinding,
     text: string,
   ): Promise<void> {
     const target = await this.store.resolveRoute(conversation.sourceAlias);
     if (
       sourceBinding.provider !== "claude" ||
-      target.provider !== "codex" ||
+      target.provider === "claude" ||
+      target.provider !== expectedTargetBinding.provider || target.ownerLease !== expectedTargetBinding.ownerLease ||
       sourceBinding.hostId !== target.hostId
     ) {
       throw new BridgeError(
         "RECOVERED_REPLY_ROUTE_MISMATCH",
-        "The retained provider reply no longer matches an exact same-host Codex target.",
+        "The retained provider reply no longer matches an exact same-host non-Claude target.",
       );
     }
     const sequence = conversation.nextSequence;
@@ -6455,6 +6484,7 @@ export class GatewayService {
       expectsReply: false,
       sequence,
       targetBindingKey: bindingKey(target),
+      sourceBinding: { ...sourceBinding },
       authorization: "selected_route",
       targetAlias: conversation.sourceAlias,
       deadlineAt,
@@ -6467,7 +6497,7 @@ export class GatewayService {
       deadlineAt,
     });
     await this.changed();
-    await this.setNativeCodexStatus(conversation.sourceAlias, "waiting");
+    await this.setNativeSourceStatus(conversation.sourceAlias, "waiting");
     this.scheduleDispatch(conversation.sourceAlias);
   }
 
@@ -6837,12 +6867,30 @@ export class GatewayService {
             ).markerActive
           : false;
     }
+    const sourceBinding = context.sourceBinding ??
+      (await this.store.inspectPrivateRoute(item.sourceAlias))?.binding;
+    const parsedDirection = parseDirection(item.direction);
+    if (
+      sourceBinding === undefined ||
+      parsedDirection?.sourceProvider !== sourceBinding.provider ||
+      parsedDirection.targetProvider !== binding.provider ||
+      item.direction !== directionId(sourceBinding.provider, binding.provider)
+    ) {
+      await this.finishDelivery({
+        messageId: item.messageId,
+        state: "failed",
+        safeErrorCode: "MESSAGE_DIRECTION_BINDING_MISMATCH",
+      });
+      return;
+    }
+    context.sourceBinding ??= { ...sourceBinding };
     let result: GatewayAdapterDispatchResult;
     try {
       result = await this.awaitDispatchWithNativeHeldLocked(
         tracker,
         this.adapter(binding.provider, binding.hostId).dispatch({
           sourceAlias: item.sourceAlias,
+          sourceProvider: sourceBinding.provider,
           targetAlias: item.targetAlias,
           conversationId: context.conversationId,
           binding,
@@ -6953,12 +7001,11 @@ export class GatewayService {
             await this.store.observeRoute({
               binding,
               state: "idle",
-              compatibility: "compatible",
             });
           } else if (binding.provider === "codex") {
             this.scheduleHeldRedispatch(currentTargetAlias);
           }
-          await this.setNativeCodexStatus(currentTargetAlias, "waiting");
+          await this.setNativeSourceStatus(currentTargetAlias, "waiting");
         }
       } else if (requeued.status === "settled") {
         await this.applyTerminalSettlementLocked(requeued.settlement);
@@ -7262,17 +7309,17 @@ export class GatewayService {
             .catch(() => false);
           const pairStillActive =
             conversation.pair !== true ||
-            (await this.store.hasPair({
-              claudeAlias: conversation.targetAlias,
-              codexAlias: conversation.sourceAlias,
+            (await this.store.hasConsentEdge({
+              aliases: [conversation.targetAlias, conversation.sourceAlias],
             }));
           if (
             (!sourceStillRoutable || !pairStillActive) &&
-            sourceBinding?.provider === "claude"
+            sourceBinding?.provider === "claude" && context.sourceBinding !== undefined
           ) {
             await this.enqueueObservedClaudeReplyAfterRouteTeardownLocked(
               conversation,
               sourceBinding,
+              context.sourceBinding,
               replyText,
             );
           } else {
@@ -7405,7 +7452,7 @@ export class GatewayService {
       const collision = this.routeBindings.get(event.sourceAlias);
       if (
         target === undefined ||
-        target.provider !== "codex" ||
+        target.provider === "claude" ||
         target.hostId !== event.endpoint.hostId ||
         (collision !== undefined &&
           bindingKey(collision) !== bindingKey(sourceBinding))
@@ -7463,6 +7510,7 @@ export class GatewayService {
         expectsReply: !steer,
         sequence: 0,
         targetBindingKey: bindingKey(target),
+        sourceBinding: { ...sourceBinding },
         authorization: "selected_route",
         targetAlias: event.targetAlias,
         deadlineAt,
@@ -7488,7 +7536,7 @@ export class GatewayService {
         deadlineAt,
       });
       await this.changed();
-      await this.setNativeCodexStatus(event.targetAlias, "waiting");
+      await this.setNativeSourceStatus(event.targetAlias, "waiting");
       // Native ingress gets one immediate dispatch opportunity. Only an
       // actual queued/waiting result earns a `held` acknowledgement; an idle
       // fast path can therefore settle with one terminal acknowledgement.
@@ -7715,7 +7763,6 @@ export class GatewayService {
     await this.store.observeConnector({
       identity: event.current,
       health: "healthy",
-      compatibility: "compatible",
       protocol: adapter.protocol,
       protocolVersion: adapter.protocolVersion,
     });
@@ -7989,7 +8036,7 @@ export class GatewayService {
       }
       for (const route of activatedRoutes) {
         requireNativeContinuity(route);
-        await this.setNativeCodexStatus(
+        await this.setNativeSourceStatus(
           route.alias,
           route.state === "idle"
             ? "idle"
@@ -8089,7 +8136,6 @@ export class GatewayService {
     await this.store.observeConnector({
       identity: source,
       health: event.state === "stale" ? "degraded" : "healthy",
-      compatibility: event.state === "stale" ? "expired" : "compatible",
       protocol: adapter.protocol,
       protocolVersion: adapter.protocolVersion,
       ...(event.safeErrorCode === undefined
@@ -8112,14 +8158,12 @@ export class GatewayService {
       await this.store.observeRoute({
         binding,
         state: "stale",
-        compatibility: "expired",
         safeErrorCode: staleSafeCode,
       });
     } else {
       await this.store.observeRoute({
         binding,
         state: event.state,
-        compatibility: "compatible",
         ...(event.safeErrorCode === undefined
           ? {}
           : {
@@ -8132,8 +8176,8 @@ export class GatewayService {
     }
     await this.store.touchProgressWatchesForAlias(alias);
     await this.changed();
-    if (binding.provider === "codex") {
-      await this.setNativeCodexStatus(
+    if (binding.provider !== "claude") {
+      await this.setNativeSourceStatus(
         alias,
         event.state === "idle"
           ? "idle"
@@ -8141,11 +8185,9 @@ export class GatewayService {
             ? "waiting"
             : "busy",
       );
-      if (previousState === "stale" && event.state !== "stale") {
-        adapter.rearmEndpointRefreshActivation?.(
-          binding.endpointGeneration,
-        );
-      }
+    }
+    if (binding.provider === "codex" && previousState === "stale" && event.state !== "stale") {
+      adapter.rearmEndpointRefreshActivation?.(binding.endpointGeneration);
     }
     if (event.state === "idle" || event.state === "stale") {
       const heldTimer = this.heldRedispatchTimers.get(alias);
@@ -8157,15 +8199,15 @@ export class GatewayService {
     }
   }
 
-  private async setNativeCodexStatus(
+  private async setNativeSourceStatus(
     alias: string,
     status: "idle" | "busy" | "waiting",
     requireSuccess = false,
   ): Promise<void> {
     const binding = this.routeBindings.get(alias);
-    if (binding?.provider !== "codex") return;
+    if (binding === undefined || binding.provider === "claude") return;
     const adapter = this.adapter("claude", binding.hostId);
-    const update = adapter.updateNativeCodexPeerStatus;
+    const update = adapter.updateNativeSourcePeerStatus;
     if (update === undefined) {
       if (requireSuccess) {
         throw new BridgeError(

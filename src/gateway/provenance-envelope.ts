@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
+import type { GatewayProvider } from "./types.js";
 
 export const PROVENANCE_RAW_BODY_MAX_BYTES = 16 * 1024;
 export const PROVENANCE_ENVELOPE_MAX_BYTES = 64 * 1024;
@@ -11,13 +12,41 @@ const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const RESERVED_TAG_PATTERN =
   /<(?=\/?(?:cross-session-message|embassy-reply-hint|embassy-track-active|embassy-queued-ahead)(?:[>\s/]|$))/giu;
 const CLAUDE_FROM_NAME_MAX_CODEPOINTS = 64;
-const LONG_ALIAS_PREFIX_CODEPOINTS = 47;
 const LONG_ALIAS_HASH_HEX_LENGTH = 16;
 
-export type ProvenanceEnvelopeDirection = "codex" | "claude";
+type ProvenanceRecipientProfile = Readonly<{
+  fromNameMaxCodepoints?: number;
+  emitConversationAttribute: boolean;
+  allowQueuedAhead: boolean;
+}>;
+
+const PROVENANCE_RECIPIENT_PROFILE_VALUES = {
+  claude: Object.freeze({
+    fromNameMaxCodepoints: CLAUDE_FROM_NAME_MAX_CODEPOINTS,
+    emitConversationAttribute: false,
+    allowQueuedAhead: false,
+  }),
+  codex: Object.freeze({
+    emitConversationAttribute: true,
+    allowQueuedAhead: true,
+  }),
+  deepseek: Object.freeze({
+    emitConversationAttribute: true,
+    allowQueuedAhead: false,
+  }),
+  grok: Object.freeze({
+    emitConversationAttribute: true,
+    allowQueuedAhead: false,
+  }),
+} satisfies Record<GatewayProvider, ProvenanceRecipientProfile>;
+
+const PROVENANCE_RECIPIENT_PROFILES: Readonly<
+  Record<GatewayProvider, ProvenanceRecipientProfile>
+> = Object.freeze(PROVENANCE_RECIPIENT_PROFILE_VALUES);
 
 export type ComposeProvenanceEnvelopeInput = Readonly<{
-  direction: ProvenanceEnvelopeDirection;
+  sourceProvider: GatewayProvider;
+  recipientProvider: GatewayProvider;
   sourceAlias: string;
   targetAlias: string;
   conversationId: string;
@@ -41,11 +70,20 @@ function envelopeTooLarge(): never {
   );
 }
 
+function isGatewayProvider(value: unknown): value is GatewayProvider {
+  return (
+    typeof value === "string" &&
+    Object.hasOwn(PROVENANCE_RECIPIENT_PROFILES, value)
+  );
+}
+
 function validateInput(input: ComposeProvenanceEnvelopeInput): void {
   if (
     typeof input !== "object" ||
     input === null ||
-    (input.direction !== "codex" && input.direction !== "claude") ||
+    !isGatewayProvider(input.sourceProvider) ||
+    !isGatewayProvider(input.recipientProvider) ||
+    input.sourceProvider === input.recipientProvider ||
     typeof input.sourceAlias !== "string" ||
     !ALIAS_PATTERN.test(input.sourceAlias) ||
     typeof input.targetAlias !== "string" ||
@@ -56,7 +94,8 @@ function validateInput(input: ComposeProvenanceEnvelopeInput): void {
     (input.progressWatchActive !== undefined &&
       input.progressWatchActive !== true) ||
     (input.queuedAhead !== undefined &&
-      (input.direction !== "codex" ||
+      (!PROVENANCE_RECIPIENT_PROFILES[input.recipientProvider]
+        .allowQueuedAhead ||
         !Number.isSafeInteger(input.queuedAhead) ||
         input.queuedAhead < 1))
   ) {
@@ -68,12 +107,12 @@ function validateInput(input: ComposeProvenanceEnvelopeInput): void {
   }
 }
 
-function claudeDisplayAlias(alias: string): {
+function boundedDisplayAlias(alias: string, maximumCodepoints: number): {
   displayAlias: string;
   shortened: boolean;
 } {
   const codepoints = [...alias];
-  if (codepoints.length <= CLAUDE_FROM_NAME_MAX_CODEPOINTS) {
+  if (codepoints.length <= maximumCodepoints) {
     return { displayAlias: alias, shortened: false };
   }
 
@@ -81,8 +120,10 @@ function claudeDisplayAlias(alias: string): {
     .update(alias, "utf8")
     .digest("hex")
     .slice(0, LONG_ALIAS_HASH_HEX_LENGTH);
+  const prefixCodepoints =
+    maximumCodepoints - LONG_ALIAS_HASH_HEX_LENGTH - 1;
   return {
-    displayAlias: `${codepoints.slice(0, LONG_ALIAS_PREFIX_CODEPOINTS).join("")}~${digest}`,
+    displayAlias: `${codepoints.slice(0, prefixCodepoints).join("")}~${digest}`,
     shortened: true,
   };
 }
@@ -101,15 +142,24 @@ export function composeProvenanceEnvelope(
 ): string {
   validateInput(input);
 
-  const display = claudeDisplayAlias(input.sourceAlias);
+  const profile = PROVENANCE_RECIPIENT_PROFILES[input.recipientProvider];
+  const display =
+    profile.fromNameMaxCodepoints === undefined
+      ? { displayAlias: input.sourceAlias, shortened: false }
+      : boundedDisplayAlias(
+          input.sourceAlias,
+          profile.fromNameMaxCodepoints,
+        );
   const fromName =
-    input.direction === "codex" ? input.sourceAlias : display.displayAlias;
+    profile.fromNameMaxCodepoints === undefined
+      ? input.sourceAlias
+      : display.displayAlias;
   const conversationAttribute =
-    input.direction === "codex"
+    profile.emitConversationAttribute
       ? ` conversation="${input.conversationId}"`
       : "";
   const exactSourceAttribute =
-    input.direction === "claude" && display.shortened
+    profile.fromNameMaxCodepoints !== undefined && display.shortened
       ? ` from-alias="${input.sourceAlias}"`
       : "";
   const replyCommand =
@@ -117,7 +167,8 @@ export function composeProvenanceEnvelope(
     ` --alias ${input.targetAlias}`;
   const hint =
     `<embassy-reply-hint conversation="${input.conversationId}"` +
-    ` reply-as="${input.targetAlias}"${exactSourceAttribute}>` +
+    ` reply-as="${input.targetAlias}"${exactSourceAttribute}` +
+    ` from-provider="${input.sourceProvider}">` +
     `Reply by running \`${replyCommand}\` with the reply body on stdin. ` +
     "Caller, conversation, and route policy are rechecked.</embassy-reply-hint>";
   const trackMarker =
