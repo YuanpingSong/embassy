@@ -47,3 +47,30 @@ first as this ticket; implementation splits priced from the design's
 remainder maps (standing rule).
 
 **Budgets**: size 8 (design). Implementation sized after design acceptance.
+
+## Charter addendum: the stateless Codex transport is the centerpiece (2026-08-16)
+
+Founder, after the second attach incident in one day: restarts of the App
+Server or Desktop are ROUTINE user behavior; manual troubleshooting after
+them is unacceptable; four releases of patching the same seam (v1.2 boot
+reactivation, v1.5 generation sentinel, v1.6 re-arm, v1.7 exact-generation
+activation) means the dance itself is the defect. "Think from the ground up
+and think about what the user wants."
+
+DESIGN CENTERPIECE, and the first implementation slice of v1.8: the Codex
+transport rebuilt stateless in the ACP client's shape. A route is
+(alias, durable thread ID) — no endpoint generation, no persisted endpoint
+evidence, no stale lifecycle. Every dispatch is connection-per-operation:
+attest socket path (OS boundary kept) → connect → initialize →
+thread/resume --excludeTurns (idempotent; existing privacy-preserving call)
+→ turn → receipt. Daemon restarts are invisible to the next dispatch;
+mid-turn death settles UNKNOWN under the ambiguity law. ChatGPT Desktop is
+demoted to a viewer — its attachment state affects nothing operational
+(evidence: main took turns with Desktop dead this morning). One best-effort
+notification subscription remains for steering/busy freshness, reconnecting
+with backoff, never able to block dispatch. Expected deletions: succession
+machinery (~1,037 lines), endpoint-refresh/activation choreography, the
+route-staleness lifecycle — the incident CLASS, not the incident.
+
+emb-75 remains the deliberately small v1.7.1 interim (guidance regression
+fix + orphan detector) so diagnostics are truthful until this lands.
