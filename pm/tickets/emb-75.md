@@ -151,3 +151,13 @@ dashboards; normalized JSON + localized remedy as display copy; lazy-attach
 pending founder verification; auto-relaunch design-note only. Window
 approved (prefer new codex-doctor module; DECLINED.md superseding record if
 applicable). TICKET CAP: ≤2,000 changed lines total, E5/R3.
+
+## Contest #16 (window, pre-gate) — GRANTED
+
+check-npm-package.mjs in window for exactly one codex-doctor allowlist line
+(new runtime module imported by server.ts; closed GATEWAY_RUNTIME_MODULES
+would fail or omit it at the package gate). Third catch of the emb-56
+manifest-scar class, second pre-gate. Ledger 16/16. v1.8 NOTE filed with the
+grant: consider deriving the runtime allowlist from the module graph at
+package time — a hand-list with three catches is a deletion-by-construction
+candidate.
