@@ -214,7 +214,7 @@ export type ClaudePeerConnect = (socketPath: string) => Socket;
 export type ClaudePeerAdapterOptions = {
   sessionsDir: string;
   socketDir: string;
-  /** Bounded version evidence attested by the trusted launcher, never user input. */
+  /** Bounded metadata from the attested runtime, never user input. */
   attestedClaudeCodeVersion: string;
   /** Locale for bounded user-visible gateway notices written to Claude. */
   locale?: DashboardLocale;
@@ -588,7 +588,6 @@ function parseRegistryRecord(
     "cwd",
     "startedAt",
     "procStart",
-    "version",
     "peerProtocol",
     "kind",
     "entrypoint",
@@ -614,7 +613,9 @@ function parseRegistryRecord(
   ) {
     return undefined;
   }
-  const versionObserved = isCompatibilityVersionEvidence(value.version);
+  const versionObserved =
+    value.version === undefined ||
+    isCompatibilityVersionEvidence(value.version);
 
   if (value.pid !== expectedPid) return undefined;
   if (

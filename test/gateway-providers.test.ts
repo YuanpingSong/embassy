@@ -546,14 +546,10 @@ async function waitFor(
 
 function claudeRuntime(
   claudeCodeVersion = "2.1.227",
-  launcherVersionEvidence?: string,
 ): AttestedClaudePeerRuntime {
   return {
     claudeExecutable: "/synthetic/home/.local/share/claude/versions/2.1.227",
     claudeCodeVersion,
-    ...(launcherVersionEvidence === undefined
-      ? {}
-      : { launcherVersionEvidence }),
     sessionsDir: "/synthetic/home/.claude/sessions",
     socketDir: "/synthetic/tmp/cc-socks",
   };

@@ -176,6 +176,7 @@ async function addPeer(
     recordPid?: number;
     cwd?: string;
     version?: string;
+    omitVersion?: boolean;
     nameSource?: string | null;
     omitStatus?: boolean;
     handler?: (socket: net.Socket) => void;
@@ -199,7 +200,12 @@ async function addPeer(
       cwd: input.cwd ?? current.workspace,
       startedAt: 1_786_148_832_556,
       procStart: "Sat Aug  8 00:27:11 2026",
-      version: input.version ?? CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+      ...(input.omitVersion
+        ? {}
+        : {
+            version:
+              input.version ?? CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+          }),
       peerProtocol: input.peerProtocol ?? 1,
       kind: input.kind ?? "interactive",
       entrypoint: "cli",
@@ -792,16 +798,45 @@ test("discovery rejects unsupported peer protocols per record", async (t) => {
   assert.equal(result.parseableRecords, 0);
 });
 
-test("discovery treats bounded Claude versions as metadata per record", async (t) => {
+test("absent and bounded Claude versions remain metadata through delivery", async (t) => {
   const current = await fixture(t);
-  await addPeer(current, { pid: 42_113, version: "3.0.0" });
+  let connections = 0;
+  await addPeer(current, {
+    pid: 42_113,
+    version: "3.0.0",
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
+  await addPeer(current, {
+    pid: 42_115,
+    sessionId: SESSION_TWO,
+    omitVersion: true,
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
   await addPeer(current, { pid: 42_114, version: "not-a-version" });
 
   const result = await current.adapter.discover();
-  assert.equal(result.peers.length, 1);
+  assert.equal(result.peers.length, 2);
   assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
-  assert.equal(result.entriesScanned, 2);
-  assert.equal(result.parseableRecords, 1);
+  assert.equal(result.entriesScanned, 3);
+  assert.equal(result.parseableRecords, 2);
+  for (const target of result.peers) {
+    await current.adapter.assertTargetWorkspaceDisjoint(
+      target.targetId,
+      current.stateDir,
+    );
+    const sent = await current.adapter.send(
+      target.targetId,
+      "version metadata does not fence the route",
+    );
+    assert.equal(sent.transportStatus, "transport_written");
+  }
+  assert.equal(connections, 2);
 });
 
 test("discovery excludes a marked Embassy helper advertisement before peer accounting", async (t) => {
