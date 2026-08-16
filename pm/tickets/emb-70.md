@@ -36,8 +36,9 @@ attestation, not loose lookup; preserve pre/post-write uncertainty; keep
 refresh freeze/settlement/CAS; no migration/prune/support-manifest runtime
 concept appears.
 
-**Budgets**: E5/R3. Caps REVISED by contest #11: ≤3,200 source + ≤5,200
-tests touched (≤8,400 total). Expected net unchanged: strongly negative.
+**Budgets**: E5/R3. Caps REVISED by contest #11 as amended: ≤3,200 source +
+≤6,000 tests touched (≤9,200 total). Expected net unchanged: strongly
+negative.
 
 ## Contest #11 (budget, 2026-08-16) — GRANTED
 
@@ -53,3 +54,14 @@ PM-set; retaining dead authority tests to fit them would fail the ticket.
 Ledger: 11/11 engineer-correct. Added SLICE READY requirement: touched-line
 accounting split into deleted-dead-authority / added-best-effort /
 added-rewritten-tests / emb-68 shim lines.
+
+## Contest #11 amendment (same day)
+
+Engineer's post-freeze remainder map corrected its own test estimate:
+gateway-providers.test.ts alone needs ~1,500–1,850 touched lines (the file
+absorbed the entire probe/two-factor/fake-refresh apparatus across
+emb-58/59/60); 4,113 current + that surgery projects 5,600–5,950. Test cap
+amended 5,200 → 6,000; source cap unchanged. Engineer re-froze on the stale
+grant rather than riding it — correct. Messages crossed once (delayed-echo
+class, retro item stands). RETRO RULE from this contest: de-ceremony batch
+caps are set from a frozen-lane remainder map, not from design-stage tables.
