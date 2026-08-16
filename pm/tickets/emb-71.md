@@ -41,3 +41,17 @@ against the landed acp-client, zero overlap with emb-70's authority seam
 (main cutting it concurrently). E3, new-files-only window.
 Phase 2 (HELD until emb-70 lands): deliverables (1) and (3) — the Claude
 version-read decision needs the post-cutover seam to exist.
+
+## Phase 1 LANDED (2026-08-16)
+
+swe3 SLICE READY: base bf56bee verified, patch frozen (SHA-256 e16b5491…),
++400/-0, exactly one new file (test/acp-protocol-core.test.ts), window
+honored (no source, no existing tests, no emb-70 seam). Smell-check clean
+(fake child + in-memory streams only, no timers/network/env). 11 focused
+tests with explicit non-duplication ownership vs the emb-67 unit suite;
+notable coverage: closed-child late same-ID frames cannot settle a new
+connection; delivered receipts cannot be downgraded by later process death;
+no replay after uncertainty (exactly one wire write per prompt); cross-
+session contamination of the 64 KiB bound ruled out. PM gate: isolated
+worktree, check 858 pass / 0 fail (counts from output). Phase 2 remains
+HELD on emb-70.
