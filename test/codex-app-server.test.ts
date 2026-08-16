@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setImmediate as delayImmediate } from "node:timers/promises";
 import { test } from "node:test";
 
 import {
   CODEX_APP_SERVER_V1_METHODS,
+  CODEX_PROBE_EFFORT,
+  CODEX_PROBE_MODEL_PREFERENCE,
+  CODEX_WRITE_PROBE_INPUT,
   CodexAppServerConnector,
   CodexConnectorError,
   WebSocketDuplexTransport,
@@ -23,6 +29,7 @@ const STEERING_ATTESTATION = {
   requestSchema: "expected-turn-id-text-v1",
   deliveryBoundary: "next-tool-call-boundary",
 } as const;
+const DEFAULT_PROBE_EFFORT = "low";
 
 function futureDeadline(milliseconds = 60_000): string {
   return new Date(Date.now() + milliseconds).toISOString();
@@ -114,6 +121,7 @@ function fixture(
     turnWatchdogMs?: number;
     writesEnabled?: boolean;
     observedSchemaCandidate?: true;
+    writeCompatibilityProbe?: true;
   } = {},
 ): {
   connect: () => Promise<CodexAppServerConnector>;
@@ -173,6 +181,9 @@ function fixture(
           threadId: THREAD_ID,
         },
         transport,
+        ...(options.writeCompatibilityProbe === true
+          ? { writeCompatibilityProbe: true as const }
+          : {}),
         writesEnabled: options.writesEnabled ?? true,
       }),
     events,
@@ -221,6 +232,210 @@ function assertConnectorError(
   code: CodexConnectorError["code"],
 ): boolean {
   return error instanceof CodexConnectorError && error.code === code;
+}
+
+const PROBE_THREAD_ID = "019c0000-0000-7000-8000-000000000059";
+const PROBE_TURN_ID = "turn-write-probe-1";
+
+function unconstrainedRateLimits(
+  overrides: Record<string, unknown> = {},
+): WireRecord {
+  return {
+    rateLimits: {
+      individualLimit: null,
+      primary: null,
+      rateLimitReachedType: null,
+      secondary: null,
+      spendControlReached: false,
+      ...overrides,
+    },
+  };
+}
+
+function probeModelList(
+  efforts: readonly string[] = ["high", DEFAULT_PROBE_EFFORT],
+): WireRecord {
+  return {
+    data: [
+      {
+        hidden: false,
+        model: CODEX_PROBE_MODEL_PREFERENCE[0],
+        supportedReasoningEfforts: efforts.map((reasoningEffort) => ({
+          reasoningEffort,
+        })),
+      },
+    ],
+  };
+}
+
+function probeThreadStartResult(
+  cwd: string,
+  threadId = PROBE_THREAD_ID,
+): WireRecord {
+  return {
+    approvalPolicy: "never",
+    cwd,
+    model: CODEX_PROBE_MODEL_PREFERENCE[0],
+    runtimeWorkspaceRoots: [],
+    sandbox: { type: "readOnly" },
+    thread: {
+      cwd,
+      ephemeral: false,
+      id: threadId,
+      status: { type: "idle" },
+      turns: [],
+    },
+  };
+}
+
+function emitProbeSettings(
+  fake: FakeTransport,
+  cwd: string,
+  effort = DEFAULT_PROBE_EFFORT,
+  threadId = PROBE_THREAD_ID,
+): void {
+  fake.emit({
+    method: "thread/settings/updated",
+    params: {
+      threadId,
+      threadSettings: {
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        collaborationMode: {
+          mode: "default",
+          settings: {
+            model: CODEX_PROBE_MODEL_PREFERENCE[0],
+            reasoning_effort: effort,
+          },
+        },
+        cwd,
+        effort,
+        model: CODEX_PROBE_MODEL_PREFERENCE[0],
+        modelProvider: "openai",
+        sandboxPolicy: { networkAccess: false, type: "readOnly" },
+      },
+    },
+  });
+}
+
+function emitSuccessfulProbeTurn(
+  fake: FakeTransport,
+  cwd: string,
+  threadId = PROBE_THREAD_ID,
+  turnId = PROBE_TURN_ID,
+): void {
+  fake.emit({
+    method: "turn/started",
+    params: {
+      threadId,
+      turn: { id: turnId, items: [], status: "inProgress" },
+    },
+  });
+  fake.emit({
+    method: "item/started",
+    params: {
+      item: { type: "agentMessage" },
+      startedAtMs: 1,
+      threadId,
+      turnId,
+    },
+  });
+  fake.emit({
+    method: "item/completed",
+    params: {
+      completedAtMs: 2,
+      item: { type: "agentMessage" },
+      threadId,
+      turnId,
+    },
+  });
+  fake.emit({
+    method: "turn/completed",
+    params: {
+      threadId,
+      turn: { id: turnId, items: [], status: "completed" },
+    },
+  });
+  fake.emit({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId,
+      tokenUsage: { last: { totalTokens: 17 } },
+      turnId,
+    },
+  });
+}
+
+type ProbeScenarioOptions = {
+  archive?: SendHandler;
+  loadedAfter?: unknown;
+  loadedBefore?: unknown;
+  model?: SendHandler;
+  rateLimits?: SendHandler;
+  settingsEffort?: string;
+  threadStart?: SendHandler;
+  turnStart?: SendHandler;
+  unsubscribe?: SendHandler;
+};
+
+function probeScenarioHandler(
+  cwd: string,
+  options: ProbeScenarioOptions = {},
+): SendHandler {
+  let loadedCalls = 0;
+  return async (message, fake) => {
+    if (message.method === "account/rateLimits/read") {
+      if (options.rateLimits !== undefined) {
+        await options.rateLimits(message, fake);
+      } else {
+        fake.respond(message, unconstrainedRateLimits());
+      }
+    } else if (message.method === "model/list") {
+      if (options.model !== undefined) await options.model(message, fake);
+      else fake.respond(message, probeModelList());
+    } else if (message.method === "thread/loaded/list") {
+      loadedCalls += 1;
+      fake.respond(
+        message,
+        loadedCalls === 1
+          ? (options.loadedBefore ?? { data: [THREAD_ID] })
+          : (options.loadedAfter ?? { data: [THREAD_ID] }),
+      );
+    } else if (message.method === "thread/start") {
+      if (options.threadStart !== undefined) {
+        await options.threadStart(message, fake);
+      } else {
+        emitProbeSettings(fake, cwd, options.settingsEffort);
+        fake.respond(message, probeThreadStartResult(cwd));
+      }
+    } else if (message.method === "turn/start") {
+      if (options.turnStart !== undefined) {
+        await options.turnStart(message, fake);
+      } else {
+        emitSuccessfulProbeTurn(fake, cwd);
+        fake.respond(message, {
+          turn: { id: PROBE_TURN_ID, items: [], status: "completed" },
+        });
+      }
+    } else if (message.method === "turn/interrupt") {
+      fake.respond(message, {});
+    } else if (message.method === "thread/archive") {
+      if (options.archive !== undefined) await options.archive(message, fake);
+      else fake.respond(message, {});
+    } else if (message.method === "thread/unsubscribe") {
+      if (options.unsubscribe !== undefined) {
+        await options.unsubscribe(message, fake);
+      } else {
+        fake.respond(message, { status: "unsubscribed" });
+      }
+    }
+  };
+}
+
+async function createProbeCwd(): Promise<string> {
+  const cwd = await mkdtemp(join(tmpdir(), "emb59-connector-probe-"));
+  await chmod(cwd, 0o700);
+  return cwd;
 }
 
 test("WebSocket transport treats nullish send callbacks as success", async () => {
@@ -352,8 +567,12 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
   assert.equal(JSON.stringify(events).includes(experimentalSentinel), false);
 
   assert.deepEqual(CODEX_APP_SERVER_V1_METHODS, [
+    "account/rateLimits/read",
+    "model/list",
+    "thread/archive",
     "thread/loaded/list",
     "thread/resume",
+    "thread/start",
     "thread/unsubscribe",
     "turn/start",
     "turn/steer",
@@ -362,7 +581,6 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
   for (const forbidden of [
     "thread/list",
     "thread/read",
-    "thread/archive",
     "thread/delete",
     "thread/shellCommand",
     "config/read",
@@ -442,6 +660,925 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
   assert.equal(incompatibleTransport.sent.length, 0);
 
   await connector.close();
+});
+
+test("the bounded write probe pins policy, tolerates response races, and confirms cleanup", async (t) => {
+  const cwd = await createProbeCwd();
+  t.after(async () => rm(cwd, { recursive: true, force: true }));
+  const current = fixture(probeScenarioHandler(cwd), {
+    writeCompatibilityProbe: true,
+  });
+  const connector = await current.connect();
+
+  assert.deepEqual(CODEX_PROBE_EFFORT, [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+  ]);
+
+  const initialize = current.transport.sent[0]?.params as WireRecord;
+  const capabilities = initialize.capabilities as WireRecord;
+  assert.equal(
+    (capabilities.optOutNotificationMethods as unknown[]).includes(
+      "item/started",
+    ),
+    false,
+  );
+  const result = await connector.runWriteCompatibilityProbe({
+    cwd,
+    forbiddenThreadIds: [],
+  });
+  assert.deepEqual(result, {
+    archivedThreadCount: 1,
+    outcome: "pass",
+    settingsEchoObserved: true,
+    tokenCount: 17,
+  });
+  assert.equal(JSON.stringify(result).includes(PROBE_THREAD_ID), false);
+  assert.equal(JSON.stringify(result).includes(CODEX_WRITE_PROBE_INPUT), false);
+  assert.deepEqual(requestMethods(current.transport), [
+    "initialize",
+    "account/rateLimits/read",
+    "model/list",
+    "thread/loaded/list",
+    "thread/start",
+    "turn/start",
+    "thread/archive",
+    "thread/unsubscribe",
+    "thread/loaded/list",
+  ]);
+
+  const request = (method: string) =>
+    current.transport.sent.find((message) => message.method === method);
+  assert.equal(request("account/rateLimits/read")?.params, null);
+  assert.deepEqual(request("model/list")?.params, {
+    includeHidden: true,
+    limit: 100,
+  });
+  assert.deepEqual(request("thread/start")?.params, {
+    allowProviderModelFallback: false,
+    approvalPolicy: "never",
+    cwd,
+    dynamicTools: [],
+    environments: [],
+    ephemeral: false,
+    model: CODEX_PROBE_MODEL_PREFERENCE[0],
+    runtimeWorkspaceRoots: [],
+    sandbox: "read-only",
+    selectedCapabilityRoots: [],
+  });
+  assert.deepEqual(request("turn/start")?.params, {
+    approvalPolicy: "never",
+    cwd,
+    effort: DEFAULT_PROBE_EFFORT,
+    environments: [],
+    input: [{ text: CODEX_WRITE_PROBE_INPUT, type: "text" }],
+    model: CODEX_PROBE_MODEL_PREFERENCE[0],
+    runtimeWorkspaceRoots: [],
+    sandboxPolicy: { networkAccess: false, type: "readOnly" },
+    threadId: PROBE_THREAD_ID,
+  });
+  assert.deepEqual(request("thread/archive")?.params, {
+    threadId: PROBE_THREAD_ID,
+  });
+
+  const sentAfterFirstAttempt = current.transport.sent.length;
+  assert.deepEqual(
+    await connector.runWriteCompatibilityProbe({
+      cwd,
+      forbiddenThreadIds: [],
+    }),
+    {
+      outcome: "fail",
+      safeErrorCode: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+      settingsEchoObserved: false,
+    },
+  );
+  assert.equal(current.transport.sent.length, sentAfterFirstAttempt);
+  await connector.close();
+
+  await t.test("records an absent settings echo without requiring it", async () => {
+    const withoutEcho = fixture(
+      probeScenarioHandler(cwd, {
+        threadStart: (message, fake) =>
+          fake.respond(message, probeThreadStartResult(cwd)),
+      }),
+      { writeCompatibilityProbe: true },
+    );
+    const withoutEchoConnector = await withoutEcho.connect();
+    assert.deepEqual(
+      await withoutEchoConnector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        archivedThreadCount: 1,
+        outcome: "pass",
+        settingsEchoObserved: false,
+        tokenCount: 17,
+      },
+    );
+    await withoutEchoConnector.close();
+  });
+
+  await t.test("rejects a settings echo that changes the selected effort", async () => {
+    const mismatch = fixture(
+      probeScenarioHandler(cwd, { settingsEffort: "high" }),
+      { writeCompatibilityProbe: true },
+    );
+    const mismatchConnector = await mismatch.connect();
+    assert.deepEqual(
+      await mismatchConnector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        archivedThreadCount: 1,
+        outcome: "fail",
+        safeErrorCode: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+        settingsEchoObserved: true,
+      },
+    );
+    assert.equal(requestMethods(mismatch.transport).includes("turn/start"), false);
+    await mismatchConnector.close();
+  });
+});
+
+test("the write probe declines before creation at the reviewed quota and model boundaries", async (t) => {
+  const rateCases: Array<[string, unknown]> = [
+    [
+      "reached flag",
+      unconstrainedRateLimits({ rateLimitReachedType: "primary" }),
+    ],
+    ["spend control", unconstrainedRateLimits({ spendControlReached: true })],
+    [
+      "individual remainder",
+      unconstrainedRateLimits({ individualLimit: { remainingPercent: 5 } }),
+    ],
+    ["primary window", unconstrainedRateLimits({ primary: { usedPercent: 95 } })],
+    [
+      "preferred Codex secondary window",
+      {
+        ...unconstrainedRateLimits(),
+        rateLimitsByLimitId: {
+          codex: {
+            individualLimit: null,
+            primary: null,
+            rateLimitReachedType: null,
+            secondary: { usedPercent: 95 },
+            spendControlReached: false,
+          },
+        },
+      },
+    ],
+  ];
+  for (const [name, rateResult] of rateCases) {
+    await t.test(name, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(
+        probeScenarioHandler(cwd, {
+          rateLimits: (message, fake) => fake.respond(message, rateResult),
+        }),
+        { writeCompatibilityProbe: true },
+      );
+      const connector = await current.connect();
+      assert.deepEqual(
+        await connector.runWriteCompatibilityProbe({
+          cwd,
+          forbiddenThreadIds: [],
+        }),
+        {
+          outcome: "fail",
+          safeErrorCode: "CODEX_WRITE_PROBE_RATE_LIMIT_CONSTRAINED",
+          settingsEchoObserved: false,
+        },
+      );
+      assert.equal(requestMethods(current.transport).includes("model/list"), false);
+      assert.equal(requestMethods(current.transport).includes("thread/start"), false);
+      await connector.close();
+    });
+  }
+
+  const modelCases: Array<[string, SendHandler]> = [
+    ["missing", (message, fake) => fake.respond(message, { data: [] })],
+    [
+      "hidden",
+      (message, fake) =>
+        fake.respond(message, {
+          data: [
+            {
+              ...((probeModelList().data as WireRecord[])[0] ?? {}),
+              hidden: true,
+            },
+          ],
+        }),
+    ],
+    [
+      "no recognized effort",
+      (message, fake) =>
+        fake.respond(message, {
+          data: [
+            {
+              ...((probeModelList().data as WireRecord[])[0] ?? {}),
+              supportedReasoningEfforts: [
+                null,
+                {},
+                { reasoningEffort: "future" },
+              ],
+            },
+          ],
+        }),
+    ],
+    [
+      "later duplicate cannot rescue the first visible row",
+      (message, fake) =>
+        fake.respond(message, {
+          data: [
+            {
+              hidden: false,
+              model: CODEX_PROBE_MODEL_PREFERENCE[0],
+              supportedReasoningEfforts: [{ reasoningEffort: "future" }],
+            },
+            ...((probeModelList(["none"]).data as WireRecord[]) ?? []),
+          ],
+        }),
+    ],
+    ["RPC rejected", (message, fake) => fake.reject(message)],
+  ];
+  for (const [name, model] of modelCases) {
+    await t.test(`model pin ${name}`, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(probeScenarioHandler(cwd, { model }), {
+        writeCompatibilityProbe: true,
+      });
+      const connector = await current.connect();
+      assert.deepEqual(
+        await connector.runWriteCompatibilityProbe({
+          cwd,
+          forbiddenThreadIds: [],
+        }),
+        {
+          outcome: "fail",
+          safeErrorCode: "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE",
+          settingsEchoObserved: false,
+        },
+      );
+      assert.equal(requestMethods(current.transport).includes("thread/start"), false);
+      await connector.close();
+    });
+  }
+
+  const effortCases: Array<{
+    expected: string;
+    modelResult: WireRecord;
+    name: string;
+  }> = [
+    {
+      expected: "none",
+      modelResult: probeModelList([...CODEX_PROBE_EFFORT].reverse()),
+      name: "canonical order beats advertised order",
+    },
+    {
+      expected: "high",
+      modelResult: {
+        data: [
+          {
+            hidden: false,
+            model: "other-model",
+            supportedReasoningEfforts: [{ reasoningEffort: "none" }],
+          },
+          {
+            hidden: true,
+            model: CODEX_PROBE_MODEL_PREFERENCE[0],
+            supportedReasoningEfforts: [{ reasoningEffort: "none" }],
+          },
+          ...((probeModelList(["high"]).data as WireRecord[]) ?? []),
+        ],
+      },
+      name: "unpinned and hidden rows cannot donate a cheaper effort",
+    },
+  ];
+  for (const currentCase of effortCases) {
+    await t.test(currentCase.name, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(
+        probeScenarioHandler(cwd, {
+          model: (message, fake) =>
+            fake.respond(message, currentCase.modelResult),
+          settingsEffort: currentCase.expected,
+        }),
+        { writeCompatibilityProbe: true },
+      );
+      const connector = await current.connect();
+      assert.equal(
+        (await connector.runWriteCompatibilityProbe({
+          cwd,
+          forbiddenThreadIds: [],
+        })).outcome,
+        "pass",
+      );
+      assert.equal(
+        (current.transport.sent.find((message) =>
+          message.method === "turn/start")?.params as WireRecord).effort,
+        currentCase.expected,
+      );
+      await connector.close();
+    });
+  }
+});
+
+test("the write probe rejects reused identities and unproved fresh-thread fences", async (t) => {
+  const cases: Array<{
+    name: string;
+    forbidden?: string[];
+    loadedBefore?: unknown;
+    result: (cwd: string) => WireRecord;
+    archived: boolean;
+  }> = [
+    {
+      name: "route sentinel",
+      result: (cwd) => probeThreadStartResult(cwd, THREAD_ID),
+      archived: false,
+    },
+    {
+      name: "forbidden retained route",
+      forbidden: [PROBE_THREAD_ID],
+      result: (cwd) => probeThreadStartResult(cwd),
+      archived: false,
+    },
+    {
+      name: "already loaded identity",
+      loadedBefore: { data: [THREAD_ID, PROBE_THREAD_ID] },
+      result: (cwd) => probeThreadStartResult(cwd),
+      archived: false,
+    },
+    {
+      name: "non-v7 identity",
+      result: (cwd) => probeThreadStartResult(cwd, "not-a-v7-identity"),
+      archived: false,
+    },
+    {
+      name: "already active thread",
+      result: (cwd) => {
+        const result = probeThreadStartResult(cwd);
+        (result.thread as WireRecord).status = { type: "active" };
+        return result;
+      },
+      archived: false,
+    },
+    {
+      name: "ephemeral thread",
+      result: (cwd) => {
+        const result = probeThreadStartResult(cwd);
+        (result.thread as WireRecord).ephemeral = true;
+        return result;
+      },
+      archived: false,
+    },
+    {
+      name: "network-enabled sandbox",
+      result: (cwd) => ({
+        ...probeThreadStartResult(cwd),
+        sandbox: { networkAccess: true, type: "readOnly" },
+      }),
+      archived: false,
+    },
+  ];
+  for (const currentCase of cases) {
+    await t.test(currentCase.name, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(
+        probeScenarioHandler(cwd, {
+          ...(currentCase.loadedBefore === undefined
+            ? {}
+            : { loadedBefore: currentCase.loadedBefore }),
+          threadStart: (message, fake) =>
+            fake.respond(message, currentCase.result(cwd)),
+        }),
+        { writeCompatibilityProbe: true },
+      );
+      const connector = await current.connect();
+      const result = await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: currentCase.forbidden ?? [],
+      });
+      assert.deepEqual(result, {
+        ...(currentCase.archived ? { archivedThreadCount: 1 } : {}),
+        outcome: "fail",
+        safeErrorCode: currentCase.archived
+          ? "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED"
+          : "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+        settingsEchoObserved: false,
+      });
+      assert.equal(requestMethods(current.transport).includes("turn/start"), false);
+      assert.equal(
+        requestMethods(current.transport).includes("thread/archive"),
+        currentCase.archived,
+      );
+      await connector.close();
+    });
+  }
+  await t.test("unrelated tool activity does not void probe evidence", async (t) => {
+    const cwd = await createProbeCwd();
+    t.after(async () => rm(cwd, { recursive: true, force: true }));
+    const current = fixture(
+      probeScenarioHandler(cwd, {
+        turnStart: (message, fake) => {
+          fake.emit({
+            method: "item/commandExecution/terminalInteraction",
+            params: { threadId: THREAD_ID, turnId: PROBE_TURN_ID },
+          });
+          emitSuccessfulProbeTurn(fake, cwd);
+          fake.respond(message, {
+            turn: { id: PROBE_TURN_ID, items: [], status: "completed" },
+          });
+        },
+      }),
+      { writeCompatibilityProbe: true },
+    );
+    const connector = await current.connect();
+    assert.deepEqual(
+      await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        archivedThreadCount: 1,
+        outcome: "pass",
+        settingsEchoObserved: true,
+        tokenCount: 17,
+      },
+    );
+    await connector.close();
+  });
+});
+
+test("targeted probe activity and out-of-order lifecycle frames fail before archival", async (t) => {
+  const started = (fake: FakeTransport) =>
+    fake.emit({
+      method: "turn/started",
+      params: {
+        threadId: PROBE_THREAD_ID,
+        turn: { id: PROBE_TURN_ID, items: [], status: "inProgress" },
+      },
+    });
+  const completedItem = (fake: FakeTransport) =>
+    fake.emit({
+      method: "item/completed",
+      params: {
+        completedAtMs: 2,
+        item: { type: "agentMessage" },
+        threadId: PROBE_THREAD_ID,
+        turnId: PROBE_TURN_ID,
+      },
+    });
+  const completedTurn = (fake: FakeTransport) =>
+    fake.emit({
+      method: "turn/completed",
+      params: {
+        threadId: PROBE_THREAD_ID,
+        turn: { id: PROBE_TURN_ID, items: [], status: "completed" },
+      },
+    });
+  const cases: Array<{
+    code:
+      | "CODEX_WRITE_PROBE_MODEL_REROUTED"
+      | "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED"
+      | "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED";
+    emit: (fake: FakeTransport) => void;
+    name: string;
+  }> = [
+    {
+      name: "model reroute",
+      code: "CODEX_WRITE_PROBE_MODEL_REROUTED",
+      emit: (fake) => {
+        started(fake);
+        fake.emit({
+          method: "model/rerouted",
+          params: {
+            fromModel: CODEX_PROBE_MODEL_PREFERENCE[0],
+            reason: "highRiskCyberActivity",
+            threadId: PROBE_THREAD_ID,
+            toModel: "gpt-5.6-sol",
+            turnId: PROBE_TURN_ID,
+          },
+        });
+      },
+    },
+    {
+      name: "model reroute with an unrelated thread id",
+      code: "CODEX_WRITE_PROBE_MODEL_REROUTED",
+      emit: (fake) => {
+        started(fake);
+        fake.emit({
+          method: "model/rerouted",
+          params: {
+            fromModel: CODEX_PROBE_MODEL_PREFERENCE[0],
+            reason: "highRiskCyberActivity",
+            threadId: "unrelated-thread",
+            toModel: "gpt-5.6-sol",
+            turnId: PROBE_TURN_ID,
+          },
+        });
+      },
+    },
+    {
+      name: "model reroute with an unknown reason and no thread id",
+      code: "CODEX_WRITE_PROBE_MODEL_REROUTED",
+      emit: (fake) => {
+        started(fake);
+        fake.emit({
+          method: "model/rerouted",
+          params: {
+            fromModel: CODEX_PROBE_MODEL_PREFERENCE[0],
+            reason: "futureUnknownReason",
+            toModel: "gpt-5.6-sol",
+            turnId: PROBE_TURN_ID,
+          },
+        });
+      },
+    },
+    {
+      name: "tool item before turn start",
+      code: "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
+      emit: (fake) =>
+        fake.emit({
+          method: "item/started",
+          params: {
+            item: { type: "commandExecution" },
+            startedAtMs: 1,
+            threadId: PROBE_THREAD_ID,
+            turnId: PROBE_TURN_ID,
+          },
+        }),
+    },
+    {
+      name: "correlated server request",
+      code: "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
+      emit: (fake) =>
+        fake.emit({
+          id: "probe-server-request",
+          method: "item/tool/call",
+          params: { threadId: PROBE_THREAD_ID, turnId: PROBE_TURN_ID },
+        }),
+    },
+    {
+      name: "item completed before turn start",
+      code: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+      emit: completedItem,
+    },
+    {
+      name: "turn completed before item",
+      code: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+      emit: (fake) => {
+        started(fake);
+        completedTurn(fake);
+      },
+    },
+    {
+      name: "duplicate turn start",
+      code: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+      emit: (fake) => {
+        started(fake);
+        started(fake);
+      },
+    },
+    {
+      name: "passive item after terminal",
+      code: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+      emit: (fake) => {
+        started(fake);
+        completedItem(fake);
+        completedTurn(fake);
+        fake.emit({
+          method: "item/started",
+          params: {
+            item: { type: "reasoning" },
+            startedAtMs: 3,
+            threadId: PROBE_THREAD_ID,
+            turnId: PROBE_TURN_ID,
+          },
+        });
+      },
+    },
+  ];
+  for (const currentCase of cases) {
+    await t.test(currentCase.name, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(
+        probeScenarioHandler(cwd, {
+          turnStart: (message, fake) => {
+            currentCase.emit(fake);
+            fake.respond(message, {
+              turn: { id: PROBE_TURN_ID, items: [], status: "inProgress" },
+            });
+          },
+        }),
+        { writeCompatibilityProbe: true },
+      );
+      const connector = await current.connect();
+      assert.deepEqual(
+        await connector.runWriteCompatibilityProbe({
+          cwd,
+          forbiddenThreadIds: [],
+        }),
+        {
+          archivedThreadCount: 1,
+          outcome: "fail",
+          safeErrorCode: currentCase.code,
+          settingsEchoObserved: true,
+        },
+      );
+      const methods = requestMethods(current.transport);
+      assert.ok(methods.indexOf("turn/interrupt") < methods.indexOf("thread/archive"));
+      await connector.close();
+    });
+  }
+});
+
+test("cleanup uncertainty dominates earlier probe failures and late activity still voids a pass", async (t) => {
+  const cleanupCases: Array<{
+    archived: boolean;
+    name: string;
+    options: ProbeScenarioOptions;
+  }> = [
+    {
+      name: "archive rejected",
+      archived: false,
+      options: { archive: (message, fake) => fake.reject(message) },
+    },
+    {
+      name: "unsubscribe rejected",
+      archived: true,
+      options: { unsubscribe: (message, fake) => fake.reject(message) },
+    },
+    {
+      name: "archived thread remains loaded",
+      archived: true,
+      options: { loadedAfter: { data: [THREAD_ID, PROBE_THREAD_ID] } },
+    },
+    {
+      name: "loaded set remains paginated",
+      archived: true,
+      options: { loadedAfter: { data: [THREAD_ID], nextCursor: "more" } },
+    },
+  ];
+  for (const currentCase of cleanupCases) {
+    await t.test(currentCase.name, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(
+        probeScenarioHandler(cwd, {
+          ...currentCase.options,
+          turnStart: (message, fake) => {
+            fake.emit({
+              method: "turn/started",
+              params: {
+                threadId: PROBE_THREAD_ID,
+                turn: {
+                  id: PROBE_TURN_ID,
+                  items: [],
+                  status: "inProgress",
+                },
+              },
+            });
+            fake.emit({
+              method: "model/rerouted",
+              params: {
+                fromModel: CODEX_PROBE_MODEL_PREFERENCE[0],
+                reason: "highRiskCyberActivity",
+                threadId: PROBE_THREAD_ID,
+                toModel: "gpt-5.6-sol",
+                turnId: PROBE_TURN_ID,
+              },
+            });
+            fake.respond(message, {
+              turn: { id: PROBE_TURN_ID, items: [], status: "inProgress" },
+            });
+          },
+        }),
+        { writeCompatibilityProbe: true },
+      );
+      const connector = await current.connect();
+      assert.deepEqual(
+        await connector.runWriteCompatibilityProbe({
+          cwd,
+          forbiddenThreadIds: [],
+        }),
+        {
+          ...(currentCase.archived ? { archivedThreadCount: 1 } : {}),
+          outcome: "fail",
+          safeErrorCode: "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+          settingsEchoObserved: true,
+        },
+      );
+      await connector.close();
+    });
+  }
+
+  await t.test("late terminal activity", async (t) => {
+    const cwd = await createProbeCwd();
+    t.after(async () => rm(cwd, { recursive: true, force: true }));
+    const current = fixture(
+      probeScenarioHandler(cwd, {
+        archive: (message, fake) => {
+          fake.emit({
+            method: "item/commandExecution/terminalInteraction",
+            params: { threadId: PROBE_THREAD_ID, turnId: PROBE_TURN_ID },
+          });
+          fake.respond(message, {});
+        },
+      }),
+      { writeCompatibilityProbe: true },
+    );
+    const connector = await current.connect();
+    assert.deepEqual(
+      await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        archivedThreadCount: 1,
+        outcome: "fail",
+        safeErrorCode: "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
+        settingsEchoObserved: true,
+        tokenCount: 17,
+      },
+    );
+    await connector.close();
+  });
+
+  await t.test("late activity plus archive rejection", async (t) => {
+    const cwd = await createProbeCwd();
+    t.after(async () => rm(cwd, { recursive: true, force: true }));
+    const current = fixture(
+      probeScenarioHandler(cwd, {
+        archive: (message, fake) => {
+          fake.emit({
+            method: "item/commandExecution/terminalInteraction",
+            params: { threadId: PROBE_THREAD_ID, turnId: PROBE_TURN_ID },
+          });
+          fake.reject(message);
+        },
+      }),
+      { writeCompatibilityProbe: true },
+    );
+    const connector = await current.connect();
+    assert.deepEqual(
+      await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        outcome: "fail",
+        safeErrorCode: "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+        settingsEchoObserved: true,
+        tokenCount: 17,
+      },
+    );
+    await connector.close();
+  });
+});
+
+test("the write probe rejects a cwd mutation despite an otherwise clean turn", async (t) => {
+  const cwd = await createProbeCwd();
+  t.after(async () => rm(cwd, { recursive: true, force: true }));
+  const current = fixture(
+    probeScenarioHandler(cwd, {
+      turnStart: async (message, fake) => {
+        await writeFile(join(cwd, "unexpected"), "mutation");
+        emitSuccessfulProbeTurn(fake, cwd);
+        fake.respond(message, {
+          turn: { id: PROBE_TURN_ID, items: [], status: "completed" },
+        });
+      },
+    }),
+    { writeCompatibilityProbe: true },
+  );
+  const connector = await current.connect();
+  assert.deepEqual(
+    await connector.runWriteCompatibilityProbe({
+      cwd,
+      forbiddenThreadIds: [],
+    }),
+    {
+      archivedThreadCount: 1,
+      outcome: "fail",
+      safeErrorCode: "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
+      settingsEchoObserved: true,
+      tokenCount: 17,
+    },
+  );
+  await connector.close();
+});
+
+test("probe timeouts never retry creation and interrupt only an observed turn", async (t) => {
+  await t.test("ambiguous thread creation", async (t) => {
+    const cwd = await createProbeCwd();
+    t.after(async () => rm(cwd, { recursive: true, force: true }));
+    const current = fixture(
+      probeScenarioHandler(cwd, { threadStart: () => undefined }),
+      { requestTimeoutMs: 10, writeCompatibilityProbe: true },
+    );
+    const connector = await current.connect();
+    assert.deepEqual(
+      await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        outcome: "fail",
+        safeErrorCode: "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+        settingsEchoObserved: false,
+      },
+    );
+    const methods = requestMethods(current.transport);
+    assert.equal(methods.filter((method) => method === "thread/start").length, 1);
+    assert.equal(methods.includes("turn/interrupt"), false);
+    assert.equal(methods.includes("thread/archive"), false);
+    await connector.close();
+  });
+
+  await t.test("observed turn watchdog", async (t) => {
+    const cwd = await createProbeCwd();
+    t.after(async () => rm(cwd, { recursive: true, force: true }));
+    const current = fixture(
+      probeScenarioHandler(cwd, {
+        turnStart: (message, fake) =>
+          fake.respond(message, {
+            turn: { id: PROBE_TURN_ID, items: [], status: "inProgress" },
+          }),
+      }),
+      {
+        requestTimeoutMs: 20,
+        turnWatchdogMs: 5,
+        writeCompatibilityProbe: true,
+      },
+    );
+    const connector = await current.connect();
+    assert.deepEqual(
+      await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [],
+      }),
+      {
+        archivedThreadCount: 1,
+        outcome: "fail",
+        safeErrorCode: "CODEX_WRITE_PROBE_TIMEOUT",
+        settingsEchoObserved: true,
+      },
+    );
+    const methods = requestMethods(current.transport);
+    assert.ok(methods.indexOf("turn/interrupt") < methods.indexOf("thread/archive"));
+    assert.equal(methods.filter((method) => method === "turn/start").length, 1);
+    await connector.close();
+  });
+
+  for (const disconnect of ["error", "close"] as const) {
+    await t.test(`connector ${disconnect} wakes the observed probe`, async (t) => {
+      const cwd = await createProbeCwd();
+      t.after(async () => rm(cwd, { recursive: true, force: true }));
+      const current = fixture(
+        probeScenarioHandler(cwd, {
+          turnStart: (message, fake) => {
+            fake.respond(message, {
+              turn: { id: PROBE_TURN_ID, items: [], status: "inProgress" },
+            });
+            queueMicrotask(() => {
+              if (disconnect === "error") fake.emitError();
+              else void fake.close();
+            });
+          },
+        }),
+        { turnWatchdogMs: 10_000, writeCompatibilityProbe: true },
+      );
+      const connector = await current.connect();
+      const result = await Promise.race([
+        connector.runWriteCompatibilityProbe({
+          cwd,
+          forbiddenThreadIds: [],
+        }),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("probe wait did not wake")), 250),
+        ),
+      ]);
+      assert.deepEqual(result, {
+        outcome: "fail",
+        safeErrorCode: "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+        settingsEchoObserved: true,
+      });
+      assert.equal(
+        requestMethods(current.transport).filter(
+          (method) => method === "thread/start",
+        ).length,
+        1,
+      );
+      await connector.close();
+    });
+  }
 });
 
 test("monitor-only connectors can observe but can never start a turn", async () => {
@@ -2332,13 +3469,24 @@ test("blocks method smuggling and faults on malformed targeted notifications", a
   assert.equal(events.at(-1)?.kind, "server_request_ignored");
 
   const hiddenRequest = connector as unknown as {
-    request: (method: string, params: WireRecord) => Promise<unknown>;
+    request: (method: string, params: WireRecord | null) => Promise<unknown>;
   };
-  await assert.rejects(
-    hiddenRequest.request("thread/list", {}),
-    (error) => assertConnectorError(error, "METHOD_NOT_ALLOWED"),
-  );
-  assert.equal(requestMethods(transport).includes("thread/list"), false);
+  for (const forbiddenMethod of [
+    "thread/list",
+    "account/rateLimits/read",
+    "model/list",
+    "thread/archive",
+    "thread/start",
+  ]) {
+    await assert.rejects(
+      hiddenRequest.request(
+        forbiddenMethod,
+        forbiddenMethod === "account/rateLimits/read" ? null : {},
+      ),
+      (error) => assertConnectorError(error, "METHOD_NOT_ALLOWED"),
+    );
+    assert.equal(requestMethods(transport).includes(forbiddenMethod), false);
+  }
 
   await observeRoute(connector);
   await connector.resumeThread(connector.guard());

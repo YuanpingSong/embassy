@@ -35,7 +35,9 @@ import {
   type GatewayAdapterRouteObservationState,
   type GatewayAdapterRouteState,
   type GatewayAdapterRegistryObservation,
+  type GatewayCompatibilityProbeContext,
   type GatewayProviderAdapter,
+  type GatewayWriteCompatibilityProbeObservation,
 } from "../src/gateway/service.js";
 import {
   GatewayStore,
@@ -353,10 +355,15 @@ class FakeProvider implements GatewayProviderAdapter {
   selectedRouteHandleOverride: string | undefined;
   closed = false;
   compatibilityProbeCalls = 0;
+  compatibilityProbeContexts: GatewayCompatibilityProbeContext[] = [];
   registryObservation: GatewayAdapterRegistryObservation | undefined;
+  writeProbeObservation: GatewayWriteCompatibilityProbeObservation | undefined;
+  writeProbeObservationGenerations: string[] = [];
   compatibilityVersion: string | undefined;
   compatibilitySurface?: () => CompatibilitySurfaceObservation;
-  runCompatibilityProbes?: () => Promise<readonly CompatibilityProbeResult[]>;
+  runCompatibilityProbes?: (
+    context?: GatewayCompatibilityProbeContext,
+  ) => Promise<readonly CompatibilityProbeResult[]>;
   closeError: Error | undefined;
   state: GatewayAdapterRouteState = "idle";
   dispatchResults: GatewayAdapterDispatchResult[] = [];
@@ -463,13 +470,28 @@ class FakeProvider implements GatewayProviderAdapter {
       surface,
       version: this.compatibilityVersion ?? version,
     });
-    this.runCompatibilityProbes = async () => {
+    this.runCompatibilityProbes = async (context) => {
       this.compatibilityProbeCalls += 1;
+      if (context !== undefined) {
+        this.compatibilityProbeContexts.push({
+          forbiddenCodexThreadIds: [...context.forbiddenCodexThreadIds],
+          stateRoot: context.stateRoot,
+        });
+      }
       return compatibilityProbeNames[surface].map((name) => ({
         name,
         outcome: "pass" as const,
       }));
     };
+  }
+
+  latestWriteCompatibilityProbeObservation(
+    endpointGeneration: string,
+  ): GatewayWriteCompatibilityProbeObservation | undefined {
+    this.writeProbeObservationGenerations.push(endpointGeneration);
+    return endpointGeneration === this.identity.endpointGeneration
+      ? this.writeProbeObservation
+      : undefined;
   }
 
   async initialize(callbacks: GatewayAdapterCallbacks) {
@@ -1579,6 +1601,170 @@ test("a compatibility-only observer attests without entering provider state", as
   }).start(), (error: unknown) =>
     error instanceof BridgeError && error.code === "COMPAT_SURFACE_UNDECLARED");
   await rm(undeclared.root, { recursive: true, force: true });
+});
+
+const writeProbeFailureCodes = [
+  "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE",
+  "CODEX_WRITE_PROBE_MODEL_REROUTED",
+  "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+  "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
+  "CODEX_WRITE_PROBE_TIMEOUT",
+  "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+  "CODEX_WRITE_PROBE_RATE_LIMIT_CONSTRAINED",
+] as const;
+
+test("write-probe failures stay Codex-local, alert exactly, and persist no optional evidence", async () => {
+  for (const safeErrorCode of writeProbeFailureCodes) {
+    const current = await fixture();
+    const claude = new FakeProvider("claude");
+    const codex = new FakeProvider("codex");
+    codex.enableCompatibility("0.147.1");
+    codex.writeProbeObservation = Object.freeze({
+      outcome: "fail",
+      safeErrorCode,
+      settingsEchoObserved: false,
+      ...(safeErrorCode === "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED"
+        ? { tokenCount: 17 }
+        : {}),
+    });
+    const service = new GatewayService({
+      config: loadGatewayConfig({
+        EMBASSY_STATE_DIR: current.stateDir,
+        EMBASSY_HOSTS: "this-mac",
+      }),
+      adapters: [claude, codex],
+    });
+    try {
+      await service.start();
+      assert.deepEqual(await service.handlers().health(), {
+        status: "ok",
+        revision: 0,
+      });
+      const snapshot = await service.handlers().listSnapshot();
+      const codexEvidence = snapshot.compatibilityChecks?.find(
+        ({ surface }) => surface === "codex",
+      );
+      assert.equal(codexEvidence?.tier, "schema_attested", safeErrorCode);
+      assert.equal(codexEvidence?.writesCovered, false, safeErrorCode);
+      assert.equal(codexEvidence?.probes.length, 4, safeErrorCode);
+      assert.deepEqual(
+        snapshot.alerts
+          .filter(({ code }) => code === safeErrorCode)
+          .map(({ severity }) => severity),
+        [
+          safeErrorCode === "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED" ||
+          safeErrorCode === "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED"
+            ? "error"
+            : "warning",
+        ],
+        safeErrorCode,
+      );
+      assert.equal(
+        snapshot.connectors.find(({ provider }) => provider === "claude")
+          ?.health,
+        "healthy",
+        safeErrorCode,
+      );
+      assert.equal(
+        (
+          await service.store.inspectCompatibilityAttestations()
+        ).find(({ surface }) => surface === "codex")?.probes.length,
+        4,
+        safeErrorCode,
+      );
+      assert.deepEqual(codex.writeProbeObservationGenerations, [
+        codex.identity.endpointGeneration,
+      ]);
+      assert.equal(codex.compatibilityProbeContexts.length, 1, safeErrorCode);
+      assert.equal(
+        codex.compatibilityProbeContexts[0]?.stateRoot,
+        service.store.rootDir,
+        safeErrorCode,
+      );
+      assert.deepEqual(
+        codex.compatibilityProbeContexts[0]?.forbiddenCodexThreadIds,
+        [],
+        safeErrorCode,
+      );
+      const persisted = await readFile(service.store.stateFilePath, "utf8");
+      assert.equal(persisted.includes("tokenCount"), false, safeErrorCode);
+      assert.equal(
+        persisted.includes("settingsEchoObserved"),
+        false,
+        safeErrorCode,
+      );
+      assert.equal(
+        persisted.includes("archivedThreadCount"),
+        false,
+        safeErrorCode,
+      );
+    } finally {
+      await service.close().catch(() => undefined);
+      await rm(current.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("passing write evidence is derived and persisted without unlocking schema-attested Codex", async () => {
+  const current = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  codex.enableCompatibility("0.147.1");
+  const readProbes = codex.runCompatibilityProbes!;
+  codex.runCompatibilityProbes = async (context) => [
+    ...(await readProbes(context)),
+    { name: "write_attestation", outcome: "pass" as const },
+  ];
+  codex.writeProbeObservation = Object.freeze({
+    archivedThreadCount: 1,
+    outcome: "pass",
+    settingsEchoObserved: true,
+    tokenCount: 17,
+  });
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: current.stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  try {
+    await service.start();
+    const snapshot = await service.handlers().listSnapshot();
+    const codexEvidence = snapshot.compatibilityChecks?.find(
+      ({ surface }) => surface === "codex",
+    );
+    assert.equal(codexEvidence?.tier, "schema_attested");
+    assert.equal(codexEvidence?.writesCovered, true);
+    assert.deepEqual(codexEvidence?.probes.at(-1), {
+      name: "write_attestation",
+      outcome: "pass",
+    });
+    assert.equal(
+      snapshot.alerts.some(({ code }) =>
+        code.startsWith("CODEX_WRITE_PROBE_"),
+      ),
+      false,
+    );
+    const persistedEvidence = (
+      await service.store.inspectCompatibilityAttestations()
+    ).find(({ surface }) => surface === "codex");
+    assert.deepEqual(persistedEvidence?.probes.at(-1), {
+      name: "write_attestation",
+      outcome: "pass",
+    });
+    const persisted = await readFile(service.store.stateFilePath, "utf8");
+    assert.equal(persisted.includes("tokenCount"), false);
+    assert.equal(persisted.includes("settingsEchoObserved"), false);
+    assert.equal(persisted.includes("archivedThreadCount"), false);
+    assert.deepEqual(codex.writeProbeObservationGenerations, [
+      codex.identity.endpointGeneration,
+    ]);
+    assert.equal(codex.compatibilityProbeContexts.length, 1);
+  } finally {
+    await service.close().catch(() => undefined);
+    await rm(current.root, { recursive: true, force: true });
+  }
 });
 
 test("a schema-attested real Codex provider boots monitor-only and later activates only a certified generation", async (t) => {

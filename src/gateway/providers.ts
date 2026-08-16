@@ -1,4 +1,13 @@
 import path from "node:path";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rmdir,
+} from "node:fs/promises";
 
 import { BridgeError } from "../errors.js";
 import {
@@ -32,6 +41,8 @@ import {
   CODEX_APP_SERVER_WRITABLE_VERSIONS,
   CodexAppServerConnector,
   CodexConnectorError,
+  codexWriteProbeFailure,
+  type CodexWriteCompatibilityProbeResult,
   type CodexConnectorEvent,
   type CodexConnectorObservation,
   type CodexTransientTurnResult,
@@ -61,6 +72,8 @@ import type {
   GatewayAdapterRegistryObservation,
   GatewayAdapterStart,
   GatewayProviderAdapter,
+  GatewayCompatibilityProbeContext,
+  GatewayWriteCompatibilityProbeObservation,
 } from "./service.js";
 import type {
   PrivateEndpointIdentity,
@@ -86,6 +99,12 @@ const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
 const MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES = 3;
 const COMPATIBILITY_PROBE_THREAD_ID =
   "00000000-0000-7000-8000-000000000000";
+const CODEX_WRITE_PROBE_DIRECTORY_PREFIX = ".codex-write-probe-";
+const CODEX_WRITE_PROBE_ROOT = "write-probes";
+const MAX_CODEX_WRITE_PROBE_ATTEMPTS = 16;
+const CODEX_WRITE_PROBE_TRANSIENT_ERRNOS = new Set([
+  "EAGAIN", "EIO", "EMFILE", "ENFILE",
+]);
 const CLAUDE_CLEAN_PREWRITE_RETRY_CODES = new Set([
   "CLAUDE_PEER_TARGET_UNKNOWN",
   "CLAUDE_PEER_TARGET_STALE",
@@ -163,6 +182,148 @@ function failedProbe(
   safeErrorCode: string,
 ): CompatibilityProbeResult {
   return { name, outcome: "fail", safeErrorCode };
+}
+
+type CodexWriteProbeDirectoryEvidence = Readonly<{
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  mtimeNs: bigint;
+  uid: bigint;
+}>;
+
+type CodexWriteProbeRootEvidence = Omit<CodexWriteProbeDirectoryEvidence, "mtimeNs">;
+
+function systemErrorCode(error: unknown): string | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : undefined;
+}
+
+function transientCodexWriteProbeError(error: unknown): boolean {
+  return CODEX_WRITE_PROBE_TRANSIENT_ERRNOS.has(systemErrorCode(error) ?? "");
+}
+
+function safeCodexWriteProbeFilesystemFailure(error: unknown): boolean {
+  return (
+    transientCodexWriteProbeError(error) ||
+    systemErrorCode(error) === "ENOTEMPTY" ||
+    (error instanceof BridgeError &&
+      error.code === "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED")
+  );
+}
+
+async function attestCodexWriteProbeDirectory(
+  directory: string,
+): Promise<CodexWriteProbeDirectoryEvidence> {
+  try {
+    const resolved = path.resolve(directory);
+    const [metadata, canonical, entries] = await Promise.all([
+      lstat(resolved, { bigint: true }),
+      realpath(resolved),
+      readdir(resolved),
+    ]);
+    const uid = process.getuid?.();
+    if (
+      uid === undefined ||
+      !metadata.isDirectory() ||
+      canonical !== resolved ||
+      metadata.uid !== BigInt(uid) ||
+      (metadata.mode & 0o777n) !== 0o700n
+    ) {
+      throw new BridgeError(
+        "CODEX_FACTORY_ATTESTATION_INVALID",
+        "The disposable Codex probe directory crossed its ownership, mode, or canonical-path boundary.",
+      );
+    }
+    if (entries.length !== 0) {
+      throw new BridgeError(
+        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+        "The disposable Codex probe directory was not empty.",
+      );
+    }
+    return {
+      dev: metadata.dev,
+      ino: metadata.ino,
+      mode: metadata.mode & 0o777n,
+      mtimeNs: metadata.mtimeNs,
+      uid: metadata.uid,
+    };
+  } catch (error) {
+    if (error instanceof BridgeError) throw error;
+    if (transientCodexWriteProbeError(error)) {
+      throw new BridgeError(
+        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+        "A transient filesystem error prevented disposable probe attestation.",
+      );
+    }
+    throw new BridgeError(
+      "CODEX_FACTORY_ATTESTATION_INVALID",
+      "The disposable Codex probe directory could not be attested safely.",
+    );
+  }
+}
+
+async function attestCodexWriteProbeRoot(
+  root: string,
+): Promise<CodexWriteProbeRootEvidence | null> {
+  try {
+    const resolved = path.resolve(root);
+    const [metadata, canonical] = await Promise.all([
+      lstat(resolved, { bigint: true }),
+      realpath(resolved),
+    ]);
+    const uid = process.getuid?.();
+    if (
+      uid === undefined ||
+      !metadata.isDirectory() ||
+      canonical !== resolved ||
+      metadata.uid !== BigInt(uid) ||
+      (metadata.mode & 0o777n) !== 0o700n
+    ) {
+      throw new BridgeError(
+        "CODEX_FACTORY_ATTESTATION_INVALID",
+        "A controller-owned Codex probe root changed outside its exact owned-directory boundary.",
+      );
+    }
+    return {
+      dev: metadata.dev,
+      ino: metadata.ino,
+      mode: metadata.mode & 0o777n,
+      uid: metadata.uid,
+    };
+  } catch (error) {
+    if (error instanceof BridgeError) throw error;
+    if (transientCodexWriteProbeError(error)) {
+      return null;
+    }
+    throw new BridgeError(
+      "CODEX_FACTORY_ATTESTATION_INVALID",
+      "A controller-owned Codex probe root could not be attested.",
+    );
+  }
+}
+
+function sameCodexWriteProbeDirectory(
+  before: CodexWriteProbeDirectoryEvidence,
+  after: CodexWriteProbeDirectoryEvidence,
+): boolean {
+  return sameCodexWriteProbeRoot(before, after) && before.mtimeNs === after.mtimeNs;
+}
+
+function sameCodexWriteProbeRoot(
+  before: CodexWriteProbeRootEvidence,
+  after: CodexWriteProbeRootEvidence,
+): boolean {
+  return (
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.mode === after.mode &&
+    before.uid === after.uid
+  );
 }
 
 type ClaudePeerFactory = (
@@ -2821,6 +2982,21 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   private endpointActivationRetryTimer: NodeJS.Timeout | undefined;
   private callbackDrainFrozen = false;
+  private readonly writeProbeObservationsByGeneration = new Map<
+    string,
+    GatewayWriteCompatibilityProbeObservation
+  >();
+  private readonly writeProbeResults = new Map<
+    string,
+    Promise<CodexWriteCompatibilityProbeResult>
+  >();
+  private writeProbeOverflow:
+    | Readonly<{
+        endpointGeneration: string;
+        key: string;
+        observation: GatewayWriteCompatibilityProbeObservation;
+      }>
+    | undefined;
   private compatibilityAttested: boolean;
   private compatibilityFailureCode: string | undefined;
   private endpointUnavailable = false;
@@ -2999,12 +3175,36 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
-  async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
-    return await this.runCompatibilityProbesFor(this.factory);
+  latestWriteCompatibilityProbeObservation(
+    endpointGeneration: string,
+  ):
+    | GatewayWriteCompatibilityProbeObservation
+    | undefined {
+    return (
+      this.writeProbeObservationsByGeneration.get(endpointGeneration) ??
+      (this.writeProbeOverflow?.endpointGeneration === endpointGeneration
+        ? this.writeProbeOverflow.observation
+        : undefined)
+    );
+  }
+
+  async runCompatibilityProbes(
+    context?: GatewayCompatibilityProbeContext,
+  ): Promise<readonly CompatibilityProbeResult[]> {
+    return await this.runCompatibilityProbesFor(
+      this.factory,
+      context === undefined
+        ? undefined
+        : {
+            stateRoot: path.resolve(context.stateRoot),
+            forbiddenCodexThreadIds: [...context.forbiddenCodexThreadIds],
+          },
+    );
   }
 
   private async runCompatibilityProbesFor(
     factory: LocalCodexTransportFactory,
+    context?: GatewayCompatibilityProbeContext,
   ): Promise<readonly CompatibilityProbeResult[]> {
     const [installation, control, initialize, threadList] =
       compatibilityProbeNames.codex;
@@ -3016,6 +3216,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       stage = "initialize";
       connector = await CodexAppServerConnector.connect({
         compatibility: factory.schemaCompatibility,
+        ...(context === undefined
+          ? {}
+          : { writeCompatibilityProbe: true as const }),
         writesEnabled: false,
         route: {
           endpointGeneration: factory.endpointGeneration,
@@ -3029,14 +3232,25 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       });
       stage = "thread_list";
       await connector.observeLoadedThread(connector.guard());
-      return [
+      const requiredProbes = [
         passedProbe(installation),
         passedProbe(control),
         passedProbe(initialize),
         passedProbe(threadList),
       ];
+      if (context === undefined) return requiredProbes;
+      const result = await this.runCodexWriteProbe(factory, connector, context);
+      return result.outcome === "pass"
+        ? [...requiredProbes, passedProbe("write_attestation")]
+        : requiredProbes;
     } catch (error) {
-      if (this.isEndpointGenerationChanged(error)) throw error;
+      if (
+        this.isEndpointGenerationChanged(error) ||
+        (error instanceof BridgeError &&
+          error.code === "CODEX_FACTORY_ATTESTATION_INVALID")
+      ) {
+        throw error;
+      }
       if (stage === "transport") {
         const availabilityFailure =
           error instanceof LocalCodexTransportError &&
@@ -3081,6 +3295,193 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         await transport.close();
       }
     }
+  }
+
+  private async runCodexWriteProbe(
+    factory: LocalCodexTransportFactory,
+    connector: CodexAppServerConnector,
+    context: GatewayCompatibilityProbeContext,
+  ): Promise<CodexWriteCompatibilityProbeResult> {
+    const key = `${factory.appServerVersion}\0${factory.endpointGeneration}`;
+    const cached = this.writeProbeResults.get(key);
+    if (cached !== undefined) return await cached;
+    if (this.writeProbeOverflow?.key === key) {
+      return this.writeProbeOverflow.observation;
+    }
+    if (this.writeProbeResults.size >= MAX_CODEX_WRITE_PROBE_ATTEMPTS) {
+      const observation = Object.freeze(
+        codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED"),
+      );
+      this.writeProbeOverflow = Object.freeze({
+        endpointGeneration: factory.endpointGeneration,
+        key,
+        observation,
+      });
+      if (this.callbacks !== undefined) {
+        invokeCallback(() =>
+          this.callbacks?.onProtocolNotice?.({
+            code: observation.safeErrorCode,
+          }),
+        );
+      }
+      return observation;
+    }
+
+    const pending = this.executeCodexWriteProbe(
+      connector,
+      context,
+    ).then((result) => {
+      const observation = Object.freeze({ ...result });
+      this.writeProbeObservationsByGeneration.set(
+        factory.endpointGeneration,
+        observation,
+      );
+      if (observation.outcome === "fail" && this.callbacks !== undefined) {
+        invokeCallback(() =>
+          this.callbacks?.onProtocolNotice?.({
+            code: observation.safeErrorCode,
+          }),
+        );
+      }
+      return observation;
+    });
+    this.writeProbeResults.set(key, pending);
+    return await pending;
+  }
+
+  private async executeCodexWriteProbe(
+    connector: CodexAppServerConnector,
+    context: GatewayCompatibilityProbeContext,
+  ): Promise<CodexWriteCompatibilityProbeResult> {
+    const stateRoot = path.resolve(context.stateRoot);
+    const rootBefore = await attestCodexWriteProbeRoot(stateRoot);
+    if (rootBefore === null) {
+      return codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED");
+    }
+
+    const probeRoot = path.join(stateRoot, CODEX_WRITE_PROBE_ROOT);
+    let probeRootBefore: CodexWriteProbeRootEvidence;
+    try {
+      let created = false;
+      try {
+        await mkdir(probeRoot, { mode: 0o700 });
+        created = true;
+      } catch (error) {
+        if (systemErrorCode(error) !== "EEXIST") throw error;
+      }
+      if (created) await chmod(probeRoot, 0o700);
+      const evidence = await attestCodexWriteProbeRoot(probeRoot);
+      if (evidence === null) {
+        return codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED");
+      }
+      probeRootBefore = evidence;
+    } catch (error) {
+      if (
+        error instanceof BridgeError &&
+        error.code === "CODEX_FACTORY_ATTESTATION_INVALID"
+      ) {
+        throw error;
+      }
+      if (transientCodexWriteProbeError(error)) {
+        return codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED");
+      }
+      throw new BridgeError(
+        "CODEX_FACTORY_ATTESTATION_INVALID",
+        "The controller-owned Codex probe root could not be established safely.",
+      );
+    }
+
+    let cwd: string | undefined;
+    let before: CodexWriteProbeDirectoryEvidence | undefined;
+    let result: CodexWriteCompatibilityProbeResult = codexWriteProbeFailure(
+      "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+    );
+    try {
+      cwd = await mkdtemp(
+        path.join(probeRoot, CODEX_WRITE_PROBE_DIRECTORY_PREFIX),
+      );
+      if (path.dirname(cwd) !== probeRoot) {
+        throw new Error("probe directory escaped its dedicated root");
+      }
+      await chmod(cwd, 0o700);
+      before = await attestCodexWriteProbeDirectory(cwd);
+      result = await connector.runWriteCompatibilityProbe({
+        cwd,
+        forbiddenThreadIds: [
+          ...new Set([
+            COMPATIBILITY_PROBE_THREAD_ID,
+            ...context.forbiddenCodexThreadIds,
+            ...this.trackedRoutes,
+          ]),
+        ],
+      });
+    } catch (error) {
+      if (!safeCodexWriteProbeFilesystemFailure(error)) {
+        if (error instanceof BridgeError) throw error;
+        throw new BridgeError(
+          "CODEX_FACTORY_ATTESTATION_INVALID",
+          "The disposable Codex probe directory could not be established safely.",
+        );
+      }
+      result = codexWriteProbeFailure(
+        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+      );
+    }
+
+    let unchanged = false;
+    let removed = false;
+    if (cwd !== undefined && before !== undefined) {
+      try {
+        const after = await attestCodexWriteProbeDirectory(cwd);
+        unchanged = sameCodexWriteProbeDirectory(before, after);
+        await rmdir(cwd);
+        try {
+          await lstat(cwd);
+        } catch (error) {
+          removed = systemErrorCode(error) === "ENOENT";
+        }
+      } catch (error) {
+        if (!safeCodexWriteProbeFilesystemFailure(error)) {
+          if (error instanceof BridgeError) throw error;
+          throw new BridgeError(
+            "CODEX_FACTORY_ATTESTATION_INVALID",
+            "The disposable Codex probe directory could not be re-attested safely.",
+          );
+        }
+        // Never remove a path after its exact ownership evidence changed.
+      }
+    }
+    if (cwd !== undefined && !removed) {
+      result = codexWriteProbeFailure(
+        "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+        result,
+      );
+    } else if (cwd !== undefined && !unchanged) {
+      result = codexWriteProbeFailure(
+        "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
+        result,
+      );
+    }
+    const [probeRootAfter, rootAfter] = await Promise.all([
+      attestCodexWriteProbeRoot(probeRoot),
+      attestCodexWriteProbeRoot(stateRoot),
+    ]);
+    if (probeRootAfter === null || rootAfter === null) {
+      return codexWriteProbeFailure(
+        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+        result,
+      );
+    }
+    if (
+      !sameCodexWriteProbeRoot(probeRootBefore, probeRootAfter) ||
+      !sameCodexWriteProbeRoot(rootBefore, rootAfter)
+    ) {
+      throw new BridgeError(
+        "CODEX_FACTORY_ATTESTATION_INVALID",
+        "A controller-owned Codex probe root changed while the disposable probe ran.",
+      );
+    }
+    return result;
   }
 
   async initialize(

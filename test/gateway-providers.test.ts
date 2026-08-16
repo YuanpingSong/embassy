@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setImmediate as delayImmediate } from "node:timers/promises";
@@ -49,6 +57,7 @@ import type {
 } from "../src/gateway/types.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
+const WRITE_PROBE_THREAD_ID = "019c0000-0000-7000-8000-000000000059";
 const PROVIDER_MESSAGE_ID = "11111111-1111-4111-8111-111111111111";
 const GATEWAY_MESSAGE_ID = "gateway-message-001";
 const SAFE_WORKSPACE = "/workspace/synthetic-project";
@@ -2727,11 +2736,14 @@ type Wire = Record<string, unknown>;
 class FakeCodexTransport implements LocalCodexOwnedTransport {
   cleanupConfirmed = false;
   closeFailure: Error | undefined;
+  probeCwd: string | undefined;
+  probeCwdMode: number | undefined;
   readonly sent: Wire[] = [];
   private readonly closeListeners = new Set<() => void>();
   private readonly errorListeners = new Set<() => void>();
   private readonly messageListeners = new Set<(payload: string) => void>();
   private resumedThreadId: string;
+  private writeProbeLoaded = false;
 
   constructor(
     private readonly threadIds: readonly string[],
@@ -2739,6 +2751,8 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     private readonly resumeStatus: "idle" | "active",
     private readonly completeInterrupt: boolean,
     private readonly faultAfterResume = false,
+    private readonly writeProbeThreadId?: string,
+    private readonly mutateProbeCwdMode = false,
   ) {
     this.resumedThreadId = threadIds[0] ?? THREAD_ID;
   }
@@ -2763,8 +2777,65 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     this.sent.push(message);
     if (message.method === "initialize") {
       this.respond(message, { platformFamily: "unix", platformOs: "darwin" });
+    } else if (message.method === "account/rateLimits/read") {
+      this.respond(message, {
+        rateLimits: {
+          individualLimit: null,
+          primary: null,
+          rateLimitReachedType: null,
+          secondary: null,
+          spendControlReached: false,
+        },
+      });
+    } else if (message.method === "model/list") {
+      this.respond(message, {
+        data: [
+          {
+            hidden: false,
+            model: "gpt-5.6-luna",
+            supportedReasoningEfforts: [
+              { reasoningEffort: "high" },
+              { reasoningEffort: "low" },
+            ],
+          },
+        ],
+      });
     } else if (message.method === "thread/loaded/list") {
-      this.respond(message, { data: [...this.threadIds] });
+      this.respond(message, {
+        data: [
+          ...new Set([
+            ...this.threadIds,
+            ...(this.writeProbeLoaded && this.writeProbeThreadId !== undefined
+              ? [this.writeProbeThreadId]
+              : []),
+          ]),
+        ],
+      });
+    } else if (
+      message.method === "thread/start" &&
+      this.writeProbeThreadId !== undefined
+    ) {
+      const params = message.params as { cwd?: unknown; model?: unknown };
+      assert.equal(typeof params.cwd, "string");
+      const metadata = await lstat(params.cwd as string);
+      this.probeCwd = params.cwd as string;
+      this.probeCwdMode = metadata.mode & 0o777;
+      if (this.mutateProbeCwdMode) await chmod(this.probeCwd, 0o755);
+      this.writeProbeLoaded = true;
+      this.respond(message, {
+        approvalPolicy: "never",
+        cwd: params.cwd,
+        model: params.model,
+        runtimeWorkspaceRoots: [],
+        sandbox: { type: "readOnly" },
+        thread: {
+          cwd: params.cwd,
+          ephemeral: false,
+          id: this.writeProbeThreadId,
+          status: { type: "idle" },
+          turns: [],
+        },
+      });
     } else if (message.method === "thread/resume") {
       const params = message.params as { threadId?: unknown };
       if (typeof params.threadId === "string") {
@@ -2786,14 +2857,56 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
         queueMicrotask(() => this.faultUnexpectedly());
       }
     } else if (message.method === "turn/start") {
-      this.respond(message, {
-        turn: { id: "turn-provider-1", status: "inProgress" },
-      });
+      const params = message.params as { threadId?: unknown };
+      if (params.threadId === this.writeProbeThreadId) {
+        const turnId = "turn-provider-write-probe";
+        this.emit({
+          method: "turn/started",
+          params: {
+            threadId: this.writeProbeThreadId,
+            turn: { id: turnId, items: [], status: "inProgress" },
+          },
+        });
+        this.emit({
+          method: "item/completed",
+          params: {
+            completedAtMs: 1,
+            item: { type: "agentMessage" },
+            threadId: this.writeProbeThreadId,
+            turnId,
+          },
+        });
+        this.emit({
+          method: "turn/completed",
+          params: {
+            threadId: this.writeProbeThreadId,
+            turn: { id: turnId, items: [], status: "completed" },
+          },
+        });
+        this.emit({
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId: this.writeProbeThreadId,
+            tokenUsage: { last: { totalTokens: 17 } },
+            turnId,
+          },
+        });
+        this.respond(message, {
+          turn: { id: turnId, items: [], status: "completed" },
+        });
+      } else {
+        this.respond(message, {
+          turn: { id: "turn-provider-1", status: "inProgress" },
+        });
+      }
     } else if (message.method === "turn/steer") {
       const params = message.params as { expectedTurnId?: unknown };
       this.respond(message, { turnId: params.expectedTurnId });
     } else if (message.method === "thread/unsubscribe") {
       this.respond(message, { status: "unsubscribed" });
+    } else if (message.method === "thread/archive") {
+      this.writeProbeLoaded = false;
+      this.respond(message, {});
     } else if (message.method === "turn/interrupt") {
       this.respond(message, {});
       if (this.completeInterrupt) {
@@ -2872,6 +2985,8 @@ class FakeCodexFactory {
   closed = false;
   failNextConnect = false;
   readonly connectFailures: Error[] = [];
+  writeProbeThreadId: string | undefined;
+  mutateProbeCwdMode = false;
   nextTransportCloseFailure: Error | undefined;
   faultNextRouteAfterResume = false;
   endpointGenerationChanged = false;
@@ -2924,6 +3039,8 @@ class FakeCodexFactory {
       this.resumeStatus,
       this.completeInterrupt,
       faultAfterResume,
+      this.writeProbeThreadId,
+      this.mutateProbeCwdMode,
     );
     transport.closeFailure = this.nextTransportCloseFailure;
     this.nextTransportCloseFailure = undefined;
@@ -3046,6 +3163,235 @@ test("Codex compatibility check initializes and lists without touching a thread 
   );
   assert.equal(factory.transports[0]!.cleanupConfirmed, true);
   await provider.close();
+});
+
+test("Codex write evidence uses one owned 0700 cwd and one attempt per version generation", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-probe-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+  const context = {
+    forbiddenCodexThreadIds: [THREAD_ID],
+    stateRoot: root,
+  };
+
+  const [first, concurrent] = await Promise.all([
+    provider.runCompatibilityProbes(context),
+    provider.runCompatibilityProbes(context),
+  ]);
+  const cached = await provider.runCompatibilityProbes(context);
+  for (const probes of [first, concurrent, cached]) {
+    assert.deepEqual(probes.at(-1), {
+      name: "write_attestation",
+      outcome: "pass",
+    });
+  }
+  const threadStarts = factory.transports.flatMap((transport) =>
+    transport.sent.filter((message) => message.method === "thread/start"),
+  );
+  assert.equal(threadStarts.length, 1);
+  const probeTransport = factory.transports.find(
+    (transport) => transport.probeCwd !== undefined,
+  );
+  assert.equal(
+    (probeTransport?.sent.find((message) => message.method === "turn/start")
+      ?.params as { effort?: unknown }).effort,
+    "low",
+  );
+  assert.equal(probeTransport?.probeCwdMode, 0o700);
+  const probeRoot = path.join(root, "write-probes");
+  assert.equal(path.dirname(probeTransport?.probeCwd ?? ""), probeRoot);
+  const probeRootMetadata = await lstat(probeRoot);
+  assert.equal(probeRootMetadata.isDirectory(), true);
+  assert.equal(probeRootMetadata.mode & 0o777, 0o700);
+  assert.equal(await realpath(probeRoot), probeRoot);
+  assert.deepEqual(await readdir(probeRoot), []);
+  assert.deepEqual(await readdir(root), ["write-probes"]);
+  assert.deepEqual(
+    provider.latestWriteCompatibilityProbeObservation(
+      factory.endpointGeneration,
+    ),
+    {
+      archivedThreadCount: 1,
+      outcome: "pass",
+      settingsEchoObserved: false,
+      tokenCount: 17,
+    },
+  );
+});
+
+test("Codex write evidence stops at the fixed process attempt bound without eviction", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-bound-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+  const internals = provider as unknown as {
+    writeProbeObservationsByGeneration: Map<string, unknown>;
+    writeProbeResults: Map<string, Promise<unknown>>;
+  };
+  for (let index = 0; index < 16; index += 1) {
+    internals.writeProbeResults.set(`prior-${index}`, Promise.resolve({}));
+  }
+
+  const context = { forbiddenCodexThreadIds: [], stateRoot: root };
+  const first = await provider.runCompatibilityProbes(context);
+  const firstObservation = provider.latestWriteCompatibilityProbeObservation(
+    factory.endpointGeneration,
+  );
+  const repeated = await provider.runCompatibilityProbes(context);
+  assert.deepEqual(first, repeated);
+  assert.equal(first.length, 4);
+  assert.deepEqual(firstObservation, {
+    outcome: "fail",
+    safeErrorCode: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+    settingsEchoObserved: false,
+  });
+  assert.strictEqual(
+    provider.latestWriteCompatibilityProbeObservation(
+      factory.endpointGeneration,
+    ),
+    firstObservation,
+  );
+  assert.equal(internals.writeProbeResults.size, 16);
+  assert.equal(internals.writeProbeObservationsByGeneration.size, 0);
+  assert.equal(
+    factory.transports.flatMap((transport) =>
+      transport.sent.filter((message) => message.method === "thread/start"),
+    ).length,
+    0,
+  );
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("Codex write evidence rejects retained and sentinel thread identities without a turn", async (t) => {
+  for (const [name, threadId, forbidden] of [
+    ["retained", WRITE_PROBE_THREAD_ID, [WRITE_PROBE_THREAD_ID]],
+    ["sentinel", "00000000-0000-7000-8000-000000000000", []],
+  ] as const) {
+    await t.test(name, async (t) => {
+      const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-id-"));
+      const root = await realpath(created);
+      await chmod(root, 0o700);
+      t.after(async () => rm(root, { recursive: true, force: true }));
+      const factory = new FakeCodexFactory(THREAD_ID, true);
+      factory.writeProbeThreadId = threadId;
+      const provider = codexProvider(factory);
+      t.after(async () => provider.close());
+      const probes = await provider.runCompatibilityProbes({
+        forbiddenCodexThreadIds: [...forbidden],
+        stateRoot: root,
+      });
+      assert.deepEqual(probes, probes.slice(0, 4));
+      assert.deepEqual(
+        provider.latestWriteCompatibilityProbeObservation(
+          factory.endpointGeneration,
+        ),
+        {
+          outcome: "fail",
+          safeErrorCode: "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
+          settingsEchoObserved: false,
+        },
+      );
+      const methods = factory.transports.flatMap((transport) =>
+        transport.sent.map((message) => message.method),
+      );
+      assert.equal(methods.filter((method) => method === "thread/start").length, 1);
+      assert.equal(methods.includes("turn/start"), false);
+      assert.equal(methods.includes("thread/archive"), false);
+      assert.deepEqual(await readdir(root), ["write-probes"]);
+      assert.deepEqual(await readdir(path.join(root, "write-probes")), []);
+    });
+  }
+});
+
+test("an unsafe controller state root remains fatal before Codex thread creation", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-root-"));
+  const root = await realpath(created);
+  await chmod(root, 0o755);
+  t.after(async () => {
+    await chmod(root, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+
+  await assert.rejects(
+    provider.runCompatibilityProbes({
+      forbiddenCodexThreadIds: [],
+      stateRoot: root,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_FACTORY_ATTESTATION_INVALID",
+  );
+  assert.equal(
+    factory.transports.some((transport) =>
+      transport.sent.some((message) => message.method === "thread/start"),
+    ),
+    false,
+  );
+});
+
+test("an unsafe Codex write-probe root remains fatal before thread creation", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-parent-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  const probeRoot = path.join(root, "write-probes");
+  await mkdir(probeRoot, { mode: 0o755 });
+  await chmod(probeRoot, 0o755);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+
+  await assert.rejects(
+    provider.runCompatibilityProbes({
+      forbiddenCodexThreadIds: [],
+      stateRoot: root,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_FACTORY_ATTESTATION_INVALID",
+  );
+  assert.equal(
+    factory.transports.some((transport) =>
+      transport.sent.some((message) => message.method === "thread/start"),
+    ),
+    false,
+  );
+});
+
+test("a disposable Codex probe cwd trust change remains fatal", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-child-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  factory.mutateProbeCwdMode = true;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+
+  await assert.rejects(
+    provider.runCompatibilityProbes({
+      forbiddenCodexThreadIds: [],
+      stateRoot: root,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CODEX_FACTORY_ATTESTATION_INVALID",
+  );
 });
 
 test("Codex compatibility probing degrades only reviewed availability failures", async () => {
@@ -3747,7 +4093,11 @@ test("a dead Codex connector becomes stale and auto-recovers without replay", as
   await provider.close();
 });
 
-test("Codex endpoint refresh probes once, coalesces route recovery, and reanchors only loaded threads", async () => {
+test("Codex endpoint refresh probes once, coalesces route recovery, and reanchors only loaded threads", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-refresh-probe-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  t.after(async () => rm(root, { recursive: true, force: true }));
   const secondThread = "00000000-0000-7000-8000-000000000702";
   const firstFactory = retargetCodexFactory(
     new FakeCodexFactory([THREAD_ID, secondThread], true),
@@ -3757,6 +4107,8 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
     new FakeCodexFactory([THREAD_ID], true),
     "local-synthetic-generation-2",
   );
+  firstFactory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  secondFactory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
   let refreshCalls = 0;
   const provider = codexProvider(firstFactory, {
     recoveryInitialMs: 1,
@@ -3765,6 +4117,15 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
       refreshCalls += 1;
       return secondFactory as unknown as LocalCodexTransportFactory;
     },
+  });
+  t.after(async () => provider.close());
+  const bootProbes = await provider.runCompatibilityProbes({
+    forbiddenCodexThreadIds: [],
+    stateRoot: root,
+  });
+  assert.deepEqual(bootProbes.at(-1), {
+    name: "write_attestation",
+    outcome: "pass",
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
@@ -3777,7 +4138,11 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
     routeHandle: secondThread,
   });
   await delayImmediate();
-  const lateFirstListeners = firstFactory.transports[0]!.snapshotMessageListeners();
+  const firstRouteTransport = firstFactory.transports.find((transport) =>
+    transport.sent.some((message) => message.method === "thread/resume"),
+  );
+  assert.ok(firstRouteTransport);
+  const lateFirstListeners = firstRouteTransport.snapshotMessageListeners();
 
   firstFactory.endpointGenerationChanged = true;
   for (const transport of firstFactory.transports) {
@@ -3815,7 +4180,7 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
   );
 
   const routeCountBeforeLateEvent = observed.routes.length;
-  firstFactory.transports[0]!.emitTo(lateFirstListeners, {
+  firstRouteTransport.emitTo(lateFirstListeners, {
     method: "thread/status/changed",
     params: { status: { type: "active" }, threadId: THREAD_ID },
   });
@@ -3867,7 +4232,6 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
     ).length,
     1,
   );
-  await provider.close();
 });
 
 test("Codex endpoint refresh skips a candidate that churns during its compatibility handshake", async () => {
@@ -4619,7 +4983,7 @@ test("callback-published endpoint evidence is never republished by a retained se
   });
   firstFactory.endpointGenerationChanged = true;
   firstFactory.transports[0]!.disconnectUnexpectedly();
-  await waitFor(() => observed.endpointRefreshes.length === 1);
+  await waitFor(() => observed.endpointRefreshes.length === 1, 2_000);
 
   secondFactory.transports.at(-1)!.disconnectUnexpectedly();
   secondFactory.endpointGenerationChanged = true;
