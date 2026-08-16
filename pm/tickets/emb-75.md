@@ -181,3 +181,5 @@ test remains only if the engineer's own environment gates it. Projected
 finish ≤2,500. Ledger 17/17. Review-findings-break-maps noted for retro:
 maps price the known; R3 reviews exist to find the unknown — cap contests
 after review are expected, not failures.
+Engineer self-correction (unprompted): subtotal transposition — authoritative
+split is source/docs +1,294/−152, tests +978/−26; totals/cap unchanged.
