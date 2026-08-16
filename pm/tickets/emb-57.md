@@ -39,3 +39,24 @@ This is the ticket's north star: the prerelease/0.x decision is a waypoint towar
 that asks "what can this build do, proven by probes" rather than "what is this build's number."
 Design promise 1 accordingly: the written decision should state how prerelease handling converges
 with the write-attestation track (emb-49/58/59/60) rather than adding version machinery.
+
+## Window + design ruling (2026-08-16)
+
+**Window APPROVED, exactly three files**: pm/tickets/emb-57.md (the engineer writes the decision
+section — promise 1 — reviewed at landing like any diff), src/gateway/compatibility.ts,
+test/gateway-compatibility.test.ts.
+
+**Design APPROVED as proposed**: (1) bounded SemVer prerelease grammar; certified inventories stay
+stable-only. (2) Prerelease on a supported series may reach schema_attested but is PERMANENTLY
+monitor-only — compatibilityCoversWrites requires stable evidence; even a passing write attestation
+cannot cover prerelease. (3) Series = major for >=1, 0.minor for 0.x; cross-series drift stays
+incompatible until an Embassy release certifies it. (4) Explicitly a waypoint to the founder's
+capability-over-version north star, not new pin machinery.
+
+**Cost accepted and recorded for the retro/release notes**: strict rule 3 means every Codex minor
+bump (0.147→0.148) is monitor-only until a certification release — the hard fence the emb-49 design
+report warned about, priced acceptable because release cadence is fast and emb-60 valves
+same-series stable builds. The north star's capability probes are the eventual dissolution of this
+fence, not tonight's.
+
+Budget: size 2 / <=200 confirmed; concepts 0.
