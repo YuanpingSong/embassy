@@ -518,3 +518,16 @@ broker restart — acceptable since releases restart the broker).
 Budget: the bundle adds ground truth; report actuals against the ≤1,050 revised target and the
 delta will be judged on the same precedent. Bounded follow-up review runs on the correction delta
 only (F2/F5/F6 shapes).
+
+## Founder rulings (2026-08-16, verbatim): pin amended, cardinality ratified
+
+1. **Effort pin AMENDED by founder** ("we can use the lowest effort available instead of a
+   hard-coded minimum. I agree with this amendment"): CODEX_PROBE_EFFORT becomes policy — the
+   lowest effort the pinned model actually advertises, by canonical enum order
+   (none < minimal < low < medium < high < xhigh < max < ultra). Model pin unchanged
+   (gpt-5.6-luna). Still verified: model/rerouted voids, settings echo recorded. Folded into the
+   active correction bundle. Consequence: the pin can now resolve live — the post-correction live
+   proof becomes the FIRST real token measurement, and emb-60's live-passing gate is achievable.
+2. **Cardinality interpretation RATIFIED by founder** ("Our second ruling is also ratified"):
+   the shipped bound stands — one attempt per (version, endpointGeneration) per broker process,
+   every probe archived and cleanup-confirmed, observed counts reported.
