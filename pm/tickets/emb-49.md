@@ -4,6 +4,7 @@ title: Codex write-attestation probe — design pass
 kind: investigation
 size: 2
 status: draft
+release: v1.6
 updated: 2026-08-15
 ---
 

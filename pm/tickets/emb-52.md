@@ -4,6 +4,7 @@ title: Runtime re-anchor must outlive the endpoint transition
 kind: normal
 size: 5
 status: draft
+release: v1.6
 updated: 2026-08-15
 ---
 

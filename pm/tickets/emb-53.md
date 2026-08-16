@@ -4,6 +4,7 @@ title: Lane economics re-baseline under corrected fleet config
 kind: investigation
 size: 1
 status: draft
+release: v1.6
 updated: 2026-08-15
 ---
 
