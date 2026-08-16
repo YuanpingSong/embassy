@@ -39,3 +39,10 @@ text, adapter source/releases):
 
 **Budgets**: size 2, investigation. Read-only: registries, specs, source,
 releases. No harness is launched; no write authority exists or is implied.
+
+## Standing mandate (founder, 2026-08-16)
+
+This ticket is the sole gate on v1.7: if the investigation shows ACP is NOT
+sufficient for Embassy's usage (reliable turn-completion/receipt signals for
+best-effort delivery), the founder revisits the transport ruling. Otherwise
+the PM drives the full v1.7 release to ship without further founder inputs.
