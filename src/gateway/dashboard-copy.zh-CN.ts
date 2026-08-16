@@ -294,6 +294,7 @@ export const dashboardCopyZhCn = {
   "compatibilityTier.schema_attested.writesCovered":
     "实时读写探测通过；本次发布未测试此构建",
   "compatibilityTier.incompatible": "不兼容",
+  "compatibilityTier.notDetected": "未检测到",
   "diagnostics.registry.title": "注册表观察",
   "diagnostics.registry.entriesScanned": "已扫描条目",
   "diagnostics.registry.parseableRecords": "必需字段可解析的记录",

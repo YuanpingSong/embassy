@@ -4,8 +4,10 @@ import {
   isPublicRegistryObservationSnapshot,
 } from "./types.js";
 import {
+  compatibilitySurfaceDefinitions,
   type CompatibilityTier,
   type CompatibilitySurface,
+  type CompatibilitySurfaceDefinition,
 } from "./compatibility.js";
 import type {
   AlertSeverity,
@@ -241,7 +243,7 @@ export type DashboardConnectorRow = Readonly<{
   registry?: DashboardRegistryObservation | undefined;
 }>;
 
-export type DashboardCompatibilityCheckRow = Readonly<{
+type DashboardDetectedCompatibilityCheckRow = Readonly<{
   surface: CompatibilitySurface;
   version: string;
   testedVersion: string;
@@ -251,6 +253,26 @@ export type DashboardCompatibilityCheckRow = Readonly<{
   checkedAt: string;
   failure?: string | undefined;
   safeErrorCode?: string | undefined;
+}>;
+
+export type DashboardCompatibilityCheckRow =
+  | DashboardDetectedCompatibilityCheckRow
+  | Readonly<{
+      surface: CompatibilitySurface;
+      notDetected: true;
+      version?: never;
+      testedVersion?: never;
+      supportedMajor?: never;
+      tier?: never;
+      writesCovered?: never;
+      checkedAt?: never;
+      failure?: never;
+      safeErrorCode?: never;
+    }>;
+
+export type DashboardModelOptions = Readonly<{
+  /** Test-only surface inventory; production uses the declared registry. */
+  compatibilitySurfaceDefinitions?: readonly CompatibilitySurfaceDefinition[];
 }>;
 
 export type DashboardRegistryObservation = Readonly<{
@@ -699,14 +721,16 @@ function normalizedCounters(counters: Partial<RouteCounters> | undefined): Route
 
 export function buildDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
+  options: DashboardModelOptions = {},
 ): DashboardViewModel {
-  return buildProjectedDashboardViewModel(snapshot, false);
+  return buildProjectedDashboardViewModel(snapshot, false, options);
 }
 
 export function buildLiveDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
+  options: DashboardModelOptions = {},
 ): LiveDashboardViewModel {
-  return buildProjectedDashboardViewModel(snapshot, true);
+  return buildProjectedDashboardViewModel(snapshot, true, options);
 }
 
 function routeIsReady(route: DashboardRouteRow): boolean {
@@ -1050,7 +1074,10 @@ function buildMessageGroups(
 function buildProjectedDashboardViewModel(
   snapshot: GatewayPublicSnapshot,
   includeBodies: boolean,
+  options: DashboardModelOptions,
 ): LiveDashboardViewModel {
+  const surfaceDefinitions =
+    options.compatibilitySurfaceDefinitions ?? compatibilitySurfaceDefinitions;
   const generatedAt = normalizedTimestamp(snapshot.generatedAt);
   const inboundMode = snapshot.inboundMode === "open" ? "open" : "paired";
   const validPeers = arePublicAvailablePeerSnapshots(snapshot.availablePeers)
@@ -1300,7 +1327,7 @@ function buildProjectedDashboardViewModel(
       compareText(`${left.provider}\0${left.host}`, `${right.provider}\0${right.host}`),
     )
     .slice(0, DASHBOARD_MODEL_LIMITS.connectors);
-  const compatibilityChecks = (
+  const detectedCompatibilityChecks = (
     Array.isArray(snapshot.compatibilityChecks)
       ? snapshot.compatibilityChecks.filter(isPublicCompatibilityCheckSnapshot)
       : []
@@ -1322,8 +1349,20 @@ function buildProjectedDashboardViewModel(
         ...(issue === undefined ? {} : { safeErrorCode: issue }),
       };
     })
+    .sort((left, right) => compareText(left.surface, right.surface));
+  const detectedSurfaces = new Set(
+    detectedCompatibilityChecks.map(({ surface }) => surface),
+  );
+  const compatibilityChecks: DashboardCompatibilityCheckRow[] = [
+    ...detectedCompatibilityChecks,
+    ...surfaceDefinitions
+      .filter(
+        ({ required, surface }) => !required && !detectedSurfaces.has(surface),
+      )
+      .map(({ surface }) => ({ surface, notDetected: true as const })),
+  ]
     .sort((left, right) => compareText(left.surface, right.surface))
-    .slice(0, 2);
+    .slice(0, surfaceDefinitions.length);
 
   const messages = buildMessageGroups(snapshot.messages, includeBodies);
   const queuedMessages = allRoutes.reduce(

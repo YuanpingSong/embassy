@@ -25,6 +25,7 @@ import {
   type DashboardAttentionItem,
   type DashboardExchangeParty,
   type DashboardMessageGroup,
+  type DashboardModelOptions,
   type DashboardTone,
   type DashboardViewModel,
 } from "./dashboard-model.js";
@@ -58,6 +59,9 @@ export type DashboardRenderOptions = {
   locale?: DashboardLocale;
   /** Deprecated and ignored: v1 snapshots are deliberately inert. */
   refreshSeconds?: number;
+  /** Test-only surface inventory; production uses the declared registry. */
+  compatibilitySurfaceDefinitions?:
+    DashboardModelOptions["compatibilitySurfaceDefinitions"];
 };
 
 const HTML_ESCAPE_PATTERN = /[&<>"']/g;
@@ -625,6 +629,9 @@ function renderDiagnostics(context: RenderContext): string {
   const compatibilityRows = context.model.compatibilityChecks.length === 0
     ? `<tr class="empty-row"><td colspan="8">${t(context, "diagnostics.compatibilityChecks.empty")}</td></tr>`
     : context.model.compatibilityChecks.map((check) => {
+        if ("notDetected" in check) {
+          return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td colspan="7">${statusPill(t(context, "compatibilityTier.notDetected"), "quiet")}</td></tr>`;
+        }
         const tone = check.tier === "certified"
           ? "good"
           : check.tier === "schema_attested"
@@ -921,7 +928,14 @@ export function renderGatewayDashboard(
   const context: RenderContext = {
     locale,
     copy: getDashboardCopy(locale),
-    model: buildDashboardViewModel(snapshot),
+    model: buildDashboardViewModel(snapshot, {
+      ...(options.compatibilitySurfaceDefinitions === undefined
+        ? {}
+        : {
+            compatibilitySurfaceDefinitions:
+              options.compatibilitySurfaceDefinitions,
+          }),
+    }),
   };
   const languageFile = locale === "en" ? DASHBOARD_FILE_NAME : DASHBOARD_ZH_CN_FILE_NAME;
   const generatedAt = context.model.generatedAt === undefined

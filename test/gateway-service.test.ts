@@ -51,6 +51,7 @@ import {
   compatibilityProbeNames,
   type CompatibilityAttestation,
   type CompatibilityProbeResult,
+  type CompatibilitySurfaceDefinition,
   type CompatibilitySurfaceObservation,
 } from "../src/gateway/compatibility.js";
 import {
@@ -1417,6 +1418,125 @@ test("automatic compatibility probes run fresh and admit untested passing schema
   );
   await drifted.close();
   await rm(driftFixture.root, { recursive: true, force: true });
+});
+
+test("optional compatibility surfaces distinguish absence, presence, and failed probes", async () => {
+  const optionalCodex = [
+    { surface: "claude", required: true },
+    { surface: "codex", required: false },
+  ] as const satisfies readonly CompatibilitySurfaceDefinition[];
+
+  const absentFixture = await fixture();
+  const absentClaude = new FakeProvider("claude");
+  const absent = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: absentFixture.stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [absentClaude],
+    compatibilitySurfaceDefinitions: optionalCodex,
+  });
+  await absent.start();
+  assert.equal(absentClaude.compatibilityProbeCalls, 1);
+  assert.deepEqual(
+    (await absent.handlers().listSnapshot()).compatibilityChecks?.map(
+      ({ surface }) => surface,
+    ),
+    ["claude"],
+  );
+  await absent.close();
+  await rm(absentFixture.root, { recursive: true, force: true });
+
+  const presentFixture = await fixture();
+  const presentClaude = new FakeProvider("claude");
+  const presentCodex = new FakeProvider("codex");
+  const present = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: presentFixture.stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [presentClaude, presentCodex],
+    compatibilitySurfaceDefinitions: optionalCodex,
+  });
+  await present.start();
+  assert.deepEqual(
+    (await present.handlers().listSnapshot()).compatibilityChecks?.map(
+      ({ surface, tier }) => ({ surface, tier }),
+    ),
+    [
+      { surface: "claude", tier: "certified" },
+      { surface: "codex", tier: "certified" },
+    ],
+  );
+  assert.equal(presentCodex.compatibilityProbeCalls, 1);
+  await present.close();
+  await rm(presentFixture.root, { recursive: true, force: true });
+
+  const failedFixture = await fixture();
+  const failedClaude = new FakeProvider("claude");
+  const failedCodex = new FakeProvider("codex");
+  failedCodex.runCompatibilityProbes = async () =>
+    compatibilityProbeNames.codex.map((name) =>
+      name === "thread_list"
+        ? {
+            name,
+            outcome: "fail" as const,
+            safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",
+          }
+        : { name, outcome: "pass" as const },
+    );
+  const failed = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: failedFixture.stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [failedClaude, failedCodex],
+    compatibilitySurfaceDefinitions: optionalCodex,
+    now: () => new Date("2026-08-16T12:00:00.000Z"),
+  });
+  await failed.start();
+  const failedSnapshot = await failed.handlers().listSnapshot();
+  await failed.close();
+  await rm(failedFixture.root, { recursive: true, force: true });
+  assert.deepEqual(
+    failedSnapshot.compatibilityChecks?.find(
+      ({ surface }) => surface === "codex",
+    ),
+    {
+      schemaVersion: 1,
+      surface: "codex",
+      version: "0.147.0",
+      testedVersion: "0.147.0",
+      supportedMajor: "0",
+      tier: "incompatible",
+      writesCovered: false,
+      checkedAt: failedSnapshot.generatedAt,
+      probes: compatibilityProbeNames.codex.map((name) =>
+        name === "thread_list"
+          ? {
+              name,
+              outcome: "fail",
+              safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",
+            }
+          : { name, outcome: "pass" },
+      ),
+      safeErrorCode: "CODEX_COMPAT_SCHEMA_MISMATCH",
+    },
+  );
+  const requiredFixture = await fixture();
+  const required = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: requiredFixture.stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [new FakeProvider("claude")],
+  });
+  await assert.rejects(
+    required.start(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "COMPAT_PROVIDER_UNAVAILABLE",
+  );
+  await rm(requiredFixture.root, { recursive: true, force: true });
 });
 
 test("a schema-attested real Codex provider boots monitor-only and later activates only a certified generation", async (t) => {
