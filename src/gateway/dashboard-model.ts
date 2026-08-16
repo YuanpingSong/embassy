@@ -246,8 +246,8 @@ export type DashboardConnectorRow = Readonly<{
 type DashboardDetectedCompatibilityCheckRow = Readonly<{
   surface: CompatibilitySurface;
   version: string;
-  testedVersion: string;
-  supportedMajor: string;
+  testedVersion?: string;
+  supportedMajor?: string;
   tier: CompatibilityTier;
   writesCovered: boolean;
   checkedAt: string;
@@ -1096,7 +1096,11 @@ function buildProjectedDashboardViewModel(
       ? snapshot.compatibilityChecks
           .filter(isPublicCompatibilityCheckSnapshot)
           .filter((check) => check.tier === "incompatible")
-          .map((check) => check.surface)
+          .flatMap((check) =>
+            check.surface === "claude" || check.surface === "codex"
+              ? [check.surface]
+              : [],
+          )
       : []),
   ]);
   const peers = validPeers
@@ -1340,8 +1344,12 @@ function buildProjectedDashboardViewModel(
       return {
         surface: attestation.surface,
         version: boundedText(attestation.version),
-        testedVersion: boundedText(attestation.testedVersion),
-        supportedMajor: boundedText(attestation.supportedMajor),
+        ...(attestation.testedVersion === undefined
+          ? {}
+          : { testedVersion: boundedText(attestation.testedVersion) }),
+        ...(attestation.supportedMajor === undefined
+          ? {}
+          : { supportedMajor: boundedText(attestation.supportedMajor) }),
         tier: attestation.tier,
         writesCovered: attestation.writesCovered,
         checkedAt: attestation.checkedAt,

@@ -395,8 +395,8 @@ export type PublicConnectorSnapshot = {
  */
 export type PublicCompatibilityCheckSnapshot = CompatibilityAttestation &
   Readonly<{
-    testedVersion: string;
-    supportedMajor: string;
+    testedVersion?: string;
+    supportedMajor?: string;
     writesCovered: boolean;
   }>;
 
@@ -417,13 +417,10 @@ export function projectPublicCompatibilityCheck(
   attestation: CompatibilityAttestation,
 ): PublicCompatibilityCheckSnapshot {
   const reference = publicCompatibilityReference(attestation.surface);
-  if (reference === undefined) {
-    throw new RangeError("COMPATIBILITY_REFERENCE_UNAVAILABLE");
-  }
   return {
     ...attestation,
     probes: attestation.probes.map((probe) => ({ ...probe })),
-    ...reference,
+    ...(reference === undefined ? {} : reference),
     writesCovered: compatibilityCoversWrites(attestation),
   };
 }
@@ -433,12 +430,13 @@ export function isPublicCompatibilityCheckSnapshot(
 ): value is PublicCompatibilityCheckSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
+  const hasTestedVersion = Object.hasOwn(candidate, "testedVersion");
+  const hasSupportedMajor = Object.hasOwn(candidate, "supportedMajor");
   if (
-    !Object.hasOwn(candidate, "testedVersion") ||
-    !Object.hasOwn(candidate, "supportedMajor") ||
+    hasTestedVersion !== hasSupportedMajor ||
     !Object.hasOwn(candidate, "writesCovered") ||
-    typeof candidate.testedVersion !== "string" ||
-    typeof candidate.supportedMajor !== "string" ||
+    (hasTestedVersion && typeof candidate.testedVersion !== "string") ||
+    (hasSupportedMajor && typeof candidate.supportedMajor !== "string") ||
     typeof candidate.writesCovered !== "boolean"
   ) {
     return false;
@@ -452,9 +450,10 @@ export function isPublicCompatibilityCheckSnapshot(
   if (!isCompatibilityAttestation(attestation)) return false;
   const reference = publicCompatibilityReference(attestation.surface);
   return (
-    reference !== undefined &&
-    candidate.testedVersion === reference.testedVersion &&
-    candidate.supportedMajor === reference.supportedMajor &&
+    (reference === undefined
+      ? !hasTestedVersion
+      : candidate.testedVersion === reference.testedVersion &&
+        candidate.supportedMajor === reference.supportedMajor) &&
     candidate.writesCovered === compatibilityCoversWrites(attestation)
   );
 }

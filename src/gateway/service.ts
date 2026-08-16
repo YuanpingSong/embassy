@@ -11,6 +11,7 @@ import {
   type CompatibilityAttestation,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceDefinition,
+  type CompatibilitySurfaceObserver,
   type CompatibilitySurfaceObservation,
 } from "./compatibility.js";
 import {
@@ -601,6 +602,8 @@ export type GatewayServiceOptions = {
   successionGeneration?: () => string;
   /** Test-only surface inventory; production uses the declared registry. */
   compatibilitySurfaceDefinitions?: readonly CompatibilitySurfaceDefinition[];
+  /** Read-only surfaces that are deliberately not routing providers. */
+  compatibilityObservers?: readonly CompatibilitySurfaceObserver[];
 };
 
 function bindingKey(binding: PrivateRouteBinding): string {
@@ -730,6 +733,7 @@ export class GatewayService {
   readonly config: GatewayConfig;
   readonly store: GatewayStore;
   private readonly adapters: readonly GatewayProviderAdapter[];
+  private readonly compatibilityObservers: readonly CompatibilitySurfaceObserver[];
   private readonly compatibilitySurfaceDefinitions:
     readonly CompatibilitySurfaceDefinition[];
   private readonly publishDashboard: typeof publishGatewayDashboard;
@@ -864,6 +868,7 @@ export class GatewayService {
   constructor(options: GatewayServiceOptions) {
     this.config = options.config;
     this.adapters = [...(options.adapters ?? [])];
+    this.compatibilityObservers = [...(options.compatibilityObservers ?? [])];
     this.compatibilitySurfaceDefinitions =
       options.compatibilitySurfaceDefinitions ?? compatibilitySurfaceDefinitions;
     this.publishDashboard = options.publishDashboard ?? publishGatewayDashboard;
@@ -1259,8 +1264,11 @@ export class GatewayService {
   private async runAutomaticCompatibilityProbesLocked(): Promise<
     readonly CompatibilityAttestation[]
   > {
-    const bySurface = new Map(
-      this.adapters.map((adapter) => {
+    const entries: Array<{
+      observer: CompatibilitySurfaceObserver;
+      adapter?: GatewayProviderAdapter;
+    }> = [
+      ...this.adapters.map((adapter) => {
         if (
           adapter.compatibilitySurface === undefined ||
           adapter.runCompatibilityProbes === undefined
@@ -1270,14 +1278,33 @@ export class GatewayService {
             "Every local provider must expose the bounded compatibility probe contract.",
           );
         }
-        const observation = adapter.compatibilitySurface();
-        return [observation.surface, { adapter, observation }] as const;
+        return {
+          observer: adapter as unknown as CompatibilitySurfaceObserver,
+          adapter,
+        };
       }),
+      ...this.compatibilityObservers.map((observer) => ({ observer })),
+    ];
+    const observedEntries = entries.map((entry) => ({
+      ...entry,
+      observation: entry.observer.compatibilitySurface(),
+    }));
+    const bySurface = new Map(
+      observedEntries.map((entry) => [entry.observation.surface, entry] as const),
     );
-    if (bySurface.size !== this.adapters.length) {
+    if (bySurface.size !== entries.length) {
       throw new BridgeError(
         "COMPAT_PROVIDER_UNAVAILABLE",
-        "Each local provider must expose one distinct compatibility surface.",
+        "Each compatibility observer must expose one distinct surface.",
+      );
+    }
+    const declared = new Set(
+      this.compatibilitySurfaceDefinitions.map(({ surface }) => surface),
+    );
+    if ([...bySurface.keys()].some((surface) => !declared.has(surface))) {
+      throw new BridgeError(
+        "COMPAT_SURFACE_UNDECLARED",
+        "Every compatibility observer must use a declared surface.",
       );
     }
 
@@ -1292,11 +1319,13 @@ export class GatewayService {
           "A required compatibility surface is unavailable.",
         );
       }
-      const probes = await entry.adapter.runCompatibilityProbes!();
-      this.captureRegistryObservation(
-        entry.adapter,
-        entry.adapter.latestRegistryObservation?.(),
-      );
+      const probes = await entry.observer.runCompatibilityProbes();
+      if (entry.adapter !== undefined) {
+        this.captureRegistryObservation(
+          entry.adapter,
+          entry.adapter.latestRegistryObservation?.(),
+        );
+      }
       const attestation = evaluateCompatibilityAttestation({
         surface,
         version: entry.observation.version,
@@ -1305,18 +1334,25 @@ export class GatewayService {
         probes,
       });
       await this.store.recordCompatibilityAttestation(attestation);
-      entry.adapter.acceptCompatibilityAttestation(attestation);
-      if (attestation.tier === "incompatible") {
+      entry.observer.acceptCompatibilityAttestation?.(attestation);
+      if (attestation.tier === "incompatible" && entry.adapter !== undefined) {
         const code =
           attestation.safeErrorCode ?? "COMPATIBILITY_CHECK_FAILED";
         this.incompatibleProviderSurfaces.set(
-          this.providerSurfaceKey(surface, entry.adapter.identity.hostId),
+          this.providerSurfaceKey(
+            entry.adapter.identity.provider,
+            entry.adapter.identity.hostId,
+          ),
           code,
         );
         if (surface === "codex") {
           this.activeCodexIncompatibility = structuredClone(attestation);
         }
-      } else if (surface === "codex" && attestation.tier === "schema_attested") {
+      } else if (
+        surface === "codex" &&
+        attestation.tier === "schema_attested" &&
+        entry.adapter !== undefined
+      ) {
         // A live but untested App Server schema is useful for observation only.
         // Fence retained boot reactivation before it can trigger endpoint
         // refresh churn; an explicit registration may still re-probe a later,
@@ -8663,8 +8699,8 @@ export class GatewayService {
       }
       const currentVersions = [
         ...new Set(
-          this.adapters.flatMap((adapter) => {
-            const observation = adapter.compatibilitySurface?.();
+          [...this.adapters, ...this.compatibilityObservers].flatMap((observer) => {
+            const observation = observer.compatibilitySurface?.();
             return observation?.surface === surface ? [observation.version] : [];
           }),
         ),

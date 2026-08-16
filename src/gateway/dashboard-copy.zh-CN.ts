@@ -341,6 +341,7 @@ export const dashboardCopyZhCn = {
   "diagnostics.omissions.activityEvents": "{count} 条操作者操作记录",
   "provider.claude": "Claude",
   "provider.codex": "Codex",
+  "provider.deepseek": "DeepSeek",
   "health.offline": "离线",
   "health.connecting": "连接中",
   "health.healthy": "健康",

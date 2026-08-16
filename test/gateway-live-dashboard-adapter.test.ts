@@ -1608,6 +1608,34 @@ test("diagnosticsProps preserves a quiet optional-surface absence row", () => {
   assert.doesNotMatch(renderedText, /COMPAT_PROVIDER_UNAVAILABLE/u);
 });
 
+test("live diagnostics renders detected DeepSeek quarantine evidence", () => {
+  const model = mutableClone(buildDashboardViewModel(dashboardFixture()));
+  model.compatibilityChecks = [{
+    surface: "deepseek", version: "unknown", tier: "incompatible",
+    writesCovered: false, checkedAt: "2026-08-16T12:00:00.000Z",
+    failure: "version", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE",
+  }];
+  const contexts = (bundle.context.React as {
+    __contexts: Record<string, unknown>[];
+  }).__contexts;
+  contexts[0]!._currentValue = {
+    locale: "en",
+    setLocale: () => undefined,
+    t: (key: string) => ({
+      "provider.deepseek": "DeepSeek",
+      "compatibilityTier.incompatible": "Incompatible",
+    })[key] ?? key,
+  };
+  const diagnosticsTab = (bundle.context.Embassy as Record<string, unknown>)[
+    "DiagnosticsTab"
+  ] as (props: unknown) => unknown;
+  const renderedText = renderStubText(
+    diagnosticsTab({ data: adapter.diagnosticsProps(model) }),
+  );
+  assert.match(renderedText,
+    /DeepSeek[\s\S]*unknown[\s\S]*Incompatible[\s\S]*DEEPSEEK_HARNESS_VERSION_UNPARSEABLE/u);
+});
+
 test("diagnosticsProps preserves bounded connector registry evidence", () => {
   const model = mutableClone(DEGRADED);
   model.connectors = model.connectors.map((connector) =>

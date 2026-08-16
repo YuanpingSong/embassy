@@ -12,6 +12,7 @@ import {
   certifiedCompatibilityVersions,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
+  UNKNOWN_COMPATIBILITY_VERSION,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceDefinition,
 } from "../src/gateway/compatibility.js";
@@ -217,6 +218,36 @@ test("an absent optional compatibility surface renders quietly in both locales",
   assert.match(en, /Codex[\s\S]*Not detected/u);
   assert.match(zh, /Codex[\s\S]*未检测到/u);
   assert.doesNotMatch(en, /Codex[\s\S]*COMPAT_PROVIDER_UNAVAILABLE/u);
+});
+
+test("detected DeepSeek renders quarantined without provider degradation", () => {
+  const snapshot = dashboardFixture();
+  snapshot.compatibilityChecks = [
+    ...(snapshot.compatibilityChecks ?? []),
+    projectPublicCompatibilityCheck(evaluateCompatibilityAttestation({
+      surface: "deepseek",
+      version: UNKNOWN_COMPATIBILITY_VERSION,
+      checkedAt: "2026-08-16T12:00:00.000Z",
+      certifiedVersions: [],
+      probes: compatibilityProbeNames.deepseek.map((name) =>
+        name === "version"
+          ? { name, outcome: "fail", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE" }
+          : { name, outcome: "pass" }),
+    })),
+  ];
+  const model = buildDashboardViewModel(snapshot);
+  const deepseek = model.compatibilityChecks.find(({ surface }) => surface === "deepseek");
+  assert.deepEqual(deepseek, {
+    surface: "deepseek", version: "unknown", tier: "incompatible",
+    writesCovered: false, checkedAt: "2026-08-16T12:00:00.000Z",
+    failure: "version", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE",
+  });
+  assert.equal(model.overall, "ready");
+  assert.equal(model.attention.some(({ provider }) => provider === ("deepseek" as never)), false);
+  assert.match(renderDashboardHtml(snapshot, { locale: "en" }),
+    /DeepSeek[\s\S]*unknown[\s\S]*Incompatible[\s\S]*DEEPSEEK_HARNESS_VERSION_UNPARSEABLE/u);
+  assert.match(renderDashboardHtml(snapshot, { locale: "zh-CN" }),
+    /DeepSeek[\s\S]*unknown[\s\S]*不兼容[\s\S]*DEEPSEEK_HARNESS_VERSION_UNPARSEABLE/u);
 });
 
 test("unsupported provider majors name bounded evidence while the broker stays usable", () => {

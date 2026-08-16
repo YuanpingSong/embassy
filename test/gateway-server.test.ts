@@ -8,6 +8,7 @@ import { CLAUDE_PEER_COMPATIBILITY } from "../src/gateway/claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
 import type { LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
+import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
 import type {
   LocalClaudeGatewayProvider,
@@ -21,6 +22,7 @@ import {
   type GatewayServerReadyResult,
 } from "../src/gateway/server.js";
 import { GatewayStore } from "../src/gateway/store.js";
+import { dashboardFixture } from "./dashboard-fixture.js";
 
 const SYNTHETIC_HOME = "/synthetic/login-home";
 const SYNTHETIC_LAUNCHER = "/synthetic/login-home/.local/bin/claude";
@@ -131,7 +133,7 @@ function signalHarness(): {
   };
 }
 
-test("foreground assembly stays local, enables native messaging, sanitizes, and closes on abort", async () => {
+test("foreground assembly ignores hostile optional detection and renders neutral absence", async () => {
   const stateDir = "/synthetic/controller-state";
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
@@ -209,6 +211,12 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
         codexProviderOptions = options as unknown as Record<string, unknown>;
         return provider(() => events.push("close-codex"));
       },
+      detectDeepSeekSurface: async (options) => {
+        assert.equal(options.loginHome, SYNTHETIC_HOME);
+        assert.equal(options.env, env);
+        events.push("detect-deepseek");
+        throw Object.assign(new Error("hostile PATH entry"), { code: "EACCES" });
+      },
       createService: (options) => {
         serviceOptions = options as unknown as Record<string, unknown>;
         return {
@@ -249,6 +257,9 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
     2,
   );
+  assert.equal(serviceOptions?.compatibilityObservers, undefined);
+  assert.match(renderDashboardHtml(dashboardFixture(), { locale: "en" }),
+    /DeepSeek[\s\S]*Not detected/u);
   assert.deepEqual(ready, [
     {
       status: "ready",
@@ -265,6 +276,7 @@ test("foreground assembly stays local, enables native messaging, sanitizes, and 
     "create-store",
     "create-codex-factory",
     "create-codex",
+    "detect-deepseek",
     "start-service",
     "ready",
     "close-service",

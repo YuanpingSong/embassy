@@ -295,6 +295,7 @@ export const dashboardCopyKeys = [
   "diagnostics.omissions.activityEvents",
   "provider.claude",
   "provider.codex",
+  "provider.deepseek",
   "health.offline",
   "health.connecting",
   "health.healthy",

@@ -62,6 +62,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "dashboard-copy.en",
   "dashboard-copy.zh-CN",
   "dashboard-model",
+  "deepseek-detect",
   "delivery-machine",
   "instance-lease",
   "live-dashboard",

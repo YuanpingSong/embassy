@@ -19,6 +19,10 @@ import {
 } from "./config.js";
 import { DASHBOARD_FILE_NAME } from "./dashboard.js";
 import {
+  detectDeepSeekSurface,
+  type DeepSeekDetectOptions,
+} from "./deepseek-detect.js";
+import {
   acquireGatewayInstanceLease,
   type GatewayInstanceLease,
 } from "./instance-lease.js";
@@ -101,6 +105,9 @@ export type GatewayServerDependencies = {
     options: LocalCodexGatewayProviderOptions,
   ) => GatewayProviderAdapter;
   createIncompatibleCodexProvider?: typeof createIncompatibleCodexGatewayProvider;
+  detectDeepSeekSurface?: (
+    options: DeepSeekDetectOptions,
+  ) => ReturnType<typeof detectDeepSeekSurface>;
   createService?: (options: GatewayServiceOptions) => GatewayServerService;
   addSignalListener?: (
     signal: GatewaySignal,
@@ -278,6 +285,8 @@ export async function runGatewayServer(
   const createIncompatibleCodexProvider =
     dependencies.createIncompatibleCodexProvider ??
     createIncompatibleCodexGatewayProvider;
+  const detectDeepSeek =
+    dependencies.detectDeepSeekSurface ?? detectDeepSeekSurface;
   const createService =
     dependencies.createService ??
     ((serviceOptions) => new GatewayService(serviceOptions));
@@ -524,9 +533,17 @@ export async function runGatewayServer(
             : "CODEX_APP_SERVER_VERSION_UNSUPPORTED"),
       });
     }
+    const deepSeekObserver = await awaitWhileLeaseHeld(
+      detectDeepSeek({ env, loginHome: resolvedLoginHome }).catch(
+        () => undefined,
+      ),
+    );
     const createdService = createService({
       config,
       adapters: [claudeProvider, codexProvider],
+      ...(deepSeekObserver === undefined
+        ? {}
+        : { compatibilityObservers: [deepSeekObserver] }),
       store,
     });
     service = createdService;
