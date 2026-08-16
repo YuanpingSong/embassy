@@ -114,3 +114,40 @@ when their registry record and socket are live — no codex registration, no
 operator command, no manual select-claude. The select-claude wrapper remains
 for NEW selections only; recovery of an existing selection is the broker's
 job.
+
+## Contest #15 SUSTAINED — finding 3 amended; D1 + doctor rulings (2026-08-16)
+
+Engineer's read-only evidence falsified finding 3's mechanism: there is NO
+periodic codex observation loop. The proven chain: service.scheduleDispatch →
+dispatchOne holds the GLOBAL service mutex across adapter.dispatch; the 84s
+Grok prompt therefore queued all codex callbacks behind the mutex (the
+measured CONTROL_TIMEOUTs); KeyedMutex releases in finally; and successful
+heartbeats never emit route observations — lastSeenAt freezing during quiet
+health is the ABSENCE of positive observation by design, not a dead loop.
+The proposed dead-loop regression test would pass today and prove nothing.
+Adjacent real defect found: enqueueCallbackWorkerOnly clears
+callbackScheduled before acquiring and overwrites callbackWorker — waiter
+buildup under long holds. Causation for the hour of registration failures is
+re-attributed primarily to the split-brain (finding 2); the broker restart's
+apparent cure is confounded by the near-simultaneous Desktop flag/attach fix
+— both candidates recorded, honestly unresolved. Ledger: 15/15.
+
+D1 RULED: A + B + coalescing. A = provider I/O outside the service mutex
+with post-I/O revalidation (~180-320, R3, settlement-sensitive — kills the
+user-facing starvation class while routine ACP turns run); B = fixed
+periodic bounded Codex positive observation (~100-180 — required so the 35s
+freshness bound doesn't brand quiet-healthy Codex "degraded"); + the
+evidence-backed callback coalescing (~40-70) with the drain/re-arm test
+folded into A's evidence.
+
+DOCTOR RULED (six points): executable-path identity (attested daemon path;
+/Applications/*.app bundles — bundle id com.openai.codex is tonight's ground
+truth, names lie); distinct-PID holder semantics excluding the daemon's own
+PID (its listener+accepted FDs fooled a watch tonight) and Embassy-owned
+PIDs; 0-external+app-running = split-brain, 0+not-running = orphaned,
+>=1 external desktop PID = attached, inspection failure = unknown; report
+ALL conditions (remedy-actionable first, no masking); static AND live
+dashboards; normalized JSON + localized remedy as display copy; lazy-attach
+pending founder verification; auto-relaunch design-note only. Window
+approved (prefer new codex-doctor module; DECLINED.md superseding record if
+applicable). TICKET CAP: ≤2,000 changed lines total, E5/R3.
