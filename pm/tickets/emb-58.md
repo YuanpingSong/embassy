@@ -3,7 +3,7 @@ id: emb-58
 title: Write-evidence ladder plumbing (49A): optional probes + derived writesCovered
 kind: normal
 size: 2
-status: dispatched
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -50,3 +50,9 @@ wrong — swe3's concurrent emb-52 window contains no dashboard files (its scope
 modules only), so there is no live-app collision and no sequencing needed. Budget unchanged: the
 design's 49A estimate already priced "dashboard model + render." Contest record: 7/7 engineer-correct
 on the core claim; the collision half was checked and cleared rather than inherited.
+
+## Completion (2026-08-16)
+
+Landed on public main @ 29f9a74 (dev 6d2bf3a) after PM read of the full source diff. All four
+promises delivered at exactly the size-2 cap; the v1.5-loads-v1.6 downgrade regression is the
+standing law-2 contract test the design demanded. Zero authority changed.
