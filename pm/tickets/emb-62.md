@@ -3,7 +3,7 @@ id: emb-62
 title: Connector recovery re-arms the endpoint transition — no finite retry cliff
 kind: normal
 size: 3
-status: dispatched
+status: review
 release: v1.6
 updated: 2026-08-16
 ---
@@ -44,3 +44,11 @@ only the GatewayProviderAdapter compatibility-probe interface/context and
 runAutomaticCompatibilityProbesLocked. swe3 (emb-62) owns: route recovery, endpoint-transition,
 dispatch, and delivery-settlement neighborhoods. Neither enters the other's symbols; any collision
 stops and contests through the PM. Landing order decided by the PM at handoff time.
+
+## Landing state (2026-08-16)
+
+Slice accepted: PM full-diff read (36 src lines, all guards verified), authoritative gate 761/761
+(verdict read as value), budget 120/500. Code committed locally on dev; PUBLIC PUSH AND status:
+landed WAIT on promise 4 — the live drill — which is deliberately queued to release time, behind
+emb-59's handoff, so the daemon/Desktop restart it requires never again interrupts a working
+engineer. One drill validates the whole v1.6 fix stack.
