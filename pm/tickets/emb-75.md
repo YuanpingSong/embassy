@@ -38,3 +38,31 @@ lazy-attach observation (attach may complete when a Codex task view opens,
 not at app launch) and verify it, since it changes the guidance text.
 
 **Budgets**: size 3. Remainder map before cutting per standing rule.
+
+## Finding 2 (same evening): split-brain server state blocks registration for ALL tasks
+
+Both engineers' register-codex attempts failed CODEX_ROUTE_SETUP_REJECTED
+("the exact Codex task could not be safely observed and resumed",
+providers.ts:3180-3185). Root cause: registration is a LIVE observe+resume
+ceremony against the managed daemon, but Desktop — unattached after the
+founder's restarts — was serving the live tasks from its PRIVATE App Server;
+the managed daemon correctly refused to resume threads owned elsewhere (the
+v1.0 ownership boundary). One split-brain, two rejections. The PM's stale
+env-trick registration was a real but secondary collision on main's alias
+(cleared by env-attested unregister; that trick is hereby demoted to
+emergency reads only, never standing registrations).
+
+SCOPE ADDITION: the doctor/orphan detector must also detect split-brain —
+managed socket has one holder while ChatGPT Desktop is running ⇒ report
+"Desktop is on a private App Server; its tasks are unreachable by Embassy;
+relaunch: /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT"
+— and the registration rejection copy must name the split-brain state when
+detected, not just "could not be observed".
+
+v1.8 note (ratified centerpiece): under the stateless transport,
+registration = attested record write; per-dispatch proof replaces the setup
+ceremony; this rejection class dies at the design level. OPEN QUESTION for
+the incident record: the scripted `open --env` relaunch did not produce an
+attach tonight though it did this morning — possible Desktop auto-update
+behavior change; founder performing a manual terminal relaunch to
+discriminate.
