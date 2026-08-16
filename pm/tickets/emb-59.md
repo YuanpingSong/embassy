@@ -300,3 +300,221 @@ overcited. Corrected here per gap 12; TTL, if ever wanted, is emb-60-or-later ma
 definitions at the next maintenance pass; items 6-9/11/17 fold into emb-60's design preconditions;
 items 14-16 accepted as implemented. The full 18-item list is the primary input to the
 agents/taste-reviewer.md extraction.
+
+---
+
+## Adversarial review (2026-08-16, fresh opus, frozen 43b7682)
+
+# Adversarial review — emb-59 frozen diff (43b7682, base 7f0821e/3d574ce)
+
+Line numbers are for the post-diff tree (`git show 43b7682:<path>`); doc line numbers are the working tree.
+
+---
+
+## F1 — HIGH. The diff falsifies three shipped security guarantees and touches zero documentation
+
+The ticket's own budget line flagged this: *"first creating method in the allowlist: 6→9 — SECURITY.md-relevant."* Six files changed, none of them docs.
+
+Three published statements are now false:
+
+| Claim | Location | Contradicted by |
+|---|---|---|
+| "Codex's bounded pre-write reads may include `initialize`, `thread/loaded/list`, and registration-time `thread/resume`, **but never `turn/start`**" | `SECURITY.md:184-186`, `SECURITY.md:350-352`, `docs/CONFIGURATION.md:86`, `docs/GATEWAY-ARCHITECTURE.md:37-38`, `:774`, `:1054`, `docs/DASHBOARD.md:90-91`, + both zh-CN mirrors | `src/gateway/codex-app-server.ts:1372` issues `turn/start` from the compatibility probe |
+| "These checks do not route a user message or **start a model turn**" / "These reads do not route a user message, retain history, or **invoke `turn/start`**" | `SECURITY.md:359-360`, `docs/CONFIGURATION.md:90` | same |
+| "App Server methods are allowlisted. Embassy exposes **no archive**, deletion, shell, … method" | `SECURITY.md:203-205` | `src/gateway/codex-app-server.ts:19` adds `thread/archive` to `CODEX_APP_SERVER_V1_METHODS` |
+
+This is not a code defect, but it is the highest-severity gap against the ticket: SECURITY.md is the user-facing contract for exactly the property this slice changes, and it now reads as an affirmative denial of what the code does. It must land in the same commit as the allowlist expansion, not after.
+
+---
+
+## F2 — HIGH. The probe is not boot-scoped; it also fires on the message-dispatch path
+
+`compatibilityProbeContext` is set once at boot (`providers.ts:3165-3170`) and **never cleared**. Every later call to `runCompatibilityProbesFor` therefore builds its connector with `writeCompatibilityProbe: true` (`providers.ts:3187-3189`) and runs the full probe (`providers.ts:3209-3214`).
+
+The reachable non-boot path:
+
+```
+selectRoute (providers.ts:3450)  ← message dispatch
+  → refreshEndpoint("selector")           providers.ts:3504 / 3513 / 3529 / 3533 / 3557
+  → performEndpointRefresh                providers.ts:4248
+  → resolveEndpointRefreshCandidate       providers.ts:4402
+  → runCompatibilityProbesFor(candidate)  providers.ts:4466
+  → runCodexWriteProbe → thread/start + a paid turn
+```
+
+**Scenario:** broker boots and probes. Hours later the Codex App Server restarts. The next Claude→Codex message enters `selectRoute`, triggers an endpoint refresh, gets a new `endpointGeneration` → new `(version, generation)` key → a *new real thread is created and a turn is spent*, synchronously, while the sender's message waits behind it.
+
+Worst-case added latency on that delivery path: 15 s (`account/rateLimits/read`) + 15 (`model/list`) + 15 (`thread/loaded/list`) + 15 (`thread/start`) + 15 (`turn/start`) + up to **120 s** turn watchdog (`DEFAULT_TURN_WATCHDOG_MS`, `codex-app-server.ts:208`; compat connectors do not override it) + cleanup round-trips.
+
+Two aggravating consequences on this path:
+- The fail-safe severity mapping is lost. `captureWriteCompatibilityProbeObservation` (`service.ts:1356-1372`) raises `TOOL_ACTIVITY_OBSERVED` / `CLEANUP_UNCONFIRMED` to `"error"`, but it only runs at boot. On the refresh path the same codes arrive via `onProtocolNotice` and are hard-coded to `"warning"` (`service.ts:1910-1914`). Same event, two severities.
+- Under callback-queue pressure, `protocol_notice` entries are among the two types deliberately evicted to make room (`service.ts:1777-1786`) — a `CLEANUP_UNCONFIRMED` (an unarchived durable thread) can be dropped entirely.
+
+The cardinality ruling technically permits one attempt per `(version, generation)`, so the *count* stays in bounds. But the ruling's rationale is boot ("boot-time re-probes the exception, not the rule"), and paid writes plus multi-minute stalls on the delivery path are a materially different blast radius from what was priced. **No test covers this** — every provider test calls `runCompatibilityProbes(context)` directly; none exercises refresh. Clear `compatibilityProbeContext` after the boot probe, or get an explicit ruling.
+
+---
+
+## F3 — MEDIUM-HIGH. The pin's effort half is requested, never verified; the model echo can be silently skipped
+
+Ticket: *"verified via `model/rerouted` (pin requested is not pin honored)"* and *"verified via `model/rerouted` + settings echo as designed."*
+
+**(a) Effort is never checked against any response.** It is sent only on `turn/start` (`codex-app-server.ts:1375`). The `turn/start` result is validated for shape and status only (`:1383-1395`) — no effort echo. The single effort assertion lives in `thread/settings/updated` and is permissive on absence:
+
+```ts
+(settings.effort !== undefined && settings.effort !== CODEX_PROBE_EFFORT)   // codex-app-server.ts:2493-2495
+```
+
+Missing field ⇒ pass.
+
+**(b) The settings echo can never be evaluated at all.** `this.probeRuntime = runtime` is assigned at `codex-app-server.ts:1371` — *after* the `thread/start` response is awaited at `:1337`. `handlePayload` dispatches every framed message synchronously; the awaiting continuation is a microtask. Any `thread/settings/updated` the App Server emits in the same socket read as the `thread/start` response is processed with `probeRuntime === null`, so `handleProbeNotification` returns `false` at `:2452-2458` and the echo is discarded. Thread creation is the *natural* point for a settings notification, so this is the expected ordering, not an exotic race.
+
+**(c) Absence of the echo is never an error.** Nothing asserts it was observed.
+
+Net: the probe proves the model was echoed on the `thread/start` **result** (`validateProbeThread`, `:1552-1580`) and that no matching `model/rerouted` arrived. Effort is unproven in every case.
+
+Note the test fixture masks (b): `emitSuccessfulProbeTurn` emits `thread/settings/updated` from the **turn/start** handler (patch lines 1401-1428), i.e. the one ordering the code can observe. With the founder's effort decision still open, this matters — if effort is redefined to "lowest advertised," an unverified effort is a direct spend risk.
+
+---
+
+## F4 — MEDIUM. The entire post-creation state machine is fixture-only, and two correlation assumptions fail in opposite directions
+
+The live proof declined at `selectProbeModel`, so everything from `thread/start` onward has never run against a real App Server. No generated schema is checked into the repo, so these two are unverifiable here and load-bearing:
+
+- **`model/rerouted` fails OPEN.** `handleProbeNotification` gates every method on `params.threadId === runtime.threadId` (`codex-app-server.ts:2452-2458`). The `model/rerouted` branch itself only reads `turnId`, `fromModel`, `toModel`, `reason` (`:2505-2517`). If that notification is turn-scoped and carries no `threadId`, it falls through to `return false` — **and the probe can PASS on a substituted model**. Every other gated method fails closed (timeout). This is the one gate whose whole purpose is catching a dishonored pin.
+- **`thread/tokenUsage/updated` may fail CLOSED forever.** The handler requires `observeTurnId(params.turnId)` (`:2519-2521`). If that notification is thread-scoped — as its name suggests — `totalTokens` resolves to `null` and every probe reports `THREAD_SETUP_FAILED` after burning the full 120 s watchdog.
+
+Recommend: fail the probe on *any* `model/rerouted` seen on the probe connector regardless of threadId match, and treat a missing token correlation as "cost unverified" rather than a hard precondition for reaching terminal.
+
+---
+
+## F5 — MEDIUM. `thread/archive` targets an id screened only for freshness, not for "provably ours"
+
+```
+codex-app-server.ts:1349   threadId = this.probeCleanupThreadId(started, loadedBefore, forbidden)
+codex-app-server.ts:1354     if (threadId === null || !this.validateProbeThread(...)) throw
+codex-app-server.ts:1453   finally: if (threadId !== null) → this.request("thread/archive", { threadId })
+```
+
+`probeCleanupThreadId` (`:1533-1551`) checks only uuidv7 / ≠ route thread / ∉ `loadedBefore` / ∉ forbidden. The *strong* evidence that this is our disposable thread — `thread.cwd === our mkdtemp dir`, `turns.length === 0`, `status.type === "idle"` — is computed by `validateProbeThread` (`:1552-1580`) and then **discarded for cleanup purposes**: when it fails, `threadId` is already assigned and the `finally` archives anyway.
+
+Precondition: an App Server whose `thread/start` returns a pre-existing thread. Impossible under reviewed 0.147.0 — **but the probe deliberately runs on unreviewed builds.** `codexVersionFailureCode` (`providers.ts:2810-2825`) gates only on the shared major, so any `0.y.z` reaches the probe; the diff's own service tests use `0.148.0`. `CODEX_APP_SERVER_WRITABLE_VERSIONS` is never consulted on this path.
+
+The forbidden list is otherwise sound (verified: the store invariant at `store.ts:1873-1876` forces codex ⇒ `explicit_opt_in`, exactly the filter `inspectPrivateCodexRoutes` applies, `store.ts:3554`), but `trackedRoutes` is empty at boot, so for an unbound user thread the only barrier is `loadedBefore`.
+
+**Failure scenario:** a 0.148.x App Server with resume-or-create `thread/start` semantics returns an idle, unloaded, never-bound user thread → freshness screen passes → shape check fails → **Embassy archives the user's thread** and reports `CLEANUP_UNCONFIRMED`. Cheap fix: archive only when `validateProbeThread` passed; otherwise report `CLEANUP_UNCONFIRMED` without touching it. Downgraded from HIGH because it needs non-conforming server semantics — but "unreviewed build" is the probe's designed operating envelope.
+
+---
+
+## F6 — MEDIUM. Two throw sites reach the boot catch, against the stated never-throw discipline
+
+`attestCodexWriteProbeStateRoot` (`providers.ts:238-274`) wraps its whole body and converts **every** error — including transient `EMFILE`/`ENFILE`/`EIO` from `lstat`/`realpath` — into `BridgeError("CODEX_FACTORY_ATTESTATION_INVALID")`. `executeCodexWriteProbe` throws the same code again at `:3394-3400`. `runCompatibilityProbesFor` then *explicitly re-throws* it (`:3216-3222`) → `runAutomaticCompatibilityProbesLocked` (`service.ts:1318`) → `start()`'s try → the catch that calls `close()` and rethrows. **The broker does not boot.**
+
+The test `"an unsafe controller state root remains fatal before Codex thread creation"` shows this is deliberate. Two objections:
+
+1. The ticket's promise set is explicit — failures are safe codes + alerts, monitor-only stays bit-for-bit. An evidence probe that "unlocks nothing" should not be able to refuse the whole broker.
+2. The asymmetry is unprincipled: `attestCodexWriteProbeDirectory` failures on the **stronger** check (child dir, includes emptiness) are caught and downgraded to a safe code (`providers.ts:3355-3359`, `:3374-3376`), while the **weaker** state-root check (no emptiness check) is fatal.
+
+Probability is genuinely low — `store.prepareOwnedDirectory` (`store.ts:6792-6885`) already canonicalises the root and asserts `(mode & 0o077) === 0`, and `store.initialize()` runs before the probe, so mode/canonicality cannot realistically differ. Only transient FS errors and out-of-band mutation reach it. Downgraded accordingly. The operator-facing symptom is also misleading: fd exhaustion at boot surfaces as `CODEX_FACTORY_ATTESTATION_INVALID`.
+
+---
+
+## F7 — MEDIUM. The probe cwd is a child of the live gateway state root
+
+`executeCodexWriteProbe` mkdtemps `.codex-write-probe-*` **directly inside `store.rootDir`** (`providers.ts:3336-3342`) — alongside the state file, controller lock, and route bindings.
+
+Codex's `read-only` sandbox constrains writes, not reads. The tool fences are **detective, not preventive**: an unexpected `item/started` with a non-passive type fails the probe (`codex-app-server.ts:2554-2564`) only *after* the read has already been sent to the model provider. The agent's cwd being one level below the broker's private state is an unnecessary adjacency when a dedicated subdirectory yields identical attestation.
+
+Second-order: when the dir's evidence changes, the code deliberately does not `rmdir` (`providers.ts:3363-3376`, *"Never remove a path after its exact ownership evidence changed"*). A tool-touched probe dir therefore leaks **permanently** into the state root, and its path is never reported anywhere.
+
+---
+
+## F8 — MEDIUM-LOW. Measured token cost is dropped on every failure, even when tokens were spent
+
+The fail variant of `CodexWriteCompatibilityProbeResult` (`codex-app-server.ts:185-195`) carries no `tokenCount`.
+
+**Scenario:** the turn completes, `thread/tokenUsage/updated` reports 900 tokens, then `thread/unsubscribe` fails → the `finally` rewrites the result to `CLEANUP_UNCONFIRMED` (`:1481-1488`) and the count is gone. Ruling 3 states *"the measured token count MUST appear in the completion report."* The failure case — precisely when someone will ask what was spent — reports nothing. Carry `tokenCount` on the fail variant.
+
+---
+
+## F9 — MEDIUM-LOW. A dropped connection mid-turn costs the full watchdog and guarantees a durable unarchived thread
+
+`waitForProbeTurn` (`codex-app-server.ts:1581-1601`) waits only on notifications or `turnWatchdogMs`. `settleProbeRuntime` is never called from `protocolFault`, `rejectPending`, or close.
+
+Two consecutive request timeouts already self-fault the connector (`:2073-2081`). If the transport faults during the turn, the probe sleeps the remaining ~120 s, then every cleanup request rejects `CONNECTOR_CLOSED` → `CLEANUP_UNCONFIRMED` **and a created, never-archived probe thread** — exactly the durable residue the founder ruling bounded to "archived." Wake the wait on connection loss.
+
+---
+
+## F10 — LOW. The 16-cap decline is indistinguishable from a real failure, and free declines consume the budget
+
+`writeProbeResults.size >= 16` (`providers.ts:3280`) counts entries created by *declines* too — `MODEL_PIN_UNAVAILABLE`, `RATE_LIMIT_CONSTRAINED` — where nothing was spent and nothing was created. Under today's reality (pin unavailable on every generation, per the catalog diagnostic), a long-lived broker crossing 16 App Server generations enters permanent overflow and then reports `CODEX_WRITE_PROBE_THREAD_SETUP_FAILED` (`:3282-3284`) for a condition that is neither a thread setup nor a failure. Ruling 2 specified that code, so this is as-ordered — flagged only because the alert stream will misstate the cause.
+
+The one-shot property itself **holds**: `get` → `then` → `set` at `:3275-3318` has no `await` between check and insert, and the concurrency test covers it.
+
+---
+
+## F11 / F12 — LOW
+
+- **F11.** `PROBE_TOOL_NOTIFICATION_METHODS` (`codex-app-server.ts:107-116`) includes `item/commandExecution/outputDelta` and `turn/diff/updated`, both of which stay in `OUTPUT_NOTIFICATION_OPT_OUTS` during the probe — the initialize filter re-enables only `item/started` (`:1623-1627`). Two of eight tripwires can never fire. Coverage is preserved through `item/started`'s non-passive-type check, so this is dead code, not a hole — but delete or comment it so a future reader doesn't count them as defence.
+- **F12.** `codex-app-server.ts:2508-2515`: a `model/rerouted` with an unrecognised `reason` reports `THREAD_SETUP_FAILED` instead of `MODEL_REROUTED`. Same severity class, but the alert stream misattributes the one event the pin promise exists to catch.
+
+---
+
+## Verified sound (negative space)
+
+- **Non-probe connectors are bit-identical.** `handleProbeNotification` / `handleServerRequest` hooks short-circuit on `probeRuntime === null` (`:2452`, `:2415`); the opt-out filter yields the identical list when `writeCompatibilityProbe` is false.
+- **The 6→10 allowlist expansion is contained.** All 20 `request()` / `beginRequest()` call sites pass string literals — no dynamic method can reach `request()`. `PROBE_ONLY_METHODS` + the flag (`:2043-2049`) closes the four new methods on every ordinary connector.
+- **A failed probe can never surface as present.** `write_attestation` is appended only on `outcome === "pass"` (`providers.ts:3212-3214`); `hasCurrentProbeSequence` (`compatibility.ts:118-133`) requires optional probes to be ordered *and* passing with no safe code, and `persistedProbeSet` accepts it on reload. Every failure returns `requiredProbes` unchanged → attestation identical to v1.5 (F6 excepted).
+- **Never-throw is airtight everywhere except F6.** The 16-cap path (`invokeCallback` swallows, `providers.ts:458-464`), the rate-limit decline, `normalizeError` (`:2725-2732`), and every live-response parse (`rateLimitConstrained`, `parseLoadedThreadIds`, `selectProbeModel`, `parseTurn` all return `null`, never throw). The try/finally `result` capture is correct: all early `return result` statements precede thread creation, so the `finally`'s downgrades can't be silently bypassed.
+- **Credential/privacy is clean.** No auth material is read. `model/list` yields only the source-constant model name; loaded thread ids are used for membership tests only and never leave memory; `item/completed` inspects `type` and timestamps, never text; alerts carry safe code + provider + host. `forbiddenCodexThreadIds` never goes on the wire.
+- **The forbidden list is complete** for persisted routes — the store's own invariant makes `explicit_opt_in` the only possible codex registration mode.
+- **The owned-cwd chain is sound**: `mkdtemp` under the resolved root, `dirname` re-check, `chmod 0700`, then `lstat` + `realpath` + `isDirectory` + uid + exact `0700` + emptiness in the provider, re-`stat`ed independently in the connector (`:1290-1299`).
+
+## PM integrated rulings on the paired review (2026-08-16) — landing HELD for one correction bundle
+
+**F1 → emb-64 (already filed), scope EXPANDED**: + the SECURITY.md:203 no-archive-method claim; the
+"same commit" demand adapts to our model as: emb-59 and emb-64 land as adjacent commits in one
+sequence, both before the v1.6 tag. Non-negotiable ordering.
+
+**F2 → CORRECTION (the round's real find)**: the probe must be boot-scoped — clear
+compatibilityProbeContext after the boot pass; the endpoint-refresh path runs read probes only.
+Paid writes and multi-minute stalls on the delivery path are outside everything that was priced,
+and the cardinality rationale explicitly assumed boot. Write-attestation-on-refresh, if ever
+wanted, is emb-60+ design with its own ruling. One test: refresh path runs no write probe.
+
+**F3 → CORRECTION (b only)**: assign probeRuntime before awaiting the thread/start response (or
+buffer same-read notifications) so the natural-ordering settings echo is observable; record
+echo-observed/echo-absent in the observation. (a)/(c) stay permissive AS DESIGNED but the
+observation must say which verification actually happened — emb-60's gate reads it.
+
+**F4 → CORRECTION (a)**: any model/rerouted on the probe connector fails the probe regardless of
+threadId correlation — fail-open on the pin's one guard is unacceptable. (b) tokenUsage stays
+strict-fail-closed pending first live passing data; the observation carries enough detail to
+diagnose a thread-scoped-notification server quickly. Re-visit with live evidence.
+
+**F5 → CORRECTION**: archive only a thread validateProbeThread accepted; otherwise report
+CLEANUP_UNCONFIRMED without touching the id. Never archive what we have not proven ours.
+
+**F6 → RULING REFINED (taste ratification stands, adversary's errno point accepted)**: trust
+violations (uid/mode/canonicality mismatch) remain boot-fatal per the ratified reading; transient
+resource errnos (EMFILE/ENFILE/EIO/EAGAIN) are NOT OS-boundary evidence and downgrade to
+THREAD_SETUP_FAILED. Split the mapping.
+
+**F7 → CORRECTION**: probe cwds move under a dedicated child (e.g. <stateRoot>/write-probes/),
+same attestation chain, containing any evidence-changed leak away from live state files.
+
+**F8 → CORRECTION**: fail variant carries tokenCount — Ruling 3's reporting duty applies most
+exactly when tokens were spent and the probe still failed.
+
+**F9 → CORRECTION**: wake waitForProbeTurn on connector fault/close; no full-watchdog sleep into a
+guaranteed unarchived thread.
+
+**F11/F12 → fold as trivia** (delete-or-comment dead tripwires; rerouted-unknown-reason maps to
+MODEL_REROUTED).
+
+**F10 → BACKLOG (emb-60)**: overflow's borrowed THREAD_SETUP code + zero-spend declines consuming
+cap slots (note: a founder pin fix will not retrigger cached declines until generation change or
+broker restart — acceptable since releases restart the broker).
+
+Budget: the bundle adds ground truth; report actuals against the ≤1,050 revised target and the
+delta will be judged on the same precedent. Bounded follow-up review runs on the correction delta
+only (F2/F5/F6 shapes).

@@ -35,3 +35,10 @@ CHANGELOG.md. No source files.
 
 Found by the emb-59 taste review (item 2). The claims are true at HEAD and false after emb-59
 lands — sequence this ticket to land WITH or immediately after emb-59, before the v1.6 tag.
+
+## Scope expansion (2026-08-16, from the adversarial review F1)
+
+Third falsified claim added: SECURITY.md:203-205 "Embassy exposes no archive, deletion, shell, ...
+method" — thread/archive is now allowlisted (probe-only). State the probe-only containment
+precisely. ORDERING REQUIREMENT: this ticket lands adjacent to emb-59 in one sequence, both before
+the v1.6 tag.
