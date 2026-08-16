@@ -3,7 +3,7 @@ id: emb-57
 title: Version semantics: prerelease identifiers and 0.x majors
 kind: normal
 size: 2
-status: dispatched
+status: review
 release: v1.7
 updated: 2026-08-16
 ---
@@ -90,3 +90,11 @@ accounting says otherwise — re-contest at the number, as always.
    but it cannot launder prerelease, unknown-version, or cross-series evidence.
    The accepted present cost is explicit: every Codex minor bump is monitor-only
    until an Embassy release certifies that new 0.x series.
+
+## Landing state (2026-08-16)
+
+Accepted: decision record written-before-code per promise 1 (verbatim the approved design incl.
+the stated strict-series cost); core diff read (bounded prerelease grammar with SemVer leading-zero
+rejection, series function as ruled, stable-only certified validator); gate 774/775 with the sole
+red being the known 1s timing flake (green 77/77 on proper focused rerun; its fix rides emb-59);
+194/200, concepts 0. Committed locally. This closes swe3's dispatched queue for both releases.
