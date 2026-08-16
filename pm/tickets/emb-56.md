@@ -3,7 +3,8 @@ id: emb-56
 title: DeepSeek harness monitor-only attestation (Shape A)
 kind: normal
 size: 3
-status: draft
+status: dispatched
+release: v1.7
 updated: 2026-08-16
 ---
 

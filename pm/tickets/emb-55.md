@@ -3,7 +3,8 @@ id: emb-55
 title: Compatibility surface set tolerates optional and absent surfaces
 kind: normal
 size: 3
-status: draft
+status: dispatched
+release: v1.7
 updated: 2026-08-16
 ---
 
