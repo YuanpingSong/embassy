@@ -5,6 +5,7 @@ import {
   compatibilityCacheKey,
   compatibilityCoversWrites,
   compatibilityProbeNames,
+  compatibilitySurfaceDefinitions,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
   isPersistedCompatibilityAttestation,
@@ -12,6 +13,18 @@ import {
   type CompatibilityProbeResult,
   type CompatibilitySurface,
 } from "../src/gateway/compatibility.js";
+import { gatewayPublicSnapshotLimits } from "../src/gateway/types.js";
+
+test("the declared compatibility inventory remains required and sets snapshot capacity", () => {
+  assert.deepEqual(compatibilitySurfaceDefinitions, [
+    { surface: "claude", required: true },
+    { surface: "codex", required: true },
+  ]);
+  assert.equal(
+    gatewayPublicSnapshotLimits.compatibilityChecks,
+    compatibilitySurfaceDefinitions.length,
+  );
+});
 
 function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {
   return compatibilityProbeNames[surface].map((name) => ({

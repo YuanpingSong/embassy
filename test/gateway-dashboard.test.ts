@@ -13,6 +13,7 @@ import {
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
   type CompatibilityProbeResult,
+  type CompatibilitySurfaceDefinition,
 } from "../src/gateway/compatibility.js";
 import { projectPublicCompatibilityCheck } from "../src/gateway/types.js";
 
@@ -183,6 +184,39 @@ test("diagnostics reduce compatibility to automatic provider safety rows", () =>
   assert.equal(en.includes("COMPATIBILITY_CERTIFICATION_FAILED"), false);
   assert.match(zh, /提供方兼容性/);
   assert.equal(zh.includes("实时认证"), false);
+});
+
+test("an absent optional compatibility surface renders quietly in both locales", () => {
+  const snapshot = dashboardFixture();
+  snapshot.compatibilityChecks = (snapshot.compatibilityChecks ?? []).filter(
+    ({ surface }) => surface === "claude",
+  );
+  const definitions = [
+    { surface: "claude", required: true },
+    { surface: "codex", required: false },
+  ] as const satisfies readonly CompatibilitySurfaceDefinition[];
+  const model = buildDashboardViewModel(snapshot, {
+    compatibilitySurfaceDefinitions: definitions,
+  });
+  assert.deepEqual(model.compatibilityChecks.at(-1), {
+    surface: "codex",
+    notDetected: true,
+  });
+  assert.equal(
+    model.attention.some(({ provider }) => provider === "codex"),
+    false,
+  );
+  const en = renderDashboardHtml(snapshot, {
+    locale: "en",
+    compatibilitySurfaceDefinitions: definitions,
+  });
+  const zh = renderDashboardHtml(snapshot, {
+    locale: "zh-CN",
+    compatibilitySurfaceDefinitions: definitions,
+  });
+  assert.match(en, /Codex[\s\S]*Not detected/u);
+  assert.match(zh, /Codex[\s\S]*未检测到/u);
+  assert.doesNotMatch(en, /Codex[\s\S]*COMPAT_PROVIDER_UNAVAILABLE/u);
 });
 
 test("unsupported provider majors name bounded evidence while the broker stays usable", () => {

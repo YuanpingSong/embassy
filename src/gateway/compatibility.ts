@@ -1,7 +1,18 @@
 import { BridgeError } from "../errors.js";
 
-export const compatibilitySurfaces = ["claude", "codex"] as const;
-export type CompatibilitySurface = (typeof compatibilitySurfaces)[number];
+export const compatibilitySurfaceDefinitions = [
+  { surface: "claude", required: true },
+  { surface: "codex", required: true },
+] as const;
+export type CompatibilitySurface =
+  (typeof compatibilitySurfaceDefinitions)[number]["surface"];
+export type CompatibilitySurfaceDefinition = Readonly<{
+  surface: CompatibilitySurface;
+  required: boolean;
+}>;
+export const compatibilitySurfaces = Object.freeze(
+  compatibilitySurfaceDefinitions.map(({ surface }) => surface),
+);
 
 /** Exact upstream builds exercised by this release's deterministic suite. */
 export const certifiedCompatibilityVersions = Object.freeze({
@@ -71,7 +82,14 @@ const PERSISTED_PROBE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const PERSISTED_PROBE_CAPACITY = 32;
 
 function legacyVersionDriftCode(surface: CompatibilitySurface): string {
-  return surface === "claude" ? "CLAUDE_VERSION_DRIFT" : "CODEX_VERSION_DRIFT";
+  switch (surface) {
+    case "claude":
+      return "CLAUDE_VERSION_DRIFT";
+    case "codex":
+      return "CODEX_VERSION_DRIFT";
+  }
+  const exhaustive: never = surface;
+  return exhaustive;
 }
 
 function unsupportedVersionCode(
@@ -81,9 +99,14 @@ function unsupportedVersionCode(
     certifiedCompatibilityVersions[surface],
 ): string | undefined {
   if (version === UNKNOWN_COMPATIBILITY_VERSION) {
-    return surface === "claude"
-      ? "CLAUDE_VERSION_UNPARSEABLE"
-      : "CODEX_APP_SERVER_VERSION_UNPARSEABLE";
+    switch (surface) {
+      case "claude":
+        return "CLAUDE_VERSION_UNPARSEABLE";
+      case "codex":
+        return "CODEX_APP_SERVER_VERSION_UNPARSEABLE";
+    }
+    const exhaustive: never = surface;
+    return exhaustive;
   }
   if (
     certifiedVersions.some((certifiedVersion) =>
@@ -92,9 +115,14 @@ function unsupportedVersionCode(
   ) {
     return undefined;
   }
-  return surface === "claude"
-    ? "CLAUDE_PEER_VERSION_UNSUPPORTED"
-    : "CODEX_APP_SERVER_VERSION_UNSUPPORTED";
+  switch (surface) {
+    case "claude":
+      return "CLAUDE_PEER_VERSION_UNSUPPORTED";
+    case "codex":
+      return "CODEX_APP_SERVER_VERSION_UNSUPPORTED";
+  }
+  const exhaustive: never = surface;
+  return exhaustive;
 }
 
 function versionMajor(version: string): number {

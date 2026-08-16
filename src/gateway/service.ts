@@ -5,11 +5,12 @@ import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
 import {
   certifiedCompatibilityVersions,
-  compatibilitySurfaces,
+  compatibilitySurfaceDefinitions,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
   type CompatibilityAttestation,
   type CompatibilityProbeResult,
+  type CompatibilitySurfaceDefinition,
   type CompatibilitySurfaceObservation,
 } from "./compatibility.js";
 import {
@@ -598,6 +599,8 @@ export type GatewayServiceOptions = {
   timers?: GatewayServiceTimers;
   /** Test seam for opaque listener generations; production remains random. */
   successionGeneration?: () => string;
+  /** Test-only surface inventory; production uses the declared registry. */
+  compatibilitySurfaceDefinitions?: readonly CompatibilitySurfaceDefinition[];
 };
 
 function bindingKey(binding: PrivateRouteBinding): string {
@@ -727,6 +730,8 @@ export class GatewayService {
   readonly config: GatewayConfig;
   readonly store: GatewayStore;
   private readonly adapters: readonly GatewayProviderAdapter[];
+  private readonly compatibilitySurfaceDefinitions:
+    readonly CompatibilitySurfaceDefinition[];
   private readonly publishDashboard: typeof publishGatewayDashboard;
   private readonly now: () => Date;
   private readonly timers: GatewayServiceTimers;
@@ -859,6 +864,8 @@ export class GatewayService {
   constructor(options: GatewayServiceOptions) {
     this.config = options.config;
     this.adapters = [...(options.adapters ?? [])];
+    this.compatibilitySurfaceDefinitions =
+      options.compatibilitySurfaceDefinitions ?? compatibilitySurfaceDefinitions;
     this.publishDashboard = options.publishDashboard ?? publishGatewayDashboard;
     this.now = options.now ?? (() => new Date());
     this.store =
@@ -1267,20 +1274,19 @@ export class GatewayService {
         return [observation.surface, { adapter, observation }] as const;
       }),
     );
-    if (
-      bySurface.size !== compatibilitySurfaces.length ||
-      compatibilitySurfaces.some((surface) => !bySurface.has(surface))
-    ) {
+    if (bySurface.size !== this.adapters.length) {
       throw new BridgeError(
         "COMPAT_PROVIDER_UNAVAILABLE",
-        "The bounded compatibility probe requires one Claude and one Codex surface.",
+        "Each local provider must expose one distinct compatibility surface.",
       );
     }
 
     const attestations: CompatibilityAttestation[] = [];
-    for (const surface of compatibilitySurfaces) {
+    for (const definition of this.compatibilitySurfaceDefinitions) {
+      const { surface } = definition;
       const entry = bySurface.get(surface);
       if (entry === undefined) {
+        if (!definition.required) continue;
         throw new BridgeError(
           "COMPAT_PROVIDER_UNAVAILABLE",
           "A required compatibility surface is unavailable.",
@@ -8648,7 +8654,7 @@ export class GatewayService {
   private async publicSnapshotLocked(): Promise<GatewayPublicSnapshot> {
     const base = await this.store.publicSnapshot();
     const compatibilityChecks: CompatibilityAttestation[] = [];
-    for (const surface of compatibilitySurfaces) {
+    for (const { surface } of this.compatibilitySurfaceDefinitions) {
       if (surface === "codex" && this.activeCodexIncompatibility !== undefined) {
         compatibilityChecks.push(
           structuredClone(this.activeCodexIncompatibility),

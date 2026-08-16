@@ -5,6 +5,7 @@ import type {
 import {
   certifiedCompatibilityVersions,
   compatibilityCoversWrites,
+  compatibilitySurfaces,
   isCompatibilityAttestation,
   type CompatibilityAttestation,
   type CompatibilitySurface,
@@ -102,7 +103,7 @@ export type BusyPolicy = "queue";
 /** Canonical closed-array bounds shared by store projections and control/UI. */
 export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64,
-  compatibilityChecks: 2,
+  compatibilityChecks: compatibilitySurfaces.length,
   registryRejectionCodes: 32,
   availablePeers: 256,
   routes: 256,

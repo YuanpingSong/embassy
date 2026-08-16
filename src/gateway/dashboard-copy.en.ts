@@ -323,6 +323,7 @@ export const dashboardCopyEn = {
   "compatibilityTier.schema_attested.writesCovered":
     "Live read and write probes passed; build not tested by this release",
   "compatibilityTier.incompatible": "Incompatible",
+  "compatibilityTier.notDetected": "Not detected",
   "diagnostics.registry.title": "Registry observation",
   "diagnostics.registry.entriesScanned": "Entries scanned",
   "diagnostics.registry.parseableRecords":

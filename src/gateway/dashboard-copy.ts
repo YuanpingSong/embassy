@@ -252,6 +252,7 @@ export const dashboardCopyKeys = [
   "compatibilityTier.schema_attested",
   "compatibilityTier.schema_attested.writesCovered",
   "compatibilityTier.incompatible",
+  "compatibilityTier.notDetected",
   "diagnostics.registry.title",
   "diagnostics.registry.entriesScanned",
   "diagnostics.registry.parseableRecords",

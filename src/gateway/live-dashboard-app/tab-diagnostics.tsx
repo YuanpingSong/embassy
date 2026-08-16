@@ -234,25 +234,33 @@ namespace Embassy {
                       ? t("provider.claude")
                       : t("provider.codex")}
                   </th>
-                  <td className="cell-mono">{check.version}</td>
-                  <td className="cell-mono">{check.testedVersion}</td>
-                  <td className="cell-mono">{check.supportedMajor}</td>
-                  <td>
-                    {t(
-                      check.tier === "schema_attested" && check.writesCovered
-                        ? "compatibilityTier.schema_attested.writesCovered"
-                        : `compatibilityTier.${check.tier}`,
-                    )}
-                  </td>
-                  <td>
-                    <TimeAgo iso={check.checkedAt} />
-                  </td>
-                  <td className="cell-mono">
-                    {check.failure ?? DIAGNOSTICS_ABSENT_FIELD}
-                  </td>
-                  <td className="cell-mono">
-                    {check.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
-                  </td>
+                  {"notDetected" in check ? (
+                    <td colSpan={7}>
+                      {t("compatibilityTier.notDetected")}
+                    </td>
+                  ) : (
+                    <>
+                      <td className="cell-mono">{check.version}</td>
+                      <td className="cell-mono">{check.testedVersion}</td>
+                      <td className="cell-mono">{check.supportedMajor}</td>
+                      <td>
+                        {t(
+                          check.tier === "schema_attested" && check.writesCovered
+                            ? "compatibilityTier.schema_attested.writesCovered"
+                            : `compatibilityTier.${check.tier}`,
+                        )}
+                      </td>
+                      <td>
+                        <TimeAgo iso={check.checkedAt} />
+                      </td>
+                      <td className="cell-mono">
+                        {check.failure ?? DIAGNOSTICS_ABSENT_FIELD}
+                      </td>
+                      <td className="cell-mono">
+                        {check.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
+                      </td>
+                    </>
+                  )}
                 </tr>
               ))
             )}

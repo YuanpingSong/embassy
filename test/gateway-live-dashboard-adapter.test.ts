@@ -59,6 +59,7 @@ type LoadedBundle = {
 
 /** A React stub whose createElement returns inert plain objects. */
 function createReactStub(): Record<string, unknown> {
+  const contexts: Record<string, unknown>[] = [];
   const createElement = (
     type: unknown,
     props: unknown,
@@ -76,6 +77,7 @@ function createReactStub(): Record<string, unknown> {
       Consumer: "Context.Consumer",
       _currentValue: defaultValue,
     };
+    contexts.push(context);
     return context;
   };
   const base: Record<string, unknown> = {
@@ -108,6 +110,7 @@ function createReactStub(): Record<string, unknown> {
     ) => getSnapshot(),
     memo: (component: unknown) => component,
     forwardRef: (component: unknown) => component,
+    __contexts: contexts,
   };
   // Unknown React APIs resolve to inert no-ops so a future app.tsx cannot fail
   // the adapter suite for a reason unrelated to the adapter.
@@ -255,6 +258,33 @@ function loadBundle(): LoadedBundle {
 
 const bundle = loadBundle();
 const { adapter } = bundle.Embassy;
+
+function renderStubText(node: unknown): string {
+  if (node === null || node === undefined || typeof node === "boolean") {
+    return "";
+  }
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  if (Array.isArray(node)) return node.map(renderStubText).join(" ");
+  if (typeof node !== "object") return "";
+  const element = node as Readonly<{
+    $$stub?: string;
+    type?: unknown;
+    props?: Record<string, unknown>;
+    children?: readonly unknown[];
+  }>;
+  if (element.$$stub !== "element") return "";
+  if (typeof element.type === "function") {
+    return renderStubText(
+      element.type({
+        ...(element.props ?? {}),
+        children: element.children,
+      }),
+    );
+  }
+  return renderStubText(element.children ?? []);
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures and helpers
@@ -1545,6 +1575,37 @@ test("diagnosticsProps forwards automatic provider compatibility rows", () => {
     plain(adapter.diagnosticsProps(model).compatibilityChecks),
     plain(model.compatibilityChecks),
   );
+});
+
+test("diagnosticsProps preserves a quiet optional-surface absence row", () => {
+  const model = buildDashboardViewModel(dashboardFixture(), {
+    compatibilitySurfaceDefinitions: [
+      { surface: "claude", required: true },
+      { surface: "codex", required: false },
+    ],
+  });
+  assert.deepEqual(
+    plain(adapter.diagnosticsProps(model).compatibilityChecks.at(-1)),
+    { surface: "codex", notDetected: true },
+  );
+  const contexts = (bundle.context.React as {
+    __contexts: Record<string, unknown>[];
+  }).__contexts;
+  assert.equal(contexts.length, 1);
+  contexts[0]!._currentValue = {
+    locale: "en",
+    setLocale: () => undefined,
+    t: (key: string) =>
+      key === "compatibilityTier.notDetected" ? "Not detected" : key,
+  };
+  const diagnosticsTab = (bundle.context.Embassy as Record<string, unknown>)[
+    "DiagnosticsTab"
+  ] as (props: unknown) => unknown;
+  const renderedText = renderStubText(
+    diagnosticsTab({ data: adapter.diagnosticsProps(model) }),
+  );
+  assert.match(renderedText, /Not detected/u);
+  assert.doesNotMatch(renderedText, /COMPAT_PROVIDER_UNAVAILABLE/u);
 });
 
 test("diagnosticsProps preserves bounded connector registry evidence", () => {
