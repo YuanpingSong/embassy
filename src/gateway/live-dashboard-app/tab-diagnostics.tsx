@@ -13,7 +13,7 @@ namespace Embassy {
   /** Rendered wherever the live contract carries no value for a field. */
   const DIAGNOSTICS_ABSENT_FIELD = "—";
 
-  const DIAGNOSTICS_CONNECTOR_COLUMNS = 7;
+  const DIAGNOSTICS_CONNECTOR_COLUMNS = 8;
 
   const diagnosticsNumberFormatters = new Map<Locale, Intl.NumberFormat>();
 
@@ -104,6 +104,7 @@ namespace Embassy {
               <th scope="col">{t("app.diag.col.protocol")}</th>
               <th scope="col">{t("app.diag.col.version")}</th>
               <th scope="col">{t("diagnostics.health")}</th>
+              <th scope="col">{t("column.observed")}</th>
               <th scope="col">{t("diagnostics.registry.title")}</th>
               <th scope="col">{t("column.issue")}</th>
             </tr>
@@ -141,6 +142,13 @@ namespace Embassy {
                     <StateChip domain="health" state={connector.health} small />
                   </td>
                   <td>
+                    {connector.lastSeenAt === undefined ? (
+                      DIAGNOSTICS_ABSENT_FIELD
+                    ) : (
+                      <TimeAgo iso={connector.lastSeenAt} />
+                    )}
+                  </td>
+                  <td>
                     {observation === undefined || stateKey === undefined ? (
                       DIAGNOSTICS_ABSENT_FIELD
                     ) : (
@@ -173,7 +181,21 @@ namespace Embassy {
                     )}
                   </td>
                   <td className="cell-mono">
-                    {connector.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
+                    {connector.safeErrorCode === undefined &&
+                    connector.codexDoctor === undefined
+                      ? DIAGNOSTICS_ABSENT_FIELD
+                      : (
+                        <div className="stack-sm">
+                          {connector.safeErrorCode === undefined
+                            ? null
+                            : <code>{connector.safeErrorCode}</code>}
+                          {connector.codexDoctor?.conditions.map((condition) => (
+                            <span key={condition} className="cell-note">
+                              {t(`diagnostics.codexDoctor.${condition}`)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                   </td>
                   </tr>
                 );

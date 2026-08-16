@@ -304,6 +304,14 @@ export const dashboardCopyEn = {
   "diagnostics.connectors": "Connectors",
   "diagnostics.connectors.empty": "No connector metadata is available.",
   "diagnostics.connectors.caption": "Local provider connector status",
+  "diagnostics.codexDoctor.split_brain":
+    "Desktop is on a private App Server; its tasks are unreachable by Embassy. Relaunch: /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT",
+  "diagnostics.codexDoctor.orphaned":
+    "The daemon is running but no Desktop client is attached; threads cannot load. Run: /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT, then open your Codex task.",
+  "diagnostics.codexDoctor.attached": "Desktop is attached to the managed App Server.",
+  "diagnostics.codexDoctor.observation_stale":
+    "Connector observation is stale; current health is not proven.",
+  "diagnostics.codexDoctor.unknown": "Desktop attachment could not be determined.",
   "diagnostics.registry.title": "Registry observation",
   "diagnostics.registry.entriesScanned": "Entries scanned",
   "diagnostics.registry.parseableRecords":

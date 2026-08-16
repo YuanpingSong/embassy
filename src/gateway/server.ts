@@ -19,6 +19,10 @@ import {
   type LocalCodexTransportFactoryOptions,
 } from "./codex-local-transport.js";
 import {
+  createSystemCodexDoctorInspector,
+  diagnoseCodexAttachment,
+} from "./codex-doctor.js";
+import {
   loadGatewayConfig,
   type GatewayConfig,
 } from "./config.js";
@@ -457,6 +461,20 @@ export async function runGatewayServer(
       config,
       adapters: [claudeProvider, codexProvider, ...acpProviders],
       store,
+      ...(createdCodexFactory.diagnosticInstallation === undefined
+        ? {}
+        : {
+            codexDoctor: async () =>
+              await diagnoseCodexAttachment({
+                socketPath:
+                  createdCodexFactory.diagnosticInstallation!
+                    .controlSocketPath,
+                daemonExecutablePath:
+                  createdCodexFactory.diagnosticInstallation!.binaryPath,
+                embassyPid: process.pid,
+                inspector: createSystemCodexDoctorInspector(),
+              }),
+          }),
     });
     service = createdService;
     await awaitWhileLeaseHeld(

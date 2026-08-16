@@ -403,9 +403,26 @@ export type PublicConnectorSnapshot = {
   protocol: string;
   protocolVersion: string;
   lastSeenAt?: string;
+  /** Age of the latest positive connector observation at snapshot generation. */
+  observationAgeMs?: number;
+  codexDoctor?: PublicCodexDoctorSnapshot;
   safeErrorCode?: string;
   registry?: PublicRegistryObservationSnapshot;
 };
+
+export type PublicCodexDoctorCondition =
+  | "split_brain"
+  | "orphaned"
+  | "attached"
+  | "observation_stale"
+  | "unknown";
+
+export type PublicCodexDoctorSnapshot = Readonly<{
+  conditions: readonly PublicCodexDoctorCondition[];
+}>;
+
+/** A healthy connector must have positive observation evidence within this age. */
+export const CONNECTOR_OBSERVATION_STALE_AFTER_MS = 35_000;
 
 /**
  * Bounded, native-ID-free evidence attached to one Claude connector. Counts

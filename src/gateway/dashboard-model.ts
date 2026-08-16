@@ -227,6 +227,15 @@ export type DashboardConnectorRow = Readonly<{
   protocol?: string | undefined;
   protocolVersion?: string | undefined;
   lastSeenAt?: string | undefined;
+  codexDoctor?: Readonly<{
+    conditions: readonly (
+      | "split_brain"
+      | "orphaned"
+      | "attached"
+      | "observation_stale"
+      | "unknown"
+    )[];
+  }>;
   safeErrorCode?: string | undefined;
   registry?: DashboardRegistryObservation | undefined;
 }>;
@@ -736,7 +745,8 @@ function needsCodexAppReconnect(
   if (
     route.provider !== "codex" ||
     route.state !== "stale" ||
-    route.safeErrorCode !== "CODEX_ROUTE_STALE" ||
+    (route.safeErrorCode !== "CODEX_ROUTE_STALE" &&
+      route.safeErrorCode !== "ENDPOINT_GENERATION_CHANGED") ||
     route.lastSeenAt === undefined ||
     generatedAt === undefined ||
     Date.parse(generatedAt) - Date.parse(route.lastSeenAt) <
@@ -1214,6 +1224,13 @@ function buildProjectedDashboardViewModel(
         ...(normalizedTimestamp(connector.lastSeenAt) === undefined
           ? {}
           : { lastSeenAt: normalizedTimestamp(connector.lastSeenAt) }),
+        ...(connector.codexDoctor === undefined
+          ? {}
+          : {
+              codexDoctor: {
+                conditions: [...connector.codexDoctor.conditions],
+              },
+            }),
         ...(safeCode(connector.safeErrorCode) === undefined
           ? {}
           : { safeErrorCode: safeCode(connector.safeErrorCode) }),

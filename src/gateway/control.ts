@@ -22,6 +22,7 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
+  CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   gatewayProviders,
   gatewayPublicSnapshotLimits,
   isGatewayProvider,
@@ -1175,7 +1176,13 @@ function isConnectorSnapshot(
         "protocol",
         "protocolVersion",
       ],
-      ["lastSeenAt", "safeErrorCode", "registry"],
+      [
+        "lastSeenAt",
+        "observationAgeMs",
+        "codexDoctor",
+        "safeErrorCode",
+        "registry",
+      ],
     ) &&
     isGatewayProvider(value.provider) &&
     isHostId(value.host) &&
@@ -1185,6 +1192,24 @@ function isConnectorSnapshot(
     typeof value.protocolVersion === "string" &&
     PROTOCOL_VERSION_PATTERN.test(value.protocolVersion) &&
     (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
+    (value.observationAgeMs === undefined ||
+      isNonNegativeInteger(value.observationAgeMs)) &&
+    (value.codexDoctor === undefined ||
+      (value.provider === "codex" &&
+        isRecord(value.codexDoctor) &&
+        hasExactKeys(value.codexDoctor, ["conditions"]) &&
+        Array.isArray(value.codexDoctor.conditions) &&
+        value.codexDoctor.conditions.length > 0 &&
+        value.codexDoctor.conditions.length <= 2 &&
+        value.codexDoctor.conditions.every((condition) =>
+          [
+            "split_brain",
+            "orphaned",
+            "attached",
+            "observation_stale",
+            "unknown",
+          ].includes(condition),
+        ))) &&
     (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
     (value.registry === undefined ||
       (value.provider === "claude" &&
@@ -1695,6 +1720,25 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   const connectorKeys = value.connectors.map(
     (connector) => `${connector.provider}@${connector.host}`,
   );
+  const generatedAtMs = Date.parse(value.generatedAt);
+  const connectorObservationsHonest = value.connectors.every((connector) => {
+    const observedAtMs = connector.lastSeenAt === undefined
+      ? undefined
+      : Date.parse(connector.lastSeenAt);
+    const derivedAgeMs = observedAtMs === undefined
+      ? undefined
+      : Math.min(
+          Number.MAX_SAFE_INTEGER,
+          Math.max(0, generatedAtMs - observedAtMs),
+        );
+    return (
+      (connector.observationAgeMs === undefined ||
+        connector.observationAgeMs === derivedAgeMs) &&
+      (connector.health !== "healthy" ||
+        (derivedAgeMs !== undefined &&
+          derivedAgeMs <= CONNECTOR_OBSERVATION_STALE_AFTER_MS))
+    );
+  });
   const aliases = value.routes.map((route) => route.alias);
   const peerAliases = value.availablePeers.map((peer) => peer.alias);
   const consentEdgeKeys = value.consentEdges.map(
@@ -1702,6 +1746,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   );
   const routeByAlias = new Map(value.routes.map((route) => [route.alias, route]));
   return (
+    connectorObservationsHonest &&
     new Set(connectorKeys).size === connectorKeys.length &&
     new Set(aliases).size === aliases.length &&
     new Set(peerAliases).size === peerAliases.length &&

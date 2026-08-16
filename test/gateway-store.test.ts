@@ -30,6 +30,7 @@ import type {
 import {
   CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY,
   CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY,
+  CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   arePublicAvailablePeerSnapshots,
   isPublicAvailablePeerSnapshot,
@@ -347,6 +348,65 @@ const transientClaudePeer = {
     ownerLease: "native-claude-call-proof-0001",
   },
 } as const;
+
+test("public connector health expires with its positive observation evidence", async () => {
+  const { store, config, clock: testClock } = await fixture();
+  await store.initialize();
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+
+  let snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.connectors[0]?.observationAgeMs, 0);
+  assert.equal(snapshot.connectors[0]?.health, "healthy");
+
+  testClock.advance(CONNECTOR_OBSERVATION_STALE_AFTER_MS);
+  snapshot = await store.publicSnapshot();
+  assert.equal(
+    snapshot.connectors[0]?.observationAgeMs,
+    CONNECTOR_OBSERVATION_STALE_AFTER_MS,
+  );
+  assert.equal(snapshot.connectors[0]?.health, "healthy");
+
+  testClock.advance(1);
+  snapshot = await store.publicSnapshot();
+  assert.equal(
+    snapshot.connectors[0]?.observationAgeMs,
+    CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1,
+  );
+  assert.equal(snapshot.connectors[0]?.health, "degraded");
+  assert.equal(snapshot.health, "degraded");
+
+  await store.observeConnector({
+    identity: endpoint(codexBinding),
+    health: "healthy",
+    protocol: "app-server-jsonrpc",
+    protocolVersion: "1",
+  });
+  snapshot = await store.publicSnapshot();
+  assert.equal(snapshot.connectors[0]?.observationAgeMs, 0);
+  assert.equal(snapshot.connectors[0]?.health, "healthy");
+
+  await store.close();
+  const persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+    connectors: Array<{ lastSeenAt?: string }>;
+  };
+  delete persisted.connectors[0]?.lastSeenAt;
+  await writeFile(store.stateFilePath, JSON.stringify(persisted), { mode: 0o600 });
+  const reopened = new GatewayStore(config, {
+    now: testClock.now,
+    randomId: testClock.randomId,
+  });
+  await reopened.initialize();
+  snapshot = await reopened.publicSnapshot();
+  assert.equal(snapshot.connectors[0]?.health, "offline");
+  assert.equal(snapshot.connectors[0]?.observationAgeMs, undefined);
+  assert.equal(snapshot.health, "offline");
+  await reopened.close();
+});
 
 test("native v2 state round-trips and rejects every retired schema without rewriting", async () => {
   const { store, config, clock: testClock } = await fixture();

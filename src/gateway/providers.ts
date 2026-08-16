@@ -71,6 +71,7 @@ const DEFAULT_CODEX_CLEANUP_TIMEOUT_MS = 5_000;
 const DEFAULT_CODEX_CLEANUP_POLL_MS = 25;
 const DEFAULT_CODEX_RECOVERY_INITIAL_MS = 250;
 const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
+const DEFAULT_CODEX_OBSERVATION_POLL_MS = 15_000;
 const MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES = 3;
 const CLAUDE_CLEAN_PREWRITE_RETRY_CODES = new Set([
   "CLAUDE_PEER_TARGET_UNKNOWN",
@@ -2343,6 +2344,8 @@ export type LocalCodexGatewayProviderOptions = {
   cleanupTimeoutMs?: number;
   recoveryInitialMs?: number;
   recoveryMaxMs?: number;
+  /** Deterministic test seam; production uses the fixed positive-observation cadence. */
+  observationPollMs?: number;
   maxCallbackEvents?: number;
   maxRoutes?: number;
   maxReplyBytes?: number;
@@ -2435,6 +2438,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly cleanupTimeoutMs: number;
   private readonly recoveryInitialMs: number;
   private readonly recoveryMaxMs: number;
+  private readonly observationPollMs: number;
   private readonly now: () => Date;
   private readonly routes = new Map<string, CodexRoute>();
   /** Exact public alias authority retained across internal route recovery. */
@@ -2446,6 +2450,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private readonly routeRecoveries = new Map<string, Promise<void>>();
   private readonly routesRequiringRecovery = new Set<string>();
   private readonly trackedRoutes = new Set<string>();
+  private observationTimer: NodeJS.Timeout | undefined;
+  private observationInFlight: Promise<void> | undefined;
   private retiredEndpointGeneration: string | undefined;
   private readonly expectsReply = new Map<string, boolean>();
   private readonly callbackQueue: CodexCallbackEvent[] = [];
@@ -2522,6 +2528,11 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         "The Codex recovery initial delay cannot exceed its capped delay.",
       );
     }
+    this.observationPollMs = positiveBounded(
+      options.observationPollMs,
+      DEFAULT_CODEX_OBSERVATION_POLL_MS,
+      60_000,
+    );
     this.now = options.now ?? (() => new Date());
   }
 
@@ -2740,6 +2751,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.trackedRoutes.add(input.routeHandle);
+    this.scheduleCodexObservation();
     this.routeAliases.set(input.routeHandle, input.alias);
     if (refreshResult === undefined) {
       this.queueRouteObservation(route, observation);
@@ -2919,6 +2931,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.trackedRoutes.delete(routeHandle);
+    if (this.trackedRoutes.size === 0 && this.observationTimer !== undefined) {
+      clearTimeout(this.observationTimer);
+      this.observationTimer = undefined;
+    }
     this.cancelRouteRecovery(routeHandle);
     const recovery = this.routeRecoveries.get(routeHandle);
     if (recovery !== undefined) await recovery;
@@ -2956,6 +2972,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   async close(): Promise<void> {
     if (this.closed || this.closing) return;
     this.closing = true;
+    if (this.observationTimer !== undefined) {
+      clearTimeout(this.observationTimer);
+      this.observationTimer = undefined;
+    }
     for (const timer of this.routeRecoveryTimers.values()) clearTimeout(timer);
     this.routeRecoveryTimers.clear();
     this.routesRequiringRecovery.clear();
@@ -2973,6 +2993,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     await Promise.allSettled([
       ...this.routeRecoveries.values(),
       ...this.routeCreations.values(),
+      ...(this.observationInFlight === undefined
+        ? []
+        : [this.observationInFlight]),
     ]);
     this.drainCallbackQueue();
     if (
@@ -3205,6 +3228,53 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     ) {
       this.routesRequiringRecovery.add(threadId);
       this.scheduleRouteRecovery(threadId);
+    }
+  }
+
+  private scheduleCodexObservation(): void {
+    if (
+      this.closed ||
+      this.closing ||
+      this.trackedRoutes.size === 0 ||
+      this.observationTimer !== undefined ||
+      this.observationInFlight !== undefined
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (this.observationTimer !== timer) return;
+      this.observationTimer = undefined;
+      const observation = this.refreshCodexObservations().catch(() => {
+        // Unexpected provider-local observation failures must not kill re-arm.
+      });
+      this.observationInFlight = observation;
+      void observation.finally(() => {
+        if (this.observationInFlight === observation) {
+          this.observationInFlight = undefined;
+        }
+        this.scheduleCodexObservation();
+      });
+    }, this.observationPollMs);
+    timer.unref();
+    this.observationTimer = timer;
+  }
+
+  private async refreshCodexObservations(): Promise<void> {
+    for (const [threadId, route] of [...this.routes]) {
+      if (
+        this.closed ||
+        this.closing ||
+        !this.trackedRoutes.has(threadId) ||
+        route.connector.observation().requestInFlight
+      ) {
+        continue;
+      }
+      try {
+        await route.connector.observeLoadedThread(route.connector.guard());
+      } catch {
+        // Connector events carry the provider-local failure evidence. One
+        // route's failed observation must not stop later routes or the timer.
+      }
     }
   }
 

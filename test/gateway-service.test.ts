@@ -323,6 +323,7 @@ class ManualGatewayClock {
       await immediate();
     }
   }
+
 }
 
 class FakeProvider implements GatewayProviderAdapter {
@@ -342,6 +343,7 @@ class FakeProvider implements GatewayProviderAdapter {
   selectedRoutes: Array<{ alias: string; routeHandle: string }> = [];
   selectRouteFailures: Error[] = [];
   selectRouteBeforeReturn: (() => void) | undefined;
+  selectRouteGate: Promise<void> | undefined;
   releasedRoutes: string[] = [];
   selectedRouteHandleOverride: string | undefined;
   closed = false;
@@ -491,6 +493,9 @@ class FakeProvider implements GatewayProviderAdapter {
     if (failure !== undefined) throw failure;
     this.selectedRoutes.push({ ...input });
     this.selectRouteBeforeReturn?.();
+    const gate = this.selectRouteGate;
+    this.selectRouteGate = undefined;
+    await gate;
     return {
       routeHandle: this.selectedRouteHandleOverride ?? input.routeHandle,
       state: this.state,
@@ -6261,7 +6266,7 @@ test("retained stale Codex authority cannot replace a Claude route before pairin
     alias: "advisor@this-mac",
   });
   assert.equal(decision.accepted, false);
-  assert.equal(discoveryCalls, 0);
+  assert.equal(discoveryCalls, 1);
   assert.deepEqual(await second.store.inspectPrivateClaudeRoutes(), routesBefore);
   assert.deepEqual((await second.snapshot()).consentEdges, edgesBefore);
   assert.equal(
@@ -6302,6 +6307,7 @@ test("authorized discovery heals one legacy hashed Claude generation and adopts 
 
   const secondClaude = new FakeProvider("claude", "claude_local_endpoint");
   const secondCodex = new FakeProvider("codex");
+  const clock = new ManualGatewayClock();
   secondClaude.discoveries = [
     {
       alias: "latest-name@this-mac",
@@ -6310,7 +6316,12 @@ test("authorized discovery heals one legacy hashed Claude generation and adopts 
       state: "idle",
     },
   ];
-  const second = new GatewayService({ config, adapters: [secondClaude, secondCodex] });
+  const second = new GatewayService({
+    config,
+    adapters: [secondClaude, secondCodex],
+    now: clock.now,
+    timers: clock,
+  });
   await second.start();
   t.after(async () => {
     await second.close();
@@ -6318,25 +6329,7 @@ test("authorized discovery heals one legacy hashed Claude generation and adopts 
   });
   await second.handlers().registerCodex(codexRegistration());
 
-  const before = await second.snapshot();
-  assert.equal(secondClaude.selectedRoutes.length, 0);
-  assert.deepEqual(before.availablePeers, []);
-  assert.equal(
-    before.routes.find((route) => route.alias === "old-name@this-mac")?.state,
-    "stale",
-  );
-
-  assert.deepEqual(await second.handlers().refreshDashboard(), {
-    accepted: true,
-    code: "ok",
-    revision: 2,
-  });
-  assert.deepEqual(await second.handlers().refreshDashboard(), {
-    accepted: true,
-    code: "ok",
-    revision: 2,
-  });
-  const restored = await second.snapshot();
+  let restored = await second.snapshot();
   assert.deepEqual(secondClaude.selectedRoutes, [
     { alias: "latest-name@this-mac", routeHandle: CLAUDE_SESSION_ID },
   ]);
@@ -6364,6 +6357,157 @@ test("authorized discovery heals one legacy hashed Claude generation and adopts 
     privateRoute?.binding.endpointGeneration,
     "claude_local_endpoint",
   );
+
+  secondClaude.discoveries = secondClaude.discoveries.map((peer) => ({
+    ...peer,
+    state: "busy",
+  }));
+  await clock.advanceBy(30_000);
+  await waitForAsync(async () =>
+    (await second.snapshot()).routes.some(
+      (route) => route.alias === "latest-name@this-mac" && route.state === "busy",
+    ),
+  );
+  restored = await second.snapshot();
+  assert.equal(
+    restored.routes.find((route) => route.alias === "latest-name@this-mac")
+      ?.state,
+    "busy",
+  );
+});
+
+test("timed exact-UUID Claude reobservation wakes a retained queue after boot absence", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstClaude = new FakeProvider("claude", "claude_generation_before");
+  const firstCodex = new FakeProvider("codex");
+  firstClaude.discoveries = [
+    {
+      alias: "advisor-old@this-mac",
+      routeHandle: CLAUDE_SESSION_ID,
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.handlers().selectClaude({ alias: "advisor-old@this-mac" });
+  firstClaude.state = "busy";
+  firstClaude.emitRouteState(CLAUDE_SESSION_ID, "busy");
+  await waitForAsync(async () =>
+    (await first.snapshot()).routes.some(
+      ({ alias, state }) =>
+        alias === "advisor-old@this-mac" && state === "busy",
+    ),
+  );
+  await first.handlers().sendToClaude({
+    ...toClaude("retained until timed reobservation"),
+    toAlias: "advisor-old@this-mac",
+  });
+  await first.close();
+
+  const clock = new ManualGatewayClock();
+  const secondClaude = new FakeProvider("claude", "claude_generation_after");
+  const second = new GatewayService({
+    config,
+    adapters: [secondClaude, new FakeProvider("codex")],
+    now: clock.now,
+    timers: clock,
+  });
+  await second.start();
+  t.after(async () => {
+    await second.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.equal(secondClaude.selectedRoutes.length, 0);
+  assert.equal(secondClaude.dispatches.length, 0);
+
+  secondClaude.discoveries = [
+    {
+      alias: "advisor-latest@this-mac",
+      routeHandle: CLAUDE_SESSION_ID,
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  await clock.advanceBy(30_000);
+  await waitFor(() => secondClaude.dispatches.length === 1);
+  assert.equal(secondClaude.dispatches[0]?.text, "retained until timed reobservation");
+  assert.equal(
+    (await second.snapshot()).routes.some(
+      ({ alias, state }) =>
+        alias === "advisor-latest@this-mac" && state === "idle",
+    ),
+    true,
+  );
+});
+
+test("periodic Claude cleanup cannot release a concurrent exact manual rebind", async (t) => {
+  const { root, stateDir } = await fixture();
+  const config = loadGatewayConfig({
+    EMBASSY_STATE_DIR: stateDir,
+    EMBASSY_HOSTS: "this-mac",
+  });
+  const firstClaude = new FakeProvider("claude", "claude_stable_generation");
+  const first = new GatewayService({
+    config,
+    adapters: [firstClaude, new FakeProvider("codex")],
+  });
+  firstClaude.discoveries = [
+    {
+      alias: "advisor@this-mac",
+      routeHandle: CLAUDE_SESSION_ID,
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  await first.start();
+  await first.handlers().registerCodex(codexRegistration());
+  await first.handlers().selectClaude({ alias: "advisor@this-mac" });
+  await first.close();
+
+  const clock = new ManualGatewayClock();
+  const secondClaude = new FakeProvider("claude", "claude_stable_generation");
+  const second = new GatewayService({
+    config,
+    adapters: [secondClaude, new FakeProvider("codex")],
+    now: clock.now,
+    timers: clock,
+  });
+  await second.start();
+  t.after(async () => {
+    await second.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  secondClaude.discoveries = firstClaude.discoveries.map((peer) => ({ ...peer }));
+  let releasePeriodicSelect: (() => void) | undefined;
+  secondClaude.selectRouteGate = new Promise<void>((resolve) => {
+    releasePeriodicSelect = resolve;
+  });
+  await clock.advanceBy(30_000);
+  await waitFor(() => secondClaude.selectedRoutes.length === 1);
+
+  await second.handlers().refreshDashboard();
+  assert.equal(
+    (await second.snapshot()).routes.find(
+      ({ alias }) => alias === "advisor@this-mac",
+    )?.state,
+    "idle",
+  );
+  releasePeriodicSelect?.();
+  await waitFor(() => secondClaude.selectedRoutes.length === 2);
+  await immediate();
+  assert.deepEqual(secondClaude.releasedRoutes, []);
+
+  await second.handlers().sendToClaude({
+    ...toClaude("manual winner remains live"),
+    toAlias: "advisor@this-mac",
+  });
+  await waitFor(() => secondClaude.dispatches.length === 1);
 });
 
 test("incomplete, colliding, and workspace-failed discovery cannot restore a durable Claude UUID", async (t) => {
@@ -6911,6 +7055,11 @@ test("a recovered watch reuses its exact conversation for queued mail", async (t
   });
   assert.equal(queuedFollowup.accepted, true, JSON.stringify(queuedFollowup));
   assert.equal((await firstStore.publicSnapshot()).progressWatches?.length, 1);
+  await waitForAsync(async () =>
+    (await first.snapshot()).messages.some(
+      ({ safeErrorCode }) => safeErrorCode === "CLAUDE_ROUTE_HELD",
+    ),
+  );
   await first.close();
 
   const secondClaude = new FakeProvider("claude");
@@ -6947,16 +7096,14 @@ test("a recovered watch reuses its exact conversation for queued mail", async (t
     await second.close();
     await rm(root, { recursive: true, force: true });
   });
-  await second.handlers().refreshDashboard();
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await waitFor(() => secondClaude.dispatches.length === 1);
   const snapshot = await second.snapshot();
   assert.equal((await secondStore.publicSnapshot()).progressWatches?.length, 1);
-  assert.equal(secondClaude.dispatches.length, 0);
+  assert.equal(secondClaude.dispatches.length, 1);
   assert.equal(secondCodex.dispatches.length, 0);
   assert.equal(
     snapshot.accounting.queuedBytes,
-    Buffer.byteLength("must survive restart") +
-      Buffer.byteLength("second queued item in the watched conversation"),
+    Buffer.byteLength("second queued item in the watched conversation"),
   );
   assert.equal(
     snapshot.messages.some(
@@ -8107,6 +8254,469 @@ test("native ingress emits held after the prompt boundary and then one terminal 
     { receiptHandle: "receipt-prompt-boundary", status: "held" },
     { receiptHandle: "receipt-prompt-boundary", status: "delivered" },
   ]);
+});
+
+test("a long provider dispatch does not starve control or later Codex observations", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "accepted" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    releaseDispatch?.();
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const accepted = await handlers.sendToCodex(
+    toCodex("uds:/synthetic/claude.sock"),
+  );
+  assert.equal(accepted.accepted, true);
+  await dispatchEntered;
+
+  await clock.advanceBy(90_000);
+  codex.emitRouteState(THREAD_ID, "busy");
+  const firstObservation = handlers.listSnapshot();
+  assert.equal(
+    await Promise.race([
+      Promise.resolve(firstObservation).then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]),
+    true,
+  );
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, lastSeenAt }) =>
+        alias === "codex-main@this-mac" &&
+        lastSeenAt === "2026-08-08T12:01:30.000Z",
+    ),
+  );
+
+  await clock.advanceBy(1_000);
+  codex.emitRouteState(THREAD_ID, "busy");
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, lastSeenAt }) =>
+        alias === "codex-main@this-mac" &&
+        lastSeenAt === "2026-08-08T12:01:31.000Z",
+    ),
+  );
+
+  releaseDispatch?.();
+  await waitForAsync(async () => {
+    const snapshot = await handlers.deliveryStatus({
+      token: accepted.deliveryToken,
+    });
+    return snapshot.found && snapshot.terminal;
+  });
+  assert.equal(codex.dispatches.length, 1);
+});
+
+test("connector freshness expiry republishes the static dashboard after one publish failure", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const published: GatewayPublicSnapshot[] = [];
+  let failNextPublish = false;
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [
+      new FakeProvider("claude"),
+      new FakeProvider("codex"),
+      new FakeProvider("grok"),
+    ],
+    now: clock.now,
+    timers: clock,
+    publishDashboard: async (_stateDirectory, snapshot) => {
+      if (failNextPublish) {
+        failNextPublish = false;
+        throw new Error("synthetic one-shot dashboard failure");
+      }
+      published.push(snapshot);
+      return path.join(stateDir, "gateway-dashboard.html");
+    },
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.equal(
+    published.at(-1)?.connectors.find(({ provider }) => provider === "grok")
+      ?.health,
+    "healthy",
+  );
+
+  failNextPublish = true;
+  await clock.advanceBy(35_001);
+  await clock.advanceBy(250);
+  await waitFor(
+    () =>
+      published.at(-1)?.connectors.find(
+        ({ provider }) => provider === "grok",
+      )?.health === "degraded",
+  );
+});
+
+test("a dispatch whose selected endpoint changes settles ambiguous without replay", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  const codex = new FakeProvider("codex", "codex_generation_before_dispatch");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "accepted" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    releaseDispatch?.();
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const accepted = await handlers.sendToCodex(
+    toCodex("uds:/synthetic/claude.sock"),
+  );
+  assert.equal(accepted.accepted, true);
+  await dispatchEntered;
+
+  const previous = { ...codex.identity };
+  codex.identity.endpointGeneration = "codex_generation_after_dispatch";
+  codex.callbacks?.onEndpointRefresh?.({
+    previous,
+    current: { ...codex.identity },
+    routes: [{ routeHandle: THREAD_ID, state: "busy" }],
+  });
+  await waitForAsync(async () =>
+    (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+      .endpointGeneration === "codex_generation_after_dispatch",
+  );
+
+  releaseDispatch?.();
+  let terminalState: string | undefined;
+  await waitForAsync(async () => {
+    const status = await handlers.deliveryStatus({
+      token: accepted.deliveryToken,
+    });
+    if (!status.found || !status.terminal) return false;
+    terminalState = status.state;
+    return true;
+  });
+  assert.equal(terminalState, "ambiguous");
+  assert.equal(codex.dispatches.length, 1);
+});
+
+test("a clean-prewrite result cannot overwrite a newer stale route observation", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "deferred", safeErrorCode: "ROUTE_UNAVAILABLE" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+  });
+  await service.start();
+  t.after(async () => {
+    releaseDispatch?.();
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+  const accepted = await handlers.sendToCodex(
+    toCodex("uds:/synthetic/claude.sock"),
+  );
+  assert.equal(accepted.accepted, true);
+  if (!accepted.accepted) return;
+  await dispatchEntered;
+
+  codex.emitRouteState(THREAD_ID, "stale", "CODEX_ROUTE_STALE");
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, state }) =>
+        alias === "codex-main@this-mac" && state === "stale",
+    ),
+  );
+  releaseDispatch?.();
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      ({ alias, state, queueDepth }) =>
+        alias === "codex-main@this-mac" &&
+        state === "stale" &&
+        queueDepth === 1,
+    ),
+  );
+  await clock.advanceBy(500);
+  assert.equal(codex.dispatches.length, 1);
+  const status = await handlers.deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(status.found && status.terminal, false);
+});
+
+test("shutdown settles an invoked provider dispatch ambiguous and never replays it", async () => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "accepted" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  try {
+    await service.start();
+    const handlers = service.handlers();
+    await selectAndRegister(handlers);
+    await handlers.sendToCodex(toCodex("uds:/synthetic/claude.sock"));
+    await dispatchEntered;
+    const stateFilePath = service.store.stateFilePath;
+
+    await service.close();
+    const persisted = JSON.parse(await readFile(stateFilePath, "utf8")) as {
+      events: Array<{ state: string; safeErrorCode?: string }>;
+    };
+    assert.equal(
+      persisted.events.some(
+        ({ state, safeErrorCode }) =>
+          state === "ambiguous" &&
+          safeErrorCode === "DISPATCH_OUTCOME_AMBIGUOUS",
+      ),
+      true,
+    );
+    releaseDispatch?.();
+    await immediate();
+    assert.equal(codex.dispatches.length, 1);
+  } finally {
+    releaseDispatch?.();
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a commit preamble failure preserves provider outcome uncertainty", async () => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+    },
+  ];
+  const codex = new FakeProvider("codex");
+  let markDispatchEntered: (() => void) | undefined;
+  let releaseDispatch: (() => void) | undefined;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    markDispatchEntered = resolve;
+  });
+  const dispatchMayFinish = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  codex.dispatch = async (input) => {
+    codex.dispatches.push({ ...input, binding: { ...input.binding } });
+    markDispatchEntered?.();
+    await dispatchMayFinish;
+    return { state: "accepted" };
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  try {
+    await service.start();
+    const handlers = service.handlers();
+    await selectAndRegister(handlers);
+    await handlers.sendToCodex(toCodex("uds:/synthetic/claude.sock"));
+    await dispatchEntered;
+    const internal = service as unknown as {
+      processLifecycleLocked: () => Promise<boolean>;
+      dispatchRunnerTargets: Set<string>;
+    };
+    const processLifecycleLocked =
+      internal.processLifecycleLocked.bind(service);
+    let failOnce = true;
+    internal.processLifecycleLocked = async () => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("synthetic commit preamble failure");
+      }
+      return await processLifecycleLocked();
+    };
+    const stateFilePath = service.store.stateFilePath;
+
+    releaseDispatch?.();
+    await waitFor(() => internal.dispatchRunnerTargets.size === 0);
+    await service.close();
+    const persisted = JSON.parse(await readFile(stateFilePath, "utf8")) as {
+      events: Array<{ state: string; safeErrorCode?: string }>;
+    };
+    assert.equal(
+      persisted.events.some(
+        ({ state, safeErrorCode }) =>
+          state === "ambiguous" &&
+          safeErrorCode === "DISPATCH_OUTCOME_AMBIGUOUS",
+      ),
+      true,
+    );
+    assert.equal(codex.dispatches.length, 1);
+  } finally {
+    releaseDispatch?.();
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex doctor evidence refreshes outside routing authority", async (t) => {
+  const { root, stateDir } = await fixture();
+  const clock = new ManualGatewayClock();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  let condition: "split_brain" | "orphaned" = "split_brain";
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+    now: clock.now,
+    timers: clock,
+    codexDoctor: async () => ({ conditions: [condition] }),
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  assert.deepEqual(
+    (await service.snapshot()).connectors.find(
+      (connector) => connector.provider === "codex",
+    )?.codexDoctor?.conditions,
+    ["split_brain"],
+  );
+  condition = "orphaned";
+  await clock.advanceBy(30_000);
+  assert.deepEqual(
+    (await service.snapshot()).connectors.find(
+      (connector) => connector.provider === "codex",
+    )?.codexDoctor?.conditions,
+    ["orphaned"],
+  );
 });
 
 test("a terminal provider callback observed before the prompt boundary suppresses held", async (t) => {

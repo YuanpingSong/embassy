@@ -2613,6 +2613,7 @@ type Wire = Record<string, unknown>;
 class FakeCodexTransport implements LocalCodexOwnedTransport {
   cleanupConfirmed = false;
   closeFailure: Error | undefined;
+  loadedListGate: Promise<void> | undefined;
   readonly sent: Wire[] = [];
   private readonly closeListeners = new Set<() => void>();
   private readonly errorListeners = new Set<() => void>();
@@ -2650,6 +2651,7 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     if (message.method === "initialize") {
       this.respond(message, { platformFamily: "unix", platformOs: "darwin" });
     } else if (message.method === "thread/loaded/list") {
+      await this.loadedListGate;
       this.respond(message, { data: [...this.threadIds] });
     } else if (message.method === "thread/resume") {
       const params = message.params as { threadId?: unknown };
@@ -2815,6 +2817,7 @@ function codexProvider(
     cleanupTimeoutMs?: number;
     recoveryInitialMs?: number;
     recoveryMaxMs?: number;
+    observationPollMs?: number;
   } = {},
 ) {
   return createLocalCodexGatewayProvider({
@@ -2822,6 +2825,63 @@ function codexProvider(
     ...options,
   });
 }
+
+test("Codex routes publish bounded positive observations while quiet", async () => {
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  const provider = codexProvider(factory, { observationPollMs: 5 });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  const transport = factory.transports[0]!;
+  const initialObservations = transport.sent.filter(
+    (message) => message.method === "thread/loaded/list",
+  ).length;
+  const initialRouteEvents = observed.routes.length;
+
+  await waitFor(
+    () =>
+      transport.sent.filter(
+        (message) => message.method === "thread/loaded/list",
+      ).length > initialObservations && observed.routes.length > initialRouteEvents,
+  );
+  assert.deepEqual(observed.routes.at(-1), {
+    endpoint: { ...provider.identity, routeHandle: THREAD_ID },
+    state: "idle",
+  });
+
+  let releaseObservation: (() => void) | undefined;
+  transport.loadedListGate = new Promise<void>((resolve) => {
+    releaseObservation = resolve;
+  });
+  const beforeHeldObservation = transport.sent.filter(
+    (message) => message.method === "thread/loaded/list",
+  ).length;
+  await waitFor(
+    () =>
+      transport.sent.filter(
+        (message) => message.method === "thread/loaded/list",
+      ).length === beforeHeldObservation + 1,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(
+    transport.sent.filter(
+      (message) => message.method === "thread/loaded/list",
+    ).length,
+    beforeHeldObservation + 1,
+  );
+  transport.loadedListGate = undefined;
+  releaseObservation?.();
+  await waitFor(
+    () =>
+      transport.sent.filter(
+        (message) => message.method === "thread/loaded/list",
+      ).length > beforeHeldObservation + 1,
+  );
+  await provider.close();
+});
 
 function retargetCodexFactory(
   factory: FakeCodexFactory,

@@ -38,6 +38,7 @@ import {
   type ValidatedSendToCodexParams,
 } from "../src/gateway/control.js";
 import {
+  CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   projectGatewayPublicSnapshot,
   messageDirections,
 } from "../src/gateway/types.js";
@@ -101,6 +102,7 @@ function snapshot(): GatewaySnapshot {
         protocol: "codex-app-server",
         protocolVersion: "0.147.0",
         lastSeenAt: NOW,
+        observationAgeMs: 0,
       },
       {
         provider: "claude",
@@ -109,6 +111,7 @@ function snapshot(): GatewaySnapshot {
         protocol: "claude-peer",
         protocolVersion: "1",
         lastSeenAt: NOW,
+        observationAgeMs: 0,
         registry: {
           entriesScanned: 3,
           parseableRecords: 2,
@@ -1452,6 +1455,17 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   )?.registry;
   assert.ok(registry);
   registry.parseableRecords = 4;
+  const invalidObservationAge = snapshot();
+  invalidObservationAge.connectors[0]!.observationAgeMs = -1;
+  const dishonestHealthyAge = snapshot();
+  dishonestHealthyAge.connectors[0]!.lastSeenAt = new Date(
+    Date.parse(NOW) - CONNECTOR_OBSERVATION_STALE_AFTER_MS - 1,
+  ).toISOString();
+  dishonestHealthyAge.connectors[0]!.observationAgeMs =
+    CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1;
+  const missingHealthyObservation = snapshot();
+  delete missingHealthyObservation.connectors[0]!.lastSeenAt;
+  delete missingHealthyObservation.connectors[0]!.observationAgeMs;
   const duplicateRegistryCodes = snapshot();
   const duplicateRegistry = duplicateRegistryCodes.connectors.find(
     (connector) => connector.provider === "claude",
@@ -1499,6 +1513,9 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidRecoveryAuthority,
     invalidDeadline,
     invalidRegistry,
+    invalidObservationAge,
+    dishonestHealthyAge,
+    missingHealthyObservation,
     duplicateRegistryCodes,
     registryOnCodex,
     nonClaudeAvailablePeer,
