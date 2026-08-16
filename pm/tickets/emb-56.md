@@ -3,7 +3,7 @@ id: emb-56
 title: DeepSeek harness monitor-only attestation (Shape A)
 kind: normal
 size: 3
-status: dispatched
+status: review
 release: v1.7
 updated: 2026-08-16
 ---
@@ -111,3 +111,10 @@ exit code without printed counts — pipe-masked. TWO corrections ruled: (1) add
 artifact to the manifest allowlist (window += the manifest-bearing file(s) the test derives from);
 (2) HOUSE RULE SHARPENED: verification claims cite printed pass/fail counts, never exit codes —
 an exit code through a pipe is the pipe's, not the suite's.
+
+## Landing state (2026-08-16)
+
+Accepted after two correction cycles (boot-safety catch; manifest allowlist): PM reads of the
+detector and correction hunks, gate 773/773 from full captured log (counts, per the sharpened
+rule the engineer adopted in the same handoff), budget 577/500 as accepted ground truth,
+concepts 1/1. Committed locally on the drill-gated stack; goes public with the release sequence.
