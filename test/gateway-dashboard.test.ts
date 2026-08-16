@@ -434,7 +434,7 @@ test("provider quarantine owns recovery and suppresses normal-route noise", () =
     .map((name) => ({ name, outcome: "pass" }));
   probes.push({ name: "write_attestation", outcome: "pass" });
   snapshot.compatibilityChecks = [projectPublicCompatibilityCheck(evaluateCompatibilityAttestation({
-    surface: "codex", version: "0.148.0", checkedAt: "2026-08-08T11:58:00.000Z",
+    surface: "codex", version: "0.147.1", checkedAt: "2026-08-08T11:58:00.000Z",
     certifiedVersions: certifiedCompatibilityVersions.codex, probes,
   }))];
   const writeAttested = buildDashboardViewModel(snapshot);

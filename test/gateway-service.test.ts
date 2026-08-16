@@ -1022,7 +1022,7 @@ function compatibleCodexAttestation(
 }
 
 function schemaAttestedCodexAttestation(
-  version = "0.148.0",
+  version = "0.147.1",
 ): CompatibilityAttestation {
   return {
     ...compatibleCodexAttestation(version),
@@ -1584,12 +1584,12 @@ test("a compatibility-only observer attests without entering provider state", as
 test("a schema-attested real Codex provider boots monitor-only and later activates only a certified generation", async (t) => {
   const current = await fixture();
   const observed = syntheticServiceCodexFactory({
-    version: "0.148.0",
+    version: "0.147.1",
     endpointGeneration: "codex_schema_only_g1",
     writable: false,
   });
   const refreshedObservation = syntheticServiceCodexFactory({
-    version: "0.149.0",
+    version: "0.147.2",
     endpointGeneration: "codex_schema_only_g2",
     writable: false,
   });
@@ -1680,12 +1680,12 @@ test("a schema-attested real Codex provider boots monitor-only and later activat
 test("a same-generation Codex refresh reports monitor-only without churn", async (t) => {
   const current = await fixture();
   const observed = syntheticServiceCodexFactory({
-    version: "0.148.0",
+    version: "0.147.1",
     endpointGeneration: "codex_schema_same_g1",
     writable: false,
   });
   const sameGeneration = syntheticServiceCodexFactory({
-    version: "0.148.0",
+    version: "0.147.1",
     endpointGeneration: "codex_schema_same_g1",
     writable: false,
   });
@@ -2267,7 +2267,7 @@ test("schema-attested Codex startup leaves retained routes stale without refresh
   await first.close();
 
   const observed = syntheticServiceCodexFactory({
-    version: "0.148.0",
+    version: "0.147.1",
     endpointGeneration: "codex_schema_only_boot_g2",
     writable: false,
   });
@@ -3735,7 +3735,7 @@ test("a schema-attested Codex endpoint refresh stays monitor-only without a dura
   const beforeGeneration = "codex_schema_refresh_g1";
   const observedGeneration = "codex_schema_refresh_g2";
   const claude = new FakeProvider("claude");
-  const codex = new FakeProvider("codex", beforeGeneration, "0.148.0");
+  const codex = new FakeProvider("codex", beforeGeneration, "0.147.1");
   const service = new GatewayService({
     config: loadGatewayConfig({
       EMBASSY_STATE_DIR: stateDir,

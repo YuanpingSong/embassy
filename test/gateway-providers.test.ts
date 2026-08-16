@@ -3148,7 +3148,7 @@ test("a schema-attested Codex probe stays monitor-only after acceptance", async 
   const factory = retargetCodexFactory(
     new FakeCodexFactory(THREAD_ID, true),
     "local-synthetic-generation-unpinned",
-    "0.148.0",
+    "0.147.1",
   );
   const provider = codexProvider(factory);
   await provider.initialize(callbacks().callbacks);
@@ -3173,7 +3173,7 @@ test("a schema-attested Codex probe stays monitor-only after acceptance", async 
   provider.acceptCompatibilityAttestation({
     schemaVersion: 1,
     surface: "codex",
-    version: "0.148.0",
+    version: "0.147.1",
     tier: "schema_attested",
     checkedAt: new Date().toISOString(),
     probes,
@@ -4643,7 +4643,7 @@ test("schema-attested Codex endpoint drift stays monitor-only and never writes",
   const driftedFactory = retargetCodexFactory(
     new FakeCodexFactory([THREAD_ID, freshThread], true),
     "local-synthetic-generation-2",
-    "0.148.0",
+    "0.147.1",
   );
   const provider = codexProvider(firstFactory, {
     recoveryInitialMs: 1_000,
