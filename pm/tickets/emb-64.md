@@ -42,3 +42,17 @@ Third falsified claim added: SECURITY.md:203-205 "Embassy exposes no archive, de
 method" — thread/archive is now allowlisted (probe-only). State the probe-only containment
 precisely. ORDERING REQUIREMENT: this ticket lands adjacent to emb-59 in one sequence, both before
 the v1.6 tag.
+
+## Window contest and ruling (2026-08-16)
+
+**Contest**: the grep-proven promise found four published surfaces outside the declared scope still
+carrying the falsified claim: CONTRIBUTING.md:75, skills/embassy-peer/SKILL.md:34 (ships in the npm
+package), site/index.html:92, site/zh-CN/index.html:92.
+
+**Ruling: expansion APPROVED** — all four files, copy-only, same truth language (ordinary reads
+read-only / optional disposable write probe / zero-spend fail-safe today). The site and the shipped
+skill are the MOST public surfaces; the enumeration that seeded this ticket came from the taste
+review and was never itself grep-verified — the promise's grep is what caught it, which is the
+promise working. Correctly preserved as-is: the test fixture's behavioral never-reach assertion and
+DECLINED.md's still-true no-authority-from-read-evidence statement. The scoped no-archive language
+(ordinary connectors vs probe-only exception) is the intended shape. Budget: size 2 stands.
