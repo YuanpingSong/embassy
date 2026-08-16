@@ -3,7 +3,7 @@ id: emb-63
 title: Stale-route guidance names the actual blocker (waiting for Codex app)
 kind: normal
 size: 2
-status: dispatched
+status: review
 release: v1.6
 updated: 2026-08-16
 ---
@@ -28,3 +28,11 @@ may not.
 ## Dispatch note (2026-08-16)
 
 Dispatched to swe3, queued behind emb-62. Scope contract: src/gateway/dashboard-model.ts, dashboard copy files (en/zh-CN), docs/README release-notes touchpoints, test/**.
+
+## Landing state (2026-08-16)
+
+Accepted: PM diff read (honest-conjunction detector: stale + CODEX_ROUTE_STALE + aged >=2s past the
+1.75s burst + same-host healthy/compatible connector; weaker evidence keeps generic copy), gate
+762/762, budget 135/200, one declared guidance concept. Committed locally behind emb-62; both go
+public together after the release drill — which will render this exact guidance live during the
+slow-reattach window, making the drill the experiential check too.
