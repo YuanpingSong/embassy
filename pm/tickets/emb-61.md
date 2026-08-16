@@ -3,7 +3,7 @@ id: emb-61
 title: Routable DeepSeek provider — transport decision + product-type generalization (design)
 kind: investigation
 size: 3
-status: building
+status: review
 release: v1.7
 updated: 2026-08-16
 ---
@@ -222,3 +222,326 @@ BSD-3-Clause, no bin):
 
 Remaining in this ticket: the product-type generalization design (PairParams, messageDirections,
 ProvenanceEnvelopeDirection) — running now; founder eyes required before implementation.
+
+---
+
+## Generalization design report (2026-08-16, opus agent)
+
+I have what I need. Here is the design report.
+
+---
+
+# emb-61 part 2 — Generalizing Embassy's three closed 2-provider product types to N providers
+
+**Scope:** read-only design. No files modified. Transport is settled (native SDK JSON-RPC) and not revisited.
+
+**What I read directly:** `provenance-envelope.ts` (all 148 lines), `types.ts` (schema regions), `control.ts` (validators, params, snapshot checks, method union), `store.ts` (all persisted validators, the migration chain, `loadStateFile`, `directionFor`/`pairAliasesForRoutes`, pair projection, watch-lease attribution), `dashboard-model.ts` (semantics tables, pair rows, attention scan), `dashboard.ts`, `tab-deliveries.tsx`, `chips.tsx`, `app-types.d.ts`, `live-dashboard-http.ts`, `cli.ts`, `compatibility.ts`, the two `composeProvenanceEnvelope` call sites in `providers.ts`, the `codex-` gates in `claude-helper-protocol.ts` / `claude-helper-supervisor.ts`, `docs/DELIVERY.md`, `docs/GATEWAY-ARCHITECTURE.md:460-512`, and emb-49 §3 / emb-54 §2 for the hazard precedent.
+
+---
+
+## 0. Two corrections to the brief's framing — read these first, they change the design
+
+**(a) `ProvenanceEnvelopeDirection` is not a message direction. It is the recipient provider's rendering dialect.**
+
+Both call sites confirm it: `providers.ts:1717` passes `direction: "claude"` on the path that writes *into* Claude (`CLAUDE_ROUTE_UNAVAILABLE` guards), and `providers.ts:3357` passes `direction: "codex"` on the path that writes *into* Codex (`CODEX_ROUTE_UNAVAILABLE`, `steer`/`queuedAhead`). The file's own header says "at the provider write boundary."
+
+So "adding a third direction" is the wrong operation. The correct operation is **adding a third entry to a recipient-rendering-profile table** — and the profile is chosen by the *recipient*, which means it is `GatewayProvider`-indexed, not direction-indexed. This is much cheaper than the brief assumes, and it also means the type is the *only* one of the three with **zero downgrade exposure**: `composeProvenanceEnvelope` is a pure function, its inputs are never persisted, and its output is transient payload the store explicitly never retains (`GATEWAY-ARCHITECTURE.md:462-464`).
+
+**(b) The envelope has never encoded the sender's provider. Recipients infer it, and the inference is only sound because N = 2.**
+
+The frame carries `from-name` (the verified source alias), `conversation`, `reply-as`, and optionally `from-alias`. No provider field. Today a recipient computes the sender's provider as *"not mine"* — and that is sound, because `directionFor` (`store.ts:2260-2283`) and `pairAliasesForRoutes` (`store.ts:2153-2173`) both hard-throw `INVALID_GATEWAY_ROUTE_PAIR` on same-provider edges, so every routed message crosses between the only two providers that exist.
+
+**At N = 3 that inference silently becomes false.** A Claude recipient seeing `from-name="reviewer@this-mac"` can no longer tell Codex from DeepSeek. No written guarantee is broken; a real, correct, load-bearing recipient inference is. That is the sharpest provenance finding in this pass, and §1c is built around it.
+
+Related, and it closes off the cheap fix: **alias prefixes are not provider proof.** Codex *registrations* must start with `codex-` (enforced in 9 places), but Claude aliases come from Claude's own session names via discovery (`providers.ts:2506-2516`) and carry no enforced prefix — and the shipped skill states the rule explicitly at `skills/embassy-peer/SKILL.md:20`: *"a genuine unmarked Claude session remains visible even when its name starts with `codex-*`."* Using the prefix as a provider assertion would have Embassy claiming something it cannot verify — precisely what `GATEWAY-ARCHITECTURE.md:486-488` forbids for `from`/`from-session`/`from-mode`.
+
+---
+
+## 1. Target shape
+
+### 1a. Direction — a derived ordered provider pair, not a hand-written union
+
+```ts
+// types.ts
+export const gatewayProviders = ["codex", "claude"] as const;   // + "deepseek" later
+
+export function directionId<F extends GatewayProvider, T extends GatewayProvider>(
+  from: F, to: T
+): `${F}_to_${T}` { return `${from}_to_${to}`; }
+
+export const messageDirections = orderedProviderPairs(gatewayProviders)
+  .map(([f, t]) => directionId(f, t));          // derived, never hand-listed
+
+export type MessageDirection = ...;             // same derivation at the type level
+export function parseDirection(d: MessageDirection): { from: GatewayProvider; to: GatewayProvider };
+```
+
+Persisted and wire form stays a **flat string**, unchanged. With `gatewayProviders = ["codex","claude"]` the derivation yields exactly `["codex_to_claude","claude_to_codex"]` — same two strings, same values in every existing state file, same values in every snapshot. Adding `"deepseek"` yields six.
+
+Two structural simplifications fall out, and both matter for cost:
+
+- **`deliveryChipByDirection` and `deliveryMeaningByDirection` are recipient-keyed in meaning, not pair-keyed.** The copy proves it: `activity.meaning.delivered.codexToClaude` = *"Embassy wrote the message to Claude's native mailbox immediately"*; `.claudeToCodex` = *"Codex App Server accepted the turn."* Both describe **the recipient's** acceptance semantics. Re-key both tables to `Record<GatewayProvider, key>` — output is bit-identical for the two existing directions, and delivery semantics grow **N, not N²**.
+- **Only the route label `direction.claudeToCodex` / `.codexToClaude` is genuinely a pair**, and it becomes compositional: `providerLabel(from) + " → " + providerLabel(to)`. Also N, not N².
+
+Net: `dashboardCopyKeys` grows by ~2 per provider, not ~2N.
+
+### 1b. Pairing — keep the Claude×Codex table exactly, add an optional general table
+
+Constraint that forces the shape: `store.ts:1591-1614` validates the persisted state's **top-level key set exactly**, and `isPairRecord` (`:543-564`) validates the pair record's key set exactly, and `:1764-1776` cross-checks `claude?.binding.provider === "claude" && codex?.binding.provider === "codex"`. A field rename or an added required key is boot-fatal for the previous binary (§2).
+
+**Target:**
+
+```ts
+// unchanged, forever — the Claude×Codex consent table
+pairs: GatewayPairRecord[];                       // {claudeAlias, codexAlias, claudeOwnerLease, codexOwnerLease, createdAt, updatedAt, counters}
+
+// new, OPTIONAL, omitted entirely when empty
+providerPairs?: GatewayProviderPairRecord[];      // {endpoints: [{alias, provider, ownerLease}, {alias, provider, ownerLease}], createdAt, updatedAt, counters}
+```
+
+with a single read-side accessor `allConsentEdges(state)` that yields a role-neutral view over both tables, and a canonical ordering function (sort endpoints by `provider` then `alias`) so keys are stable.
+
+Rejected alternatives, with reasons:
+
+- **One generalized table, migrate legacy records forward.** Cleanest code by far. But it rewrites *every* install's pair records on first persist, so a Claude+Codex-only user who never touches DeepSeek loses v1.6 loadability. Violates law 2 for the majority to serve the minority. Rejected.
+- **Reuse the two slots as canonical positions** (slot "claude" = provider that sorts first). Lies in the field names *and* doesn't even buy downgrade safety, since v1.6's cross-check follows the alias to the route and demands `provider === "claude"`. Rejected hard.
+
+**Control-wire shape** — keep one method, discriminated params, each arm strictly key-checked:
+
+```ts
+export type PairParams =
+  | { claudeAlias: string; codexAlias: string; codexThreadId?: string }        // legacy, byte-identical
+  | { aliases: [string, string]; threadAttestation?: { alias: string; threadId: string } };
+```
+
+The legacy arm keeps `hasExactKeys(value, ["claudeAlias","codexAlias"], ["codexThreadId"])` and its Codex-prefix / Claude-selector / same-host checks **verbatim**, so a v1.6 CLI's `pair` frame is accepted unchanged and takes the identical code path. `gatewayControlMethods` is not touched (adding a method to that closed union has its own cross-binary cost for no benefit).
+
+`codexThreadId` generalizes to `threadAttestation: {alias, threadId}` — the alias names *which* endpoint the attestation is for, checked against that route's registered handle. For Codex with the attestation supplied, behavior is identical to today.
+
+### 1c. Provenance — a recipient-profile table, plus one new hint attribute
+
+**Refactor (bytes provably unchanged):**
+
+```ts
+type ProvenanceRecipientProfile = Readonly<{
+  fromNameMaxCodepoints?: number;   // present ⇒ bounded display alias + from-alias on shortening
+  emitConversationAttribute: boolean;
+  allowQueuedAhead: boolean;
+}>;
+
+const provenanceProfiles = {
+  claude:   { fromNameMaxCodepoints: 64, emitConversationAttribute: false, allowQueuedAhead: false },
+  codex:    { emitConversationAttribute: true,  allowQueuedAhead: true  },
+  deepseek: { emitConversationAttribute: true,  allowQueuedAhead: false },
+} as const satisfies Record<GatewayProvider, ProvenanceRecipientProfile>;
+```
+
+Every existing conditional maps one-to-one: `direction === "codex" ? sourceAlias : display.displayAlias` → `profile.fromNameMaxCodepoints === undefined`; the `conversation` attribute → `emitConversationAttribute`; the `input.direction !== "codex"` guard on `queuedAhead` → `!profile.allowQueuedAhead`; the `direction !== "codex" && direction !== "claude"` validator arm → table membership. **The string templates are untouched, so the emitted bytes for `claude` and `codex` are identical by construction**, and the repo's existing exact-wire-shape tests (`test/provenance-envelope.test.ts`; `GATEWAY-ARCHITECTURE.md:197`) prove it rather than asserting it.
+
+**Why DeepSeek gets the Codex-shaped profile, and what that means.** The Claude profile exists for exactly one reason: Claude Code has a *pinned canonical parser* for `<cross-session-message from-name=…>` with a 64-codepoint bound and no `conversation` attribute. That is a fact about Claude's parser, not a fact about being a peer. DeepSeek has no such parser — the native SDK sends `contentBlocks` verbatim as the user message. So DeepSeek takes the fuller frame. The profile names should say so (`bounded_native_parser` vs `verbatim_text`); "codex" and "claude" as *dialect* names are the thing that misled the brief. `allowQueuedAhead: false` for DeepSeek is correct and load-bearing: `queuedAhead` is the STEER marker, and per emb-54 §2 the steer path is Codex-only by construction.
+
+**What a third provider's provenance marking asserts.** Precisely and only:
+
+1. This text entered your context **through Embassy, at the broker's write boundary**, inside exactly one authoritative outer frame.
+2. The sender is the **exact alias in `from-name`**, verified by the broker against a live registered route whose owner lease it proved.
+3. Here is a participant-scoped conversation locator and the exact `embassy reply` command; caller, membership, and route policy are rechecked at reply time.
+
+Not asserted, now or ever: that the body is safe, that the frame is signed, or (today) which provider the sender is.
+
+**How a recipient distinguishes providers — the recommendation.** Add one broker-owned attribute to the **reply hint**, not the outer frame:
+
+```
+<embassy-reply-hint conversation="conv_…" reply-as="…" from-provider="codex">
+```
+
+Four reasons for the hint rather than the outer element: the outer element is the one that must satisfy Claude's pinned parser and must stay minimal there; the hint is entirely Embassy-owned in both dialects; the hint already carries a broker-invented attribute (`from-alias`), so the precedent exists; and it renders identically in both profiles, so provenance does not vary by recipient.
+
+The value comes from `binding.provider` on the source route record — proven by owner lease, exactly as strong as `from-name` is today. **No new trust is being asserted; a fact Embassy already verifies is being stated instead of left to inference.**
+
+**This is the one change in the pack that alters the emitted bytes for the two existing providers.** It is additive (no existing attribute changes, no ordering changes), it is caught by the existing exact-wire-shape tests rather than slipping through, and it requires a docs update in `DELIVERY.md`, `DELIVERY.zh-CN.md`, and `GATEWAY-ARCHITECTURE.md`. It is founder question #1.
+
+The alternative — ship nothing and let recipients keep an inference that has quietly become unsound — is cheaper and preserves bytes exactly. I recommend against it, and I've priced both.
+
+### Proof obligations that make "two-provider behavior unchanged" checkable rather than asserted
+
+| # | Obligation | Test |
+|---|---|---|
+| P1 | `messageDirections` deep-equals `["codex_to_claude","claude_to_codex"]` while `gatewayProviders` is the pair | source-level assertion |
+| P2 | `composeProvenanceEnvelope` output is byte-identical across the profile refactor, over the full existing input matrix | golden-bytes, extends `test/provenance-envelope.test.ts` |
+| P3 | State written by a v1.7 broker in a Claude+Codex-only session is accepted by v1.6's `isPersistedState` | **frozen copy of the v1.6 validator kept in the test tree**, run against v1.7 fixtures |
+| P4 | For a Claude×Codex edge, `providerPairs` is absent from the persisted file and the executed code path is unchanged | store round-trip + path assertion |
+
+**P3 should become a standing test, not an emb-61 artifact.** emb-58 needs the same guard, and it is the only mechanical enforcement of law 2 that exists.
+
+---
+
+## 2. Downgrade safety — the answer is No, conditionally, and the condition is the whole design
+
+### The mechanism, and it is worse than emb-49's
+
+`loadStateFile` (`store.ts:7089-7153`) runs ten migrations, then `isPersistedState`, then throws `CORRUPT_GATEWAY_STATE` on failure. That throw propagates out of `initialize()` (`store.ts:2380-2386`) after releasing the controller lock. **There is no quarantine path and no degrade path. A v1.6 binary that cannot parse the state file refuses to boot at all.**
+
+emb-49 found an escape hatch — probe names are pattern-validated, not list-validated, so a fifth probe rides through an old binary untouched. **There is no equivalent escape hatch anywhere in the provider/direction/pair path.** All four persisted touchpoints are closed:
+
+| Persisted field | v1.6 validator | Widenable? |
+|---|---|---|
+| `routes[].binding.provider` | `PROVIDERS.has(value.provider)` — `store.ts:398`, set built from `gatewayProviders` at `:137` | **No** |
+| `connectors[].provider` | same predicate via `isPrivateEndpointIdentity` — `store.ts:885` | **No** |
+| `queue[]`/`inFlight[]`/`events[]`/`dedupe[]` `.direction` | `DIRECTIONS.has(value.direction)` — `store.ts:933, 989, 1036`, set built from `messageDirections` at `:142` | **No** |
+| `pairs[]` | exact key set (`:543-564`) **plus** `claude?.binding.provider === "claude" && codex?.binding.provider === "codex"` (`:1767-1776`) | **No** |
+| top-level state object | `hasOnlyKeys([...22 keys])` — `store.ts:1593-1614` | **No new required key** |
+
+So: **the first DeepSeek route or connector a v1.7 broker persists makes the state file unloadable by every v1.6 binary.** Not the first message, not the first pair — the first *route*. And the failure is boot refusal for Claude and Codex too, not just for DeepSeek.
+
+Bumping `schemaVersion` to `2` is strictly worse: it breaks v1.6 for every install immediately, including those that never install `dsh`. Rejected.
+
+### The design that survives: deferred taint
+
+Because v1.6's rejection is triggered by *records naming a third provider*, not by the v1.7 binary's existence, the guarantee can be stated exactly:
+
+> **v1.7 persistence invariant.** For any install with no third-provider route, connector, pair, or message, the state file v1.7 writes is shape-identical to what v1.6 writes and loads cleanly under v1.6. Every schema addition must therefore be an **optional key that is omitted when empty**, and every union widening must be **value-space only** — no new fields, no renamed fields, no changed field types, no `schemaVersion` bump.
+
+Consequences, stated plainly:
+
+- Law 2 holds unconditionally for every install that does not opt in. Yesterday's data stays readable by yesterday's binary.
+- The downgrade cliff exists, is entered only by an explicit operator action (`register-deepseek`), and is not silent.
+- It must be **reversible**, which v1.6 cannot help with — v1.6 has already shipped. The escape has to be v1.7-side.
+
+### Migrate-forward-once plan
+
+There is no forward migration to write: no field changes shape, so the existing ten-step migration chain gains nothing. What is required instead is the **reverse** operation:
+
+1. **`embassy state prune-provider <name>`** — a v1.7 command that rewrites `gateway-state.json` to a v1.6-loadable projection: drop every route, connector, pair, queued/in-flight message, dedupe row, and event naming the pruned provider; drop `providerPairs` entirely; rebuild `accounting`/`counters`/`queuedBytes` so the cross-invariants at `store.ts:1748-1790` still hold; write atomically through the existing temp-file-and-rename path. Refuse to run while the broker holds the lock.
+2. **A documented downgrade procedure** in `CHANGELOG.md` / release notes: stop the broker, prune, downgrade. Not a footnote — this is the first Embassy release where rolling back is not free.
+3. **P3 as a standing CI test** so the invariant is enforced rather than remembered.
+
+Two-file "downgrade shadow" schemes (v2 at a new path, a v1 projection at the legacy path) were considered and rejected: any binary that then mutates the legacy file forks the state, and there is no honest reconciliation.
+
+### One cross-binary hazard beyond the state file
+
+The control protocol has a single integer version (`GATEWAY_CONTROL_PROTOCOL_VERSION = 1`) checked on **requests only** (`control.ts:930`). Responses are validated **client-side** with exact-key and closed-union checks. `isNormalizedMessageEvent` (`control.ts:1266-1267`) hard-codes `direction === "codex_to_claude" || direction === "claude_to_codex"`, and `isGatewaySnapshot` rejects the **entire snapshot** if any message fails (`:1626-1628`).
+
+**So a v1.6 CLI pointed at a running v1.7 broker that has ever routed a DeepSeek message gets a total `embassy status` failure — not a partial view.** Same for `isPairSnapshot` (`:1191-1203`, exact keys `claudeAlias`/`codexAlias`) and `isGatewayActivityIdentity` (`:1442-1476`, closed kind→action switch). Both binaries ship in one npm package, so this window is the upgrade itself. It should be named in the release notes alongside the state cliff.
+
+---
+
+## 3. Enumerated edit map
+
+Hazard classes:
+
+- **H1** closed persisted/validated union — boot-fatal or snapshot-fatal on widening
+- **H2** exact key-set validator — rejects any added field
+- **H3** hand-written type literal — **will not fail compilation** when the union widens
+- **H4** binary ternary / two-arm branch — silently routes a third value into an existing arm
+- **H5** exhaustive mapped type — **will** fail compilation (good; must be filled)
+- **H6** enumerated filter / UI site — silently incomplete
+- **H7** provider-named API surface (method, param, copy key)
+- **H8** alias prefix used as provider proof — unsound per `SKILL.md:20`
+
+| File | Site | Class |
+|---|---|---|
+| `types.ts` | `:13` `gatewayProviders`; `:59` `messageDirections` | H1 |
+| | `:170-179` `GatewayPairRecord`; `:320-353` `GatewayPersistedState`; `:372` `PublicPairSnapshot` | H2 |
+| | `:217`,`:248`,`:265` `.direction` fields | H1 |
+| | `:515` `gatewayActivityActions` (7 of 11 provider-named) | H7 |
+| `store.ts` | `:137` `PROVIDERS`; `:142` `DIRECTIONS` | H1 |
+| | **`:391-403` `isPrivateEndpointIdentity` → `PROVIDERS.has`** | **H1 — downgrade-decisive** |
+| | `:543-564` `isPairRecord`; **`:1591-1614` top-level `hasOnlyKeys`** | **H2 — downgrade-decisive** |
+| | `:904-951`, `:959-1004`, `:1005-1040` direction checks | H1 |
+| | `:1764-1776` `pairsValid` provider cross-check | H1/H4 |
+| | `:1785` `isValidPersistedMessagePair` literal param | H3 |
+| | `:2149-2173` `pairKey` / `pairAliasesForRoutes`; `:2196-2212` `renamePairAlias`; `:2229-2240` `removePairsForAliases` | H4 |
+| | `:2260-2283` `directionFor` (literal return type) | H3/H4 |
+| | `:2285` `ResolvedEnqueueSides.direction` | H3 |
+| | `:4290`, `:4383`, `:4400`, `:4442` direction assignment | H3 |
+| | `:4900-4910` public pair projection — `host` derived from `claudeAlias` | H4 |
+| | `:6165-6175` watch owner/worker **lease chosen by `claudeAlias` position** | H4 |
+| | `:7113-7129` migration chain + `CORRUPT_GATEWAY_STATE` throw | migrate seam |
+| `control.ts` | `:128-133` `PairParams` | target |
+| | `:809-831` pair/unpair validator (exact keys + `codex-` + Claude selector + same host) | H2/H8 |
+| | **`:1266-1267` direction closed check in `isNormalizedMessageEvent`** | **H1 — cross-binary decisive** |
+| | `:1191-1203` `isPairSnapshot`; `:1650-1652` snapshot pair↔route provider cross-check | H2/H4 |
+| | `:1442-1476` `isGatewayActivityIdentity` closed switch | H7 |
+| | `:73-89` `gatewayControlMethods` | H7 |
+| `provenance-envelope.ts` | `:17` type; `:44-69` validator; `:106`,`:108`,`:112` dialect ternaries; `:129-135` `queuedAhead` | whole file |
+| `providers.ts` | `:1717`, `:3357` compose call sites | target |
+| | `:1987` `codex-` prefix on native peer registration | H8 |
+| | `:467` `IncompatibleGatewayProvider` surface↔provider coupling (emb-54) | H7 |
+| `service.ts` | **`:2093` `adapter(provider: "codex" \| "claude", …)`** | **H3** |
+| | `:2119-2137` `assertCrossProviderMutationCompatible` — two hard-coded provider arms | H4 |
+| | **`:7502-7503` `hasPair({claudeAlias: conversation.targetAlias, codexAlias: conversation.sourceAlias})` — pair key built by position** | **H4 — live wrong-branch risk** |
+| | `:5641-5646` pair matching; `:5587` `planPairInFlightSettlementsLocked`; `:4819-4850`, `:4900-4975`, `:5013` pair flow | H4/H7 |
+| | `:1224-1226` `sendToClaude`/`sendToCodex`/`reply` | H7 |
+| | `:1268-1276` boot arity (already emb-55) | H1 |
+| `dashboard-model.ts` | `:506` `deliveryChipByDirection` — accessed through a `Record<string,…>` cast, **will not fail** | H4/H6 |
+| | `:523-524` `deliveryMeaningByDirection` — indexed by `MessageDirection`, **will** fail | H5 |
+| | **`:1464-1465` `direction === "codex_to_claude"` unread-write detector** | **H4/H6 — silent semantic loss** |
+| | `:1130-1155` pair rows; `:1323-1324` `pairedClaude`/`pairedCodex`; `:1445-1446` provider-by-slot | H4/H7 |
+| `dashboard.ts` | `:401` hard-coded `Codex → Claude` / `Claude → Codex` legend | H6 |
+| | `:510` direction ternary; `:569` `providerLabel` ternary | H4 |
+| `tab-deliveries.tsx` | `:55-58` `DIRECTION_FILTERS: readonly MessageDirection[]` — **will not fail** | H6 |
+| | `:60-63`, `:70-73` `Record<MessageDirection,string>` — **will** fail | H5 |
+| | `:527-568`, `:721-740` filter UI | H6 |
+| `chips.tsx` / `app-types.d.ts` / `shared.tsx` | mirrors of the above | H5/H6 |
+| `live-dashboard-http.ts` | `:291-312` pair action: `claude-` **and** `codex-` prefix required | H8/H2 |
+| `cli.ts` | `:80-81`, `:615-625` `--claude` / `--codex` flags | H7 |
+| `claude-helper-protocol.ts` | `:270`, `:353` `sourceAlias.startsWith("codex-")` | **H8** |
+| `claude-helper-supervisor.ts` | `:225` same, on every Claude inbound dispatch | **H8** |
+| `claude-peer.ts` | `:607`, `:2378`, `:2602` | H8 |
+| `compatibility.ts` | `:3` `compatibilitySurfaces`; `:8-10`, `:38` `satisfies Record<…>` | H1/H5 |
+| | `:70` `legacyVersionDriftCode`; `:77-92` `unsupportedVersionCode` ternaries | H4 |
+| `dashboard-copy{,.en,.zh-CN}.ts` | `:179-180`, `:198-199`, `:369-370`, `:443` + exhaustive `DashboardCopy` | H5 |
+
+**Two H8 sites are load-bearing safety, not just debt.** `claude-helper-protocol.ts:353` and `claude-helper-supervisor.ts:225` reject any Claude-bound message whose `sourceAlias` does not start with `codex-`, returning `PROVENANCE_ENVELOPE_INVALID`. That means **DeepSeek → Claude is hard-fenced today, fail-closed.** That is a gift: the first routable slice can leave it closed and ship DeepSeek↔Codex only. When it is opened, it must be re-expressed as a check on the source route's `binding.provider`, never on the alias string.
+
+---
+
+## 4. Priced split (rungs 1/2/3/5/8, source lines only)
+
+| Ticket | Scope | Size | Est. source lines |
+|---|---|---|---|
+| **61a** | **Direction as a derived ordered provider pair.** `directionId`/`parseDirection`; derive `messageDirections`; kill the four H3 literals (`store.ts:1785, 2263, 2285`, `service.ts:2093`); re-key `deliveryChipByDirection` + `deliveryMeaningByDirection` to `Record<GatewayProvider,…>`; compositional route label; derive `DIRECTION_FILTERS` and the `dashboard.ts:401` legend; fix the `:1464` detector. **`gatewayProviders` unchanged, so every emitted and persisted value is identical — a zero-behavior-diff refactor.** | **3** | ~300 |
+| **61b** | **Provenance.** (i) profile table, bytes provably unchanged (~90, one file). (ii) `from-provider` on the reply hint + 3 doc files (~50). (iii) re-express the three `codex-` source gates as provider checks (~45). **Founder gate on (ii).** Effort ≈ 2; blast radius maximal. | **3** | ~185 |
+| **61c** | **Role-neutral pairing.** Discriminated `PairParams` + `threadAttestation`; optional `providerPairs` table; `allConsentEdges` accessor; union queries across ~55 pair sites in `store.ts`, ~24 in `service.ts`, ~24 in `control.ts`, `dashboard-model.ts`, `live-dashboard-http.ts`, `tab-routes.tsx`, CLI. Touches the durable consent graph — highest blast radius in the repo. **Re-prices to 8 if the watch-lease attribution (`store.ts:6165-6175`) and the succession/rename paths cannot be expressed through the accessor without restructuring.** | **5** | ~470 |
+| **61d** | **Downgrade guard + prune command.** `embassy state prune-provider`; frozen v1.6 validator in the test tree as a standing P3 test; release-note procedure. **Must land before any third provider ships.** | **2** | ~180 |
+| **61e** | **Add `"deepseek"` to `gatewayProviders`.** After a–d, genuinely small: every site that must change fails compilation via H5. Excludes the adapter and transport, which are their own tickets. Blocked on emb-55/56/57. | **2** | ~120 |
+
+Total **15** across five tickets. Sequencing: **61a → 61b → 61d → 61c → 61e.** 61a and 61b are independently valuable pure refactors with zero behavior change and can land in any release; 61d is the safety precondition; 61c is the one that should own a release lane alone.
+
+---
+
+## 5. Open questions for the founder
+
+**1. The provenance byte change — the only question here that changes what provenance communicates.** Today the frame does not name the sender's provider; recipients infer it as "not mine," which is sound only because there are exactly two providers. At three, that inference silently becomes false. Do we add `from-provider="…"` to the reply hint — additive, sourced from the lease-proven `binding.provider`, asserting nothing Embassy doesn't already verify, but **changing the emitted bytes for Codex and Claude** and touching three docs? Or do we keep bytes exact and accept that a correct recipient inference quietly stops holding? **I recommend adding it.** A provenance marker whose value came from an inference should not lose that value silently.
+
+**2. The law-2 reading.** v1.6's persisted-route validator closes `provider` against a two-member set. It has shipped; it cannot be relaxed retroactively. So the strongest achievable guarantee is: *v1.6 loads v1.7 state cleanly unless and until the operator registers a third-provider route, and a single documented command reverses that.* Is that an acceptable satisfaction of law 2? **If it is not, there is no design that ships a third routable provider** — the constraint is in the already-released binary, not in this design.
+
+**3. Alias namespace.** Should Embassy begin asserting a provider prefix on every route alias — which would mean retiring the shipped rule that a Claude session named `codex-*` is still a valid Claude destination (`SKILL.md:20`)? It would make provenance cheaper. **I recommend no**: it trades a user-facing naming freedom for a fact we can already state honestly from the route record. But it is a values call.
+
+**4. Two pair tables, permanently.** The recommended design keeps the Claude×Codex consent graph on a privileged schema forever, with a second table for everything else. It is the price of downgrade safety for users who will never install `dsh`. Acceptable, or would you rather have one clean generalized table and give up v1.6 loadability for every v1.7 install?
+
+**5. Six directions is a UI question, not just a type question.** At N=3 the deliveries tab needs six filter pills. Should it instead become two independent "from provider" / "to provider" selectors? This is cheaper to decide *before* 61a than after.
+
+**6. DeepSeek alias prefix at registration** — `deepseek-` or `dsh-`, and is it required the way `codex-` is? (Cheap, but it's a naming decision that lands in the CLI and the skill.)
+
+**7. First routable slice scope.** DeepSeek→Claude is currently hard-fenced by the helper's `codex-` source gate, fail-closed. Ship the first routable slice as **DeepSeek↔Codex only**, leaving that gate shut? It removes the entire Claude-ingress surface from the first landing and costs nothing to open later.
+
+## PM acceptance + recommendations (2026-08-16) — AWAITING FOUNDER on the seven questions
+
+Report ACCEPTED; load-bearing claims spot-checked (codex- source gates at
+claude-helper-supervisor.ts:225 / claude-helper-protocol.ts:353 verbatim; the H3 direction literal
+at store.ts:1785 verbatim). emb-61's deliverable is complete: transport ruled (native JSON-RPC),
+generalization designed and priced (61a-e, total 15 across five tickets, sequencing a→b→d→c→e).
+Sub-tickets will be drafted AFTER the founder answers — several answers reshape them.
+
+PM recommendations on the seven founder questions:
+1. from-provider on the reply hint: ADD IT (concur with report) — an inference silently going
+   false is worse than an additive byte change caught by exact-wire tests.
+2. Law-2 reading: the deferred-taint guarantee is an honest satisfaction — the cliff is entered
+   only by explicit operator action and reversed by one documented command. Founder's law, founder's call.
+3. Alias-prefix-as-provider-proof: NO (concur) — state the fact from the lease-proven route record.
+4. Two pair tables permanently: YES — it is the price of never bricking a Claude+Codex-only install.
+5. Deliveries filter UI: two from/to provider selectors over six direction pills.
+6. DeepSeek registration prefix: require `deepseek-` at registration, mirroring the codex- asymmetry.
+7. First routable slice: DeepSeek↔Codex ONLY, Claude-ingress gate stays shut (concur) — the
+   existing fail-closed fence is a gift; opening it is its own later decision.
