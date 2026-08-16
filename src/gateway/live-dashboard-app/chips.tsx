@@ -56,9 +56,11 @@ namespace Embassy {
         safeErrorCode,
       ) ??
       deliveryOverride(
-        semantics.deliveryChipByDirection,
+        semantics.deliveryChipByTargetProvider,
         state,
-        direction,
+        direction === undefined
+          ? undefined
+          : parseDirection(direction)?.targetProvider,
       ) ??
       presentation("delivery", state)
     );
@@ -74,10 +76,6 @@ namespace Embassy {
 
   export function healthChipKind(state: string): ChipKind {
     return presentation("health", state);
-  }
-
-  export function compatibilityChipKind(state: string): ChipKind {
-    return presentation("compatibility", state);
   }
 
   export function overallChipKind(state: string): ChipKind {
@@ -122,7 +120,10 @@ namespace Embassy {
       return semantics.deliveryMeaningBySafeErrorCode.SENDER_NOT_PAIRED;
     }
     if (state === "delivered" && direction !== undefined) {
-      return semantics.deliveryMeaningByDirection[direction];
+      const target = parseDirection(direction)?.targetProvider;
+      if (target !== undefined) {
+        return semantics.deliveryMeaningByTargetProvider[target];
+      }
     }
     if (state === "abandoned" && safeErrorCode !== undefined) {
       const byCode = semantics.deliveryMeaningBySafeErrorCode as Readonly<
@@ -153,8 +154,6 @@ namespace Embassy {
         return `peer.meaning.${camelCaseToken(state)}`;
       case "health":
         return `health.meaning.${camelCaseToken(state)}`;
-      case "compatibility":
-        return `compatibility.meaning.${camelCaseToken(state)}`;
       case "overall":
         return `overall.${camelCaseToken(state)}`;
       case "party":

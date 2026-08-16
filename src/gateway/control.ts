@@ -22,8 +22,10 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
+  gatewayProviders,
   gatewayPublicSnapshotLimits,
-  isPublicCompatibilityCheckSnapshot,
+  isGatewayProvider,
+  isMessageDirection,
   isPublicRegistryObservationSnapshot,
 } from "./types.js";
 import type {
@@ -34,7 +36,7 @@ import type {
   PublicAvailablePeerSnapshot,
   PublicGatewayActivityEvent,
   PublicConnectorSnapshot,
-  PublicPairSnapshot,
+  PublicConsentEdgeSnapshot,
   PublicProgressWatchEventSnapshot,
   PublicProgressWatchSnapshot,
   PublicRouteSnapshot,
@@ -125,12 +127,38 @@ export type SelectClaudeParams = {
   codexThreadId?: string;
 };
 
-export type PairParams = {
+export type LegacyPairParams = {
   claudeAlias: string;
   codexAlias: string;
   /** Optional task attestation: when supplied it must match the alias's live registered thread exactly; when omitted, pairing binds to the alias's live registered endpoint without thread attestation. */
   codexThreadId?: string;
 };
+
+export type GenericPairParams = {
+  aliases: readonly [string, string];
+  /** Optional exact Codex task attestation. Provider truth is checked by the service route binding. */
+  threadAttestation?: Readonly<{ alias: string; threadId: string }>;
+};
+
+/** The legacy arm remains wire-compatible; new providers use the neutral arm. */
+export type PairParams = LegacyPairParams | GenericPairParams;
+
+export function pairParamAliases(
+  params: Readonly<PairParams>,
+): readonly [string, string] {
+  return "aliases" in params
+    ? params.aliases
+    : [params.claudeAlias, params.codexAlias];
+}
+
+export function pairParamThreadAttestation(
+  params: Readonly<PairParams>,
+): Readonly<{ alias: string; threadId: string }> | undefined {
+  if ("aliases" in params) return params.threadAttestation;
+  return params.codexThreadId === undefined
+    ? undefined
+    : { alias: params.codexAlias, threadId: params.codexThreadId };
+}
 
 export type SendToClaudeParams = {
   fromAlias: string;
@@ -805,6 +833,40 @@ function normalizeParams(
     }
     case "pair":
     case "unpair": {
+      if (Object.hasOwn(value, "aliases")) {
+        if (
+          !hasExactKeys(value, ["aliases"], ["threadAttestation"]) ||
+          !Array.isArray(value.aliases) ||
+          value.aliases.length !== 2 ||
+          !isAlias(value.aliases[0]) ||
+          !isAlias(value.aliases[1]) ||
+          value.aliases[0] === value.aliases[1] ||
+          value.aliases[0].slice(value.aliases[0].lastIndexOf("@") + 1) !==
+            value.aliases[1].slice(value.aliases[1].lastIndexOf("@") + 1)
+        ) {
+          throw new ProtocolFault("INVALID_REQUEST");
+        }
+        let threadAttestation: GenericPairParams["threadAttestation"];
+        if (value.threadAttestation !== undefined) {
+          if (
+            !isRecord(value.threadAttestation) ||
+            !hasExactKeys(value.threadAttestation, ["alias", "threadId"]) ||
+            !isAlias(value.threadAttestation.alias) ||
+            !value.aliases.includes(value.threadAttestation.alias) ||
+            !isUuid(value.threadAttestation.threadId)
+          ) {
+            throw new ProtocolFault("INVALID_REQUEST");
+          }
+          threadAttestation = {
+            alias: value.threadAttestation.alias,
+            threadId: value.threadAttestation.threadId.toLowerCase(),
+          };
+        }
+        return {
+          aliases: [value.aliases[0], value.aliases[1]],
+          ...(threadAttestation === undefined ? {} : { threadAttestation }),
+        };
+      }
       if (
         !hasExactKeys(value, ["claudeAlias", "codexAlias"], ["codexThreadId"]) ||
         typeof value.claudeAlias !== "string" ||
@@ -1016,26 +1078,12 @@ function isRefreshResult(value: unknown): value is GatewayRefreshResult {
   return isDecision(decision);
 }
 
-function isProvider(value: unknown): value is "codex" | "claude" {
-  return value === "codex" || value === "claude";
-}
-
 function isConnectorHealth(value: unknown): boolean {
   return (
     value === "offline" ||
     value === "connecting" ||
     value === "healthy" ||
-    value === "degraded" ||
-    value === "incompatible"
-  );
-}
-
-function isCompatibility(value: unknown): boolean {
-  return (
-    value === "unknown" ||
-    value === "compatible" ||
-    value === "incompatible" ||
-    value === "expired"
+    value === "degraded"
   );
 }
 
@@ -1124,16 +1172,14 @@ function isConnectorSnapshot(
         "provider",
         "host",
         "health",
-        "compatibility",
         "protocol",
         "protocolVersion",
       ],
       ["lastSeenAt", "safeErrorCode", "registry"],
     ) &&
-    isProvider(value.provider) &&
+    isGatewayProvider(value.provider) &&
     isHostId(value.host) &&
     isConnectorHealth(value.health) &&
-    isCompatibility(value.compatibility) &&
     typeof value.protocol === "string" &&
     PROTOCOL_PATTERN.test(value.protocol) &&
     typeof value.protocolVersion === "string" &&
@@ -1157,7 +1203,6 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
         "host",
         "enabled",
         "state",
-        "compatibility",
         "busyPolicy",
         "queueDepth",
         "counters",
@@ -1165,7 +1210,7 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
       ["lastSeenAt", "oldestQueuedAt", "safeErrorCode"],
     ) &&
     isAlias(value.alias) &&
-    isProvider(value.provider) &&
+    isGatewayProvider(value.provider) &&
     isHostId(value.host) &&
     value.alias.endsWith(`@${value.host}`) &&
     typeof value.enabled === "boolean" &&
@@ -1174,9 +1219,7 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
       value.state === "busy" ||
       value.state === "awaiting_approval" ||
       value.state === "offline" ||
-      value.state === "incompatible" ||
       value.state === "disabled") &&
-    isCompatibility(value.compatibility) &&
     value.busyPolicy === "queue" &&
     (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
     isNonNegativeInteger(value.queueDepth) &&
@@ -1188,16 +1231,49 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
   );
 }
 
-function isPairSnapshot(value: unknown): value is PublicPairSnapshot {
+function isConsentEndpoint(value: unknown): boolean {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ["claudeAlias", "codexAlias", "host", "counters"]) &&
-    isAlias(value.claudeAlias) &&
-    isAlias(value.codexAlias) &&
-    value.claudeAlias !== value.codexAlias &&
+    hasExactKeys(value, ["alias", "provider"]) &&
+    isAlias(value.alias) &&
+    isGatewayProvider(value.provider)
+  );
+}
+
+function compareConsentEndpoints(
+  left: Readonly<{ alias: string; provider: string }>,
+  right: Readonly<{ alias: string; provider: string }>,
+): number {
+  const providerDelta =
+    gatewayProviders.indexOf(left.provider as (typeof gatewayProviders)[number]) -
+    gatewayProviders.indexOf(right.provider as (typeof gatewayProviders)[number]);
+  return providerDelta || left.alias.localeCompare(right.alias);
+}
+
+function isConsentEdgeSnapshot(
+  value: unknown,
+): value is PublicConsentEdgeSnapshot {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["endpoints", "host", "counters"]) ||
+    !Array.isArray(value.endpoints) ||
+    value.endpoints.length !== 2 ||
+    !isConsentEndpoint(value.endpoints[0]) ||
+    !isConsentEndpoint(value.endpoints[1])
+  ) {
+    return false;
+  }
+  const [left, right] = value.endpoints as unknown as [
+    { alias: string; provider: (typeof gatewayProviders)[number] },
+    { alias: string; provider: (typeof gatewayProviders)[number] },
+  ];
+  return (
+    left.provider !== right.provider &&
+    left.alias !== right.alias &&
+    compareConsentEndpoints(left, right) < 0 &&
     isHostId(value.host) &&
-    value.claudeAlias.endsWith(`@${value.host}`) &&
-    value.codexAlias.endsWith(`@${value.host}`) &&
+    left.alias.endsWith(`@${value.host}`) &&
+    right.alias.endsWith(`@${value.host}`) &&
     isRouteCounters(value.counters)
   );
 }
@@ -1214,7 +1290,6 @@ function isAvailablePeerSnapshot(
         "provider",
         "host",
         "state",
-        "compatibility",
         "validated",
         "selected",
       ],
@@ -1227,9 +1302,7 @@ function isAvailablePeerSnapshot(
     (value.state === "idle" ||
       value.state === "busy" ||
       value.state === "awaiting_approval" ||
-      value.state === "offline" ||
-      value.state === "incompatible") &&
-    isCompatibility(value.compatibility) &&
+      value.state === "offline") &&
     typeof value.validated === "boolean" &&
     typeof value.selected === "boolean" &&
     (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
@@ -1263,8 +1336,7 @@ function isNormalizedMessageEvent(
     (value.conversationIdSuffix === undefined ||
       (typeof value.conversationIdSuffix === "string" &&
         CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
-    (value.direction === "codex_to_claude" ||
-      value.direction === "claude_to_codex") &&
+    isMessageDirection(value.direction) &&
     isAlias(value.sourceAlias) &&
     isAlias(value.targetAlias) &&
     (value.state === "queued" ||
@@ -1328,7 +1400,7 @@ function isSafeAlert(value: unknown): value is SafeGatewayAlert {
       value.severity === "warning" ||
       value.severity === "error") &&
     isIsoTimestamp(value.timestamp) &&
-    (value.provider === undefined || isProvider(value.provider)) &&
+    (value.provider === undefined || isGatewayProvider(value.provider)) &&
     (value.host === undefined || isHostId(value.host)) &&
     (value.alias === undefined || isAlias(value.alias))
   );
@@ -1393,14 +1465,12 @@ function isProgressWatchEventSnapshot(
           (value.actor === "owner" || value.actor === "worker")) ||
           (value.reason === "untracked" && value.actor === "operator") ||
           ((value.reason === "idle_timeout" ||
-            value.reason === "tracking_disabled" ||
-            value.reason === "legacy_upgrade") &&
+            value.reason === "tracking_disabled") &&
             value.actor === "gateway") ||
           (value.reason === "endpoint_retired" &&
             (value.actor === "gateway" || value.actor === "operator")) ||
           (value.reason === "pair_removed" &&
-            value.actor === "operator") ||
-          (value.reason === "legacy_done" && value.actor === "unknown"))))
+            value.actor === "operator"))))
   );
 }
 
@@ -1526,12 +1596,11 @@ function isSnapshotTruncation(value: unknown): boolean {
         "connectors",
         "availablePeers",
         "routes",
-        "pairs",
+        "consentEdges",
         "messages",
         "alerts",
       ],
       [
-        "compatibilityChecks",
         "progressWatches",
         "progressWatchEvents",
         "activityEvents",
@@ -1540,11 +1609,9 @@ function isSnapshotTruncation(value: unknown): boolean {
     isNonNegativeInteger(value.connectors) &&
     isNonNegativeInteger(value.availablePeers) &&
     isNonNegativeInteger(value.routes) &&
-    isNonNegativeInteger(value.pairs) &&
+    isNonNegativeInteger(value.consentEdges) &&
     isNonNegativeInteger(value.messages) &&
     isNonNegativeInteger(value.alerts) &&
-    (value.compatibilityChecks === undefined ||
-      isNonNegativeInteger(value.compatibilityChecks)) &&
     (value.progressWatches === undefined ||
       isNonNegativeInteger(value.progressWatches)) &&
     (value.progressWatchEvents === undefined ||
@@ -1567,41 +1634,35 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
         "connectors",
         "availablePeers",
         "routes",
-        "pairs",
+        "consentEdges",
         "messages",
         "accounting",
         "alerts",
         "truncation",
       ],
       [
-        "compatibilityChecks",
         "progressWatches",
         "progressWatchEvents",
         "activityEvents",
         "deadlinePressure",
       ],
     ) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     !isIsoTimestamp(value.generatedAt) ||
     (value.inboundMode !== "paired" && value.inboundMode !== "open") ||
     !isConnectorHealth(value.health) ||
     !Array.isArray(value.connectors) ||
     value.connectors.length > gatewayPublicSnapshotLimits.connectors ||
     !value.connectors.every(isConnectorSnapshot) ||
-    (value.compatibilityChecks !== undefined &&
-      (!Array.isArray(value.compatibilityChecks) ||
-        value.compatibilityChecks.length >
-          gatewayPublicSnapshotLimits.compatibilityChecks ||
-        !value.compatibilityChecks.every(isPublicCompatibilityCheckSnapshot))) ||
     !Array.isArray(value.availablePeers) ||
     value.availablePeers.length > gatewayPublicSnapshotLimits.availablePeers ||
     !value.availablePeers.every(isAvailablePeerSnapshot) ||
     !Array.isArray(value.routes) ||
     value.routes.length > gatewayPublicSnapshotLimits.routes ||
     !value.routes.every(isRouteSnapshot) ||
-    !Array.isArray(value.pairs) ||
-    value.pairs.length > gatewayPublicSnapshotLimits.pairs ||
-    !value.pairs.every(isPairSnapshot) ||
+    !Array.isArray(value.consentEdges) ||
+    value.consentEdges.length > gatewayPublicSnapshotLimits.consentEdges ||
+    !value.consentEdges.every(isConsentEdgeSnapshot) ||
     (value.progressWatches !== undefined &&
       (!Array.isArray(value.progressWatches) ||
         value.progressWatches.length >
@@ -1636,19 +1697,21 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   );
   const aliases = value.routes.map((route) => route.alias);
   const peerAliases = value.availablePeers.map((peer) => peer.alias);
-  const pairKeys = value.pairs.map(
-    (pair) => `${pair.claudeAlias}\0${pair.codexAlias}`,
+  const consentEdgeKeys = value.consentEdges.map(
+    (edge) => `${edge.endpoints[0].alias}\0${edge.endpoints[1].alias}`,
   );
   const routeByAlias = new Map(value.routes.map((route) => [route.alias, route]));
   return (
     new Set(connectorKeys).size === connectorKeys.length &&
     new Set(aliases).size === aliases.length &&
     new Set(peerAliases).size === peerAliases.length &&
-    new Set(pairKeys).size === pairKeys.length &&
-    value.pairs.every(
-      (pair) =>
-        routeByAlias.get(pair.claudeAlias)?.provider === "claude" &&
-        routeByAlias.get(pair.codexAlias)?.provider === "codex",
+    new Set(consentEdgeKeys).size === consentEdgeKeys.length &&
+    value.consentEdges.every(
+      (edge) =>
+        routeByAlias.get(edge.endpoints[0].alias)?.provider ===
+          edge.endpoints[0].provider &&
+        routeByAlias.get(edge.endpoints[1].alias)?.provider ===
+          edge.endpoints[1].provider,
     ) &&
     Buffer.byteLength(JSON.stringify(value), "utf8") <=
       GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET

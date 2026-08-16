@@ -449,13 +449,11 @@ test("action route forwards only the four exact verbs", async () => {
   const fixtures: LiveDashboardAction[] = [
     {
       action: "pair",
-      claudeAlias: "claude-advisor@this-mac",
-      codexAlias: "codex-builder@this-mac",
+      aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
     },
     {
       action: "unpair",
-      claudeAlias: "claude-advisor@this-mac",
-      codexAlias: "codex-builder@this-mac",
+      aliases: ["grok-builder@this-mac", "advisor@this-mac"],
     },
     {
       action: "remove_stale_codex_registration",
@@ -637,9 +635,25 @@ test("action route rejects malformed or cross-origin requests before broker cont
     {
       method: "POST",
       headers: actionHeaders(
-        '{"action":"pair","claudeAlias":"NOT AN ALIAS","codexAlias":"codex-builder@this-mac"}',
+        '{"action":"pair","aliases":["NOT AN ALIAS","codex-builder@this-mac"]}',
       ),
-      body: '{"action":"pair","claudeAlias":"NOT AN ALIAS","codexAlias":"codex-builder@this-mac"}',
+      body: '{"action":"pair","aliases":["NOT AN ALIAS","codex-builder@this-mac"]}',
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"pair","aliases":["one@this-mac","two@other-mac"]}',
+      ),
+      body: '{"action":"pair","aliases":["one@this-mac","two@other-mac"]}',
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"pair","aliases":["one@this-mac","two@this-mac"],"provider":"codex"}',
+      ),
+      body: '{"action":"pair","aliases":["one@this-mac","two@this-mac"],"provider":"codex"}',
       status: 400,
     },
   ];

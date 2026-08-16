@@ -150,11 +150,10 @@ class SoakProvider implements GatewayProviderAdapter {
 
   async initialize(callbacks: GatewayAdapterCallbacks): Promise<{
     health: "healthy";
-    compatibility: "compatible";
   }> {
     this.#trace("initialize");
     this.callbacks = callbacks;
-    return { health: "healthy", compatibility: "compatible" };
+    return { health: "healthy" };
   }
 
   async discoverClaudePeers(): Promise<{
@@ -163,7 +162,6 @@ class SoakProvider implements GatewayProviderAdapter {
       routeHandle: string;
       kind: "interactive";
       state: GatewayAdapterRouteState;
-      compatibility: "compatible";
     }>;
     complete: boolean;
   }> {
@@ -175,7 +173,6 @@ class SoakProvider implements GatewayProviderAdapter {
           routeHandle: "claude_target_1",
           kind: "interactive",
           state: "idle",
-          compatibility: "compatible",
         },
       ],
       complete: true,
@@ -192,18 +189,19 @@ class SoakProvider implements GatewayProviderAdapter {
 
   #advertisedGenerations = new Map<string, string>();
 
-  async advertiseNativeCodexPeer(input: { alias: string }): Promise<void> {
-    this.#trace("advertiseNativeCodexPeer");
+  async advertiseNativeSourcePeer(input: { alias: string; sourceProvider: PrivateEndpointIdentity["provider"] }): Promise<void> {
+    assert.equal(input.sourceProvider, "codex");
+    this.#trace("advertiseNativeSourcePeer");
     this.#advertisedGenerations.set(input.alias, "soak_listener_1");
   }
 
-  async unadvertiseNativeCodexPeer(): Promise<void> {
-    this.#trace("unadvertiseNativeCodexPeer");
+  async unadvertiseNativeSourcePeer(): Promise<void> {
+    this.#trace("unadvertiseNativeSourcePeer");
     // Soak never asserts unadvertisement.
   }
 
-  async updateNativeCodexPeerStatus(): Promise<void> {
-    this.#trace("updateNativeCodexPeerStatus");
+  async updateNativeSourcePeerStatus(): Promise<void> {
+    this.#trace("updateNativeSourcePeerStatus");
     // Soak never asserts peer status writes.
   }
 

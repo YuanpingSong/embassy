@@ -39,13 +39,8 @@ import {
 } from "../src/gateway/control.js";
 import {
   projectGatewayPublicSnapshot,
-  projectPublicCompatibilityCheck,
+  messageDirections,
 } from "../src/gateway/types.js";
-import {
-  certifiedCompatibilityVersions,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-} from "../src/gateway/compatibility.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
@@ -94,7 +89,7 @@ function snapshot(): GatewaySnapshot {
     bytesAccepted: 12,
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: NOW,
     inboundMode: "paired",
     health: "healthy",
@@ -103,7 +98,6 @@ function snapshot(): GatewaySnapshot {
         provider: "codex",
         host: "this-mac",
         health: "healthy",
-        compatibility: "compatible",
         protocol: "codex-app-server",
         protocolVersion: "0.147.0",
         lastSeenAt: NOW,
@@ -112,7 +106,6 @@ function snapshot(): GatewaySnapshot {
         provider: "claude",
         host: "build-mac",
         health: "healthy",
-        compatibility: "compatible",
         protocol: "claude-peer",
         protocolVersion: "1",
         lastSeenAt: NOW,
@@ -133,7 +126,6 @@ function snapshot(): GatewaySnapshot {
         provider: "claude",
         host: "this-mac",
         state: "idle",
-        compatibility: "compatible",
         validated: true,
         selected: false,
         lastSeenAt: NOW,
@@ -146,7 +138,6 @@ function snapshot(): GatewaySnapshot {
         host: "this-mac",
         enabled: true,
         state: "idle",
-        compatibility: "compatible",
         busyPolicy: "queue",
         lastSeenAt: NOW,
         queueDepth: 1,
@@ -159,14 +150,13 @@ function snapshot(): GatewaySnapshot {
         host: "build-mac",
         enabled: true,
         state: "busy",
-        compatibility: "compatible",
         busyPolicy: "queue",
         lastSeenAt: NOW,
         queueDepth: 0,
         counters: { ...counters },
       },
     ],
-    pairs: [],
+    consentEdges: [],
     progressWatches: [
       {
         conversationIdSuffix: "AbCd_123",
@@ -228,16 +218,6 @@ function snapshot(): GatewaySnapshot {
       },
       {
         sequence: 6,
-        timestamp: NOW,
-        conversationIdSuffix: "EfGh_567",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "settled",
-        actor: "unknown",
-        reason: "legacy_done",
-      },
-      {
-        sequence: 7,
         timestamp: NOW,
         conversationIdSuffix: "FgHi_678",
         ownerAlias: "codex-main@this-mac",
@@ -325,7 +305,7 @@ function snapshot(): GatewaySnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      pairs: 0,
+      consentEdges: 0,
       progressWatches: 0,
       progressWatchEvents: 0,
       activityEvents: 0,
@@ -333,21 +313,6 @@ function snapshot(): GatewaySnapshot {
       alerts: 0,
     },
   };
-}
-
-function publicClaudeCompatibilityCheck() {
-  return projectPublicCompatibilityCheck(
-    evaluateCompatibilityAttestation({
-      surface: "claude",
-      version: "2.1.228",
-      checkedAt: NOW,
-      certifiedVersions: certifiedCompatibilityVersions.claude,
-      probes: compatibilityProbeNames.claude.map((name) => ({
-        name,
-        outcome: "pass" as const,
-      })),
-    }),
-  );
 }
 
 function handlers(
@@ -624,6 +589,27 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     claudeAlias: "claude-two@this-mac",
     codexAlias: "codex-main@this-mac",
   });
+  await sendGatewayControlRequest({
+    socketPath,
+    request: {
+      protocolVersion: 1,
+      method: "pair",
+      params: {
+        aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
+        threadAttestation: {
+          alias: "dsh-misleading@this-mac",
+          threadId: THREAD_ID.toUpperCase(),
+        },
+      },
+    },
+  });
+  assert.deepEqual(paired, {
+    aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
+    threadAttestation: {
+      alias: "dsh-misleading@this-mac",
+      threadId: THREAD_ID,
+    },
+  });
 
   const secretText = "transient body that must not appear in the response";
   const outbound = await sendGatewayControlRequest({
@@ -761,7 +747,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     connectors: 0,
     availablePeers: 0,
     routes: 0,
-    pairs: 0,
+    consentEdges: 0,
     progressWatches: 0,
     progressWatchEvents: 0,
     activityEvents: 0,
@@ -906,6 +892,8 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       registerCodex: count,
       unregisterCodex: count,
       removeStaleCodexRegistration: count,
+      pair: count,
+      unpair: count,
       deliveryStatus: () => {
         called += 1;
         return { found: false };
@@ -1048,6 +1036,36 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["observe_snapshot", { extra: true }],
     ["remove_stale_codex_registration", { alias: "claude@this-mac" }],
     ["remove_stale_codex_registration", { alias: "codex-main" }],
+    ["pair", { aliases: ["one@this-mac", "one@this-mac"] }],
+    ["pair", { aliases: ["one@this-mac", "two@other-mac"] }],
+    ["pair", { aliases: ["one@this-mac"] }],
+    ["pair", { aliases: ["one@this-mac", "two@this-mac"], extra: true }],
+    [
+      "pair",
+      {
+        aliases: ["one@this-mac", "two@this-mac"],
+        threadAttestation: { alias: "three@this-mac", threadId: THREAD_ID },
+      },
+    ],
+    [
+      "pair",
+      {
+        aliases: ["one@this-mac", "two@this-mac"],
+        threadAttestation: {
+          alias: "one@this-mac",
+          threadId: THREAD_ID,
+          provider: "codex",
+        },
+      },
+    ],
+    [
+      "unpair",
+      {
+        claudeAlias: "claude@this-mac",
+        codexAlias: "codex@this-mac",
+        aliases: ["claude@this-mac", "codex@this-mac"],
+      },
+    ],
     [
       "remove_stale_codex_registration",
       { alias: "codex-main@this-mac", threadId: THREAD_ID },
@@ -1453,6 +1471,8 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   )?.registry;
   assert.ok(sourceRegistry);
   codexConnector.registry = structuredClone(sourceRegistry);
+  const nonClaudeAvailablePeer = snapshot();
+  (nonClaudeAvailablePeer.availablePeers[0] as unknown as { provider: string }).provider = "grok";
   const unprojected = snapshot();
   const baseEvent = unprojected.messages[0];
   assert.ok(baseEvent);
@@ -1481,6 +1501,7 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidRegistry,
     duplicateRegistryCodes,
     registryOnCodex,
+    nonClaudeAvailablePeer,
     unprojected,
   ];
   const attempts = candidates.length;
@@ -1502,42 +1523,23 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   await server.close();
 });
 
-test("list_snapshot carries an exact public compatibility comparison", async () => {
+test("list_snapshot accepts all derived directions and rejects legacy authority schema", async () => {
   const { stateDir, socketPath } = await privateState();
   const canonical = snapshot();
-  canonical.compatibilityChecks = [publicClaudeCompatibilityCheck()];
-  const missingReference = structuredClone(canonical);
-  delete (
-    missingReference.compatibilityChecks![0] as {
-      testedVersion?: string;
-    }
-  ).testedVersion;
-  const wrongTestedVersion = structuredClone(canonical);
-  (
-    wrongTestedVersion.compatibilityChecks![0] as {
-      testedVersion: string;
-    }
-  ).testedVersion = "2.1.226";
-  const wrongReference = structuredClone(canonical);
-  (
-    wrongReference.compatibilityChecks![0] as {
-      supportedMajor: string;
-    }
-  ).supportedMajor = "3";
-  const widenedReference = structuredClone(canonical);
-  (
-    widenedReference.compatibilityChecks![0] as unknown as Record<
-      string,
-      unknown
-    >
-  ).extra = true;
-  const candidates = [
-    canonical,
-    missingReference,
-    wrongTestedVersion,
-    wrongReference,
-    widenedReference,
-  ];
+  const baseMessage = canonical.messages[0];
+  assert.ok(baseMessage);
+  canonical.messages = messageDirections.map((direction, index) => ({
+    ...baseMessage,
+    sequence: index + 1,
+    messageIdSuffix: index.toString(16).padStart(8, "0"),
+    direction,
+  }));
+  const oldSchema = { ...snapshot(), schemaVersion: 1 };
+  const compatibilityField = { ...snapshot(), compatibilityChecks: [] };
+  const oldPairs = { ...snapshot(), pairs: [] };
+  const invalidDirection = structuredClone(canonical);
+  invalidDirection.messages[0]!.direction = "codex_to_codex" as never;
+  const candidates = [canonical, oldSchema, compatibilityField, oldPairs, invalidDirection];
   const server = await startGatewayControlServer({
     stateDir,
     socketPath,
@@ -1551,34 +1553,53 @@ test("list_snapshot carries an exact public compatibility comparison", async () 
     wireRequest("list_snapshot", {}),
   );
   assert.equal(accepted.ok, true);
-  assert.deepEqual(
-    (
-      accepted as {
-        result: GatewaySnapshot;
-      }
-    ).result.compatibilityChecks?.map(
-      ({ version, testedVersion, supportedMajor, writesCovered }) => ({
-        version,
-        testedVersion,
-        supportedMajor,
-        writesCovered,
-      }),
-    ),
-    [
-      {
-        version: "2.1.228",
-        testedVersion: "2.1.227",
-        supportedMajor: "2",
-        writesCovered: false,
-      },
-    ],
-  );
+  if (!accepted.ok) assert.fail("expected schema-v2 snapshot");
+  assert.deepEqual((accepted.result as GatewaySnapshot).messages.map(({ direction }) => direction), messageDirections);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const response = await rawRequest(
       socketPath,
       wireRequest("list_snapshot", {}),
     );
     assertWireError(response, "INVALID_HANDLER_RESPONSE");
+  }
+  await server.close();
+});
+
+test("list_snapshot validates canonical consent endpoints against route bindings", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const canonical = snapshot();
+  const claudeRoute = structuredClone(canonical.routes[1]!);
+  claudeRoute.alias = "claude-one@this-mac";
+  claudeRoute.host = "this-mac";
+  canonical.routes.push(claudeRoute);
+  canonical.consentEdges = [
+    {
+      endpoints: [
+        { alias: claudeRoute.alias, provider: "claude" },
+        { alias: "codex-main@this-mac", provider: "codex" },
+      ],
+      host: "this-mac",
+      counters: { ...canonical.routes[0]!.counters },
+    },
+  ];
+  const reversed = structuredClone(canonical);
+  (reversed.consentEdges[0]!.endpoints as unknown as unknown[]).reverse();
+  const providerMismatch = structuredClone(canonical);
+  (providerMismatch.consentEdges[0]!.endpoints[0] as unknown as { provider: string }).provider = "grok";
+  const widenedEndpoint = structuredClone(canonical);
+  (widenedEndpoint.consentEdges[0]!.endpoints[0] as unknown as Record<string, unknown>).lease = "private";
+  const candidates = [canonical, reversed, providerMismatch, widenedEndpoint];
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({ listSnapshot: () => candidates.shift() as GatewaySnapshot }),
+  });
+  assert.equal((await rawRequest(socketPath, wireRequest("list_snapshot", {}))).ok, true);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assertWireError(
+      await rawRequest(socketPath, wireRequest("list_snapshot", {})),
+      "INVALID_HANDLER_RESPONSE",
+    );
   }
   await server.close();
 });

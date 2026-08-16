@@ -22,6 +22,14 @@ import type {
   ClaudePeerSendResult,
 } from "../src/gateway/claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
+import type {
+  ClaudeNativeHelperClientLike,
+  ClaudeNativeHelperClientStartOptions,
+} from "../src/gateway/claude-helper-client.js";
+import type {
+  ClaudeNativeHelperCommand,
+  ClaudeNativeHelperResult,
+} from "../src/gateway/claude-helper-protocol.js";
 import type { CodexAppServerTransport } from "../src/gateway/codex-app-server.js";
 import type {
   LocalCodexOwnedTransport,
@@ -58,11 +66,13 @@ function claudeProvenance(
   sourceAlias = "codex-reviewer@this-mac",
   targetAlias = "advisor@this-mac",
 ): Readonly<{
+  sourceProvider: "codex";
   sourceAlias: string;
   targetAlias: string;
   conversationId: string;
 }> {
   return {
+    sourceProvider: "codex",
     sourceAlias,
     targetAlias,
     conversationId: SYNTHETIC_CONVERSATION_ID,
@@ -117,6 +127,37 @@ function callbacks(): {
     routes,
     endpointRefreshes,
   };
+}
+
+class CapturingNativeHelper implements ClaudeNativeHelperClientLike {
+  readonly commands: ClaudeNativeHelperCommand[] = [];
+  readonly pid: number;
+  readonly registration: ClaudeNativeHelperClientLike["registration"];
+  generation: string;
+
+  constructor(
+    private readonly options: ClaudeNativeHelperClientStartOptions,
+    index: number,
+  ) {
+    this.pid = 70_000 + index;
+    this.registration = options.registration;
+    this.generation = `capturing_helper_${index}`;
+  }
+
+  async request(
+    command: ClaudeNativeHelperCommand,
+  ): Promise<ClaudeNativeHelperResult> {
+    this.commands.push(command);
+    return command.method === "dispatch" ? { state: "pending" } : { ok: true };
+  }
+
+  async close(): Promise<void> {
+    this.options.callbacks.onExit({ code: 0, signal: null });
+  }
+
+  async forceClose(): Promise<void> {
+    await this.close();
+  }
 }
 
 class FakeClaudePeer {
@@ -514,9 +555,8 @@ class RegistrationOnlyCodexProvider implements GatewayProviderAdapter {
 
   async initialize(): Promise<{
     health: "healthy";
-    compatibility: "compatible";
   }> {
-    return { health: "healthy", compatibility: "compatible" };
+    return { health: "healthy" };
   }
 
   async selectRoute(input: {
@@ -676,7 +716,6 @@ test("Claude listener initialization quarantines only Claude-owned registry drif
   });
   assert.deepEqual(await quarantined.initialize(callbacks().callbacks), {
     health: "degraded",
-    compatibility: "incompatible",
     safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE",
   });
   await quarantined.close();
@@ -715,10 +754,10 @@ test("local Claude provider publishes only canonical interactive names and gener
   const observed = callbacks();
   assert.deepEqual(await provider.initialize(observed.callbacks), {
     health: "healthy",
-    compatibility: "compatible",
   });
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
 
@@ -736,14 +775,12 @@ test("local Claude provider publishes only canonical interactive names and gener
         routeHandle: "target-selected",
         kind: "interactive",
         state: "idle",
-        compatibility: "compatible",
       },
       {
         alias: "codex-cli@this-mac",
         routeHandle: "target-codex-named-session",
         kind: "interactive",
         state: "idle",
-        compatibility: "compatible",
       },
     ],
   });
@@ -798,8 +835,8 @@ test("local Claude provider publishes only canonical interactive names and gener
   assert.deepEqual(fake.lastSend, {
     targetId: "target-selected",
     content: composeProvenanceEnvelope({
-      direction: "claude",
       ...claudeProvenance(),
+      recipientProvider: "claude",
       body: "synthetic body",
       progressWatchActive: true,
     }),
@@ -864,6 +901,139 @@ test("local Claude provider publishes only canonical interactive names and gener
   assert.equal(fake.closed, true);
 });
 
+test("supervised Claude helpers bind source provider independently of alias spelling", async () => {
+  const fake = new FakeClaudePeer();
+  const helpers: CapturingNativeHelper[] = [];
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    discoveryPollMs: 30_000,
+    peerFactory: () => fake as never,
+    nativeHelpers: {
+      maxHelpers: 4,
+      factory: async (options) => {
+        const helper = new CapturingNativeHelper(options, helpers.length + 1);
+        helpers.push(helper);
+        return helper;
+      },
+    },
+  });
+  await provider.initialize(callbacks().callbacks);
+  await provider.discoverClaudePeers();
+  await provider.assertWorkspaceDisjoint(
+    "target-selected",
+    "/synthetic/controller-state",
+  );
+  await provider.selectRoute({
+    alias: "advisor@this-mac",
+    routeHandle: "target-selected",
+  });
+
+  await provider.advertiseNativeSourcePeer({
+    alias: "codex-misleading@this-mac",
+    sourceProvider: "deepseek",
+    cwd: SAFE_WORKSPACE,
+  });
+  await provider.advertiseNativeSourcePeer({
+    alias: "dsh-misleading@this-mac",
+    sourceProvider: "grok",
+    cwd: SAFE_WORKSPACE,
+  });
+  assert.deepEqual(
+    helpers.map((helper) => helper.registration),
+    [
+      {
+        alias: "codex-misleading@this-mac",
+        sourceProvider: "deepseek",
+        cwd: SAFE_WORKSPACE,
+      },
+      {
+        alias: "dsh-misleading@this-mac",
+        sourceProvider: "grok",
+        cwd: SAFE_WORKSPACE,
+      },
+    ],
+  );
+
+  const send = async (
+    sourceAlias: string,
+    sourceProvider: "deepseek" | "grok",
+    messageId: string,
+  ) =>
+    await provider.dispatch({
+      sourceAlias,
+      sourceProvider,
+      targetAlias: "advisor@this-mac",
+      conversationId: SYNTHETIC_CONVERSATION_ID,
+      authorization: "selected_route",
+      binding: binding(provider),
+      messageId,
+      text: `${sourceProvider} to Claude`,
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+  assert.deepEqual(
+    await send(
+      "codex-misleading@this-mac",
+      "deepseek",
+      "gateway-deepseek-to-claude",
+    ),
+    { state: "pending" },
+  );
+  assert.deepEqual(
+    await send(
+      "dsh-misleading@this-mac",
+      "grok",
+      "gateway-grok-to-claude",
+    ),
+    { state: "pending" },
+  );
+  const deepseekDispatches = helpers[0]!.commands.filter(
+    (command) => command.method === "dispatch",
+  );
+  const grokDispatches = helpers[1]!.commands.filter(
+    (command) => command.method === "dispatch",
+  );
+  assert.equal(deepseekDispatches.length, 1);
+  assert.equal(grokDispatches.length, 1);
+  assert.equal(deepseekDispatches[0]?.sourceProvider, "deepseek");
+  assert.equal(grokDispatches[0]?.sourceProvider, "grok");
+
+  assert.deepEqual(
+    await send(
+      "codex-misleading@this-mac",
+      "grok",
+      "gateway-wrong-source-provider",
+    ),
+    { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" },
+  );
+  assert.equal(
+    helpers[0]!.commands.filter((command) => command.method === "dispatch")
+      .length,
+    1,
+  );
+  await provider.close();
+});
+
+test("single-listener Claude mode rejects non-Codex source advertisements", async () => {
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(),
+    peerFactory: () => new FakeClaudePeer() as never,
+  });
+  await provider.initialize(callbacks().callbacks);
+  await assert.rejects(
+    provider.advertiseNativeSourcePeer({
+      alias: "dsh-main@this-mac",
+      sourceProvider: "deepseek",
+      cwd: SAFE_WORKSPACE,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_NATIVE_HELPER_UNAVAILABLE" &&
+      error.recoverable,
+  );
+  await provider.close();
+});
+
 test("Claude discovery cannot rename selected mailbox authority", async () => {
   const fake = new FakeClaudePeer();
   const provider = createLocalClaudeGatewayProvider({
@@ -872,8 +1042,9 @@ test("Claude discovery cannot rename selected mailbox authority", async () => {
     peerFactory: () => fake as never,
   });
   await provider.initialize(callbacks().callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -932,8 +1103,9 @@ test("Claude provider frames raw maximum bodies once and rejects provenance mism
     peerFactory: () => fake as never,
   });
   await provider.initialize(callbacks().callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -1014,8 +1186,9 @@ test("an exact live native sender stays outbound-unselected but can receive its 
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
   await provider.discoverClaudePeers();
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
 
@@ -1061,8 +1234,8 @@ test("an exact live native sender stays outbound-unselected but can receive its 
   assert.equal(
     fake.lastSend?.content,
     composeProvenanceEnvelope({
-      direction: "claude",
       ...claudeProvenance(),
+      recipientProvider: "claude",
       body: "correlated native reply",
     }),
   );
@@ -1088,8 +1261,8 @@ test("an exact live native sender stays outbound-unselected but can receive its 
   assert.equal(
     fake.lastSend?.content,
     composeProvenanceEnvelope({
-      direction: "claude",
       ...claudeProvenance("codex-reviewer@this-mac", "renamed-advisor@this-mac"),
+      recipientProvider: "claude",
       body: "correlated native reply after same-session rename",
     }),
   );
@@ -1151,8 +1324,9 @@ test("native advertisement installs generation ownership before publication beco
       trust: "untrusted_same_uid_peer",
     });
   };
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-visible@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   assert.deepEqual(observed.messages, [
@@ -1197,8 +1371,9 @@ test("recoverable advertisement failure retains provisional identity after re-en
     );
   };
   await assert.rejects(
-    provider.advertiseNativeCodexPeer({
+    provider.advertiseNativeSourcePeer({
       alias: "codex-provisional@this-mac",
+      sourceProvider: "codex",
       cwd: SAFE_WORKSPACE,
     }),
     (error: unknown) =>
@@ -1216,7 +1391,7 @@ test("recoverable advertisement failure retains provisional identity after re-en
     "expired",
     "ROUTE_UNAVAILABLE",
   );
-  await provider.unadvertiseNativeCodexPeer("codex-provisional@this-mac");
+  await provider.unadvertiseNativeSourcePeer("codex-provisional@this-mac");
   await assert.rejects(
     async () =>
       provider.currentNativeCodexPeerGeneration(
@@ -1257,8 +1432,9 @@ test("overlapping same-alias advertisements reassert ownership after a clean fir
       true,
     );
   };
-  const first = provider.advertiseNativeCodexPeer({
+  const first = provider.advertiseNativeSourcePeer({
     alias: "codex-overlap@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   const firstRejected = assert.rejects(
@@ -1267,8 +1443,9 @@ test("overlapping same-alias advertisements reassert ownership after a clean fir
       error instanceof BridgeError && error.recoverable,
   );
   await firstStarted;
-  const second = provider.advertiseNativeCodexPeer({
+  const second = provider.advertiseNativeSourcePeer({
     alias: "codex-overlap@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   releaseFirst();
@@ -1291,8 +1468,9 @@ test("native Codex succession fences callbacks and retires only the exact old li
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-old@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   const initialGeneration = provider.currentNativeCodexPeerGeneration(
@@ -1441,8 +1619,8 @@ test("native Codex succession fences callbacks and retires only the exact old li
   assert.equal(
     fake.lastSend?.content,
     composeProvenanceEnvelope({
-      direction: "claude",
       ...claudeProvenance("codex-new@this-mac"),
+      recipientProvider: "claude",
       body: "reply through the exact new listener",
     }),
   );
@@ -1489,8 +1667,9 @@ test("native Codex succession rolls back only proven non-publication", async () 
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-old@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   const initialGeneration = provider.currentNativeCodexPeerGeneration(
@@ -1601,8 +1780,9 @@ test("native succession freezes discovery callbacks until resume", async () => {
     alias: "advisor@this-mac",
     routeHandle: "target-selected",
   });
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-old@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   const initialGeneration = provider.currentNativeCodexPeerGeneration(
@@ -1725,8 +1905,9 @@ test("provider-owned invalid, stale, and capacity rejections retry only clean pr
     });
     const observed = callbacks();
     await provider.initialize(observed.callbacks);
-    await provider.advertiseNativeCodexPeer({
+    await provider.advertiseNativeSourcePeer({
       alias: "codex-reviewer@this-mac",
+      sourceProvider: "codex",
       cwd: SAFE_WORKSPACE,
     });
     await fake.emitInbound("target-selected", "occupy native capacity");
@@ -1846,8 +2027,9 @@ test("local Claude provider keeps progress distinct and propagates receipt outco
   assert.deepEqual(observed.notices, [
     { code: "UNKNOWN_RECEIPT" },
   ]);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await fake.emitInbound();
@@ -1963,8 +2145,9 @@ test("local Claude provider waits for a late exact receipt after post-write ambi
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -2031,8 +2214,9 @@ test("local Claude provider reattests each selected dispatch and defers clean ro
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -2125,8 +2309,9 @@ test("Claude provider settles deadline outcomes from transport evidence", async 
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -2263,8 +2448,9 @@ test("Claude idle discovery overlapping an entire dispatch remains stale until t
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -2312,8 +2498,9 @@ test("local Claude provider retains successful socket writes until exact receipt
   });
   const observed = callbacks();
   await provider.initialize(observed.callbacks);
-  await provider.advertiseNativeCodexPeer({
+  await provider.advertiseNativeSourcePeer({
     alias: "codex-reviewer@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.discoverClaudePeers();
@@ -2663,11 +2850,13 @@ function codexProvenance(
   targetAlias = "codex-main@this-mac",
   sourceAlias = "advisor@this-mac",
 ): Readonly<{
+  sourceProvider: "claude";
   sourceAlias: string;
   targetAlias: string;
   conversationId: string;
 }> {
   return {
+    sourceProvider: "claude",
     sourceAlias,
     targetAlias,
     conversationId: SYNTHETIC_CONVERSATION_ID,
@@ -2681,7 +2870,7 @@ function expectedCodexEnvelope(
 ): string {
   return (
     `<cross-session-message from-name="${sourceAlias}" conversation="${SYNTHETIC_CONVERSATION_ID}">\n` +
-    `<embassy-reply-hint conversation="${SYNTHETIC_CONVERSATION_ID}" reply-as="${targetAlias}">` +
+    `<embassy-reply-hint conversation="${SYNTHETIC_CONVERSATION_ID}" reply-as="${targetAlias}" from-provider="claude">` +
     `Reply by running \`embassy reply --conversation ${SYNTHETIC_CONVERSATION_ID} --alias ${targetAlias}\` with the reply body on stdin. ` +
     `Caller, conversation, and route policy are rechecked.</embassy-reply-hint>\n${body}\n` +
     "</cross-session-message>"
@@ -2818,7 +3007,6 @@ test("local Codex provider attaches one exact route, refreshes it before write, 
   const observed = callbacks();
   assert.deepEqual(await provider.initialize(observed.callbacks), {
     health: "healthy",
-    compatibility: "compatible",
   });
   assert.deepEqual(
     await provider.selectRoute({
@@ -2831,8 +3019,8 @@ test("local Codex provider attaches one exact route, refreshes it before write, 
 
   assert.deepEqual(
     await provider.dispatch({
-      ...codexProvenance(),
-    authorization: "selected_route",
+      ...codexProvenance("codex-main@this-mac", "dsh-misleading@this-mac"),
+      authorization: "selected_route",
       binding: codexBinding(provider),
       messageId: GATEWAY_MESSAGE_ID,
       text: "synthetic Codex request",
@@ -2849,7 +3037,11 @@ test("local Codex provider attaches one exact route, refreshes it before write, 
   assert.deepEqual(starts[0]?.params, {
     input: [
       {
-        text: expectedCodexEnvelope("synthetic Codex request"),
+        text: expectedCodexEnvelope(
+          "synthetic Codex request",
+          "codex-main@this-mac",
+          "dsh-misleading@this-mac",
+        ),
         type: "text",
       },
     ],
@@ -4232,8 +4424,8 @@ test("local Codex provider settles an exact active-turn steer at acceptance", as
     input: [
       {
         text: composeProvenanceEnvelope({
-          direction: "codex",
           ...codexProvenance(),
+          recipientProvider: "codex",
           body: "STEER: continue from the next tool boundary",
           queuedAhead: 2,
         }),

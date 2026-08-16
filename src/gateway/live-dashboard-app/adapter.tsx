@@ -7,6 +7,26 @@
 // `nowMs` — the server's `queueAgeMs`/`oldestQueueAgeMs` are excluded from the
 // stream fingerprint, go stale between frames, and must never be displayed.
 namespace Embassy {
+  export const GATEWAY_PROVIDERS: readonly GatewayProvider[] = ["claude", "codex", "deepseek", "grok"];
+
+  export function parseDirection(direction: MessageDirection): Readonly<{
+    sourceProvider: GatewayProvider; targetProvider: GatewayProvider;
+  }> | undefined {
+    const separator = direction.indexOf("_to_");
+    if (separator < 1 || separator !== direction.lastIndexOf("_to_")) {
+      return undefined;
+    }
+    const sourceProvider = direction.slice(0, separator);
+    const targetProvider = direction.slice(separator + 4);
+    const providers = GATEWAY_PROVIDERS as readonly string[];
+    if (sourceProvider === targetProvider || !providers.includes(sourceProvider) ||
+        !providers.includes(targetProvider)) return undefined;
+    return {
+      sourceProvider: sourceProvider as GatewayProvider,
+      targetProvider: targetProvider as GatewayProvider,
+    };
+  }
+
   /** The eight terminal delivery states, in canonical pulse-bar order. */
   export const TERMINAL_DELIVERY_STATES: readonly DeliveryState[] = [
     "delivered",
@@ -29,18 +49,9 @@ namespace Embassy {
   /** Worst-first connector-health order (§2.2). */
   const HEALTH_WORST_FIRST: readonly ConnectorHealth[] = [
     "offline",
-    "incompatible",
     "degraded",
     "connecting",
     "healthy",
-  ];
-
-  /** Worst-first compatibility order (§2.2). */
-  const COMPATIBILITY_WORST_FIRST: readonly CompatibilityState[] = [
-    "incompatible",
-    "expired",
-    "unknown",
-    "compatible",
   ];
 
   function compareText(left: string, right: string): number {
@@ -132,27 +143,6 @@ namespace Embassy {
   }
 
   /**
-   * Worst compatibility across all connectors, order
-   * incompatible < expired < unknown < compatible;
-   * undefined when no connectors are observed.
-   */
-  export function worstCompatibility(
-    model: DashboardViewModel,
-  ): CompatibilityState | undefined {
-    let worst: CompatibilityState | undefined;
-    for (const connector of model.connectors) {
-      if (
-        worst === undefined ||
-        COMPATIBILITY_WORST_FIRST.indexOf(connector.compatibility) <
-          COMPATIBILITY_WORST_FIRST.indexOf(worst)
-      ) {
-        worst = connector.compatibility;
-      }
-    }
-    return worst;
-  }
-
-  /**
    * Pulse (§2.2): terminal-state settlements over the 3600 s window before
    * `generatedAt`, one bar per terminal state (all eight, zeros included).
    * Without a parseable `generatedAt` the window check is skipped.
@@ -180,11 +170,6 @@ namespace Embassy {
         model.omissions.messageGroups > 0 ||
         model.omissions.upstreamMessageEvents > 0,
     };
-  }
-
-  /** Monitor-only detection: the codex write gate is closed (§2.2). */
-  export function isMonitorOnly(route: DashboardRouteRow): boolean {
-    return route.safeErrorCode === "CODEX_WRITES_DISABLED";
   }
 
   /**
@@ -284,26 +269,26 @@ namespace Embassy {
     model: DashboardViewModel,
     nowMs: number,
   ): OverviewData {
-    const nonReadyPairCount =
-      model.graph.pairCount - model.graph.readyPairCount;
+    const nonReadyConsentEdgeCount =
+      model.graph.consentEdgeCount - model.graph.readyConsentEdgeCount;
     return {
       generatedAt: model.generatedAt,
       inboundMode: model.inboundMode,
       overall: model.overall,
       statusStrip: {
         broker: model.health,
-        claudeConnector: worstConnectorHealth(model, "claude"),
-        codexConnector: worstConnectorHealth(model, "codex"),
-        compatibility: worstCompatibility(model),
+        providers: GATEWAY_PROVIDERS.map((provider) =>
+          ({ provider, health: worstConnectorHealth(model, provider) })),
       },
       exchange: model.exchange,
-      queueClaudeToCodex: queueSplit(model, "codex", nowMs),
-      queueCodexToClaude: queueSplit(model, "claude", nowMs),
+      providerQueues: GATEWAY_PROVIDERS.map((provider) =>
+        ({ provider, queue: queueSplit(model, provider, nowMs) })),
       graph: model.graph,
-      degradedPairCopyKey:
-        nonReadyPairCount <= 0
+      degradedConsentEdgeCopyKey:
+        nonReadyConsentEdgeCount <= 0
           ? undefined
-          : nonReadyPairCount === 1 && !model.graph.pairCountIsLowerBound
+          : nonReadyConsentEdgeCount === 1 &&
+              !model.graph.consentEdgeCountIsLowerBound
             ? "app.overview.degradedEdge"
             : "app.overview.degradedEdges",
       attention: attentionViews(model),
@@ -319,37 +304,48 @@ namespace Embassy {
   export function deliveriesGroups(
     model: DashboardViewModel,
   ): readonly DeliveryGroupView[] {
-    return model.activity.map(
-      (group): DeliveryGroupView => ({
+    return model.activity.map((group): DeliveryGroupView => {
+      const parsed = parseDirection(group.direction);
+      if (parsed === undefined) throw new Error("INVALID_MESSAGE_DIRECTION");
+      return {
         key: deliveryGroupKey(group),
         group,
         routePair: `${group.sourceAlias} → ${group.targetAlias}`,
+        sourceProvider: parsed.sourceProvider,
+        targetProvider: parsed.targetProvider,
         eventsTruncated: hasLifecycleTruncation(group),
-      }),
-    );
+      };
+    });
+  }
+
+  export function matchesProviderFilters(
+    view: DeliveryGroupView,
+    from: "all" | GatewayProvider,
+    to: "all" | GatewayProvider,
+  ): boolean {
+    const parsed = parseDirection(view.group.direction);
+    return parsed !== undefined && (from === "all" || parsed.sourceProvider === from) &&
+      (to === "all" || parsed.targetProvider === to);
   }
 
   export function routesProps(
     model: DashboardViewModel,
     nowMs: number,
   ): RoutesData {
-    const codexRoutes = model.routes
-      .filter((route) => route.provider === "codex")
-      .map(
-        (route): CodexRouteView => ({
-          route,
-          monitorOnly: isMonitorOnly(route),
-          oldestAgeMs: routeOldestAgeMs(route, nowMs),
-        }),
-      );
+    const routes = model.routes.map(
+      (route): RouteView => ({
+        route,
+        oldestAgeMs: routeOldestAgeMs(route, nowMs),
+      }),
+    );
     return {
       inboundMode: model.inboundMode,
       peers: model.peers,
       peersOmitted: model.omissions.availablePeers,
-      codexRoutes,
+      routes,
       routesOmitted: model.omissions.routes,
-      pairs: model.pairs,
-      pairsOmitted: model.omissions.pairs,
+      consentEdges: model.consentEdges,
+      consentEdgesOmitted: model.omissions.consentEdges,
       graph: model.graph,
       successions: extractSuccessions(model),
     };
@@ -399,7 +395,6 @@ namespace Embassy {
     return {
       connectors: model.connectors,
       connectorsOmitted: model.omissions.connectors,
-      compatibilityChecks: model.compatibilityChecks ?? [],
       expiredCount: model.accounting.expired,
       ...(model.deadlinePressure === undefined
         ? {}
@@ -415,6 +410,7 @@ namespace Embassy {
   export const adapter = {
     overviewProps,
     deliveriesGroups,
+    matchesProviderFilters,
     routesProps,
     activityRows,
     diagnosticsProps,
@@ -422,9 +418,7 @@ namespace Embassy {
     routeOldestAgeMs,
     pulse,
     worstConnectorHealth,
-    worstCompatibility,
     extractSuccessions,
-    isMonitorOnly,
     hasLifecycleTruncation,
     deliveriesTruncated,
     deliveryGroupKey,

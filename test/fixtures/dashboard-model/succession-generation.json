@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedAt": "2026-08-08T12:00:00.000Z",
   "inboundMode": "paired",
   "health": "degraded",
   "overall": "attention",
   "exchange": {
-    "claude": {
+    "parties": [{
       "kind": "claude",
       "status": "ready",
       "total": 1,
@@ -14,8 +14,7 @@
       "countIsLowerBound": false,
       "primaryAlias": "claude-advisor@this-mac",
       "nextAction": "none"
-    },
-    "codex": {
+    }, {
       "kind": "codex",
       "status": "busy",
       "total": 2,
@@ -23,7 +22,7 @@
       "countIsLowerBound": false,
       "primaryAlias": "codex-builder@this-mac",
       "nextAction": "restore_codex"
-    },
+    }],
     "queuedMessages": 1,
     "queueCountIsLowerBound": false,
     "oldestQueueAgeMs": 10000,
@@ -128,7 +127,6 @@
       "alias": "claude-advisor@this-mac",
       "host": "this-mac",
       "state": "idle",
-      "compatibility": "compatible",
       "selected": true,
       "selectable": true,
       "lastSeenAt": "2026-08-08T11:59:58.000Z"
@@ -141,7 +139,6 @@
       "host": "this-mac",
       "enabled": true,
       "state": "stale",
-      "compatibility": "compatible",
       "queueDepth": 0,
       "counters": {
         "accepted": 12,
@@ -164,7 +161,6 @@
       "host": "this-mac",
       "enabled": true,
       "state": "busy",
-      "compatibility": "compatible",
       "queueDepth": 1,
       "oldestQueuedAt": "2026-08-08T11:59:50.000Z",
       "queueAgeMs": 10000,
@@ -180,8 +176,7 @@
         "rejected": 0,
         "bytesAccepted": 16384
       },
-      "lastSeenAt": "2026-08-08T11:59:59.000Z",
-      "safeErrorCode": "CODEX_WRITES_DISABLED"
+      "lastSeenAt": "2026-08-08T11:59:59.000Z"
     },
     {
       "alias": "claude-advisor@this-mac",
@@ -189,7 +184,6 @@
       "host": "this-mac",
       "enabled": true,
       "state": "idle",
-      "compatibility": "compatible",
       "queueDepth": 0,
       "counters": {
         "accepted": 14,
@@ -206,10 +200,12 @@
       "lastSeenAt": "2026-08-08T11:59:58.000Z"
     }
   ],
-  "pairs": [
+  "consentEdges": [
     {
-      "claudeAlias": "claude-advisor@this-mac",
-      "codexAlias": "codex-builder@this-mac",
+      "endpoints": [
+        { "alias": "claude-advisor@this-mac", "provider": "claude" },
+        { "alias": "codex-builder@this-mac", "provider": "codex" }
+      ],
       "host": "this-mac",
       "state": "ready",
       "counters": {
@@ -227,18 +223,21 @@
     }
   ],
   "graph": {
-    "pairCount": 1,
-    "readyPairCount": 1,
-    "pairCountIsLowerBound": false,
-    "unpairedReadyClaude": 0,
-    "unpairedReadyCodex": 0
+    "consentEdgeCount": 1,
+    "readyConsentEdgeCount": 1,
+    "consentEdgeCountIsLowerBound": false,
+    "unpairedReadyByProvider": {
+      "claude": 0,
+      "codex": 0,
+      "deepseek": 0,
+      "grok": 0
+    }
   },
   "connectors": [
     {
       "provider": "claude",
       "host": "this-mac",
       "health": "healthy",
-      "compatibility": "compatible",
       "protocol": "peer/1",
       "protocolVersion": "1",
       "lastSeenAt": "2026-08-08T11:59:58.000Z"
@@ -247,7 +246,6 @@
       "provider": "codex",
       "host": "this-mac",
       "health": "degraded",
-      "compatibility": "unknown",
       "protocol": "app-server/1",
       "protocolVersion": "0.147.0",
       "lastSeenAt": "2026-08-08T11:59:59.000Z",
@@ -272,7 +270,7 @@
     "connectors": 0,
     "availablePeers": 0,
     "routes": 0,
-    "pairs": 0,
+    "consentEdges": 0,
     "upstreamMessageEvents": 0,
     "messageGroups": 0,
     "messageEvents": 0,

@@ -59,7 +59,7 @@ function clock(): Clock {
 function limits(): GatewayConfig["limits"] {
   return {
     maxRoutes: 4,
-    maxPairs: 128,
+    maxConsentEdges: 128,
     eventCapacity: 10,
     eventTtlMs: 1_000,
     dedupeCapacity: 10,
@@ -131,14 +131,22 @@ const claudeBinding: PrivateRouteBinding = {
   ownerLease: "claude-owner-lease-0001",
 };
 
-const legacyCompatibilityAttestation = {
-  schemaVersion: 1,
-  surface: "claude",
-  version: "2.1.226",
-  tier: "schema_attested",
-  checkedAt: "2026-08-09T12:00:00.000Z",
-  probes: [{ name: "launcher", outcome: "pass" }],
-} as const;
+const deepseekBinding: PrivateRouteBinding = {
+  ...codexBinding,
+  provider: "deepseek",
+  endpointGeneration: "deepseek-generation-0001",
+  routeHandle: "deepseek-task-private-0001",
+  ownerLease: "deepseek-owner-lease-0001",
+};
+
+const grokBinding: PrivateRouteBinding = {
+  ...codexBinding,
+  provider: "grok",
+  endpointGeneration: "grok-generation-0001",
+  routeHandle: "grok-task-private-0001",
+  ownerLease: "grok-owner-lease-0001",
+};
+
 
 const successorCodexBinding: PrivateRouteBinding = {
   ...codexBinding,
@@ -180,19 +188,17 @@ async function observeAndRegister(store: GatewayStore): Promise<void> {
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
   await store.observeConnector({
     identity: endpoint(claudeBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "claude-peer",
     protocolVersion: "1",
   });
   const codex: RegisterRouteInput = {
-    alias: "reviewer@this-mac",
+    alias: "codex-reviewer@this-mac",
     binding: codexBinding,
     registrationMode: "explicit_opt_in",
   };
@@ -203,9 +209,8 @@ async function observeAndRegister(store: GatewayStore): Promise<void> {
   };
   await store.registerRoute(codex);
   await store.registerRoute(claude);
-  await store.pairRoutes({
-    claudeAlias: claude.alias,
-    codexAlias: codex.alias,
+  await store.addConsentEdge({
+    aliases: [claude.alias, codex.alias],
   });
 }
 
@@ -262,21 +267,35 @@ async function observeAndRegisterCodexOnly(store: GatewayStore): Promise<void> {
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
   await store.observeConnector({
     identity: endpoint(claudeBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "claude-peer",
     protocolVersion: "1",
   });
   await store.registerRoute({
-    alias: "reviewer@this-mac",
+    alias: "codex-reviewer@this-mac",
     binding: codexBinding,
     registrationMode: "explicit_opt_in",
+  });
+}
+
+async function observeAndRegisterProviderOnly(
+  store: GatewayStore,
+  binding: PrivateRouteBinding,
+  alias: string,
+): Promise<void> {
+  for (const observed of [claudeBinding, binding]) {
+    await store.observeConnector({
+      identity: endpoint(observed), health: "healthy",
+      protocol: `${observed.provider}-protocol`, protocolVersion: "1",
+    });
+  }
+  await store.registerRoute({
+    alias, binding, registrationMode: "explicit_opt_in",
   });
 }
 
@@ -287,7 +306,6 @@ async function observeAndRegisterSuccessionRoutes(
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -295,7 +313,6 @@ async function observeAndRegisterSuccessionRoutes(
     await store.observeConnector({
       identity: endpoint(claudeBinding),
       health: "healthy",
-      compatibility: "compatible",
       protocol: "claude-peer",
       protocolVersion: "1",
     });
@@ -311,9 +328,8 @@ async function observeAndRegisterSuccessionRoutes(
       binding: claudeBinding,
       registrationMode: "selected_live_peer",
     });
-    await store.pairRoutes({
-      claudeAlias: "advisor@this-mac",
-      codexAlias: oldSuccessionIdentity.alias,
+    await store.addConsentEdge({
+      aliases: ["advisor@this-mac", oldSuccessionIdentity.alias],
     });
   }
 }
@@ -331,6 +347,209 @@ const transientClaudePeer = {
     ownerLease: "native-claude-call-proof-0001",
   },
 } as const;
+
+test("native v2 state round-trips and rejects every retired schema without rewriting", async () => {
+  const { store, config, clock: testClock } = await fixture();
+  await store.initialize();
+  await store.close();
+  const native = JSON.parse(await readFile(store.stateFilePath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(native.schemaVersion, 2);
+  assert.deepEqual(native.consentEdges, []);
+  assert.equal(Object.hasOwn(native, "pairs"), false);
+  assert.equal(Object.hasOwn(native, "compatibilityAttestations"), false);
+
+  for (const retired of [
+    { ...native, schemaVersion: 1 },
+    { ...native, consentEdges: undefined, pairs: [] },
+    { ...native, compatibilityAttestations: [] },
+  ]) {
+    const body = JSON.stringify(retired);
+    await writeFile(store.stateFilePath, body, { mode: 0o600 });
+    const reopened = new GatewayStore(config, {
+      now: testClock.now,
+      randomId: testClock.randomId,
+    });
+    await assert.rejects(
+      reopened.initialize(),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+    );
+    assert.equal(await readFile(store.stateFilePath, "utf8"), body);
+  }
+});
+
+test("four-provider consent derives all twelve directions without trusting alias names", async () => {
+  const { store, config } = await fixture();
+  config.limits.maxRoutes = 8;
+  config.limits.maxConsentEdges = 16;
+  config.limits.maxQueueMessages = 24;
+  config.limits.maxQueueMessagesPerRoute = 12;
+  config.limits.eventCapacity = 24;
+  const bindings = {
+    claude: claudeBinding,
+    codex: codexBinding,
+    deepseek: {
+      ...codexBinding,
+      provider: "deepseek",
+      endpointGeneration: "deepseek-generation-0001",
+      routeHandle: "deepseek-task-private-0001",
+      ownerLease: "deepseek-owner-lease-0001",
+    },
+    grok: {
+      ...codexBinding,
+      provider: "grok",
+      endpointGeneration: "grok-generation-0001",
+      routeHandle: "grok-task-private-0001",
+      ownerLease: "grok-owner-lease-0001",
+    },
+  } satisfies Record<string, PrivateRouteBinding>;
+  const aliases = {
+    claude: "dsh-misleading-claude@this-mac",
+    codex: "codex-main@this-mac",
+    deepseek: "dsh-main@this-mac",
+    grok: "grok-main@this-mac",
+  } as const;
+  await store.initialize();
+  for (const binding of Object.values(bindings)) {
+    await store.observeConnector({
+      identity: endpoint(binding),
+      health: "healthy",
+      protocol: `${binding.provider}-protocol`,
+      protocolVersion: "1",
+    });
+  }
+  for (const provider of Object.keys(bindings) as Array<keyof typeof bindings>) {
+    await store.registerRoute({
+      alias: aliases[provider],
+      binding: bindings[provider],
+      registrationMode:
+        provider === "claude" ? "selected_live_peer" : "explicit_opt_in",
+    });
+  }
+  await assert.rejects(
+    store.registerRoute({
+      alias: "deepseek-wrong-prefix@this-mac",
+      binding: { ...bindings.deepseek, ownerLease: "deepseek-owner-lease-0002" },
+      registrationMode: "explicit_opt_in",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_GATEWAY_ALIAS",
+  );
+  await store.registerRoute({
+    alias: "codex-alt@this-mac",
+    binding: {
+      ...bindings.codex,
+      routeHandle: "codex-task-private-0002",
+      ownerLease: "codex-owner-lease-0002",
+    },
+    registrationMode: "explicit_opt_in",
+  });
+  await assert.rejects(
+    store.addConsentEdge({
+      aliases: [aliases.codex, "codex-alt@this-mac"],
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_CONSENT_EDGE",
+  );
+  const remoteGrok = {
+    ...bindings.grok,
+    hostId: "build-mac",
+    endpointGeneration: "grok-generation-build",
+    routeHandle: "grok-task-private-build",
+    ownerLease: "grok-owner-lease-build",
+  };
+  await store.observeConnector({
+    identity: endpoint(remoteGrok),
+    health: "healthy",
+    protocol: "grok-protocol",
+    protocolVersion: "1",
+  });
+  await store.registerRoute({
+    alias: "grok-build@build-mac",
+    binding: remoteGrok,
+    registrationMode: "explicit_opt_in",
+  });
+  await assert.rejects(
+    store.addConsentEdge({
+      aliases: [aliases.codex, "grok-build@build-mac"],
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_CONSENT_EDGE",
+  );
+
+  const providers = Object.keys(bindings) as Array<keyof typeof bindings>;
+  for (let left = 0; left < providers.length; left += 1) {
+    for (let right = left + 1; right < providers.length; right += 1) {
+      const leftProvider = providers[left]!;
+      const rightProvider = providers[right]!;
+      assert.deepEqual(
+        await store.addConsentEdge({
+          aliases: [aliases[rightProvider], aliases[leftProvider]],
+        }),
+        { created: true },
+      );
+      assert.deepEqual(
+        await store.addConsentEdge({
+          aliases: [aliases[leftProvider], aliases[rightProvider]],
+        }),
+        { created: false },
+      );
+      for (const [source, target] of [
+        [leftProvider, rightProvider],
+        [rightProvider, leftProvider],
+      ] as const) {
+        await store.enqueueMessage({
+          sourceAlias: aliases[source],
+          targetAlias: aliases[target],
+          body: `${source} to ${target}`,
+          dedupeKey: `${source}-to-${target}`,
+        });
+      }
+    }
+  }
+  assert.deepEqual(
+    [...new Set((await store.publicSnapshot()).messages.map(({ direction }) => direction))].sort(),
+    [
+      "claude_to_codex",
+      "claude_to_deepseek",
+      "claude_to_grok",
+      "codex_to_claude",
+      "codex_to_deepseek",
+      "codex_to_grok",
+      "deepseek_to_claude",
+      "deepseek_to_codex",
+      "deepseek_to_grok",
+      "grok_to_claude",
+      "grok_to_codex",
+      "grok_to_deepseek",
+    ],
+  );
+  await store.close();
+  const nativeBody = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
+    consentEdges: Array<{
+      endpoints: Array<{ alias: string; provider: string; ownerLease: string }>;
+    }>;
+  };
+  const reversed = structuredClone(nativeBody);
+  reversed.consentEdges[0]!.endpoints.reverse();
+  await writeFile(store.stateFilePath, JSON.stringify(reversed), { mode: 0o600 });
+  await assert.rejects(
+    new GatewayStore(config).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+  );
+  const wrongLease = structuredClone(nativeBody);
+  wrongLease.consentEdges[0]!.endpoints[0]!.ownerLease = "wrong-owner-lease";
+  await writeFile(store.stateFilePath, JSON.stringify(wrongLease), { mode: 0o600 });
+  await assert.rejects(
+    new GatewayStore(config).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+  );
+});
 
 test("gateway configuration is local, bounded, and fail-closed", () => {
   const config = loadGatewayConfig({
@@ -573,7 +792,6 @@ test("routes require explicit selection and immutable exact generations", async 
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -588,7 +806,7 @@ test("routes require explicit selection and immutable exact generations", async 
   );
   await assert.rejects(
     store.registerRoute({
-      alias: "reviewer@this-mac",
+      alias: "codex-reviewer@this-mac",
       binding: codexBinding,
       registrationMode: "selected_live_peer",
     }),
@@ -596,13 +814,13 @@ test("routes require explicit selection and immutable exact generations", async 
       error instanceof BridgeError && error.code === "ROUTE_OPT_IN_REQUIRED",
   );
   await store.registerRoute({
-    alias: "reviewer@this-mac",
+    alias: "codex-reviewer@this-mac",
     binding: codexBinding,
     registrationMode: "explicit_opt_in",
   });
   await assert.rejects(
     store.registerRoute({
-      alias: "reviewer@this-mac",
+      alias: "codex-reviewer@this-mac",
       binding: {
         ...codexBinding,
         endpointGeneration: "codex-generation-0002",
@@ -628,66 +846,6 @@ test("routes require explicit selection and immutable exact generations", async 
   await store.close();
 });
 
-test("legacy compatibility shadows neither grant nor withhold route authority", async () => {
-  const { store } = await fixture();
-  await store.initialize();
-  for (const binding of [codexBinding, claudeBinding]) {
-    await store.observeConnector({
-      identity: endpoint(binding),
-      health: "healthy",
-      compatibility: "expired",
-      protocol:
-        binding.provider === "codex" ? "app-server-jsonrpc" : "claude-peer",
-      protocolVersion: "1",
-    });
-  }
-  await store.registerRoute({
-    alias: "reviewer@this-mac",
-    binding: codexBinding,
-    registrationMode: "explicit_opt_in",
-  });
-  await store.registerRoute({
-    alias: "advisor@this-mac",
-    binding: claudeBinding,
-    registrationMode: "selected_live_peer",
-  });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
-  });
-  for (const binding of [codexBinding, claudeBinding]) {
-    await store.observeRoute({
-      binding,
-      state: "idle",
-      compatibility: "expired" as "compatible",
-    });
-  }
-
-  assert.deepEqual(await store.resolveRoute("reviewer@this-mac"), codexBinding);
-  assert.equal(
-    (
-      await store.enqueueMessage({
-        sourceAlias: "reviewer@this-mac",
-        targetAlias: "advisor@this-mac",
-        body: "best-effort route",
-        dedupeKey: "legacy-compatibility-shadow",
-      })
-    ).accepted,
-    true,
-  );
-  await store.markConnectorOffline(endpoint(codexBinding));
-  await assert.rejects(
-    store.observeRoute({
-      binding: codexBinding,
-      state: "idle",
-      compatibility: "compatible",
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "ROUTE_ENDPOINT_NOT_OBSERVED",
-  );
-  await store.close();
-});
-
 test("route registry has a configured durable capacity", async () => {
   const { store, workspace, config } = await fixture();
   config.limits.maxRoutes = 2;
@@ -695,7 +853,7 @@ test("route registry has a configured durable capacity", async () => {
   await observeAndRegister(store);
   await assert.rejects(
     store.registerRoute({
-      alias: "builder@this-mac",
+      alias: "codex-builder@this-mac",
       binding: {
         ...codexBinding,
         routeHandle: "codex-thread-private-0002",
@@ -724,7 +882,7 @@ test("permission graph admission and unpair teardown are exact to one edge", asy
     ownerLease: "claude-owner-lease-0002",
   };
   await store.registerRoute({
-    alias: "writer@this-mac",
+    alias: "codex-writer@this-mac",
     binding: secondCodexBinding,
     registrationMode: "explicit_opt_in",
   });
@@ -733,32 +891,27 @@ test("permission graph admission and unpair teardown are exact to one edge", asy
     binding: secondClaudeBinding,
     registrationMode: "selected_live_peer",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "writer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-writer@this-mac"],
   });
-  await store.pairRoutes({
-    claudeAlias: "critic@this-mac",
-    codexAlias: "reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["critic@this-mac", "codex-reviewer@this-mac"],
   });
-  assert.deepEqual(await store.inspectPairs(), [
+  assert.deepEqual(await store.inspectConsentEdges(), [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "reviewer@this-mac",
+      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     },
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "writer@this-mac",
+      aliases: ["advisor@this-mac", "codex-writer@this-mac"],
     },
     {
-      claudeAlias: "critic@this-mac",
-      codexAlias: "reviewer@this-mac",
+      aliases: ["critic@this-mac", "codex-reviewer@this-mac"],
     },
   ]);
   await assert.rejects(
     store.enqueueMessage({
       sourceAlias: "critic@this-mac",
-      targetAlias: "writer@this-mac",
+      targetAlias: "codex-writer@this-mac",
       body: "must not cross an absent edge",
       dedupeKey: "absent-edge",
     }),
@@ -767,23 +920,22 @@ test("permission graph admission and unpair teardown are exact to one edge", asy
   );
   const first = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "first edge in flight",
     dedupeKey: "first-edge",
   });
   const adjacent = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "writer@this-mac",
+    targetAlias: "codex-writer@this-mac",
     body: "adjacent edge remains queued",
     dedupeKey: "adjacent-edge",
   });
   assert.equal(first.accepted, true);
   assert.equal(adjacent.accepted, true);
-  const dispatched = await store.dequeueMessage("reviewer@this-mac");
+  const dispatched = await store.dequeueMessage("codex-reviewer@this-mac");
   assert.equal(dispatched?.messageId, first.messageId);
-  const result = await store.unpairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
+  const result = await store.removeConsentEdge({
+    aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     inFlightSettlements: [
       {
         messageId: first.messageId ?? "",
@@ -799,18 +951,17 @@ test("permission graph admission and unpair teardown are exact to one edge", asy
       safeErrorCode: "PAIR_REMOVED",
     },
   ]);
-  assert.equal(result.claudeRouteUnreferenced, false);
+  assert.deepEqual(result.unreferencedAliases, []);
   assert.equal(
-    await store.hasPair({
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "reviewer@this-mac",
+    await store.hasConsentEdge({
+      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     }),
     false,
   );
-  const remaining = await store.dequeueMessage("writer@this-mac");
+  const remaining = await store.dequeueMessage("codex-writer@this-mac");
   assert.equal(remaining?.messageId, adjacent.messageId);
   const snapshot = await store.publicSnapshot();
-  assert.equal(snapshot.pairs.length, 2);
+  assert.equal(snapshot.consentEdges.length, 2);
   assert.equal(snapshot.accounting.rejected, 1);
   assert.equal(snapshot.accounting.cancelled, 1);
   assert.equal(JSON.stringify(snapshot).includes("owner-lease"), false);
@@ -819,27 +970,27 @@ test("permission graph admission and unpair teardown are exact to one edge", asy
 
 test("permission graph capacity is configured and fail-closed", async () => {
   const { store, config } = await fixture();
-  config.limits.maxPairs = 1;
+  config.limits.maxConsentEdges = 1;
   await store.initialize();
   await observeAndRegister(store);
-  assert.equal((await store.inspectPairs()).length, 1);
+  assert.equal((await store.inspectConsentEdges()).length, 1);
   const secondCodexBinding: PrivateRouteBinding = {
     ...codexBinding,
     routeHandle: "codex-thread-private-capacity",
     ownerLease: "codex-owner-lease-capacity",
   };
   await store.registerRoute({
-    alias: "writer@this-mac",
+    alias: "codex-writer@this-mac",
     binding: secondCodexBinding,
     registrationMode: "explicit_opt_in",
   });
   await assert.rejects(
-    store.pairRoutes({
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "writer@this-mac",
+    store.addConsentEdge({
+      aliases: ["advisor@this-mac", "codex-writer@this-mac"],
     }),
     (error: unknown) =>
-      error instanceof BridgeError && error.code === "PAIR_CAPACITY_REACHED",
+      error instanceof BridgeError &&
+      error.code === "CONSENT_EDGE_CAPACITY_REACHED",
   );
   await store.close();
 });
@@ -849,9 +1000,8 @@ test("unpair removes only edge-owned work and preserves open-mode ingress", asyn
   config.inboundMode = "open";
   await store.initialize();
   await observeAndRegister(store);
-  await store.unpairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
+  await store.removeConsentEdge({
+    aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
   });
 
   const openIngress = await store.enqueueNativeIngress({
@@ -859,24 +1009,22 @@ test("unpair removes only edge-owned work and preserves open-mode ingress", asyn
       alias: "advisor@this-mac",
       binding: claudeBinding,
     },
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "open authority survives an unrelated edge lifecycle",
     dedupeKey: "open-before-edge",
   });
   assert.equal(openIngress.accepted, true);
   assert.equal(openIngress.pair, undefined);
 
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
   });
-  const removed = await store.unpairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
+  const removed = await store.removeConsentEdge({
+    aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
   });
   assert.deepEqual(removed.settlements, []);
   assert.equal(
-    (await store.dequeueMessage("reviewer@this-mac"))?.messageId,
+    (await store.dequeueMessage("codex-reviewer@this-mac"))?.messageId,
     openIngress.messageId,
   );
   await store.close();
@@ -888,7 +1036,7 @@ test("progress watches persist exact edge authority and advance completion-ended
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_abcdefghijklmnop",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -897,7 +1045,7 @@ test("progress watches persist exact edge authority and advance completion-ended
   assert.deepEqual(publicOpened.progressWatches, [
     {
       conversationIdSuffix: "ijklmnop",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       lastActivityAt: testClock.now().toISOString(),
       nextActionAt: new Date(testClock.now().getTime() + 60_000).toISOString(),
@@ -919,7 +1067,7 @@ test("progress watches persist exact edge authority and advance completion-ended
   assert.deepEqual(due, [
     {
       conversationId: "conv_abcdefghijklmnop",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       nudgeNumber: 1,
     },
@@ -928,7 +1076,7 @@ test("progress watches persist exact edge authority and advance completion-ended
   assert.equal(
     (
       await store.enqueueMessage({
-        sourceAlias: "reviewer@this-mac",
+        sourceAlias: "codex-reviewer@this-mac",
         targetAlias: "advisor@this-mac",
         body: "[Embassy automated liveness check]",
         dedupeKey: "watch-nudge-1",
@@ -945,7 +1093,7 @@ test("progress watches persist exact edge authority and advance completion-ended
     (
       await store.enqueueMessage({
         sourceAlias: "advisor@this-mac",
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "codex-reviewer@this-mac",
         body: "DONE: worker completion",
         dedupeKey: "watch-worker-complete",
         progressWatch: {
@@ -969,7 +1117,7 @@ test("progress watches persist exact edge authority and advance completion-ended
       sequence: 2,
       timestamp: "2026-08-07T12:01:00.000Z",
       conversationId: "conv_abcdefghijklmnop",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       kind: "settled",
       actor: "worker",
@@ -999,18 +1147,18 @@ test("owner and worker completion retain distinct terminal history", async () =>
       "conv_worker_done_history",
       "advisor@this-mac",
       "advisor@this-mac",
-      "reviewer@this-mac",
+      "codex-reviewer@this-mac",
     ],
     [
       "conv_owner_done_history1",
-      "reviewer@this-mac",
-      "reviewer@this-mac",
+      "codex-reviewer@this-mac",
+      "codex-reviewer@this-mac",
       "advisor@this-mac",
     ],
   ] as const) {
     await armProgressWatch(store, {
       conversationId,
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       idleMs: 60_000,
     });
@@ -1053,14 +1201,14 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_watchsingular0001",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
   await assert.rejects(
     store.enqueueMessage({
       sourceAlias: "advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       body: "TRACK: worker cannot change the original options",
       dedupeKey: "reject-worker-watch-options",
       progressWatch: {
@@ -1078,7 +1226,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
   await assert.rejects(
     store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
       body: "counterparty cannot replace the active pair watch",
       dedupeKey: "reject-counterparty-watch-replacement",
     progressWatch: {
@@ -1107,7 +1255,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
 
   await armProgressWatch(store, {
     conversationId: "conv_watchsingular0002",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 120_000,
   });
@@ -1120,14 +1268,14 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     [
       {
         conversationId: "conv_watchsingular0002",
-        ownerAlias: "reviewer@this-mac",
+        ownerAlias: "codex-reviewer@this-mac",
         idleMs: 120_000,
       },
     ],
   );
   await armProgressWatch(store, {
     conversationId: "conv_watchsingular0002",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 120_000,
   });
@@ -1150,18 +1298,17 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     ],
   );
   await store.registerRoute({
-    alias: "other-reviewer@this-mac",
+    alias: "codex-other-reviewer@this-mac",
     binding: independentCodexBinding,
     registrationMode: "explicit_opt_in",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "other-reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-other-reviewer@this-mac"],
   });
   await assert.rejects(
     store.enqueueMessage({
       sourceAlias: "advisor@this-mac",
-      targetAlias: "other-reviewer@this-mac",
+      targetAlias: "codex-other-reviewer@this-mac",
       body: "do not retarget an existing conversation watch",
       dedupeKey: "retarget-pair-watch",
       progressWatch: {
@@ -1181,9 +1328,8 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     ["conv_watchsingular0002"],
   );
 
-  await store.unpairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "reviewer@this-mac",
+  await store.removeConsentEdge({
+    aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
   });
   assert.deepEqual(await inspectProgressWatches(store), []);
   persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
@@ -1196,7 +1342,7 @@ test("one exact live pair has one watch and a new conversation replaces it atomi
     sequence: 3,
     timestamp: "2026-08-07T12:00:00.000Z",
     conversationId: "conv_watchsingular0002",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     kind: "settled",
     actor: "operator",
@@ -1211,7 +1357,7 @@ test("a retained Claude selection rename keeps its exact watch and immutable his
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_selection_rename1",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -1226,7 +1372,6 @@ test("a retained Claude selection rename keeps its exact watch and immutable his
   await store.observeConnector({
     identity: endpoint(replacementBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "claude-peer",
     protocolVersion: "1",
   });
@@ -1246,16 +1391,15 @@ test("a retained Claude selection rename keeps its exact watch and immutable his
     })),
     [
       {
-        ownerAlias: "reviewer@this-mac",
+        ownerAlias: "codex-reviewer@this-mac",
         workerAlias: "renamed-advisor@this-mac",
         workerLease: claudeBinding.ownerLease,
       },
     ],
   );
-  assert.deepEqual(await store.inspectPairs(), [
+  assert.deepEqual(await store.inspectConsentEdges(), [
     {
-      claudeAlias: "renamed-advisor@this-mac",
-      codexAlias: "reviewer@this-mac",
+      aliases: ["renamed-advisor@this-mac", "codex-reviewer@this-mac"],
     },
   ]);
   assert.deepEqual(
@@ -1264,7 +1408,7 @@ test("a retained Claude selection rename keeps its exact watch and immutable his
       sequence: 1,
       timestamp: "2026-08-07T12:00:00.000Z",
       conversationIdSuffix: "_rename1",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       kind: "opened",
       actor: "owner",
@@ -1284,7 +1428,7 @@ test("a progress watch cannot arm while its durable pair is unobserved", async (
   await assert.rejects(
     armProgressWatch(recovered, {
       conversationId: "conv_unobservedwatch1",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       idleMs: 60_000,
     }),
@@ -1295,54 +1439,13 @@ test("a progress watch cannot arm while its durable pair is unobserved", async (
   await recovered.close();
 });
 
-test("a malformed legacy duplicate cannot be laundered by migration", async () => {
-  const { store, config, clock: testClock } = await fixture();
-  await store.initialize();
-  await observeAndRegister(store);
-  await armProgressWatch(store, {
-    conversationId: "conv_legacywatchold01",
-    ownerAlias: "reviewer@this-mac",
-    workerAlias: "advisor@this-mac",
-    idleMs: 60_000,
-  });
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    progressWatches: Array<Record<string, unknown>>;
-  };
-  const oldWatch = legacy.progressWatches[0]!;
-  legacy.progressWatches.push({
-    ...oldWatch,
-    conversationId: "conv_legacywatchnew01",
-    createdAt: "2026-08-07T12:00:00.001Z",
-    updatedAt: "2026-08-07T12:00:00.001Z",
-    lastActivityAt: "2026-08-07T12:00:00.001Z",
-    nextActionAt: "2026-08-07T12:01:00.001Z",
-  });
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-  testClock.advance(2);
-
-  const durable = `${JSON.stringify(legacy)}\n`;
-  await writeFile(store.stateFilePath, durable, { mode: 0o600 });
-  await assert.rejects(
-    new GatewayStore(config, { now: testClock.now }).initialize(),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-  );
-  assert.equal(await readFile(store.stateFilePath, "utf8"), durable);
-});
-
 test("the removed pre-v1.4 worker flag remains corrupt", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_legacyworker_done",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -1367,418 +1470,27 @@ test("the removed pre-v1.4 worker flag remains corrupt", async () => {
   );
 });
 
-test("v1.4 migration rebases an exhausted journal and settles live watches once", async () => {
-  const { store, config, clock: testClock } = await fixture();
-  await store.initialize();
-  await observeAndRegister(store);
-  await armProgressWatch(store, {
-    conversationId: "conv_restartsequence_max",
-    ownerAlias: "reviewer@this-mac",
-    workerAlias: "advisor@this-mac",
-    idleMs: 60_000,
-  });
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    watchSequence: number;
-    progressWatches: ProgressWatch[];
-    progressWatchEvents: unknown[];
-  };
-  const watch = legacy.progressWatches[0]!;
-  legacy.watchSequence = Number.MAX_SAFE_INTEGER;
-  legacy.progressWatches = [
-    v14ProgressWatch(watch) as unknown as ProgressWatch,
-  ];
-  legacy.progressWatchEvents = [
-    ...Array.from({ length: 6 }, (_, index) => ({
-      sequence: Number.MAX_SAFE_INTEGER - 10 + index,
-      timestamp: watch.lastActivityAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "activity",
-    })),
-    {
-      sequence: Number.MAX_SAFE_INTEGER - 4,
-      timestamp: watch.lastActivityAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "opened",
-    },
-    {
-      sequence: Number.MAX_SAFE_INTEGER - 3,
-      timestamp: watch.lastActivityAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "activity",
-    },
-    {
-      sequence: Number.MAX_SAFE_INTEGER - 2,
-      timestamp: watch.lastActivityAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "done",
-    },
-    {
-      sequence: Number.MAX_SAFE_INTEGER - 1,
-      timestamp: watch.lastActivityAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "worker_reported_complete",
-    },
-    {
-      sequence: Number.MAX_SAFE_INTEGER,
-      timestamp: watch.lastActivityAt,
-      conversationId: watch.conversationId,
-      ownerAlias: watch.ownerAlias,
-      workerAlias: watch.workerAlias,
-      kind: "replaced",
-    },
-  ];
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  const reducedCapacityConfig = {
-    ...config,
-    limits: { ...config.limits, eventCapacity: 10 },
-  };
-  const recovered = new GatewayStore(reducedCapacityConfig, {
-    now: testClock.now,
-  });
-  await recovered.initialize();
-  assert.deepEqual(await inspectProgressWatches(recovered), []);
-  const migrated = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    watchSequence: number;
-    progressWatchEvents: unknown[];
-  };
-  assert.equal(migrated.watchSequence, 5);
-  assert.deepEqual(migrated.progressWatchEvents, [
-    {
-      sequence: 1,
-      timestamp: "2026-08-07T12:00:00.000Z",
-      conversationId: "conv_restartsequence_max",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      kind: "opened",
-      actor: "owner",
-    },
-    {
-      sequence: 2,
-      timestamp: "2026-08-07T12:00:00.000Z",
-      conversationId: "conv_restartsequence_max",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      kind: "settled",
-      actor: "unknown",
-      reason: "legacy_done",
-    },
-    {
-      sequence: 3,
-      timestamp: "2026-08-07T12:00:00.000Z",
-      conversationId: "conv_restartsequence_max",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      kind: "settled",
-      actor: "worker",
-      reason: "done",
-    },
-    {
-      sequence: 4,
-      timestamp: "2026-08-07T12:00:00.000Z",
-      conversationId: "conv_restartsequence_max",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      kind: "replaced",
-      actor: "unknown",
-    },
-    {
-      sequence: 5,
-      timestamp: "2026-08-07T12:00:00.000Z",
-      conversationId: "conv_restartsequence_max",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      kind: "settled",
-      actor: "gateway",
-      reason: "legacy_upgrade",
-    },
-  ]);
-  await recovered.close();
-
-  const loadedAgain = new GatewayStore(reducedCapacityConfig, {
-    now: testClock.now,
-  });
-  await loadedAgain.initialize();
-  assert.deepEqual(
-    (JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
-      progressWatchEvents: unknown[];
-    }).progressWatchEvents,
-    migrated.progressWatchEvents,
-  );
-  await loadedAgain.close();
-});
-
-test("v1.4 migration keeps every live-watch settlement above a lower configured history depth", async () => {
-  const { store, config, clock: testClock } = await fixture();
-  config.limits.maxRoutes = 24;
-  config.limits.maxWatches = 12;
-  config.limits.eventCapacity = 32;
-  await store.initialize();
-  await store.observeConnector({
-    identity: endpoint(codexBinding),
-    health: "healthy",
-    compatibility: "compatible",
-    protocol: "app-server-jsonrpc",
-    protocolVersion: "1",
-  });
-  await store.observeConnector({
-    identity: endpoint(claudeBinding),
-    health: "healthy",
-    compatibility: "compatible",
-    protocol: "claude-peer",
-    protocolVersion: "1",
-  });
-
-  const conversations: string[] = [];
-  for (let index = 0; index < 12; index += 1) {
-    const suffix = index.toString().padStart(2, "0");
-    const ownerAlias = `reviewer-${suffix}@this-mac`;
-    const workerAlias = `advisor-${suffix}@this-mac`;
-    const conversationId = `conv_capacity_watch_${suffix}`;
-    conversations.push(conversationId);
-    await store.registerRoute({
-      alias: ownerAlias,
-      binding: {
-        ...codexBinding,
-        routeHandle: `codex-thread-private-${suffix}`,
-        ownerLease: `codex-owner-lease-${suffix}`,
-      },
-      registrationMode: "explicit_opt_in",
-    });
-    await store.registerRoute({
-      alias: workerAlias,
-      binding: {
-        ...claudeBinding,
-        routeHandle: `claude-session-private-${suffix}`,
-        ownerLease: `claude-owner-lease-${suffix}`,
-      },
-      registrationMode: "selected_live_peer",
-    });
-    await store.pairRoutes({
-      claudeAlias: workerAlias,
-      codexAlias: ownerAlias,
-    });
-    await armProgressWatch(store, {
-      conversationId,
-      ownerAlias,
-      workerAlias,
-      idleMs: 60_000,
-    });
-  }
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    watchSequence: number;
-    progressWatches: ProgressWatch[];
-    progressWatchEvents: unknown[];
-  };
-  legacy.progressWatches = legacy.progressWatches.map(
-    (watch) => v14ProgressWatch(watch) as unknown as ProgressWatch,
-  );
-  legacy.progressWatchEvents = legacy.progressWatches.map((watch, index) => ({
-    sequence: index + 1,
-    timestamp: watch.lastActivityAt,
-    conversationId: watch.conversationId,
-    ownerAlias: watch.ownerAlias,
-    workerAlias: watch.workerAlias,
-    kind: "opened",
-  }));
-  legacy.watchSequence = legacy.progressWatchEvents.length;
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  const reducedCapacityConfig = {
-    ...config,
-    limits: { ...config.limits, eventCapacity: 10 },
-  };
-  const recovered = new GatewayStore(reducedCapacityConfig, {
-    now: testClock.now,
-  });
-  await recovered.initialize();
-  const migrated = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    watchSequence: number;
-    progressWatchEvents: Array<{
-      sequence: number;
-      conversationId: string;
-      kind: string;
-      actor: string;
-      reason?: string;
-    }>;
-  };
-  assert.equal(migrated.watchSequence, 24);
-  assert.deepEqual(
-    migrated.progressWatchEvents.slice(0, 12).map(
-      ({ sequence, conversationId, kind, actor }) => ({
-        sequence,
-        conversationId,
-        kind,
-        actor,
-      }),
-    ),
-    conversations.map((conversationId, index) => ({
-      sequence: index + 1,
-      conversationId,
-      kind: "opened",
-      actor: "owner",
-    })),
-  );
-  assert.deepEqual(
-    migrated.progressWatchEvents.slice(12).map(
-      ({ sequence, conversationId, kind, actor, reason }) => ({
-        sequence,
-        conversationId,
-        kind,
-        actor,
-        reason,
-      }),
-    ),
-    conversations.map((conversationId, index) => ({
-      sequence: index + 13,
-      conversationId,
-      kind: "settled",
-      actor: "gateway",
-      reason: "legacy_upgrade",
-    })),
-  );
-  await recovered.close();
-
-  const loadedAgain = new GatewayStore(reducedCapacityConfig, {
-    now: testClock.now,
-  });
-  await loadedAgain.initialize();
-  assert.deepEqual(
-    (
-      JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
-        progressWatchEvents: unknown[];
-      }
-    ).progressWatchEvents,
-    migrated.progressWatchEvents,
-  );
-  await loadedAgain.close();
-});
-
-test("a v1.4 watch without its exact pair cannot be laundered by migration", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await observeAndRegister(store);
-  await armProgressWatch(store, {
-    conversationId: "conv_orphanedwatch001",
-    ownerAlias: "reviewer@this-mac",
-    workerAlias: "advisor@this-mac",
-    idleMs: 60_000,
-  });
-  await store.close();
-
-  const corrupt = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as { pairs: unknown[]; progressWatches: ProgressWatch[] };
-  corrupt.progressWatches = corrupt.progressWatches.map(
-    (watch) => v14ProgressWatch(watch) as unknown as ProgressWatch,
-  );
-  corrupt.pairs = [];
-  await writeFile(store.stateFilePath, `${JSON.stringify(corrupt)}\n`, {
-    mode: 0o600,
-  });
-  await assert.rejects(
-    new GatewayStore(config).initialize(),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-  );
-});
-
-test("malformed v1.4 journal vocabulary cannot be laundered by migration", async () => {
-  for (const corruptTransition of [
-    { kind: "invented_transition" },
-    { kind: "opened", nudgeNumber: 1 },
-  ] as const) {
-    const { store, config } = await fixture();
-    await store.initialize();
-    await observeAndRegister(store);
-    await armProgressWatch(store, {
-      conversationId: "conv_malformedjournal1",
-      ownerAlias: "reviewer@this-mac",
-      workerAlias: "advisor@this-mac",
-      idleMs: 60_000,
-    });
-    await store.close();
-
-    const corrupt = JSON.parse(
-      await readFile(store.stateFilePath, "utf8"),
-    ) as {
-      progressWatches: ProgressWatch[];
-      progressWatchEvents: unknown[];
-    };
-    const watch = corrupt.progressWatches[0]!;
-    corrupt.progressWatches = [
-      v14ProgressWatch(watch) as unknown as ProgressWatch,
-    ];
-    corrupt.progressWatchEvents = [
-      {
-        sequence: 1,
-        timestamp: watch.lastActivityAt,
-        conversationId: watch.conversationId,
-        ownerAlias: watch.ownerAlias,
-        workerAlias: watch.workerAlias,
-        ...corruptTransition,
-      },
-    ];
-    const durable = `${JSON.stringify(corrupt)}\n`;
-    await writeFile(store.stateFilePath, durable, { mode: 0o600 });
-
-    await assert.rejects(
-      new GatewayStore(config).initialize(),
-      (error: unknown) =>
-        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-    );
-    assert.equal(await readFile(store.stateFilePath, "utf8"), durable);
-  }
-});
-
 test("the single watch-journal guard rejects a whole close batch atomically", async () => {
   const { store, config, clock: testClock } = await fixture();
   await store.initialize();
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_exhaustedwatch01",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
   await store.registerRoute({
-    alias: "other-reviewer@this-mac",
+    alias: "codex-other-reviewer@this-mac",
     binding: independentCodexBinding,
     registrationMode: "explicit_opt_in",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "other-reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-other-reviewer@this-mac"],
   });
   await armProgressWatch(store, {
     conversationId: "conv_exhaustedwatch02",
-    ownerAlias: "other-reviewer@this-mac",
+    ownerAlias: "codex-other-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -1809,14 +1521,12 @@ test("the single watch-journal guard rejects a whole close batch atomically", as
     ),
     ["conv_exhaustedwatch01", "conv_exhaustedwatch02"],
   );
-  assert.deepEqual(await recovered.inspectPairs(), [
+  assert.deepEqual(await recovered.inspectConsentEdges(), [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "other-reviewer@this-mac",
+      aliases: ["advisor@this-mac", "codex-other-reviewer@this-mac"],
     },
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "reviewer@this-mac",
+      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     },
   ]);
   assert.ok(await recovered.inspectPrivateRoute("advisor@this-mac"));
@@ -1828,17 +1538,16 @@ test("restart preserves an exact dispatch watch until tracking is disabled", asy
   await store.initialize();
   await observeAndRegister(store);
   await store.registerRoute({
-    alias: "other-reviewer@this-mac",
+    alias: "codex-other-reviewer@this-mac",
     binding: independentCodexBinding,
     registrationMode: "explicit_opt_in",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "other-reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-other-reviewer@this-mac"],
   });
   await armProgressWatch(store, {
     conversationId: "conv_pre_restart_watch",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -1850,7 +1559,7 @@ test("restart preserves an exact dispatch watch until tracking is disabled", asy
   assert.deepEqual(await inspectProgressWatches(recovered), before);
   assert.deepEqual(
     await recovered.resolveProgressWatchDispatch({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       conversationId: "conv_pre_restart_watch",
     }),
@@ -1859,14 +1568,14 @@ test("restart preserves an exact dispatch watch until tracking is disabled", asy
   assert.deepEqual(
     await recovered.resolveProgressWatchDispatch({
       sourceAlias: "advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       conversationId: "conv_pre_restart_watch",
     }),
     { conversationId: "conv_pre_restart_watch", markerActive: false },
   );
   assert.deepEqual(
     await recovered.resolveProgressWatchDispatch({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       recoveredConversationIdSuffix: "rt_watch",
     }),
@@ -1875,19 +1584,19 @@ test("restart preserves an exact dispatch watch until tracking is disabled", asy
   assert.deepEqual(
     await recovered.resolveProgressWatchDispatch({
       sourceAlias: "advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       recoveredConversationIdSuffix: "rt_watch",
     }),
     { conversationId: "conv_pre_restart_watch", markerActive: false },
   );
   for (const lookup of [
     {
-      sourceAlias: "other-reviewer@this-mac",
+      sourceAlias: "codex-other-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       recoveredConversationIdSuffix: "rt_watch",
     },
     {
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       recoveredConversationIdSuffix: "notwatch",
     },
@@ -1908,7 +1617,7 @@ test("restart preserves an exact dispatch watch until tracking is disabled", asy
       sequence: 2,
       timestamp: "2026-08-07T12:00:00.000Z",
       conversationIdSuffix: "rt_watch",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       kind: "settled",
       actor: "gateway",
@@ -1924,7 +1633,7 @@ test("explicit untrack closes once with operator attribution", async () => {
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_operator_untrack1",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -1938,7 +1647,7 @@ test("explicit untrack closes once with operator attribution", async () => {
       sequence: 2,
       timestamp: "2026-08-07T12:00:00.000Z",
       conversationIdSuffix: "untrack1",
-      ownerAlias: "reviewer@this-mac",
+      ownerAlias: "codex-reviewer@this-mac",
       workerAlias: "advisor@this-mac",
       kind: "settled",
       actor: "operator",
@@ -1954,7 +1663,7 @@ test("stale nudge work cannot shorten a freshly reset idle window", async () => 
   await observeAndRegister(store);
   await armProgressWatch(store, {
     conversationId: "conv_stale_nudge_work",
-    ownerAlias: "reviewer@this-mac",
+    ownerAlias: "codex-reviewer@this-mac",
     workerAlias: "advisor@this-mac",
     idleMs: 60_000,
   });
@@ -1975,7 +1684,7 @@ test("stale nudge work cannot shorten a freshly reset idle window", async () => 
 
   await assert.rejects(
     store.enqueueMessage({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       body: "stale controller nudge",
       dedupeKey: "stale-controller-nudge",
@@ -2641,9 +2350,8 @@ test("Codex succession is route-scoped and preserves unrelated queued work", asy
     binding: independentCodexBinding,
     registrationMode: "explicit_opt_in",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "codex-independent@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-independent@this-mac"],
   });
   const unrelated = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
@@ -2685,7 +2393,7 @@ test("persistence retains bounded bodies but not dedupe keys or public native ID
   const body = "BODY_SENTINEL_4e6d_do_not_persist";
   const dedupeKey = "RAW_PROVIDER_MESSAGE_ID_SENTINEL_198a";
   const result = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body,
     dedupeKey,
@@ -2717,22 +2425,24 @@ test("persistence retains bounded bodies but not dedupe keys or public native ID
   await store.close();
 });
 
-test("native Claude ingress queues for an explicit Codex route without registering the peer", async () => {
+test("native Claude ingress queues for an explicit DeepSeek route without registering the peer", async () => {
   const { store, workspace, config } = await fixture();
   config.inboundMode = "open";
   config.limits.rateLimitPerRoute = 1;
   await store.initialize();
-  await observeAndRegisterCodexOnly(store);
+  await observeAndRegisterProviderOnly(
+    store, deepseekBinding, "dsh-reviewer@this-mac",
+  );
 
   const accepted = await store.enqueueNativeIngress({
     source: transientClaudePeer,
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "dsh-reviewer@this-mac",
     body: "native ingress body",
     dedupeKey: "native-ingress-provider-message-1",
   });
   const duplicate = await store.enqueueNativeIngress({
     source: transientClaudePeer,
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "dsh-reviewer@this-mac",
     body: "duplicate body is ignored",
     dedupeKey: "native-ingress-provider-message-1",
   });
@@ -2742,7 +2452,7 @@ test("native Claude ingress queues for an explicit Codex route without registeri
   await assert.rejects(
     store.enqueueNativeIngress({
       source: transientClaudePeer,
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "dsh-reviewer@this-mac",
       body: "rate limited native ingress",
       dedupeKey: "native-ingress-provider-message-2",
     }),
@@ -2753,9 +2463,9 @@ test("native Claude ingress queues for an explicit Codex route without registeri
   const beforeDispatch = await store.publicSnapshot();
   assert.deepEqual(
     beforeDispatch.routes.map((route) => route.alias),
-    ["reviewer@this-mac"],
+    ["dsh-reviewer@this-mac"],
   );
-  assert.equal(beforeDispatch.routes[0]?.provider, "codex");
+  assert.equal(beforeDispatch.routes[0]?.provider, "deepseek");
   assert.equal(beforeDispatch.routes[0]?.queueDepth, 1);
   assert.equal(beforeDispatch.accounting.accepted, 1);
   assert.equal(beforeDispatch.accounting.duplicates, 1);
@@ -2769,15 +2479,15 @@ test("native Claude ingress queues for an explicit Codex route without registeri
     })),
     [
       {
-        direction: "claude_to_codex",
+        direction: "claude_to_deepseek",
         sourceAlias: "native-advisor@this-mac",
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "dsh-reviewer@this-mac",
         state: "queued",
       },
       {
-        direction: "claude_to_codex",
+        direction: "claude_to_deepseek",
         sourceAlias: "native-advisor@this-mac",
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "dsh-reviewer@this-mac",
         state: "duplicate",
       },
     ],
@@ -2793,9 +2503,9 @@ test("native Claude ingress queues for an explicit Codex route without registeri
     assert.equal(exposed.includes(privateValue), false);
   }
 
-  const dispatch = await store.dequeueMessage("reviewer@this-mac");
+  const dispatch = await store.dequeueMessage("dsh-reviewer@this-mac");
   assert.equal(dispatch?.body, "native ingress body");
-  assert.equal(dispatch?.direction, "claude_to_codex");
+  assert.equal(dispatch?.direction, "claude_to_deepseek");
   assert.ok(accepted.messageId);
   await store.settleMessage({
     messageId: accepted.messageId,
@@ -2805,21 +2515,23 @@ test("native Claude ingress queues for an explicit Codex route without registeri
   assert.equal(settled.accounting.delivered, 1);
   assert.equal(settled.routes[0]?.counters.delivered, 1);
   await store.unregisterRoute(
-    "reviewer@this-mac",
-    codexBinding.ownerLease,
+    "dsh-reviewer@this-mac",
+    deepseekBinding.ownerLease,
   );
   assert.deepEqual((await store.publicSnapshot()).routes, []);
   await store.close();
 });
 
-test("paired native ingress accepts only the exact selected Claude binding", async () => {
+test("paired native ingress accepts one exact Claude-to-DeepSeek consent edge", async () => {
   const { store } = await fixture();
   await store.initialize();
-  await observeAndRegisterCodexOnly(store);
+  await observeAndRegisterProviderOnly(
+    store, deepseekBinding, "dsh-reviewer@this-mac",
+  );
 
   const input = {
     source: transientClaudePeer,
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "dsh-reviewer@this-mac",
     body: "PAIRING_PRIVATE_BODY",
     dedupeKey: "paired-native-ingress",
   } as const;
@@ -2834,9 +2546,8 @@ test("paired native ingress accepts only the exact selected Claude binding", asy
     binding: transientClaudePeer.binding,
     registrationMode: "selected_live_peer",
   });
-  await store.pairRoutes({
-    claudeAlias: transientClaudePeer.alias,
-    codexAlias: "reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: [transientClaudePeer.alias, "dsh-reviewer@this-mac"],
   });
   const otherPeer = {
     alias: "other-advisor@this-mac",
@@ -2862,7 +2573,7 @@ test("paired native ingress accepts only the exact selected Claude binding", asy
   assert.equal(snapshot.inboundMode, "paired");
   assert.equal(snapshot.accounting.accepted, 1);
   assert.equal(snapshot.accounting.rejected, 2);
-  assert.equal(snapshot.routes.find((route) => route.provider === "codex")?.queueDepth, 1);
+  assert.equal(snapshot.routes.find((route) => route.provider === "deepseek")?.queueDepth, 1);
   assert.deepEqual(
     snapshot.messages
       .filter((event) => event.safeErrorCode === "SENDER_NOT_PAIRED")
@@ -2876,13 +2587,13 @@ test("paired native ingress accepts only the exact selected Claude binding", asy
       {
         state: "rejected",
         sourceAlias: transientClaudePeer.alias,
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "dsh-reviewer@this-mac",
         safeErrorCode: "SENDER_NOT_PAIRED",
       },
       {
         state: "rejected",
         sourceAlias: otherPeer.alias,
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "dsh-reviewer@this-mac",
         safeErrorCode: "SENDER_NOT_PAIRED",
       },
     ],
@@ -2903,7 +2614,7 @@ test("queued steers retain three newest per edge and expose an exact journal mar
 
   await store.enqueueNativeIngress({
     source: transientClaudePeer,
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "ordinary message stays ahead in the normal queue",
     dedupeKey: "ordinary-before-steers",
   });
@@ -2912,7 +2623,7 @@ test("queued steers retain three newest per edge and expose an exact journal mar
     steers.push(
       await store.enqueueNativeIngress({
         source: transientClaudePeer,
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "codex-reviewer@this-mac",
         body: `STEER: instruction ${index}`,
         dedupeKey: `steer-${index}`,
         steer: true,
@@ -2942,7 +2653,7 @@ test("queued steers retain three newest per edge and expose an exact journal mar
   );
 
   const firstSteer = await store.dequeueMessage(
-    "reviewer@this-mac",
+    "codex-reviewer@this-mac",
     "steer_only",
   );
   assert.equal(firstSteer?.messageId, steers[1]?.messageId);
@@ -2953,7 +2664,7 @@ test("queued steers retain three newest per edge and expose an exact journal mar
     messageId: firstSteer?.messageId ?? "",
     state: "delivered",
   });
-  const ordinary = await store.dequeueMessage("reviewer@this-mac");
+  const ordinary = await store.dequeueMessage("codex-reviewer@this-mac");
   assert.equal(ordinary?.body, "ordinary message stays ahead in the normal queue");
   assert.equal(ordinary?.steer, undefined);
   assert.equal(ordinary?.queuedAhead, undefined);
@@ -2977,9 +2688,8 @@ test("adjacent edges have independent steer caps and attributable counters", asy
     binding: secondClaudeBinding,
     registrationMode: "selected_live_peer",
   });
-  await store.pairRoutes({
-    claudeAlias: "critic@this-mac",
-    codexAlias: "reviewer@this-mac",
+  await store.addConsentEdge({
+    aliases: ["critic@this-mac", "codex-reviewer@this-mac"],
   });
 
   const firstEdge = [];
@@ -2988,7 +2698,7 @@ test("adjacent edges have independent steer caps and attributable counters", asy
     firstEdge.push(
       await store.enqueueMessage({
         sourceAlias: "advisor@this-mac",
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "codex-reviewer@this-mac",
         body: `STEER: first edge ${index}`,
         dedupeKey: `first-edge-steer-${index}`,
         steer: true,
@@ -2997,7 +2707,7 @@ test("adjacent edges have independent steer caps and attributable counters", asy
     secondEdge.push(
       await store.enqueueMessage({
         sourceAlias: "critic@this-mac",
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "codex-reviewer@this-mac",
         body: `STEER: second edge ${index}`,
         dedupeKey: `second-edge-steer-${index}`,
         steer: true,
@@ -3006,7 +2716,7 @@ test("adjacent edges have independent steer caps and attributable counters", asy
   }
   const fourthFirstEdge = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "STEER: first edge 4",
     dedupeKey: "first-edge-steer-4",
     steer: true,
@@ -3019,18 +2729,18 @@ test("adjacent edges have independent steer caps and attributable counters", asy
   });
   assert.equal(secondEdge.every((result) => result.accepted), true);
   const snapshot = await store.publicSnapshot();
-  const firstCounters = snapshot.pairs.find(
-    (pair) => pair.claudeAlias === "advisor@this-mac",
+  const firstCounters = snapshot.consentEdges.find(
+    (edge) => edge.endpoints.some(({ alias }) => alias === "advisor@this-mac"),
   )?.counters;
-  const secondCounters = snapshot.pairs.find(
-    (pair) => pair.claudeAlias === "critic@this-mac",
+  const secondCounters = snapshot.consentEdges.find(
+    (edge) => edge.endpoints.some(({ alias }) => alias === "critic@this-mac"),
   )?.counters;
   assert.equal(firstCounters?.accepted, 4);
   assert.equal(firstCounters?.cancelled, 1);
   assert.equal(secondCounters?.accepted, 3);
   assert.equal(secondCounters?.cancelled, 0);
   assert.equal(
-    snapshot.routes.find((route) => route.alias === "reviewer@this-mac")
+    snapshot.routes.find((route) => route.alias === "codex-reviewer@this-mac")
       ?.queueDepth,
     6,
   );
@@ -3052,7 +2762,7 @@ test("a rejected fourth steer does not displace an already accepted body", async
     accepted.push(
       await store.enqueueNativeIngress({
         source: transientClaudePeer,
-        targetAlias: "reviewer@this-mac",
+        targetAlias: "codex-reviewer@this-mac",
         body: `STEER: keep ${index}`,
         dedupeKey: `keep-steer-${index}`,
         steer: true,
@@ -3062,7 +2772,7 @@ test("a rejected fourth steer does not displace an already accepted body", async
   await assert.rejects(
     store.enqueueNativeIngress({
       source: transientClaudePeer,
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       body: `STEER: ${"x".repeat(73)}`,
       dedupeKey: "oversized-steer-replacement",
       steer: true,
@@ -3079,20 +2789,20 @@ test("a rejected fourth steer does not displace an already accepted body", async
     ),
     false,
   );
-  const first = await store.dequeueMessage("reviewer@this-mac", "steer_only");
+  const first = await store.dequeueMessage("codex-reviewer@this-mac", "steer_only");
   assert.equal(first?.messageId, accepted[0]?.messageId);
   assert.equal(first?.body, "STEER: keep 1");
   await store.close();
 });
 
-test("a correlated native reply retains transient-target queue semantics and no route authority", async () => {
+test("a correlated Grok reply retains transient-target queue semantics and no route authority", async () => {
   const { store, workspace } = await fixture();
   await store.initialize();
-  await observeAndRegisterCodexOnly(store);
+  await observeAndRegisterProviderOnly(store, grokBinding, "grok-reviewer@this-mac");
 
   await assert.rejects(
     store.enqueueMessage({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "grok-reviewer@this-mac",
       targetAlias: transientClaudePeer.alias,
       body: "generic routing must still require a registered target",
       dedupeKey: "generic-native-target-is-not-authority",
@@ -3102,7 +2812,7 @@ test("a correlated native reply retains transient-target queue semantics and no 
   );
 
   const reply = await store.enqueueNativeReply({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "grok-reviewer@this-mac",
     target: transientClaudePeer,
     body: "correlated native reply",
     dedupeKey: "native-reply-1",
@@ -3110,7 +2820,7 @@ test("a correlated native reply retains transient-target queue semantics and no 
   assert.ok(reply.messageId);
   const firstDispatch = await store.dequeueMessage(transientClaudePeer.alias);
   assert.equal(firstDispatch?.body, "correlated native reply");
-  assert.equal(firstDispatch?.direction, "codex_to_claude");
+  assert.equal(firstDispatch?.direction, "grok_to_claude");
   assert.deepEqual(
     await store.requeueInFlightMessage(
       reply.messageId,
@@ -3122,18 +2832,31 @@ test("a correlated native reply retains transient-target queue semantics and no 
   assert.equal(retry?.messageId, reply.messageId);
   await store.settleMessage({ messageId: reply.messageId, state: "delivered" });
 
+  await store.registerRoute({
+    alias: transientClaudePeer.alias,
+    binding: transientClaudePeer.binding,
+    registrationMode: "selected_live_peer",
+  });
+  await store.addConsentEdge({
+    aliases: ["grok-reviewer@this-mac", transientClaudePeer.alias],
+  });
   const cancelled = await store.enqueueNativeReply({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "grok-reviewer@this-mac",
     target: transientClaudePeer,
     body: "cancel this transient reply",
     dedupeKey: "native-reply-2",
+    pair: true,
   });
   assert.ok(cancelled.messageId);
   assert.equal(await store.cancelQueuedMessage(cancelled.messageId), true);
+  await store.unregisterRoute(
+    transientClaudePeer.alias,
+    transientClaudePeer.binding.ownerLease,
+  );
 
   const snapshot = await store.publicSnapshot();
   assert.deepEqual(snapshot.routes.map((route) => route.alias), [
-    "reviewer@this-mac",
+    "grok-reviewer@this-mac",
   ]);
   assert.equal(snapshot.accounting.accepted, 2);
   assert.equal(snapshot.accounting.delivered, 1);
@@ -3158,7 +2881,7 @@ test("native messages retain queued bodies but abandon transient authority acros
         ...transientClaudePeer,
         alias: "native-advisor@build-mac",
       },
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       body: "cross-host ingress",
       dedupeKey: "cross-host-ingress",
     }),
@@ -3174,7 +2897,7 @@ test("native messages retain queued bodies but abandon transient authority acros
           endpointGeneration: "unobserved-claude-generation",
         },
       },
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       body: "unobserved generation",
       dedupeKey: "unobserved-generation",
     }),
@@ -3185,19 +2908,19 @@ test("native messages retain queued bodies but abandon transient authority acros
 
   await store.enqueueNativeIngress({
     source: transientClaudePeer,
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "queued native ingress",
     dedupeKey: "restart-native-ingress",
   });
   const reply = await store.enqueueNativeReply({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     target: transientClaudePeer,
     body: "in-flight native reply",
     dedupeKey: "restart-native-reply",
   });
   assert.ok(reply.messageId);
   const queuedReply = await store.enqueueNativeReply({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     target: {
       ...transientClaudePeer,
       alias: "rotated-native-advisor@this-mac",
@@ -3236,7 +2959,7 @@ test("native messages retain queued bodies but abandon transient authority acros
     Buffer.byteLength("queued native ingress"),
   );
   assert.equal(
-    (await recovered.dequeueMessage("reviewer@this-mac"))?.body,
+    (await recovered.dequeueMessage("codex-reviewer@this-mac"))?.body,
     "queued native ingress",
   );
   assert.equal(
@@ -3256,7 +2979,6 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       provider: "claude",
       host: "this-mac",
       state: "idle",
-      compatibility: "compatible",
       validated: true,
       selected: false,
       lastSeenAt: "2026-08-07T12:00:00.000Z",
@@ -3269,7 +2991,6 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       provider: "claude",
       host: "this-mac",
       state: "idle",
-      compatibility: "compatible",
       validated: true,
       selected: false,
       targetId: "PRIVATE_TARGET_MUST_NOT_ESCAPE",
@@ -3282,7 +3003,6 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
       provider: "claude",
       host: "this-mac",
       state: "idle",
-      compatibility: "compatible",
       validated: true,
       selected: false,
     }),
@@ -3290,11 +3010,10 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
   );
   assert.equal(
     isPublicAvailablePeerSnapshot({
-      alias: "reviewer@this-mac",
+      alias: "codex-reviewer@this-mac",
       provider: "codex",
       host: "this-mac",
       state: "idle",
-      compatibility: "compatible",
       validated: true,
       selected: true,
     }),
@@ -3305,7 +3024,6 @@ test("transient available-peer rows use a closed metadata-only schema", () => {
     provider: "claude",
     host: "this-mac",
     state: "idle",
-    compatibility: "compatible",
     validated: true,
     selected: false,
   } as const;
@@ -3334,7 +3052,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
     bytesAccepted: maximum,
   };
   const snapshot: GatewayPublicSnapshot = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: timestamp,
     inboundMode: "paired",
     health: "degraded",
@@ -3342,7 +3060,6 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       provider: index % 2 === 0 ? "codex" : "claude",
       host: hosts[Math.floor(index / 2)]!,
       health: "degraded",
-      compatibility: "compatible",
       protocol: "p".repeat(32),
       protocolVersion: "v".repeat(32),
       lastSeenAt: timestamp,
@@ -3353,7 +3070,6 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       provider: "claude",
       host: hosts[index % hosts.length]!,
       state: index % 2 === 0 ? "busy" : "offline",
-      compatibility: index % 2 === 0 ? "compatible" : "expired",
       validated: index % 2 === 0,
       selected: index % 3 === 0,
       lastSeenAt: timestamp,
@@ -3365,20 +3081,24 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       host: hosts[index % hosts.length]!,
       enabled: true,
       state: "awaiting_approval",
-      compatibility: "compatible",
       busyPolicy: "queue",
       lastSeenAt: timestamp,
       queueDepth: maximum,
       counters: { ...counters },
       safeErrorCode: `R${"X".repeat(59)}${index.toString().padStart(4, "0")}`,
     })),
-    pairs: Array.from({ length: 256 }, (_, index) => {
+    consentEdges: Array.from({ length: 256 }, (_, index) => {
       const claudeIndex = 128 + (index % 128);
       const codexIndex =
         (index % 128 + (index < 128 ? 0 : 32)) % 128;
       return {
-        claudeAlias: alias("r", claudeIndex),
-        codexAlias: alias("r", codexIndex),
+        endpoints: [
+          { alias: alias("r", claudeIndex), provider: "claude" as const },
+          { alias: alias("r", codexIndex), provider: "codex" as const },
+        ].sort((left, right) => left.provider.localeCompare(right.provider)) as [
+          { alias: string; provider: "claude" | "codex" },
+          { alias: string; provider: "claude" | "codex" },
+        ],
         host: hosts[claudeIndex % hosts.length]!,
         counters: { ...counters },
       };
@@ -3423,7 +3143,7 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      pairs: 0,
+      consentEdges: 0,
       messages: 0,
       alerts: 0,
     },
@@ -3434,8 +3154,8 @@ test("public snapshot projection is deterministic, explicit, and control-sized",
   assert.equal(projected.connectors.length, snapshot.connectors.length);
   assert.equal(projected.routes.length, snapshot.routes.length);
   assert.equal(
-    projected.truncation.pairs,
-    snapshot.pairs.length - projected.pairs.length,
+    projected.truncation.consentEdges,
+    snapshot.consentEdges.length - projected.consentEdges.length,
   );
   assert.equal(
     projected.truncation.messages,
@@ -3469,7 +3189,7 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
   await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "accounted before refresh",
     dedupeKey: "pre-refresh",
@@ -3478,7 +3198,7 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
   await store.cancelQueuedMessage(accepted.messageId);
   const selectedSource = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "selected source rate bucket",
     dedupeKey: "selected-source-rate-bucket",
   });
@@ -3492,7 +3212,7 @@ test("stale rebind preserves counters but cannot silently retarget an alias", as
         routeHandle: "00000000-0000-4000-8000-000000000188",
       },
     },
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "current name rate bucket",
     dedupeKey: "current-name-rate-bucket",
   });
@@ -3584,14 +3304,12 @@ test("boot reactivation journals an exact same-generation Codex route and preser
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
   await store.observeConnector({
     identity: endpoint(claudeBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "claude-peer",
     protocolVersion: "1",
   });
@@ -3606,9 +3324,8 @@ test("boot reactivation journals an exact same-generation Codex route and preser
     binding: claudeBinding,
     registrationMode: "selected_live_peer",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "codex-main@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-main@this-mac"],
   });
   await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
@@ -3626,7 +3343,6 @@ test("boot reactivation journals an exact same-generation Codex route and preser
   await restarted.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -3680,23 +3396,23 @@ test("route invalidation atomically applies an exact in-flight terminal plan onc
   await store.initialize();
   await observeAndRegister(store);
   const towardClaude = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "confirmed route teardown",
     dedupeKey: "route-plan-confirmed",
   });
   const fromClaude = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "uncertain route teardown",
     dedupeKey: "route-plan-uncertain",
   });
   assert.ok(towardClaude.messageId);
   assert.ok(fromClaude.messageId);
   await store.dequeueMessage("advisor@this-mac");
-  await store.dequeueMessage("reviewer@this-mac");
+  await store.dequeueMessage("codex-reviewer@this-mac");
   const queuedDue = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "queued deadline wins route teardown",
     dedupeKey: "route-plan-queued-due",
@@ -3717,8 +3433,8 @@ test("route invalidation atomically applies an exact in-flight terminal plan onc
       error.code === "ROUTE_TERMINATION_PLAN_MISMATCH",
   );
   assert.equal(
-    (await store.inspectPrivateRoute("advisor@this-mac"))?.compatibility,
-    "compatible",
+    (await store.inspectPrivateRoute("advisor@this-mac"))?.state,
+    "idle",
   );
 
   testClock.advance(100);
@@ -3784,14 +3500,12 @@ test("Codex endpoint refresh re-anchors only the exact present subset and journa
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
   await store.observeConnector({
     identity: endpoint(claudeBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "claude-peer",
     protocolVersion: "1",
   });
@@ -3810,13 +3524,11 @@ test("Codex endpoint refresh re-anchors only the exact present subset and journa
     binding: claudeBinding,
     registrationMode: "selected_live_peer",
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "codex-one@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-one@this-mac"],
   });
-  await store.pairRoutes({
-    claudeAlias: "advisor@this-mac",
-    codexAlias: "codex-two@this-mac",
+  await store.addConsentEdge({
+    aliases: ["advisor@this-mac", "codex-two@this-mac"],
   });
   const accounted = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
@@ -3838,7 +3550,6 @@ test("Codex endpoint refresh re-anchors only the exact present subset and journa
   await store.observeConnector({
     identity: newEndpoint,
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "2",
   });
@@ -3913,14 +3624,12 @@ test("Codex endpoint refresh re-anchors only the exact present subset and journa
     routes.find((route) => route.alias === "codex-two@this-mac")?.state,
     "stale",
   );
-  assert.deepEqual(await store.inspectPairs(), [
+  assert.deepEqual(await store.inspectConsentEdges(), [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-one@this-mac",
+      aliases: ["advisor@this-mac", "codex-one@this-mac"],
     },
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-two@this-mac",
+      aliases: ["advisor@this-mac", "codex-two@this-mac"],
     },
   ]);
   const publicSnapshot = await store.publicSnapshot();
@@ -4011,7 +3720,6 @@ test("Codex endpoint-refresh sequence exhaustion is all-or-none", async () => {
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -4031,7 +3739,6 @@ test("Codex endpoint-refresh sequence exhaustion is all-or-none", async () => {
   await store.observeConnector({
     identity: newEndpoint,
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "2",
   });
@@ -4061,7 +3768,6 @@ test("Codex endpoint-refresh sequence exhaustion is all-or-none", async () => {
   await recovered.observeConnector({
     identity: newEndpoint,
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "2",
   });
@@ -4106,14 +3812,12 @@ test("Codex orphan removal requires dead-generation proof and preserves the rest
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
   await store.observeConnector({
     identity: endpoint(claudeBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "claude-peer",
     protocolVersion: "1",
   });
@@ -4136,9 +3840,8 @@ test("Codex orphan removal requires dead-generation proof and preserves the rest
     "codex-orphan@this-mac",
     "codex-kept@this-mac",
   ]) {
-    await store.pairRoutes({
-      claudeAlias: "advisor@this-mac",
-      codexAlias,
+    await store.addConsentEdge({
+      aliases: ["advisor@this-mac", codexAlias],
     });
     const queued = await store.enqueueMessage({
       sourceAlias: codexAlias,
@@ -4196,16 +3899,14 @@ test("Codex orphan removal requires dead-generation proof and preserves the rest
   });
   assert.equal(removed.alias, "codex-orphan@this-mac");
   assert.deepEqual(removed.binding, codexBinding);
-  assert.deepEqual(removed.removedPairs, [
+  assert.deepEqual(removed.removedEdges, [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-orphan@this-mac",
+      aliases: ["advisor@this-mac", "codex-orphan@this-mac"],
     },
   ]);
-  assert.deepEqual(await store.inspectPairs(), [
+  assert.deepEqual(await store.inspectConsentEdges(), [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-kept@this-mac",
+      aliases: ["advisor@this-mac", "codex-kept@this-mac"],
     },
   ]);
   assert.equal(
@@ -4287,7 +3988,6 @@ test("Codex orphan removal requires dead-generation proof and preserves the rest
       endpointGeneration: "codex-generation-0002",
     },
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "2",
   });
@@ -4318,7 +4018,7 @@ test("Codex orphan-removal sequence exhaustion preserves the route and consent e
   await store.initialize();
   await observeAndRegister(store);
   await store.renameRoute(
-    "reviewer@this-mac",
+    "codex-reviewer@this-mac",
     "codex-orphan-exhaust@this-mac",
     codexBinding.ownerLease,
   );
@@ -4357,10 +4057,9 @@ test("Codex orphan-removal sequence exhaustion preserves the route and consent e
   assert.ok(
     await recovered.inspectPrivateRoute("codex-orphan-exhaust@this-mac"),
   );
-  assert.deepEqual(await recovered.inspectPairs(), [
+  assert.deepEqual(await recovered.inspectConsentEdges(), [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-orphan-exhaust@this-mac",
+      aliases: ["advisor@this-mac", "codex-orphan-exhaust@this-mac"],
     },
   ]);
   const after = JSON.parse(
@@ -4387,7 +4086,6 @@ test("Codex orphan removal reconciles an exact verified post-rename commit", asy
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -4449,7 +4147,6 @@ test("Codex orphan commit proof fails closed for absent, unrelated, newer, and r
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -4492,7 +4189,6 @@ test("Codex orphan commit proof fails closed for absent, unrelated, newer, and r
   await store.observeConnector({
     identity: endpoint(codexBinding),
     health: "healthy",
-    compatibility: "compatible",
     protocol: "app-server-jsonrpc",
     protocolVersion: "1",
   });
@@ -4539,13 +4235,13 @@ test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   await store.initialize();
   await observeAndRegister(store);
   const first = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "first",
     dedupeKey: "provider-message-1",
   });
   const duplicate = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "first repeated",
     dedupeKey: "provider-message-1",
@@ -4553,14 +4249,14 @@ test("queue, dedupe, delivery, and accounting stay bounded", async () => {
   assert.equal(duplicate.duplicate, true);
   assert.equal(duplicate.messageIdSuffix, first.messageIdSuffix);
   await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "second",
     dedupeKey: "provider-message-2",
   });
   await assert.rejects(
     store.enqueueMessage({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       body: "third",
       dedupeKey: "provider-message-3",
@@ -4599,7 +4295,7 @@ test("public route queue age is exact while retained bodies remain bounded", asy
 
   const firstReviewer = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "OLDEST_REVIEWER_BODY_MUST_NOT_ESCAPE",
     dedupeKey: "oldest-reviewer",
   });
@@ -4608,7 +4304,7 @@ test("public route queue age is exact while retained bodies remain bounded", asy
   testClock.advance(100);
   const secondReviewer = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "NEWER_REVIEWER_BODY_MUST_NOT_ESCAPE",
     dedupeKey: "newer-reviewer",
   });
@@ -4616,7 +4312,7 @@ test("public route queue age is exact while retained bodies remain bounded", asy
   const secondReviewerAt = testClock.now().toISOString();
   testClock.advance(100);
   const advisor = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "ADVISOR_BODY_MUST_NOT_ESCAPE",
     dedupeKey: "advisor-queue-age",
@@ -4638,7 +4334,7 @@ test("public route queue age is exact while retained bodies remain bounded", asy
         oldestQueuedAt: advisorAt,
       },
       {
-        alias: "reviewer@this-mac",
+        alias: "codex-reviewer@this-mac",
         queueDepth: 2,
         oldestQueuedAt: firstReviewerAt,
       },
@@ -4666,7 +4362,7 @@ test("public route queue age is exact while retained bodies remain bounded", asy
   const afterOldestCancellation = await store.publicSnapshot();
   assert.equal(
     afterOldestCancellation.routes.find(
-      (route) => route.alias === "reviewer@this-mac",
+      (route) => route.alias === "codex-reviewer@this-mac",
     )?.oldestQueuedAt,
     secondReviewerAt,
   );
@@ -4690,14 +4386,14 @@ test("conversation correlation stays suffix-only while body and deadline evidenc
 
   const queued = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "SUFFIX_ONLY_BODY_MUST_NOT_ESCAPE",
     dedupeKey: "suffix-only-evidence",
     conversationIdSuffix: "aB_9-zY0",
   });
   assert.ok(queued.messageId);
   assert.equal(
-    (await store.dequeueMessage("reviewer@this-mac"))?.conversationIdSuffix,
+    (await store.dequeueMessage("codex-reviewer@this-mac"))?.conversationIdSuffix,
     "aB_9-zY0",
   );
   testClock.advance(750);
@@ -4735,7 +4431,7 @@ test("conversation correlation stays suffix-only while body and deadline evidenc
   await assert.rejects(
     store.enqueueMessage({
       sourceAlias: "advisor@this-mac",
-      targetAlias: "reviewer@this-mac",
+      targetAlias: "codex-reviewer@this-mac",
       body: "invalid suffix",
       dedupeKey: "invalid-suffix",
       conversationIdSuffix: "too-long-token",
@@ -4754,7 +4450,7 @@ test("requeue preserves the original enqueue time as the public queue age", asyn
 
   const queued = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "REQUEUED_BODY_MUST_STAY_TRANSIENT",
     dedupeKey: "requeue-preserves-age",
   });
@@ -4762,10 +4458,10 @@ test("requeue preserves the original enqueue time as the public queue age", asyn
   const originalEnqueuedAt = testClock.now().toISOString();
 
   testClock.advance(400);
-  const dispatched = await store.dequeueMessage("reviewer@this-mac");
+  const dispatched = await store.dequeueMessage("codex-reviewer@this-mac");
   assert.equal(dispatched?.messageId, queued.messageId);
   const whileInFlight = (await store.publicSnapshot()).routes.find(
-    (route) => route.alias === "reviewer@this-mac",
+    (route) => route.alias === "codex-reviewer@this-mac",
   );
   assert.equal(whileInFlight?.queueDepth, 0);
   assert.equal(Object.hasOwn(whileInFlight ?? {}, "oldestQueuedAt"), false);
@@ -4779,7 +4475,7 @@ test("requeue preserves the original enqueue time as the public queue age", asyn
     { status: "requeued" },
   );
   const afterRequeue = (await store.publicSnapshot()).routes.find(
-    (route) => route.alias === "reviewer@this-mac",
+    (route) => route.alias === "codex-reviewer@this-mac",
   );
   assert.equal(afterRequeue?.queueDepth, 1);
   assert.equal(afterRequeue?.oldestQueuedAt, originalEnqueuedAt);
@@ -4794,7 +4490,7 @@ test("due expiry is explicit, atomic, stable, and returned exactly once", async 
   const startedAt = testClock.now().getTime();
 
   const inFlightDue = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "in-flight due",
     dedupeKey: "in-flight-due",
@@ -4802,7 +4498,7 @@ test("due expiry is explicit, atomic, stable, and returned exactly once", async 
   });
   const inFlightFuture = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "in-flight future",
     dedupeKey: "in-flight-future",
     deadlineAt: new Date(startedAt + 3_000).toISOString(),
@@ -4814,12 +4510,12 @@ test("due expiry is explicit, atomic, stable, and returned exactly once", async 
     inFlightDue.messageId,
   );
   assert.equal(
-    (await store.dequeueMessage("reviewer@this-mac"))?.messageId,
+    (await store.dequeueMessage("codex-reviewer@this-mac"))?.messageId,
     inFlightFuture.messageId,
   );
 
   const queuedDue = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "queued due",
     dedupeKey: "queued-due",
@@ -4827,7 +4523,7 @@ test("due expiry is explicit, atomic, stable, and returned exactly once", async 
   });
   const queuedFuture = await store.enqueueMessage({
     sourceAlias: "advisor@this-mac",
-    targetAlias: "reviewer@this-mac",
+    targetAlias: "codex-reviewer@this-mac",
     body: "queued future",
     dedupeKey: "queued-future",
     deadlineAt: new Date(startedAt + 3_000).toISOString(),
@@ -4846,7 +4542,7 @@ test("due expiry is explicit, atomic, stable, and returned exactly once", async 
     })),
     [
       { alias: "advisor@this-mac", queueDepth: 1 },
-      { alias: "reviewer@this-mac", queueDepth: 1 },
+      { alias: "codex-reviewer@this-mac", queueDepth: 1 },
     ],
   );
 
@@ -4899,7 +4595,7 @@ test("due expiry is explicit, atomic, stable, and returned exactly once", async 
     0,
   );
   assert.equal(
-    afterExpiry.routes.find((route) => route.alias === "reviewer@this-mac")
+    afterExpiry.routes.find((route) => route.alias === "codex-reviewer@this-mac")
       ?.queueDepth,
     1,
   );
@@ -4927,7 +4623,7 @@ test("settlement and deadline requeue races are first-terminal-wins", async () =
   await observeAndRegister(store);
 
   const delivered = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "settle once",
     dedupeKey: "settle-once",
@@ -4954,7 +4650,7 @@ test("settlement and deadline requeue races are first-terminal-wins", async () =
   );
 
   const requeueDue = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "expire during clean requeue",
     dedupeKey: "expire-during-requeue",
@@ -5023,7 +4719,7 @@ test("unconfirmed is an exact-once in-flight terminal outcome", async () => {
   await observeAndRegister(store);
 
   const accepted = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "transport accepted without a native direct receipt",
     dedupeKey: "unconfirmed-native-receipt",
@@ -5085,7 +4781,7 @@ test("a transient dispatch can return to the held queue without leaking in-fligh
   await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "retry me after the target becomes available",
     dedupeKey: "transient-dispatch-retry",
@@ -5128,7 +4824,7 @@ test("queued terminal settlement is authoritative, exact-once, and fully account
 
   for (const [index, expected] of cases.entries()) {
     const accepted = await store.enqueueMessage({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       body: `canonical queued settlement ${index}`,
       dedupeKey: `canonical-queued-settlement-${index}`,
@@ -5180,7 +4876,7 @@ test("queued terminal settlement is authoritative, exact-once, and fully account
   }
 
   const stillQueued = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "invalid settlements must retain queue ownership",
     dedupeKey: "invalid-queued-settlement",
@@ -5226,7 +4922,7 @@ test("queued settlement and due expiry are first-terminal-wins", async () => {
   await observeAndRegister(store);
 
   const setterFirstAtCutoff = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "deadline wins even when manual settlement enters first",
     dedupeKey: "queued-manual-first-at-deadline",
@@ -5253,7 +4949,7 @@ test("queued settlement and due expiry are first-terminal-wins", async () => {
   assert.deepEqual(expirySweepLoser, []);
 
   const expiryFirst = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "expiry settlement wins at the deadline",
     dedupeKey: "queued-expiry-first-at-deadline",
@@ -5308,7 +5004,7 @@ test("in-flight expiry is terminal while progress remains nonterminal", async ()
   await store.initialize();
   await observeAndRegister(store);
   const accepted = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "synthetic receipt expiration",
     dedupeKey: "receipt-expired",
@@ -5342,7 +5038,7 @@ test("event and dedupe TTLs prune and the event ring is capped", async () => {
   await observeAndRegister(store);
   for (let index = 0; index < 6; index += 1) {
     const accepted = await store.enqueueMessage({
-      sourceAlias: "reviewer@this-mac",
+      sourceAlias: "codex-reviewer@this-mac",
       targetAlias: "advisor@this-mac",
       body: `message ${index}`,
       dedupeKey: `unique-${index}`,
@@ -5354,7 +5050,7 @@ test("event and dedupe TTLs prune and the event ring is capped", async () => {
   testClock.advance(1_001);
   assert.equal((await store.publicSnapshot()).messages.length, 0);
   const acceptedAgain = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "dedupe expired",
     dedupeKey: "unique-0",
@@ -5370,7 +5066,7 @@ test("retained event bodies evict oldest payloads without removing lifecycle met
   await observeAndRegister(store);
 
   const first = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "first-body",
     dedupeKey: "retained-body-first",
@@ -5379,7 +5075,7 @@ test("retained event bodies evict oldest payloads without removing lifecycle met
   await store.cancelQueuedMessage(first.messageId);
 
   const second = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "secondbody",
     dedupeKey: "retained-body-second",
@@ -5409,7 +5105,7 @@ test("restart stales routes, retains queued bodies, and never replays ambiguous 
   await store.initialize();
   await observeAndRegister(store);
   const inFlight = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "may have been written",
     dedupeKey: "restart-inflight",
@@ -5417,7 +5113,7 @@ test("restart stales routes, retains queued bodies, and never replays ambiguous 
   assert.ok(inFlight.messageId);
   await store.dequeueMessage();
   await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
+    sourceAlias: "codex-reviewer@this-mac",
     targetAlias: "advisor@this-mac",
     body: "still queued",
     dedupeKey: "restart-queued",
@@ -5441,425 +5137,6 @@ test("restart stales routes, retains queued bodies, and never replays ambiguous 
       error instanceof BridgeError && error.code === "ROUTE_UNAVAILABLE",
   );
   await recovered.close();
-});
-
-test("legacy persisted hop counters are ignored and removed", async () => {
-  const { store, config, clock: testClock } = await fixture();
-  await store.initialize();
-  await observeAndRegister(store);
-  const dispatched = await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "legacy in flight",
-    dedupeKey: "legacy-hop-in-flight",
-  });
-  assert.ok(dispatched.messageId);
-  await store.dequeueMessage();
-  await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "legacy queued",
-    dedupeKey: "legacy-hop-queued",
-  });
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    queue: Array<Record<string, unknown>>;
-    inFlight: Array<Record<string, unknown>>;
-    events: Array<Record<string, unknown>>;
-  };
-  for (const row of [...legacy.queue, ...legacy.inFlight, ...legacy.events]) {
-    row.hopCount = 16;
-  }
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  const recovered = new GatewayStore(config, {
-    now: testClock.now,
-    randomId: testClock.randomId,
-  });
-  await recovered.initialize();
-  const snapshot = await recovered.publicSnapshot();
-  assert.ok(snapshot.messages.every((event) => !("hopCount" in event)));
-  const persisted = JSON.parse(
-    await readFile(recovered.stateFilePath, "utf8"),
-  ) as {
-    queue: Array<Record<string, unknown>>;
-    inFlight: Array<Record<string, unknown>>;
-    events: Array<Record<string, unknown>>;
-  };
-  assert.ok(
-    [...persisted.queue, ...persisted.inFlight, ...persisted.events].every(
-      (row) => !("hopCount" in row),
-    ),
-  );
-  await recovered.close();
-});
-
-test("malformed legacy hop counters remain corrupt", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await observeAndRegister(store);
-  await store.enqueueMessage({
-    sourceAlias: "reviewer@this-mac",
-    targetAlias: "advisor@this-mac",
-    body: "legacy malformed hop",
-    dedupeKey: "legacy-malformed-hop",
-  });
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as { queue: Array<Record<string, unknown>> };
-  assert.ok(legacy.queue[0]);
-  legacy.queue[0]!.hopCount = -1;
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  await assert.rejects(
-    new GatewayStore(config).initialize(),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-  );
-});
-
-test("one narrow migration adds zeroed unconfirmed counters to old dogfood state", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await observeAndRegister(store);
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    accounting: Record<string, unknown>;
-    routes: Array<{ counters: Record<string, unknown> }>;
-    codexSuccession?: unknown;
-    pairs?: unknown;
-    watchSequence?: unknown;
-    progressWatches?: unknown;
-    progressWatchEvents?: unknown;
-    compatibilityAttestations?: unknown;
-    codexEndpointRefreshSequence?: unknown;
-    codexEndpointRefreshEvents?: unknown;
-    codexOrphanRemovalSequence?: unknown;
-    codexOrphanRemovalEvents?: unknown;
-  };
-  delete legacy.accounting.unconfirmed;
-  for (const route of legacy.routes) delete route.counters.unconfirmed;
-  delete legacy.codexSuccession;
-  delete legacy.pairs;
-  delete legacy.watchSequence;
-  delete legacy.progressWatches;
-  delete legacy.progressWatchEvents;
-  delete legacy.compatibilityAttestations;
-  delete legacy.codexEndpointRefreshSequence;
-  delete legacy.codexEndpointRefreshEvents;
-  delete legacy.codexOrphanRemovalSequence;
-  delete legacy.codexOrphanRemovalEvents;
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  const migrated = new GatewayStore(config);
-  await migrated.initialize();
-  const snapshot = await migrated.publicSnapshot();
-  assert.equal(snapshot.accounting.unconfirmed, 0);
-  assert.ok(
-    snapshot.routes.every((route) => route.counters.unconfirmed === 0),
-  );
-  assert.deepEqual(snapshot.pairs, [
-    {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "reviewer@this-mac",
-      host: "this-mac",
-      counters: {
-        accepted: 0,
-        delivered: 0,
-        unconfirmed: 0,
-        failed: 0,
-        ambiguous: 0,
-        expired: 0,
-        cancelled: 0,
-        abandoned: 0,
-        rejected: 0,
-        bytesAccepted: 0,
-      },
-    },
-  ]);
-  const persisted = JSON.parse(
-    await readFile(migrated.stateFilePath, "utf8"),
-  ) as {
-    accounting: Record<string, unknown>;
-    routes: Array<{ counters: Record<string, unknown> }>;
-    codexSuccession?: unknown;
-    compatibilityAttestations?: unknown;
-    codexEndpointRefreshSequence?: unknown;
-    codexEndpointRefreshEvents?: unknown;
-    codexOrphanRemovalSequence?: unknown;
-    codexOrphanRemovalEvents?: unknown;
-  };
-  assert.equal(persisted.accounting.unconfirmed, 0);
-  assert.ok(
-    persisted.routes.every((route) => route.counters.unconfirmed === 0),
-  );
-  assert.equal(persisted.codexSuccession, null);
-  assert.deepEqual(persisted.compatibilityAttestations, []);
-  assert.equal(persisted.codexEndpointRefreshSequence, 0);
-  assert.deepEqual(persisted.codexEndpointRefreshEvents, []);
-  assert.equal(persisted.codexOrphanRemovalSequence, 0);
-  assert.deepEqual(persisted.codexOrphanRemovalEvents, []);
-  await migrated.close();
-});
-
-test("startup staging defers migration persistence until one explicit commit", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await store.close();
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as Record<string, unknown>;
-  delete legacy.compatibilityAttestations;
-  delete legacy.codexEndpointRefreshSequence;
-  delete legacy.codexEndpointRefreshEvents;
-  delete legacy.codexOrphanRemovalSequence;
-  delete legacy.codexOrphanRemovalEvents;
-  const legacyBytes = `${JSON.stringify(legacy)}\n`;
-  await writeFile(store.stateFilePath, legacyBytes, { mode: 0o600 });
-
-  const staged = new GatewayStore(config);
-  await staged.initialize({ deferPersistence: true });
-  assert.equal(await readFile(store.stateFilePath, "utf8"), legacyBytes);
-
-  await staged.commitInitialization();
-  const committed = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as { compatibilityAttestations?: unknown };
-  assert.deepEqual(committed.compatibilityAttestations, []);
-  await staged.close();
-});
-
-test("legacy compatibility shadows load strictly without entering the public model", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await store.recordCompatibilityAttestation(legacyCompatibilityAttestation);
-  assert.deepEqual(
-    await store.inspectCompatibilityAttestation("claude", "2.1.226"),
-    legacyCompatibilityAttestation,
-  );
-  assert.deepEqual(await store.inspectCompatibilityAttestations(), [
-    legacyCompatibilityAttestation,
-  ]);
-  await assert.rejects(
-    store.recordCompatibilityAttestation({
-      ...legacyCompatibilityAttestation,
-      probes: [],
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "COMPAT_ATTESTATION_INVALID",
-  );
-  await store.close();
-  const writeAttested = {
-    schemaVersion: 1,
-    surface: "codex",
-    version: "0.148.0",
-    tier: "schema_attested",
-    checkedAt: "2026-08-09T12:02:00.000Z",
-    probes: [{ name: "write_attestation", outcome: "pass" }],
-  } as const;
-  const persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
-    compatibilityAttestations: Array<Record<string, unknown>>;
-  };
-  persisted.compatibilityAttestations = [
-    legacyCompatibilityAttestation,
-    writeAttested,
-  ];
-  await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
-    mode: 0o600,
-  });
-
-  const recovered = new GatewayStore(config);
-  await recovered.initialize();
-  assert.equal(
-    JSON.stringify(await recovered.publicSnapshot()).includes("2.1.226"),
-    false,
-  );
-  await recovered.close();
-  const recoveredBytes = await readFile(store.stateFilePath, "utf8");
-  const idempotent = new GatewayStore(config);
-  await idempotent.initialize();
-  await idempotent.close();
-  assert.equal(await readFile(store.stateFilePath, "utf8"), recoveredBytes);
-
-  for (const variant of ["failed", "unknown", "malformed"] as const) {
-    const current = await fixture();
-    await current.store.initialize();
-    await current.store.close();
-    const invalid = JSON.parse(
-      await readFile(current.store.stateFilePath, "utf8"),
-    ) as { compatibilityAttestations: Array<Record<string, unknown>> };
-    const row = JSON.parse(
-      JSON.stringify(legacyCompatibilityAttestation),
-    ) as Record<string, unknown>;
-    invalid.compatibilityAttestations = [row];
-    if (variant === "failed") {
-      const probes = row.probes as Array<Record<string, unknown>>;
-      probes[0] = {
-        name: "launcher",
-        outcome: "fail",
-        safeErrorCode: "CLAUDE_LAUNCHER_INVALID",
-      };
-    } else if (variant === "unknown") {
-      row.version = "unknown";
-    } else {
-      row.checkedAt = "not-a-timestamp";
-    }
-    await writeFile(
-      current.store.stateFilePath,
-      `${JSON.stringify(invalid)}\n`,
-      { mode: 0o600 },
-    );
-    await assert.rejects(
-      new GatewayStore(current.config).initialize(),
-      (error: unknown) =>
-        error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-      variant,
-    );
-  }
-
-  const duplicate = await fixture();
-  await duplicate.store.initialize();
-  await duplicate.store.close();
-  const duplicateState = JSON.parse(
-    await readFile(duplicate.store.stateFilePath, "utf8"),
-  ) as { compatibilityAttestations: Array<Record<string, unknown>> };
-  duplicateState.compatibilityAttestations = [
-    legacyCompatibilityAttestation,
-    legacyCompatibilityAttestation,
-  ];
-  await writeFile(
-    duplicate.store.stateFilePath,
-    `${JSON.stringify(duplicateState)}\n`,
-    { mode: 0o600 },
-  );
-  await assert.rejects(
-    new GatewayStore(duplicate.config).initialize(),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-  );
-});
-
-test("legacy manual certification is stripped while its inert persisted shadow survives", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await store.close();
-
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    compatibilityAttestations: Array<Record<string, unknown>>;
-  };
-  legacy.compatibilityAttestations = [
-    {
-      ...legacyCompatibilityAttestation,
-      tier: "certified",
-      certification: {
-        depth: "wire",
-        outcome: "pass",
-        certifiedAt: "2026-08-09T12:01:00.000Z",
-      },
-    },
-  ];
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  const migrated = new GatewayStore(config);
-  await migrated.initialize();
-  await migrated.close();
-  const persisted = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as {
-    compatibilityAttestations: Array<Record<string, unknown>>;
-  };
-  assert.equal(
-    Object.hasOwn(persisted.compatibilityAttestations[0] ?? {}, "certification"),
-    false,
-  );
-  assert.deepEqual(persisted.compatibilityAttestations, [
-    legacyCompatibilityAttestation,
-  ]);
-
-  const persistedRow = persisted.compatibilityAttestations[0] as
-    | Record<string, unknown>
-    | undefined;
-  assert.ok(persistedRow);
-  persistedRow.certification = {
-    depth: "wire",
-    outcome: "pass",
-    certifiedAt: "2026-08-09T12:02:00.000Z",
-    safeErrorCode: "LEGACY_CERTIFICATION_INVALID",
-  };
-  await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
-    mode: 0o600,
-  });
-  await assert.rejects(
-    new GatewayStore(config).initialize(),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
-  );
-});
-
-test("one additive migration adds the orphan-removal journal without changing endpoint-refresh evidence", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  await store.close();
-  const legacy = JSON.parse(
-    await readFile(store.stateFilePath, "utf8"),
-  ) as Record<string, unknown>;
-  legacy.codexEndpointRefreshSequence = 1;
-  legacy.codexEndpointRefreshEvents = [
-    {
-      sequence: 1,
-      timestamp: "2026-08-09T12:00:00.000Z",
-      alias: "codex-journal@this-mac",
-      hostId: "this-mac",
-      threadId: "codex-thread-private-journal",
-      oldEndpointGeneration: "codex-generation-old",
-      newEndpointGeneration: "codex-generation-new",
-    },
-  ];
-  delete legacy.codexOrphanRemovalSequence;
-  delete legacy.codexOrphanRemovalEvents;
-  await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
-    mode: 0o600,
-  });
-
-  const migrated = new GatewayStore(config);
-  await migrated.initialize();
-  const persisted = JSON.parse(
-    await readFile(migrated.stateFilePath, "utf8"),
-  ) as Record<string, unknown>;
-  assert.equal(persisted.codexEndpointRefreshSequence, 1);
-  assert.deepEqual(persisted.codexEndpointRefreshEvents, [
-    {
-      sequence: 1,
-      timestamp: "2026-08-09T12:00:00.000Z",
-      alias: "codex-journal@this-mac",
-      hostId: "this-mac",
-      threadId: "codex-thread-private-journal",
-      oldEndpointGeneration: "codex-generation-old",
-      newEndpointGeneration: "codex-generation-new",
-    },
-  ]);
-  assert.equal(persisted.codexOrphanRemovalSequence, 0);
-  assert.deepEqual(persisted.codexOrphanRemovalEvents, []);
-  await migrated.close();
 });
 
 test("private Codex endpoint-refresh journal rejects malformed, out-of-sequence, and oversized state", async () => {

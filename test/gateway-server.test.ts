@@ -133,7 +133,7 @@ function signalHarness(): {
   };
 }
 
-test("foreground assembly ignores hostile optional detection and renders neutral absence", async () => {
+test("foreground assembly ignores hostile optional detection without inventing provider state", async () => {
   const stateDir = "/synthetic/controller-state";
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
@@ -256,8 +256,10 @@ test("foreground assembly ignores hostile optional detection and renders neutral
     2,
   );
   assert.equal(serviceOptions?.compatibilityObservers, undefined);
-  assert.match(renderDashboardHtml(dashboardFixture(), { locale: "en" }),
-    /DeepSeek[\s\S]*Not detected/u);
+  assert.doesNotMatch(
+    renderDashboardHtml(dashboardFixture(), { locale: "en" }),
+    /Not detected|Compatibility checks/u,
+  );
   assert.deepEqual(ready, [
     {
       status: "ready",

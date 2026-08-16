@@ -82,7 +82,7 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
     bytesAccepted: 0,
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt,
     inboundMode: "paired",
     health: "healthy",
@@ -91,7 +91,6 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
         provider: "claude",
         host: "this-mac",
         health: "healthy",
-        compatibility: "compatible",
         protocol: "claude-peer",
         protocolVersion: "1",
         lastSeenAt: generatedAt,
@@ -105,14 +104,13 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
         host: "this-mac",
         enabled: true,
         state: "idle",
-        compatibility: "compatible",
         busyPolicy: "queue",
         lastSeenAt: generatedAt,
         queueDepth: 0,
         counters,
       },
     ],
-    pairs: [],
+    consentEdges: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -133,11 +131,15 @@ function semanticSnapshot(generatedAt: string): GatewayPublicSnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      pairs: 0,
+      consentEdges: 0,
       messages: 0,
       alerts: 0,
     },
   };
+}
+
+function consentEdgeAliases(snapshot: GatewayPublicSnapshot): string[][] {
+  return snapshot.consentEdges.map(({ endpoints }) => endpoints.map(({ alias }) => alias));
 }
 
 class MutableSnapshotStore extends GatewayStore {
@@ -423,7 +425,7 @@ class FakeProvider implements GatewayProviderAdapter {
   ) => Promise<void>;
 
   constructor(
-    provider: "codex" | "claude",
+    provider: PrivateEndpointIdentity["provider"],
     endpointGeneration = `generation_${provider}`,
     protocolVersion = "synthetic-1",
   ) {
@@ -432,7 +434,7 @@ class FakeProvider implements GatewayProviderAdapter {
       hostId: "this-mac",
       endpointGeneration,
     };
-    this.protocol = provider === "codex" ? "codex-app-server" : "claude-peer";
+    this.protocol = provider === "codex" ? "codex-app-server" : provider === "claude" ? "claude-peer" : "synthetic-acp";
     this.protocolVersion = protocolVersion;
     if (provider === "claude") {
       this.assertWorkspaceDisjoint = async (routeHandle) => {
@@ -446,7 +448,6 @@ class FakeProvider implements GatewayProviderAdapter {
     this.activateEndpointGeneration(this.identity.endpointGeneration);
     return {
       health: "healthy" as const,
-      compatibility: "compatible" as const,
     };
   }
 
@@ -546,7 +547,7 @@ class FakeProvider implements GatewayProviderAdapter {
     );
   }
 
-  async updateNativeCodexPeerStatus(
+  async updateNativeSourcePeerStatus(
     alias: string,
     status: "idle" | "busy" | "waiting",
   ): Promise<void> {
@@ -556,8 +557,9 @@ class FakeProvider implements GatewayProviderAdapter {
     this.nativeCodexStatusAfterUpdate?.();
   }
 
-  async advertiseNativeCodexPeer(input: {
+  async advertiseNativeSourcePeer(input: {
     alias: string;
+    sourceProvider: PrivateEndpointIdentity["provider"];
     cwd: string;
   }): Promise<void> {
     const failure = this.nativeCodexAdvertisementFailures.shift();
@@ -587,7 +589,7 @@ class FakeProvider implements GatewayProviderAdapter {
     )!;
   }
 
-  async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
+  async unadvertiseNativeSourcePeer(alias: string): Promise<void> {
     this.lifecycleEvents.push(`native:unadvertise:${alias}`);
     const failure = this.nativeCodexUnadvertisementFailures.shift();
     if (failure !== undefined) throw failure;
@@ -1267,16 +1269,14 @@ test("an unsafe Claude sessions directory quarantines only Claude", async (t) =>
   assert.deepEqual(
     snapshot.connectors
       .filter(({ provider }) => provider === "claude")
-      .map(({ health, compatibility, safeErrorCode, registry }) => ({
+      .map(({ health, safeErrorCode, registry }) => ({
         health,
-        compatibility,
         safeErrorCode,
         registry,
       })),
     [
       {
         health: "degraded",
-        compatibility: "incompatible",
         safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE",
         registry: {
           entriesScanned: 0,
@@ -1608,7 +1608,7 @@ test("aborted startup cannot become active after an in-flight adapter initializa
     provider.callbacks = callbacks;
     markInitializeEntered?.();
     await initializeMayFinish;
-    return { health: "healthy", compatibility: "compatible" };
+    return { health: "healthy" };
   };
   provider.close = async () => {
     markCloseEntered?.();
@@ -1971,7 +1971,6 @@ test("broker restart reactivates an exact Codex task and wakes its durable queue
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const firstCodex = new FakeProvider("codex", "codex_boot_generation_g1");
@@ -2021,15 +2020,8 @@ test("broker restart reactivates an exact Codex task and wakes its durable queue
     "durable mail wakes after broker restart",
   );
   assert.deepEqual(
-    (await second.handlers().listSnapshot()).pairs.map(
-      ({ claudeAlias, codexAlias }) => ({ claudeAlias, codexAlias }),
-    ),
-    [
-      {
-        claudeAlias: "claude-one@this-mac",
-        codexAlias: "codex-main@this-mac",
-      },
-    ],
+    consentEdgeAliases(await second.handlers().listSnapshot()),
+    [["claude-one@this-mac", "codex-main@this-mac"]],
   );
   const route = await second.store.inspectPrivateRoute(
     "codex-main@this-mac",
@@ -2038,7 +2030,6 @@ test("broker restart reactivates an exact Codex task and wakes its durable queue
     route?.binding.endpointGeneration,
     "codex_boot_generation_g2",
   );
-  assert.equal(route?.compatibility, "compatible");
   const persisted = JSON.parse(
     await readFile(second.store.stateFilePath, "utf8"),
   ) as {
@@ -2116,7 +2107,6 @@ test("boot reactivation completes a compatible daemon-generation change in fligh
   );
   assert.equal(route?.binding.endpointGeneration, current.endpointGeneration);
   assert.equal(route?.state, "idle");
-  assert.equal(route?.compatibility, "compatible");
   assert.deepEqual(claude.nativeCodexAdvertisements, [
     "codex-main@this-mac",
   ]);
@@ -2366,7 +2356,6 @@ test("a compatible Codex endpoint refresh reanchors exact tasks and preserves pa
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider(
@@ -2389,15 +2378,8 @@ test("a compatible Codex endpoint refresh reanchors exact tasks and preserves pa
   const handlers = service.handlers();
   await selectAndRegister(handlers);
   assert.deepEqual(
-    (await handlers.listSnapshot()).pairs.map(
-      ({ claudeAlias, codexAlias }) => ({ claudeAlias, codexAlias }),
-    ),
-    [
-      {
-        claudeAlias: "claude-one@this-mac",
-        codexAlias: "codex-main@this-mac",
-      },
-    ],
+    consentEdgeAliases(await handlers.listSnapshot()),
+    [["claude-one@this-mac", "codex-main@this-mac"]],
   );
 
   codex.state = "busy";
@@ -2440,30 +2422,20 @@ test("a compatible Codex endpoint refresh reanchors exact tasks and preserves pa
   assert.deepEqual(
     snapshot.routes
       .filter(({ provider }) => provider === "codex")
-      .map(({ alias, state, compatibility }) => ({
+      .map(({ alias, state }) => ({
         alias,
         state,
-        compatibility,
       })),
     [
       {
         alias: "codex-main@this-mac",
         state: "idle",
-        compatibility: "compatible",
       },
     ],
   );
   assert.deepEqual(
-    snapshot.pairs.map(({ claudeAlias, codexAlias }) => ({
-      claudeAlias,
-      codexAlias,
-    })),
-    [
-      {
-        claudeAlias: "claude-one@this-mac",
-        codexAlias: "codex-main@this-mac",
-      },
-    ],
+    consentEdgeAliases(snapshot),
+    [["claude-one@this-mac", "codex-main@this-mac"]],
   );
   assert.deepEqual(
     snapshot.activityEvents
@@ -2590,7 +2562,6 @@ test("a real Codex provider reanchors runtime routes and drains mail after endpo
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const service = new GatewayService({
@@ -2853,12 +2824,12 @@ test("endpoint refresh activation requires one exact live native listener and st
       "codex-main@this-mac",
     )!;
     const originalUpdate =
-      claude.updateNativeCodexPeerStatus.bind(claude);
+      claude.updateNativeSourcePeerStatus.bind(claude);
     if (failurePoint === "listener_missing") {
       claude.nativeCodexGenerations.delete("codex-main@this-mac");
     } else if (failurePoint === "status_method_missing") {
       (claude as unknown as Record<string, unknown>)[
-        "updateNativeCodexPeerStatus"
+        "updateNativeSourcePeerStatus"
       ] = undefined;
     } else if (failurePoint === "listener_exits_after_status") {
       claude.nativeCodexStatusAfterUpdate = () => {
@@ -2911,9 +2882,9 @@ test("endpoint refresh activation requires one exact live native listener and st
     claude.nativeCodexActiveGeneration = listenerGeneration;
     (
       claude as unknown as {
-        updateNativeCodexPeerStatus: FakeProvider["updateNativeCodexPeerStatus"];
+        updateNativeSourcePeerStatus: FakeProvider["updateNativeSourcePeerStatus"];
       }
-    ).updateNativeCodexPeerStatus = originalUpdate;
+    ).updateNativeSourcePeerStatus = originalUpdate;
     codex.callbacks?.onRouteState?.({
       endpoint: { ...codex.identity, routeHandle: THREAD_ID },
       state: "idle",
@@ -2980,10 +2951,6 @@ test("an uncertain durable reanchor can fail closed natively and then retry exac
   assert.equal(
     (await store.inspectPrivateRoute("codex-main@this-mac"))?.state,
     "stale",
-  );
-  assert.equal(
-    (await store.inspectPrivateRoute("codex-main@this-mac"))?.compatibility,
-    "expired",
   );
   claude.nativeCodexGenerations.delete("codex-main@this-mac");
 
@@ -3224,7 +3191,6 @@ test("exact re-registration finalizes a selector refresh only after rebuilding i
         codex.identity.endpointGeneration,
       );
       assert.equal(route?.state, "idle");
-      assert.equal(route?.compatibility, "compatible");
       assert.equal(
         claude.currentNativeCodexPeerGeneration("codex-main@this-mac"),
         "initial",
@@ -3313,7 +3279,6 @@ test("selector refresh registration failures remain stale and retry to one final
       );
       assert.equal(route?.binding.endpointGeneration, codex.identity.endpointGeneration);
       assert.equal(route?.state, "idle");
-      assert.equal(route?.compatibility, "compatible");
       assert.equal(codex.activatedEndpointGenerations.length, 2);
       assert.equal(
         claude.currentNativeCodexPeerGeneration("codex-main@this-mac"),
@@ -3454,7 +3419,6 @@ test("a malformed selector endpoint refresh has no durable or native activation 
   );
   assert.equal(retained?.binding.endpointGeneration, generation);
   assert.equal(retained?.state, "idle");
-  assert.equal(retained?.compatibility, "compatible");
   assert.equal(
     await service.store.inspectPrivateRoute("codex-malformed@this-mac"),
     undefined,
@@ -3619,7 +3583,6 @@ test("owned orphan removal quiesces and drains native ingress before unadvertisi
   await service.store.observeConnector({
     identity: codex.identity,
     health: "healthy",
-    compatibility: "compatible",
     protocol: codex.protocol,
     protocolVersion: codex.protocolVersion,
   });
@@ -3969,7 +3932,6 @@ test("dashboard recovery removes only a stale Codex registration on a superseded
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const firstCodex = new FakeProvider("codex", "codex_orphan_generation");
@@ -3985,7 +3947,7 @@ test("dashboard recovery removes only a stale Codex registration on a superseded
   });
   await first.start();
   await selectAndRegister(first.handlers());
-  assert.equal((await first.handlers().listSnapshot()).pairs.length, 1);
+  assert.equal((await first.handlers().listSnapshot()).consentEdges.length, 1);
   await first.close();
 
   const secondClaude = new FakeProvider("claude");
@@ -4011,7 +3973,7 @@ test("dashboard recovery removes only a stale Codex registration on a superseded
       ?.state,
     "stale",
   );
-  assert.equal(snapshot.pairs.length, 1);
+  assert.equal(snapshot.consentEdges.length, 1);
 
   assert.deepEqual(
     await handlers.removeStaleCodexRegistration({
@@ -4024,7 +3986,7 @@ test("dashboard recovery removes only a stale Codex registration on a superseded
     snapshot.routes.some(({ alias }) => alias === "codex-main@this-mac"),
     false,
   );
-  assert.deepEqual(snapshot.pairs, []);
+  assert.deepEqual(snapshot.consentEdges, []);
   assert.equal(
     await second.store.inspectPrivateRoute("codex-main@this-mac"),
     undefined,
@@ -4400,7 +4362,6 @@ test("Codex succession preserves terminal delivery-token status but transfers no
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -4661,7 +4622,6 @@ test("an installed prepare journal is reconciled and cleared after a post-rename
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -4785,8 +4745,7 @@ test("an unprovable prepare commit stays poisoned and requires manual recovery",
   );
   assert.equal(
     (await handlers.listSnapshot()).routes.every(
-      ({ enabled, state, compatibility }) =>
-        !enabled && state === "disabled" && compatibility === "expired",
+      ({ enabled, state }) => !enabled && state === "disabled",
     ),
     true,
   );
@@ -4839,18 +4798,16 @@ test("a failed old-generation resume stays poisoned, offline, and closed to new 
   assert.equal(codex.closed, false);
   const snapshot = await handlers.listSnapshot();
   assert.deepEqual(
-    snapshot.routes.map(({ alias, enabled, state, compatibility }) => ({
+    snapshot.routes.map(({ alias, enabled, state }) => ({
       alias,
       enabled,
       state,
-      compatibility,
     })),
     [
       {
         alias: "codex-main@this-mac",
         enabled: false,
         state: "disabled",
-        compatibility: "expired",
       },
     ],
   );
@@ -4911,8 +4868,7 @@ test("an unknown succession publication outcome takes both registrations offline
   const snapshot = await handlers.listSnapshot();
   assert.equal(
     snapshot.routes.every(
-      ({ enabled, state, compatibility }) =>
-        !enabled && state === "disabled" && compatibility === "expired",
+      ({ enabled, state }) => !enabled && state === "disabled",
     ),
     true,
   );
@@ -4964,13 +4920,12 @@ test("succession poison disables only the replaced edge and leaves unrelated Cod
   );
   assert.deepEqual(
     side === undefined
-      ? undefined
-      : {
-          enabled: side.enabled,
-          state: side.state,
-          compatibility: side.compatibility,
-        },
-    { enabled: true, state: "idle", compatibility: "compatible" },
+        ? undefined
+        : {
+            enabled: side.enabled,
+            state: side.state,
+          },
+    { enabled: true, state: "idle" },
   );
   assert.equal(claude.closed, false);
   assert.equal(codex.closed, false);
@@ -5134,11 +5089,10 @@ test("post-activation poison drains an admitted native frame and its terminal re
   const snapshot = await handlers.listSnapshot();
   assert.deepEqual(
     snapshot.routes.map(
-      ({ alias, enabled, state, compatibility, queueDepth }) => ({
+      ({ alias, enabled, state, queueDepth }) => ({
         alias,
         enabled,
         state,
-        compatibility,
         queueDepth,
       }),
     ),
@@ -5147,7 +5101,6 @@ test("post-activation poison drains an admitted native frame and its terminal re
         alias: "codex-next@this-mac",
         enabled: false,
         state: "disabled",
-        compatibility: "expired",
         queueDepth: 0,
       },
     ],
@@ -5347,7 +5300,6 @@ test("fake end-to-end delivery retains bodies while keeping route and conversati
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
     // Unsafe native names are not transformed into a public selector.
     {
@@ -5355,7 +5307,6 @@ test("fake end-to-end delivery retains bodies while keeping route and conversati
       routeHandle: "never_selected",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -5561,7 +5512,6 @@ test("Claude sends require explicit selection while UUID routing survives rename
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -5626,7 +5576,6 @@ test("Claude sends require explicit selection while UUID routing survives rename
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   await handlers.refreshDashboard();
@@ -5671,7 +5620,6 @@ test("fresh Claude selection releases provider state when the selected handle ch
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   claude.selectedRouteHandleOverride =
@@ -5722,14 +5670,12 @@ test("pairing a second Claude session selects it additively and preserves old wo
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
     {
       alias: "claude-two@this-mac",
       routeHandle: "claude_target_2",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -5789,18 +5735,9 @@ test("pairing a second Claude session selects it additively and preserves old wo
       { alias: "claude-two@this-mac", selected: true },
     ],
   );
-  assert.deepEqual(snapshot.pairs.map(({ claudeAlias, codexAlias }) => ({
-    claudeAlias,
-    codexAlias,
-  })), [
-    {
-      claudeAlias: "claude-one@this-mac",
-      codexAlias: "codex-main@this-mac",
-    },
-    {
-      claudeAlias: "claude-two@this-mac",
-      codexAlias: "codex-main@this-mac",
-    },
+  assert.deepEqual(consentEdgeAliases(snapshot), [
+    ["claude-one@this-mac", "codex-main@this-mac"],
+    ["claude-two@this-mac", "codex-main@this-mac"],
   ]);
   assert.deepEqual(claude.releasedRoutes, []);
   const oldStatus = await handlers.deliveryStatus({
@@ -5838,16 +5775,8 @@ test("pairing a second Claude session selects it additively and preserves old wo
   );
   const afterUnpair = await handlers.listSnapshot();
   assert.deepEqual(
-    afterUnpair.pairs.map(({ claudeAlias, codexAlias }) => ({
-      claudeAlias,
-      codexAlias,
-    })),
-    [
-      {
-        claudeAlias: "claude-two@this-mac",
-        codexAlias: "codex-main@this-mac",
-      },
-    ],
+    consentEdgeAliases(afterUnpair),
+    [["claude-two@this-mac", "codex-main@this-mac"]],
   );
   assert.deepEqual(
     await handlers.sendToClaude({
@@ -5919,14 +5848,12 @@ test("unpair settles only that edge's native receipt while an adjacent receipt r
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
     {
       alias: "claude-two@this-mac",
       routeHandle: "claude_target_2",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -6069,14 +5996,12 @@ test("a pair-capacity rejection rolls a fresh Claude selection back", async (t) 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
     {
       alias: "claude-two@this-mac",
       routeHandle: "claude_target_2",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -6116,16 +6041,8 @@ test("a pair-capacity rejection rolls a fresh Claude selection back", async (t) 
     ["claude-one@this-mac"],
   );
   assert.deepEqual(
-    snapshot.pairs.map(({ claudeAlias, codexAlias }) => ({
-      claudeAlias,
-      codexAlias,
-    })),
-    [
-      {
-        claudeAlias: "claude-one@this-mac",
-        codexAlias: "codex-main@this-mac",
-      },
-    ],
+    consentEdgeAliases(snapshot),
+    [["claude-one@this-mac", "codex-main@this-mac"]],
   );
   assert.deepEqual(claude.releasedRoutes, ["claude_target_2"]);
   assert.equal(
@@ -6146,7 +6063,6 @@ test("a send survives discovery absence without revoking the selected route", as
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -6206,7 +6122,6 @@ test("explicit Claude selection reactivates its persisted stale alias after rest
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const first = new GatewayService({
@@ -6257,7 +6172,6 @@ test("retained stale Codex authority cannot replace a Claude route before pairin
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const first = new GatewayService({
@@ -6288,7 +6202,6 @@ test("retained stale Codex authority cannot replace a Claude route before pairin
       routeHandle: replacementSession,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   let discoveryCalls = 0;
@@ -6308,14 +6221,14 @@ test("retained stale Codex authority cannot replace a Claude route before pairin
   await second.start();
 
   const routesBefore = await second.store.inspectPrivateClaudeRoutes();
-  const pairsBefore = (await second.snapshot()).pairs;
+  const edgesBefore = (await second.snapshot()).consentEdges;
   const decision = await second.handlers().selectClaude({
     alias: "advisor@this-mac",
   });
   assert.equal(decision.accepted, false);
   assert.equal(discoveryCalls, 0);
   assert.deepEqual(await second.store.inspectPrivateClaudeRoutes(), routesBefore);
-  assert.deepEqual((await second.snapshot()).pairs, pairsBefore);
+  assert.deepEqual((await second.snapshot()).consentEdges, edgesBefore);
   assert.equal(
     (await second.store.inspectPrivateClaudeRoutes()).some(
       (route) => route.binding.routeHandle === replacementSession,
@@ -6341,7 +6254,6 @@ test("authorized discovery heals one legacy hashed Claude generation and adopts 
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
@@ -6361,7 +6273,6 @@ test("authorized discovery heals one legacy hashed Claude generation and adopts 
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const second = new GatewayService({ config, adapters: [secondClaude, secondCodex] });
@@ -6434,7 +6345,6 @@ test("incomplete, colliding, and workspace-failed discovery cannot restore a dur
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
@@ -6489,7 +6399,6 @@ test("incomplete, colliding, and workspace-failed discovery cannot restore a dur
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   await second.handlers().refreshDashboard();
@@ -6541,7 +6450,6 @@ test("a same-name different UUID requires an explicit atomic selection swap", as
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const first = new GatewayService({ config, adapters: [firstClaude, firstCodex] });
@@ -6558,7 +6466,6 @@ test("a same-name different UUID requires an explicit atomic selection swap", as
       routeHandle: otherSession,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const second = new GatewayService({ config, adapters: [secondClaude, secondCodex] });
@@ -6616,7 +6523,6 @@ test("a stale Claude selection can be unselected by stored alias or bounded UUID
         routeHandle: CLAUDE_SESSION_ID,
         kind: "interactive",
         state: "idle",
-        compatibility: "compatible",
       },
     ];
     const first = new GatewayService({
@@ -6695,7 +6601,6 @@ test("unselect settles in-flight delivery from exact write evidence once", async
         routeHandle: "claude_target_1",
         kind: "interactive",
         state: "idle",
-        compatibility: "compatible",
       },
     ];
     claude.dispatchResults.push({ state: "pending" });
@@ -6769,7 +6674,6 @@ test("missing discovery is display-only and does not revoke Claude mailbox autho
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const service = new GatewayService({
@@ -6822,7 +6726,6 @@ test("a discovery read failure does not gate an exact selected Claude mailbox wr
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const service = new GatewayService({
@@ -6868,7 +6771,6 @@ test("a renamed-session collision revokes the exact selected Claude route", asyn
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const service = new GatewayService({
@@ -6938,7 +6840,6 @@ test("a recovered watch reuses its exact conversation for queued mail", async (t
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "busy",
-      compatibility: "compatible",
     },
   ];
   firstClaude.dispatchResults.push({
@@ -7160,7 +7061,6 @@ test("transient Codex dispatch failures return to held queue and retry", async (
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -7248,7 +7148,6 @@ test("a Codex deferral inside the last retry slice settles failed, not expired",
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -7303,7 +7202,6 @@ test("a stale Codex route preserves held work and rejects new sends", async (t) 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -7379,7 +7277,6 @@ test("a stale Codex route preserves held work and rejects new sends", async (t) 
       (connector) =>
         connector.provider === "codex" &&
         connector.health === "degraded" &&
-        connector.compatibility === "expired" &&
         connector.safeErrorCode === "CODEX_ROUTE_STALE",
     ),
     true,
@@ -7413,14 +7310,12 @@ test("a stale Codex route preserves held work and rejects new sends", async (t) 
       recovered.routes.some(
         (route) =>
           route.alias === "codex-main@this-mac" &&
-          route.state === "idle" &&
-          route.compatibility === "compatible",
+          route.state === "idle",
       ) &&
       recovered.connectors.some(
         (connector) =>
           connector.provider === "codex" &&
-          connector.health === "healthy" &&
-          connector.compatibility === "compatible",
+          connector.health === "healthy",
       )
     );
   });
@@ -7617,7 +7512,6 @@ test("clean Claude prewrite gaps retry boundedly without waiting for an idle obs
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   claude.dispatchResults.push(
@@ -7699,7 +7593,6 @@ test("a long Claude prewrite outage backs off without observing route idle", asy
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "busy",
-      compatibility: "compatible",
     },
   ];
   claude.dispatchResults.push(
@@ -7781,7 +7674,6 @@ test("Claude control ingress classifies only the exact leading STEER prefix", as
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -7866,7 +7758,6 @@ test("a steering dispatch does not replace the active ordinary turn owner", asyn
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -8065,7 +7956,6 @@ test("native Claude ingress acknowledges held only after a real provider deferra
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -8359,7 +8249,6 @@ test("open inbound accepts an exact unselected native Claude peer and returns on
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -8458,7 +8347,6 @@ test("paired inbound terminally refuses an unselected native sender and accepts 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -8550,7 +8438,6 @@ test("native Claude ingress reports delivery errors as expired with a safe diagn
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -8756,7 +8643,6 @@ test("a synchronous terminal callback wins over explicit provider acceptance", a
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -8836,7 +8722,6 @@ test("dispatch drains predeadline write evidence before exact-cutoff result or t
         routeHandle: "claude_target_1",
         kind: "interactive",
         state: "idle",
-        compatibility: "compatible",
       },
     ];
     claude.dispatch = async (input) => {
@@ -8909,7 +8794,6 @@ test("write evidence overrides a contradictory deferred return without replay", 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   claude.synchronousDispatchDelivery = {
@@ -8965,7 +8849,6 @@ test("terminal callback arrival time arbitrates the exact delivery deadline", as
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -9052,7 +8935,6 @@ test("plain pending remains nonterminal and expires instead of leaking forever",
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -9102,7 +8984,6 @@ test("predeadline transport uncertainty survives callback delay and settles ambi
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -9163,7 +9044,6 @@ test("confirmed Claude transport is the delivered boundary without a native rece
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -9397,7 +9277,6 @@ test("delivery tokens expose queued, stalled, and exact terminal states", async 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -9465,7 +9344,6 @@ test("progress watches survive restart, nudge through the ordinary queue, and se
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   claude.dispatchResults.push({ state: "delivered" });
@@ -9580,7 +9458,6 @@ test("explicit Codex unregister attributes its progress-watch settlement to the 
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   claude.dispatchResults.push({ state: "delivered" });
@@ -9646,7 +9523,6 @@ test("TRACK marks watched delivery and worker DONE closes the watch", async (t) 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   claude.dispatchResults.push({ state: "delivered" }, { state: "delivered" });
@@ -9783,7 +9659,6 @@ test("every accepted send and reply gets a fresh process-local delivery token", 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "busy",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -9866,7 +9741,6 @@ test("delivery-token pressure evicts only the oldest terminal cohort", async (t)
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10192,7 +10066,6 @@ test("a selected busy Claude peer receives mailbox writes immediately", async (t
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "busy",
-      compatibility: "compatible",
     },
   ];
   claude.state = "busy";
@@ -10238,7 +10111,6 @@ test("queued bodies survive close and remain held until exact route recovery", a
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10297,7 +10169,6 @@ test("Claude transport-written releases the next mailbox write without an idle o
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10404,7 +10275,6 @@ test("callback pressure never evicts authoritative delivery write evidence", asy
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10491,7 +10361,6 @@ test("a missing delivery tracker settles the ledger and releases the target", as
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10556,7 +10425,6 @@ test("terminal write ambiguity releases the expired reply authority", async (t) 
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10610,7 +10478,6 @@ test("a failed terminal ledger write retries before the machine absorbs it", asy
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10681,7 +10548,7 @@ test("a failed terminal ledger write retries before the machine absorbs it", asy
   assert.equal((await service.handlers().listSnapshot()).accounting.queuedBytes, 0);
 });
 
-test("route teardown preserves a reply retained by a failed terminal ledger write", async (t) => {
+test("route teardown preserves a non-Codex reply retained by a failed terminal ledger write", async (t) => {
   const { root, stateDir } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -10690,16 +10557,16 @@ test("route teardown preserves a reply retained by a failed terminal ledger writ
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
+  const deepseek = new FakeProvider("deepseek");
   const service = new GatewayService({
     config: loadGatewayConfig({
       EMBASSY_STATE_DIR: stateDir,
       EMBASSY_HOSTS: "this-mac",
     }),
-    adapters: [claude, codex],
+    adapters: [claude, codex, deepseek],
   });
   await service.start();
   t.after(async () => {
@@ -10707,6 +10574,23 @@ test("route teardown preserves a reply retained by a failed terminal ledger writ
     await rm(root, { recursive: true, force: true });
   });
   await selectAndRegister(service.handlers());
+  const deepseekBinding: PrivateRouteBinding = {
+    ...deepseek.identity,
+    routeHandle: "deepseek_target_1",
+    ownerLease: createHash("sha256").update("deepseek\0deepseek_target_1").digest("hex"),
+  };
+  await service.store.registerRoute({ alias: "dsh-main@this-mac", binding: deepseekBinding, registrationMode: "explicit_opt_in", state: "idle" });
+  const internal = service as unknown as {
+    rememberBinding(alias: string, binding: PrivateRouteBinding, state: GatewayAdapterRouteState): void;
+    enqueue(source: string, target: string, text: string, expectsReply: boolean): Promise<{ conversationId: string; messageId: string; deliveryToken?: string }>;
+    conversations: Map<string, unknown>;
+    enqueueObservedClaudeReplyAfterRouteTeardownLocked(conversation: unknown, source: PrivateRouteBinding, expectedTarget: PrivateRouteBinding, text: string): Promise<void>;
+  };
+  internal.rememberBinding("dsh-main@this-mac", deepseekBinding, "idle");
+  assert.deepEqual(await service.handlers().pair({ aliases: ["claude-one@this-mac", "dsh-main@this-mac"] }), { accepted: true, code: "ok" });
+  assert.deepEqual(await service.handlers().unpair({ aliases: ["claude-one@this-mac", "codex-main@this-mac"] }), { accepted: true, code: "ok" });
+  const claudeRoute = await service.store.inspectPrivateRoute("claude-one@this-mac");
+  assert.ok(claudeRoute);
   const originalSettleMessage = service.store.settleMessage.bind(service.store);
   let failFirstTerminal = true;
   service.store.settleMessage = async (input) => {
@@ -10721,11 +10605,8 @@ test("route teardown preserves a reply retained by a failed terminal ledger writ
     return await originalSettleMessage(input);
   };
 
-  const accepted = await service.handlers().sendToClaude(
-    toClaude("route teardown resolves retained reply"),
-  );
-  assert.equal(accepted.accepted, true);
-  if (!accepted.accepted) return;
+  const accepted = await internal.enqueue("dsh-main@this-mac", "claude-one@this-mac", "route teardown resolves retained reply", true);
+  assert.ok(accepted.deliveryToken);
   await waitFor(() => claude.dispatches.length === 1);
   claude.emitDelivery({
     messageId: claude.dispatches[0]!.messageId,
@@ -10733,21 +10614,26 @@ test("route teardown preserves a reply retained by a failed terminal ledger writ
     replyText: "retained reply survives atomic route teardown settlement",
   });
   await waitFor(() => failFirstTerminal === false);
+  const conversation = internal.conversations.get(accepted.conversationId);
+  assert.ok(conversation);
+  await assert.rejects(
+    internal.enqueueObservedClaudeReplyAfterRouteTeardownLocked(conversation, claudeRoute.binding, { ...deepseekBinding, ownerLease: "f".repeat(64) }, "must not transfer"),
+    (error: unknown) => error instanceof BridgeError && error.code === "RECOVERED_REPLY_ROUTE_MISMATCH",
+  );
+  assert.equal(deepseek.dispatches.length, 0);
+  deepseek.dispatchResults.push({ state: "delivered" });
 
   assert.deepEqual(
-    await service.handlers().unselectClaude({
-      alias: "claude-one@this-mac",
-    }),
+    await service.handlers().unpair({ aliases: ["claude-one@this-mac", "dsh-main@this-mac"] }),
     { accepted: true, code: "ok" },
   );
-  const status = await service.handlers().deliveryStatus({
-    token: accepted.deliveryToken,
-  });
+  assert.equal((await service.handlers().listSnapshot()).routes.some(({ provider }) => provider === "claude"), false);
+  await waitFor(() => deepseek.dispatches.length === 1);
+  const status = await service.handlers().deliveryStatus({ token: accepted.deliveryToken });
   assert.equal(status.found, true);
   if (status.found) assert.equal(status.state, "delivered");
-  await waitFor(() => codex.dispatches.length === 1);
   assert.equal(
-    codex.dispatches[0]?.text,
+    deepseek.dispatches[0]?.text,
     "retained reply survives atomic route teardown settlement",
   );
   await waitForAsync(async () =>
@@ -10768,7 +10654,6 @@ test("a Claude rename migrates an enqueue that is already scheduled to dispatch"
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");
@@ -10801,7 +10686,6 @@ test("a Claude rename migrates an enqueue that is already scheduled to dispatch"
       routeHandle: CLAUDE_SESSION_ID,
       kind: "interactive",
       state: "idle",
-      compatibility: "compatible",
     },
   ];
   await handlers.refreshDashboard();
@@ -10901,7 +10785,6 @@ test("snapshot observations ignore generatedAt but revision every public semanti
       provider: "claude",
       host: "this-mac",
       state: "idle",
-      compatibility: "compatible",
       validated: true,
       selected: false,
       lastSeenAt: clock.now().toISOString(),
@@ -11002,6 +10885,123 @@ test("snapshot observations ignore generatedAt but revision every public semanti
   await rm(root, { recursive: true, force: true });
 });
 
+test("generic consent routes all ordered provider pairs from exact binding truth", async (t) => {
+  const { root, stateDir } = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const deepseek = new FakeProvider("deepseek");
+  const grok = new FakeProvider("grok");
+  const otherGrok = new FakeProvider("grok");
+  otherGrok.identity.hostId = "other-mac";
+  claude.discoveries = [{
+    alias: "codex-mask@this-mac",
+    routeHandle: "claude_target_1",
+    kind: "interactive",
+    state: "idle",
+  }];
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac,other-mac",
+    }),
+    adapters: [claude, codex, deepseek, grok, otherGrok],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await handlers.refreshDashboard();
+  await handlers.registerCodex(codexRegistration());
+  await handlers.selectClaude({ alias: "codex-mask@this-mac" });
+  const internal = service as unknown as {
+    rememberBinding(alias: string, binding: PrivateRouteBinding, state: GatewayAdapterRouteState): void;
+    enqueue(source: string, target: string, text: string, expectsReply: boolean): Promise<unknown>;
+  };
+  const register = async (
+    alias: string,
+    adapter: FakeProvider,
+    handle: string,
+    state: GatewayAdapterRouteState = "idle",
+  ): Promise<PrivateRouteBinding> => {
+    const binding: PrivateRouteBinding = {
+      ...adapter.identity,
+      routeHandle: handle,
+      ownerLease: createHash("sha256").update(`${adapter.identity.provider}\0${handle}`).digest("hex"),
+    };
+    await service.store.registerRoute({ alias, binding, registrationMode: "explicit_opt_in", state });
+    internal.rememberBinding(alias, binding, state);
+    return binding;
+  };
+  await register("dsh-main@this-mac", deepseek, "deepseek-route");
+  await register("grok-main@this-mac", grok, "grok-route");
+  await register("dsh-two@this-mac", deepseek, "deepseek-route-2");
+  await register("grok-stale@this-mac", grok, "grok-route-stale");
+  grok.emitRouteState("grok-route-stale", "stale", "SYNTHETIC_STALE");
+  await waitForAsync(async () => (await service.store.inspectPrivateRoute("grok-stale@this-mac"))?.state === "stale");
+  await register("grok-other@other-mac", otherGrok, "grok-route-other");
+  await assert.rejects(
+    internal.enqueue("dsh-main@this-mac", "grok-main@this-mac", "no edge", false),
+    (error: unknown) => error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED",
+  );
+  assert.deepEqual(await handlers.pair({
+    aliases: ["dsh-main@this-mac", "grok-main@this-mac"],
+    threadAttestation: { alias: "dsh-main@this-mac", threadId: THREAD_ID },
+  }), { accepted: false, code: "route_mismatch" });
+  for (const pair of [
+    ["dsh-main@this-mac", "dsh-two@this-mac"],
+    ["dsh-main@this-mac", "grok-stale@this-mac"],
+    ["dsh-main@this-mac", "grok-other@other-mac"],
+  ] as const) {
+    assert.equal((await handlers.pair({ aliases: pair })).accepted, false);
+  }
+
+  const aliases = [
+    "codex-mask@this-mac",
+    "codex-main@this-mac",
+    "dsh-main@this-mac",
+    "grok-main@this-mac",
+  ] as const;
+  for (let left = 0; left < aliases.length; left += 1) {
+    for (let right = left + 1; right < aliases.length; right += 1) {
+      assert.deepEqual(await handlers.pair({ aliases: [aliases[left]!, aliases[right]!] }), {
+        accepted: true,
+        code: "ok",
+      });
+    }
+  }
+  assert.equal((await handlers.listSnapshot()).consentEdges.length, 6);
+  const adapters = { claude, codex, deepseek, grok } as const;
+  const providerByAlias = new Map(aliases.map((alias) => [
+    alias,
+    alias === "codex-mask@this-mac" ? "claude" : alias.startsWith("codex-") ? "codex" : alias.startsWith("dsh-") ? "deepseek" : "grok",
+  ] as const));
+  for (const source of aliases) {
+    for (const target of aliases) {
+      if (source === target) continue;
+      const targetProvider = providerByAlias.get(target)!;
+      const adapter = adapters[targetProvider];
+      const before = adapter.dispatches.length;
+      adapter.dispatchResults.push({ state: "delivered" });
+      await internal.enqueue(source, target, `${source}->${target}`, false);
+      await waitFor(() => adapter.dispatches.length === before + 1);
+      assert.equal(adapter.dispatches.at(-1)?.sourceProvider, providerByAlias.get(source));
+      adapter.emitRouteState(adapter.dispatches.at(-1)!.binding.routeHandle, "idle");
+    }
+  }
+  const beforeNative = deepseek.dispatches.length;
+  deepseek.dispatchResults.push({ state: "delivered" });
+  claude.callbacks?.onClaudeMessage?.({
+    endpoint: { ...claude.identity, routeHandle: "claude_target_1" },
+    sourceAlias: "codex-mask@this-mac",
+    targetAlias: "dsh-main@this-mac",
+    text: "native all-to-all",
+  });
+  await waitFor(() => deepseek.dispatches.length === beforeNative + 1);
+  assert.equal(deepseek.dispatches.at(-1)?.sourceProvider, "claude");
+});
+
 test("observe_snapshot processes due delivery lifecycle before one atomic result", async (t) => {
   const { root, stateDir } = await fixture();
   const clock = new ManualGatewayClock();
@@ -11013,7 +11013,6 @@ test("observe_snapshot processes due delivery lifecycle before one atomic result
       routeHandle: "claude_target_1",
       kind: "interactive",
       state: "busy",
-      compatibility: "compatible",
     },
   ];
   const codex = new FakeProvider("codex");

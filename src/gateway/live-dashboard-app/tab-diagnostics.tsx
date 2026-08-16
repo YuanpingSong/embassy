@@ -13,7 +13,7 @@ namespace Embassy {
   /** Rendered wherever the live contract carries no value for a field. */
   const DIAGNOSTICS_ABSENT_FIELD = "—";
 
-  const DIAGNOSTICS_CONNECTOR_COLUMNS = 8;
+  const DIAGNOSTICS_CONNECTOR_COLUMNS = 7;
 
   const diagnosticsNumberFormatters = new Map<Locale, Intl.NumberFormat>();
 
@@ -104,7 +104,6 @@ namespace Embassy {
               <th scope="col">{t("app.diag.col.protocol")}</th>
               <th scope="col">{t("app.diag.col.version")}</th>
               <th scope="col">{t("diagnostics.health")}</th>
-              <th scope="col">{t("app.diag.col.compat")}</th>
               <th scope="col">{t("diagnostics.registry.title")}</th>
               <th scope="col">{t("column.issue")}</th>
             </tr>
@@ -129,9 +128,7 @@ namespace Embassy {
                 return (
                   <tr key={`${connector.provider}|${connector.host}|${index}`}>
                   <th scope="row">
-                    {connector.provider === "claude"
-                      ? t("provider.claude")
-                      : t("provider.codex")}
+                    {t(`provider.${connector.provider}`)}
                   </th>
                   <td className="cell-mono">{connector.host}</td>
                   <td className="cell-mono">
@@ -142,13 +139,6 @@ namespace Embassy {
                   </td>
                   <td>
                     <StateChip domain="health" state={connector.health} small />
-                  </td>
-                  <td>
-                    <StateChip
-                      domain="compatibility"
-                      state={connector.compatibility}
-                      small
-                    />
                   </td>
                   <td>
                     {observation === undefined || stateKey === undefined ? (
@@ -188,83 +178,6 @@ namespace Embassy {
                   </tr>
                 );
               })
-            )}
-          </tbody>
-        </table>
-      </div>
-    );
-  }
-
-  function DiagnosticsCompatibilityTable(
-    props: Readonly<{
-      checks: readonly DashboardCompatibilityCheckRow[];
-    }>,
-  ): React.ReactElement {
-    const t = useT();
-    return (
-      <div className="table-wrap">
-        <table className="data-table">
-          <caption className="sr-only">
-            {t("diagnostics.compatibilityChecks.caption")}
-          </caption>
-          <thead>
-            <tr>
-              <th scope="col">{t("app.diag.col.provider")}</th>
-              <th scope="col">{t("diagnostics.version")}</th>
-              <th scope="col">{t("diagnostics.testedVersion")}</th>
-              <th scope="col">{t("diagnostics.supportedMajor")}</th>
-              <th scope="col">{t("diagnostics.tier")}</th>
-              <th scope="col">{t("diagnostics.checkedAt")}</th>
-              <th scope="col">{t("diagnostics.failure")}</th>
-              <th scope="col">{t("column.issue")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {props.checks.length === 0 ? (
-              <tr>
-                <td colSpan={8}>
-                  {t("diagnostics.compatibilityChecks.empty")}
-                </td>
-              </tr>
-            ) : (
-              props.checks.map((check) => (
-                <tr key={check.surface}>
-                  <th scope="row">
-                    {t(`provider.${check.surface}`)}
-                  </th>
-                  {"notDetected" in check ? (
-                    <td colSpan={7}>
-                      {t("compatibilityTier.notDetected")}
-                    </td>
-                  ) : (
-                    <>
-                      <td className="cell-mono">{check.version}</td>
-                      <td className="cell-mono">
-                        {check.testedVersion ?? DIAGNOSTICS_ABSENT_FIELD}
-                      </td>
-                      <td className="cell-mono">
-                        {check.supportedMajor ?? DIAGNOSTICS_ABSENT_FIELD}
-                      </td>
-                      <td>
-                        {t(
-                          check.tier === "schema_attested" && check.writesCovered
-                            ? "compatibilityTier.schema_attested.writesCovered"
-                            : `compatibilityTier.${check.tier}`,
-                        )}
-                      </td>
-                      <td>
-                        <TimeAgo iso={check.checkedAt} />
-                      </td>
-                      <td className="cell-mono">
-                        {check.failure ?? DIAGNOSTICS_ABSENT_FIELD}
-                      </td>
-                      <td className="cell-mono">
-                        {check.safeErrorCode ?? DIAGNOSTICS_ABSENT_FIELD}
-                      </td>
-                    </>
-                  )}
-                </tr>
-              ))
             )}
           </tbody>
         </table>
@@ -495,6 +408,12 @@ namespace Embassy {
         }),
       },
       {
+        field: "consentEdges",
+        text: t("diagnostics.omissions.consentEdges", {
+          count: formatDiagnosticsCount(omissions.consentEdges, locale),
+        }),
+      },
+      {
         field: "upstreamMessageEvents",
         text: t("diagnostics.omissions.upstreamMessageEvents", {
           count: formatDiagnosticsCount(
@@ -533,6 +452,7 @@ namespace Embassy {
       omissions.connectors === 0 &&
       omissions.availablePeers === 0 &&
       omissions.routes === 0 &&
+      omissions.consentEdges === 0 &&
       omissions.upstreamMessageEvents === 0 &&
       omissions.messageGroups === 0 &&
       omissions.messageEvents === 0 &&
@@ -679,20 +599,6 @@ namespace Embassy {
         </section>
 
         <div className="grid-2">
-          <section
-            className="card"
-            aria-labelledby="provider-compatibility-title"
-          >
-            <div className="card__head">
-              <h3
-                className="card__title"
-                id="provider-compatibility-title"
-              >
-                {t("app.diag.providerCompatibility.title")}
-              </h3>
-            </div>
-            <DiagnosticsCompatibilityTable checks={data.compatibilityChecks} />
-          </section>
           <AbsentFeature
             title={t("app.diag.lease.title")}
             body={t("app.diag.lease.absent")}

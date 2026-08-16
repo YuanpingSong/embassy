@@ -49,9 +49,11 @@ import type {
   GatewayProviderAdapter,
 } from "./service.js";
 import type {
+  GatewayProvider,
   PrivateEndpointIdentity,
   PrivateRouteBinding,
 } from "./types.js";
+import { gatewayRegistrationIngressPrefixes } from "./types.js";
 
 const LOCAL_HOST = "this-mac";
 const STABLE_CLAUDE_ENDPOINT_GENERATION = "claude_local_endpoint";
@@ -160,6 +162,7 @@ export type LocalClaudeGatewayProviderOptions = {
     maxHelpers: number;
     factory?: ClaudeNativeHelperFactory;
   }>;
+  nativeHelperSourceProvider?: GatewayProvider;
   /** Deterministic test seam. Production callers must omit this. */
   peerFactory?: ClaudePeerFactory;
 };
@@ -175,6 +178,7 @@ type ClaudePending = {
 
 type NativeCodexPeerRegistration = Readonly<{
   alias: string;
+  sourceProvider: GatewayProvider;
   cwd: string;
   name: string;
 }>;
@@ -397,6 +401,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   private readonly now: () => number;
   private readonly selectedStateRoots = new Map<string, string>();
   private readonly nativeHelpers: ClaudeNativeHelperSupervisor | undefined;
+  private readonly nativeHelperSourceProvider: GatewayProvider | undefined;
   private readonly discovered = new Map<string, GatewayAdapterDiscovery>();
   private readonly selected = new Map<string, string>();
   /** Exact live same-UID sessions observed through native inbound frames. */
@@ -512,6 +517,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
               ? {}
               : { factory: options.nativeHelpers.factory }),
           });
+    this.nativeHelperSourceProvider = options.nativeHelperSourceProvider;
   }
 
   latestRegistryObservation(): GatewayAdapterRegistryObservation | undefined {
@@ -545,7 +551,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.callbacks = callbacks;
     if (this.nativeHelpers !== undefined) {
       this.initialized = true;
-      return { health: "healthy", compatibility: "compatible" };
+      return { health: "healthy" };
     }
     try {
       let listenerGeneration: NativeCodexListenerGeneration | undefined;
@@ -583,7 +589,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
       this.activeNativeCodexListener = listenerGeneration;
       this.initialized = true;
-      return { health: "healthy", compatibility: "compatible" };
+      return { health: "healthy" };
     } catch (error) {
       if (
         error instanceof BridgeError &&
@@ -594,7 +600,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         this.initialized = true;
         return {
           health: "degraded",
-          compatibility: "incompatible",
           safeErrorCode: "CLAUDE_REGISTRY_UNAVAILABLE",
         };
       }
@@ -671,14 +676,25 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     return { routeHandle: resolved.targetId };
   }
 
-  async advertiseNativeCodexPeer(input: {
+  async advertiseNativeSourcePeer(input: {
     alias: string;
+    sourceProvider: GatewayProvider;
     cwd: string;
   }): Promise<void> {
     if (this.nativeHelpers !== undefined) {
       this.assertReady();
       await this.nativeHelpers.advertise(input);
       return;
+    }
+    if (
+      input.sourceProvider !== "codex" &&
+      input.sourceProvider !== this.nativeHelperSourceProvider
+    ) {
+      throw new BridgeError(
+        "CLAUDE_NATIVE_HELPER_UNAVAILABLE",
+        "A non-Codex source requires a supervised native Claude helper.",
+        true,
+      );
     }
     const registration = this.nativeCodexRegistration(input);
     await this.serializeNativeCodexRegistration(async () => {
@@ -805,7 +821,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         "Only one distinct prepared or retired Codex generation is allowed.",
       );
     }
-    const registration = this.nativeCodexRegistration(input);
+    const registration = this.nativeCodexRegistration({ ...input, sourceProvider: "codex" });
     this.nativeCodexPreparationInFlight = input.generation;
     let prepared: NativeCodexListenerGeneration | undefined;
     try {
@@ -1173,7 +1189,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     return purged;
   }
 
-  async unadvertiseNativeCodexPeer(alias: string): Promise<void> {
+  async unadvertiseNativeSourcePeer(alias: string): Promise<void> {
     if (this.nativeHelpers !== undefined) {
       await this.nativeHelpers.unadvertise(alias);
       return;
@@ -1191,7 +1207,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     });
   }
 
-  async updateNativeCodexPeerStatus(
+  async updateNativeSourcePeerStatus(
     alias: string,
     status: "idle" | "busy" | "waiting",
   ): Promise<void> {
@@ -1372,7 +1388,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
       }
     }
-    if (activeListener.registration?.alias !== input.sourceAlias) {
+    if (
+      activeListener.registration?.alias !== input.sourceAlias ||
+      activeListener.registration.sourceProvider !== input.sourceProvider
+    ) {
       return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
     }
     if (
@@ -1395,7 +1414,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     let content: string;
     try {
       content = composeProvenanceEnvelope({
-        direction: "claude",
+        sourceProvider: input.sourceProvider,
+        recipientProvider: this.identity.provider,
         sourceAlias: input.sourceAlias,
         targetAlias: input.targetAlias,
         conversationId: input.conversationId,
@@ -1654,6 +1674,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   private nativeCodexRegistration(input: {
     alias: string;
+    sourceProvider: GatewayProvider;
     cwd: string;
   }): NativeCodexPeerRegistration {
     const suffix = `@${this.identity.hostId}`;
@@ -1664,10 +1685,11 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       );
     }
     const name = input.alias.slice(0, -suffix.length);
-    if (!name.startsWith("codex-") || !NATIVE_CLAUDE_NAME.test(name)) {
+    const prefix = gatewayRegistrationIngressPrefixes[input.sourceProvider];
+    if (prefix === undefined || !name.startsWith(prefix) || !NATIVE_CLAUDE_NAME.test(name)) {
       throw new BridgeError(
         "INVALID_CODEX_PEER_ALIAS",
-        "The native Codex peer alias must start with codex-.",
+        "The native source peer alias must use its provider prefix.",
       );
     }
     if (!path.isAbsolute(input.cwd) || input.cwd.includes("\0")) {
@@ -1676,7 +1698,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         "A native Codex peer requires an absolute working directory.",
       );
     }
-    return { alias: input.alias, cwd: input.cwd, name };
+    return { alias: input.alias, sourceProvider: input.sourceProvider, cwd: input.cwd, name };
   }
 
   private requireActiveNativeCodexListener(): NativeCodexListenerGeneration {
@@ -2199,7 +2221,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         routeHandle: peer.targetId,
         kind: "interactive",
         state: claudeRouteState(peer),
-        compatibility: "compatible",
       };
       this.discovered.set(peer.targetId, row);
       rows.push(row);
@@ -2567,7 +2588,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     this.callbacks = callbacks;
     this.initialized = true;
-    return { health: "healthy", compatibility: "compatible" };
+    return { health: "healthy" };
   }
 
   async selectRoute(input: {
@@ -2825,7 +2846,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     let content: string;
     try {
       content = composeProvenanceEnvelope({
-        direction: "codex",
+        sourceProvider: input.sourceProvider,
+        recipientProvider: this.identity.provider,
         sourceAlias: input.sourceAlias,
         targetAlias: input.targetAlias,
         conversationId: input.conversationId,

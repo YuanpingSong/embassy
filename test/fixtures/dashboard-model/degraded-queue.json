@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedAt": "2026-08-08T12:00:00.000Z",
   "inboundMode": "paired",
   "health": "degraded",
   "overall": "attention",
   "exchange": {
-    "claude": {
+    "parties": [{
       "kind": "claude",
       "status": "busy",
       "total": 2,
@@ -14,8 +14,7 @@
       "countIsLowerBound": true,
       "primaryAlias": "claude-advisor@this-mac",
       "nextAction": "pair_routes"
-    },
-    "codex": {
+    }, {
       "kind": "codex",
       "status": "attention",
       "total": 2,
@@ -23,7 +22,7 @@
       "countIsLowerBound": true,
       "primaryAlias": "codex-builder@this-mac",
       "nextAction": "restore_codex"
-    },
+    }],
     "queuedMessages": 7,
     "queueCountIsLowerBound": true,
     "oldestQueueAgeMs": 450000,
@@ -222,7 +221,6 @@
       "alias": "claude-advisor@this-mac",
       "host": "this-mac",
       "state": "busy",
-      "compatibility": "compatible",
       "selected": true,
       "selectable": true,
       "lastSeenAt": "2026-08-08T11:59:57.000Z"
@@ -231,7 +229,6 @@
       "alias": "claude-reviewer@this-mac",
       "host": "this-mac",
       "state": "idle",
-      "compatibility": "compatible",
       "selected": false,
       "selectable": false,
       "selectionGuidance": "alias_collision",
@@ -246,7 +243,6 @@
       "host": "this-mac",
       "enabled": true,
       "state": "stale",
-      "compatibility": "compatible",
       "queueDepth": 5,
       "oldestQueuedAt": "2026-08-08T11:52:30.000Z",
       "queueAgeMs": 450000,
@@ -271,7 +267,6 @@
       "host": "this-mac",
       "enabled": false,
       "state": "disabled",
-      "compatibility": "unknown",
       "queueDepth": 0,
       "oldestQueuedAt": "2026-08-08T09:00:00.000Z",
       "counters": {
@@ -294,7 +289,6 @@
       "host": "this-mac",
       "enabled": true,
       "state": "busy",
-      "compatibility": "compatible",
       "queueDepth": 2,
       "oldestQueuedAt": "2026-08-08T11:57:00.000Z",
       "queueAgeMs": 180000,
@@ -318,7 +312,6 @@
       "host": "this-mac",
       "enabled": true,
       "state": "idle",
-      "compatibility": "compatible",
       "queueDepth": 0,
       "counters": {
         "accepted": 6,
@@ -335,10 +328,12 @@
       "lastSeenAt": "2026-08-08T11:59:41.000Z"
     }
   ],
-  "pairs": [
+  "consentEdges": [
     {
-      "claudeAlias": "claude-advisor@this-mac",
-      "codexAlias": "codex-builder@this-mac",
+      "endpoints": [
+        { "alias": "claude-advisor@this-mac", "provider": "claude" },
+        { "alias": "codex-builder@this-mac", "provider": "codex" }
+      ],
       "host": "this-mac",
       "state": "degraded",
       "counters": {
@@ -356,18 +351,21 @@
     }
   ],
   "graph": {
-    "pairCount": 1,
-    "readyPairCount": 0,
-    "pairCountIsLowerBound": true,
-    "unpairedReadyClaude": 1,
-    "unpairedReadyCodex": 0
+    "consentEdgeCount": 1,
+    "readyConsentEdgeCount": 0,
+    "consentEdgeCountIsLowerBound": true,
+    "unpairedReadyByProvider": {
+      "claude": 1,
+      "codex": 0,
+      "deepseek": 0,
+      "grok": 0
+    }
   },
   "connectors": [
     {
       "provider": "claude",
       "host": "lab-mini",
       "health": "healthy",
-      "compatibility": "compatible",
       "protocol": "peer/1",
       "protocolVersion": "1",
       "lastSeenAt": "2026-08-08T11:59:52.000Z"
@@ -376,7 +374,6 @@
       "provider": "claude",
       "host": "this-mac",
       "health": "degraded",
-      "compatibility": "compatible",
       "protocol": "peer/1",
       "protocolVersion": "1",
       "lastSeenAt": "2026-08-08T11:59:57.000Z",
@@ -386,7 +383,6 @@
       "provider": "codex",
       "host": "this-mac",
       "health": "offline",
-      "compatibility": "expired",
       "protocol": "app-server/1",
       "protocolVersion": "0.147.0",
       "lastSeenAt": "2026-08-08T11:41:12.000Z",
@@ -411,7 +407,7 @@
     "connectors": 0,
     "availablePeers": 3,
     "routes": 1,
-    "pairs": 2,
+    "consentEdges": 2,
     "upstreamMessageEvents": 12,
     "messageGroups": 4,
     "messageEvents": 9,

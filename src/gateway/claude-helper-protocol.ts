@@ -6,7 +6,11 @@ import type {
   GatewayAdapterDelivery,
   GatewayAdapterDispatchResult,
 } from "./service.js";
-import type { PrivateRouteBinding } from "./types.js";
+import {
+  isGatewayProvider,
+  type GatewayProvider,
+  type PrivateRouteBinding,
+} from "./types.js";
 
 export const CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION = 1 as const;
 // A valid raw 16 KiB dispatch can expand to nearly 96 KiB when JSON escapes
@@ -17,6 +21,7 @@ export const CLAUDE_NATIVE_HELPER_MAX_REQUESTS = 64;
 
 export type ClaudeNativeHelperRegistration = Readonly<{
   alias: string;
+  sourceProvider: GatewayProvider;
   cwd: string;
 }>;
 
@@ -53,6 +58,7 @@ export type ClaudeNativeHelperCommand =
       authorization: "selected_route" | "native_reply";
       messageId: string;
       sourceAlias: string;
+      sourceProvider: GatewayProvider;
       targetAlias: string;
       conversationId: string;
       text: string;
@@ -242,6 +248,10 @@ function iso(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
+function provider(value: unknown): value is GatewayProvider {
+  return isGatewayProvider(value);
+}
+
 function binding(value: unknown): value is PrivateRouteBinding {
   return (
     record(value) &&
@@ -252,7 +262,7 @@ function binding(value: unknown): value is PrivateRouteBinding {
       "ownerLease",
       "endpointGeneration",
     ]) &&
-    (value.provider === "claude" || value.provider === "codex") &&
+    provider(value.provider) &&
     value.hostId === "this-mac" &&
     typeof value.routeHandle === "string" &&
     ROUTE.test(value.routeHandle) &&
@@ -264,10 +274,10 @@ function binding(value: unknown): value is PrivateRouteBinding {
 function registration(value: unknown): value is ClaudeNativeHelperRegistration {
   return (
     record(value) &&
-    exact(value, ["alias", "cwd"]) &&
+    exact(value, ["alias", "sourceProvider", "cwd"]) &&
     typeof value.alias === "string" &&
     ALIAS.test(value.alias) &&
-    value.alias.startsWith("codex-") &&
+    provider(value.sourceProvider) &&
     typeof value.cwd === "string" &&
     value.cwd.startsWith("/") &&
     value.cwd.length <= 4_096 &&
@@ -336,6 +346,7 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
             "authorization",
             "messageId",
             "sourceAlias",
+            "sourceProvider",
             "targetAlias",
             "conversationId",
             "text",
@@ -350,7 +361,7 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         boundedString(value.messageId, 256) &&
         typeof value.sourceAlias === "string" &&
         ALIAS.test(value.sourceAlias) &&
-        value.sourceAlias.startsWith("codex-") &&
+        provider(value.sourceProvider) &&
         typeof value.targetAlias === "string" &&
         ALIAS.test(value.targetAlias) &&
         typeof value.conversationId === "string" &&
@@ -414,7 +425,12 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
     case "prepare_generation":
       return (
         exact(value, ["method", "alias", "cwd", "generation"]) &&
-        registration({ alias: value.alias, cwd: value.cwd }) &&
+        typeof value.alias === "string" &&
+        ALIAS.test(value.alias) &&
+        typeof value.cwd === "string" &&
+        value.cwd.startsWith("/") &&
+        value.cwd.length <= 4_096 &&
+        !value.cwd.includes("\0") &&
         typeof value.generation === "string" &&
         GENERATION.test(value.generation)
       );

@@ -40,10 +40,8 @@ export type ProgressWatchSettlement =
       reason:
         | "idle_timeout"
         | "endpoint_retired"
-        | "tracking_disabled"
-        | "legacy_upgrade";
-    }>
-  | Readonly<{ actor: "unknown"; reason: "legacy_done" }>;
+        | "tracking_disabled";
+    }>;
 
 type ProgressWatchJournalBase = Readonly<{
   sequence: number;

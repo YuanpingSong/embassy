@@ -2,13 +2,12 @@ import type {
   DashboardActivityEventRow as ModelActivityEventRow,
   DashboardAttentionItem as ModelAttentionItem,
   DashboardChipKind as ModelChipKind,
-  DashboardCompatibilityCheckRow as ModelCompatibilityCheckRow,
   DashboardConnectorRow as ModelConnectorRow,
+  DashboardConsentEdgeRow as ModelConsentEdgeRow,
   DashboardExchangeParty as ModelExchangeParty,
   DashboardGraphFacts as ModelGraphFacts,
   DashboardNextAction as ModelNextAction,
   DashboardOmissions as ModelOmissions,
-  DashboardPairRow as ModelPairRow,
   DashboardPeerRow as ModelPeerRow,
   DashboardProgressWatchEventRow as ModelProgressWatchEventRow,
   DashboardProgressWatchRow as ModelProgressWatchRow,
@@ -30,7 +29,6 @@ import type {
 } from "../live-dashboard-stream.js";
 import type {
   AlertSeverity as GatewayAlertSeverity,
-  CompatibilityState as GatewayCompatibilityState,
   ConnectorHealth as GatewayConnectorHealth,
   DeliveryState as GatewayDeliveryState,
   GatewayProvider as ModelGatewayProvider,
@@ -51,7 +49,6 @@ export type DeliveryState = GatewayDeliveryState;
 export type MessageDirection = GatewayMessageDirection;
 export type GatewayProvider = ModelGatewayProvider;
 export type ConnectorHealth = GatewayConnectorHealth;
-export type CompatibilityState = GatewayCompatibilityState;
 
 export type QueueSummary = Readonly<{
   depth: number;
@@ -79,9 +76,7 @@ export type AttentionView = Readonly<{
 
 export type StatusStripData = Readonly<{
   broker: GatewayConnectorHealth;
-  claudeConnector: GatewayConnectorHealth | undefined;
-  codexConnector: GatewayConnectorHealth | undefined;
-  compatibility: GatewayCompatibilityState | undefined;
+  providers: readonly Readonly<{ provider: ModelGatewayProvider; health: GatewayConnectorHealth | undefined }>[];
 }>;
 
 export type OverviewData = Readonly<{
@@ -89,15 +84,10 @@ export type OverviewData = Readonly<{
   inboundMode: "paired" | "open";
   overall: ModelViewModel["overall"];
   statusStrip: StatusStripData;
-  exchange: Omit<ModelViewModel["exchange"], "codex"> &
-    Readonly<{
-      codex: ModelExchangeParty &
-        Readonly<{ monitorOnly?: number | undefined }>;
-    }>;
-  queueClaudeToCodex: QueueSummary;
-  queueCodexToClaude: QueueSummary;
+  exchange: ModelViewModel["exchange"];
+  providerQueues: readonly Readonly<{ provider: ModelGatewayProvider; queue: QueueSummary }>[];
   graph: ModelGraphFacts;
-  degradedPairCopyKey:
+  degradedConsentEdgeCopyKey:
     | "app.overview.degradedEdge"
     | "app.overview.degradedEdges"
     | undefined;
@@ -110,12 +100,13 @@ export type DeliveryGroupView = Readonly<{
   key: string;
   group: ModelMessageGroup;
   routePair: string;
+  sourceProvider: ModelGatewayProvider;
+  targetProvider: ModelGatewayProvider;
   eventsTruncated: boolean;
 }>;
 
-export type CodexRouteView = Readonly<{
+export type RouteView = Readonly<{
   route: ModelRouteRow;
-  monitorOnly: boolean;
   oldestAgeMs: number | undefined;
 }>;
 
@@ -129,10 +120,10 @@ export type RoutesData = Readonly<{
   inboundMode: "paired" | "open";
   peers: readonly ModelPeerRow[];
   peersOmitted: number;
-  codexRoutes: readonly CodexRouteView[];
+  routes: readonly RouteView[];
   routesOmitted: number;
-  pairs: readonly ModelPairRow[];
-  pairsOmitted: number;
+  consentEdges: readonly ModelConsentEdgeRow[];
+  consentEdgesOmitted: number;
   graph: ModelGraphFacts;
   successions: readonly SuccessionView[];
 }>;
@@ -158,7 +149,6 @@ export type ActivityRow =
 export type DiagnosticsData = Readonly<{
   connectors: readonly ModelConnectorRow[];
   connectorsOmitted: number;
-  compatibilityChecks: readonly ModelCompatibilityCheckRow[];
   expiredCount: number;
   deadlinePressure?: ModelViewModel["deadlinePressure"];
   queuedMessages: number;
@@ -170,6 +160,7 @@ export type DiagnosticsData = Readonly<{
 export type EmbassyAdapter = Readonly<{
   overviewProps(model: ModelViewModel, nowMs: number): OverviewData;
   deliveriesGroups(model: ModelViewModel): readonly DeliveryGroupView[];
+  matchesProviderFilters(view: DeliveryGroupView, from: "all" | ModelGatewayProvider, to: "all" | ModelGatewayProvider): boolean;
   routesProps(model: ModelViewModel, nowMs: number): RoutesData;
   activityRows(model: ModelViewModel): readonly ActivityRow[];
   diagnosticsProps(model: ModelViewModel): DiagnosticsData;
@@ -184,9 +175,7 @@ export type EmbassyAdapter = Readonly<{
     model: ModelViewModel,
     provider: ModelGatewayProvider,
   ): GatewayConnectorHealth | undefined;
-  worstCompatibility(model: ModelViewModel): GatewayCompatibilityState | undefined;
   extractSuccessions(model: ModelViewModel): readonly SuccessionView[];
-  isMonitorOnly(route: ModelRouteRow): boolean;
   hasLifecycleTruncation(group: ModelMessageGroup): boolean;
   deliveriesTruncated(model: ModelViewModel): boolean;
   deliveryGroupKey(group: ModelMessageGroup): string;
@@ -224,7 +213,6 @@ export type EmbassyNamespace = Readonly<{
   routeChipKind(state: string): string;
   peerChipKind(state: string): string;
   healthChipKind(state: string): string;
-  compatibilityChipKind(state: string): string;
   overallChipKind(state: string): string;
   partyChipKind(state: string): string;
   severityChipKind(state: string): string;
@@ -242,6 +230,7 @@ export type EmbassyNamespace = Readonly<{
   ): string;
   camelCaseToken(token: string): string;
   canRequestStaleCodexRegistrationRemoval(route: ModelRouteRow): boolean;
+  canOfferConsentEdgeCandidate(route: ModelRouteRow): boolean;
   activityAuthority(event: ModelActivityEventRow): "operator" | "automatic";
   attentionQueueDepthLine(
     item: ModelAttentionItem,
@@ -276,7 +265,6 @@ declare global {
     type LiveDashboardActionResult = HttpActionResult;
     type GatewayProvider = ModelGatewayProvider;
     type ConnectorHealth = GatewayConnectorHealth;
-    type CompatibilityState = GatewayCompatibilityState;
     type RouteState = GatewayRouteState;
     type MessageDirection = GatewayMessageDirection;
     type DeliveryState = GatewayDeliveryState;
@@ -296,16 +284,18 @@ declare global {
     type DashboardActivityEventRow = ModelActivityEventRow;
     type DeadlinePressureSnapshot = NonNullable<ModelViewModel["deadlinePressure"]>;
     type DashboardRouteRow = ModelRouteRow;
-    type DashboardPairRow = ModelPairRow;
+    type DashboardConsentEdgeRow = ModelConsentEdgeRow;
     type DashboardProgressWatchRow = ModelProgressWatchRow;
     type DashboardProgressWatchEventRow = ModelProgressWatchEventRow;
     type DashboardGraphFacts = ModelGraphFacts;
     type DashboardConnectorRow = ModelConnectorRow;
-    type DashboardCompatibilityCheckRow = ModelCompatibilityCheckRow;
     type DashboardRegistryObservation = ModelRegistryObservation;
     type DashboardOmissions = ModelOmissions;
     type DashboardAccounting = ModelViewModel["accounting"];
     type DashboardViewModel = ModelViewModel;
+    function parseDirection(direction: MessageDirection): Readonly<{
+      sourceProvider: GatewayProvider; targetProvider: GatewayProvider;
+    }> | undefined;
     type LiveDashboardSnapshotRevision = StreamSnapshotRevision;
     type LiveDashboardStreamEvent = StreamEvent;
     type StatusStripData = import("./app-types.js").StatusStripData;
@@ -319,7 +309,7 @@ declare global {
       state?: GatewayDeliveryState | undefined;
     }>;
     type DeliveryGroupView = import("./app-types.js").DeliveryGroupView;
-    type CodexRouteView = import("./app-types.js").CodexRouteView;
+    type RouteView = import("./app-types.js").RouteView;
     type SuccessionView = import("./app-types.js").SuccessionView;
     type RoutesData = import("./app-types.js").RoutesData;
     type ActivityRow = import("./app-types.js").ActivityRow;

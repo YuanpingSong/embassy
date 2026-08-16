@@ -448,28 +448,27 @@ test("serves the rendered shell and bundles byte-for-byte in both locales", asyn
       assets.styleSheet.includes(".watch-register"),
       `${locale} stylesheet must include the bounded watch register`,
     );
-    assert.ok(
-      assets.appJavaScript.includes("providerCompatibility"),
-      `${locale} app bundle must render automatic provider compatibility`,
-    );
     assert.equal(
-      assets.appJavaScript.includes("embassy compat-check"),
+      assets.appJavaScript.includes("providerCompatibility") ||
+        assets.appJavaScript.includes("compatibilityChipKind"),
       false,
-      `${locale} app bundle must not offer manual compatibility ceremony`,
+      `${locale} app bundle must not render compatibility sections`,
     );
     assert.equal(
       assets.appJavaScript.includes("diagnostics.certification"),
       false,
       `${locale} app bundle must not render live-certification columns`,
     );
-    assert.ok(
-      assets.clientJavaScript.includes("Provider compatibility"),
-      `${locale} client copy must name automatic provider compatibility in English`,
-    );
-    assert.ok(
-      assets.clientJavaScript.includes("提供方兼容性"),
-      `${locale} client copy must name automatic provider compatibility in Chinese`,
-    );
+    for (const copy of [
+      "From provider", "To provider", "All providers",
+      "发送提供方", "接收提供方", "所有提供方",
+      "Claude", "Codex", "DeepSeek", "Grok Build",
+    ]) {
+      assert.ok(
+        assets.clientJavaScript.includes(copy),
+        `${locale} client copy must include ${copy}`,
+      );
+    }
     assert.equal(
       assets.clientJavaScript.includes("Live certification") ||
         assets.clientJavaScript.includes("实时认证"),

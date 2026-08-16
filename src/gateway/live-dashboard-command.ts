@@ -272,8 +272,7 @@ export function createGatewayLiveDashboardActions(
                 protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
                 method: "pair",
                 params: {
-                  claudeAlias: action.claudeAlias,
-                  codexAlias: action.codexAlias,
+                  aliases: action.aliases,
                 },
               },
             });
@@ -285,8 +284,7 @@ export function createGatewayLiveDashboardActions(
                 protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
                 method: "unpair",
                 params: {
-                  claudeAlias: action.claudeAlias,
-                  codexAlias: action.codexAlias,
+                  aliases: action.aliases,
                 },
               },
             });

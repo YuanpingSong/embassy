@@ -36,8 +36,7 @@ export type LiveDashboardRequestHandler = (
 export type LiveDashboardAction =
   | Readonly<{
       action: "pair" | "unpair";
-      claudeAlias: string;
-      codexAlias: string;
+      aliases: readonly [string, string];
     }>
   | Readonly<{
       action: "remove_stale_codex_registration";
@@ -290,25 +289,24 @@ function parseAction(body: string): LiveDashboardAction | undefined {
   }
   if (
     (record.action === "pair" || record.action === "unpair") &&
-    keys.length === 3 &&
+    keys.length === 2 &&
     keys.includes("action") &&
-    keys.includes("claudeAlias") &&
-    keys.includes("codexAlias") &&
-    typeof record.claudeAlias === "string" &&
-    typeof record.codexAlias === "string" &&
-    record.claudeAlias.length <= 128 &&
-    record.codexAlias.length <= 128 &&
-    isGatewayAlias(record.claudeAlias) &&
-    isGatewayAlias(record.codexAlias) &&
-    record.claudeAlias.startsWith("claude-") &&
-    record.codexAlias.startsWith("codex-") &&
-    record.claudeAlias.slice(record.claudeAlias.lastIndexOf("@") + 1) ===
-      record.codexAlias.slice(record.codexAlias.lastIndexOf("@") + 1)
+    keys.includes("aliases") &&
+    Array.isArray(record.aliases) &&
+    record.aliases.length === 2 &&
+    typeof record.aliases[0] === "string" &&
+    typeof record.aliases[1] === "string" &&
+    record.aliases[0].length <= 128 &&
+    record.aliases[1].length <= 128 &&
+    isGatewayAlias(record.aliases[0]) &&
+    isGatewayAlias(record.aliases[1]) &&
+    record.aliases[0] !== record.aliases[1] &&
+    record.aliases[0].slice(record.aliases[0].lastIndexOf("@") + 1) ===
+      record.aliases[1].slice(record.aliases[1].lastIndexOf("@") + 1)
   ) {
     return {
       action: record.action,
-      claudeAlias: record.claudeAlias,
-      codexAlias: record.codexAlias,
+      aliases: [record.aliases[0], record.aliases[1]],
     };
   }
   return undefined;

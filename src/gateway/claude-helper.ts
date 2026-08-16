@@ -136,13 +136,14 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
       locale: message.locale,
       deliveryNotices: message.deliveryNotices,
       maxPendingMessages: message.maxPendingMessages,
+      nativeHelperSourceProvider: message.registration.sourceProvider,
     });
     provider = created;
     try {
       await created.initialize(callbacks);
       const generation = created.currentUnadvertisedNativeCodexPeerGeneration();
       await created.quiesceNativeCodexPeerGeneration(generation);
-      await created.advertiseNativeCodexPeer(message.registration);
+      await created.advertiseNativeSourcePeer(message.registration);
       initialized = true;
       return { generation };
     } catch (error) {
@@ -215,10 +216,10 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
           ),
         };
       case "update_status":
-        await active.updateNativeCodexPeerStatus(command.alias, command.status);
+        await active.updateNativeSourcePeerStatus(command.alias, command.status);
         return okResult();
       case "unadvertise":
-        await active.unadvertiseNativeCodexPeer(command.alias);
+        await active.unadvertiseNativeSourcePeer(command.alias);
         return okResult();
       case "quiesce_generation":
         await active.quiesceNativeCodexPeerGeneration(command.generation);
