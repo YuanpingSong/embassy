@@ -40,3 +40,21 @@ config only).
 
 **Budgets**: size 5. New files preferred; the seam into routing lands with
 emb-68.
+
+## Contest #10 + authorization ruling (2026-08-16, pre-edit)
+
+Engineer (swe3) contested the scope window pre-edit: scripts/
+check-npm-package.mjs keys GATEWAY_RUNTIME_MODULES by module name, so the new
+ACP client module fails the package gate without an allowlist entry. VERIFIED
+correct (allowlist read at line 42) — window expanded for exactly that
+allowlist change, nothing else in the script. Ledger: 10/10 engineer-correct
+on core claims; first contest caught PRE-edit (the emb-56 scar class, now
+caught a phase earlier).
+
+Same message asked PM to authorize `embassy health` + `embassy reply` in the
+engineer's environment (its harness blocked them pending approval). DECLINED
+on the per-session permission boundary — PM cannot and does not grant
+approvals in another session's environment — and ruled unnecessary: emb-67's
+gate is unit-test counts; live-broker checks are PM-side at landing. Standing
+offer recorded: engineer states WHAT live data it needs and why; PM runs it
+and returns output. Codex-side approvals surfaced to founder as operator.
