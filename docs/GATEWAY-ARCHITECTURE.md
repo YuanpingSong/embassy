@@ -1,8 +1,8 @@
 # Embassy Gateway Architecture
 
-Status: local bidirectional version 1 implemented and live-tested with one
-advertised Codex task; remote connectors remain deferred. The published v1
-package supports macOS, the only platform exercised end to end so far.
+Status: local bidirectional routing is implemented for Claude, Codex, DeepSeek,
+and Grok. Remote connectors remain deferred. The published package supports
+macOS, the only platform exercised end to end so far.
 
 This document uses four evidence labels:
 
@@ -29,33 +29,17 @@ edge, created by `pair` or the one-task `select-claude` shorthand. It provides
 a single private operational view across the two products without rebuilding
 either agent runtime.
 
-Provider compatibility follows exact OS-boundary attestation, version-major
-evidence, and bounded live-schema probes. A certified same-major build is
-writable; a same-major build whose probes all pass is `schema_attested` and
-writable only when the probes cover the write path. Current Claude probes cover
-their native write path. Ordinary Codex compatibility and registration reads
-remain read-only: they may include `initialize`, `thread/loaded/list`, and
-registration-time `thread/resume`, but do not invoke `turn/start`. The optional
-Codex write-attestation probe is the sole exception. It may create at most one
-disposable broker-owned thread per attempt, under a bounded write fence with
-zero user-thread contact; every created probe thread is archived and confirmed
-absent from the loaded set. The probe resolves the pinned model's lowest
-advertised effort. Whenever that model/effort pin cannot resolve, it declines
-in a zero-spend fail-safe before creating any thread or model turn. An untested
-Codex 0.x build therefore stays monitor-only pending a certified write schema.
-Failed
-probes, a different major, or version evidence that
-cannot establish a safe major leave only that provider degraded, monitor-only,
-and write-fenced while the
-broker and other provider remain available. Probes never promote across a
-major or compensate for unknown major evidence; an exact official launcher
-target may supply separate bounded major evidence even when its banner is
-unparseable. Unsafe OS evidence for Embassy-owned or executed artifacts and
-Embassy callback, control, or state paths refuses broker startup; unsafe UID or
-mode evidence on Claude's external sessions registry root quarantines only
-Claude. A Claude
-session record whose native peer protocol is not 1 is rejected in isolation and
-included in bounded rejection evidence.
+Provider versions are best-effort diagnostic metadata, never routing authority.
+An explicit pair plus the exact owned route and session identity authorizes an
+attempt; current connector, generation, strict wire, capability, and correlated
+operation facts decide its result. The release-owned offline support matrix is
+the tested-artifact record and is never imported by runtime. Unsafe OS evidence
+for Embassy-owned or executed artifacts and Embassy callback, control, or state
+paths refuses broker startup; unsafe UID or mode evidence on Claude's external
+sessions registry root quarantines only Claude. A Claude session record whose
+native peer protocol is not 1 is rejected in isolation and included in bounded
+rejection evidence. Missing optional providers and interface drift degrade only
+their own routes while the broker and other providers remain available.
 
 It is deliberately:
 
@@ -96,27 +80,22 @@ sessions and `SendMessage` to contact them. A target can accept, hold, or
 refuse inbound cross-session messages through `crossSessionInbound`. Messages
 do not bypass the receiver's tool permissions or approval boundary.
 
-**Evidence-gated internal boundary:** the installed Claude Code build advertises
+**Best-effort internal boundary:** the installed Claude Code build advertises
 live sessions through registry records and transports peer frames over
 per-session Unix-domain sockets using peer protocol 1. Those registry and wire
 shapes are not documented as a stable third-party integration API. The gateway
-therefore assigns write authority only from supported-major evidence and
-bounded live-schema probes, and validates every consumed field, frame, and
-socket immediately before use. Unknown top-level registry fields are tolerated
-because Embassy never consumes them; malformed required fields and records
-whose peer protocol is not 1 remain isolated and counted. A passing same-major
-patch outside the tested inventory is writable `schema_attested`; a failed
-probe, different major, or version evidence that cannot establish a safe major
-keeps only the Claude surface monitor-only. An exact official launcher target
-may supply separate bounded major evidence when its banner is unparseable, but
-unknown major evidence is never promoted by probes.
+therefore validates every consumed field, frame, socket, generation, and
+correlated result immediately before use. Unknown top-level registry fields are
+tolerated because Embassy never consumes them; malformed required fields and
+records whose peer protocol is not 1 remain isolated and counted. Version
+metadata describes what was observed but grants no runtime authority.
 
 For the lowest-impedance native path, the gateway publishes one process-owned
 registry record whose name is visibly prefixed `codex-` and which carries the
 supported explicit versioned Embassy-advertisement marker. The listener remains
 gateway-owned and does not claim to be a Claude model session; the marker, not
 the name prefix alone, distinguishes Embassy's advertisement. The record uses
-the schema-attested native peer shape so Claude's own `ListAgents` and
+the validated native peer shape so Claude's own `ListAgents` and
 `SendMessage` tools work unchanged.
 
 Consequences:
@@ -194,11 +173,11 @@ The status below is intentionally narrower than the target architecture.
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the stable loopback listener, direct multi-browser access, projection, request guards, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
-| Claude registry/peer adapter gated by supported major / peer protocol 1 / live schema probes | **Implemented** and live-tested through Claude Code 2.1.227, including patch-overlap discovery, print-session discovery, native status frames, cancellation, accessible-workspace attestation, and writable `schema_attested` admission for passing same-major builds outside the tested inventory |
-| Automatic Claude binary/runtime attestation | **Implemented**; validates the exact owned path, executes only bounded `claude --version` with a scrubbed environment, tolerates bounded suffix/stderr observations, and derives but does not open provider roots |
+| Claude registry/peer adapter with strict peer protocol 1 and per-operation validation | **Implemented** and live-tested through Claude Code 2.1.227, including discovery, native status frames, cancellation, and accessible-workspace validation |
+| Claude binary/runtime metadata | **Implemented**; validates the exact owned path and records launcher-leaf metadata without granting it routing authority |
 | Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
-| Local provider adapters | **Implemented**, focused synthetic tests cover genuine-interactive Claude discovery, exact send/callback/receipt settlement and post-dispatch refresh, plus exact opted-in Codex ownership, registered-route reachability, monitor-only fallback, and cleanup; remote adapters remain disabled |
+| Local provider adapters | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, and lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup; remote adapters remain disabled |
 | Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
 | Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque memory-only correlation handles, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
@@ -248,8 +227,8 @@ generation.
 
 An App Server endpoint-generation change is a fenced route transition, not a
 new registration. Embassy stops dispatch through the old connector and creates
-a monitor-only replacement connector. That exact generation must pass a fresh
-automatic initialize and `thread/loaded/list` validation, where every retained
+a replacement connector. That exact generation must negotiate its current
+interface and pass `thread/loaded/list` validation, where every retained
 private thread ID must occur exactly once. The connector resumes that exact
 task with history excluded; only then may the controller activate writes and
 atomically re-anchor the same alias, owner lease, and pair edges to the new
@@ -687,10 +666,9 @@ prototype state root is no longer read, locked, or mutated.
 
 It emits one normalized ready line, publishes the private dashboard, and
 holds the process until `SIGINT` or `SIGTERM`, when exact-owned resources are
-closed. Startup automatically attests the exact owned Claude and Codex paths,
-observes their version majors, and runs bounded required-schema probes, then
-binds controller-owned UDS listeners. A provider-local compatibility failure
-keeps that surface monitor-only. Unsafe ownership, path, symlink, lease, state,
+closed. Startup validates exact owned provider paths and binds controller-owned
+UDS listeners. Missing optional providers or a provider-local interface failure
+degrades only that surface. Unsafe ownership, path, symlink, lease, state,
 or generation evidence for Embassy-owned or executed artifacts and Embassy
 callback, control, or state paths aborts startup; unsafe UID or mode evidence
 on Claude's external sessions registry root quarantines only Claude. The bounded read-only Claude registry
@@ -755,16 +733,11 @@ any NVM-managed `codex` on the user's `PATH` (for example
 it, and does not edit a shell profile. The two installations therefore do not
 conflict.
 
-The connector has a fixed App Server method allowlist. An ordinary connector
+The connector has a fixed App Server method allowlist. A connector
 may initialize, observe loaded tasks, resume/unsubscribe the exact registered
-task, start a dedicated turn, and interrupt only its own confirmed turn. The
-optional write-attestation probe alone may call `thread/archive`, only for its
-validated disposable broker-owned probe thread, then confirms that thread is
-absent from the loaded set. The probe resolves the pinned model's lowest
-advertised effort. Whenever that model/effort pin cannot resolve, it declines
-in a zero-spend fail-safe before creating any thread or model turn. Delete,
-history, shell, configuration, authentication, plugin, approval-response, and
-generic RPC methods remain excluded everywhere.
+task, start a dedicated turn, and interrupt only its own confirmed turn. Archive,
+delete, history, shell, configuration, authentication, plugin,
+approval-response, and generic RPC methods remain excluded everywhere.
 
 The App Server capability first tested with 0.147.0 gates the privacy-preserving
 `thread/resume.excludeTurns` field behind initialization capability
@@ -776,25 +749,12 @@ Missing, malformed, or nonempty turns fail closed and are never emitted or
 persisted. The capability does not add an experimental client method or change
 the closed RPC allowlist.
 
-Automatic generation validation and controller write activation are distinct
-gates. A replacement connector may initialize, list, resume, and expose
-normalized monitor state while still reporting its write gate as unavailable.
-A certified same-major Codex build may activate after the exact generation
-checks pass. A fully probed untested same-major `schema_attested` build does not
-authorize Codex writes. Its ordinary compatibility and registration reads
-remain read-only: they may include `initialize`, `thread/loaded/list`, and
-registration-time `thread/resume`, but do not invoke `turn/start`. The optional
-Codex write-attestation probe is the sole exception. It may create at most one
-disposable broker-owned thread per attempt, under a bounded write fence with
-zero user-thread contact; every created probe thread is archived and confirmed
-absent from the loaded set. The probe resolves the pinned model's lowest
-advertised effort. Whenever that model/effort pin cannot resolve, it declines
-in a zero-spend fail-safe before creating any thread or model turn. That build,
-failed probes, a different major, or version evidence
-that cannot establish a safe major remain on the monitor-only path and cannot
-be promoted by probes. No Claude-initiated turn
-can start until the controller activates that exact endpoint generation and
-explicit route ownership is established.
+Generation validation and controller activation are distinct gates. A
+replacement connector may initialize, list, resume, and expose normalized
+status before the controller activates it. No Claude-initiated turn can start
+until that exact endpoint generation has negotiated its current interface,
+re-observed the registered task, and established explicit route ownership.
+Version metadata does not participate in that decision.
 
 Registration resumes the exact task and establishes reachability. Embassy does
 not read or retain reported working-directory or policy fields. Before
@@ -875,13 +835,11 @@ The one Desktop restart needed for the local shared-App-Server feasibility
 test has already been completed. Building, running synthetic tests, starting
 the gateway, rendering the dashboard, and a future Claude peer-socket test do
 not themselves require another Desktop restart. A provider or Desktop major
-upgrade outside the supported compatibility major leaves only that provider
-monitor-only and requires an Embassy release supporting the observed major
-before writes can resume. A required-schema or declared-protocol change also
-keeps its responsible boundary closed. If the attachment mode changes, the
-supporting release may require a separately announced controlled restart.
-Patch updates within the supported major are admitted according to live
-evidence rather than a release pin.
+upgrade may change an internal interface; strict per-operation checks keep the
+responsible route closed if that interface no longer matches. Other providers
+remain available. If the attachment mode changes, a supporting release may
+require a separately announced controlled restart. The offline support matrix
+records what a release was tested with but never grants runtime authority.
 
 ## Dashboard
 
@@ -900,18 +858,18 @@ no meta refresh and the page tells the operator to re-run
 
 Each page assembles seven sections:
 
-- **Exchange** — aggregate gateway health plus the pair graph: every explicit
-  Claude↔Codex edge and its per-edge counters.
+- **Exchange** — aggregate gateway health plus every explicit cross-provider
+  pair and its per-edge counters.
 - **Attention** — allowlisted alerts such as stale route, protocol mismatch,
   queue full, or ambiguous delivery.
 - **Transit** — queued-message depth and bytes in flight.
 - **Progress supervision** — active progress watches and their state.
 - **Operator activity** — the broker's bounded public journal of accepted
   operator actions.
-- **Sessions** — available/selected Claude aliases, registered Codex aliases,
-  provider, host, compatibility, state, and queue depth.
-- **Diagnostics** — compatibility attestations per provider, per-host connector
-  health and protocol, deadline-pressure buckets, accounting totals, and the
+- **Sessions** — first-class Claude, Codex, DeepSeek, and Grok provider rows,
+  aliases, host, route state, and queue depth.
+- **Diagnostics** — best-effort observed metadata, per-host connector health,
+  last safe code, deadline-pressure buckets, accounting totals, and the
   omission counters below. Normalized message direction and delivery state,
   timestamp, latency, byte count, and a short opaque message-ID suffix appear
   with the delivery rows.
@@ -1036,8 +994,8 @@ and fake App Server transports.
 
 ### Exact default roots on macOS
 
-The automatic provider attestor derives these paths from the current OS user's
-verified home; it does not scan the home directory. These are the reviewed
+Provider setup derives these paths from the current OS user's verified home; it
+does not scan the home directory. These are the reviewed
 boundaries exercised by the live gateway; routine tests substitute synthetic
 paths, peers, and transports:
 
@@ -1066,25 +1024,11 @@ the preferred least-context setup, but it is not mandatory.
 
 ## Failure and upgrade policy
 
-- A certified same-major provider build is writable; a fully probed same-major
-  build is `schema_attested` and writable only where the probes cover writes.
-  Ordinary Codex compatibility and registration reads remain read-only: they
-  may include `initialize`, `thread/loaded/list`, and registration-time
-  `thread/resume`, but do not invoke `turn/start`. The optional Codex
-  write-attestation probe is the sole exception. It may create at most one
-  disposable broker-owned thread per attempt, under a bounded write fence with
-  zero user-thread contact; every created probe thread is archived and
-  confirmed absent from the loaded set. The probe resolves the pinned model's
-  lowest advertised effort. Whenever that model/effort pin cannot resolve, it
-  declines in a zero-spend fail-safe before creating any thread or model turn.
-  Current untested Codex 0.x therefore stays monitor-only. Failed
-  probes, a different major, or
-  version evidence that cannot establish a safe major leave only that provider
-  monitor-only and write-fenced. Probes never promote across a major or
-  compensate for unknown major evidence. A different-major alert names the observed/tested versions
-  and supported major and requires an Embassy release supporting the observed
-  major. A session record whose peer protocol is not 1 is rejected per record
-  and counted without stopping the broker.
+- Provider versions are best-effort metadata and never grant or remove routing
+  authority. The offline support matrix records tested artifacts, capabilities,
+  limitations, and dates without entering runtime. A session record whose peer
+  protocol is not 1 is rejected per record and counted without stopping the
+  broker; interface drift degrades only its responsible provider.
 - Unsafe ownership, path, symlink, lease, state, or generation evidence for
   Embassy-owned or executed artifacts and Embassy callback, control, or state
   paths refuses broker startup. Unsafe UID or mode evidence on Claude's
@@ -1127,12 +1071,10 @@ the preferred least-context setup, but it is not mandatory.
   the process was lost settles `ambiguous` with `CONTROLLER_RESTARTED`; a
   message whose target authority was transient, or whose target route no longer
   exists, settles `abandoned` with the same code.
-- A provider or Desktop update outside the supported major leaves that surface
-  monitor-only while the broker and other surface remain available. A Claude
-  record outside peer protocol 1 is rejected per record; a required live-schema
-  failure degrades the responsible provider, and retained state never activates
-  an unvalidated replacement endpoint generation. A patch update that passes
-  those checks does not block writes for its version alone.
+- A provider or Desktop update that changes an internal interface degrades its
+  responsible route while the broker and other providers remain available. A
+  Claude record outside peer protocol 1 is rejected per record, and retained
+  state never activates an unvalidated replacement endpoint generation.
 
 ## Validation boundary
 

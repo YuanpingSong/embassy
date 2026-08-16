@@ -29,6 +29,10 @@ test("static projection never materializes message bodies while live projection 
 test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {
   const snapshot = dashboardFixture();
   const model = buildDashboardViewModel(snapshot);
+  assert.deepEqual(
+    model.exchange.parties.map(({ kind }) => kind),
+    ["claude", "codex", "deepseek", "grok"],
+  );
   assert.equal(model.peers.every((peer) => peer.validated), true);
   assert.equal(model.activity[0]?.conversationIdSuffix, "IjKl_789");
   assert.deepEqual(model.brokerActivity, [
@@ -51,6 +55,8 @@ test("snapshot evidence exposes suffix-only correlation, peer validation, operat
   assert.match(en, /Consent edge paired/);
   assert.match(en, /Validated/);
   assert.match(en, /Retained evidence: 3 terminal attempts/);
+  assert.match(en, /data-semantic-party="deepseek"/);
+  assert.match(en, /data-semantic-party="grok"/);
   assert.match(zh, /已建立同意边/);
   assert.match(zh, /已验证/);
   assert.match(zh, /保留证据：3 次终局尝试/);

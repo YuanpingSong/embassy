@@ -128,10 +128,10 @@ test("progress-watch history copy names who settled it and why", () => {
   );
 });
 
-test("pair copy names consent counts, exact refresh recovery, and one shown degraded edge", () => {
+test("pair copy keeps unpaired provider rows visible and names exact recovery", () => {
   assert.match(
     dashboardCopyEn["app.routes.unpairedSummary"],
-    /have no consent edge/,
+    /visible in their provider rows/,
   );
   assert.equal(
     dashboardCopyEn["app.overview.degradedEdge"],
@@ -143,7 +143,7 @@ test("pair copy names consent counts, exact refresh recovery, and one shown degr
   );
   assert.match(
     dashboardCopyZhCn["app.routes.unpairedSummary"],
-    /没有同意边/,
+    /显示在各自提供方行中/,
   );
   assert.equal(
     dashboardCopyZhCn["app.overview.degradedEdge"],

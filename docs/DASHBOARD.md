@@ -9,7 +9,7 @@ tabs, request controls, bounded actions, and security caveat.
 
 ## Static dashboard
 
-Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of connector health, available and selected Claude peers, the registered Codex route, recent delivery states, queue depth, latency, and safe alerts.
+Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of all four provider rows (Claude, Codex, DeepSeek, and Grok Build), connector health, exact named routes and consent edges, recent delivery states, queue depth, latency, and last safe codes.
 
 Interpret queue and delivery by direction. Codex-bound ordinary work can wait
 for the task to become idle. Claude-bound work does not wait for Claude idle:
@@ -81,43 +81,9 @@ snapshot via same-origin `fetch`; after each bounded action it reads
 a fresh snapshot. A snapshot observation may settle already-due
 lifecycle deliveries before projecting state.
 
-An automatically schema-probed and generation-gated App Server endpoint
-refresh appears in Activity as an automatic event, distinct from operator
-actions. Diagnostics reports each provider's compatibility evidence:
-`schema_attested` is informational and means the live probes passed on a
-same-major build outside this release's tested inventory. It is writable only
-when those probes cover the write path. Ordinary Codex compatibility and
-registration reads remain read-only: they may include `initialize`,
-`thread/loaded/list`, and registration-time `thread/resume`, but do not invoke
-`turn/start`. The optional Codex write-attestation probe is the sole exception.
-It may create at most one disposable broker-owned thread per attempt, under a
-bounded write fence with zero user-thread contact; every created probe thread
-is archived and confirmed absent from the loaded set. The probe resolves the
-pinned model's lowest advertised effort. Whenever that model/effort pin cannot
-resolve, it declines in a zero-spend fail-safe before creating any thread or
-model turn. Current untested Codex 0.x builds therefore stay monitor-only.
-A same-major probe failure, different major, or version evidence that
-cannot establish a safe major leaves only that provider degraded, monitor-only,
-and write-fenced while the
-broker and other provider remain available, and probes never promote across a
-major or unknown major. The different-major alert names the observed/tested
-versions and supported major
-and says that a supporting Embassy release is required. Probe, major-version,
-or generation failures remain explicit while a missing or duplicate exact task
-leaves its route stale. The Diagnostics
-registry block mirrors optional bounded `registry` evidence on the existing
-public Claude connector row: `entriesScanned`, `parseableRecords`, monotonic
-`parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and
-`rejectedCodesOmitted`. It derives “Parseable required fields observed”,
-“Empty since broker start”, or “No parseable record since broker start”. The
-last warning says that no Claude registry record with parseable required fields
-has been observed since broker start and that, if Claude is running, its
-registry layout may have changed; that possible layout change therefore cannot
-look like a healthy empty peer list. Compatibility remains passive status: the
-dashboard has no compatibility action or override. The dashboard never exposes
-the retained task ID, either
-endpoint generation, or raw registry records, and endpoint recovery never
-replays a message body.
+An exact App Server generation transition appears in Activity as an automatic event, distinct from operator actions. The dashboard does not certify builds or grant authority: it reports only best-effort runtime facts from the bounded public snapshot. Overview and Routes keep Claude, Codex, DeepSeek, and Grok Build visible even when a route or connector is absent; Deliveries filters by all four source and target providers; Diagnostics shows observed protocol/version metadata, current connector health, and the last safe code. Version metadata never changes route authority.
+
+The Diagnostics registry block mirrors optional bounded `registry` observations on the Claude connector row: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. It derives “Parseable required fields observed”, “Empty since broker start”, or “No parseable record since broker start”. The last warning says that no Claude registry record with parseable required fields has been observed since broker start and that, if Claude is running, its registry layout may have changed; that possible layout change therefore cannot look like a healthy empty peer list. The dashboard never exposes retained native IDs, endpoint generations, raw registry records, or the release-owned offline support matrix, and endpoint recovery never replays a message body.
 
 An optional `--lang en|zh-CN` flag selects the display language. It belongs to
 the live companion only; the static pair is always written in both languages

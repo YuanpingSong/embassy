@@ -18,7 +18,7 @@ export const dashboardCopyZhCn = {
   "exchange.eyebrow": "交换台",
   "exchange.title": "提供方路由与明确边界",
   "exchange.note":
-    "每条同意边都指定两个已验证的提供方端点。原生发现仍覆盖整台机器，权限则不会。",
+    "每条同意边连接两条精确本地路由。当前路由状态与连接器健康度描述 Embassy 此刻可观察到的事实。",
   "inbound.paired.badge": "配对入站",
   "inbound.paired.body": "每个已注册端点只接受沿其显式同意边发送的消息。",
   "inbound.open.badge": "开放入站",
@@ -272,7 +272,7 @@ export const dashboardCopyZhCn = {
   "column.observed": "观察时间",
   "column.issue": "问题",
   "diagnostics.title": "系统详情",
-  "diagnostics.note": "固定协议、计数器与有界显示说明",
+  "diagnostics.note": "连接器健康度、已观察协议元数据、最近安全代码、计数器与有界显示说明",
   "diagnostics.connectors": "连接器",
   "diagnostics.connectors.empty": "没有连接器元数据。",
   "diagnostics.connectors.caption": "本地提供方连接器状态",
@@ -328,7 +328,7 @@ export const dashboardCopyZhCn = {
   "health.connecting": "连接中",
   "health.healthy": "健康",
   "health.degraded": "降级",
-  "health.meaning.healthy": "已连接并在交换心跳。",
+  "health.meaning.healthy": "本地连接器当前可用。",
   "health.meaning.connecting": "正在建立本地连接。",
   "health.meaning.degraded": "已连接，但保留了警告。",
   "health.meaning.offline": "在本机上无法访问。",
@@ -339,7 +339,7 @@ export const dashboardCopyZhCn = {
   "route.offline": "离线",
   "route.disabled": "已停用",
   "route.meaning.idle": "已启用，可以承载消息。",
-  "route.meaning.busy": "发往 Claude 的消息仍会立即写入原生消息邮箱；发往 Codex 的普通消息会等待路由空闲。",
+  "route.meaning.busy": "端点正忙；投递时机取决于目标提供方的传输方式。",
   "route.meaning.awaitingApproval": "正在等待提供方的原生审批。",
   "route.meaning.stale": "当前没有端点证明；请刷新并恢复该路由。",
   "route.meaning.offline": "该路由的连接器无法访问。",
@@ -453,7 +453,7 @@ export const dashboardCopyZhCn = {
     "已就绪 {ready} · 已注册 {total}",
   "app.overview.noPair.title": "没有同意边",
   "app.overview.noPair.body":
-    "配对入站仅接受由显式同意边连接到已注册 Codex 任务的发送方；Codex 也只沿显式边路由。",
+    "配对入站仅接受由显式同意边连接的发送方；所有提供方路由都遵循相同的同意边。",
   "app.overview.degradedEdge": "有一条已显示的同意边尚未就绪。",
   "app.overview.degradedEdges": "部分同意边仍然保留，但尚未就绪。",
   "app.overview.queueC2x": "Claude → Codex",
@@ -506,14 +506,14 @@ export const dashboardCopyZhCn = {
     "同意边仍然保留；此快照中缺少一端或两端已保存路由的记录。",
   "app.routes.pairSummary": "就绪：{ready} · 同意边：{total}",
   "app.routes.unpairedSummary":
-    "{claude} 个就绪 Claude 端点与 {codex} 个就绪 Codex 端点没有同意边。",
+    "尚无同意边的就绪端点仍会显示在各自提供方行中。",
   "app.routes.pairCmd.consequence":
-    "仅在 {claude} 与 {codex} 之间建立同意；现有边保持不变。",
+    "仅在这两个具名提供方端点之间建立同意；现有边保持不变。",
   "app.routes.unpairCmd.consequence":
-    "仅移除 {claude} 与 {codex} 之间的同意；相邻边上的工作保持活动。",
+    "仅移除这两个具名提供方端点之间的同意；相邻边上的工作保持活动。",
   "app.routes.selectCmd.title": "建立同意边",
   "app.routes.selectCmd.consequence":
-    "在此 Claude 会话与一个 Codex 任务之间建立一条同意边；其他边保持不变。",
+    "在这两个具名提供方端点之间建立一条同意边；其他边保持不变。",
   "app.routes.selectCmd.consequenceOpen":
     "建立一条出站目标边。开放入站仍会接受同一操作系统用户下的任何在线 Claude 会话。",
   "app.routes.unselectCmd.consequence":
@@ -538,7 +538,7 @@ export const dashboardCopyZhCn = {
   "app.routes.registerHint":
     "注册不是按钮：它必须在 Codex 任务内运行以继承其身份。请让你的代理运行：",
   "app.routes.noPairInline":
-    "无同意边 — 请将 Claude 会话与 Codex 任务配对",
+    "无同意边 — 请配对来自不同提供方的两个就绪端点",
   "app.omitted.pairs": "另有 {count} 条同意边未显示。",
   "app.activity.title": "事件流 — 有界，最新在前",
   "app.activity.kinds.all": "所有类型",
@@ -564,14 +564,14 @@ export const dashboardCopyZhCn = {
     "操作者操作台账仅保留于本次代理进程。操作者操作行不携带消息正文；“投递”按设计显示已保留正文。完整能力令牌始终不会显示。",
   "app.activity.empty":
     "此窗口内没有内容。事件会随 broker 产生而出现；可以试试",
-  "app.diag.versions": "连接器协议",
-  "app.diag.versions.caption": "本地连接器已观察到的协议状态",
+  "app.diag.versions": "提供方连接器",
+  "app.diag.versions.caption": "本地提供方连接器的尽力而为观测",
   "app.diag.col.provider": "提供方",
   "app.diag.col.host": "主机",
   "app.diag.col.protocol": "协议",
   "app.diag.col.version": "版本",
   "app.diag.versions.rangeAbsent":
-    "连接器行显示已观察到的协议标记与当前健康状态。",
+    "协议与版本只是观测元数据，不授予路由权限。健康度与最近安全代码描述当前连接器。",
   "app.diag.lease.title": "租约 / 实例",
   "app.diag.lease.absent": "实时契约不携带租约状态。请用下面的命令查看本地状态。",
   "app.diag.limits": "限制与压力",

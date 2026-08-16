@@ -71,8 +71,7 @@ namespace Embassy {
   }
 
   /**
-   * Per-direction queue split (§2.2): messages queue at the target route, so
-   * claude→codex sums codex routes and codex→claude sums claude routes.
+   * Per-target queue split (§2.2): messages queue at the target route.
    * Oldest age ticks on the live clock from `oldestQueuedAt`.
    */
   export function queueSplit(

@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-43853d)](package.json)
 
-你的 [Claude Code](https://code.claude.com) 会话和 [Codex](https://chatgpt.com/codex) 桌面任务彼此无法对话。当一方需要另一方的视角时，你只能在窗口之间手动搬运上下文。Embassy 是一个小型本地代理，让它们按名称互相发现并双向交换消息——无需插件、无需 API 密钥、无需云端中继。
+你的 [Claude Code](https://code.claude.com) 会话、[Codex](https://chatgpt.com/codex) 桌面任务、本地 DeepSeek Harness 与 Grok Build 代理没有共同路由面。Embassy 是一个小型本地代理，为四种提供方提供具名路由与显式同意边——无需插件，Embassy 不处理 API 密钥，也无需云端中继。
 
 ```bash
 npm install -g agent-embassy
@@ -25,7 +25,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 ## 快速开始
 
-**前置要求：** macOS、Node.js 20+、使用已支持 2.x 主版本且对等协议为 1 的 Claude Code，以及配置为使用托管独立 App Server 的 Codex 桌面应用。Embassy 最近完成实机测试的版本是 Claude Code 2.1.227 与 Codex App Server 0.147.0；这些补丁版本是测试证据，而非启动固定值：
+**前置要求：** macOS 与 Node.js 20+。Claude 路由要求对等协议 1；Codex 路由要求 Desktop 使用托管独立 App Server。DeepSeek 是可选提供方，通过 `DSH_HOME`（默认 `~/.dsh`）指向的本地 checkout 中 `demo:acp` 脚本启动；Grok Build 也是可选提供方，通过发布版固定的 ACP 包启动。发布版自有的[支持矩阵](support/provider-support-matrix.json)记录四种提供方已测试的精确构件与能力；它只是发布证据，绝不是运行时允许列表：
 
 ```bash
 ~/.codex/packages/standalone/current/codex app-server daemon start
@@ -36,7 +36,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 Desktop 仅在启动时附着到托管独立 App Server。如果 Desktop 已打开时守护进程重启，单纯等待不会让该应用进程重新连接：请完全退出 Desktop，重新运行 `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`，再打开该确切任务。
 
-提供方兼容性无需操作员执行额外步骤。`embassy serve` 会验证解析到的安装边界，并对两种提供方应用同一套证据阶梯：同主版本且在已认证清单中的构建可写；同主版本但不在本发布版已测清单中的构建，在全部有界实时结构探测通过后显示为 `schema_attested`，但只有探测覆盖写入路径时才可写。Claude 探测覆盖原生写入路径。常规 Codex 兼容性与注册读取仍保持只读：它们可能包括 `initialize`、`thread/loaded/list` 与注册时的 `thread/resume`，但不会调用 `turn/start`。唯一例外是可选的 Codex 写入认证探测：每次尝试最多可创建一个代理自有的临时线程，在有界写入围栏下运行且绝不接触用户线程；每个已创建的探测线程都会被归档，并确认已从已加载集合中清除。该探测会解析固定模型所公布的最低 effort。只要该模型/effort 固定项无法解析，探测就会以零消耗故障安全方式拒绝，并且不会创建任何线程或模型轮次。未测试的 Codex 0.x 在认证写入结构出现前保持仅监控。探测失败、主版本不同或版本证据无法建立安全主版本时，只有该提供方保持降级、仅监控并禁止写入，代理、控制面/仪表盘和另一提供方继续运行。探测绝不能跨主版本或未知主版本提升权限。主版本不同的告警会列出已观测/已测版本和支持主版本，并说明必须使用支持已观测主版本的 Embassy 发布版。只有 Embassy 自有或执行的构件及其回调、控制与状态路径出现不安全 OS 证据时才会拒绝代理启动；Claude 外部会话注册表根目录的 UID 或模式不安全时，只隔离 Claude。对等协议不是 1 的 Claude 会话记录会单独被拒绝并计数。
+运行时投递采用尽力而为模式。版本与构建字符串只是未经验证的元数据，绝不授予或撤销路由权限。同意加上精确的自有路由/会话身份会授权一次尝试；当前连接器、路由状态与相关操作决定诚实结果。接口不受支持或发生变化时，Embassy 会返回提供方局部的安全代码，而不是在线兼容性等级。Embassy 仍会验证信任边界：精确自有的可执行文件与状态路径、端点代际、被消费协议字段的严格结构、Claude 对等协议 1、有界队列，以及结果不确定的写入绝不重放。
 
 > **已知限制：** 仅当 Desktop 使用托管独立 App Server 时，Embassy 才能访问 Codex 任务。在该模式下，任务目前无法连接 Desktop 内置的应用内浏览器（`@Browser` 可加载但无法附着）。将 Desktop 切换回其默认的私有 App Server 会立即恢复内置浏览器——但会使这些任务对 Embassy 不可达。目前未发现其他能力回退，但这并非穷尽的能力对比测试。
 
@@ -67,7 +67,7 @@ embassy register-codex --alias codex-reviewer@this-mac
 
 你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，请在同一个任务内运行 `embassy unregister-codex --alias codex-reviewer@this-mac`。
 
-托管 App Server 端点代际变更与 `embassy serve` 重启都会使用精确任务重新激活。每个替代端点都从仅监控状态开始；只有重新初始化并通过 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，才能重新锚定别名，而且在激活这个精确代际前写入始终保持封锁。因此，正常的代理重启不需要手动重新注册。端点不兼容，或精确任务缺失、重复，都会使路由以 `REOBSERVATION_REQUIRED` 保持陈旧；该任务恢复可观察后，请从精确任务内再次运行 `embassy register-codex --alias codex-reviewer@this-mac`，且不要先注销。Embassy 绝不会按别名改投其他任务，也不会重放写入结果不明确的正文。
+托管 App Server 端点代际变更与 `embassy serve` 重启都会使用精确任务重新激活。新的 `initialize` 用于协商连接；只有 `thread/loaded/list` 恰好一次找到字节级一致的原任务时，Embassy 才会在该精确代际上重新锚定别名。因此，正常的代理重启不需要手动重新注册。精确任务缺失或重复、代际变化或协商失败都会让路由以安全代码保持陈旧；任务恢复可观察后，请从精确任务内再次运行 `embassy register-codex --alias codex-reviewer@this-mac`，且不要先注销。Embassy 绝不会按别名改投其他任务，也不会重放写入结果不明确的正文。
 
 ### 3. 选择 Claude 目的地
 
@@ -81,7 +81,7 @@ embassy select-claude --alias advisor@this-mac
 
 你应看到 `"accepted":true`。注册和选择共同构成一个配对——现在这个 Claude 会话和这个 Codex 任务可以通过 Embassy 交换消息。
 
-当你注册了多个任务后，请用 `embassy pair --claude <name@host> --codex <codex-alias>` 显式指定两端；多个配对可以并存。与 `select-claude` 不同，`pair` 和 `unpair` 必须**在 Codex 任务内部**运行，就像 `register-codex` 一样。在普通终端中它们会以 `CODEX_IDENTITY_REQUIRED` 失败，在 Claude 会话内则以 `CALLER_IDENTITY_CONFLICT` 失败。
+要连接来自不同提供方的任意两条路由，请用 `embassy pair --from <alias> --to <alias>` 显式指定两端；多条边可以并存。命令必须在属于该请求边的继承端点身份下运行。本地操作者也可在实时仪表盘中执行同样的有界确认操作。
 
 ### 4. 发送消息
 
@@ -146,9 +146,9 @@ Embassy 会在实际写入提供方之前，为双向路由消息添加一个由
   └───────────────────────────────────────────────────────────┘
 ```
 
-Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份发布到 Claude Code 的实时会话注册表中。兼容的 Claude 会话通过原生的 `ListAgents` 发现它们，并通过 `SendMessage` 与之通信——无需插件、MCP 服务器或设置更改。
+Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份发布到 Claude Code 的实时会话注册表中。Claude 会话通过 `ListAgents` 发现这些任务；Codex 使用托管 App Server。DeepSeek 与 Grok Build 是启动时登记的 ACP 路由，其自有子进程与单个路由本地会话会在首次投递时惰性启动。
 
-配对是一个 Claude 会话与一个 Codex 任务之间的单一显式权限边，而配对关系是多对多的：一个 Claude 会话可以与多个 Codex 任务建立边，一个 Codex 任务也可以与多个 Claude 会话建立边（默认上限 128 个配对）。每条边都通过 `pair` 或单任务简写 `select-claude` 显式创建；一切都不会被隐式推断。没有边时，发送方以 `SENDER_NOT_PAIRED` 终局结算。`embassy serve --inbound open` 是显式的退出选项，可恢复任意会话入站。
+配对是来自不同提供方的两条具名路由之间的单一显式权限边，默认上限 128 条。每条边都通过通用的 `pair --from/--to` 显式创建；`select-claude` 保留为单 Codex 任务建立 Claude↔Codex 边的简写。一切都不会被隐式推断。没有边时，发送方以 `SENDER_NOT_PAIRED` 终局结算。`embassy serve --inbound open` 是针对受支持原生入站发送方的显式退出选项。
 
 投递时机因方向而异。通过路由与写前检查后，所有朝向 Claude 的正文都会立即写入 Claude 的原生邮箱，无论观测到 Claude 正繁忙还是空闲。`transport_written` 记录这次邮箱写入，并且就是朝向 Claude 的终局 `delivered` 边界；它不表示 Claude 已读取或消费正文。朝向 Codex 的普通正文则在任务忙碌时排队，并在任务空闲后启动轮次。仅在 Claude→Codex 方向，正文以精确 `STEER:` 开头的消息可以在 App Server 的下一个工具调用边界进入当前轮次；若该边界不可用，消息会回到普通队列。
 
@@ -192,7 +192,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
 | `untrack` | 任一提供方 | 关闭一个活跃的进度监视：`embassy untrack --conversation conv_<token>` |
 | `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；两者都需要 `--alias <codex-alias>`，而 `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
-| `pair` / `unpair` | Codex 任务 | 显式指定两端来添加或移除一条 Claude↔Codex 边：`embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac`。与 `register-codex` 一样，它必须在 Codex 任务内部运行 |
+| `pair` / `unpair` | 端点参与方 | 显式指定两端来添加或移除一条跨提供方边：`embassy pair --from advisor@this-mac --to grok-main@this-mac`；继承调用方必须属于该边 |
 | `select-claude` / `unselect-claude` | 操作员或 Codex 任务 | `pair`/`unpair` 的单任务简写，接受 `--alias <name@host>` 或 `--session <uuid>`：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
 | `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息：`--from <codex-alias> --to <claude-alias>`，正文从标准输入读取，可选 `--expects-reply` 与 `--track [--idle-minutes <n>]` |
 | `send-to-codex` | Claude 会话 | 标志与正文输入方式相同，使用继承的原生回复标识 |
@@ -204,7 +204,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 
 - **本地代理，稳定的 loopback 仪表盘。** `embassy serve` 仅监听私有 Unix 域套接字，不发起任何提供商 API 调用。可选启用的 `embassy dashboard --live` 组件是一个独立进程，也是 Embassy 能创建的唯一监听器；它精确绑定 `127.0.0.1`，默认使用稳定端口 `41961`（也可为本次启动传入 `--port <n>`）。它是在可信单用户机器上有意不设身份认证的本地 HTTP；Host、Origin 与哨兵检查约束浏览器来源的请求，但不认证本地进程或 OS 用户。
 - **同 UID 隔离，而非身份认证。** 调用者身份继承自本地进程环境。路由所有权和生成号检查能减少误操作，但不是对已以你的 OS 用户身份运行的代码的防御。
-- **兼容性依据证据，而非固定补丁版本。** 代理/提供方启动先验证精确的 OS 边界，再应用证据阶梯。同主版本的已认证构建可写；全部探测通过的同主版本构建显示为 `schema_attested`，且仅在探测覆盖写入时才可写。常规 Codex 兼容性与注册读取仍保持只读：它们可能包括 `initialize`、`thread/loaded/list` 与注册时的 `thread/resume`，但不会调用 `turn/start`。唯一例外是可选的 Codex 写入认证探测：每次尝试最多可创建一个代理自有的临时线程，在有界写入围栏下运行且绝不接触用户线程；每个已创建的探测线程都会被归档，并确认已从已加载集合中清除。该探测会解析固定模型所公布的最低 effort。只要该模型/effort 固定项无法解析，探测就会以零消耗故障安全方式拒绝，并且不会创建任何线程或模型轮次。未测试的 Codex 0.x 保持仅监控。探测失败、主版本不同或版本证据未知时，只封锁该提供方，代理和另一提供方继续运行。探测绝不能跨主版本或未知版本提升权限。Embassy 自有或执行的构件及其回调、控制与状态路径不安全时仍拒绝启动；Claude 外部会话注册表根目录不安全时只隔离 Claude。
+- **兼容性在离线阶段测试；运行时尽力而为。** 发布版自有支持矩阵记录精确已测构件、协议、能力、停止保真度、限制与测试日期。运行时从不导入该矩阵，也绝不会把版本事实变成权限。它验证精确自有边界与协议事实，尝试当前操作，并以提供方局部健康度、路由陈旧状态和安全代码报告结果，且绝不重放不确定写入。
 - **来源标记是提示，不是签名。** Embassy 在提供方写入边界生成跨会话来源封装，让接收模型能够区分代理路由消息及其已验证发送方别名；这不是密码学证明，也不会把不可信正文变成可信指令。
 - **原生权限保持原生。** Embassy 不发送任何 Codex 审批或沙盒覆盖，也不应答任何审批请求。`crossSessionInbound` 仍是 Claude 自身的控制机制；Embassy 无法覆盖它。
 - **消息体有界保存，属于你。** 消息体以有界保留策略持久化在 broker 的私有 mode-0600 状态中，让台账能够展示邮件本身；排队中的邮件在 broker 重启后幸存并恰好重发一次。原始提供方帧仍仅存于内存。静态仪表盘文件保持仅元数据；实时仪表盘展示保留的正文。

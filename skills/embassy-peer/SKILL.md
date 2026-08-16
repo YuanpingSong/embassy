@@ -31,7 +31,7 @@ embassy health
 
 If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
-Compatibility is automatic and evidence-gated. A certified same-major provider is writable; a same-major build whose bounded live schema probes all pass is schema-attested (`schema_attested`) and writable only when those probes cover the write path. Claude's probes cover its native write path. Ordinary Codex compatibility and registration reads remain read-only: they may include `initialize`, `thread/loaded/list`, and registration-time `thread/resume`, but do not invoke `turn/start`. The optional Codex write-attestation probe is the sole exception. It may create at most one disposable broker-owned thread per attempt, under a bounded write fence with zero user-thread contact; every created probe thread is archived and confirmed no longer loaded. The probe resolves the pinned model's lowest advertised effort. Whenever that model/effort pin cannot resolve, it declines in a zero-spend fail-safe before creating any thread or model turn. Untested Codex 0.x therefore stays monitor-only. Failed probes, a different major, or version evidence that cannot establish a safe major leave only that provider degraded, monitor-only, and write-fenced while the broker and other provider remain available; probes never promote across a major or unknown major. A different-major alert safely names the observed/tested versions and supported major and means an Embassy release supporting the observed major is required—`embassy health` is not a recovery step. Claude `peerProtocol 1` is required per registry record; other values are rejected in isolation and counted. Unknown top-level registry fields are tolerated, but every required known field remains strict; bounded rejected-record counts and an observed-empty registry are loud status and dashboard observations. There is no separate agent or operator compatibility action. Report a degraded surface and stop rather than manually probing the provider, sending a test message, or trying to override the fence.
+Embassy presents Claude, Codex, DeepSeek, and Grok as first-class providers. Runtime status is best-effort: use route staleness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed route.
 
 List the public snapshot:
 
@@ -47,18 +47,18 @@ embassy refresh-dashboard
 
 Run that refresh only at the passive-discovery authorization stage. Treat the response as a normalized refresh result; it does not reveal the path. The operator-facing page is `gateway-dashboard.html` in the configured state directory, by default `~/.local/state/agent-embassy/`. Use the operator's configured location when it differs. Do not search for the file or scan controller-owned paths.
 
-## Pair with a Claude session
+## Pair providers
 
-Create one explicit Claude↔Codex edge by naming both ends. The Claude end must be a user-chosen, unique candidate from `availablePeers`:
+Create one explicit cross-provider edge by naming both ends. Each endpoint must be a user-chosen route from the current snapshot:
 
 ```sh
-embassy pair --claude advisor@this-mac --codex codex-reviewer@this-mac
+embassy pair --from codex-reviewer@this-mac --to advisor@this-mac
 ```
 
 Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. Run `pair` and `unpair` from inside a registered Codex task so the CLI reads the inherited `CODEX_THREAD_ID`; a plain operator shell fails closed with `CODEX_IDENTITY_REQUIRED` — use the live dashboard or the one-task shorthand instead. Remove exactly the named edge:
 
 ```sh
-embassy unpair --claude advisor@this-mac --codex codex-reviewer@this-mac
+embassy unpair --from codex-reviewer@this-mac --to advisor@this-mac
 ```
 
 When the Codex end is unambiguous — inherited from the calling task, or the sole registered task — the one-task shorthand forms or removes the same edge:
@@ -113,7 +113,7 @@ until manual recovery rather than leaving two live registrations.
 
 Embassy also pins the exact identity fail-closed when a retained route cannot fully reactivate or a fresh registration cannot confirm complete rollback. Retry only that exact identity; choose another only after the old route is confirmed unregistered and Embassy is restarted.
 
-A compatible Codex App Server generation change or broker restart can reattach an exact registered task automatically. Each replacement generation starts monitor-only and must pass a fresh initialize plus exact `thread/loaded/list` observation before re-anchoring; provider writes remain fenced until the controller activates that exact generation. A normal broker restart therefore needs no manual registration. If boot reactivation cannot find the task exactly once, the route remains stale with `REOBSERVATION_REQUIRED`; once the task is observable, recover it only from that exact Codex task by rerunning `embassy register-codex --alias <same-alias>`. Do not unregister first, supply a thread ID, or replay any ambiguously written body.
+A Codex App Server generation change or broker restart can reattach an exact registered task automatically. Each replacement generation negotiates its current interface and must observe the exact task before the controller re-anchors it. A normal broker restart therefore needs no manual registration. If boot reactivation cannot find the task exactly once, the route remains stale with `REOBSERVATION_REQUIRED`; once the task is observable, recover it only from that exact Codex task by rerunning `embassy register-codex --alias <same-alias>`. Do not unregister first, supply a thread ID, or replay any ambiguously written body.
 
 Unregister from the same Codex task:
 

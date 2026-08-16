@@ -28,7 +28,7 @@ import {
   type DashboardTone,
   type DashboardViewModel,
 } from "./dashboard-model.js";
-import { gatewayProviderDisplayNames, parseDirection } from "./types.js";
+import { parseDirection } from "./types.js";
 import type {
   ConnectorHealth,
   DeliveryState,
@@ -269,7 +269,7 @@ function renderParty(context: RenderContext, party: DashboardExchangeParty): str
     ? t(context, "exchange.claude.title")
     : party.kind === "codex"
       ? t(context, "exchange.codex.title")
-      : gatewayProviderDisplayNames[party.kind];
+      : providerLabel(context, party.kind);
   const note = party.kind === "claude"
     ? t(context, "exchange.claude.note")
     : party.kind === "codex"
@@ -314,7 +314,7 @@ function renderPairGraph(context: RenderContext): string {
   });
   const unpaired = context.model.exchange.parties.map((party) =>
     t(context, "app.routes.unpairedProvider", {
-      provider: gatewayProviderDisplayNames[party.kind],
+      provider: providerLabel(context, party.kind),
       count: String(graph.unpairedReadyByProvider[party.kind]),
     })
   ).join(" · ");
@@ -326,11 +326,11 @@ function renderPairGraph(context: RenderContext): string {
         const [left, right] = edge.endpoints;
         const label = t(context, "app.routes.consentEdge", {
           left: t(context, "app.routes.consentEndpoint", {
-            provider: gatewayProviderDisplayNames[left.provider],
+            provider: providerLabel(context, left.provider),
             alias: escapeDashboardHtml(left.alias),
           }),
           right: t(context, "app.routes.consentEndpoint", {
-            provider: gatewayProviderDisplayNames[right.provider],
+            provider: providerLabel(context, right.provider),
             alias: escapeDashboardHtml(right.alias),
           }),
         });
@@ -415,7 +415,7 @@ function renderExchange(context: RenderContext): string {
       </div>
       ${context.model.exchange.parties.slice(1).map((party) => renderParty(context, party)).join("")}
     </div>
-    <div class="direction-key" aria-label="${t(context, "exchange.title")}">${directionParties.flatMap((source) => context.model.exchange.parties.filter((target) => target.kind !== source.kind).map((target) => `<span>${gatewayProviderDisplayNames[source.kind]} → ${gatewayProviderDisplayNames[target.kind]}</span>`)).join("")}</div>
+    <div class="direction-key" aria-label="${t(context, "exchange.title")}">${directionParties.flatMap((source) => context.model.exchange.parties.filter((target) => target.kind !== source.kind).map((target) => `<span>${providerLabel(context, source.kind)} → ${providerLabel(context, target.kind)}</span>`)).join("")}</div>
     ${renderPairGraph(context)}
   </section>`;
 }
@@ -457,7 +457,7 @@ function renderAttention(context: RenderContext): string {
         const scope = [
           item.provider === undefined
             ? undefined
-            : t(context, item.provider === "claude" ? "provider.claude" : "provider.codex"),
+            : providerLabel(context, item.provider),
           item.alias === undefined ? undefined : escapeDashboardHtml(item.alias),
           item.host === undefined ? undefined : escapeDashboardHtml(item.host),
         ].filter((value): value is string => value !== undefined);
@@ -524,7 +524,7 @@ function renderActivity(context: RenderContext): string {
         .map(
           (message) => `<tr data-dashboard-row="message-summary" data-delivery-state="${message.state}">
             <td data-label="${t(context, "activity.column.updated")}">${renderTimestampAtSnapshot(context, message.timestamp)}</td>
-            <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${directionLabel(message.direction)}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
+            <td data-label="${t(context, "activity.column.route")}" class="route-cell"><strong>${directionLabel(context, message.direction)}${message.steer === true ? ' <span class="pill quiet">STEER</span>' : ""}</strong><span>${escapeDashboardHtml(message.sourceAlias)} → ${escapeDashboardHtml(message.targetAlias)}</span></td>
             <td data-label="${t(context, "activity.column.id")}"><code>…${message.messageIdSuffix ?? "—"}</code>${message.conversationIdSuffix === undefined ? "" : `<span class="cell-note"><code>conv …${escapeDashboardHtml(message.conversationIdSuffix)}</code></span>`}</td>
             <td data-label="${t(context, "activity.column.result")}">${statusPill(t(context, deliveryLabelKey(message.state)), toneForDelivery(message.state, message.safeErrorCode))}<span class="cell-note">${t(context, deliveryMeaningKey(message.state, message.direction, message.safeErrorCode) as DashboardCopyKey)}</span>${message.safeErrorCode === undefined ? "" : `<code class="cell-code">${message.safeErrorCode}</code>`}</td>
             <td data-label="${t(context, "activity.column.elapsed")}" class="numeric">${formatDuration(message.latencyMs)}</td>
@@ -583,18 +583,18 @@ function renderProgressWatches(context: RenderContext): string {
   </section>`;
 }
 
-function providerLabel(
-  _context: RenderContext,
-  provider: GatewayProvider,
-): string {
-  return gatewayProviderDisplayNames[provider];
+function providerLabel(context: RenderContext, provider: GatewayProvider): string {
+  return t(context, `provider.${provider}` as DashboardCopyKey);
 }
 
-function directionLabel(direction: DashboardMessageGroup["direction"]): string {
+function directionLabel(
+  context: RenderContext,
+  direction: DashboardMessageGroup["direction"],
+): string {
   const parsed = parseDirection(direction);
   return parsed === undefined
     ? direction
-    : `${gatewayProviderDisplayNames[parsed.sourceProvider]} → ${gatewayProviderDisplayNames[parsed.targetProvider]}`;
+    : `${providerLabel(context, parsed.sourceProvider)} → ${providerLabel(context, parsed.targetProvider)}`;
 }
 
 function healthLabel(context: RenderContext, health: ConnectorHealth): string {
@@ -822,8 +822,7 @@ const DASHBOARD_STYLES = `
     .pouch__title { margin: 0; padding: 0 .35rem; color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .1em; }
     .pouch strong { padding: .1rem .35rem; font: 720 .88rem/1.4 ui-sans-serif, system-ui, sans-serif; }
     .pouch small { padding: 0 .35rem; color: var(--muted); }
-    .direction-key { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; padding-top: .55rem; color: var(--muted); font-size: .74rem; }
-    .direction-key span:last-child { text-align: right; }
+    .direction-key { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .25rem 1rem; padding-top: .55rem; color: var(--muted); font-size: .74rem; }
     .pair-graph { margin-top: 1.2rem; padding: 1rem; border: 1px solid var(--hairline); background: var(--sheet); }
     .pair-graph__heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .7rem 1rem; align-items: baseline; }
     .pair-graph__heading h3, .pair-graph p { margin-bottom: .55rem; }
