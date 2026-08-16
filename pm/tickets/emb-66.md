@@ -34,9 +34,17 @@ table is v1.7's NATIVE state format — no in-binary forward migration, no
 reverse/prune command; our own state database is migrated once by hand at
 upgrade; unparseable state gets the normal strict-parse honest error.
 
-**Explicit consequence, ruled**: this unwinds machinery shipped in v1.6.0 and
-v1.6.1 (emb-58 plumbing, emb-59 probe, emb-60 gate). The founder granted the
-authority knowingly; the ledger keeps the full build-then-remove arc.
+**Explicit consequence, ruled and ratified**: this unwinds machinery shipped
+in v1.6.0 and v1.6.1 (emb-58 plumbing, emb-59 probe, emb-60 gate). The
+founder, on seeing the consequence stated: unfortunate to unship recent work,
+but "even as recently as v1.6, the certification issue keeps coming back to
+us. It's nowhere near settled, so just doing away with it is the long-term
+fix" — the best time to take the step was at the start; with the experience
+we now know it is correct. SCALE EXPECTATION: removal on the order of
+hundreds of lines, possibly over 1,000; the design should be priced and
+judged against significant net simplification of the codebase (easier to
+develop, maintain, build on) and reduced DeepSeek integration work — not
+against minimal diff size.
 
 **Budgets**: size 3, design only — no code moves until the design is reviewed
 and the split is priced. Sequenced after emb-65 so the ACP client is designed
