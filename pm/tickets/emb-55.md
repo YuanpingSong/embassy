@@ -3,7 +3,7 @@ id: emb-55
 title: Compatibility surface set tolerates optional and absent surfaces
 kind: normal
 size: 3
-status: dispatched
+status: review
 release: v1.7
 updated: 2026-08-16
 ---
@@ -44,3 +44,11 @@ arity bug as the boot check. Bound it honestly: capacity derives from the declar
 truth. Public-snapshot only — nothing persisted changes (downgrade-safe per the emb-49 analysis).
 
 Budget unchanged: size 3, <=500. Promises unchanged plus the capacity clause above.
+
+## Landing state (2026-08-16)
+
+Accepted: PM core-diff read (definitions registry, optional-absent continue, exhaustive switches
+with never floors, capacity derives from surface set — the ruling's constraint verbatim), gate
+766/766, budget 413/500, concepts 1/1. Committed locally on the drill-gated stack. Watch-item
+carried to emb-56: an adapter exposing an UNDECLARED surface boots without attesting — unreachable
+in production today; emb-56's surface registration must keep it so.
