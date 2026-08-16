@@ -583,6 +583,7 @@ test("all client commands use one private control socket and expose only normali
           })),
           testedVersion: "2.1.227",
           supportedMajor: "2",
+          writesCovered: false,
         },
       ]);
     }

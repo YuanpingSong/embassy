@@ -315,6 +315,8 @@ export const dashboardCopyEn = {
   "compatibilityTier.certified": "Supported",
   "compatibilityTier.schema_attested":
     "Live schema probes passed; build not tested by this release",
+  "compatibilityTier.schema_attested.writesCovered":
+    "Live read and write probes passed; build not tested by this release",
   "compatibilityTier.incompatible": "Incompatible",
   "diagnostics.registry.title": "Registry observation",
   "diagnostics.registry.entriesScanned": "Entries scanned",

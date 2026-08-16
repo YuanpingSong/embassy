@@ -1557,10 +1557,11 @@ test("list_snapshot carries an exact public compatibility comparison", async () 
         result: GatewaySnapshot;
       }
     ).result.compatibilityChecks?.map(
-      ({ version, testedVersion, supportedMajor }) => ({
+      ({ version, testedVersion, supportedMajor, writesCovered }) => ({
         version,
         testedVersion,
         supportedMajor,
+        writesCovered,
       }),
     ),
     [
@@ -1568,6 +1569,7 @@ test("list_snapshot carries an exact public compatibility comparison", async () 
         version: "2.1.228",
         testedVersion: "2.1.227",
         supportedMajor: "2",
+        writesCovered: false,
       },
     ],
   );

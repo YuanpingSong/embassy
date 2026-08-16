@@ -159,6 +159,7 @@ test("diagnostics reduce compatibility to automatic provider safety rows", () =>
     testedVersion: certifiedCompatibilityVersions.claude[0],
     supportedMajor: "2",
     tier: "incompatible",
+    writesCovered: false,
     checkedAt: "2026-08-08T11:58:00.000Z",
     failure: "registry_schema",
     safeErrorCode: "CLAUDE_REGISTRY_SCHEMA_REJECTED",
@@ -230,6 +231,7 @@ test("unsupported provider majors name bounded evidence while the broker stays u
     testedVersion: "2.1.227",
     supportedMajor: "2",
     tier: "incompatible",
+    writesCovered: false,
     checkedAt: "2026-08-08T11:58:00.000Z",
     failure: "version",
     safeErrorCode: "CLAUDE_PEER_VERSION_UNSUPPORTED",
@@ -362,6 +364,20 @@ test("provider quarantine owns recovery and suppresses normal-route noise", () =
     both.attention.some((item) => item.guidance === "degraded"),
     false,
   );
+
+  const probes: CompatibilityProbeResult[] = compatibilityProbeNames.codex
+    .map((name) => ({ name, outcome: "pass" }));
+  probes.push({ name: "write_attestation", outcome: "pass" });
+  snapshot.compatibilityChecks = [projectPublicCompatibilityCheck(evaluateCompatibilityAttestation({
+    surface: "codex", version: "0.148.0", checkedAt: "2026-08-08T11:58:00.000Z",
+    certifiedVersions: certifiedCompatibilityVersions.codex, probes,
+  }))];
+  const writeAttested = buildDashboardViewModel(snapshot);
+  assert.equal(writeAttested.compatibilityChecks[0]?.writesCovered, true);
+  assert.equal(writeAttested.attention.some((item) =>
+    item.provider === "codex" && item.guidance === "provider_incompatible"), false);
+  assert.match(renderDashboardHtml(snapshot, { locale: "en" }), /Live read and write probes passed/);
+  assert.match(renderDashboardHtml(snapshot, { locale: "zh-CN" }), /实时读写探测通过/);
 });
 
 test("registry evidence stays connector-scoped and raises one honest warning", () => {
