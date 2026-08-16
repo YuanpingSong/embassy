@@ -223,3 +223,12 @@ Rulings:
   revisit after v1.6; D (write authority) waits on emb-49 + founder eyes.
 - Incidental finding logged: the six design laws are not written anywhere in the Embassy repo —
   candidate pm/ content, founder's call.
+
+## Corrections (2026-08-16, from the emb-61 transport investigation — registry-verified)
+
+Two claims in the completion report above are corrected by deeper evidence: (1) dsh-acp's npm
+`latest` dist-tag points at 0.0.1-rc.1 (BSD-3-Clause, day-one build) — the MIT 0.1.0-rc line sits
+under `next`, so a default install gets the oldest build under the older license; (2) the native
+SDK **wire** has no cancel method — the typed AgentCancelCause exists only in-process. Also closed:
+the TypeScript SDK is real (read from source), and native wire method names are now verified
+(requests use slash: session/prompt; notifications use dot: session.event). See emb-61.
