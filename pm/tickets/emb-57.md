@@ -3,7 +3,8 @@ id: emb-57
 title: Version semantics: prerelease identifiers and 0.x majors
 kind: normal
 size: 2
-status: draft
+status: dispatched
+release: v1.7
 updated: 2026-08-16
 ---
 
@@ -30,3 +31,11 @@ Rule 3 (0.x minors are major-equivalent) is correct on safety and for DeepSeek â
 exactly the population (Codex same-major untested builds) that write attestation serves. Landing
 emb-57 without emb-60 converts a soft fence into a hard one: every Codex minor bump would mean
 monitor-only until an Embassy release. Decide rule 3 first, knowing emb-60 is the release valve.
+
+## Founder direction (2026-08-16, verbatim intent)
+
+"Our long-term goal is to move toward a capability-based test rather than a version pinning."
+This is the ticket's north star: the prerelease/0.x decision is a waypoint toward attestation
+that asks "what can this build do, proven by probes" rather than "what is this build's number."
+Design promise 1 accordingly: the written decision should state how prerelease handling converges
+with the write-attestation track (emb-49/58/59/60) rather than adding version machinery.
