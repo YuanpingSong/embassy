@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.7.0] - 2026-08-16
+
+### Added
+
+- DeepSeek and Grok Build are routable providers. Four providers — Claude Code, Codex, DeepSeek, Grok Build — give twelve ordered directions, each requiring an explicit consent edge. New providers ride ACP, the open Agent Client Protocol: a minimal spawn-owned client (`initialize`, `session/new`, `session/prompt`, `session/cancel`; permission requests always denied; all five stop reasons preserved; subprocess death settles the honest `UNKNOWN`) plus a per-provider launch definition. Grok Build launches from the ACP registry's exact pin; DeepSeek launches from a local harness checkout (`DSH_HOME`, default `~/.dsh`) and its `end_turn` receipts deliberately settle `unconfirmed`/`ACP_OUTCOME_COARSE` because that adapter collapses failure outcomes upstream — the receipt stays honest until the adapter does.
+- A strict generic pairing arm (`{aliases:[a,b]}`) beside the byte-preserved legacy Claude/Codex arm; deliveries UI gains independent from-provider/to-provider selectors; routed messages carry an additive `from-provider` attribute in the broker-owned envelope.
+- A release-owned provider support matrix (`support/provider-support-matrix.json`) records what each release was tested with; a test proves the running broker never imports it.
+- An offline ACP protocol-core conformance suite (framing, correlation, generation isolation, permission/cancel races, process-death phases, no-replay-after-uncertainty, reply bounds).
+
+### Removed
+
+- Online compatibility certification, in full: evidence tiers, boot compatibility probes, adapter certification APIs, version-gated quarantine providers, the Codex write-attestation probe and its capacity ledger, and the two-factor write gate. Runtime version and build strings are unverified metadata and never grant or withhold anything; authority is consent plus exact owned route identity; results are what the correlated operation proved. Net for this release: about 8,500 lines removed while two providers were added.
+- The bounded `claude --version` subprocess: an interop proof showed the version field was never load-bearing; version is now the attested launcher leaf or `unknown`.
+
+### Changed
+
+- Native persisted state is schema v2 with one role-neutral `consentEdges` table. Pre-v1.7 state fails ordinary strict parsing with a clear error and no in-binary migration — single-user installs re-pair once after upgrading (minutes; registration and pairing are two commands per route).
+- The Codex integration resolves and attests the exact managed `current` release (ownership, layout, architecture, endpoint generation) instead of consulting a version allowlist; exact-generation activation replaces certification at endpoint refresh.
+- The dashboard and site describe only observable truth: route staleness, connector health, last safe codes, consent edges, and the tested-with matrix.
+
 ## [1.6.1] - 2026-08-16
 
 ### Added
