@@ -1,0 +1,27 @@
+---
+id: emb-58
+title: Write-evidence ladder plumbing (49A): optional probes + derived writesCovered
+kind: normal
+size: 2
+status: draft
+release: v1.6
+updated: 2026-08-16
+---
+
+## Binding
+
+**Why**: the evidence ladder cannot record which authority its probes covered, so GATEWAY-ARCHITECTURE's own "writable only where the probes cover writes" clause has been dead text since v1.5. This is the plumbing that makes write evidence recordable — with zero writes performed and zero authority granted.
+
+**Promises:**
+1. The attestation probe set supports optional, present-only-on-pass probes (required ordered prefix + known optional names); `write_attestation` is registered as an optional Codex probe name. A v1.5 binary loads a v1.6 five-probe record unmodified (downgrade-safety test required — design law 2).
+2. `compatibilityCoversWrites()` derives write coverage from probes; `writesCovered` appears on the public compatibility snapshot only (never persisted as a field — the persisted key-set is closed).
+3. Dashboard: the schema_attested tier pill gains a writes-covered label variant (en + zh-CN); no new columns. `guidance.providerIncompatible` gains the writes-covered guard.
+4. Absent the optional probe, behavior is byte-identical to v1.5.
+
+**Budgets**: size 2; concepts: one user-facing ("write evidence" on the compat table). Tests: the promises, incl. the v1.5-loads-v1.6-state downgrade test.
+
+**Non-goals**: no probe implementation (emb-59); no authority change (emb-60); no allowlist changes.
+
+## Background
+
+Derived from emb-49's completion report §3/§9 (49A) — the probe-name design exists precisely because adding any persisted field or fourth tier is downgrade-fatal via the exact key-set validator (compatibility.ts:258+) and the closed tier union. Re-verify cited line numbers against HEAD.
