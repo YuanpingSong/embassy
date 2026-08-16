@@ -60,3 +60,28 @@ before spawning only `<absolute dsh> --version`; absent resolution returns befor
 detector never enumerates or opens the home, above all .credentials.yaml.
 
 Budget: size 3 stands with the corrected (smaller) promise set.
+
+## Certified-set ruling (2026-08-16, contest #14)
+
+**Ruling: option (A).** An explicitly empty certified set is permitted for OPTIONAL
+compatibility-only surfaces — it is the honest expression of "no build of this surface has ever
+been certified." Evaluation then falls through naturally (nothing certified, nothing same-major)
+to incompatible; today's prerelease reality surfaces as DEEPSEEK_HARNESS_VERSION_UNPARSEABLE
+(declared via emb-55's exhaustive switches, so the compiler enforces the new surface's codes).
+The nonempty rule is PRESERVED for required surfaces — Claude/Codex semantics byte-identical.
+Public reference fields (testedVersion/supportedMajor) become optional only for empty-set surfaces
+and render as unavailable — public snapshot only, nothing persisted, downgrade-safe.
+
+Option (B) REJECTED: a detected-but-non-attested second evidence shape is two kinds of truth about
+surfaces — more machinery and less honesty than teaching the one evidence shape to state "never
+certified."
+
+**Window expanded**: + src/gateway/types.ts, + src/gateway/dashboard-model.ts. SEAM NOTE: main's
+emb-59 lane also holds types.ts (safe-code list only); your hunks (snapshot reference fields) are
+disjoint — lanes make this a text merge, and landing order is PM-decided as always.
+
+**emb-57 unaffected**: it still owns whether prerelease can ever climb; empty-set-permitted plus
+honest quarantine is compatible with any answer it produces.
+
+**Budget**: size 3 stands; if the honest implementation exceeds 500, report the actual per the
+emb-59 ground-truth precedent — expected to fit.
