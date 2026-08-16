@@ -3,7 +3,7 @@ id: emb-69
 title: DeepSeek and Grok Build as routable ACP providers
 kind: normal
 size: 3
-status: draft
+status: dispatched
 release: v1.7
 updated: 2026-08-16
 ---
