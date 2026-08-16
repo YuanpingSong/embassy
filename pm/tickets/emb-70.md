@@ -3,7 +3,7 @@ id: emb-70
 title: De-ceremony 66A — runtime authority cutover, one seam owner
 kind: normal
 size: 5
-status: dispatched
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -86,3 +86,32 @@ admission authority = emb-70; version-metadata sourcing = emb-71 phase 2.
 Expansion budget by remainder-map rule: ≤+300 src / ≤+500 tests without
 another round-trip (≤3,500 / ≤6,500 hard); over that, map first. The
 Codex-side user authorization explicitly covers these version-gate removals.
+
+## Landed (2026-08-16)
+
+SLICE READY at f358d25 on base 82423f2 (= dev tip; clean rebase, zero overlap
+with intervening emb-67/71p1). Accounting verified TO THE DIGIT from the
+frozen diff: source +218/−2,850 = 3,068 (≤3,200); tests +571/−5,317 = 5,888
+(≤6,000); total 8,956 (≤9,200); NET −7,378. Four-part split checks out
+(8,162 deletions + 202 best-effort additions + 571 tests + 19 shim + 2
+TODO annotations = 8,956).
+
+PM review: (1) dead-authority grep on the result tree — zero live callers of
+any compatibility evaluator in providers/service/server/claude-peer/
+codex-app-server; survivors are inert shadows with named owners
+(compatibility.ts validators → emb-68, deepseek-detect observer → emb-69,
+dashboard tier copy → emb-72), and nothing produces compatibilityChecks.
+(2) KEEP-list survivals confirmed (peerProtocol, SENDER_NOT_PAIRED,
+pairRoutes, ownerLease, endpointGeneration, neutralization, ambiguity).
+(3) All 218 added source lines read: exact managed-installation attestation
+replaces the pin (fail-closed MANAGED_CODEX_INVALID /
+ENDPOINT_GENERATION_CHANGED, version = observed metadata or UNKNOWN);
+exact-generation activation latches on both providers fail closed on
+mismatch; refresh events validated as strict generation-transition proofs;
+Claude registry unsafety degrades provider-locally; store admission requires
+positively observed liveness, not version tier; ruling A applied exactly
+(syntax-only version metadata, peerProtocol:1 and identity/OS checks intact).
+PM gate: isolated worktree at f358d25, check 761 pass / 0 fail (count drop
+858→761 consistent with −97 net tests), soak 1/0 with every accepted message
+settled exactly once. Landed by fast-forward; the release's central promise
+is now code: version facts carry zero routing authority anywhere at runtime.
