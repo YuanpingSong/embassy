@@ -33,3 +33,27 @@ Grok tokens).
 **Budgets**: size 3. Sequenced after emb-68. No write-authority concept
 exists post-de-ceremony; routing a message to a provider starts a turn on it
 — that IS the product, founder-directed for both providers by name.
+
+## Pre-cut contest + three rulings (2026-08-16)
+
+Engineer verified the landed seams before writing anything and surfaced three
+real gaps; PM verified the machine before ruling and CORRECTED THIS TICKET:
+no deepseek-harness checkout exists locally (DSH_HOME unset, ~/.dsh absent) —
+the binding's "attested harness home locates the checkout" assumed an
+install; the primary acceptance behavior is therefore the honest DEGRADED
+path. DRILL DEPENDENCY (founder-side): the v1.7.0 DeepSeek live proof
+requires the founder to clone/install the harness and configure its own
+credentials; otherwise the release live-proves Grok only and DeepSeek's
+proof lands when installed. Grok's proof needs no install (registry npx pin).
+
+RULED: (1) registration lifecycle = config-declared acpProviders section,
+boot-registered PM-bound aliases (defaults dsh-main@this-mac,
+grok-main@this-mac), lazily-spawned child on first dispatch, one session per
+route, stale lifecycle + bounded backoff on death/absence; NO new
+control/CLI surface (pairing = emb-68's generic arm). (2) DSH_HOME (default
+~/.dsh) IS the harness checkout root; launch argv config-overridable,
+default ["pnpm","--dir",<home>,"run","demo:acp"] — emb-61's exact evidence,
+the stable public entry; internals not encoded. (3) file window approved as
+proposed + config.ts (+test); deepseek-detect.ts is a conversion (version
+machinery dies, attested-home resolver survives). E3 stands; contest-before-
+cut if the remainder map disagrees. Ledger: 13/13 (all three gaps real).
