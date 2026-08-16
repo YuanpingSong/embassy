@@ -3,7 +3,7 @@ id: emb-64
 title: Published no-write claims must survive the write probe (docs truth sweep)
 kind: docs
 size: 2
-status: review
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -84,3 +84,7 @@ survivor = DECLINED.md's approved still-true statement), copy sampled and read, 
 lane checks 773/773 (one disclosed flake of the known 1s timing test whose fix rides emb-59's
 unlanded lane — rerun green). 172/200, zero source lines, zero concepts. Committed locally on the
 drill-gated stack, adjacent to emb-59 per the ordering requirement.
+
+## Shipped in v1.6.0 (2026-08-16)
+
+Tagged on public main d22ddf0; pipeline-verified tarball published as agent-embassy@1.6.0 (npm trusted publishing, provenance). Docs truth sweep shipped; no published surface still promises 'never turn/start'.

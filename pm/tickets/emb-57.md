@@ -3,7 +3,7 @@ id: emb-57
 title: Version semantics: prerelease identifiers and 0.x majors
 kind: normal
 size: 2
-status: review
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -98,3 +98,7 @@ the stated strict-series cost); core diff read (bounded prerelease grammar with 
 rejection, series function as ruled, stable-only certified validator); gate 774/775 with the sole
 red being the known 1s timing flake (green 77/77 on proper focused rerun; its fix rides emb-59);
 194/200, concepts 0. Committed locally. This closes swe3's dispatched queue for both releases.
+
+## Shipped in v1.6.0 (2026-08-16)
+
+Tagged on public main d22ddf0; pipeline-verified tarball published as agent-embassy@1.6.0 (npm trusted publishing, provenance). Prerelease version grammar shipped; 0.x series treated per-minor, prerelease never writes-covered.

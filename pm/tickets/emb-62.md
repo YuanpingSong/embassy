@@ -3,7 +3,7 @@ id: emb-62
 title: Connector recovery re-arms the endpoint transition — no finite retry cliff
 kind: normal
 size: 3
-status: review
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -52,3 +52,7 @@ Slice accepted: PM full-diff read (36 src lines, all guards verified), authorita
 landed WAIT on promise 4 — the live drill — which is deliberately queued to release time, behind
 emb-59's handoff, so the daemon/Desktop restart it requires never again interrupts a working
 engineer. One drill validates the whole v1.6 fix stack.
+
+## Shipped in v1.6.0 (2026-08-16)
+
+Tagged on public main d22ddf0; pipeline-verified tarball published as agent-embassy@1.6.0 (npm trusted publishing, provenance). Drill proof: after a daemon restart the codex route re-anchored WITHOUT a broker restart, before ChatGPT Desktop reattached; the published-broker boot then re-anchored both codex routes unaided.
