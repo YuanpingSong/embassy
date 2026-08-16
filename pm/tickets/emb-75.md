@@ -161,3 +161,23 @@ manifest-scar class, second pre-gate. Ledger 16/16. v1.8 NOTE filed with the
 grant: consider deriving the runtime allowlist from the module graph at
 package time — a hand-list with three catches is a deletion-by-construction
 candidate.
+
+## Contest #17 (cap, post-R3-review) — GRANTED: ≤2,600
+
+Honest freeze at 2,450 (+2,272/−178, 29 files) after the independent R3
+review found five unpriced release-blocking consequences of
+mutex-externalization: (1) invoked write settling falsely
+cancelled/failed on shutdown/replacement → explicit in-flight uncertainty +
+no-replay tests; (2) clean-prewrite result overwriting a newer stale
+observation; (3) freshness reaching only status/live, static dashboard
+permanently healthy → publish at the exact age boundary, survive one publish
+failure; (4) lifecycle-timer one-throw death; (5) periodic Claude recovery
+doing RPC under the global mutex → split to prepare/perform/commit with
+rebind-race cleanup + finding-4's retained-queue wake. All five ENFORCE the
+D1/D2/D3 rulings. Doctor-split alternative declined (delays founder
+diagnostics for 600 lines). Cross-generation timer replacement confirmed
+ruled on the PM side (founder veto window offered, not exercised); a red
+test remains only if the engineer's own environment gates it. Projected
+finish ≤2,500. Ledger 17/17. Review-findings-break-maps noted for retro:
+maps price the known; R3 reviews exist to find the unknown — cap contests
+after review are expected, not failures.
