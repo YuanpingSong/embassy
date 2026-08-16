@@ -3,7 +3,7 @@ id: emb-72
 title: De-ceremony 66C+66D — presentation and docs truth sweep
 kind: docs
 size: 5
-status: draft
+status: dispatched
 release: v1.7
 updated: 2026-08-16
 ---
