@@ -25,3 +25,22 @@ updated: 2026-08-16
 ## Background (hypotheses — re-verify)
 
 From the emb-54 investigation (report in that ticket): `compatibilitySurfaces` (compatibility.ts:3) is already separate from `gatewayProviders` (types.ts:12) — that separation is the seam. ~150 provider-discriminating branches exist; most fall through safely for non-routing surfaces but are not compiler-checked (see report's hidden-cost warning: hand-written literal annotations at service.ts:2068/2076/2083).
+## Window contest and ruling (2026-08-16)
+
+**Contest**: no explicit scope contract in the ticket (correct — a drafting gap from the v1.7
+re-queue; the engineer rightly refused to infer authority). Plus one discovered seam: the public
+snapshot caps compatibilityChecks at 2, so a third surface would be silently omitted — truncation
+rendering as absence.
+
+**Ruling 1 — window APPROVED as requested** (13 files): compatibility.ts, service.ts, types.ts
+(compatibilityChecks capacity only), dashboard-model.ts, dashboard.ts, dashboard-copy.ts/.en/.zh-CN,
+live-dashboard-app/tab-diagnostics.tsx, and the four named test files. The internal/test surface
+override stays test-scoped — no production optional surface is declared until emb-56.
+
+**Ruling 2 — the capacity fix belongs in emb-55**, not emb-56: this ticket's Why is "the gate for
+every future provider," and a snapshot that silently drops the third surface is the same closed-
+arity bug as the boot check. Bound it honestly: capacity derives from the declared surface set
+(required + optional), never a new magic number; the existing truncation counter keeps telling the
+truth. Public-snapshot only — nothing persisted changes (downgrade-safe per the emb-49 analysis).
+
+Budget unchanged: size 3, <=500. Promises unchanged plus the capacity clause above.
