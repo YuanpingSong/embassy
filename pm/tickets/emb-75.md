@@ -2,8 +2,8 @@
 id: emb-75
 title: v1.7.1 — the orphaned-Desktop case goes from documented to handled
 kind: bug
-size: 3
-status: draft
+size: 5
+status: dispatched
 release: v1.7.1
 updated: 2026-08-16
 ---
@@ -37,7 +37,7 @@ orphan-detected — weighing the it-kills-user-windows cost; also record the
 lazy-attach observation (attach may complete when a Codex task view opens,
 not at app launch) and verify it, since it changes the guidance text.
 
-**Budgets**: size 3. Remainder map before cutting per standing rule.
+**Budgets**: size 5 (repriced from 3 — four findings became four deliverables). Remainder map before cutting per standing rule.
 
 ## Finding 2 (same evening): split-brain server state blocks registration for ALL tasks
 

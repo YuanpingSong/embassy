@@ -3,7 +3,7 @@ id: emb-73
 title: v1.8 — first-principles core rebuild to a 20k-line budget
 kind: design
 size: 8
-status: draft
+status: dispatched
 release: v1.8
 updated: 2026-08-16
 ---
