@@ -118,3 +118,22 @@ the cheapest visible model supporting minimal. (3) The pin is FOUNDER-NAMED: any
 founder's call, queued with the diagnostic data. (4) emb-60 stays gated on a live PASSING probe —
 unchanged. SLICE READY proceeds after the diagnostic; the fork trial runs on the frozen diff
 regardless (taste review needs no live pin).
+
+## Catalog diagnostic result + rebase ruling (2026-08-16)
+
+**Diagnostic (one model/list read, nothing spawned)**: gpt-5.6-luna present, not hidden, lacks
+`minimal`; NO visible model advertises minimal (8 models, no more pages); no price evidence exists.
+**FOUNDER DECISION QUEUED**: the pin's effort half cannot be satisfied as named. PM recommendation:
+redefine CODEX_PROBE_EFFORT as "the lowest effort the pinned model actually advertises" (canonical
+enum order none<minimal<low<medium<...), keeping the founder's lowest-spend intent without a new
+founder decision per Codex release; verified via model/rerouted + settings echo as designed.
+Alternative: retain zero-spend fail-safe until minimal ships. Implementation pin unchanged pending
+the founder's word.
+
+**Rebase ruling**: rebase in the lane and repeat the authoritative pair on the new tip — the
+emb-55 landing touches runAutomaticCompatibilityProbesLocked, the same function this slice changes;
+that seam is the author's to resolve, not the PM cherry-pick's. The 808/808 + soak on 3d574ce stand
+as pre-rebase evidence; the handoff claim is "this diff, on this base, passes."
+
+**Reviews launched in parallel on the frozen 9ad0398 diff** (fork trial: taste half; fresh opus:
+adversarial half); any rebase-delta gets a bounded re-look at landing.
