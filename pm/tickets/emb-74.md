@@ -56,3 +56,28 @@ yes — matches turn-based PM rhythm).
 
 **Budgets**: size 8 (design). Implementation priced from the design's
 remainder maps.
+
+## Founder ratification + budgets (2026-08-16)
+
+Plan APPROVED with line budgets and an anti-over-engineering directive:
+- Pillar 1 (SSH federation): ~500 source lines core, soft cap — exceed only
+  with real need; "consider what's the simplest approach that accomplishes
+  the goal"; SSH itself is not built, only (a) how SSH node configs are
+  stored and (b) a deliberately simple peer protocol. The 5,000-line version
+  of this feature is explicitly unwanted.
+- Pillar 2 (universal peer ingress / Cursor PM): 300–500 source lines.
+
+PM realism assessment, on the record: both budgets are achievable with two
+stated conditions. (1) They assume the post-v1.8 core — on today's core,
+every new concept pays a god-module tax; on the rebuilt core the peer-stdio
+transport reuses the ACP client's framing discipline (562-line precedent,
+and this protocol is SIMPLER: we control both ends — no capability zoo, no
+permission proxying). (2) The budgets count CORE logic: tests are budgeted
+separately (conformance suites will exceed the source, as they should), and
+single-pane dashboard aggregation counts in the UI bucket, not core. The
+design trick that keeps Pillar 1 at ~500: cross-host delivery RIDES the
+existing delivery machine and receipt states — federation adds a binding
+kind and a transport, never a second delivery system.
+
+MANDATE: founder directs execution through the full v1.9 release
+(v1.7 → v1.8 → v1.9), budgets as above.
