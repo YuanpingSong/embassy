@@ -29,8 +29,10 @@ attempt the operation, degrade gracefully, settle receipts with honest
 terminal codes, never refuse to boot over version drift; (3) defines the
 offline compatibility process — what CI/release must exercise per supported
 harness so "supported" is a tested claim, not a runtime gate; (4) prices the
-removal, including persisted-state migration under the migrate-forward-once /
-deferred-taint design and the unified route table (emb-61 Q4).
+removal. Per the founder's migration addendum on emb-61: the unified route
+table is v1.7's NATIVE state format — no in-binary forward migration, no
+reverse/prune command; our own state database is migrated once by hand at
+upgrade; unparseable state gets the normal strict-parse honest error.
 
 **Explicit consequence, ruled**: this unwinds machinery shipped in v1.6.0 and
 v1.6.1 (emb-58 plumbing, emb-59 probe, emb-60 gate). The founder granted the
