@@ -74,3 +74,8 @@ route-staleness lifecycle — the incident CLASS, not the incident.
 
 emb-75 remains the deliberately small v1.7.1 interim (guidance regression
 fix + orphan detector) so diagnostics are truthful until this lands.
+
+**Founder ratification (2026-08-16 evening)**: root cause confirmed — "let's
+land this in v1.8 on top of the broader simplification work." The stateless
+Codex transport is bound as v1.8's first implementation slice; the design
+phase must produce it first and the rest of the rebuild composes around it.
