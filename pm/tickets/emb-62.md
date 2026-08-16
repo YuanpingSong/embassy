@@ -34,3 +34,13 @@ restarts" headline claim.**
 ## Dispatch note (2026-08-16)
 
 Dispatched to swe3 ahead of the v1.7 queue: v1.6 headline blocker, same subsystem as emb-52 (warm context). Scope contract: src/gateway/providers.ts, src/gateway/service.ts, test/**; the emb-52 live drill is the acceptance test and the PM runs it at landing.
+
+## Concurrent-seam partition (2026-08-16, PM-brokered)
+
+main (emb-59) reserves: codex-app-server.ts entirely; in providers.ts only imports/constants for
+the write-probe result, LocalCodexGatewayProvider compatibility-probe state,
+runCompatibilityProbes/runCompatibilityProbesFor, and an owned-cwd helper adjacent; in service.ts
+only the GatewayProviderAdapter compatibility-probe interface/context and
+runAutomaticCompatibilityProbesLocked. swe3 (emb-62) owns: route recovery, endpoint-transition,
+dispatch, and delivery-settlement neighborhoods. Neither enters the other's symbols; any collision
+stops and contests through the PM. Landing order decided by the PM at handoff time.
