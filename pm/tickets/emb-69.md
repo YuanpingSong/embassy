@@ -57,3 +57,13 @@ the stable public entry; internals not encoded. (3) file window approved as
 proposed + config.ts (+test); deepseek-detect.ts is a conversion (version
 machinery dies, attested-home resolver survives). E3 stands; contest-before-
 cut if the remainder map disagrees. Ledger: 13/13 (all three gaps real).
+
+## Contest #14 (budget, pre-edit) — GRANTED
+
+Remainder map before first edit: the Ruling 3 detector conversion mandates
+~250 lines of delete/replace (obsolete version observer + its three tests)
+that the E3/500 figure never priced; smallest production shape ~230–280
+added source + ~180–230 added tests. Ceiling revised to ≤800 changed lines
+total (adds+deletes), behavior level and window unchanged, actual counts at
+freeze. Cap-from-remainder-map rule working as designed on its third use.
+Ledger: 14/14.
