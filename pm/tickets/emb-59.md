@@ -531,3 +531,13 @@ only (F2/F5/F6 shapes).
 2. **Cardinality interpretation RATIFIED by founder** ("Our second ruling is also ratified"):
    the shipped bound stands — one attempt per (version, endpointGeneration) per broker process,
    every probe archived and cleanup-confirmed, observed counts reported.
+
+## Correction-bundle budget ruling (2026-08-16)
+
+The ≤1,050 cap predates the paired review's nine ruled corrections; the +154 delta is itemized as
+exactly those rulings (settings correlation + evidence, validated-ID-only cleanup, failure-side
+token evidence, connection-loss wakeup, boot-scoped probing, dedicated attested probe parent,
+errno/trust split). **Cap revised to ≤1,110 post-diet** on the standing ground-truth precedent; no
+ruled finding yields — each closes a reproduced-or-traced defect. Exact final actuals in the
+replacement SLICE READY; the refusal to compress away assertions or disguise overage is the
+required posture, as before.
