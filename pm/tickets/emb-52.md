@@ -3,7 +3,7 @@ id: emb-52
 title: Runtime re-anchor must outlive the endpoint transition
 kind: normal
 size: 5
-status: building
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -178,3 +178,45 @@ Independent gate: PASS (758/758, isolated worktree). Review verdict adopted — 
 - **F4 (accepted as intended, document-only)**: the stale-route requeue widening is truthful and
   fail-closed; document in the completion report and release notes — no code change.
 Budget: corrections expected within the existing E5; contest if not. Window unchanged.
+
+## Bounded follow-up review verdict + landing authorization (2026-08-16)
+
+**F1 CLOSED, F2 CLOSED** — reviewer traced both fixes against the original repro recipes with
+ablation proofs (commenting each fix out reproduces its exact failure signature; restoring passes),
+verified the migrated binding key is byte-identical to the one rememberBinding installs, re-audited
+all six publication-state sites (including the close()-entry site the prior round found missing),
+and ran an instrumented desync probe: 229/229, zero hits, instrumentation removed, md5s re-verified.
+Two contained degradations on the F2 gate examined and bounded (recovery channel survives via the
+original callback-armed retry; stale-handle reanchor fails closed while recovery recreates). Gate v2:
+759/759 isolated.
+
+**Backlog (filed, not blocking)**: (1) pre-existing F1-shaped residual on the requiredRoute-alias
+path (provider-omitted-but-recreated handles never key-migrate) — follow-up ticket next release;
+(2) new provider test at :4549 is timing-marginal (1000ms recovery vs 1000ms waitFor default) —
+one-line widen, immediate follow-up if release CI flakes; (3) comment drift at providers.ts:3225;
+(4) derive→record hardening for the publication flag; (5) F5-body stickiness (out of scope, known).
+
+**Landing authorized**: live drill next (broker on the v2 build, daemon kill+restart under the live
+pair); public main receives the code only after the drill passes.
+
+## Completion + live drill verdict (2026-08-16) — LANDED with honest scoping
+
+Landed on public main @ 426f3de (dev af13960). Mechanisms proven: two adversarial review rounds
+(F1/F2 closed with ablation proofs), isolated gate 759/759, shared 760/760, soak 1/1.
+
+**Live drill verdict: the headline scenario is NOT yet live-proven.** The drill (daemon restart
+under a live pair, broker on this build) discovered two environmental truths and one spec gap:
+1. **ChatGPT Desktop attaches to the daemon only at launch** — a daemon restart orphans it silently
+   (lsof: the new daemon's only socket holder was itself). No broker code can re-anchor to threads
+   the daemon isn't serving. Release notes MUST document the reattach precondition.
+2. **Re-anchor requires the threads to be LOADED daemon-side**; after a forced Desktop relaunch the
+   engineer threads stayed unloaded, and even a fresh broker boot correctly (honestly, fail-closed,
+   stale-with-reason) refused to re-anchor to absent peers.
+3. **The F5 retry envelope is a real-world blocker**: recovery is a finite retry burst; a reattach
+   slower than the envelope lands in the known sticky wedge. The review flagged it; the PM ruled it
+   out of scope; the drill proved that ruling wrong for the headline promise. Filed as emb-62
+   (blocks the "survives restarts" release claim). Surface-truth companion filed as emb-63.
+
+Ticket promises 1-3 are test-and-ablation proven within the retry envelope; promise 4 (truthful
+surfaces) was validated LIVE (stale-with-reason, alerts emitted, health honest). The release call —
+ship v1.6 with a scoped headline vs hold for emb-62 — is the founder's, queued for morning.
