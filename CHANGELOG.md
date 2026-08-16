@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.6.1] - 2026-08-16
+
+### Added
+
+- A stable, schema-attested Codex App Server whose write attestation passed may now hold writable routes, under a two-factor gate: durable write-covered attestation evidence AND a current-generation, process-local write-attestation pass. Neither factor alone enables writes — a recorded pass from an earlier daemon generation cannot authorize the current one — and prerelease versions remain fenced regardless of evidence.
+- Write-probe capacity exhaustion now reports the honest `CODEX_WRITE_PROBE_CAPACITY_EXHAUSTED` instead of a thread-setup failure. Only attempts that could have spent tokens occupy the fixed per-process bound; the two provably zero-spend declines (model pin unavailable, rate limit constrained) release their slot into one retryable decline slot so a transient constraint does not burn permanent capacity.
+
+### Changed
+
+- A monitor-only Codex provider now refuses route selection up front (`CODEX_PROVIDER_UNAVAILABLE`) instead of accepting a route whose every dispatch would fail; no transport is spawned for observation-only providers.
+
 ## [1.6.0] - 2026-08-16
 
 ### Fixed
