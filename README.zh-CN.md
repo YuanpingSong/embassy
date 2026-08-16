@@ -34,6 +34,8 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。请在普通终端中运行守护进程命令，切勿在代理会话内运行：Codex 任务会继承守护进程的环境，因此在 Claude Code 会话内启动的守护进程会把该会话的身份泄漏到每个任务中，注册将以 `CALLER_IDENTITY_CONFLICT` 关闭失败——请在普通终端执行 `codex app-server daemon restart` 修复。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
 
+Desktop 仅在启动时附着到托管独立 App Server。如果 Desktop 已打开时守护进程重启，单纯等待不会让该应用进程重新连接：请完全退出 Desktop，重新运行 `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`，再打开该确切任务。
+
 提供方兼容性无需操作员执行额外步骤。`embassy serve` 会验证解析到的安装边界，并对两种提供方应用同一套证据阶梯：同主版本且在已认证清单中的构建可写；同主版本但不在本发布版已测清单中的构建，在全部有界实时结构探测通过后显示为 `schema_attested`，但只有探测覆盖写入路径时才可写。Claude 探测覆盖原生写入路径。Codex 的有界写入前读取可能包括 `initialize`、`thread/loaded/list` 与注册时的 `thread/resume`，但绝不包括 `turn/start`；因此未测试的 Codex 0.x 在认证写入结构出现前保持仅监控。探测失败、主版本不同或版本证据无法建立安全主版本时，只有该提供方保持降级、仅监控并禁止写入，代理、控制面/仪表盘和另一提供方继续运行。探测绝不能跨主版本或未知主版本提升权限。主版本不同的告警会列出已观测/已测版本和支持主版本，并说明必须使用支持已观测主版本的 Embassy 发布版。只有 Embassy 自有或执行的构件及其回调、控制与状态路径出现不安全 OS 证据时才会拒绝代理启动；Claude 外部会话注册表根目录的 UID 或模式不安全时，只隔离 Claude。对等协议不是 1 的 Claude 会话记录会单独被拒绝并计数。
 
 > **已知限制：** 仅当 Desktop 使用托管独立 App Server 时，Embassy 才能访问 Codex 任务。在该模式下，任务目前无法连接 Desktop 内置的应用内浏览器（`@Browser` 可加载但无法附着）。将 Desktop 切换回其默认的私有 App Server 会立即恢复内置浏览器——但会使这些任务对 Embassy 不可达。目前未发现其他能力回退，但这并非穷尽的能力对比测试。

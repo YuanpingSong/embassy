@@ -107,6 +107,11 @@ export const dashboardCopyEn = {
     "The registered Codex task no longer has a ready App Server connection.",
   "guidance.codexStale.action":
     "Re-run register-codex with the same alias inside that exact Codex task. Do not unregister first.",
+  "guidance.codexAppReconnectRequired.title": "Waiting for the Codex app",
+  "guidance.codexAppReconnectRequired.body":
+    "The managed App Server is reachable, but this saved task is still not observable; the app or task may not have reconnected.",
+  "guidance.codexAppReconnectRequired.action":
+    "Open the Codex app and this exact task. If the app was already open when the daemon restarted, relaunch it with /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT. Do not resend queued mail.",
   "guidance.connectorOffline.title": "A provider connector is offline",
   "guidance.connectorOffline.body":
     "Embassy cannot currently reach the local provider connector.",

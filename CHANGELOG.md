@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Stale Codex guidance now distinguishes the automatic endpoint transition from a Desktop app or task that has not reconnected after the recovery burst, and gives the exact managed-daemon relaunch command. The quickstart documents Desktop's attach-at-launch precondition.
+
 ## [1.5.0] - 2026-08-11
 
 ### Changed
