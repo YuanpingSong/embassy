@@ -26,6 +26,7 @@ import {
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import {
   certifiedCompatibilityVersions,
+  compatibilityCoversWrites,
   compatibilityProbeNames,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
@@ -2910,6 +2911,25 @@ function validateCodexFactory(
   }
 }
 
+function codexFactoryWritesEnabled(
+  factory: LocalCodexTransportFactory,
+  attestation: CompatibilityAttestation,
+  writeProbePassed = false,
+): boolean {
+  return (
+    (attestation.tier === "certified" &&
+      CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
+        attestation.version as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
+      ) &&
+      factory.writableReady &&
+      factory.writeCompatibility !== null) ||
+    (!factory.writableReady &&
+      factory.writeCompatibility === null &&
+      writeProbePassed &&
+      compatibilityCoversWrites(attestation))
+  );
+}
+
 function codexRouteState(
   observation: CodexConnectorObservation,
 ): GatewayAdapterRouteObservationState {
@@ -2990,6 +3010,12 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     string,
     Promise<CodexWriteCompatibilityProbeResult>
   >();
+  private writeProbeDecline:
+    | Readonly<{
+        endpointGeneration: string;
+        observation: GatewayWriteCompatibilityProbeObservation;
+      }>
+    | undefined;
   private writeProbeOverflow:
     | Readonly<{
         endpointGeneration: string;
@@ -3014,9 +3040,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.factory = options.factory;
     this.refreshFactory = options.refreshFactory;
     exactLocalHost(options.factory.hostId);
-    this.compatibilityAttested = CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
-      options.factory.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
-    );
+    this.compatibilityAttested =
+      options.factory.writableReady &&
+      options.factory.writeCompatibility !== null;
     this.maxCallbacks = positiveBounded(
       options.maxCallbackEvents,
       MAX_CODEX_CALLBACKS,
@@ -3123,19 +3149,19 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         attestation.safeErrorCode ?? "CODEX_COMPATIBILITY_CHECK_FAILED";
       return;
     }
-    const writableCertified =
-      attestation.tier === "certified" &&
-      CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
-        attestation.version as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
-      ) &&
-      this.factory.writableReady &&
-      this.factory.writeCompatibility !== null;
+    const writesEnabled = codexFactoryWritesEnabled(
+      this.factory,
+      attestation,
+      this.latestWriteCompatibilityProbeObservation(
+        this.factory.endpointGeneration,
+      )?.outcome === "pass",
+    );
     const schemaObserved =
       attestation.tier === "schema_attested" &&
       !this.factory.writableReady &&
       this.factory.writeCompatibility === null;
     if (
-      (!writableCertified && !schemaObserved) ||
+      (!writesEnabled && !schemaObserved) ||
       (this.endpointUnavailable && pending === undefined) ||
       !pendingMatches
     ) {
@@ -3148,8 +3174,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.pendingEndpointRefreshEvent = undefined;
     this.pendingEndpointRefreshSelectorClaimed = false;
     this.clearEndpointActivationRetry();
-    this.compatibilityAttested = writableCertified;
-    this.endpointUnavailable = !writableCertified;
+    this.compatibilityAttested = writesEnabled;
+    this.endpointUnavailable = !writesEnabled;
     this.compatibilityFailureCode = undefined;
   }
 
@@ -3184,6 +3210,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       this.writeProbeObservationsByGeneration.get(endpointGeneration) ??
       (this.writeProbeOverflow?.endpointGeneration === endpointGeneration
         ? this.writeProbeOverflow.observation
+        : undefined) ??
+      (this.writeProbeDecline?.endpointGeneration === endpointGeneration
+        ? this.writeProbeDecline.observation
         : undefined)
     );
   }
@@ -3306,11 +3335,14 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const cached = this.writeProbeResults.get(key);
     if (cached !== undefined) return await cached;
     if (this.writeProbeOverflow?.key === key) {
-      return this.writeProbeOverflow.observation;
+      if (this.writeProbeResults.size >= MAX_CODEX_WRITE_PROBE_ATTEMPTS) {
+        return this.writeProbeOverflow.observation;
+      }
+      this.writeProbeOverflow = undefined;
     }
     if (this.writeProbeResults.size >= MAX_CODEX_WRITE_PROBE_ATTEMPTS) {
       const observation = Object.freeze(
-        codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED"),
+        codexWriteProbeFailure("CODEX_WRITE_PROBE_CAPACITY_EXHAUSTED"),
       );
       this.writeProbeOverflow = Object.freeze({
         endpointGeneration: factory.endpointGeneration,
@@ -3332,10 +3364,24 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       context,
     ).then((result) => {
       const observation = Object.freeze({ ...result });
-      this.writeProbeObservationsByGeneration.set(
-        factory.endpointGeneration,
-        observation,
-      );
+      if (
+        observation.outcome === "fail" &&
+        (observation.safeErrorCode ===
+          "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE" ||
+          observation.safeErrorCode ===
+            "CODEX_WRITE_PROBE_RATE_LIMIT_CONSTRAINED")
+      ) {
+        this.writeProbeResults.delete(key);
+        this.writeProbeDecline = Object.freeze({
+          endpointGeneration: factory.endpointGeneration,
+          observation,
+        });
+      } else {
+        this.writeProbeObservationsByGeneration.set(
+          factory.endpointGeneration,
+          observation,
+        );
+      }
       if (observation.outcome === "fail" && this.callbacks !== undefined) {
         invokeCallback(() =>
           this.callbacks?.onProtocolNotice?.({
@@ -3502,7 +3548,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         safeErrorCode: this.compatibilityFailureCode,
       };
     }
-    return this.factory.writeCompatibility === null
+    return !this.compatibilityAttested
       ? {
           health: "degraded",
           compatibility: "compatible",
@@ -3760,12 +3806,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     ) {
       return { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" };
     }
-    if (
-      !this.factory.writableReady ||
-      this.factory.writeCompatibility === null
-    ) {
-      return { state: "failed", safeErrorCode: "CODEX_WRITES_DISABLED" };
-    }
     const guard = route.connector.guard();
     if (!guard.writableReady) {
       return { state: "failed", safeErrorCode: "CODEX_WRITES_DISABLED" };
@@ -4012,6 +4052,15 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         threadId,
         admittedFactory,
         queueInitialObservation,
+        this.pendingEndpointAttestation === undefined
+          ? this.compatibilityAttested
+          : codexFactoryWritesEnabled(
+              admittedFactory,
+              this.pendingEndpointAttestation,
+              this.latestWriteCompatibilityProbeObservation(
+                admittedFactory.endpointGeneration,
+              )?.outcome === "pass",
+            ),
       );
       if (this.closing || this.closed) {
         await this.closeRoute(route);
@@ -4049,14 +4098,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     threadId: string,
     factory: LocalCodexTransportFactory,
     queueInitialObservation: boolean,
+    writesEnabled: boolean,
   ): Promise<CodexRoute> {
     let transport: LocalCodexOwnedTransport | undefined;
     let connector: CodexAppServerConnector | undefined;
     const generation = Symbol(threadId);
     try {
       transport = await factory.connectTransport();
-      const writesEnabled =
-        factory.writableReady && factory.writeCompatibility !== null;
       connector = await CodexAppServerConnector.connect({
         compatibility:
           factory.writeCompatibility ?? factory.schemaCompatibility,
@@ -4403,6 +4451,13 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
             routeHandle,
             replacementFactory,
             false,
+            codexFactoryWritesEnabled(
+              replacementFactory,
+              attestation,
+              this.latestWriteCompatibilityProbeObservation(
+                replacementFactory.endpointGeneration,
+              )?.outcome === "pass",
+            ),
           );
           if (this.closing || this.closed) {
             await this.closeRoute(route);

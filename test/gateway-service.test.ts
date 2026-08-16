@@ -1604,6 +1604,7 @@ test("a compatibility-only observer attests without entering provider state", as
 });
 
 const writeProbeFailureCodes = [
+  "CODEX_WRITE_PROBE_CAPACITY_EXHAUSTED",
   "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE",
   "CODEX_WRITE_PROBE_MODEL_REROUTED",
   "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
@@ -1705,7 +1706,7 @@ test("write-probe failures stay Codex-local, alert exactly, and persist no optio
   }
 });
 
-test("passing write evidence is derived and persisted without unlocking schema-attested Codex", async () => {
+test("passing write evidence unlocks stable schema-attested Codex within its tier", async () => {
   const current = await fixture();
   const claude = new FakeProvider("claude");
   const codex = new FakeProvider("codex");
@@ -1761,6 +1762,15 @@ test("passing write evidence is derived and persisted without unlocking schema-a
       codex.identity.endpointGeneration,
     ]);
     assert.equal(codex.compatibilityProbeContexts.length, 1);
+    assert.deepEqual(
+      await service.handlers().registerCodex(codexRegistration()),
+      { accepted: true, code: "ok" },
+    );
+    assert.equal(
+      (await service.store.inspectPrivateRoute("codex-main@this-mac"))
+        ?.binding.endpointGeneration,
+      codex.identity.endpointGeneration,
+    );
   } finally {
     await service.close().catch(() => undefined);
     await rm(current.root, { recursive: true, force: true });
@@ -3916,7 +3926,7 @@ test("a real Codex provider reanchors runtime routes and drains mail after endpo
   assert.equal(persisted.codexEndpointRefreshEvents.length, 1);
 });
 
-test("a schema-attested Codex endpoint refresh stays monitor-only without a durable G2 reanchor", async (t) => {
+test("a write-covered row without a current-generation pass cannot reanchor Codex", async (t) => {
   const { root, stateDir } = await fixture();
   const beforeGeneration = "codex_schema_refresh_g1";
   const observedGeneration = "codex_schema_refresh_g2";
@@ -3942,7 +3952,16 @@ test("a schema-attested Codex endpoint refresh stays monitor-only without a dura
     outcome: "compatible",
     previous,
     current: { ...codex.identity },
-    attestation: schemaAttestedCodexAttestation(codex.protocolVersion),
+    attestation: {
+      ...schemaAttestedCodexAttestation(codex.protocolVersion),
+      probes: [
+        ...compatibilityProbeNames.codex.map((name) => ({
+          name,
+          outcome: "pass" as const,
+        })),
+        { name: "write_attestation", outcome: "pass" },
+      ],
+    },
     routes: [{ routeHandle: THREAD_ID, state: "idle" }],
   });
 

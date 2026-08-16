@@ -72,7 +72,7 @@ export type CodexEndpointCompatibilityAttestation = {
   appServerVersion: string;
   endpointGeneration: string;
   protocol: "app-server-v2-stable";
-  /** Internal marker for a read-only replacement probe; it never enables writes. */
+  /** Schema candidate; only separately attested write coverage may enable writes. */
   observedSchemaCandidate?: true;
   steering: {
     method: "turn/steer";
@@ -178,6 +178,7 @@ export type CodexConnectorErrorCode =
   | "PROTOCOL_ERROR";
 
 export type CodexWriteCompatibilityProbeErrorCode =
+  | "CODEX_WRITE_PROBE_CAPACITY_EXHAUSTED"
   | "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE"
   | "CODEX_WRITE_PROBE_MODEL_REROUTED"
   | "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED"
@@ -873,8 +874,12 @@ export class CodexAppServerConnector {
     }
     if (
       options.writesEnabled &&
-      !CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
-        options.compatibility.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
+      !(
+        CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
+          options.compatibility.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
+        ) ||
+        (options.compatibility.observedSchemaCandidate === true &&
+          !options.compatibility.appServerVersion.includes("-"))
       )
     ) {
       throw new CodexConnectorError("INVALID_CONFIGURATION");
