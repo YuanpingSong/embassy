@@ -133,7 +133,7 @@ function signalHarness(): {
   };
 }
 
-test("foreground assembly ignores hostile optional detection without inventing provider state", async () => {
+test("foreground assembly keeps an unavailable optional ACP provider local", async () => {
   const stateDir = "/synthetic/controller-state";
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
@@ -156,6 +156,7 @@ test("foreground assembly ignores hostile optional detection without inventing p
   let claudeOptions: unknown;
   let codexFactoryOptions: Record<string, unknown> | undefined;
   let codexProviderOptions: Record<string, unknown> | undefined;
+  const acpProviderOptions: Record<string, unknown>[] = [];
   let serviceOptions: Record<string, unknown> | undefined;
 
   await runGatewayServer(
@@ -211,11 +212,16 @@ test("foreground assembly ignores hostile optional detection without inventing p
         codexProviderOptions = options as unknown as Record<string, unknown>;
         return provider(() => events.push("close-codex"));
       },
-      detectDeepSeekSurface: async (options) => {
+      resolveDeepSeekAcpLaunch: async (options) => {
         assert.equal(options.loginHome, SYNTHETIC_HOME);
         assert.equal(options.env, env);
-        events.push("detect-deepseek");
+        events.push("resolve-deepseek");
         throw Object.assign(new Error("hostile PATH entry"), { code: "EACCES" });
+      },
+      createAcpProvider: (options) => {
+        events.push(`create-${options.provider}`);
+        acpProviderOptions.push(options as unknown as Record<string, unknown>);
+        return provider(() => undefined);
       },
       createService: (options) => {
         serviceOptions = options as unknown as Record<string, unknown>;
@@ -253,9 +259,31 @@ test("foreground assembly ignores hostile optional detection without inventing p
   assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
-    2,
+    4,
   );
-  assert.equal(serviceOptions?.compatibilityObservers, undefined);
+  assert.deepEqual(
+    acpProviderOptions.map(({ provider, alias, launch, unavailableCode }) => ({
+      provider, alias, launch, unavailableCode,
+    })),
+    [
+      {
+        provider: "deepseek",
+        alias: "dsh-main@this-mac",
+        launch: undefined,
+        unavailableCode: "DEEPSEEK_HARNESS_HOME_UNSAFE",
+      },
+      {
+        provider: "grok",
+        alias: "grok-main@this-mac",
+        launch: {
+          kind: "npx",
+          package: "@xai-official/grok@1.0.5",
+          args: ["agent", "stdio"],
+        },
+        unavailableCode: undefined,
+      },
+    ],
+  );
   assert.doesNotMatch(
     renderDashboardHtml(dashboardFixture(), { locale: "en" }),
     /Not detected|Compatibility checks/u,
@@ -276,7 +304,9 @@ test("foreground assembly ignores hostile optional detection without inventing p
     "create-store",
     "create-codex-factory",
     "create-codex",
-    "detect-deepseek",
+    "resolve-deepseek",
+    "create-deepseek",
+    "create-grok",
     "start-service",
     "ready",
     "close-service",

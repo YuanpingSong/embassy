@@ -10,6 +10,7 @@ import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
   PROGRESS_WATCH_HARD_CAPACITY,
 } from "./progress-watch-machine.js";
+import type { AcpLaunchSpec } from "./acp-client.js";
 
 export const gatewayDeliveryNoticeModes = [
   "merged",
@@ -19,6 +20,13 @@ export const gatewayDeliveryNoticeModes = [
 
 export type GatewayDeliveryNoticeMode =
   (typeof gatewayDeliveryNoticeModes)[number];
+
+export type GatewayAcpProviderConfig = Readonly<{
+  provider: "deepseek" | "grok";
+  alias: string;
+  /** Test/operator injection; omitted entries use the reviewed provider default. */
+  launch?: AcpLaunchSpec;
+}>;
 
 export type GatewayConfig = {
   stateDir: string;
@@ -34,6 +42,8 @@ export type GatewayConfig = {
   stallNoticeMs: number;
   /** Native Claude sender notice policy; omitted injected configs mean merged. */
   deliveryNotices?: GatewayDeliveryNoticeMode;
+  /** Embassy-owned ACP routes exist at boot and spawn only on first dispatch. */
+  acpProviders?: readonly GatewayAcpProviderConfig[];
   limits: GatewayStoreLimits;
 };
 
@@ -302,6 +312,10 @@ export function loadGatewayConfig(
     inboundMode: "paired",
     stallNoticeMs,
     deliveryNotices: deliveryNoticeMode(env.EMBASSY_DELIVERY_NOTICES),
+    acpProviders: Object.freeze([
+      { provider: "deepseek", alias: "dsh-main@this-mac" },
+      { provider: "grok", alias: "grok-main@this-mac" },
+    ]),
     limits,
   };
 }

@@ -60,6 +60,7 @@ import {
 import {
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
+  gatewayRegistrationIngressPrefixes,
   arePublicAvailablePeerSnapshots,
   directionId, parseDirection,
   projectGatewayPublicSnapshot,
@@ -255,6 +256,12 @@ export type GatewayAdapterCallbacks = {
 export type GatewayAdapterStart = {
   health: "healthy" | "degraded";
   safeErrorCode?: string;
+  /** One config-declared, Embassy-owned route observed without spawning. */
+  ownedRoute?: Readonly<{
+    alias: string;
+    routeHandle: string;
+    state: GatewayAdapterRouteState;
+  }>;
 };
 
 export type GatewayAdapterDispatchResult =
@@ -263,7 +270,7 @@ export type GatewayAdapterDispatchResult =
   | { state: "accepted" }
   | { state: "deferred"; safeErrorCode?: string }
   | {
-      state: "delivered" | "failed" | "ambiguous" | "cancelled";
+      state: "delivered" | "unconfirmed" | "failed" | "ambiguous" | "cancelled";
       safeErrorCode?: string;
       replyText?: string;
     };
@@ -880,11 +887,45 @@ export class GatewayService {
             ? {}
             : { safeErrorCode: safeCode(observation.safeErrorCode, "ADAPTER_DEGRADED") }),
         });
+        if (observation.ownedRoute !== undefined) {
+          const route = observation.ownedRoute;
+          const prefix = gatewayRegistrationIngressPrefixes[adapter.identity.provider];
+          if (
+            prefix === undefined || !route.alias.startsWith(prefix) ||
+            !route.alias.endsWith(`@${adapter.identity.hostId}`) ||
+            !PUBLIC_ALIAS.test(route.alias) || !PRIVATE_HANDLE.test(route.routeHandle) ||
+            route.state !== "idle"
+          ) {
+            throw new BridgeError(
+              "GATEWAY_OWNED_ROUTE_INVALID",
+              "A config-declared provider route has invalid identity evidence.",
+            );
+          }
+          const binding: PrivateRouteBinding = {
+            ...adapter.identity,
+            routeHandle: route.routeHandle,
+            ownerLease: stableLease(
+              adapter.identity.provider,
+              `${adapter.identity.hostId}\0${route.alias}`,
+            ),
+          };
+          await this.registerOrRebind(
+            route.alias,
+            binding,
+            "endpoint_reobserved",
+            route.state,
+            binding.ownerLease,
+            "explicit_opt_in",
+          );
+          this.rememberBinding(route.alias, binding, route.state);
+          bootReactivatedIdleAliases.push(route.alias);
+        }
         assertStartActive();
       }
       await this.recoverCodexSuccessionAfterRestartLocked();
-      bootReactivatedIdleAliases =
-        await this.reactivateRetainedCodexRoutesAfterRestartLocked();
+      bootReactivatedIdleAliases.push(
+        ...(await this.reactivateRetainedCodexRoutesAfterRestartLocked()),
+      );
       assertStartActive();
       const control = await startGatewayControlServer({
         stateDir: this.store.rootDir,
@@ -4833,12 +4874,14 @@ export class GatewayService {
     reason: "endpoint_reobserved" | "peer_explicitly_reselected",
     state: GatewayAdapterRouteState,
     currentOwnerLease: string = binding.ownerLease,
+    registrationMode: "explicit_opt_in" | "selected_live_peer" =
+      binding.provider === "codex" ? "explicit_opt_in" : "selected_live_peer",
   ): Promise<void> {
     try {
       await this.store.registerRoute({
         alias,
         binding,
-        registrationMode: binding.provider === "codex" ? "explicit_opt_in" : "selected_live_peer",
+        registrationMode,
         state,
       });
     } catch (error) {

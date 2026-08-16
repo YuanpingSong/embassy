@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
+import { AcpGatewayProvider } from "../src/gateway/acp-provider.js";
 import {
   loadGatewayConfig as loadBaseGatewayConfig,
   type GatewayConfig,
@@ -1147,6 +1148,40 @@ async function discoverAndRegisterCodexOnly(
     code: "ok",
   });
 }
+
+test("config-owned ACP routes register at boot before any subprocess exists", async (t) => {
+  const current = await fixture();
+  const claude = new FakeProvider("claude");
+  const codex = new FakeProvider("codex");
+  const deepseek = new AcpGatewayProvider({
+    provider: "deepseek",
+    alias: "dsh-main@this-mac",
+    hostId: "this-mac",
+    unavailableCode: "DEEPSEEK_HARNESS_HOME_UNAVAILABLE",
+    endpointGeneration: "deepseek_generation",
+  });
+  const service = new GatewayService({
+    config: loadGatewayConfig({ EMBASSY_STATE_DIR: current.stateDir }),
+    adapters: [claude, codex, deepseek],
+  });
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(current.root, { recursive: true, force: true });
+  });
+  await service.start();
+  await service.handlers().registerCodex(codexRegistration());
+  const snapshot = await service.handlers().listSnapshot();
+  const route = snapshot.routes.find(({ alias }) => alias === "dsh-main@this-mac");
+  assert.equal(route?.provider, "deepseek");
+  assert.equal(route?.state, "idle");
+  assert.equal(
+    snapshot.connectors.find(({ provider }) => provider === "deepseek")?.health,
+    "degraded",
+  );
+  assert.deepEqual(await service.handlers().pair({
+    aliases: ["codex-main@this-mac", "dsh-main@this-mac"],
+  }), { accepted: true, code: "ok" });
+});
 
 test("status carries bounded registry evidence from startup and remembers parseable records", async (t) => {
   const current = await fixture();

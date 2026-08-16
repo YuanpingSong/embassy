@@ -3,6 +3,11 @@ import path from "node:path";
 
 import { BridgeError } from "../errors.js";
 import {
+  createAcpGatewayProvider,
+  type AcpGatewayProviderOptions,
+} from "./acp-provider.js";
+import type { AcpLaunchSpec } from "./acp-client.js";
+import {
   attestClaudePeerRuntime,
   type AttestedClaudePeerRuntime,
   type ClaudePeerRuntimeOptions,
@@ -19,7 +24,8 @@ import {
 } from "./config.js";
 import { DASHBOARD_FILE_NAME } from "./dashboard.js";
 import {
-  detectDeepSeekSurface,
+  resolveDeepSeekAcpLaunch,
+  type DeepSeekAcpLaunch,
   type DeepSeekDetectOptions,
 } from "./deepseek-detect.js";
 import {
@@ -45,6 +51,11 @@ import {
 } from "./types.js";
 
 export const GATEWAY_LOCAL_HOST_ID = "this-mac";
+const GROK_ACP_LAUNCH = Object.freeze({
+  kind: "npx",
+  package: "@xai-official/grok@1.0.5",
+  args: ["agent", "stdio"],
+} satisfies AcpLaunchSpec);
 
 export type GatewayServerReadyResult = Readonly<{
   status: "ready";
@@ -94,9 +105,12 @@ export type GatewayServerDependencies = {
   createCodexProvider?: (
     options: LocalCodexGatewayProviderOptions,
   ) => GatewayProviderAdapter;
-  detectDeepSeekSurface?: (
+  resolveDeepSeekAcpLaunch?: (
     options: DeepSeekDetectOptions,
-  ) => ReturnType<typeof detectDeepSeekSurface>;
+  ) => Promise<DeepSeekAcpLaunch>;
+  createAcpProvider?: (
+    options: AcpGatewayProviderOptions,
+  ) => GatewayProviderAdapter;
   createService?: (options: GatewayServiceOptions) => GatewayServerService;
   addSignalListener?: (
     signal: GatewaySignal,
@@ -216,9 +230,13 @@ async function closeUnownedAssembly(input: {
   claudeProvider?: GatewayProviderAdapter;
   codexFactory?: LocalCodexTransportFactory;
   codexProvider?: GatewayProviderAdapter;
+  acpProviders?: readonly GatewayProviderAdapter[];
   store?: GatewayStore;
 }): Promise<void> {
   const failures: unknown[] = [];
+  for (const provider of input.acpProviders ?? []) {
+    await provider.close().catch((error: unknown) => failures.push(error));
+  }
   if (input.codexProvider !== undefined) {
     await input.codexProvider.close().catch((error: unknown) => {
       failures.push(error);
@@ -268,8 +286,10 @@ export async function runGatewayServer(
     createLocalCodexRefreshCandidateTransportFactory;
   const createCodexProvider =
     dependencies.createCodexProvider ?? createLocalCodexGatewayProvider;
-  const detectDeepSeek =
-    dependencies.detectDeepSeekSurface ?? detectDeepSeekSurface;
+  const resolveDeepSeek =
+    dependencies.resolveDeepSeekAcpLaunch ?? resolveDeepSeekAcpLaunch;
+  const createAcpProvider =
+    dependencies.createAcpProvider ?? createAcpGatewayProvider;
   const createService =
     dependencies.createService ??
     ((serviceOptions) => new GatewayService(serviceOptions));
@@ -288,6 +308,7 @@ export async function runGatewayServer(
   let claudeProvider: GatewayProviderAdapter | undefined;
   let codexFactory: LocalCodexTransportFactory | undefined;
   let codexProvider: GatewayProviderAdapter | undefined;
+  const acpProviders: GatewayProviderAdapter[] = [];
   let store: GatewayStore | undefined;
   let service: GatewayServerService | undefined;
   let instanceLease: GatewayInstanceLease | undefined;
@@ -409,17 +430,32 @@ export async function runGatewayServer(
       refreshFactory: async () =>
         await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
     });
-    const deepSeekObserver = await awaitWhileLeaseHeld(
-      detectDeepSeek({ env, loginHome: resolvedLoginHome }).catch(
-        () => undefined,
-      ),
-    );
+    for (const definition of config.acpProviders ?? []) {
+      let resolved: DeepSeekAcpLaunch = {};
+      if (definition.launch !== undefined) {
+        resolved = { launch: definition.launch };
+      } else if (definition.provider === "deepseek") {
+        resolved = await awaitWhileLeaseHeld(
+          resolveDeepSeek({ env, loginHome: resolvedLoginHome }).catch(() => ({
+            safeErrorCode: "DEEPSEEK_HARNESS_HOME_UNSAFE",
+          })),
+        );
+      } else {
+        resolved = { launch: GROK_ACP_LAUNCH };
+      }
+      acpProviders.push(createAcpProvider({
+        provider: definition.provider,
+        alias: definition.alias,
+        hostId: GATEWAY_LOCAL_HOST_ID,
+        ...(resolved.launch === undefined ? {} : { launch: resolved.launch }),
+        ...(resolved.safeErrorCode === undefined
+          ? {}
+          : { unavailableCode: resolved.safeErrorCode }),
+      }));
+    }
     const createdService = createService({
       config,
-      adapters: [claudeProvider, codexProvider],
-      ...(deepSeekObserver === undefined
-        ? {}
-        : { compatibilityObservers: [deepSeekObserver] }),
+      adapters: [claudeProvider, codexProvider, ...acpProviders],
       store,
     });
     service = createdService;
@@ -456,6 +492,7 @@ export async function runGatewayServer(
         ...(claudeProvider === undefined ? {} : { claudeProvider }),
         ...(codexFactory === undefined ? {} : { codexFactory }),
         ...(codexProvider === undefined ? {} : { codexProvider }),
+        acpProviders,
         ...(store === undefined ? {} : { store }),
       }).catch((error: unknown) => {
         cleanupFailures.push(error);
