@@ -3,7 +3,7 @@ id: emb-72
 title: De-ceremony 66C+66D — presentation and docs truth sweep
 kind: docs
 size: 5
-status: dispatched
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -48,3 +48,29 @@ Forward note: the site and dashboard refresh AGAIN at v1.9 (the multi-node
 single pane of glass is both a headline dashboard evolution and the site's
 next story beat) — recorded here so neither release ships surfaces that
 describe the previous one.
+
+## Landed (2026-08-16, two halves)
+
+swe3 half (6fa4b81): 20 files, +236/−397 = 633 changed (66C 172/500,
+66D 461/500, zero concepts); four-provider rows first-class even when
+optional routes absent; all 12 direction labels from the bilingual catalog;
+PM gate 738/0 + independent vocabulary sweep — the only two hits are
+DISAVOWALS ("does not create a compatibility tier"), zero surviving
+certification claims confirmed. Soak skipped with justification (R2/R1
+surface work, full check green).
+
+Site half (e20f0f5): PM content pipeline — opus draft with full claim-
+provenance notes (every claim mapped to ticket/source/matrix; the shipped
+page's unsourced latency claim removed; new #providers band from existing
+classes only; #protocol rebuilt around tested-with vs runtime-proved with
+the COARSE receipt as a selling point). PM review corrected one
+untrue-at-publish claim in both languages (upstream issue "filed" →
+receipt-stays-honest phrasing; filing remains founder-gated at release).
+English canonical; zh-CN translated.
+
+CARRIED FLAGS (drill/release items): (1) assets/dashboard.png re-capture
+from the live v1.7.0 dashboard post-upgrade; (2) no CLI send verb names the
+new providers — send-to-codex reaches them mechanically; the site stops at
+`embassy pair` deliberately; generic `embassy send` verb = v1.8 rebuild
+item; (3) ACP routes are not advertised into Claude's native ListAgents —
+CLI/reply-hints are the paths; v1.8/v1.9 consideration.
