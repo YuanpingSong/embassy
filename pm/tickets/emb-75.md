@@ -66,3 +66,36 @@ the incident record: the scripted `open --env` relaunch did not produce an
 attach tonight though it did this morning — possible Desktop auto-update
 behavior change; founder performing a manual terminal relaunch to
 discriminate.
+
+## Finding 3 — the true root of the evening: the observation loop DIED at the
+## mutex hold, and "healthy" lied for an hour (SEVERITY UPGRADE)
+
+Broker activity forensics: the codex connector's lastSeenAt froze at
+21:02:42.921 local — the exact moment of the 84-second Grok dispatch mutex
+hold — and never advanced again. For the following hour the connector
+reported "healthy" on frozen evidence while bound to a daemon that was later
+restarted out from under it; every registration attempt (7+ across both
+engineers) rejected CODEX_ROUTE_SETUP_REJECTED against the dead view. The
+founder's daemon restarts, multiple Desktop relaunches with the env flag,
+and engineer retries could not have ever fixed it — the wedged component was
+the broker. A broker restart restored observation instantly.
+
+CONSEQUENCES FOR THIS TICKET (v1.7.1): (1) the mutex-starvation finding is
+upgraded from degraded-visibility to KILLS-OBSERVATION — find why the
+observation loop never re-armed after the hold (timer death, swallowed
+throw, or unresolved promise) and fix with a regression test that holds the
+mutex 90s and asserts observation resumes; (2) connector-level freshness
+honesty: a connector whose lastSeenAt exceeds a staleness bound must not
+report "healthy" — surface observation age; (3) the doctor surface adds the
+frozen-observation check (connector lastSeen vs now).
+
+Confounders cleared along the way, for the record: Desktop attach-at-launch
+env fragility (fixed permanently on this machine via launchctl setenv),
+split-brain private server (real, earlier in the evening), PM's stale
+env-trick registration (real, cleared, trick demoted). Each was true; none
+was the root.
+
+v1.8 note: under the stateless transport there is NO long-lived observation
+loop to die — per-dispatch connection makes this entire failure class
+unrepresentable. Tonight is the strongest field evidence yet for the
+ratified centerpiece.
