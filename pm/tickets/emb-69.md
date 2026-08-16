@@ -87,3 +87,16 @@ proves it unread; acp-provider.ts is 212 lines. PM gate: isolated worktree,
 check 738 pass / 0 fail (+3 net tests), soak 1/0, every accepted message
 settled exactly once. Landed as one commit from the frozen patch
 (SHA 53acb2d8…). v1.7's CODE IS COMPLETE — emb-72 surfaces remain.
+
+## Post-release launch-definition intel (founder + registry, 2026-08-16)
+
+Founder: the harness runs as `npx @deepseek-ai/dsh web`. Registry verified:
+@deepseek-ai/dsh@0.1.0-rc.6 is PROPERLY published (bin present, 61 real
+deps, zero workspace: specifiers, coherent dist-tags) — the unspawnable
+defect was the dsh-acp ADAPTER package only. Tarball read: the CLI exposes
+only the `web` subcommand — no acp/stdio server mode in the published
+package — so the checkout-pnpm launch definition stands. WATCH ITEM: when
+upstream ships an ACP mode in @deepseek-ai/dsh, the launch definition
+upgrades to an npx package launch (one config default change) and the
+DeepSeek lane loses its checkout dependency. `~/.dsh` as user-data is
+consistent with the web-mode usage.
