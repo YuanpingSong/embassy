@@ -65,3 +65,14 @@ The contract tests are the promise's own enforcement arm — they must change wi
 suite goes red, which is the verification clause working. Instrument note for the record: single-line
 grep is insufficient for prose claims; the multiline/escaped-pattern sweep is the standard from now
 on, and promise 2's "grep-proven" means THAT grep. Size 2 stands.
+
+## Landing review — one posture-sentence correction (2026-08-16)
+
+Everything verified as declared (sweeps zero-match, contracts 12/12, full check 773/773 printed,
+165/200, mirrors-absent claim to be spot-checked at gate). ONE correction: the founder amended the
+effort pin (lowest-advertised) minutes before this handoff, and main is folding it into emb-59 now
+— so "the unresolved model pin holds the probe in a zero-spend fail-safe" will be stale at tag time.
+Replace the posture sentence on every surface carrying it with the CONDITIONAL form, true in all
+worlds: the probe resolves the pinned model's lowest advertised effort; whenever the pin cannot
+resolve, it declines in a zero-spend fail-safe before any thread or turn is created. Then re-run
+the sweeps + contracts and hand back.
