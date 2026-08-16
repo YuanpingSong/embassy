@@ -61,7 +61,7 @@ const DEFAULT_HOST_ID = "this-mac";
 const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
 const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
-export const EMBASSY_VERSION = "1.7.0";
+export const EMBASSY_VERSION = "1.7.1";
 // RELEASE VERSION SWEEP — every place the version lives: package.json,
 // npm-shrinkwrap.json (x2), this constant, codex-app-server.ts clientInfo,
 // test/gateway-cli.test.ts package-metadata assertion.
