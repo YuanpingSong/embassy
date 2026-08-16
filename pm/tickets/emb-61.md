@@ -3,7 +3,7 @@ id: emb-61
 title: Routable DeepSeek provider — transport decision + product-type generalization (design)
 kind: investigation
 size: 3
-status: review
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -551,3 +551,59 @@ PM recommendations on the seven founder questions:
 The visibility slice (emb-55/56/57) ships in v1.6.0 — the night's tree was gated and soaked as one
 unit and a tag split would have required reordering interdependent cherry-picks (57's fixtures sit
 under 59's diff base). v1.7 remains THIS ticket's milestone: the routable DeepSeek provider.
+
+## Founder rulings (2026-08-16, high-level review — investigation CLOSED)
+
+The founder reviewed at headline level (report depth acknowledged, not
+line-reviewed) and ruled:
+
+**R1 — Transport: ACP.** "We are going to be using the ACP protocol because
+it's an open standard which applies to not just DeepSeek. Grock build also
+uses the same protocol." This SUPERSEDES the PM transport ruling above
+(native SDK JSON-RPC). Supersession note: the PM ruling was driven by
+defects found in the dsh-acp ADAPTER (turn-outcome evidence loss, settlement
+correlation, no session list, hardcoded handshake version, dist-tag
+inversion), while this ruling selects ACP THE STANDARD — consistent with the
+report's own §4 finding that the standard is materially more mature than the
+adapter. The defect list converts from rejection rationale into the
+verification/absorption work list for the ACP client design (→ emb-65).
+
+**R2 — Certification ceremony: undone.** Verbatim: certifying a new build
+must NOT be an online process; online is best-effort delivery, graceful
+error handling, robustness where possible, clear errors where not.
+Compatibility with harness interfaces is built OFFLINE — "it should be what
+our coding and release is for." Authority granted to "undo that theatre."
+Positioning: best-effort honesty over certification/guarantee theatre —
+nothing is known-guaranteed without full-lifecycle tests that are impossible
+online. PM consequence note, surfaced to founder: the evidence-tier /
+attestation machinery shipped through v1.6.1 — including the write-attestation
+probe and the emb-60 two-factor gate — is online certification of new builds
+and sits squarely in the ruled-out category. Unwind scoped at emb-66.
+Pairing/consent edges and provenance marking are NOT ceremony (they are the
+trust model) and stay.
+
+**Q1 (from-provider hint attribute):** delegated as detail → PM decides: ADD
+IT, per report concurrence. **Q2 (law-2 reading):** delegated → deferred-taint
+reading stands where persisted-state migration still applies. **Q3
+(alias-prefix-as-provider-proof):** NO, and generalized by founder — naming
+rules like "a Claude session named codex-* is still a valid destination" are
+"things we don't really care about"; no naming rules, provider truth comes
+from the lease-proven route record, do whatever is convenient. **Q4 (two
+pair tables):** OVERRULED — founder prefers ONE unified route table; PM
+answered feasibility YES with the honest cost (pre-v1.7 binaries cannot read
+post-migration state; mitigated by migrate-forward-once + documented prune;
+an old binary erroring clearly on new state is itself the best-effort-honesty
+posture, so the never-brick argument for two tables is withdrawn). **Q5
+(deliveries UI):** from-provider / to-provider selectors RATIFIED. **Q6
+(registration prefix):** `dsh-` REQUIRED (founder's exact prefix; replaces
+PM's deepseek- rec). **Q7 (first-slice pairing restriction):** REJECTED —
+all-to-all provider routing from the start; the restriction was PM
+conservatism (ship DeepSeek↔Codex first, open Claude-ingress later as its
+own decision), not a technical limit, and the founder rules no such
+artificial restrictions. Per-edge pairing consent still applies — that is
+trust model, not restriction.
+
+**Split supersession:** the 61a–e priced split above assumed native JSON-RPC,
+the two-table design, and the DeepSeek↔Codex-only slice — superseded. New
+split drafts after emb-65 (ACP ground truth) lands. v1.7 theme is now:
+ACP transport + all-to-all routing + unified route table + de-ceremony.
