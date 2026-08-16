@@ -99,3 +99,18 @@ v1.8 note: under the stateless transport there is NO long-lived observation
 loop to die — per-dispatch connection makes this entire failure class
 unrepresentable. Tonight is the strongest field evidence yet for the
 ratified centerpiece.
+
+## Finding 4 + founder directive: Claude routes must not go stale across
+## broker restarts
+
+Post-broker-restart, the PM's claude route sat REOBSERVATION_REQUIRED until
+the engineers' codex registrations triggered a discovery refresh, whereupon
+the existing auto-rebind path (peer_identity_reobserved) healed it
+instantly. The mechanism works; the TRIGGER is wrong — it waits for an
+unrelated event. Founder directive: "your route should not go stale."
+DELIVERABLE ADDED: run claude discovery refresh AT BOOT (and on a modest
+timer), auto-rebinding previously selected sessions by exact persisted UUID
+when their registry record and socket are live — no codex registration, no
+operator command, no manual select-claude. The select-claude wrapper remains
+for NEW selections only; recovery of an existing selection is the broker's
+job.
