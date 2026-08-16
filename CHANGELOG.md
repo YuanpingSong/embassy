@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.7.1] - 2026-08-16
+
+### Fixed
+
+- Provider I/O no longer runs under the gateway's commit lane: a slow provider turn (an 84-second first ACP dispatch, live) previously starved status reads, callbacks, and observations for its whole duration. Dispatch now prepares and performs outside the mutex with commit-time revalidation; interrupted operations settle honestly (ambiguous, never replayed); callback draining coalesces and re-arms.
+- Connector health can no longer report "healthy" on stale evidence: a periodic bounded positive observation keeps evidence fresh, health degrades after 35 seconds without it, `observationAgeMs` is exported, and the static dashboard republishes at the freshness boundary.
+- Claude routes no longer go stale across broker restarts: the previously-selected session is re-observed at boot and on a fixed timer by exact UUID (observation-only; such connections can never send, pair, answer approvals, or read credentials or history), including across the session's own restarts.
+- The v1.6 stale-Codex reconnect guidance renders again (a v1.7.0 regression), in both languages.
+
+### Added
+
+- `embassy doctor`: bounded, normalized attachment diagnosis — detects an orphaned Desktop (daemon running, no client attached) and a private-App-Server split-brain (Desktop running unattached, its tasks unreachable), identifies processes by executable path with distinct-PID accounting, reports every detected condition with a localized remedy, and never grants authority.
+
 ## [1.7.0] - 2026-08-16
 
 ### Added
