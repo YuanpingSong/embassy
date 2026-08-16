@@ -891,7 +891,7 @@ export class CodexAppServerConnector {
       options.clientInfo ?? {
         name: "agent_embassy_gateway",
         title: "Embassy Gateway",
-        version: "1.6.0",
+        version: "1.6.1",
       },
     );
     this.maxFrameBytes = positiveInteger(
