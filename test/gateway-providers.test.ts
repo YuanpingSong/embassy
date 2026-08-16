@@ -2753,6 +2753,7 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
     private readonly faultAfterResume = false,
     private readonly writeProbeThreadId?: string,
     private readonly mutateProbeCwdMode = false,
+    private readonly writeProbeDecline?: "model" | "rate",
   ) {
     this.resumedThreadId = threadIds[0] ?? THREAD_ID;
   }
@@ -2784,12 +2785,12 @@ class FakeCodexTransport implements LocalCodexOwnedTransport {
           primary: null,
           rateLimitReachedType: null,
           secondary: null,
-          spendControlReached: false,
+          spendControlReached: this.writeProbeDecline === "rate",
         },
       });
     } else if (message.method === "model/list") {
       this.respond(message, {
-        data: [
+        data: this.writeProbeDecline === "model" ? [] : [
           {
             hidden: false,
             model: "gpt-5.6-luna",
@@ -2986,6 +2987,7 @@ class FakeCodexFactory {
   failNextConnect = false;
   readonly connectFailures: Error[] = [];
   writeProbeThreadId: string | undefined;
+  writeProbeDecline: "model" | "rate" | undefined;
   mutateProbeCwdMode = false;
   nextTransportCloseFailure: Error | undefined;
   faultNextRouteAfterResume = false;
@@ -3041,6 +3043,7 @@ class FakeCodexFactory {
       faultAfterResume,
       this.writeProbeThreadId,
       this.mutateProbeCwdMode,
+      this.writeProbeDecline,
     );
     transport.closeFailure = this.nextTransportCloseFailure;
     this.nextTransportCloseFailure = undefined;
@@ -3224,7 +3227,7 @@ test("Codex write evidence uses one owned 0700 cwd and one attempt per version g
   );
 });
 
-test("Codex write evidence stops at the fixed process attempt bound without eviction", async (t) => {
+test("Codex write evidence stops charged attempts at the fixed process bound", async (t) => {
   const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-bound-"));
   const root = await realpath(created);
   await chmod(root, 0o700);
@@ -3251,7 +3254,7 @@ test("Codex write evidence stops at the fixed process attempt bound without evic
   assert.equal(first.length, 4);
   assert.deepEqual(firstObservation, {
     outcome: "fail",
-    safeErrorCode: "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
+    safeErrorCode: "CODEX_WRITE_PROBE_CAPACITY_EXHAUSTED",
     settingsEchoObserved: false,
   });
   assert.strictEqual(
@@ -3269,6 +3272,42 @@ test("Codex write evidence stops at the fixed process attempt bound without evic
     0,
   );
   assert.deepEqual(await readdir(root), []);
+});
+
+test("zero-spend write-probe declines use one slot and allow a later attempt", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-decline-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const factory = new FakeCodexFactory(THREAD_ID, true);
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+  const internals = provider as unknown as {
+    writeProbeDecline?: { observation: { safeErrorCode?: string } };
+    writeProbeResults: Map<string, Promise<unknown>>;
+  };
+  const context = { forbiddenCodexThreadIds: [], stateRoot: root };
+
+  for (const [decline, safeErrorCode] of [
+    ["rate", "CODEX_WRITE_PROBE_RATE_LIMIT_CONSTRAINED"],
+    ["model", "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE"],
+  ] as const) {
+    factory.writeProbeDecline = decline;
+    assert.equal((await provider.runCompatibilityProbes(context)).length, 4);
+    assert.equal(internals.writeProbeResults.size, 0);
+    assert.equal(
+      internals.writeProbeDecline?.observation.safeErrorCode,
+      safeErrorCode,
+    );
+  }
+
+  factory.writeProbeDecline = undefined;
+  assert.deepEqual((await provider.runCompatibilityProbes(context)).at(-1), {
+    name: "write_attestation",
+    outcome: "pass",
+  });
+  assert.equal(internals.writeProbeResults.size, 1);
 });
 
 test("Codex write evidence rejects retained and sentinel thread identities without a turn", async (t) => {
@@ -3490,7 +3529,7 @@ test("Codex route creation preserves unsafe re-attestation and cleanup failures"
   await cleanupProvider.close();
 });
 
-test("a schema-attested Codex probe stays monitor-only after acceptance", async () => {
+test("schema evidence without a current-generation probe pass stays monitor-only", async () => {
   const factory = retargetCodexFactory(
     new FakeCodexFactory(THREAD_ID, true),
     "local-synthetic-generation-unpinned",
@@ -3522,7 +3561,7 @@ test("a schema-attested Codex probe stays monitor-only after acceptance", async 
     version: "0.147.1",
     tier: "schema_attested",
     checkedAt: new Date().toISOString(),
-    probes,
+    probes: [...probes, { name: "write_attestation", outcome: "pass" }],
   });
   await assert.rejects(
     provider.selectRoute({
@@ -3536,6 +3575,64 @@ test("a schema-attested Codex probe stays monitor-only after acceptance", async 
       ),
   );
   await provider.close();
+});
+
+test("current-generation write evidence enables a stable same-series Codex route", async (t) => {
+  const created = await mkdtemp(path.join(os.tmpdir(), "egp-write-authority-"));
+  const root = await realpath(created);
+  await chmod(root, 0o700);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const factory = retargetCodexFactory(
+    new FakeCodexFactory(THREAD_ID, true),
+    "local-synthetic-generation-write-covered",
+    "0.147.1",
+  );
+  factory.writeProbeThreadId = WRITE_PROBE_THREAD_ID;
+  const provider = codexProvider(factory);
+  t.after(async () => provider.close());
+  const probes = await provider.runCompatibilityProbes({
+    forbiddenCodexThreadIds: [THREAD_ID],
+    stateRoot: root,
+  });
+  provider.acceptCompatibilityAttestation({
+    schemaVersion: 1,
+    surface: "codex",
+    version: "0.147.1",
+    tier: "schema_attested",
+    checkedAt: new Date().toISOString(),
+    probes,
+  });
+  assert.deepEqual(await provider.initialize(callbacks().callbacks), {
+    health: "healthy",
+    compatibility: "compatible",
+  });
+  assert.deepEqual(
+    await provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    { routeHandle: THREAD_ID, state: "idle" },
+  );
+  assert.deepEqual(
+    await provider.dispatch({
+      ...codexProvenance(),
+      authorization: "selected_route",
+      binding: codexBinding(provider),
+      messageId: "gateway-write-covered-codex",
+      text: "covered write",
+      expectsReply: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { state: "accepted" },
+  );
+  const routeTransport = factory.transports.find((transport) =>
+    transport.sent.some((message) => message.method === "thread/resume"),
+  );
+  assert.equal(
+    routeTransport?.sent.filter((message) => message.method === "turn/start")
+      .length,
+    1,
+  );
 });
 
 test("a failed Codex probe initializes write-fenced without task or turn access", async () => {
@@ -5689,10 +5786,14 @@ test("local Codex provider remains monitor-only without the distinct write attes
     compatibility: "compatible",
     safeErrorCode: "CODEX_MONITOR_ONLY",
   });
-  await provider.selectRoute({
-    alias: "codex-main@this-mac",
-    routeHandle: THREAD_ID,
-  });
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
+  );
   assert.deepEqual(
     await provider.dispatch({
       ...codexProvenance(),
@@ -5703,14 +5804,9 @@ test("local Codex provider remains monitor-only without the distinct write attes
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
-    { state: "failed", safeErrorCode: "CODEX_WRITES_DISABLED" },
+    { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" },
   );
-  assert.equal(
-    factory.transports[0]!.sent.some(
-      (message) => message.method === "turn/start",
-    ),
-    false,
-  );
+  assert.equal(factory.transports.length, 0);
   await provider.close();
 });
 

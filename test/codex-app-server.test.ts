@@ -600,6 +600,15 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
     writeBlockCode: null,
   });
 
+  const coveredCandidate = fixture(undefined, {
+    appServerVersion: "0.147.1",
+    observedSchemaCandidate: true,
+    writesEnabled: true,
+  });
+  const coveredConnector = await coveredCandidate.connect();
+  assert.equal(coveredConnector.guard().writableReady, true);
+  await coveredConnector.close();
+
   const incompatibleTransport = new FakeTransport(() => undefined);
   await assert.rejects(
     CodexAppServerConnector.connect({
@@ -619,6 +628,14 @@ test("initializes once with output opt-outs and exposes only the reviewed v1 met
     (error) => assertConnectorError(error, "INVALID_CONFIGURATION"),
   );
   assert.equal(incompatibleTransport.sent.length, 0);
+  await assert.rejects(
+    fixture(undefined, {
+      appServerVersion: "0.147.1-rc.1",
+      observedSchemaCandidate: true,
+      writesEnabled: true,
+    }).connect(),
+    (error) => assertConnectorError(error, "INVALID_CONFIGURATION"),
+  );
   await assert.rejects(
     CodexAppServerConnector.connect({
       compatibility: {

@@ -5,6 +5,7 @@ import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
 import {
   certifiedCompatibilityVersions,
+  compatibilityCoversWrites,
   compatibilitySurfaceDefinitions,
   evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
@@ -1344,11 +1345,13 @@ export class GatewayService {
       const probes = entry.adapter === undefined
         ? await entry.observer.runCompatibilityProbes()
         : await entry.adapter.runCompatibilityProbes!(probeContext);
+      let writeProbePassed = false;
       if (entry.adapter !== undefined) {
         const writeProbe =
           entry.adapter.latestWriteCompatibilityProbeObservation?.(
             entry.adapter.identity.endpointGeneration,
           );
+        writeProbePassed = writeProbe?.outcome === "pass";
         if (writeProbe?.outcome === "fail") {
           this.addRuntimeAlert(
             writeProbe.safeErrorCode,
@@ -1389,6 +1392,7 @@ export class GatewayService {
       } else if (
         surface === "codex" &&
         attestation.tier === "schema_attested" &&
+        !(compatibilityCoversWrites(attestation) && writeProbePassed) &&
         entry.adapter !== undefined
       ) {
         // A live but untested App Server schema is useful for observation only.
@@ -8096,7 +8100,15 @@ export class GatewayService {
       await this.changed();
       return false;
     }
-    if (event.attestation.tier === "schema_attested") {
+    if (
+      event.attestation.tier === "schema_attested" &&
+      !(
+        compatibilityCoversWrites(event.attestation) &&
+        adapter.latestWriteCompatibilityProbeObservation?.(
+          event.current.endpointGeneration,
+        )?.outcome === "pass"
+      )
+    ) {
       // A passing untested-version schema is useful observation, but it is not
       // durable route or write authority. Settle the provider's pending probe
       // so a later generation can be examined, while leaving every G1 route
