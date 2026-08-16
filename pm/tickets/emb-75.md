@@ -3,7 +3,7 @@ id: emb-75
 title: v1.7.1 — the orphaned-Desktop case goes from documented to handled
 kind: bug
 size: 5
-status: dispatched
+status: landed
 release: v1.7.1
 updated: 2026-08-16
 ---
@@ -183,3 +183,38 @@ maps price the known; R3 reviews exist to find the unknown — cap contests
 after review are expected, not failures.
 Engineer self-correction (unprompted): subtotal transposition — authoritative
 split is source/docs +1,294/−152, tests +978/−26; totals/cap unchanged.
+
+## Incident evaluation / founder decision
+
+- **Observation-loop premise amended:** no periodic Codex observation loop
+  existed to die. The 84-second ACP dispatch held the service mutex and starved
+  callbacks during the hold; quiet successful heartbeats did not refresh
+  `lastSeenAt` afterward. The longer registration outage is attributed
+  primarily to the independently confirmed Desktop split-brain. The broker
+  restart and Desktop attach-setting correction happened nearly together, so
+  the apparent restart cure remains confounded rather than claimed as proof.
+- **Shipped remedy:** provider dispatch I/O runs outside the service mutex with
+  post-I/O authority revalidation; callback work coalesces behind a hold;
+  Codex publishes fixed-cadence positive observations; connector freshness
+  expires honestly; Claude exact-UUID discovery runs at boot and periodically.
+- **Automatic Desktop relaunch:** declined. It could terminate or replace the
+  user's open Desktop windows and therefore requires explicit operator action.
+  `embassy doctor`, registration hints, and both dashboards instead expose the
+  bounded diagnosis and exact relaunch command.
+- **Lazy attach:** pending founder/manual verification. It remains possible
+  that opening the exact Codex task view attaches Desktop after launch. No live
+  Desktop observation was authorized for this engineering slice, so the
+  shipped guidance says to relaunch and then open the task without claiming
+  which action completes attachment.
+
+## Landed (2026-08-16 night)
+
+SLICE READY v2 ALL GREEN after the founder's operator approval unlocked the
+cross-generation rebind: v1→v2 interdiff verified as EXACTLY the obsolete
+endpoint-generation equality clause (host match and all other fences
+retained). Final accounting +2,378/−178 = 2,556/2,600, 29 files. PM gate:
+isolated worktree on current tip, check 759 pass / 0 fail, soak 1/0. The
+ticket-file overlap between the engineer's in-window edits and PM contest
+records was merged semantically (both told the same amended incident story
+independently). Landed as one commit from the frozen v2 patch (SHA
+47393b6f…). Ships as v1.7.1.
