@@ -28,3 +28,35 @@ updated: 2026-08-16
 ## Background (hypotheses — re-verify)
 
 emb-54's completion report is the evidence base: probe table in §3, line budget in §4 (~550-650 lines pre-split), `IncompatibleGatewayProvider` (providers.ts:454-585) as the template, surface/identity coupling at providers.ts:467 to decouple. JSONL session files default to zstd framing — prefer the JSON-RPC path over file tailing.
+## Four-point contest and rulings (2026-08-16, all accepted)
+
+**1. Window APPROVED as proposed** (15 files: new deepseek-detect.ts + compatibility/service/server/
+dashboard surfaces + six test files). providers.ts and types.ts stay untouched — the engineer's
+read is right that IncompatibleGatewayProvider is identity/routing-coupled and using it would
+violate this ticket's own zero-routing promise. emb-54's decoupling suggestion is superseded.
+
+**2. Promise 1 CORRECTED — the PM's ticket lagged the PM's own emb-61 ruling** (written from the
+emb-54 report before the transport ruling adopted filesystem + dsh --version only; the native wire
+has no session-list method). Corrected promise, replacing the original: detect an installation
+without spawning it; if present, perform only bounded Shape A observations of the exact harness-home
+root and `<absolute dsh> --version`; never launch a runtime, enumerate sessions, or open JSON-RPC;
+record the current prerelease/unparseable version honestly as incompatible/quarantined. Synthetic
+tests cover all probes; no real provider read. Process lesson recorded: when a design ruling lands,
+sweep open tickets it invalidates — this one wasn't swept.
+
+**3. Observer seam APPROVED**: a narrow CompatibilitySurfaceObserver accepted separately by the
+service; adapters project into it; DeepSeek supplies observation/probe data only and never enters
+adapters, gatewayProviders, pairing, routing, connectors, or write paths. Startup rejects observers
+whose surface is absent from compatibilitySurfaceDefinitions — closing emb-55's carried watch-item
+in the same commit, as required. Internal plumbing; the user-facing concept count stays 1.
+
+**4. Absence rendering INTERPRETED**: the neutral "DeepSeek — Not detected" compatibility row IS
+the no-noise state (emb-55's promise governs); "no dashboard noise" means no attention item, no
+connector, no route, no degradation — never no row.
+
+**Trust contract APPROVED as stated**: PATH-resolve dsh to an absolute candidate; lstat/stat-attest
+the executable and exact harness-home root (DSH_HOME or ~/.dsh) for same-user/non-symlink safety
+before spawning only `<absolute dsh> --version`; absent resolution returns before any spawn; the
+detector never enumerates or opens the home, above all .credentials.yaml.
+
+Budget: size 3 stands with the corrected (smaller) promise set.
