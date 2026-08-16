@@ -3,7 +3,7 @@ id: emb-71
 title: De-ceremony 66B — Claude boundary-safe version decision + offline compatibility core
 kind: normal
 size: 3
-status: dispatched
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -55,3 +55,21 @@ no replay after uncertainty (exactly one wire write per prompt); cross-
 session contamination of the 64 KiB bound ruled out. PM gate: isolated
 worktree, check 858 pass / 0 fail (counts from output). Phase 2 remains
 HELD on emb-70.
+
+## Phase 2 LANDED — ticket CLOSED (2026-08-16)
+
+Decision rule fired on evidence, DELETE branch: swe3 first proved the landed
+reader accepts a syntactically valid but unverified version record (and an
+absent field) through parse → discovery → registration → one transport
+write, THEN deleted the entire bounded `claude --version` subprocess
+(runner, scrubbed env, timeout/caps, banner parser, conflict state, and the
+before/after generation comparison whose only purpose was the subprocess's
+time window). Executable/launcher attestation remains fail-closed; version
+= attested official-launcher target leaf, else "unknown"; no metadata case
+refuses boot (executable-evidence test). Support matrix landed at
+support/provider-support-matrix.json (four providers, Grok artifact
+refreshed from the ACP registry: @xai-official/grok@1.0.5 agent stdio);
+CI parses it; a recursive grep test proves runtime never references it.
+Accounting: source +11/−205 (≤300), tests+data 671 (≤700), net −343, patch
+SHA cc68c04a…. PM gate: isolated worktree ON CURRENT TIP 8bf3d03 (clean
+apply = trivial rebase), check 752 pass / 0 fail (761→752 = −9 net tests).
