@@ -3,7 +3,7 @@ id: emb-62
 title: Connector recovery re-arms the endpoint transition — no finite retry cliff
 kind: normal
 size: 3
-status: draft
+status: dispatched
 release: v1.6
 updated: 2026-08-16
 ---
@@ -30,3 +30,7 @@ restarts" headline claim.**
 **Budgets**: size 3; concepts: 0 user-facing. Tests: the promises + the live drill as manual check.
 
 **Non-goals**: no Desktop-side behavior (Embassy cannot fix attach-at-launch; emb-63 renders it).
+
+## Dispatch note (2026-08-16)
+
+Dispatched to swe3 ahead of the v1.7 queue: v1.6 headline blocker, same subsystem as emb-52 (warm context). Scope contract: src/gateway/providers.ts, src/gateway/service.ts, test/**; the emb-52 live drill is the acceptance test and the PM runs it at landing.
