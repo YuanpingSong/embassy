@@ -1,96 +1,56 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { UNKNOWN_COMPATIBILITY_VERSION } from "../src/gateway/compatibility.js";
-import { detectDeepSeekSurface } from "../src/gateway/deepseek-detect.js";
+import { resolveDeepSeekAcpLaunch } from "../src/gateway/deepseek-detect.js";
 
-test("absent DeepSeek costs no version spawn", async () => {
+test("an absent DeepSeek checkout is an honest provider-local absence", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "embassy-dsh-absent-"));
-  let spawns = 0;
   try {
-    assert.equal(
-      await detectDeepSeekSurface({
-        env: { PATH: root },
-        loginHome: root,
-        runVersion: async () => {
-          spawns += 1;
-          return "0.1.0";
-        },
-      }),
-      undefined,
-    );
-    assert.equal(spawns, 0);
+    assert.deepEqual(await resolveDeepSeekAcpLaunch({
+      env: {},
+      loginHome: root,
+    }), { safeErrorCode: "DEEPSEEK_HARNESS_HOME_UNAVAILABLE" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("DeepSeek prerelease evidence is bounded, quarantined, and credential-free", async () => {
+test("the attested harness root yields only the documented checkout launch", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "embassy-dsh-present-"));
-  const bin = path.join(root, "bin");
-  const home = path.join(root, ".dsh");
-  const executable = path.join(bin, "dsh");
-  const secret = "DEEPSEEK_SECRET_MUST_NOT_CROSS_PROBE";
-  await mkdir(bin, { mode: 0o700 });
-  await mkdir(home, { mode: 0o700 });
-  await writeFile(executable, "synthetic", { mode: 0o700 });
-  await chmod(executable, 0o700);
-  await writeFile(path.join(home, ".credentials.yaml"), secret, { mode: 0o600 });
-  let observedEnv: NodeJS.ProcessEnv | undefined;
+  const checkout = path.join(root, "checkout");
+  const secret = "DEEPSEEK_CREDENTIAL_SENTINEL";
+  await mkdir(checkout, { mode: 0o700 });
+  await writeFile(path.join(checkout, "package.json"), "{}", { mode: 0o600 });
+  await writeFile(path.join(checkout, ".credentials.yaml"), secret, { mode: 0o600 });
   try {
-    const detected = await detectDeepSeekSurface({
-      env: { PATH: bin, DSH_HOME: home, DEEPSEEK_API_KEY: secret },
+    const resolved = await resolveDeepSeekAcpLaunch({
+      env: { DSH_HOME: checkout, DEEPSEEK_API_KEY: secret },
       loginHome: root,
-      runVersion: async (received, env) => {
-        assert.equal(received, executable);
-        observedEnv = env;
-        return "dsh 0.1.0-rc.6";
+    });
+    assert.deepEqual(resolved, {
+      launch: {
+        kind: "local-checkout",
+        command: "pnpm",
+        args: ["--dir", checkout, "run", "demo:acp"],
+        cwd: checkout,
       },
     });
-    assert.notEqual(detected, undefined);
-    assert.deepEqual(detected!.compatibilitySurface(), {
-      surface: "deepseek",
-      version: UNKNOWN_COMPATIBILITY_VERSION,
-    });
-    assert.deepEqual(await detected!.runCompatibilityProbes(), [
-      { name: "installation", outcome: "pass" },
-      { name: "harness_home", outcome: "pass" },
-      {
-        name: "version",
-        outcome: "fail",
-        safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE",
-      },
-    ]);
-    assert.equal(observedEnv?.DEEPSEEK_API_KEY, undefined);
-    assert.equal(JSON.stringify(observedEnv).includes(secret), false);
+    assert.equal(JSON.stringify(resolved).includes(secret), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("an unsafe DeepSeek home prevents the version spawn", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "embassy-dsh-unsafe-"));
-  const bin = path.join(root, "bin");
-  const executable = path.join(bin, "dsh");
-  await mkdir(bin, { mode: 0o700 });
-  await writeFile(executable, "synthetic", { mode: 0o700 });
-  let spawns = 0;
-  try {
-    const detected = await detectDeepSeekSurface({
-      env: { PATH: bin, DSH_HOME: path.join(root, "missing") },
-      loginHome: root,
-      runVersion: async () => {
-        spawns += 1;
-        return "0.1.0";
-      },
-    });
-    assert.equal(spawns, 0);
-    assert.equal((await detected!.runCompatibilityProbes())[1]?.safeErrorCode,
-      "DEEPSEEK_HARNESS_HOME_UNSAFE");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+test("unsafe checkout evidence degrades without throwing", async () => {
+  const result = await resolveDeepSeekAcpLaunch({
+    env: { DSH_HOME: "/synthetic/checkout" },
+    loginHome: "/synthetic",
+    lstat: async () => {
+      throw Object.assign(new Error("denied"), { code: "EACCES" });
+    },
+  });
+  assert.deepEqual(result, { safeErrorCode: "DEEPSEEK_HARNESS_HOME_UNSAFE" });
 });

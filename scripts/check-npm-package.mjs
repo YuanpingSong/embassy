@@ -41,6 +41,7 @@ const PUBLIC_PACKAGE_PATHS = [
 
 const GATEWAY_RUNTIME_MODULES = [
   "acp-client",
+  "acp-provider",
   "claude-peer",
   "claude-helper",
   "claude-helper-client",
