@@ -338,6 +338,8 @@ class FakeProvider implements GatewayProviderAdapter {
   callbacks: GatewayAdapterCallbacks | undefined;
   selectedEndpointRefresh: GatewayAdapterEndpointRefresh | undefined;
   acceptedCompatibilityAttestations: CompatibilityAttestation[] = [];
+  releasedEndpointRefreshSelectorClaims: string[] = [];
+  rearmedEndpointRefreshActivations: string[] = [];
   acceptCompatibilityAttestationBefore: (() => void) | undefined;
   compatibilityFailureCode: string | undefined;
   dispatches: GatewayAdapterDispatchInput[] = [];
@@ -533,6 +535,14 @@ class FakeProvider implements GatewayProviderAdapter {
       attestation.tier === "incompatible"
         ? (attestation.safeErrorCode ?? "COMPATIBILITY_CHECK_FAILED")
         : undefined;
+  }
+
+  releaseEndpointRefreshSelectorClaim(endpointGeneration: string): void {
+    this.releasedEndpointRefreshSelectorClaims.push(endpointGeneration);
+  }
+
+  rearmEndpointRefreshActivation(endpointGeneration: string): void {
+    this.rearmedEndpointRefreshActivations.push(endpointGeneration);
   }
 
   async releaseRoute(routeHandle: string): Promise<void> {
@@ -3807,6 +3817,11 @@ test("endpoint refresh retries complete once across precommit, uncertain-commit,
         1,
         failurePoint,
       );
+      assert.deepEqual(
+        codex.releasedEndpointRefreshSelectorClaims,
+        [codex.identity.endpointGeneration],
+        failurePoint,
+      );
 
       codex.callbacks?.onEndpointRefresh?.(refresh);
       await waitForAsync(
@@ -3931,6 +3946,9 @@ test("endpoint refresh activation requires one exact live native listener and st
       )?.state,
       "stale",
     );
+    assert.deepEqual(codex.releasedEndpointRefreshSelectorClaims, [
+      codex.identity.endpointGeneration,
+    ]);
 
     claude.nativeCodexGenerations.set(
       "codex-main@this-mac",
@@ -3943,6 +3961,22 @@ test("endpoint refresh activation requires one exact live native listener and st
         updateNativeCodexPeerStatus: FakeProvider["updateNativeCodexPeerStatus"];
       }
     ).updateNativeCodexPeerStatus = originalUpdate;
+    codex.callbacks?.onRouteState?.({
+      endpoint: { ...codex.identity, routeHandle: THREAD_ID },
+      state: "idle",
+    });
+    await waitFor(
+      () => codex.rearmedEndpointRefreshActivations.length === 1,
+    );
+    codex.callbacks?.onRouteState?.({
+      endpoint: { ...codex.identity, routeHandle: THREAD_ID },
+      state: "idle",
+    });
+    await immediate();
+    await immediate();
+    assert.deepEqual(codex.rearmedEndpointRefreshActivations, [
+      codex.identity.endpointGeneration,
+    ]);
     codex.callbacks?.onEndpointRefresh?.(refresh);
     await waitForAsync(
       async () => codex.acceptedCompatibilityAttestations.length === 2,
