@@ -100,3 +100,14 @@ prevent boot (emb-55 doctrine; same never-throw class as the codex probe rulings
 renders "Not detected" — honest: no attestable installation was observed) with a bounded warning
 alert if cheap; keep the detector's internal rethrow semantics. Plus one focused test: hostile
 EACCES PATH entry → broker boots, neutral row renders. Then re-run the authoritative pair.
+
+## Second landing finding (2026-08-16) — manifest allowlist, deterministic
+
+PM gate (full-log re-run): 772 pass / 1 fail — test/npm-package-manifest.test.ts "exact npm manifest
+names every runtime artifact": the new runtime module deepseek-detect.js is absent from the npm
+package manifest allowlist. Known failure class (v1.5 incident: "new runtime module ⇒ manifest
+allowlist same commit"). Deterministic, present in both gate runs; the lane's GREEN claim cited
+exit code without printed counts — pipe-masked. TWO corrections ruled: (1) add the new runtime
+artifact to the manifest allowlist (window += the manifest-bearing file(s) the test derives from);
+(2) HOUSE RULE SHARPENED: verification claims cite printed pass/fail counts, never exit codes —
+an exit code through a pipe is the pipe's, not the suite's.
