@@ -7,10 +7,8 @@
 // designer prototype: applyQueueRaise, the confirm bars, the useReducer
 // force-update, the EMB_DATA writes, the open-mode banner (pair modes have not
 // landed), the lease status card (not in the live contract), and the phantom
-// `released` pulse bar. The board keeps the prototype's three-column
-// composition (claude · edges-or-no-pair · codex); anything that would make a
-// fourth column or a fourth node line — the no-pair explanation when queues
-// are shown, and the next-action sentences — renders under the board.
+// `released` pulse bar. The board renders the complete declared provider set;
+// route and connector absence stay visible instead of removing a provider.
 namespace Embassy {
   /** Pulse bar geometry: 6px floor, +38px at the tallest bar (prototype parity). */
   const PULSE_BAR_BASE_PX = 6;
@@ -98,8 +96,7 @@ namespace Embassy {
   }>;
 
   /**
-   * One party of the exchange board — both sides are wired (the prototype read
-   * only Claude). Node body stays at the prototype's short line count: the
+   * One party of the exchange board. Node body stays at the prototype's short line count: the
    * next-action sentences run to full sentences, so they render once beneath
    * the board (`.exchange-notes`) instead of wrapping inside a 210px node and
    * desynchronising the two nodes' heights.

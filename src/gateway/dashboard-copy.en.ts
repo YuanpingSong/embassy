@@ -19,7 +19,7 @@ export const dashboardCopyEn = {
   "exchange.eyebrow": "Exchange board",
   "exchange.title": "Provider routes and explicit boundaries",
   "exchange.note":
-    "Each consent edge names two verified provider endpoints. Native discovery remains machine-wide; permission does not.",
+    "Each consent edge names two exact local routes. Current route state and connector health describe what Embassy can observe now.",
   "inbound.paired.badge": "Paired inbound",
   "inbound.paired.body":
     "Each registered endpoint accepts messages only across its explicit consent edges.",
@@ -300,7 +300,7 @@ export const dashboardCopyEn = {
   "column.observed": "Observed",
   "column.issue": "Issue",
   "diagnostics.title": "System details",
-  "diagnostics.note": "Pinned protocols, counters, and bounded-display notes",
+  "diagnostics.note": "Connector health, observed protocol metadata, last safe codes, counters, and bounded-display notes",
   "diagnostics.connectors": "Connectors",
   "diagnostics.connectors.empty": "No connector metadata is available.",
   "diagnostics.connectors.caption": "Local provider connector status",
@@ -360,7 +360,7 @@ export const dashboardCopyEn = {
   "health.connecting": "Connecting",
   "health.healthy": "Healthy",
   "health.degraded": "Degraded",
-  "health.meaning.healthy": "Connected and exchanging heartbeats.",
+  "health.meaning.healthy": "The local connector is currently available.",
   "health.meaning.connecting": "Establishing the local connection.",
   "health.meaning.degraded": "Connected with retained warnings.",
   "health.meaning.offline": "Not reachable on this machine.",
@@ -371,7 +371,7 @@ export const dashboardCopyEn = {
   "route.offline": "Offline",
   "route.disabled": "Disabled",
   "route.meaning.idle": "Enabled and ready to carry messages.",
-  "route.meaning.busy": "Claude-bound messages still write to the native mailbox immediately; ordinary Codex-bound messages queue for idle.",
+  "route.meaning.busy": "The endpoint is occupied; delivery timing follows the target provider's transport.",
   "route.meaning.awaitingApproval":
     "Waiting on the provider's native approval.",
   "route.meaning.stale": "No current endpoint proof; refresh and restore it.",
@@ -492,7 +492,7 @@ export const dashboardCopyEn = {
     "{ready} ready · {total} registered",
   "app.overview.noPair.title": "No consent edge",
   "app.overview.noPair.body":
-    "Paired inbound accepts only senders connected to a registered Codex task by an explicit edge; Codex routes only along explicit edges.",
+    "Paired inbound accepts only senders connected by an explicit consent edge; every provider route follows those same edges.",
   "app.overview.degradedEdge":
     "One shown consent edge is not ready.",
   "app.overview.degradedEdges":
@@ -551,14 +551,14 @@ export const dashboardCopyEn = {
     "Consent edge retained; one or both saved route records are unavailable in this snapshot.",
   "app.routes.pairSummary": "Ready: {ready} · Consent edges: {total}",
   "app.routes.unpairedSummary":
-    "{claude} ready Claude endpoints and {codex} ready Codex endpoints have no consent edge.",
+    "Ready endpoints without consent remain visible in their provider rows.",
   "app.routes.pairCmd.consequence":
-    "Create consent only between {claude} and {codex}. Existing edges stay unchanged.",
+    "Create consent only between these two named provider endpoints. Existing edges stay unchanged.",
   "app.routes.unpairCmd.consequence":
-    "Remove consent only between {claude} and {codex}. Work on adjacent edges stays active.",
+    "Remove consent only between these two named provider endpoints. Work on adjacent edges stays active.",
   "app.routes.selectCmd.title": "Create a consent edge",
   "app.routes.selectCmd.consequence":
-    "Create one consent edge between this Claude session and a Codex task. Other edges stay unchanged.",
+    "Create one consent edge between the two named provider endpoints. Other edges stay unchanged.",
   "app.routes.selectCmd.consequenceOpen":
     "Create one outbound destination edge. Open inbound still accepts any live Claude session under this OS user.",
   "app.routes.unselectCmd.consequence":
@@ -584,7 +584,7 @@ export const dashboardCopyEn = {
   "app.routes.registerHint":
     "Registration is not a button: it must run inside the Codex task to inherit its identity. Ask your agent to run:",
   "app.routes.noPairInline":
-    "no consent edge — pair a Claude session with a Codex task",
+    "no consent edge — pair two ready endpoints from different providers",
   "app.omitted.pairs": "{count} additional consent edges are omitted.",
   "app.activity.title": "Event stream — bounded, most recent first",
   "app.activity.kinds.all": "All kinds",
@@ -610,15 +610,15 @@ export const dashboardCopyEn = {
     "The operator-action ledger lasts for this broker process. Operator-action rows carry no message bodies; Deliveries shows retained bodies by design. Full capability tokens are never shown.",
   "app.activity.empty":
     "Nothing in this window. Events appear as the broker produces them; try",
-  "app.diag.versions": "Connector protocols",
+  "app.diag.versions": "Provider connectors",
   "app.diag.versions.caption":
-    "Local connectors with observed protocol state",
+    "Best-effort observations for local provider connectors",
   "app.diag.col.provider": "Provider",
   "app.diag.col.host": "Host",
   "app.diag.col.protocol": "Protocol",
   "app.diag.col.version": "Version",
   "app.diag.versions.rangeAbsent":
-    "Connector rows show observed protocol tokens and current health.",
+    "Protocol and version are observed metadata, not routing authority. Health and the last safe code describe the current connector.",
   "app.diag.lease.title": "Lease / instance",
   "app.diag.lease.absent":
     "Lease state is not carried by the live contract. Read the local posture with the command below.",

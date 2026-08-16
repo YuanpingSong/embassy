@@ -170,40 +170,28 @@ silently expanding the boundary through a test or hardening patch.
 - Keep `experimentalApi: true` hard-coded solely for
   `thread/resume.excludeTurns: true`. Require an empty `thread.turns` response
   and never retain returned history.
-- Keep provider compatibility evidence-gated. Attest exact owned paths before
-  applying this ladder: a certified same-major build is writable; a same-major
-  build whose bounded probes all pass is `schema_attested` and writable only
-  when those probes cover the write path. Claude's probes cover its native
-  write path. Ordinary Codex compatibility and registration reads remain
-  read-only: they may include `initialize`, `thread/loaded/list`, and
-  registration-time `thread/resume`, but do not invoke `turn/start`. The
-  optional Codex write-attestation probe is the sole exception. It may create
-  at most one disposable broker-owned thread per attempt, under a bounded write
-  fence with zero user-thread contact; every created probe thread is archived
-  and confirmed absent from the loaded set. The probe resolves the pinned
-  model's lowest advertised effort. Whenever that model/effort pin cannot
-  resolve, it declines in a zero-spend fail-safe before creating any thread or
-  model turn. Untested Codex 0.x therefore remains monitor-only pending a
-  certified write schema. Failed probes leave only that provider degraded,
-  monitor-only, and write-fenced; a
-  different major or version evidence that cannot establish a safe major is
-  also provider-local
-  monitor-only, and probes must never promote either. Keep the broker,
-  control/dashboard surfaces, and other provider running for these degraded
-  cases. Only unsafe ownership, path, symlink, lease, state, or generation
-  evidence for Embassy-owned or executed artifacts and Embassy callback,
-  control, or state paths refuses broker startup. The Claude-owned external
-  sessions registry root is a read-side identity source: an unsafe UID or mode
-  quarantines and write-fences only Claude, with loud evidence, while the
-  broker and other provider stay available. Require Claude peer protocol 1 per
-  session record; reject any other
-  value in isolation and count that rejection loudly. Fail an unvalidated endpoint
-  generation closed on its responsible route.
-  Different-major guidance must safely name the observed and tested versions
-  plus the supported major and say that an Embassy release supporting the
-  observed major is required; never prescribe `embassy health` as recovery.
-  Ignore unknown top-level Claude registry fields while keeping every required
-  and consumed field strict, and expose bounded rejection/empty observations.
+- Keep runtime routing authority independent of provider version and build
+  metadata. An explicit pair plus the exact owned route and session identity
+  authorizes an attempt; current connector, generation, strict wire, and
+  correlated-operation facts decide its result. The release-owned offline
+  support matrix records tested artifacts, capabilities, limitations, and date,
+  but runtime never imports it.
+- Validate exact OS ownership, path, symlink, lease, state, and generation
+  boundaries for Embassy-owned or executed artifacts. Unsafe evidence there,
+  or for Embassy callback, control, or state paths, may refuse broker startup.
+  Unsafe UID or mode evidence for the Claude-owned external sessions registry root
+  quarantines only Claude while the broker and other providers stay available.
+  Require Claude peer protocol 1 per session record; reject another value in
+  isolation and count it loudly. Ignore unknown top-level registry fields while
+  keeping every required and consumed field strict, and expose bounded
+  rejection and observed-empty facts.
+- Treat interface drift and missing optional providers as provider-local
+  degradation. Surface route staleness, connector health, and the last safe
+  code; do not turn version metadata into routing authority. A replacement
+  Codex generation must negotiate its current interface and re-observe the
+  exact registered task before re-anchoring. Fail an unvalidated endpoint
+  generation closed on its responsible route, and never replay an ambiguous
+  write.
 - Preserve bounded queues, messages, callbacks, deadlines, deduplication, rate
   limits, and conversation tables. Never retry an ambiguous write.
 - The dashboard remains an atomically replaced, metadata-only static HTML file

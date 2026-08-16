@@ -592,8 +592,7 @@ namespace Embassy {
           </div>
           <div className="stack">
             <DiagnosticsConnectorTable connectors={data.connectors} />
-            {/* Connector rows stay transport-focused; the provider table below
-                carries the bounded version and probe evidence. */}
+            {/* Connector rows carry best-effort transport observations only. */}
             <p className="footnote">{t("app.diag.versions.rangeAbsent")}</p>
           </div>
         </section>

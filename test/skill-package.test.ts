@@ -75,24 +75,14 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /old name stops resolving immediately/);
   assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
-  assert.match(skill, /Compatibility is automatic and evidence-gated/);
-  assert.match(skill, /certified same-major provider is writable/i);
-  assert.match(skill, /schema-attested \(`schema_attested`\) and writable only when those probes cover the write path/);
-  assert.match(skill, /untested Codex 0\.x therefore stays monitor-only/i);
-  assert.match(
-    skill,
-    /Ordinary Codex compatibility and registration reads remain read-only.{0,240}do not invoke `turn\/start`.{0,160}optional Codex write-attestation probe is the sole exception.{0,300}at most one disposable broker-owned thread per attempt.{0,180}bounded write fence with zero user-thread contact.{0,180}every created probe thread is archived and confirmed no longer loaded.{0,180}resolves the pinned model's lowest advertised effort.{0,180}Whenever that model\/effort pin cannot resolve, it declines in a zero-spend fail-safe before creating any thread or model turn/is,
-  );
-  assert.match(skill, /Failed probes, a different major/);
-  assert.match(skill, /version evidence that cannot establish a safe major/);
-  assert.match(skill, /never promote across a major or unknown major/);
-  assert.match(skill, /Embassy release supporting the observed major is required/);
-  assert.match(skill, /`peerProtocol 1` is required per registry record/);
-  assert.match(skill, /Unknown top-level registry fields are tolerated/);
-  assert.match(skill, /required known field remains strict/);
-  assert.match(skill, /bounded rejected-record counts/);
-  assert.match(skill, /observed-empty registry/);
-  assert.match(skill, /replacement generation starts monitor-only/);
+  assert.match(skill, /Claude, Codex, DeepSeek, and Grok as first-class providers/);
+  assert.match(skill, /Runtime status is best-effort/);
+  assert.match(skill, /route staleness, connector health, observed metadata, and the last safe code/);
+  assert.match(skill, /versions are diagnostic metadata, not routing authority/);
+  assert.match(skill, /release-owned offline support matrix/);
+  assert.match(skill, /pair --from .* --to/);
+  assert.match(skill, /replacement generation negotiates its current interface/);
+  assert.doesNotMatch(skill, /schema_attested|monitor-only|write-attestation/i);
   assert.match(skill, /default paired mode/);
   assert.match(skill, /SENDER_NOT_PAIRED/);
   assert.match(skill, /serve --inbound open/);

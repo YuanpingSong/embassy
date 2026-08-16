@@ -1332,15 +1332,7 @@ function buildProjectedDashboardViewModel(
         : routesByProvider.codex.length === 0
           ? "register_codex"
           : "restore_codex";
-  const parties = gatewayProviders
-    .filter((provider) =>
-      provider === "claude" ||
-      provider === "codex" ||
-      routesByProvider[provider].length > 0 ||
-      pairedAliasesByProvider[provider].size > 0 ||
-      snapshot.connectors.some((connector) => connector.provider === provider),
-    )
-    .map((provider): DashboardExchangeParty => {
+  const parties = gatewayProviders.map((provider): DashboardExchangeParty => {
       const providerPeers = validPeers.filter((peer) => peer.provider === provider);
       const providerRoutes = routesByProvider[provider];
       const ready = provider === "claude"
@@ -1377,7 +1369,7 @@ function buildProjectedDashboardViewModel(
           : { primaryAlias: boundedText(providerPeers.find((peer) => peer.selected)!.alias) }),
         nextAction,
       };
-    });
+  });
 
   const explicitAlerts = coalesceCodexReactivationAlerts(
     snapshot.alerts

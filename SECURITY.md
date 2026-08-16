@@ -97,14 +97,13 @@ review, and audit work.
   browser can issue or read across origins. They do not authenticate a loopback
   caller, its process, or its UID; the live dashboard assumes a trusted
   single-user machine.
-- **Predictions based on version strings.** A version string is a compatibility
-  observation, never security evidence or attack detection. Directly observed
-  path, ownership, protocol, schema, and generation facts outrank prediction
-  from a version string. Within the security boundary, boot refusal is reserved
-  for an unsafe or lost singleton lease, corrupt controller state, or unsafe
-  OS-boundary attestation. Version drift, an unparseable version, failed probes,
-  or one incompatible provider degrades and write-fences that surface; it does
-  not take down the broker or the other provider.
+- **Predictions based on version strings.** A version string is diagnostic
+  metadata, never routing authority, security evidence, or attack detection.
+  Current path, ownership, protocol, interface, generation, and correlated
+  operation facts decide what Embassy can safely do. Boot refusal is reserved
+  for an unsafe or lost singleton lease, corrupt controller state, or an unsafe
+  OS boundary. Interface drift or one unavailable optional provider degrades
+  that surface; it does not take down the broker or the other providers.
 
 ### Audit rule
 
@@ -172,51 +171,28 @@ broker.
   only listeners are private Unix-domain sockets. The opt-in
   `embassy dashboard --live` companion is a separate process with its own
   loopback HTTP listener — see "Live companion boundary" below.
-- Provider compatibility is evidence-gated rather than patch-version-pinned.
-  Provider startup first validates exact OS ownership, path, symlink, lease,
-  state, and generation evidence. Unsafe evidence for Embassy-owned or executed
+- Provider startup validates exact OS ownership, path, symlink, lease, state,
+  and generation evidence. Unsafe evidence for Embassy-owned or executed
   artifacts and Embassy callback, control, or state paths refuses broker
   startup; unsafe UID or mode evidence for Claude's external sessions registry
-  root quarantines and write-fences only Claude.
-  A certified same-major provider build is writable. A same-major build whose
-  bounded live-schema probes all pass is `schema_attested` and writable only
-  when those probes cover the write path. Claude's probes cover its native
-  write path. Ordinary Codex compatibility and registration reads remain
-  read-only: they may include `initialize`, `thread/loaded/list`, and
-  registration-time `thread/resume`, but do not invoke `turn/start`. The
-  optional Codex write-attestation probe is the sole exception. It may create
-  at most one disposable broker-owned thread per attempt, under a bounded write
-  fence with zero user-thread contact; every created probe thread is archived
-  and confirmed absent from the loaded set. The probe resolves the pinned
-  model's lowest advertised effort. Whenever that model/effort pin cannot
-  resolve, it declines in a zero-spend fail-safe before creating any thread or
-  model turn. Untested Codex 0.x therefore stays monitor-only pending a
-  certified write schema. Failed
-  probes, a different major, or version evidence that cannot establish a safe
-  major leave only that
-  provider degraded, monitor-only, and write-fenced while the broker,
-  control/dashboard surfaces, and other provider remain available; probes
-  never promote across a major or unknown version. A Claude
-  session record whose peer protocol is not 1 is rejected in isolation and
+  root quarantines only Claude. A provider version is best-effort diagnostic
+  metadata and carries no routing authority. Runtime authority comes from an
+  explicit pair, exact owned route and session identity, current connector and
+  generation facts, strict protocol handling, and correlated operation results.
+  A Claude record whose peer protocol is not 1 is rejected in isolation and
   included in bounded rejection evidence. Every replacement Codex endpoint
-  generation remains write-fenced until its fresh initialize and exact-task
-  listing checks pass and the controller activates it.
+  generation must negotiate its current interface and re-observe the exact task
+  before the controller re-anchors it.
 - Embassy publishes at most one process-owned `codex-*` record in Claude's
   registry with the supported explicit versioned Embassy-advertisement marker.
   The prefix is a visible alias convention, not the discriminator: an unmarked
   genuine Claude session named `codex-*` remains discoverable. Embassy creates
   one callback socket and removes only exact-owned artifacts whose generation
   still matches during graceful shutdown.
-- App Server methods are allowlisted. Ordinary connectors expose no archive,
-  deletion, shell, configuration, authentication, plugin, history,
-  approval-response, or generic RPC method. The optional write-attestation
-  probe alone may call `thread/archive`, only for its validated disposable
-  broker-owned probe thread; it then confirms that thread is absent from the
-  loaded set. The probe resolves the pinned model's lowest advertised effort.
-  Whenever that model/effort pin cannot resolve, it declines in a zero-spend
-  fail-safe before creating any thread or model turn. No archive method is
-  exposed to ordinary routes, and the other excluded method classes remain
-  excluded everywhere.
+- App Server methods are allowlisted. Connectors expose no archive, deletion,
+  shell, configuration, authentication, plugin, history, approval-response, or
+  generic RPC method. ACP permission requests are always denied or cancelled;
+  Embassy never turns them into an approval surface.
 - `turn/steer` is reachable only for an exact leading `STEER:` body in the
   Claude-to-Codex direction, with an exact observed active-turn ID. App Server
   admits it at the next tool-call boundary; Embassy never interrupts or injects
@@ -353,39 +329,20 @@ because this surface intentionally has no such authentication boundary.
 Routine tests use temporary directories, fake peers, and fake App Server
 transports. They do not inspect live provider state or contact a model.
 
-Compatibility admission is automatic and evidence-gated. Broker/provider
-startup owns bounded read-only validation of the configured installations,
-exact OS boundaries, provider majors, declared protocol constants, and live
-schemas. Unsafe Embassy-owned/executed artifacts or Embassy callback, control,
-or state paths remain startup-fatal; unsafe UID or mode evidence on Claude's
-external sessions registry root quarantines only that provider. Certified
-same-major builds are writable. Fully probed same-major
-builds are `schema_attested` and writable only where the probes cover writes.
-Ordinary Codex compatibility and registration reads remain read-only: they may
-include `initialize`, `thread/loaded/list`, and registration-time
-`thread/resume`, but do not invoke `turn/start`. The optional Codex
-write-attestation probe is the sole exception. It may create at most one
-disposable broker-owned thread per attempt, under a bounded write fence with
-zero user-thread contact; every created probe thread is archived and confirmed
-absent from the loaded set. The probe resolves the pinned model's lowest
-advertised effort. Whenever that model/effort pin cannot resolve, it declines
-in a zero-spend fail-safe before creating any thread or model turn. Untested
-Codex 0.x therefore remains monitor-only. Failed
-probes, different majors, and
-version evidence that cannot establish a safe major remain provider-local
-monitor-only states; the
-broker and other provider stay available, and no probe can promote across a
-major or unknown version. Different-major guidance
-names the observed/tested versions and supported major and requires an Embassy
-release supporting the observed major. These checks do not route a user
-message or start a model turn. Claude
-registry parsing remains strict for every required and consumed field while
-ignoring unknown top-level fields; bounded rejected-record counts and an
-observed-empty registry are surfaced instead of hidden. A replacement Codex
-endpoint generation receives its own fresh monitor-only initialize and
-exact-task listing check, while the write gate stays closed until controller
-activation. Runtime record, frame, response, identity, generation, and
-deadline checks remain mandatory after admission.
+Broker/provider startup owns bounded validation of configured installations and
+exact OS boundaries. Unsafe Embassy-owned or executed artifacts, callback,
+control, or state paths remain startup-fatal; unsafe UID or mode evidence on
+Claude's external sessions registry root quarantines only that provider.
+Runtime does not import the release-owned support matrix or derive authority
+from version metadata. It reports best-effort connector health, route
+staleness, observed metadata, and last safe codes while strict record, frame,
+response, identity, generation, correlation, and deadline checks decide each
+operation. Claude registry parsing remains strict for every required and
+consumed field while ignoring unknown top-level fields; bounded rejected-record
+counts and an observed-empty registry are surfaced instead of hidden. A
+replacement Codex endpoint negotiates its current interface and re-observes the
+exact registered task before re-anchoring. No validation traffic routes a user
+message or starts a model turn.
 
 Passive live discovery, a live provider connection, a native message, and an
 App Server turn are distinct authorization gates. Each requires an explicit
