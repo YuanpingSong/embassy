@@ -3,7 +3,7 @@ id: emb-68
 title: N-provider generalization — all-to-all routing, unified native state, from/to-provider surfaces
 kind: normal
 size: 5
-status: draft
+status: dispatched
 release: v1.7
 updated: 2026-08-16
 ---
