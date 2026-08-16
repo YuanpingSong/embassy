@@ -86,10 +86,16 @@ refresh appears in Activity as an automatic event, distinct from operator
 actions. Diagnostics reports each provider's compatibility evidence:
 `schema_attested` is informational and means the live probes passed on a
 same-major build outside this release's tested inventory. It is writable only
-when those probes cover the write path. Codex's bounded pre-write reads may
-include `initialize`, `thread/loaded/list`, and registration-time
-`thread/resume`, but never `turn/start`; current untested Codex 0.x builds
-therefore stay monitor-only.
+when those probes cover the write path. Ordinary Codex compatibility and
+registration reads remain read-only: they may include `initialize`,
+`thread/loaded/list`, and registration-time `thread/resume`, but do not invoke
+`turn/start`. The optional Codex write-attestation probe is the sole exception.
+It may create at most one disposable broker-owned thread per attempt, under a
+bounded write fence with zero user-thread contact; every created probe thread
+is archived and confirmed absent from the loaded set. The probe resolves the
+pinned model's lowest advertised effort. Whenever that model/effort pin cannot
+resolve, it declines in a zero-spend fail-safe before creating any thread or
+model turn. Current untested Codex 0.x builds therefore stay monitor-only.
 A same-major probe failure, different major, or version evidence that
 cannot establish a safe major leaves only that provider degraded, monitor-only,
 and write-fenced while the

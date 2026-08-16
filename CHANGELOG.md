@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Codex compatibility now includes an optional write-attestation probe that may create at most one disposable broker-owned thread per attempt under a bounded write fence, never touches user threads, and archives every created probe thread with loaded-set cleanup confirmed. It grants no authority by itself. The probe resolves the pinned model's lowest advertised effort; whenever that model/effort pin cannot resolve, it declines in a zero-spend fail-safe before creating any thread or model turn.
+
 ### Fixed
 
 - Stale Codex guidance now distinguishes the automatic endpoint transition from a Desktop app or task that has not reconnected after the recovery burst, and gives the exact managed-daemon relaunch command. The quickstart documents Desktop's attach-at-launch precondition.

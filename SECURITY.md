@@ -181,9 +181,16 @@ broker.
   A certified same-major provider build is writable. A same-major build whose
   bounded live-schema probes all pass is `schema_attested` and writable only
   when those probes cover the write path. Claude's probes cover its native
-  write path. Codex's bounded pre-write reads may include `initialize`,
-  `thread/loaded/list`, and registration-time `thread/resume`, but never
-  `turn/start`; untested Codex 0.x therefore stays monitor-only pending a
+  write path. Ordinary Codex compatibility and registration reads remain
+  read-only: they may include `initialize`, `thread/loaded/list`, and
+  registration-time `thread/resume`, but do not invoke `turn/start`. The
+  optional Codex write-attestation probe is the sole exception. It may create
+  at most one disposable broker-owned thread per attempt, under a bounded write
+  fence with zero user-thread contact; every created probe thread is archived
+  and confirmed absent from the loaded set. The probe resolves the pinned
+  model's lowest advertised effort. Whenever that model/effort pin cannot
+  resolve, it declines in a zero-spend fail-safe before creating any thread or
+  model turn. Untested Codex 0.x therefore stays monitor-only pending a
   certified write schema. Failed
   probes, a different major, or version evidence that cannot establish a safe
   major leave only that
@@ -200,9 +207,16 @@ broker.
   genuine Claude session named `codex-*` remains discoverable. Embassy creates
   one callback socket and removes only exact-owned artifacts whose generation
   still matches during graceful shutdown.
-- App Server methods are allowlisted. Embassy exposes no archive, deletion,
-  shell, configuration, authentication, plugin, history, approval-response, or
-  generic RPC method.
+- App Server methods are allowlisted. Ordinary connectors expose no archive,
+  deletion, shell, configuration, authentication, plugin, history,
+  approval-response, or generic RPC method. The optional write-attestation
+  probe alone may call `thread/archive`, only for its validated disposable
+  broker-owned probe thread; it then confirms that thread is absent from the
+  loaded set. The probe resolves the pinned model's lowest advertised effort.
+  Whenever that model/effort pin cannot resolve, it declines in a zero-spend
+  fail-safe before creating any thread or model turn. No archive method is
+  exposed to ordinary routes, and the other excluded method classes remain
+  excluded everywhere.
 - `turn/steer` is reachable only for an exact leading `STEER:` body in the
   Claude-to-Codex direction, with an exact observed active-turn ID. App Server
   admits it at the next tool-call boundary; Embassy never interrupts or injects
@@ -347,9 +361,16 @@ or state paths remain startup-fatal; unsafe UID or mode evidence on Claude's
 external sessions registry root quarantines only that provider. Certified
 same-major builds are writable. Fully probed same-major
 builds are `schema_attested` and writable only where the probes cover writes.
-Codex's bounded pre-write reads may include `initialize`, `thread/loaded/list`,
-and registration-time `thread/resume`, but never `turn/start`; untested Codex
-0.x therefore remains monitor-only. Failed
+Ordinary Codex compatibility and registration reads remain read-only: they may
+include `initialize`, `thread/loaded/list`, and registration-time
+`thread/resume`, but do not invoke `turn/start`. The optional Codex
+write-attestation probe is the sole exception. It may create at most one
+disposable broker-owned thread per attempt, under a bounded write fence with
+zero user-thread contact; every created probe thread is archived and confirmed
+absent from the loaded set. The probe resolves the pinned model's lowest
+advertised effort. Whenever that model/effort pin cannot resolve, it declines
+in a zero-spend fail-safe before creating any thread or model turn. Untested
+Codex 0.x therefore remains monitor-only. Failed
 probes, different majors, and
 version evidence that cannot establish a safe major remain provider-local
 monitor-only states; the
