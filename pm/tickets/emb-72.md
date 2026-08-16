@@ -2,7 +2,7 @@
 id: emb-72
 title: De-ceremony 66C+66D — presentation and docs truth sweep
 kind: docs
-size: 2
+size: 5
 status: draft
 release: v1.7
 updated: 2026-08-16
@@ -23,7 +23,7 @@ config/architecture/site/skill text rewritten to the best-effort positioning
 (this connection, this route, this correlated operation). Historical release
 notes stay historical; v1.7's notes record the removal.
 
-**Budgets**: size 2 combined. Sequenced after emb-70/71/68 so every sentence
+**Budgets**: size 5 (repriced from 2 when the founder upgraded the scope to a full refresh — the bilingual site re-story through the content pipeline is real work, not a sweep). Sequenced after emb-70/71/68 so every sentence
 describes shipped reality.
 
 ## Scope upgraded: refresh, not just truth sweep (founder, 2026-08-16)
