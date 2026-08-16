@@ -56,3 +56,12 @@ review and was never itself grep-verified — the promise's grep is what caught 
 promise working. Correctly preserved as-is: the test fixture's behavioral never-reach assertion and
 DECLINED.md's still-true no-authority-from-read-evidence statement. The scoped no-archive language
 (ordinary connectors vs probe-only exception) is the intended shape. Budget: size 2 stands.
+
+## Second window expansion (2026-08-16)
+
+**Ruling: APPROVED** — AGENTS.md (multiline-wrapped claim, copy-only) plus test/skill-package.test.ts
+and test/public-localization.test.ts (exact contract updates to the new sentences; no new tests).
+The contract tests are the promise's own enforcement arm — they must change with the copy or the
+suite goes red, which is the verification clause working. Instrument note for the record: single-line
+grep is insufficient for prose claims; the multiline/escaped-pattern sweep is the standard from now
+on, and promise 2's "grep-proven" means THAT grep. Size 2 stands.
