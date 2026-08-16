@@ -379,6 +379,7 @@ test("all client commands use one private control socket and expose only normali
   }> = [
     { argv: ["health"], env: BOTH_IDENTITIES },
     { argv: ["status"], env: BOTH_IDENTITIES },
+    { argv: ["doctor"], env: BOTH_IDENTITIES },
     {
       argv: ["delivery-status", "--token", DELIVERY_TOKEN],
       env: BOTH_IDENTITIES,
@@ -1398,6 +1399,85 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
     stderr.chunks.join(""),
     "[embassy] gateway rejected the request.\n",
   );
+});
+
+test("doctor returns normalized conditions and registration names attachment remedies", async () => {
+  const config = {
+    stateDir: "/private/fake-state",
+    controlSocketPath: "/private/fake-state/control.sock",
+    allowedHosts: ["this-mac"],
+    stallNoticeMs: 30_000,
+    steeringEnabled: true,
+    inboundMode: "paired" as const,
+    limits: {} as never,
+  };
+  const snapshot = (condition: "split_brain" | "orphaned") => ({
+    ...emptySnapshot(),
+    connectors: [{
+      provider: "codex" as const,
+      host: "this-mac",
+      health: "degraded" as const,
+      protocol: "codex-app-server",
+      protocolVersion: "0.147.0",
+      codexDoctor: { conditions: [condition] },
+    }],
+  });
+
+  const doctorStdout = capture();
+  assert.equal(await runGatewayCli(["doctor"], {
+    env: {},
+    stdin: input(),
+    stdout: doctorStdout,
+    stderr: capture(),
+    loadConfig: () => config,
+    validateControlSocket: async () => undefined,
+    sendRequest: (async () => ({
+      protocolVersion: 1,
+      ok: true,
+      result: snapshot("split_brain"),
+    })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  }), gatewayCliExitCodes.ok);
+  assert.deepEqual(JSON.parse(doctorStdout.chunks.join("")), {
+    ok: true,
+    command: "doctor",
+    result: { conditions: ["split_brain"] },
+  });
+
+  const expected = {
+    en: /Desktop is on a private App Server.*\/usr\/bin\/open/,
+    "zh-CN": /桌面应用正在使用私有 App Server.*\/usr\/bin\/open/,
+  } as const;
+  for (const locale of ["en", "zh-CN"] as const) {
+    let calls = 0;
+    const stderr = capture();
+    const code = await runGatewayCli([
+      "register-codex",
+      "--alias",
+      "codex-reviewer@this-mac",
+      "--lang",
+      locale,
+    ], {
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      stdin: input(),
+      stdout: capture(),
+      stderr,
+      loadConfig: () => config,
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              protocolVersion: 1,
+              ok: true,
+              result: { accepted: false, code: "rejected" },
+            }
+          : { protocolVersion: 1, ok: true, result: snapshot("split_brain") };
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    });
+    assert.equal(code, gatewayCliExitCodes.rejected);
+    assert.equal(calls, 2);
+    assert.match(stderr.chunks.join(""), expected[locale]);
+  }
 });
 
 test("watch-owner conflict preserves its code and localizes the untrack remedy", async () => {

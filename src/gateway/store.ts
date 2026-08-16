@@ -35,6 +35,7 @@ import {
 import {
   CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY,
   CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY,
+  CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   connectorHealthStates,
   directionId,
   deliveryStates,
@@ -4174,17 +4175,34 @@ export class GatewayStore {
   async publicSnapshot(): Promise<GatewayPublicSnapshot> {
     return this.mutate(async (state, now) => {
       const connectors: PublicConnectorSnapshot[] = state.connectors
-        .map((connector) => ({
-          provider: connector.provider,
-          host: connector.hostId,
-          health: connector.health,
-          protocol: connector.protocol,
-          protocolVersion: connector.protocolVersion,
-          ...(connector.lastSeenAt ? { lastSeenAt: connector.lastSeenAt } : {}),
-          ...(connector.safeErrorCode
-            ? { safeErrorCode: connector.safeErrorCode }
-            : {}),
-        }))
+        .map((connector) => {
+          const observedAt = connector.lastSeenAt === undefined
+            ? undefined
+            : Date.parse(connector.lastSeenAt);
+          const observationAgeMs = observedAt === undefined || !Number.isFinite(observedAt)
+            ? undefined
+            : Math.min(
+                Number.MAX_SAFE_INTEGER,
+                Math.max(0, now.getTime() - observedAt),
+              );
+          const health = connector.health === "healthy" &&
+              (observationAgeMs === undefined ||
+                observationAgeMs > CONNECTOR_OBSERVATION_STALE_AFTER_MS)
+            ? "degraded"
+            : connector.health;
+          return {
+            provider: connector.provider,
+            host: connector.hostId,
+            health,
+            protocol: connector.protocol,
+            protocolVersion: connector.protocolVersion,
+            ...(connector.lastSeenAt ? { lastSeenAt: connector.lastSeenAt } : {}),
+            ...(observationAgeMs === undefined ? {} : { observationAgeMs }),
+            ...(connector.safeErrorCode
+              ? { safeErrorCode: connector.safeErrorCode }
+              : {}),
+          };
+        })
         .sort((left, right) =>
           `${left.provider}:${left.host}`.localeCompare(
             `${right.provider}:${right.host}`,

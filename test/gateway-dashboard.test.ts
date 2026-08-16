@@ -26,6 +26,24 @@ test("static projection never materializes message bodies while live projection 
   assert.equal(renderDashboardHtml(snapshot).includes("STATIC_BODY_SENTINEL"), false);
 });
 
+test("Codex doctor conditions render exact actionable copy in both locales", () => {
+  const snapshot = dashboardFixture();
+  const codex = snapshot.connectors.find(
+    (connector) => connector.provider === "codex",
+  );
+  assert.ok(codex);
+  codex.codexDoctor = {
+    conditions: ["split_brain", "observation_stale"],
+  };
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Desktop is on a private App Server/);
+  assert.match(en, /Connector observation is stale/);
+  assert.match(en, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
+  assert.match(zh, /桌面应用正在使用私有 App Server/);
+  assert.match(zh, /连接器观察已过期/);
+});
+
 test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {
   const snapshot = dashboardFixture();
   const model = buildDashboardViewModel(snapshot);
@@ -665,7 +683,43 @@ test("aged Codex staleness points at Desktop while the recovery burst remains tr
   assert.match(en, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
   assert.match(zh, /正在等待 Codex 应用重新连接/);
   assert.match(zh, /托管 App Server 可以访问/);
+  assert.match(zh, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
   assert.equal(en.includes("Re-run register-codex"), false);
+});
+
+test("generation-changed Codex route renders Desktop reconnect guidance", () => {
+  const snapshot = dashboardFixture();
+  const route = snapshot.routes.find((candidate) => candidate.provider === "codex");
+  assert.ok(route);
+  route.state = "stale";
+  route.safeErrorCode = "ENDPOINT_GENERATION_CHANGED";
+  route.lastSeenAt = "2026-08-08T11:59:57.000Z";
+  snapshot.alerts = [{
+    code: "ENDPOINT_GENERATION_CHANGED",
+    severity: "error",
+    timestamp: route.lastSeenAt,
+    provider: "codex",
+    host: route.host,
+    alias: route.alias,
+  }];
+  const connector = snapshot.connectors.find(
+    (candidate) => candidate.provider === "codex",
+  );
+  assert.ok(connector);
+  connector.health = "healthy";
+
+  const attention = buildDashboardViewModel(snapshot).attention.find(
+    (item) => item.alias === route.alias && item.host === route.host,
+  );
+  assert.equal(attention?.guidance, "codex_app_reconnect_required");
+
+  const relaunch = /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/;
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Waiting for the Codex app/);
+  assert.match(en, relaunch);
+  assert.match(zh, /正在等待 Codex 应用重新连接/);
+  assert.match(zh, relaunch);
 });
 
 test("any provider-to-Claude mailbox write surfaces one notice while its recipient is unobserved", () => {

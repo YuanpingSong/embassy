@@ -53,6 +53,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "cli-copy.en",
   "cli-copy.zh-CN",
   "codex-app-server",
+  "codex-doctor",
   "codex-local-transport",
   "codex-registration-generation",
   "codex-registration-succession",

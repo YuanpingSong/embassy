@@ -367,6 +367,11 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
     bundle.source,
     /settled:\s*"watches\.event\.settled"/u,
   );
+  assert.match(bundle.source, /t\("column\.observed"\)/u);
+  assert.match(
+    bundle.source,
+    /React\.createElement\(Embassy\.TimeAgo, \{ iso: connector\.lastSeenAt \}\)/u,
+  );
 });
 
 test("root browser protocol ignores fragments and uses cookie-free API posts", async () => {
@@ -1522,6 +1527,26 @@ test("diagnosticsProps preserves bounded connector registry evidence", () => {
     (connector) => connector.provider === "claude",
   );
   assert.deepEqual(plain(projected?.registry), plain(claude.registry));
+});
+
+test("diagnosticsProps preserves Codex doctor conditions", () => {
+  const model = mutableClone(DEGRADED);
+  model.connectors = model.connectors.map((connector) =>
+    connector.provider === "codex"
+      ? {
+          ...connector,
+          codexDoctor: {
+            conditions: ["orphaned", "observation_stale"] as const,
+          },
+        }
+      : connector,
+  );
+  const projected = adapter.diagnosticsProps(model).connectors.find(
+    (connector) => connector.provider === "codex",
+  );
+  assert.deepEqual(plain(projected?.codexDoctor), {
+    conditions: ["orphaned", "observation_stale"],
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -135,6 +135,11 @@ export type LocalCodexTransportFactory = {
   readonly hostId: string;
   readonly protocol: "codex-app-server";
   readonly protocolVersion: string;
+  /** Exact attested paths retained only for bounded local diagnostics. */
+  readonly diagnosticInstallation?: Readonly<{
+    binaryPath: string;
+    controlSocketPath: string;
+  }>;
   close: () => Promise<void>;
   connectTransport: () => Promise<LocalCodexOwnedTransport>;
 };
@@ -688,6 +693,10 @@ class Factory implements LocalCodexTransportFactory {
   readonly endpointGeneration: string;
   readonly appServerVersion: string;
   readonly hostId: string;
+  readonly diagnosticInstallation: Readonly<{
+    binaryPath: string;
+    controlSocketPath: string;
+  }>;
   private closed = false;
   private readonly active = new Set<OwnedTransport>();
 
@@ -712,6 +721,10 @@ class Factory implements LocalCodexTransportFactory {
     }
     this.protocolVersion = installation.appServerVersion;
     this.hostId = options.hostId ?? "this-mac";
+    this.diagnosticInstallation = Object.freeze({
+      binaryPath: installation.binaryPath,
+      controlSocketPath: installation.controlSocketPath,
+    });
   }
 
   async connectTransport(): Promise<LocalCodexOwnedTransport> {

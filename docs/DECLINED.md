@@ -7,8 +7,9 @@ means addressing its reason, not ignoring it.
 
 ## v1.5
 
-- **Metadata "doctor" view** — A new diagnostic surface does not belong in a
-  simplification release; status and the dashboard already carry the evidence.
+- **Metadata "doctor" view** — Superseded in v1.7.1 after a live split-brain
+  incident proved that status and dashboard evidence alone did not name the
+  actionable Desktop attachment failure.
 - **Consulates (multi-host federation)** — Deferred indefinitely because
   Embassy is deliberately one user, one machine.
 - **Codex write-attestation probe** — Creating probe threads has UI side effects
@@ -30,3 +31,9 @@ means addressing its reason, not ignoring it.
 - **Native stall-notice prose kept one hop from the remedy** — The native
   notice states when queued mail arrives and points onward; the dashboard owns
   the full remedy prose.
+
+## v1.7.1
+
+- **Automatic Desktop relaunch after Codex attachment failure** — Declined
+  because relaunching can terminate or replace the user's open Desktop windows;
+  Embassy diagnoses the condition and prints the exact opt-in remedy instead.

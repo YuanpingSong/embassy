@@ -71,6 +71,7 @@ export const gatewayCliCommands = [
   "serve",
   "health",
   "status",
+  "doctor",
   "delivery-status",
   "wait-delivery",
   "untrack",
@@ -520,6 +521,7 @@ async function buildRequest(
         params: emptyParams(args),
       };
     case "status":
+    case "doctor":
       return {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "list_snapshot",
@@ -863,6 +865,37 @@ function responseExitCode(response: GatewayControlResponse): number {
   return gatewayCliExitCodes.ok;
 }
 
+function codexDoctorConditions(result: unknown): readonly string[] {
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    !Object.hasOwn(result, "connectors") ||
+    !Array.isArray((result as { connectors?: unknown }).connectors)
+  ) {
+    return ["unknown"];
+  }
+  const connector = (result as { connectors: unknown[] }).connectors.find(
+    (row) =>
+      row !== null &&
+      typeof row === "object" &&
+      (row as { provider?: unknown }).provider === "codex",
+  );
+  const doctor =
+    connector !== null && typeof connector === "object"
+      ? (connector as { codexDoctor?: unknown }).codexDoctor
+      : undefined;
+  if (
+    doctor === null ||
+    typeof doctor !== "object" ||
+    !Array.isArray((doctor as { conditions?: unknown }).conditions)
+  ) {
+    return ["unknown"];
+  }
+  return (doctor as { conditions: unknown[] }).conditions.filter(
+    (condition): condition is string => typeof condition === "string",
+  );
+}
+
 function waitDeliveryExitCode(
   response: GatewayControlResponse<"delivery_status">,
 ): number {
@@ -1126,11 +1159,15 @@ export async function runGatewayCli(
       return gatewayCliExitCodes.failure;
     }
 
+    const result =
+      command === "doctor"
+        ? { conditions: codexDoctorConditions(response.result) }
+        : response.result;
     stdout.write(
       serializedOutput({
         ok: true,
         command,
-        result: response.result,
+        result,
       }),
     );
     const exitCode =
@@ -1143,6 +1180,27 @@ export async function runGatewayCli(
         stderr.write(
           `[embassy] ${getCliCopy(locale)["hint.progressWatchOwnerConflict"]}\n`,
         );
+      }
+      if (command === "register-codex") {
+        const diagnosis = await sendRequest({
+          socketPath: config.controlSocketPath,
+          request: {
+            protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+            method: "list_snapshot",
+            params: {},
+          },
+        }).catch(() => undefined);
+        if (diagnosis?.ok === true) {
+          const conditions = codexDoctorConditions(diagnosis.result);
+          const hint = conditions.includes("split_brain")
+            ? "hint.codexSplitBrain"
+            : conditions.includes("orphaned")
+              ? "hint.codexOrphaned"
+              : undefined;
+          if (hint !== undefined) {
+            stderr.write(`[embassy] ${getCliCopy(locale)[hint]}\n`);
+          }
+        }
       }
     } else if (
       command === "wait-delivery" &&

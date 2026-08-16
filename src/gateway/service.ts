@@ -51,6 +51,7 @@ import {
   isCodexRegistrationGeneration,
 } from "./codex-registration-generation.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
+import type { CodexDoctorResult } from "./codex-doctor.js";
 import {
   GatewayStore,
   type CodexSuccessionRecoveryAuthority,
@@ -76,6 +77,7 @@ import {
   type PublicConnectorSnapshot,
   type PublicGatewayActivityEvent,
   type PublicRegistryObservationSnapshot,
+  CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   type RouteState,
   type SafeGatewayAlert,
   type TerminalMessageSettlement,
@@ -96,6 +98,8 @@ const NATIVE_HELD_THRESHOLD_MS = 1_000;
 const RUNTIME_ACTIVITY_CAPACITY = 256;
 const DELIVERY_SETTLEMENT_RETRY_MS = 250;
 const DELIVERY_DASHBOARD_REFRESH_MS = 15_000;
+const CLAUDE_DISCOVERY_REFRESH_MS = 30_000;
+const CODEX_DOCTOR_REFRESH_MS = 30_000;
 const BOOT_REACTIVATION_TRUST_FAILURE_CODES = new Set([
   "HOME_INVALID",
   "MANAGED_CODEX_INVALID",
@@ -490,6 +494,20 @@ type MessageDeliveryTracker = {
   nativeReceipt?: NativeReceiptTracker;
 };
 
+type PreparedProviderDispatch = Readonly<{
+  targetAlias: string;
+  messageId: string;
+  body: string;
+  binding: PrivateRouteBinding;
+  authorization: MessageContext["authorization"];
+  steeringWhileBusy: boolean;
+  input: GatewayAdapterDispatchInput;
+}>;
+
+type ProviderDispatchOutcome =
+  | Readonly<{ kind: "result"; result: GatewayAdapterDispatchResult }>
+  | Readonly<{ kind: "error" }>;
+
 /**
  * A provider turn may outlive terminal delivery of its original body. This
  * map retains only bounded correlation needed for a later final result/reply;
@@ -576,6 +594,17 @@ type Candidate = GatewayAdapterDiscovery & {
   adapter: GatewayProviderAdapter;
 };
 
+type ClaudeDiscoveryObservation = Readonly<{
+  adapter: GatewayProviderAdapter;
+  snapshot: GatewayAdapterDiscoverySnapshot;
+}>;
+
+type PreparedClaudeRebind = Readonly<{
+  candidate: Candidate;
+  persisted: GatewayPrivateRouteInspection;
+  selectedState: GatewayAdapterRouteState;
+}>;
+
 export type GatewayServiceOptions = {
   config: GatewayConfig;
   adapters?: readonly GatewayProviderAdapter[];
@@ -586,6 +615,8 @@ export type GatewayServiceOptions = {
   timers?: GatewayServiceTimers;
   /** Test seam for opaque listener generations; production remains random. */
   successionGeneration?: () => string;
+  /** Bounded local process evidence; never routing authority. */
+  codexDoctor?: () => Promise<CodexDoctorResult>;
 };
 
 function bindingKey(binding: PrivateRouteBinding): string {
@@ -692,6 +723,7 @@ export class GatewayService {
   private readonly timers: GatewayServiceTimers;
   private readonly nativePeerCwd: string;
   private readonly successionGeneration: () => string;
+  private readonly codexDoctor: (() => Promise<CodexDoctorResult>) | undefined;
   private readonly mutex = new KeyedMutex();
   private readonly routeBindings = new Map<string, PrivateRouteBinding>();
   private readonly routeStates = new Map<
@@ -766,8 +798,17 @@ export class GatewayService {
   private readonly callbackCapacity: number;
   private readonly deliveryCallbackReserve: number;
   private readonly deliveryTokenCapacity: number;
+  private readonly providerDispatchInFlightMessageIds = new Set<string>();
+  private readonly connectorFreshnessDeadlineAt = new Map<string, number>();
   private lifecycleTimer: GatewayServiceTimer | undefined;
+  private lifecyclePublishPending = false;
   private nextDashboardRefreshAt: number | undefined;
+  private nextClaudeDiscoveryAt: number | undefined;
+  private claudeDiscoveryScheduled = false;
+  private claudeDiscoveryInFlight: Promise<void> | undefined;
+  private codexDoctorTimer: GatewayServiceTimer | undefined;
+  private codexDoctorInFlight: Promise<void> | undefined;
+  private codexDoctorResult: CodexDoctorResult | undefined;
   private nextProgressWatchAt: number | undefined;
   private control: GatewayControlServer | undefined;
   /** Coarse controller mutation revision exposed by `health`. */
@@ -823,6 +864,7 @@ export class GatewayService {
     this.successionGeneration =
       options.successionGeneration ??
       createCodexRegistrationGeneration;
+    this.codexDoctor = options.codexDoctor;
     this.callbackCapacity = Math.max(
       64,
       options.config.limits.maxRoutes +
@@ -887,6 +929,7 @@ export class GatewayService {
             ? {}
             : { safeErrorCode: safeCode(observation.safeErrorCode, "ADAPTER_DEGRADED") }),
         });
+        this.recordConnectorFreshness(adapter.identity, observation.health);
         if (observation.ownedRoute !== undefined) {
           const route = observation.ownedRoute;
           const prefix = gatewayRegistrationIngressPrefixes[adapter.identity.provider];
@@ -922,6 +965,18 @@ export class GatewayService {
         }
         assertStartActive();
       }
+      await this.refreshClaudeDiscovery({ incrementRevision: false }).catch(
+        () => false,
+      );
+      await this.refreshCodexDoctor();
+      for (const [alias, binding] of this.routeBindings) {
+        if (
+          binding.provider === "claude" &&
+          this.routeStates.get(alias) === "idle"
+        ) {
+          bootReactivatedIdleAliases.push(alias);
+        }
+      }
       await this.recoverCodexSuccessionAfterRestartLocked();
       bootReactivatedIdleAliases.push(
         ...(await this.reactivateRetainedCodexRoutesAfterRestartLocked()),
@@ -943,8 +998,11 @@ export class GatewayService {
       this.control = control;
       this.running = true;
       this.nextDashboardRefreshAt = undefined;
+      this.nextClaudeDiscoveryAt =
+        this.now().getTime() + CLAUDE_DISCOVERY_REFRESH_MS;
       await this.refreshNextProgressWatchWakeLocked();
       this.scheduleLifecycleWakeLocked();
+      this.scheduleCodexDoctor();
       for (const alias of bootReactivatedIdleAliases) {
         this.scheduleDispatch(alias);
       }
@@ -974,6 +1032,12 @@ export class GatewayService {
     const control = this.control;
     this.control = undefined;
     let closeFailed = false;
+    if (this.codexDoctorTimer !== undefined) {
+      this.timers.clearTimeout(this.codexDoctorTimer);
+      this.codexDoctorTimer = undefined;
+    }
+    await this.codexDoctorInFlight?.catch(() => undefined);
+    await this.claudeDiscoveryInFlight?.catch(() => undefined);
     if (control !== undefined) {
       try {
         await control.close();
@@ -989,6 +1053,9 @@ export class GatewayService {
           this.timers.clearTimeout(this.lifecycleTimer);
           this.lifecycleTimer = undefined;
         }
+        this.nextClaudeDiscoveryAt = undefined;
+        this.lifecyclePublishPending = false;
+        this.connectorFreshnessDeadlineAt.clear();
         const quiesceResults = await Promise.allSettled(
           this.adapters.map(async (adapter) =>
             await adapter.quiesceNativeInbound?.(),
@@ -1009,6 +1076,13 @@ export class GatewayService {
         );
         for (const messageId of [...this.messageContexts.keys()]) {
           if (retainedQueuedMessageIds.has(messageId)) continue;
+          if (this.providerDispatchInFlightMessageIds.has(messageId)) {
+            await this.advanceDeliveryLocked(messageId, {
+              type: "dispatch_ambiguous",
+              at: this.now().getTime(),
+              safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
+            });
+          }
           const queued = await this.store.settleQueuedMessage({
             messageId,
             state: "cancelled",
@@ -1068,6 +1142,7 @@ export class GatewayService {
         this.activeDispatchByTarget.clear();
         this.scheduledDispatchTargets.clear();
         this.dispatchRunnerTargets.clear();
+        this.providerDispatchInFlightMessageIds.clear();
         for (const timer of this.heldRedispatchTimers.values()) {
           this.timers.clearTimeout(timer);
         }
@@ -1297,6 +1372,14 @@ export class GatewayService {
       );
       return {
         ...connector,
+        ...(connector.provider === "codex" &&
+        this.codexDoctorResult !== undefined
+          ? {
+              codexDoctor: {
+                conditions: this.codexDoctorConditions(connector),
+              },
+            }
+          : {}),
         ...(connector.provider !== "claude" || registry === undefined
           ? {}
           : {
@@ -1307,6 +1390,89 @@ export class GatewayService {
             }),
       };
     });
+  }
+
+  private recordConnectorFreshness(
+    identity: Pick<PrivateEndpointIdentity, "provider" | "hostId">,
+    health: "healthy" | "degraded" | "offline",
+  ): void {
+    const key = `${identity.provider}\0${identity.hostId}`;
+    if (health === "healthy") {
+      this.connectorFreshnessDeadlineAt.set(
+        key,
+        this.now().getTime() + CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1,
+      );
+    } else {
+      this.connectorFreshnessDeadlineAt.delete(key);
+    }
+  }
+
+  private codexDoctorConditions(
+    connector: PublicConnectorSnapshot,
+  ): readonly (
+    | "split_brain"
+    | "orphaned"
+    | "attached"
+    | "observation_stale"
+    | "unknown"
+  )[] {
+    const attachment = this.codexDoctorResult?.conditions[0] ?? "unknown";
+    const stale =
+      connector.observationAgeMs === undefined ||
+      connector.observationAgeMs > CONNECTOR_OBSERVATION_STALE_AFTER_MS;
+    if (attachment === "split_brain" || attachment === "orphaned") {
+      return stale ? [attachment, "observation_stale"] : [attachment];
+    }
+    if (stale) return ["observation_stale", attachment];
+    return [attachment];
+  }
+
+  private async refreshCodexDoctor(): Promise<boolean> {
+    if (this.codexDoctor === undefined) return false;
+    const next = await this.codexDoctor().catch(
+      (): CodexDoctorResult => ({ conditions: ["unknown"] }),
+    );
+    const changed =
+      JSON.stringify(next.conditions) !==
+      JSON.stringify(this.codexDoctorResult?.conditions);
+    this.codexDoctorResult = next;
+    return changed;
+  }
+
+  private scheduleCodexDoctor(): void {
+    if (
+      !this.running ||
+      this.closing ||
+      this.codexDoctor === undefined ||
+      this.codexDoctorTimer !== undefined ||
+      this.codexDoctorInFlight !== undefined
+    ) {
+      return;
+    }
+    const timer = this.timers.setTimeout(() => {
+      if (this.codexDoctorTimer !== timer) return;
+      this.codexDoctorTimer = undefined;
+      const operation = this.refreshCodexDoctor()
+        .then(async (changed) => {
+          if (!changed || this.closing) return;
+          await this.mutex.run("service", async () => {
+            this.revision += 1;
+            await this.publish();
+          });
+        })
+        .catch(() => {
+          this.dashboardHealthy = false;
+        });
+      this.codexDoctorInFlight = operation;
+      void operation.finally(() => {
+        if (this.codexDoctorInFlight === operation) {
+          this.codexDoctorInFlight = undefined;
+        }
+        this.scheduleCodexDoctor();
+      });
+    }, CODEX_DOCTOR_REFRESH_MS);
+    this.codexDoctorTimer = timer;
+    (timer as { unref?: () => void }).unref?.();
   }
 
   async observeSnapshot(): Promise<GatewaySnapshotObservation> {
@@ -1346,7 +1512,17 @@ export class GatewayService {
   private fingerprintSnapshot(snapshot: GatewayPublicSnapshot): string {
     // Closed snapshot validation bounds every array and field before this
     // serialization. Omitting generatedAt is the sole semantic exception.
-    const { generatedAt: _generatedAt, ...semanticSnapshot } = snapshot;
+    const {
+      generatedAt: _generatedAt,
+      connectors,
+      ...snapshotWithoutGeneratedAt
+    } = snapshot;
+    const semanticSnapshot = {
+      ...snapshotWithoutGeneratedAt,
+      connectors: connectors.map(
+        ({ observationAgeMs: _observationAgeMs, ...connector }) => connector,
+      ),
+    };
     const encoded = JSON.stringify(
       semanticSnapshot satisfies Omit<GatewayPublicSnapshot, "generatedAt">,
     );
@@ -1668,9 +1844,9 @@ export class GatewayService {
   }
 
   private enqueueCallbackWorkerOnly(): void {
-    if (this.callbackScheduled) return;
+    if (this.callbackScheduled || this.callbackWorker !== undefined) return;
     this.callbackScheduled = true;
-    setImmediate(() => {
+    queueMicrotask(() => {
       this.callbackScheduled = false;
       const worker = this.mutex.run("service", async () => {
         await this.drainCallbackQueueLocked();
@@ -4065,7 +4241,11 @@ export class GatewayService {
       inboundMode: snapshot.inboundMode,
       health: snapshot.health,
       connectors: snapshot.connectors.map(
-        ({ lastSeenAt: _lastSeenAt, ...connector }) => connector,
+        ({
+          lastSeenAt: _lastSeenAt,
+          observationAgeMs: _observationAgeMs,
+          ...connector
+        }) => connector,
       ),
       availablePeers: snapshot.availablePeers.map(
         ({ lastSeenAt: _lastSeenAt, ...peer }) => peer,
@@ -4082,7 +4262,155 @@ export class GatewayService {
     });
   }
 
-  private async refreshClaudeDiscovery(): Promise<boolean> {
+  private schedulePeriodicClaudeDiscovery(): void {
+    if (
+      this.closing ||
+      this.claudeDiscoveryScheduled ||
+      this.claudeDiscoveryInFlight !== undefined
+    ) {
+      return;
+    }
+    this.claudeDiscoveryScheduled = true;
+    queueMicrotask(() => {
+      this.claudeDiscoveryScheduled = false;
+      if (this.closing || !this.running) return;
+      const operation = this.refreshClaudeDiscoveryPeriodically().catch(() => {
+        this.dashboardHealthy = false;
+      });
+      this.claudeDiscoveryInFlight = operation;
+      void operation.finally(() => {
+        if (this.claudeDiscoveryInFlight === operation) {
+          this.claudeDiscoveryInFlight = undefined;
+        }
+      });
+    });
+  }
+
+  private async refreshClaudeDiscoveryPeriodically(): Promise<void> {
+    const observations = (
+      await Promise.all(
+        this.adapters
+          .filter((adapter) => adapter.identity.provider === "claude")
+          .map(async (adapter): Promise<ClaudeDiscoveryObservation | undefined> => {
+            try {
+              const snapshot = await adapter.discoverClaudePeers?.();
+              return snapshot === undefined ? undefined : { adapter, snapshot };
+            } catch {
+              return undefined;
+            }
+          }),
+      )
+    ).filter(
+      (item): item is ClaudeDiscoveryObservation => item !== undefined,
+    );
+    if (this.closing) return;
+
+    const preparedRebinds: PreparedClaudeRebind[] = [];
+    const persisted = await this.store.inspectPrivateClaudeRoutes();
+    for (const route of persisted) {
+      if (!route.enabled || route.state !== "stale") continue;
+      const observation = observations.find(
+        ({ adapter, snapshot }) =>
+          snapshot.complete &&
+          adapter.identity.hostId === route.binding.hostId,
+      );
+      if (observation === undefined) continue;
+      const peers = observation.snapshot.peers.filter(
+        (peer) =>
+          peer.kind === "interactive" &&
+          PUBLIC_ALIAS.test(peer.alias) &&
+          peer.alias.endsWith(`@${observation.adapter.identity.hostId}`),
+      );
+      const candidates = peers.filter(
+        (peer) => peer.routeHandle === route.binding.routeHandle,
+      );
+      const peer = candidates[0];
+      if (
+        candidates.length !== 1 ||
+        peer === undefined ||
+        peers.filter((item) => item.alias === peer.alias).length !== 1
+      ) {
+        continue;
+      }
+      const candidate: Candidate = { ...peer, adapter: observation.adapter };
+      try {
+        this.validatePersistedClaudeCandidate(candidate, route);
+        await this.assertClaudeWorkspaceDisjoint(
+          candidate.adapter,
+          candidate.routeHandle,
+        );
+        const selected = await candidate.adapter.selectRoute({
+          alias: candidate.alias,
+          routeHandle: candidate.routeHandle,
+        });
+        if (selected.routeHandle !== candidate.routeHandle) {
+          throw new BridgeError(
+            "ROUTE_MISMATCH",
+            "The peer identity changed during selection.",
+          );
+        }
+        preparedRebinds.push({
+          candidate,
+          persisted: route,
+          selectedState: selected.state,
+        });
+      } catch {
+        await candidate.adapter.releaseRoute?.(candidate.routeHandle).catch(
+          () => undefined,
+        );
+      }
+    }
+
+    const consumed = new Set<PreparedClaudeRebind>();
+    try {
+      await this.mutex.run("service", async () => {
+        if (this.closing || !this.running) return;
+        const changed = await this.refreshClaudeDiscovery({
+          incrementRevision: false,
+          observations,
+          preparedRebinds,
+          consumedPreparedRebinds: consumed,
+        });
+        if (changed) {
+          this.revision += 1;
+          await this.publish();
+        }
+        this.scheduleLifecycleWakeLocked();
+      });
+    } finally {
+      const releasable = await this.mutex.run("service", async () =>
+        preparedRebinds.filter((prepared) => {
+          if (consumed.has(prepared)) return false;
+          const binding: PrivateRouteBinding = {
+            ...prepared.candidate.adapter.identity,
+            routeHandle: prepared.candidate.routeHandle,
+            ownerLease: stableLease(
+              "claude",
+              prepared.candidate.routeHandle,
+            ),
+          };
+          const alias = this.bindingAliases.get(bindingKey(binding));
+          return alias === undefined || this.routeStates.get(alias) === "stale";
+        }),
+      );
+      await Promise.allSettled(
+        releasable.map(async (prepared) =>
+            await prepared.candidate.adapter.releaseRoute?.(
+              prepared.candidate.routeHandle,
+            ),
+          ),
+      );
+    }
+  }
+
+  private async refreshClaudeDiscovery(
+    options: {
+      incrementRevision?: boolean;
+      observations?: readonly ClaudeDiscoveryObservation[];
+      preparedRebinds?: readonly PreparedClaudeRebind[];
+      consumedPreparedRebinds?: Set<PreparedClaudeRebind>;
+    } = {},
+  ): Promise<boolean> {
     const publicBefore = await this.discoveryPublicFingerprint();
     this.candidates.clear();
     const rowsByAlias = new Map<
@@ -4103,12 +4431,34 @@ export class GatewayService {
         peers: [],
         complete: false,
       };
+      let discoverySucceeded = false;
       try {
-        discovered = (await adapter.discoverClaudePeers?.()) ?? discovered;
+        const observed = options.observations?.find(
+          (item) => item.adapter === adapter,
+        );
+        if (observed !== undefined) {
+          discovered = observed.snapshot;
+          discoverySucceeded = true;
+        } else if (
+          options.observations === undefined &&
+          adapter.discoverClaudePeers !== undefined
+        ) {
+          discovered = await adapter.discoverClaudePeers();
+          discoverySucceeded = true;
+        }
       } catch {
         // Registry observation is dashboard evidence, not Claude mailbox
         // authority. The provider still revalidates the exact target before
         // any write.
+      }
+      if (discoverySucceeded && discovered.complete) {
+        await this.store.observeConnector({
+          identity: adapter.identity,
+          health: "healthy",
+          protocol: adapter.protocol,
+          protocolVersion: adapter.protocolVersion,
+        });
+        this.recordConnectorFreshness(adapter.identity, "healthy");
       }
       this.captureRegistryObservation(
         adapter,
@@ -4231,11 +4581,36 @@ export class GatewayService {
       if (matches.length !== 1) continue;
       const candidate = matches[0];
       if (candidate === undefined) continue;
-      await this.activatePersistedClaudeCandidate(
-        candidate,
-        route,
-        "peer_identity_reobserved",
-      ).catch(() => undefined);
+      const prepared = options.preparedRebinds?.find(
+        (item) =>
+          item.candidate.adapter === candidate.adapter &&
+          item.candidate.routeHandle === candidate.routeHandle &&
+          item.persisted.binding.ownerLease === route.binding.ownerLease,
+      );
+      const activated = prepared === undefined
+        ? options.observations === undefined &&
+          await this.activatePersistedClaudeCandidate(
+            candidate,
+            route,
+            "peer_identity_reobserved",
+          ).then(() => true, () => false)
+        : await this.commitPreparedClaudeRebind(
+            prepared,
+            "peer_identity_reobserved",
+          ).then(
+            () => {
+              options.consumedPreparedRebinds?.add(prepared);
+              return true;
+            },
+            () => false,
+          );
+      if (
+        activated &&
+        this.running &&
+        this.routeStates.get(candidate.alias) === "idle"
+      ) {
+        this.scheduleDispatch(candidate.alias);
+      }
     }
 
     const rows: PublicAvailablePeerSnapshot[] = [];
@@ -4319,7 +4694,7 @@ export class GatewayService {
     );
     const changed =
       publicBefore !== (await this.discoveryPublicFingerprint());
-    if (changed) this.revision += 1;
+    if (changed && options.incrementRevision !== false) this.revision += 1;
     return changed;
   }
 
@@ -4381,21 +4756,7 @@ export class GatewayService {
     persisted: GatewayPrivateRouteInspection,
     reason: "peer_explicitly_reselected" | "peer_identity_reobserved",
   ): Promise<void> {
-    const expectedLease = stableLease("claude", candidate.routeHandle);
-    if (
-      !persisted.enabled ||
-      persisted.state !== "stale" ||
-      persisted.binding.provider !== "claude" ||
-      candidate.adapter.identity.provider !== "claude" ||
-      persisted.binding.hostId !== candidate.adapter.identity.hostId ||
-      persisted.binding.routeHandle !== candidate.routeHandle ||
-      persisted.binding.ownerLease !== expectedLease
-    ) {
-      throw new BridgeError(
-        "ROUTE_REBIND_IDENTITY_MISMATCH",
-        "The persisted Claude selection does not match the exact live session identity.",
-      );
-    }
+    this.validatePersistedClaudeCandidate(candidate, persisted);
     await this.assertClaudeWorkspaceDisjoint(
       candidate.adapter,
       candidate.routeHandle,
@@ -4411,29 +4772,71 @@ export class GatewayService {
           "The peer identity changed during selection.",
         );
       }
-      const binding: PrivateRouteBinding = {
-        ...candidate.adapter.identity,
-        routeHandle: candidate.routeHandle,
-        ownerLease: expectedLease,
-      };
-      await this.store.rebindStaleRoute({
-        alias: persisted.alias,
-        newAlias: candidate.alias,
-        currentOwnerLease: persisted.binding.ownerLease,
-        newBinding: binding,
+      await this.commitPreparedClaudeRebind(
+        { candidate, persisted, selectedState: selected.state },
         reason,
-        state: selected.state,
-      });
-      if (persisted.alias !== candidate.alias) {
-        this.forgetBinding(persisted.alias);
-      }
-      this.rememberBinding(candidate.alias, binding, selected.state);
+      );
     } catch (error) {
       await candidate.adapter.releaseRoute?.(candidate.routeHandle).catch(() => {
         this.dashboardHealthy = false;
       });
       throw error;
     }
+  }
+
+  private validatePersistedClaudeCandidate(
+    candidate: Candidate,
+    persisted: GatewayPrivateRouteInspection,
+  ): void {
+    const expectedLease = stableLease("claude", candidate.routeHandle);
+    if (
+      !persisted.enabled ||
+      persisted.state !== "stale" ||
+      persisted.binding.provider !== "claude" ||
+      candidate.adapter.identity.provider !== "claude" ||
+      persisted.binding.hostId !== candidate.adapter.identity.hostId ||
+      persisted.binding.routeHandle !== candidate.routeHandle ||
+      persisted.binding.ownerLease !== expectedLease
+    ) {
+      throw new BridgeError(
+        "ROUTE_REBIND_IDENTITY_MISMATCH",
+        "The persisted Claude selection does not match the exact live session identity.",
+      );
+    }
+  }
+
+  private async commitPreparedClaudeRebind(
+    prepared: PreparedClaudeRebind,
+    reason: "peer_explicitly_reselected" | "peer_identity_reobserved",
+  ): Promise<void> {
+    const { candidate, selectedState } = prepared;
+    const persisted =
+      (await this.store.inspectPrivateRoute(prepared.persisted.alias)) ??
+      (await this.store.inspectPrivateRoute(candidate.alias));
+    if (persisted === undefined) {
+      throw new BridgeError(
+        "ROUTE_REBIND_IDENTITY_MISMATCH",
+        "The persisted Claude selection changed before re-observation committed.",
+      );
+    }
+    this.validatePersistedClaudeCandidate(candidate, persisted);
+    const binding: PrivateRouteBinding = {
+      ...candidate.adapter.identity,
+      routeHandle: candidate.routeHandle,
+      ownerLease: stableLease("claude", candidate.routeHandle),
+    };
+    await this.store.rebindStaleRoute({
+      alias: persisted.alias,
+      newAlias: candidate.alias,
+      currentOwnerLease: persisted.binding.ownerLease,
+      newBinding: binding,
+      reason,
+      state: selectedState,
+    });
+    if (persisted.alias !== candidate.alias) {
+      this.forgetBinding(persisted.alias);
+    }
+    this.rememberBinding(candidate.alias, binding, selectedState);
   }
 
   private async selectClaudeCandidate(
@@ -4971,6 +5374,7 @@ export class GatewayService {
       protocol: adapter.protocol,
       protocolVersion: adapter.protocolVersion,
     });
+    this.recordConnectorFreshness(adapter.identity, "healthy");
     await this.store.observeRoute({
       binding,
       state,
@@ -5393,7 +5797,16 @@ export class GatewayService {
           unwrittenOutcome: input.unwrittenOutcome,
           safeErrorCode: input.safeErrorCode,
         } satisfies DeliveryEvent);
-      const transition = transitionDelivery(tracker.machine, event);
+      const stateAtTermination =
+        tracker.pendingTerminalEvent === undefined &&
+          this.providerDispatchInFlightMessageIds.has(messageId)
+          ? transitionDelivery(tracker.machine, {
+              type: "dispatch_ambiguous",
+              at: observedAt,
+              safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
+            }).state
+          : tracker.machine;
+      const transition = transitionDelivery(stateAtTermination, event);
       const settlement = transition.effects.find(
         (
           effect,
@@ -5447,7 +5860,16 @@ export class GatewayService {
           unwrittenOutcome: input.unwrittenOutcome,
           safeErrorCode: input.safeErrorCode,
         } satisfies DeliveryEvent);
-      const transition = transitionDelivery(tracker.machine, event);
+      const stateAtTermination =
+        tracker.pendingTerminalEvent === undefined &&
+          this.providerDispatchInFlightMessageIds.has(messageId)
+          ? transitionDelivery(tracker.machine, {
+              type: "dispatch_ambiguous",
+              at: observedAt,
+              safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
+            }).state
+          : tracker.machine;
+      const transition = transitionDelivery(stateAtTermination, event);
       const settlement = transition.effects.find(
         (
           effect,
@@ -5937,6 +6359,18 @@ export class GatewayService {
   private async processLifecycleLocked(): Promise<boolean> {
     const now = this.now().getTime();
     let changed = false;
+    if (
+      this.nextClaudeDiscoveryAt !== undefined &&
+      this.nextClaudeDiscoveryAt <= now
+    ) {
+      this.nextClaudeDiscoveryAt = now + CLAUDE_DISCOVERY_REFRESH_MS;
+      this.schedulePeriodicClaudeDiscovery();
+    }
+    for (const [key, deadlineAt] of this.connectorFreshnessDeadlineAt) {
+      if (deadlineAt > now) continue;
+      this.connectorFreshnessDeadlineAt.delete(key);
+      changed = true;
+    }
     if (await this.processProgressWatchesLocked(now)) changed = true;
     await this.drainPreDeadlineDeliveryCallbacksLocked();
     for (const tracker of this.deliveryTrackers.values()) {
@@ -6095,6 +6529,13 @@ export class GatewayService {
     if (this.nextProgressWatchAt !== undefined) {
       consider(this.nextProgressWatchAt);
     }
+    if (this.nextClaudeDiscoveryAt !== undefined) {
+      consider(this.nextClaudeDiscoveryAt);
+    }
+    for (const deadlineAt of this.connectorFreshnessDeadlineAt.values()) {
+      consider(deadlineAt);
+    }
+    if (this.lifecyclePublishPending) consider(now);
     if (hasNonterminal) {
       this.nextDashboardRefreshAt ??= now + DELIVERY_DASHBOARD_REFRESH_MS;
       consider(this.nextDashboardRefreshAt);
@@ -6107,16 +6548,43 @@ export class GatewayService {
       this.lifecycleTimer = undefined;
       void this.mutex
         .run("service", async () => {
-          const changed = await this.processLifecycleLocked();
-          if (changed) {
-            this.revision += 1;
-            await this.publish();
+          try {
+            const changed = await this.processLifecycleLocked();
+            if (changed) {
+              this.revision += 1;
+              this.lifecyclePublishPending = true;
+            }
+            if (this.lifecyclePublishPending) {
+              await this.publish();
+              this.lifecyclePublishPending = false;
+            }
+            this.scheduleLifecycleWakeLocked();
+          } catch {
+            this.dashboardHealthy = false;
+            this.scheduleLifecycleRetryLocked();
           }
         })
         .catch(() => {
           this.dashboardHealthy = false;
         });
     }, Math.max(0, wakeAt - now));
+    this.lifecycleTimer = timer;
+    (timer as { unref?: () => void }).unref?.();
+  }
+
+  private scheduleLifecycleRetryLocked(): void {
+    if (!this.running || this.closing || this.lifecycleTimer !== undefined) {
+      return;
+    }
+    const timer = this.timers.setTimeout(() => {
+      if (this.lifecycleTimer !== timer) return;
+      this.lifecycleTimer = undefined;
+      void this.mutex.run("service", async () => {
+        this.scheduleLifecycleWakeLocked();
+      }).catch(() => {
+        this.dashboardHealthy = false;
+      });
+    }, DELIVERY_SETTLEMENT_RETRY_MS);
     this.lifecycleTimer = timer;
     (timer as { unref?: () => void }).unref?.();
   }
@@ -6586,8 +7054,8 @@ export class GatewayService {
     }
   }
 
-  private async awaitDispatchWithNativeHeldLocked(
-    tracker: MessageDeliveryTracker,
+  private async awaitDispatchWithNativeHeld(
+    messageId: string,
     operation: Promise<GatewayAdapterDispatchResult>,
   ): Promise<GatewayAdapterDispatchResult> {
     type Outcome =
@@ -6603,7 +7071,7 @@ export class GatewayService {
     };
 
     while (true) {
-      const current = this.deliveryTrackers.get(tracker.messageId);
+      const current = this.deliveryTrackers.get(messageId);
       if (
         current === undefined ||
         current.nativeReceipt === undefined ||
@@ -6628,16 +7096,17 @@ export class GatewayService {
 
       // A terminal callback may have arrived before the provider's dispatch
       // promise resolved. Let that exact evidence win before emitting held.
-      await this.drainDeliveryCallbacksForMessageLocked(tracker.messageId);
-      const afterCallbacks = this.deliveryTrackers.get(tracker.messageId);
-      if (
-        afterCallbacks === undefined ||
-        isTerminalDeliveryMachine(afterCallbacks.machine) ||
-        this.now().getTime() >= afterCallbacks.deadlineAt
-      ) {
-        return unwrap(await outcome);
-      }
-      await this.publishNativeHeldLocked(afterCallbacks);
+      await this.mutex.run("service", async () => {
+        await this.drainDeliveryCallbacksForMessageLocked(messageId);
+        const afterCallbacks = this.deliveryTrackers.get(messageId);
+        if (
+          afterCallbacks !== undefined &&
+          !isTerminalDeliveryMachine(afterCallbacks.machine) &&
+          this.now().getTime() < afterCallbacks.deadlineAt
+        ) {
+          await this.publishNativeHeldLocked(afterCallbacks);
+        }
+      });
     }
   }
 
@@ -6687,7 +7156,9 @@ export class GatewayService {
     return context;
   }
 
-  private async dispatchOne(targetAlias: string): Promise<void> {
+  private async prepareDispatchLocked(
+    targetAlias: string,
+  ): Promise<PreparedProviderDispatch | undefined> {
     if (
       !this.running ||
       this.closing ||
@@ -6927,42 +7398,84 @@ export class GatewayService {
       return;
     }
     context.sourceBinding ??= { ...sourceBinding };
-    let result: GatewayAdapterDispatchResult;
-    try {
-      result = await this.awaitDispatchWithNativeHeldLocked(
-        tracker,
-        this.adapter(binding.provider, binding.hostId).dispatch({
-          sourceAlias: item.sourceAlias,
-          sourceProvider: sourceBinding.provider,
-          targetAlias: item.targetAlias,
-          conversationId: context.conversationId,
-          binding,
-          authorization: context.authorization,
-          messageId: item.messageId,
-          text: item.body,
-          expectsReply: context.expectsReply,
-          deadlineAt: item.deadlineAt,
-          ...(item.steer === true ? { steer: true as const } : {}),
-          ...(item.steer === true && item.queuedAhead !== undefined
-            ? { queuedAhead: item.queuedAhead }
-            : {}),
-          ...(progressWatchActive
-            ? { progressWatchActive: true as const }
-            : {}),
-        }),
+    this.scheduleLifecycleWakeLocked();
+    return {
+      targetAlias,
+      messageId: item.messageId,
+      body: item.body,
+      binding: { ...binding },
+      authorization: context.authorization,
+      steeringWhileBusy,
+      input: {
+        sourceAlias: item.sourceAlias,
+        sourceProvider: sourceBinding.provider,
+        targetAlias: item.targetAlias,
+        conversationId: context.conversationId,
+        binding: { ...binding },
+        authorization: context.authorization,
+        messageId: item.messageId,
+        text: item.body,
+        expectsReply: context.expectsReply,
+        deadlineAt: item.deadlineAt,
+        ...(item.steer === true ? { steer: true as const } : {}),
+        ...(item.steer === true && item.queuedAhead !== undefined
+          ? { queuedAhead: item.queuedAhead }
+          : {}),
+        ...(progressWatchActive ? { progressWatchActive: true as const } : {}),
+      },
+    };
+  }
+
+  private async commitDispatchLocked(
+    prepared: PreparedProviderDispatch,
+    outcome: ProviderDispatchOutcome,
+  ): Promise<void> {
+    const {
+      targetAlias,
+      messageId,
+      body,
+      binding,
+      authorization,
+      steeringWhileBusy,
+    } = prepared;
+    await this.drainDeliveryCallbacksForMessageLocked(messageId);
+    if (await this.processLifecycleLocked()) {
+      await this.changed();
+    }
+    const context = this.messageContexts.get(messageId);
+    const tracker = this.deliveryTrackers.get(messageId);
+    if (context === undefined || tracker === undefined) {
+      this.scheduleDispatch(
+        this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
       );
-    } catch {
-      await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
-      if (await this.processLifecycleLocked()) {
-        await this.changed();
-      }
-      if (!this.messageContexts.has(item.messageId)) {
-        this.scheduleDispatch(
-          this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
-        );
-        return;
-      }
-      await this.advanceDeliveryLocked(item.messageId, {
+      return;
+    }
+    const currentTargetAlias =
+      this.bindingAliases.get(context.targetBindingKey) ??
+      this.bindingAliases.get(bindingKey(binding)) ??
+      targetAlias;
+    const currentSelectedBinding =
+      authorization === "selected_route"
+        ? this.routeBindings.get(currentTargetAlias)
+        : undefined;
+    const currentSelectedRoute =
+      authorization === "selected_route"
+        ? await this.store.inspectPrivateRoute(currentTargetAlias)
+        : undefined;
+    const authorityStillCurrent = !(
+      context.authorization !== authorization ||
+      context.targetBindingKey !== bindingKey(binding) ||
+      (authorization === "selected_route" &&
+        (currentSelectedBinding === undefined ||
+          bindingKey(currentSelectedBinding) !== bindingKey(binding) ||
+          currentSelectedRoute === undefined ||
+          !currentSelectedRoute.enabled ||
+          currentSelectedRoute.state === "stale" ||
+          bindingKey(currentSelectedRoute.binding) !== bindingKey(binding) ||
+          this.routeStates.get(currentTargetAlias) === "stale"))
+    );
+    if (outcome.kind === "error") {
+      await this.advanceDeliveryLocked(messageId, {
         type: "dispatch_ambiguous",
         at: this.now().getTime(),
         safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
@@ -6973,19 +7486,8 @@ export class GatewayService {
       );
       return;
     }
-    await this.drainDeliveryCallbacksForMessageLocked(item.messageId);
-    if (await this.processLifecycleLocked()) {
-      await this.changed();
-    }
-    if (!this.messageContexts.has(item.messageId)) {
-      this.scheduleDispatch(
-        this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
-      );
-      return;
-    }
+    const result = outcome.result;
     if (result.state === "deferred") {
-      const currentTargetAlias =
-        this.bindingAliases.get(bindingKey(binding)) ?? targetAlias;
       const now = this.now().getTime();
       const deferredSafeErrorCode = safeCode(
         result.safeErrorCode,
@@ -7000,14 +7502,14 @@ export class GatewayService {
       const retryAt = binding.provider === "claude"
         ? Math.min(now + retryDelayMs, tracker.deadlineAt - 1)
         : now + retryDelayMs;
-      await this.advanceDeliveryLocked(item.messageId, {
+      await this.advanceDeliveryLocked(messageId, {
         type: "dispatch_clean_prewrite_failed",
         at: now,
         retryAt,
         safeErrorCode: deferredSafeErrorCode,
       });
       tracker.deliverySafeErrorCode = deferredSafeErrorCode;
-      const postDeferred = this.deliveryTrackers.get(item.messageId)?.machine;
+      const postDeferred = this.deliveryTrackers.get(messageId)?.machine;
       if (
         postDeferred === undefined ||
         isTerminalDeliveryMachine(postDeferred)
@@ -7020,7 +7522,7 @@ export class GatewayService {
       // evidence. Only the reducer's explicit queued retry phase may return
       // the body to the store queue.
       if (postDeferred.phase !== "queued") {
-        await this.advanceDeliveryLocked(item.messageId, {
+        await this.advanceDeliveryLocked(messageId, {
           type: "await_terminal",
           at: this.now().getTime(),
         });
@@ -7028,17 +7530,20 @@ export class GatewayService {
         return;
       }
       const requeued = await this.store.requeueInFlightMessage(
-        item.messageId,
-        item.body,
+        messageId,
+        body,
         deferredSafeErrorCode,
       );
       if (
-        this.activeDispatchByTarget.get(currentTargetAlias) === item.messageId
+        this.activeDispatchByTarget.get(currentTargetAlias) === messageId
       ) {
         this.activeDispatchByTarget.delete(currentTargetAlias);
       }
       if (requeued.status === "requeued") {
-        if (context.authorization === "selected_route") {
+        if (
+          context.authorization === "selected_route" &&
+          authorityStillCurrent
+        ) {
           if (binding.provider === "codex" && !steeringWhileBusy) {
             this.routeStates.set(currentTargetAlias, "idle");
             await this.store.observeRoute({
@@ -7050,26 +7555,37 @@ export class GatewayService {
           }
           await this.setNativeSourceStatus(currentTargetAlias, "waiting");
         }
+        await this.publishNativeHeldLocked(tracker);
       } else if (requeued.status === "settled") {
         await this.applyTerminalSettlementLocked(requeued.settlement);
       }
       await this.changed();
       return;
     }
+    if (!authorityStillCurrent) {
+      await this.advanceDeliveryLocked(messageId, {
+        type: "dispatch_ambiguous",
+        at: this.now().getTime(),
+        safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
+      });
+      await this.changed();
+      this.scheduleDispatch(currentTargetAlias);
+      return;
+    }
     if (result.state === "pending" || result.state === "accepted") {
       if (
         result.state === "accepted" &&
-        (await this.acceptProviderDeliveryLocked(item.messageId))
+        (await this.acceptProviderDeliveryLocked(messageId))
       ) {
         await this.changed();
       } else if (result.state === "pending") {
-        await this.advanceDeliveryLocked(item.messageId, {
+        await this.advanceDeliveryLocked(messageId, {
           type: "await_terminal",
           at: this.now().getTime(),
         });
       }
     } else {
-      await this.finishDelivery({ messageId: item.messageId, state: result.state, ...(result.safeErrorCode === undefined ? {} : { safeErrorCode: result.safeErrorCode }), ...(result.replyText === undefined ? {} : { replyText: result.replyText }) });
+      await this.finishDelivery({ messageId, state: result.state, ...(result.safeErrorCode === undefined ? {} : { safeErrorCode: result.safeErrorCode }), ...(result.replyText === undefined ? {} : { replyText: result.replyText }) });
     }
     this.scheduleDispatch(
       this.bindingAliases.get(bindingKey(binding)) ?? targetAlias,
@@ -7087,9 +7603,21 @@ export class GatewayService {
     if (this.scheduledDispatchTargets.has(targetAlias)) return;
     this.scheduledDispatchTargets.add(targetAlias);
     setImmediate(() => {
-      this.mutex
-        .run("service", async () => {
+      void this.runDispatch(targetAlias).catch(() => {
+        this.dashboardHealthy = false;
+      });
+    });
+  }
+
+  private async runDispatch(targetAlias: string): Promise<void> {
+    let runnerStarted = false;
+    let initialScheduleConsumed = false;
+    let preparedMessageId: string | undefined;
+    let commitCompleted = false;
+    try {
+      const prepared = await this.mutex.run("service", async () => {
           this.scheduledDispatchTargets.delete(targetAlias);
+          initialScheduleConsumed = true;
           if (
             this.closing ||
             this.codexSuccessionDispatchFrozen.has(targetAlias) ||
@@ -7098,17 +7626,82 @@ export class GatewayService {
             return;
           }
           this.dispatchRunnerTargets.add(targetAlias);
-          try {
-            await this.dispatchOne(targetAlias);
-          } finally {
+          runnerStarted = true;
+          const candidate = await this.prepareDispatchLocked(targetAlias);
+          if (candidate === undefined) {
             this.dispatchRunnerTargets.delete(targetAlias);
             this.scheduleLifecycleWakeLocked();
+            runnerStarted = false;
+          } else {
+            preparedMessageId = candidate.messageId;
+            this.providerDispatchInFlightMessageIds.add(candidate.messageId);
           }
-        })
-        .catch(() => {
-          this.dashboardHealthy = false;
+          return candidate;
         });
-    });
+      if (prepared === undefined) return;
+      let outcome: ProviderDispatchOutcome;
+      try {
+        const adapter = this.adapter(
+          prepared.binding.provider,
+          prepared.binding.hostId,
+        );
+        outcome = {
+          kind: "result",
+          result: await this.awaitDispatchWithNativeHeld(
+            prepared.messageId,
+            adapter.dispatch(prepared.input),
+          ),
+        };
+      } catch {
+        outcome = { kind: "error" };
+      }
+      await this.mutex.run("service", async () => {
+        await this.commitDispatchLocked(prepared, outcome);
+        commitCompleted = true;
+        this.providerDispatchInFlightMessageIds.delete(prepared.messageId);
+        preparedMessageId = undefined;
+        this.dispatchRunnerTargets.delete(targetAlias);
+        runnerStarted = false;
+        this.scheduleLifecycleWakeLocked();
+      });
+    } finally {
+      await this.mutex.run("service", async () => {
+        if (preparedMessageId !== undefined) {
+          let releaseUncertaintyMarker = commitCompleted;
+          if (!commitCompleted) {
+            const tracker = this.deliveryTrackers.get(preparedMessageId);
+            if (
+              tracker !== undefined &&
+              !isTerminalDeliveryMachine(tracker.machine)
+            ) {
+              try {
+                await this.advanceDeliveryLocked(preparedMessageId, {
+                  type: "dispatch_ambiguous",
+                  at: this.now().getTime(),
+                  safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS",
+                });
+                await this.changed();
+                releaseUncertaintyMarker = true;
+              } catch {
+                this.dashboardHealthy = false;
+              }
+            } else {
+              releaseUncertaintyMarker = true;
+            }
+          }
+          if (releaseUncertaintyMarker) {
+            this.providerDispatchInFlightMessageIds.delete(preparedMessageId);
+          }
+        }
+        if (runnerStarted) {
+          this.dispatchRunnerTargets.delete(targetAlias);
+        }
+        if (!initialScheduleConsumed) {
+          this.scheduledDispatchTargets.delete(targetAlias);
+        }
+        this.scheduleLifecycleWakeLocked();
+      });
+    }
   }
 
   private scheduleHeldRedispatch(targetAlias: string): void {
@@ -7580,12 +8173,18 @@ export class GatewayService {
       });
       await this.changed();
       await this.setNativeSourceStatus(event.targetAlias, "waiting");
-      // Native ingress gets one immediate dispatch opportunity. Only an
-      // actual queued/waiting result earns a `held` acknowledgement; an idle
-      // fast path can therefore settle with one terminal acknowledgement.
-      await this.dispatchOne(event.targetAlias);
+      // Provider I/O runs outside the service mutex. The lifecycle timer emits
+      // `held` only if this exact body remains nonterminal at its prompt
+      // boundary; a fast provider result therefore still produces one
+      // terminal acknowledgement and never freezes control-plane callbacks.
+      this.scheduleDispatch(event.targetAlias);
       const tracker = this.deliveryTrackers.get(queued.messageId);
-      if (tracker?.machine.phase === "queued") {
+      const routeState = this.routeStates.get(event.targetAlias);
+      if (
+        tracker?.machine.phase === "queued" &&
+        routeState !== "idle" &&
+        (!steer || routeState !== "busy")
+      ) {
         await this.publishNativeHeldLocked(tracker);
       }
     } catch (error) {
@@ -7809,6 +8408,7 @@ export class GatewayService {
       protocol: adapter.protocol,
       protocolVersion: adapter.protocolVersion,
     });
+    this.recordConnectorFreshness(event.current, "healthy");
 
     const refreshedByHandle = new Map(
       event.routes.map((route) => [route.routeHandle, route.state] as const),
@@ -8190,6 +8790,10 @@ export class GatewayService {
             ),
           }),
     });
+    this.recordConnectorFreshness(
+      source,
+      event.state === "stale" ? "degraded" : "healthy",
+    );
     if (event.state === "stale") {
       if (previousState !== "stale") {
         this.addRuntimeAlert(
