@@ -374,6 +374,7 @@ export const dashboardCopyEn = {
   "diagnostics.omissions.activityEvents": "{count} operator-action rows",
   "provider.claude": "Claude",
   "provider.codex": "Codex",
+  "provider.deepseek": "DeepSeek",
   "health.offline": "Offline",
   "health.connecting": "Connecting",
   "health.healthy": "Healthy",

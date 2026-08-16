@@ -230,9 +230,7 @@ namespace Embassy {
               props.checks.map((check) => (
                 <tr key={check.surface}>
                   <th scope="row">
-                    {check.surface === "claude"
-                      ? t("provider.claude")
-                      : t("provider.codex")}
+                    {t(`provider.${check.surface}`)}
                   </th>
                   {"notDetected" in check ? (
                     <td colSpan={7}>
@@ -241,8 +239,12 @@ namespace Embassy {
                   ) : (
                     <>
                       <td className="cell-mono">{check.version}</td>
-                      <td className="cell-mono">{check.testedVersion}</td>
-                      <td className="cell-mono">{check.supportedMajor}</td>
+                      <td className="cell-mono">
+                        {check.testedVersion ?? DIAGNOSTICS_ABSENT_FIELD}
+                      </td>
+                      <td className="cell-mono">
+                        {check.supportedMajor ?? DIAGNOSTICS_ABSENT_FIELD}
+                      </td>
                       <td>
                         {t(
                           check.tier === "schema_attested" && check.writesCovered

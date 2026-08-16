@@ -15,6 +15,7 @@ import {
   type DashboardCopyKey,
   type DashboardLocale,
 } from "./dashboard-copy.js";
+import type { CompatibilitySurface } from "./compatibility.js";
 import {
   buildDashboardViewModel,
   DASHBOARD_MODEL_LIMITS,
@@ -570,8 +571,11 @@ function renderProgressWatches(context: RenderContext): string {
   </section>`;
 }
 
-function providerLabel(context: RenderContext, provider: GatewayProvider): string {
-  return t(context, provider === "claude" ? "provider.claude" : "provider.codex");
+function providerLabel(
+  context: RenderContext,
+  provider: GatewayProvider | CompatibilitySurface,
+): string {
+  return t(context, `provider.${provider}` as DashboardCopyKey);
 }
 
 function healthLabel(context: RenderContext, health: ConnectorHealth): string {
@@ -640,7 +644,7 @@ function renderDiagnostics(context: RenderContext): string {
         const tierKey = check.tier === "schema_attested" && check.writesCovered
           ? "compatibilityTier.schema_attested.writesCovered"
           : `compatibilityTier.${check.tier}` as DashboardCopyKey;
-        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td data-label="${t(context, "diagnostics.version")}"><code>${escapeDashboardHtml(check.version)}</code></td><td data-label="${t(context, "diagnostics.testedVersion")}"><code>${escapeDashboardHtml(check.testedVersion)}</code></td><td data-label="${t(context, "diagnostics.supportedMajor")}"><code>${escapeDashboardHtml(check.supportedMajor)}</code></td><td data-label="${t(context, "diagnostics.tier")}">${statusPill(t(context, tierKey), tone)}</td><td data-label="${t(context, "diagnostics.checkedAt")}">${renderTimestampAtSnapshot(context, check.checkedAt)}</td><td data-label="${t(context, "diagnostics.failure")}">${check.failure === undefined ? "—" : `<code>${escapeDashboardHtml(check.failure)}</code>`}</td><td data-label="${t(context, "column.issue")}">${check.safeErrorCode === undefined ? "—" : `<code>${check.safeErrorCode}</code>`}</td></tr>`;
+        return `<tr><th scope="row" data-label="${t(context, "column.provider")}">${providerLabel(context, check.surface)}</th><td data-label="${t(context, "diagnostics.version")}"><code>${escapeDashboardHtml(check.version)}</code></td><td data-label="${t(context, "diagnostics.testedVersion")}">${check.testedVersion === undefined ? "—" : `<code>${escapeDashboardHtml(check.testedVersion)}</code>`}</td><td data-label="${t(context, "diagnostics.supportedMajor")}">${check.supportedMajor === undefined ? "—" : `<code>${escapeDashboardHtml(check.supportedMajor)}</code>`}</td><td data-label="${t(context, "diagnostics.tier")}">${statusPill(t(context, tierKey), tone)}</td><td data-label="${t(context, "diagnostics.checkedAt")}">${renderTimestampAtSnapshot(context, check.checkedAt)}</td><td data-label="${t(context, "diagnostics.failure")}">${check.failure === undefined ? "—" : `<code>${escapeDashboardHtml(check.failure)}</code>`}</td><td data-label="${t(context, "column.issue")}">${check.safeErrorCode === undefined ? "—" : `<code>${check.safeErrorCode}</code>`}</td></tr>`;
       }).join("");
   const connectorRows = context.model.connectors.length === 0
     ? `<tr class="empty-row"><td colspan="8">${t(context, "diagnostics.connectors.empty")}</td></tr>`

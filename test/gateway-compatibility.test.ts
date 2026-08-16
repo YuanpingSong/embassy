@@ -19,11 +19,28 @@ test("the declared compatibility inventory remains required and sets snapshot ca
   assert.deepEqual(compatibilitySurfaceDefinitions, [
     { surface: "claude", required: true },
     { surface: "codex", required: true },
+    { surface: "deepseek", required: false },
   ]);
   assert.equal(
     gatewayPublicSnapshotLimits.compatibilityChecks,
     compatibilitySurfaceDefinitions.length,
   );
+});
+
+test("an uncertified optional surface is incompatible without fake reference evidence", () => {
+  const result = evaluateCompatibilityAttestation({
+    surface: "deepseek",
+    version: UNKNOWN_COMPATIBILITY_VERSION,
+    checkedAt: "2026-08-16T12:00:00.000Z",
+    certifiedVersions: [],
+    probes: compatibilityProbeNames.deepseek.map((name) =>
+      name === "version"
+        ? { name, outcome: "fail", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE" }
+        : { name, outcome: "pass" }),
+  });
+  assert.equal(result.tier, "incompatible");
+  assert.equal(result.safeErrorCode, "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE");
+  assert.equal(isCompatibilityAttestation(result), true);
 });
 
 function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {

@@ -49,6 +49,7 @@ import type {
 import { BridgeError } from "../src/errors.js";
 import {
   compatibilityProbeNames,
+  compatibilitySurfaceDefinitions,
   type CompatibilityAttestation,
   type CompatibilityProbeResult,
   type CompatibilitySurfaceDefinition,
@@ -1537,6 +1538,47 @@ test("optional compatibility surfaces distinguish absence, presence, and failed 
       error instanceof BridgeError && error.code === "COMPAT_PROVIDER_UNAVAILABLE",
   );
   await rm(requiredFixture.root, { recursive: true, force: true });
+});
+
+test("a compatibility-only observer attests without entering provider state", async () => {
+  const current = await fixture();
+  const observer = {
+    compatibilitySurface: () => ({ surface: "deepseek" as const, version: "unknown" }),
+    runCompatibilityProbes: async () =>
+      compatibilityProbeNames.deepseek.map((name) =>
+        name === "version"
+          ? { name, outcome: "fail" as const, safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE" }
+          : { name, outcome: "pass" as const }),
+  };
+  const service = new GatewayService({
+    config: loadGatewayConfig({ EMBASSY_STATE_DIR: current.stateDir }),
+    adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
+    compatibilityObservers: [observer],
+    now: () => new Date("2026-08-16T12:00:00.000Z"),
+  });
+  await service.start();
+  const snapshot = await service.handlers().listSnapshot();
+  assert.deepEqual(snapshot.compatibilityChecks?.at(-1), {
+    schemaVersion: 1, surface: "deepseek", version: "unknown",
+    tier: "incompatible", writesCovered: false,
+    checkedAt: snapshot.generatedAt,
+    probes: await observer.runCompatibilityProbes(),
+    safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE",
+  });
+  assert.equal(snapshot.connectors.some(({ provider }) => provider === ("deepseek" as never)), false);
+  await service.close();
+  await rm(current.root, { recursive: true, force: true });
+
+  const undeclared = await fixture();
+  await assert.rejects(new GatewayService({
+    config: loadGatewayConfig({ EMBASSY_STATE_DIR: undeclared.stateDir }),
+    adapters: [new FakeProvider("claude"), new FakeProvider("codex")],
+    compatibilityObservers: [observer],
+    compatibilitySurfaceDefinitions: compatibilitySurfaceDefinitions.filter(
+      ({ surface }) => surface !== "deepseek"),
+  }).start(), (error: unknown) =>
+    error instanceof BridgeError && error.code === "COMPAT_SURFACE_UNDECLARED");
+  await rm(undeclared.root, { recursive: true, force: true });
 });
 
 test("a schema-attested real Codex provider boots monitor-only and later activates only a certified generation", async (t) => {

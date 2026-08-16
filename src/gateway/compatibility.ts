@@ -3,6 +3,7 @@ import { BridgeError } from "../errors.js";
 export const compatibilitySurfaceDefinitions = [
   { surface: "claude", required: true },
   { surface: "codex", required: true },
+  { surface: "deepseek", required: false },
 ] as const;
 export type CompatibilitySurface =
   (typeof compatibilitySurfaceDefinitions)[number]["surface"];
@@ -18,6 +19,7 @@ export const compatibilitySurfaces = Object.freeze(
 export const certifiedCompatibilityVersions = Object.freeze({
   claude: Object.freeze(["2.1.227"]),
   codex: Object.freeze(["0.147.0"]),
+  deepseek: Object.freeze([]),
 } satisfies Readonly<Record<CompatibilitySurface, readonly string[]>>);
 
 /** Bounded evidence used when a version banner is present but not parseable. */
@@ -44,11 +46,13 @@ export const compatibilityProbeNames = {
     "initialize",
     "thread_list",
   ],
+  deepseek: ["installation", "harness_home", "version"],
 } as const;
 
 const compatibilityOptionalProbeNames = {
   claude: [],
   codex: ["write_attestation"],
+  deepseek: [],
 } as const satisfies Readonly<Record<CompatibilitySurface, readonly string[]>>;
 
 export type CompatibilityProbeName =
@@ -76,6 +80,12 @@ export type CompatibilitySurfaceObservation = Readonly<{
   version: string;
 }>;
 
+export interface CompatibilitySurfaceObserver {
+  compatibilitySurface(): CompatibilitySurfaceObservation;
+  runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]>;
+  acceptCompatibilityAttestation?(attestation: CompatibilityAttestation): void;
+}
+
 const VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PERSISTED_PROBE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
@@ -87,6 +97,8 @@ function legacyVersionDriftCode(surface: CompatibilitySurface): string {
       return "CLAUDE_VERSION_DRIFT";
     case "codex":
       return "CODEX_VERSION_DRIFT";
+    case "deepseek":
+      return "DEEPSEEK_HARNESS_VERSION_DRIFT";
   }
   const exhaustive: never = surface;
   return exhaustive;
@@ -104,6 +116,8 @@ function unsupportedVersionCode(
         return "CLAUDE_VERSION_UNPARSEABLE";
       case "codex":
         return "CODEX_APP_SERVER_VERSION_UNPARSEABLE";
+      case "deepseek":
+        return "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE";
     }
     const exhaustive: never = surface;
     return exhaustive;
@@ -120,6 +134,8 @@ function unsupportedVersionCode(
       return "CLAUDE_PEER_VERSION_UNSUPPORTED";
     case "codex":
       return "CODEX_APP_SERVER_VERSION_UNSUPPORTED";
+    case "deepseek":
+      return "DEEPSEEK_HARNESS_VERSION_UNSUPPORTED";
   }
   const exhaustive: never = surface;
   return exhaustive;
@@ -254,7 +270,10 @@ export function evaluateCompatibilityAttestation(input: Readonly<{
   const certified = new Set(input.certifiedVersions);
   if (
     certified.size !== input.certifiedVersions.length ||
-    input.certifiedVersions.length === 0 ||
+    (input.certifiedVersions.length === 0 &&
+      compatibilitySurfaceDefinitions.find(
+        ({ surface }) => surface === input.surface,
+      )?.required !== false) ||
     input.certifiedVersions.some((version) => !VERSION_PATTERN.test(version))
   ) {
     throw new BridgeError(
@@ -369,7 +388,8 @@ export function isCompatibilityAttestation(
     return false;
   }
   if (value.tier === "certified") {
-    return certifiedCompatibilityVersions[value.surface].includes(value.version);
+    return (certifiedCompatibilityVersions[value.surface] as readonly string[])
+      .includes(value.version);
   }
   if (value.tier === "incompatible") {
     if (value.probes.some((probe) => probe.outcome === "fail")) return true;
@@ -381,7 +401,8 @@ export function isCompatibilityAttestation(
     );
   }
   return (
-    !certifiedCompatibilityVersions[value.surface].includes(value.version) &&
+    !(certifiedCompatibilityVersions[value.surface] as readonly string[])
+      .includes(value.version) &&
     unsupportedVersionCode(value.surface, value.version) === undefined
   );
 }
