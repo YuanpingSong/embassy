@@ -18,7 +18,7 @@ checksummed registry).
 DeepSeek: launch spec targeting the LOCAL harness checkout's dsh-acp (the
 npm artifact is unspawnable: no bin, workspace:^ peers; emb-56's attested
 harness home locates the checkout); registration under the `dsh-` prefix;
-the lane's receipts DOCUMENTED as coarse-fidelity — the adapter's
+the lane's end_turn receipts settling **unconfirmed / ACP_OUTCOME_COARSE** per the emb-66 amendment (end_turn from this adapter proves nothing; claiming delivered would violate the ambiguity law; sound cancelled stays cancelled) — the adapter's
 spec-violating stop-reason collapse (aborted/blocked/error → end_turn) is
 adapter-side and unrecoverable client-side; an upstream issue filed for the
 collapse and for settlement-on-idle. (2) Grok Build: launch spec from the
