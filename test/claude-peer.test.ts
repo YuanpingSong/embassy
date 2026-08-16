@@ -254,23 +254,29 @@ async function eventually(
   }
 }
 
-test("adapter accepts the reviewed Claude major and normalized private roots", async () => {
+test("adapter treats bounded Claude versions as metadata and normalizes private roots", async () => {
   const unknownVersion = new ClaudePeerAdapter({
     sessionsDir: "/synthetic/sessions",
     socketDir: "/synthetic/sockets",
     attestedClaudeCodeVersion: "unknown",
   });
   await unknownVersion.close();
+  const futureVersion = new ClaudePeerAdapter({
+    sessionsDir: "/synthetic/sessions",
+    socketDir: "/synthetic/sockets",
+    attestedClaudeCodeVersion: "3.0.0",
+  });
+  await futureVersion.close();
   assert.throws(
     () =>
       new ClaudePeerAdapter({
         sessionsDir: "/synthetic/sessions",
         socketDir: "/synthetic/sockets",
-        attestedClaudeCodeVersion: "3.0.0",
+        attestedClaudeCodeVersion: "not-a-version",
       }),
     (error: unknown) =>
       error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_VERSION_UNSUPPORTED",
+      error.code === "INVALID_GATEWAY_CONFIGURATION",
   );
   assert.throws(
     () =>
@@ -786,15 +792,16 @@ test("discovery rejects unsupported peer protocols per record", async (t) => {
   assert.equal(result.parseableRecords, 0);
 });
 
-test("discovery rejects unsupported Claude majors per record", async (t) => {
+test("discovery treats bounded Claude versions as metadata per record", async (t) => {
   const current = await fixture(t);
   await addPeer(current, { pid: 42_113, version: "3.0.0" });
+  await addPeer(current, { pid: 42_114, version: "not-a-version" });
 
   const result = await current.adapter.discover();
-  assert.deepEqual(result.peers, []);
+  assert.equal(result.peers.length, 1);
   assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
-  assert.equal(result.entriesScanned, 1);
-  assert.equal(result.parseableRecords, 0);
+  assert.equal(result.entriesScanned, 2);
+  assert.equal(result.parseableRecords, 1);
 });
 
 test("discovery excludes a marked Embassy helper advertisement before peer accounting", async (t) => {

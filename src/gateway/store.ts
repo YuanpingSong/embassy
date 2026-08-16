@@ -18,7 +18,6 @@ import { KeyedMutex } from "../mutex.js";
 import { isCodexRegistrationGeneration } from "./codex-registration-generation.js";
 import {
   compatibilityCacheKey,
-  isCompatibilityAttestation,
   isPersistedCompatibilityAttestation,
   type CompatibilityAttestation,
   type CompatibilitySurface,
@@ -2523,12 +2522,11 @@ export class GatewayStore {
       );
       if (
         !connector ||
-        !["healthy", "degraded"].includes(connector.health) ||
-        connector.compatibility !== "compatible"
+        !["healthy", "degraded"].includes(connector.health)
       ) {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The exact compatible endpoint generation must be observed before a route can be registered.",
+          "The exact live endpoint generation must be observed before a route can be registered.",
         );
       }
       const byAlias = state.routes.find((route) => route.alias === input.alias);
@@ -2625,12 +2623,11 @@ export class GatewayStore {
       );
       if (
         !connector ||
-        !["healthy", "degraded"].includes(connector.health) ||
-        connector.compatibility !== "compatible"
+        !["healthy", "degraded"].includes(connector.health)
       ) {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The exact compatible endpoint generation must be observed before a Claude selection can replace another.",
+          "The exact live endpoint generation must be observed before a Claude selection can replace another.",
         );
       }
 
@@ -2655,9 +2652,7 @@ export class GatewayStore {
       if (
         retained !== undefined &&
         !sameBinding(retained.binding, replacement.binding) &&
-        (!retained.enabled ||
-          retained.state !== "stale" ||
-          retained.compatibility !== "expired")
+        (!retained.enabled || retained.state !== "stale")
       ) {
         throw new BridgeError(
           "ROUTE_REBIND_IDENTITY_MISMATCH",
@@ -2828,15 +2823,13 @@ export class GatewayStore {
       }
       const endpointObservationValid =
         input.state === "stale"
-          ? connector?.health === "degraded" &&
-            connector.compatibility === "expired"
+          ? connector?.health === "degraded"
           : connector !== undefined &&
-            ["healthy", "degraded"].includes(connector.health) &&
-            connector.compatibility === "compatible";
+            ["healthy", "degraded"].includes(connector.health);
       if (!endpointObservationValid) {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The route observation must match the exact endpoint generation's current health and compatibility.",
+          "The route observation must match the exact endpoint generation's current health.",
         );
       }
       route.state = input.state;
@@ -2924,7 +2917,6 @@ export class GatewayStore {
       if (
         !route.enabled ||
         route.state !== "stale" ||
-        route.compatibility !== "expired" ||
         state.inFlight.some(
           (item) =>
             item.sourceAlias === route.alias || item.targetAlias === route.alias,
@@ -2975,12 +2967,11 @@ export class GatewayStore {
       );
       if (
         !connector ||
-        !["healthy", "degraded"].includes(connector.health) ||
-        connector.compatibility !== "compatible"
+        !["healthy", "degraded"].includes(connector.health)
       ) {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The replacement endpoint generation must be positively observed and compatible.",
+          "The replacement endpoint generation must be positively observed and live.",
         );
       }
       if (
@@ -3080,12 +3071,11 @@ export class GatewayStore {
       );
       if (
         newConnector === undefined ||
-        !["healthy", "degraded"].includes(newConnector.health) ||
-        newConnector.compatibility !== "compatible"
+        !["healthy", "degraded"].includes(newConnector.health)
       ) {
         throw new BridgeError(
           "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The replacement Codex endpoint generation must be positively observed and compatible.",
+          "The replacement Codex endpoint generation must be positively observed and live.",
         );
       }
 
@@ -3142,7 +3132,6 @@ export class GatewayStore {
           route.registrationMode !== "explicit_opt_in" ||
           !route.enabled ||
           route.state !== "stale" ||
-          route.compatibility !== "expired" ||
           !sameEndpoint(route.binding, input.oldEndpoint) ||
           route.binding.routeHandle !== candidate.threadId ||
           route.binding.ownerLease !== candidate.ownerLease ||
@@ -3415,8 +3404,7 @@ export class GatewayStore {
       if (
         !route ||
         !route.enabled ||
-        !["idle", "busy", "awaiting_approval"].includes(route.state) ||
-        route.compatibility !== "compatible"
+        !["idle", "busy", "awaiting_approval"].includes(route.state)
       ) {
         throw new BridgeError(
           "ROUTE_UNAVAILABLE",
@@ -3650,7 +3638,7 @@ export class GatewayStore {
           "The old succession identity does not exactly own its Codex route.",
         );
       }
-      this.requireCompatibleObservedEndpoint(state, input.new.binding);
+      this.requireObservedEndpoint(state, input.new.binding);
       this.assertNewSuccessionIdentityAvailable(state, route, input.new);
       state.codexSuccession = {
         schemaVersion: 1,
@@ -3721,7 +3709,7 @@ export class GatewayStore {
       );
       this.assertSuccessionLedgerEmpty(state, journal.old.alias);
       const route = this.requireJournalRoute(state, journal, "old");
-      this.requireCompatibleObservedEndpoint(state, journal.new.binding);
+      this.requireObservedEndpoint(state, journal.new.binding);
       this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
       this.replaceCodexRouteForSuccession(
         state,
@@ -4003,6 +3991,8 @@ export class GatewayStore {
     });
   }
 
+  // TODO(emb-68): delete these inert legacy-schema shims with the coordinated
+  // state/public compatibility shadow. No runtime authority path calls them.
   async inspectCompatibilityAttestation(
     surface: CompatibilitySurface,
     version: string,
@@ -4035,10 +4025,10 @@ export class GatewayStore {
   async recordCompatibilityAttestation(
     attestation: CompatibilityAttestation,
   ): Promise<void> {
-    if (!isCompatibilityAttestation(attestation)) {
+    if (!isPersistedCompatibilityAttestation(attestation)) {
       throw new BridgeError(
         "COMPAT_ATTESTATION_INVALID",
-        "Compatibility evidence failed strict schema validation.",
+        "Legacy compatibility evidence failed strict persisted-schema validation.",
       );
     }
     await this.mutate(async (state) => {
@@ -4342,7 +4332,6 @@ export class GatewayStore {
           route.binding.provider === "claude" &&
           route.registrationMode === "selected_live_peer" &&
           route.enabled &&
-          route.compatibility === "compatible" &&
           ["idle", "busy", "awaiting_approval"].includes(route.state) &&
           sameBinding(route.binding, input.source.binding),
       );
@@ -5302,7 +5291,7 @@ export class GatewayStore {
     }
   }
 
-  private requireCompatibleObservedEndpoint(
+  private requireObservedEndpoint(
     state: GatewayPersistedState,
     binding: PrivateRouteBinding,
   ): void {
@@ -5311,12 +5300,11 @@ export class GatewayStore {
     );
     if (
       !connector ||
-      !["healthy", "degraded"].includes(connector.health) ||
-      connector.compatibility !== "compatible"
+      !["healthy", "degraded"].includes(connector.health)
     ) {
       throw new BridgeError(
         "ROUTE_ENDPOINT_NOT_OBSERVED",
-        "The exact compatible endpoint generation must be observed before Codex succession can publish or activate it.",
+        "The exact live endpoint generation must be observed before Codex succession can publish or activate it.",
       );
     }
   }
@@ -5395,7 +5383,6 @@ export class GatewayStore {
       route.registrationMode !== "explicit_opt_in" ||
       !route.enabled ||
       route.state !== "stale" ||
-      route.compatibility !== "expired" ||
       route.queueDepth !== 0 ||
       state.queue.some(
         (item) =>
@@ -5454,8 +5441,7 @@ export class GatewayStore {
     if (
       !route ||
       !route.enabled ||
-      !["idle", "busy", "awaiting_approval"].includes(route.state) ||
-      route.compatibility !== "compatible"
+      !["idle", "busy", "awaiting_approval"].includes(route.state)
     ) {
       throw new BridgeError(
         "ROUTE_UNAVAILABLE",
@@ -5571,12 +5557,11 @@ export class GatewayStore {
     );
     if (
       !connector ||
-      !["healthy", "degraded"].includes(connector.health) ||
-      connector.compatibility !== "compatible"
+      !["healthy", "degraded"].includes(connector.health)
     ) {
       throw new BridgeError(
         "NATIVE_PEER_ENDPOINT_NOT_OBSERVED",
-        "The transient Claude peer's exact compatible connector generation is not live.",
+        "The transient Claude peer's exact connector generation is not live.",
         true,
       );
     }

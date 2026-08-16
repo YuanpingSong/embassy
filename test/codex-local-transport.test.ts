@@ -240,14 +240,8 @@ test("HOME and proxy environment are exact non-credential allowlists", () => {
 test("managed installation pins release binary and already-running private socket", async () => {
   const fixture = await installationFixture();
   try {
-    const first = await resolveManagedLocalCodexInstallation(
-      fixture.home,
-      VERSION,
-    );
-    const second = await resolveManagedLocalCodexInstallation(
-      fixture.home,
-      VERSION,
-    );
+    const first = await resolveManagedLocalCodexInstallation(fixture.home);
+    const second = await resolveManagedLocalCodexInstallation(fixture.home);
     assert.equal(first.binaryPath, await realpath(fixture.binary));
     assert.equal(first.controlSocketPath, fixture.socket);
     assert.match(first.endpointGeneration, /^local_[0-9a-f]{32}$/);
@@ -256,50 +250,34 @@ test("managed installation pins release binary and already-running private socke
     await chmod(fixture.binary, 0o700);
     const metadataChanged = await resolveManagedLocalCodexInstallation(
       fixture.home,
-      VERSION,
     );
     assert.notEqual(metadataChanged.endpointGeneration, first.endpointGeneration);
     const attested = await createLocalCodexTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: { HOME: fixture.home },
-        writableProtocolAttested: true,
       },
       { loginHome: () => fixture.home },
     );
-    assert.deepEqual(attested.schemaCompatibility, {
-      appServerVersion: VERSION,
-      endpointGeneration: attested.endpointGeneration,
-      protocol: "app-server-v2-stable",
-      steering: {
-        method: "turn/steer",
-        requestSchema: "expected-turn-id-text-v1",
-        deliveryBoundary: "next-tool-call-boundary",
-      },
-    });
-    assert.deepEqual(attested.writeCompatibility, attested.schemaCompatibility);
+    assert.equal(attested.appServerVersion, VERSION);
+    assert.equal(attested.protocolVersion, VERSION);
     await attested.close();
-    await assert.rejects(
-      resolveManagedLocalCodexInstallation(fixture.home, "0.148.0"),
-      (error: unknown) =>
-        error instanceof LocalCodexTransportError &&
-        error.code === "APP_SERVER_VERSION_MISMATCH",
-    );
   } finally {
     await fixture.close();
   }
 });
 
-test("startup attests unreviewed Codex versions without opening App Server", async () => {
-  for (const version of ["0.148.0", "1.0.0"] as const) {
-    const installation = await installationFixture(version);
+test("startup attests version-drifted Codex installations without opening App Server", async () => {
+  for (const evidence of [
+    { release: "0.148.0", observedVersion: "0.148.0" },
+    { release: "1.0.0", observedVersion: "1.0.0" },
+    { release: "nightly-2026", observedVersion: "unknown" },
+  ] as const) {
+    const installation = await installationFixture(evidence.release);
     try {
       let spawnCalls = 0;
       const factory = await createLocalCodexTransportFactory(
         {
-          appServerVersion: VERSION,
           environment: { HOME: installation.home },
-          writableProtocolAttested: true,
         },
         {
           loginHome: () => installation.home,
@@ -310,11 +288,8 @@ test("startup attests unreviewed Codex versions without opening App Server", asy
         },
       );
 
-      assert.equal(factory.appServerVersion, version);
-      assert.equal(factory.protocolVersion, version);
-      assert.equal(factory.schemaCompatibility.observedSchemaCandidate, true);
-      assert.equal(factory.writableReady, false);
-      assert.equal(factory.writeCompatibility, null);
+      assert.equal(factory.appServerVersion, evidence.observedVersion);
+      assert.equal(factory.protocolVersion, evidence.observedVersion);
       assert.equal(spawnCalls, 0);
       await factory.close();
     } finally {
@@ -323,15 +298,13 @@ test("startup attests unreviewed Codex versions without opening App Server", asy
   }
 });
 
-test("refresh candidate resolution preserves the monitor-only startup posture", async () => {
+test("refresh candidate resolution attests the exact current managed release", async () => {
   const drifted = await installationFixture("0.148.0");
   try {
     let spawnCalls = 0;
     const candidate = await createLocalCodexRefreshCandidateTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: { HOME: drifted.home },
-        writableProtocolAttested: true,
       },
       {
         loginHome: () => drifted.home,
@@ -343,9 +316,6 @@ test("refresh candidate resolution preserves the monitor-only startup posture", 
     );
     assert.equal(candidate.appServerVersion, "0.148.0");
     assert.equal(candidate.protocolVersion, "0.148.0");
-    assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
-    assert.equal(candidate.writableReady, false);
-    assert.equal(candidate.writeCompatibility, null);
     assert.equal(spawnCalls, 0);
     await candidate.close();
   } finally {
@@ -363,9 +333,7 @@ test("bounded prerelease builds remain OS-attested without connecting", async ()
       let spawnCalls = 0;
       const candidate = await createFactory(
         {
-          appServerVersion: VERSION,
           environment: { HOME: drifted.home },
-          writableProtocolAttested: true,
         },
         {
           loginHome: () => drifted.home,
@@ -377,9 +345,6 @@ test("bounded prerelease builds remain OS-attested without connecting", async ()
       );
       assert.equal(candidate.appServerVersion, "0.148.0-alpha.1");
       assert.equal(candidate.protocolVersion, "0.148.0-alpha.1");
-      assert.equal(candidate.schemaCompatibility.observedSchemaCandidate, true);
-      assert.equal(candidate.writableReady, false);
-      assert.equal(candidate.writeCompatibility, null);
       assert.equal(spawnCalls, 0);
       await candidate.close();
     }
@@ -398,15 +363,13 @@ test("unsafe release leaves remain rejected before provider construction", async
       await assert.rejects(
         createFactory(
           {
-            appServerVersion: VERSION,
             environment: { HOME: drifted.home },
-            writableProtocolAttested: true,
           },
           { loginHome: () => drifted.home },
         ),
         (error: unknown) =>
           error instanceof LocalCodexTransportError &&
-          error.code === "APP_SERVER_VERSION_MISMATCH",
+          error.code === "MANAGED_CODEX_INVALID",
       );
     }
   } finally {
@@ -421,18 +384,17 @@ test("managed target-suffixed releases require the exact runtime architecture", 
   try {
     const installation = await resolveManagedLocalCodexInstallation(
       matching.home,
-      VERSION,
       { platform: "darwin", architecture: "arm64" },
     );
     assert.equal(installation.binaryPath, await realpath(matching.binary));
     await assert.rejects(
-      resolveManagedLocalCodexInstallation(matching.home, VERSION, {
+      resolveManagedLocalCodexInstallation(matching.home, {
         platform: "darwin",
         architecture: "x64",
       }),
       (error: unknown) =>
         error instanceof LocalCodexTransportError &&
-        error.code === "APP_SERVER_VERSION_MISMATCH",
+        error.code === "MANAGED_CODEX_INVALID",
     );
   } finally {
     await matching.close();
@@ -443,13 +405,13 @@ test("managed target-suffixed releases require the exact runtime architecture", 
   );
   try {
     await assert.rejects(
-      resolveManagedLocalCodexInstallation(smuggled.home, VERSION, {
+      resolveManagedLocalCodexInstallation(smuggled.home, {
         platform: "darwin",
         architecture: "arm64",
       }),
       (error: unknown) =>
         error instanceof LocalCodexTransportError &&
-        error.code === "APP_SERVER_VERSION_MISMATCH",
+        error.code === "MANAGED_CODEX_INVALID",
     );
   } finally {
     await smuggled.close();
@@ -461,7 +423,7 @@ test("managed release directory remains an owned non-writable component", async 
   try {
     await chmod(path.dirname(fixture.binary), 0o777);
     await assert.rejects(
-      resolveManagedLocalCodexInstallation(fixture.home, VERSION),
+      resolveManagedLocalCodexInstallation(fixture.home),
       (error: unknown) =>
         error instanceof LocalCodexTransportError &&
         error.code === "MANAGED_CODEX_INVALID",
@@ -474,17 +436,11 @@ test("managed release directory remains an owned non-writable component", async 
 test("missing App Server socket stays OS-attested and never bootstraps", async () => {
   const fixture = await installationFixture();
   try {
-    const live = await resolveManagedLocalCodexInstallation(
-      fixture.home,
-      VERSION,
-    );
+    const live = await resolveManagedLocalCodexInstallation(fixture.home);
     // Unlinking the synthetic endpoint makes discovery fail; the test never
     // invokes a CLI that could create or bootstrap a replacement.
     await rm(fixture.socket, { force: true });
-    const unavailable = await resolveManagedLocalCodexInstallation(
-      fixture.home,
-      VERSION,
-    );
+    const unavailable = await resolveManagedLocalCodexInstallation(fixture.home);
     assert.equal(
       unavailable.availabilityFailure,
       "CODEX_CONTROL_SOCKET_UNAVAILABLE",
@@ -494,9 +450,7 @@ test("missing App Server socket stays OS-attested and never bootstraps", async (
     let spawnCalls = 0;
     const factory = await createLocalCodexTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: { HOME: fixture.home },
-        writableProtocolAttested: true,
       },
       {
         loginHome: () => fixture.home,
@@ -510,8 +464,6 @@ test("missing App Server socket stays OS-attested and never bootstraps", async (
       factory.availabilityFailure,
       "CODEX_CONTROL_SOCKET_UNAVAILABLE",
     );
-    assert.equal(factory.writableReady, false);
-    assert.equal(factory.writeCompatibility, null);
     assert.equal(spawnCalls, 0);
     await assert.rejects(
       factory.connectTransport(),
@@ -531,7 +483,7 @@ test("unsafe App Server socket and directory permissions remain fatal", async ()
   try {
     await chmod(fixture.socket, 0o666);
     await assert.rejects(
-      resolveManagedLocalCodexInstallation(fixture.home, VERSION),
+      resolveManagedLocalCodexInstallation(fixture.home),
       (error: unknown) =>
         error instanceof LocalCodexTransportError &&
         error.code === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
@@ -540,7 +492,7 @@ test("unsafe App Server socket and directory permissions remain fatal", async ()
     await rm(fixture.socket, { force: true });
     await chmod(path.dirname(fixture.socket), 0o777);
     await assert.rejects(
-      resolveManagedLocalCodexInstallation(fixture.home, VERSION),
+      resolveManagedLocalCodexInstallation(fixture.home),
       (error: unknown) =>
         error instanceof LocalCodexTransportError &&
         error.code === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
@@ -565,7 +517,6 @@ test("factory spawns only resolved proxy with strict options and owns cleanup", 
   try {
     const factory = await createLocalCodexTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: {
           HOME: fixture.home,
           USER: "tester",
@@ -576,7 +527,6 @@ test("factory spawns only resolved proxy with strict options and owns cleanup", 
         maxStderrBytes: 8,
         signalTimeoutMs: 10,
         spawnTimeoutMs: 100,
-        writableProtocolAttested: false,
       },
       {
         connectWebSocket: async () => transport,
@@ -590,19 +540,7 @@ test("factory spawns only resolved proxy with strict options and owns cleanup", 
         },
       },
     );
-    assert.equal(factory.writableReady, false);
     assert.equal(factory.protocol, "codex-app-server");
-    assert.deepEqual(factory.schemaCompatibility, {
-      appServerVersion: VERSION,
-      endpointGeneration: factory.endpointGeneration,
-      protocol: "app-server-v2-stable",
-      steering: {
-        method: "turn/steer",
-        requestSchema: "expected-turn-id-text-v1",
-        deliveryBoundary: "next-tool-call-boundary",
-      },
-    });
-    assert.equal(factory.writeCompatibility, null);
     const owned = await factory.connectTransport();
     assert.equal(spawned?.command, await realpath(fixture.binary));
     assert.deepEqual(spawned?.args, ["app-server", "proxy"]);
@@ -632,7 +570,6 @@ test("first post-upgrade frame writes through the child proxy Duplex", async () 
   try {
     const factory = await createLocalCodexTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: { HOME: fixture.home },
         gracefulExitMs: 1,
         signalTimeoutMs: 10,
@@ -669,7 +606,6 @@ test("factory rejects a managed endpoint generation change during handshake", as
   try {
     const factory = await createLocalCodexTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: { HOME: fixture.home },
         gracefulExitMs: 1,
         signalTimeoutMs: 10,
@@ -719,7 +655,6 @@ test("factory fails closed when discarded stderr crosses its bound during handsh
   try {
     const factory = await createLocalCodexTransportFactory(
       {
-        appServerVersion: VERSION,
         environment: { HOME: fixture.home },
         gracefulExitMs: 1,
         maxStderrBytes: 4,

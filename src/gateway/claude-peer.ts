@@ -24,10 +24,7 @@ import {
 } from "./codex-registration-generation.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
-import {
-  isCompatibilityVersionEvidence,
-  sharesCompatibilityMajor,
-} from "./compatibility.js";
+import { isCompatibilityVersionEvidence } from "./compatibility.js";
 
 /**
  * This adapter intentionally pins the inspected, implementation-specific
@@ -617,13 +614,7 @@ function parseRegistryRecord(
   ) {
     return undefined;
   }
-  const versionCompatible =
-    typeof value.version === "string" &&
-    (embassyAdvertisement ||
-      sharesCompatibilityMajor(
-        value.version,
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-      ));
+  const versionObserved = isCompatibilityVersionEvidence(value.version);
 
   if (value.pid !== expectedPid) return undefined;
   if (
@@ -650,7 +641,7 @@ function parseRegistryRecord(
     !isBoundedString(value.procStart, 256) ||
     value.procStart.length === 0 ||
     value.procStart.includes("\0") ||
-    !versionCompatible ||
+    !versionObserved ||
     !isBoundedString(value.entrypoint, 64) ||
     !/^[A-Za-z0-9._-]+$/.test(value.entrypoint) ||
     (value.nameSource !== undefined &&
@@ -969,16 +960,10 @@ export class ClaudePeerAdapter {
         "Claude peer sockets are supported only on macOS and Linux.",
       );
     }
-    if (
-      options.attestedClaudeCodeVersion !== "unknown" &&
-      !sharesCompatibilityMajor(
-        options.attestedClaudeCodeVersion,
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-      )
-    ) {
+    if (!isCompatibilityVersionEvidence(options.attestedClaudeCodeVersion)) {
       throw new BridgeError(
-        "CLAUDE_PEER_VERSION_UNSUPPORTED",
-        "Claude peer transport does not support this Claude Code major.",
+        "INVALID_GATEWAY_CONFIGURATION",
+        "The Claude version metadata is malformed.",
       );
     }
     if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
