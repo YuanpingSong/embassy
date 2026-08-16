@@ -3,7 +3,7 @@ id: emb-66
 title: De-ceremony inventory — best-effort delivery replaces online certification
 kind: design
 size: 3
-status: draft
+status: dispatched
 release: v1.7
 updated: 2026-08-16
 ---

@@ -3,7 +3,7 @@ id: emb-67
 title: ACP client transport — minimal, ceremony-free, spawn-owned
 kind: normal
 size: 5
-status: draft
+status: dispatched
 release: v1.7
 updated: 2026-08-16
 ---
