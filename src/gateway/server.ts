@@ -28,19 +28,11 @@ import {
 } from "./instance-lease.js";
 import type { DashboardLocale } from "./locale.js";
 import {
-  createIncompatibleClaudeGatewayProvider,
-  createIncompatibleCodexGatewayProvider,
   createLocalClaudeGatewayProvider,
   createLocalCodexGatewayProvider,
   type LocalClaudeGatewayProviderOptions,
   type LocalCodexGatewayProviderOptions,
 } from "./providers.js";
-import {
-  isCompatibilityVersion,
-  sharesCompatibilityMajor,
-  UNKNOWN_COMPATIBILITY_VERSION,
-} from "./compatibility.js";
-import { CLAUDE_PEER_COMPATIBILITY } from "./claude-peer.js";
 import {
   GatewayService,
   type GatewayProviderAdapter,
@@ -52,7 +44,6 @@ import {
   type GatewayInboundMode,
 } from "./types.js";
 
-export const GATEWAY_CODEX_APP_SERVER_VERSION = "0.147.0";
 export const GATEWAY_LOCAL_HOST_ID = "this-mac";
 
 export type GatewayServerReadyResult = Readonly<{
@@ -90,21 +81,19 @@ export type GatewayServerDependencies = {
   createClaudeProvider?: (
     options: LocalClaudeGatewayProviderOptions,
   ) => GatewayProviderAdapter;
-  createIncompatibleClaudeProvider?: typeof createIncompatibleClaudeGatewayProvider;
   acquireInstanceLease?: (loginHome: string) => Promise<GatewayInstanceLease>;
   createStore?: (config: GatewayConfig) => GatewayStore;
-  /** OS-only startup resolver; unsupported majors are fenced before connect. */
+  /** Resolve and attest the exact current managed Codex installation. */
   createCodexFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
-  /** OS-only replacement resolver; unsupported majors are fenced before connect. */
+  /** Resolve and attest an exact current managed replacement. */
   createCodexRefreshCandidateFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
   createCodexProvider?: (
     options: LocalCodexGatewayProviderOptions,
   ) => GatewayProviderAdapter;
-  createIncompatibleCodexProvider?: typeof createIncompatibleCodexGatewayProvider;
   detectDeepSeekSurface?: (
     options: DeepSeekDetectOptions,
   ) => ReturnType<typeof detectDeepSeekSurface>;
@@ -255,7 +244,7 @@ async function closeUnownedAssembly(input: {
 
 /**
  * Assemble and run the foreground local gateway. This function never starts a
- * daemon, remote connector, provider request, or writable Codex route.
+ * daemon, remote connector, or provider request.
  */
 export async function runGatewayServer(
   options: GatewayServerOptions,
@@ -268,9 +257,6 @@ export async function runGatewayServer(
     dependencies.attestClaudeRuntime ?? attestClaudePeerRuntime;
   const createClaudeProvider =
     dependencies.createClaudeProvider ?? createLocalClaudeGatewayProvider;
-  const createIncompatibleClaudeProvider =
-    dependencies.createIncompatibleClaudeProvider ??
-    createIncompatibleClaudeGatewayProvider;
   const acquireInstanceLease =
     dependencies.acquireInstanceLease ?? acquireGatewayInstanceLease;
   const createStore =
@@ -282,9 +268,6 @@ export async function runGatewayServer(
     createLocalCodexRefreshCandidateTransportFactory;
   const createCodexProvider =
     dependencies.createCodexProvider ?? createLocalCodexGatewayProvider;
-  const createIncompatibleCodexProvider =
-    dependencies.createIncompatibleCodexProvider ??
-    createIncompatibleCodexGatewayProvider;
   const detectDeepSeek =
     dependencies.detectDeepSeekSurface ?? detectDeepSeekSurface;
   const createService =
@@ -385,87 +368,18 @@ export async function runGatewayServer(
         }),
       ),
     );
-    if (
-      runtime.claudeCodeVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
-      !isCompatibilityVersion(runtime.claudeCodeVersion)
-    ) {
-      throw new BridgeError(
-        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
-        "Claude runtime version evidence must be bounded before provider construction.",
-      );
-    }
-    if (
-      runtime.launcherVersionEvidence !== undefined &&
-      !isCompatibilityVersion(runtime.launcherVersionEvidence)
-    ) {
-      throw new BridgeError(
-        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
-        "Claude launcher version evidence must be bounded before provider construction.",
-      );
-    }
-    if (
-      runtime.versionEvidenceFailure !== undefined &&
-      ![
-        "CLAUDE_VERSION_CHECK_FAILED",
-        "CLAUDE_VERSION_EVIDENCE_CONFLICT",
-        "CLAUDE_VERSION_EVIDENCE_TOO_LARGE",
-      ].includes(runtime.versionEvidenceFailure)
-    ) {
-      throw new BridgeError(
-        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
-        "Claude version failure evidence must use the closed safe-code vocabulary.",
-      );
-    }
-    const claudeLauncherMajorUnsupported =
-      runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION &&
-      runtime.launcherVersionEvidence !== undefined &&
-      !sharesCompatibilityMajor(
-        runtime.launcherVersionEvidence,
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-      );
-    const claudeSafeErrorCode = claudeLauncherMajorUnsupported
-      ? "CLAUDE_PEER_VERSION_UNSUPPORTED"
-      : runtime.versionEvidenceFailure !== undefined
-        ? runtime.versionEvidenceFailure
-        : runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
-          ? runtime.launcherVersionEvidence === undefined
-            ? "CLAUDE_VERSION_UNPARSEABLE"
-            : undefined
-        : sharesCompatibilityMajor(
-              runtime.claudeCodeVersion,
-              CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-            )
-          ? undefined
-          : "CLAUDE_PEER_VERSION_UNSUPPORTED";
-    const claudeCompatibilityVersion =
-      runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION &&
-      runtime.launcherVersionEvidence !== undefined
-        ? runtime.launcherVersionEvidence
-        : runtime.claudeCodeVersion;
-    claudeProvider =
-      claudeSafeErrorCode === undefined
-        ? createClaudeProvider({
-            runtime,
-            ...(claudeCompatibilityVersion === runtime.claudeCodeVersion
-              ? {}
-              : { compatibilityVersion: claudeCompatibilityVersion }),
-            locale: options.locale ?? "en",
-            nativeHelpers: { maxHelpers: config.limits.maxRoutes },
-            ...(config.deliveryNotices === undefined
-              ? {}
-              : { deliveryNotices: config.deliveryNotices }),
-          })
-        : createIncompatibleClaudeProvider({
-            runtime,
-            version: claudeCompatibilityVersion,
-            safeErrorCode: claudeSafeErrorCode,
-          });
+    claudeProvider = createClaudeProvider({
+      runtime,
+      locale: options.locale ?? "en",
+      nativeHelpers: { maxHelpers: config.limits.maxRoutes },
+      ...(config.deliveryNotices === undefined
+        ? {}
+        : { deliveryNotices: config.deliveryNotices }),
+    });
     store = createStore(config);
     const codexFactoryOptions: LocalCodexTransportFactoryOptions = {
-      appServerVersion: GATEWAY_CODEX_APP_SERVER_VERSION,
       environment: localCodexProviderEnvironment(env),
       hostId: GATEWAY_LOCAL_HOST_ID,
-      writableProtocolAttested: true,
     };
     const createOwnedCodexFactory = async (
       creator: (
@@ -490,49 +404,11 @@ export async function runGatewayServer(
         "Codex App Server availability evidence must use a reviewed bounded code.",
       );
     }
-    if (
-      createdCodexFactory.appServerVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
-      !isCompatibilityVersion(createdCodexFactory.appServerVersion)
-    ) {
-      throw new BridgeError(
-        "CODEX_RUNTIME_ATTESTATION_INVALID",
-        "Codex App Server version evidence must be bounded before provider construction.",
-      );
-    }
-    if (
-      createdCodexFactory.availabilityFailure === undefined &&
-      createdCodexFactory.appServerVersion !== UNKNOWN_COMPATIBILITY_VERSION &&
-      sharesCompatibilityMajor(
-        createdCodexFactory.appServerVersion,
-        GATEWAY_CODEX_APP_SERVER_VERSION,
-      )
-    ) {
-      codexProvider = createCodexProvider({
-        factory: createdCodexFactory,
-        refreshFactory: async () =>
-          await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
-      });
-    } else {
-      const incompatibleIdentity = {
-        provider: "codex" as const,
-        hostId: createdCodexFactory.hostId,
-        endpointGeneration: createdCodexFactory.endpointGeneration,
-      };
-      await awaitWhileLeaseHeld(
-        Promise.resolve().then(() => createdCodexFactory.close()),
-      );
-      codexFactory = undefined;
-      codexProvider = createIncompatibleCodexProvider({
-        identity: incompatibleIdentity,
-        version: createdCodexFactory.appServerVersion,
-        safeErrorCode:
-          createdCodexFactory.availabilityFailure ??
-          (createdCodexFactory.appServerVersion ===
-          UNKNOWN_COMPATIBILITY_VERSION
-            ? "CODEX_APP_SERVER_VERSION_UNPARSEABLE"
-            : "CODEX_APP_SERVER_VERSION_UNSUPPORTED"),
-      });
-    }
+    codexProvider = createCodexProvider({
+      factory: createdCodexFactory,
+      refreshFactory: async () =>
+        await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
+    });
     const deepSeekObserver = await awaitWhileLeaseHeld(
       detectDeepSeek({ env, loginHome: resolvedLoginHome }).catch(
         () => undefined,

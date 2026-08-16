@@ -15,7 +15,7 @@ export const compatibilitySurfaces = Object.freeze(
   compatibilitySurfaceDefinitions.map(({ surface }) => surface),
 );
 
-/** Exact upstream builds exercised by this release's deterministic suite. */
+/** TODO(emb-68): remove with the legacy public compatibility schema. */
 export const certifiedCompatibilityVersions = Object.freeze({
   claude: Object.freeze(["2.1.227"]),
   codex: Object.freeze(["0.147.0"]),
@@ -75,11 +75,13 @@ export type CompatibilityAttestation = Readonly<{
   safeErrorCode?: string;
 }>;
 
+/** TODO(emb-69): remove with the DeepSeek online version observer. */
 export type CompatibilitySurfaceObservation = Readonly<{
   surface: CompatibilitySurface;
   version: string;
 }>;
 
+/** TODO(emb-69): remove with the DeepSeek online version observer. */
 export interface CompatibilitySurfaceObserver {
   compatibilitySurface(): CompatibilitySurfaceObservation;
   runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]>;
@@ -276,6 +278,10 @@ function persistedProbeSet(
   return value as readonly CompatibilityProbeResult[];
 }
 
+/**
+ * TODO(emb-68): remove with the legacy public compatibility schema and its
+ * test fixtures. Runtime routing authority must not call this constructor.
+ */
 export function evaluateCompatibilityAttestation(input: Readonly<{
   surface: CompatibilitySurface;
   version: string;
@@ -413,7 +419,10 @@ export function isPersistedCompatibilityAttestation(
   }
 }
 
-/** Validate a fresh attestation against this build's admission policy. */
+/**
+ * TODO(emb-68): remove with the legacy public compatibility schema. Runtime
+ * routing authority must not consult this release-relative projection.
+ */
 export function isCompatibilityAttestation(
   value: unknown,
 ): value is CompatibilityAttestation {
@@ -441,6 +450,7 @@ export function isCompatibilityAttestation(
   );
 }
 
+/** TODO(emb-68): remove with the legacy writesCovered public field. */
 export function compatibilityCoversWrites(
   attestation: Pick<
     CompatibilityAttestation,

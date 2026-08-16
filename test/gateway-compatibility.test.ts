@@ -6,18 +6,41 @@ import {
   compatibilityCoversWrites,
   compatibilityProbeNames,
   compatibilitySurfaceDefinitions,
-  evaluateCompatibilityAttestation,
   isCompatibilityAttestation,
   isCompatibilityVersion,
   isPersistedCompatibilityAttestation,
   sharesCompatibilityMajor,
   UNKNOWN_COMPATIBILITY_VERSION,
+  type CompatibilityAttestation,
   type CompatibilityProbeResult,
   type CompatibilitySurface,
 } from "../src/gateway/compatibility.js";
 import { gatewayPublicSnapshotLimits } from "../src/gateway/types.js";
 
-test("the declared compatibility inventory remains required and sets snapshot capacity", () => {
+const checkedAt = "2026-08-16T12:00:00.000Z";
+
+function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {
+  return compatibilityProbeNames[surface].map((name) => ({
+    name,
+    outcome: "pass",
+  }));
+}
+
+function attestation(
+  overrides: Partial<CompatibilityAttestation> = {},
+): CompatibilityAttestation {
+  return {
+    schemaVersion: 1,
+    surface: "claude",
+    version: "2.1.227",
+    tier: "certified",
+    checkedAt,
+    probes: passing("claude"),
+    ...overrides,
+  };
+}
+
+test("the legacy compatibility schema inventory remains bounded until emb-68", () => {
   assert.deepEqual(compatibilitySurfaceDefinitions, [
     { surface: "claude", required: true },
     { surface: "codex", required: true },
@@ -29,23 +52,7 @@ test("the declared compatibility inventory remains required and sets snapshot ca
   );
 });
 
-test("an uncertified optional surface is incompatible without fake reference evidence", () => {
-  const result = evaluateCompatibilityAttestation({
-    surface: "deepseek",
-    version: UNKNOWN_COMPATIBILITY_VERSION,
-    checkedAt: "2026-08-16T12:00:00.000Z",
-    certifiedVersions: [],
-    probes: compatibilityProbeNames.deepseek.map((name) =>
-      name === "version"
-        ? { name, outcome: "fail", safeErrorCode: "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE" }
-        : { name, outcome: "pass" }),
-  });
-  assert.equal(result.tier, "incompatible");
-  assert.equal(result.safeErrorCode, "DEEPSEEK_HARNESS_VERSION_UNPARSEABLE");
-  assert.equal(isCompatibilityAttestation(result), true);
-});
-
-test("bounded prerelease evidence is schema-attested but permanently write-fenced", () => {
+test("bounded semantic-version syntax remains available to runtime metadata", () => {
   for (const version of [
     "2.2.0-rc",
     "2.2.0-rc.1",
@@ -62,374 +69,120 @@ test("bounded prerelease evidence is schema-attested but permanently write-fence
   ]) {
     assert.equal(isCompatibilityVersion(version), false);
   }
-
-  const attestation = evaluateCompatibilityAttestation({
-    surface: "codex",
-    version: "0.147.1-rc.1",
-    checkedAt: "2026-08-16T12:00:00.000Z",
-    certifiedVersions: ["0.147.0"],
-    probes: [
-      ...passing("codex"),
-      { name: "write_attestation", outcome: "pass" },
-    ],
-  });
-  assert.deepEqual(
-    [attestation.tier, attestation.safeErrorCode],
-    ["schema_attested", undefined],
-  );
-  assert.equal(isCompatibilityAttestation(attestation), true);
-  assert.equal(compatibilityCoversWrites(attestation), false);
-  assert.equal(isPersistedCompatibilityAttestation({ ...attestation, tier: "certified" }), false);
-  assert.throws(
-    () =>
-      evaluateCompatibilityAttestation({
-        ...attestation,
-        certifiedVersions: ["0.147.1-rc.1"],
-      }),
-    { message: /inventory must be .*stable/ },
-  );
-});
-
-test("0.x minors are major-equivalent compatibility series", () => {
   assert.equal(sharesCompatibilityMajor("2.1.0", "2.99.0-rc.1"), true);
   assert.equal(sharesCompatibilityMajor("0.147.0", "0.147.9-rc.1"), true);
   assert.equal(sharesCompatibilityMajor("0.147.0", "0.148.0"), false);
   assert.equal(sharesCompatibilityMajor("0.147.0", "invalid"), false);
-
-  const base = {
-    surface: "codex" as const,
-    checkedAt: "2026-08-16T12:00:00.000Z",
-    certifiedVersions: ["0.147.0"],
-    probes: passing("codex"),
-  };
-  assert.equal(
-    evaluateCompatibilityAttestation({ ...base, version: "0.147.0" }).tier,
-    "certified",
-  );
-  assert.equal(
-    evaluateCompatibilityAttestation({ ...base, version: "0.147.1" }).tier,
-    "schema_attested",
-  );
-  const nextMinor = evaluateCompatibilityAttestation({
-    ...base,
-    version: "0.148.0",
-  });
-  assert.deepEqual(
-    [nextMinor.tier, nextMinor.safeErrorCode],
-    ["incompatible", "CODEX_APP_SERVER_VERSION_UNSUPPORTED"],
-  );
-  assert.equal(isCompatibilityAttestation(nextMinor), true);
 });
 
-function passing(surface: CompatibilitySurface): CompatibilityProbeResult[] {
-  return compatibilityProbeNames[surface].map((name) => ({
-    name,
-    outcome: "pass",
-  }));
-}
-
-// Frozen, row-focused copy of the v1.5 persisted-attestation contract.
-function v15AcceptsPersistedWriteEvidence(value: unknown): boolean {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const row = value as Record<string, unknown>;
-  if (Object.keys(row).sort().join(",") !== "checkedAt,probes,schemaVersion,surface,tier,version") return false;
-  const probes = Array.isArray(row.probes) ? row.probes : [];
-  const checkedAt = typeof row.checkedAt === "string" ? row.checkedAt : "";
-  const names = probes.map((probe) => typeof probe === "object" && probe !== null && !Array.isArray(probe)
-    ? (probe as Record<string, unknown>).name : undefined);
-  return row.schemaVersion === 1 && row.surface === "codex" && row.tier === "schema_attested" &&
-    typeof row.version === "string" && /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/.test(row.version) &&
-    Number.isFinite(Date.parse(checkedAt)) && new Date(Date.parse(checkedAt)).toISOString() === checkedAt &&
-    probes.length > 0 && probes.length <= 32 && new Set(names).size === probes.length &&
-    probes.every((probe) => {
-      if (typeof probe !== "object" || probe === null || Array.isArray(probe)) return false;
-      const item = probe as Record<string, unknown>;
-      return Object.keys(item).sort().join(",") === "name,outcome" && typeof item.name === "string" &&
-        /^[a-z][a-z0-9_]{0,63}$/.test(item.name) && item.outcome === "pass";
-    });
-}
-
-test("compatibility admission trusts only passing same-major probes beyond the certified inventory", () => {
-  const base = {
-    surface: "claude" as const,
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["2.1.227"],
-    probes: passing("claude"),
-  };
-  const certified = evaluateCompatibilityAttestation({
-    ...base,
-    version: "2.1.227",
-  });
-  assert.equal(certified.tier, "certified");
-  assert.equal(certified.safeErrorCode, undefined);
+test("persisted compatibility evidence remains strict and release-invariant", () => {
+  const certified = attestation();
+  assert.equal(isPersistedCompatibilityAttestation(certified), true);
   assert.equal(isCompatibilityAttestation(certified), true);
 
-  const sameMajor = evaluateCompatibilityAttestation({
-    ...base,
-    version: "2.2.0",
-  });
-  assert.equal(sameMajor.tier, "schema_attested");
-  assert.equal(sameMajor.safeErrorCode, undefined);
-  assert.equal(isCompatibilityAttestation(sameMajor), true);
-  assert.equal(compatibilityCacheKey(sameMajor), `claude\0${"2.2.0"}`);
-  assert.equal(
-    isCompatibilityAttestation({
-      ...sameMajor,
-      tier: "incompatible",
-    }),
-    false,
-  );
-
-  for (const [version, safeErrorCode] of [
-    ["3.0.0", "CLAUDE_PEER_VERSION_UNSUPPORTED"],
-    [UNKNOWN_COMPATIBILITY_VERSION, "CLAUDE_VERSION_UNPARSEABLE"],
-  ] as const) {
-    const result = evaluateCompatibilityAttestation({ ...base, version });
-    assert.equal(result.tier, "incompatible");
-    assert.equal(result.safeErrorCode, safeErrorCode);
-    assert.equal(isCompatibilityAttestation(result), true);
-    assert.equal(compatibilityCacheKey(result), `claude\0${version}`);
-  }
-});
-
-test("v1.5 persistence accepts pass-only write evidence without widening authority", () => {
-  const input = { surface: "codex", version: "0.147.1", checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["0.147.0"] } as const;
-  const writeAttested = evaluateCompatibilityAttestation({
-    ...input,
-    probes: [...passing("codex"), { name: "write_attestation", outcome: "pass" }],
-  });
-  assert.deepEqual(
-    [writeAttested.tier, compatibilityCoversWrites(writeAttested), isCompatibilityAttestation(writeAttested)],
-    ["schema_attested", true, true],
-  );
-  assert.equal(v15AcceptsPersistedWriteEvidence(writeAttested), true);
-  assert.equal(v15AcceptsPersistedWriteEvidence({ ...writeAttested, writesCovered: true }), false);
-  assert.equal(isCompatibilityAttestation({
-    ...writeAttested, probes: [...passing("codex"), { name: "unknown" as never, outcome: "pass" }],
-  }), false);
-  assert.equal(compatibilityCoversWrites({ ...writeAttested, tier: "incompatible" }), false);
-  assert.throws(
-    () =>
-      evaluateCompatibilityAttestation({
-        ...input,
-        probes: [
-          ...passing("codex"),
-          {
-            name: "write_attestation",
-            outcome: "fail",
-            safeErrorCode: "CODEX_WRITE_PROBE_FAILED",
-          },
-        ],
-      }),
-    { message: /known passing optional probes/ },
-  );
-});
-
-test("persisted compatibility evidence is release-invariant but remains strict", () => {
-  const checkedAt = "2026-08-09T12:00:00.000Z";
-  const certifiedByEarlierRelease = evaluateCompatibilityAttestation({
-    surface: "claude",
+  const historicalProbeSchema = attestation({
     version: "2.1.226",
-    checkedAt,
-    certifiedVersions: ["2.1.226"],
-    probes: passing("claude"),
-  });
-  const certifiedByLaterRelease = evaluateCompatibilityAttestation({
-    surface: "claude",
-    version: "2.1.227",
-    checkedAt,
-    certifiedVersions: ["2.1.226"],
-    probes: passing("claude"),
-  });
-
-  assert.equal(isCompatibilityAttestation(certifiedByEarlierRelease), false);
-  assert.equal(isCompatibilityAttestation(certifiedByLaterRelease), false);
-  assert.equal(
-    isPersistedCompatibilityAttestation(certifiedByEarlierRelease),
-    true,
-  );
-  assert.equal(
-    isPersistedCompatibilityAttestation(certifiedByLaterRelease),
-    true,
-  );
-  const historicalProbeSchema = {
-    ...certifiedByEarlierRelease,
-    probes: certifiedByEarlierRelease.probes.map((probe, index) =>
+    probes: passing("claude").map((probe, index) =>
       index === 0 ? { ...probe, name: "launcher_v0" } : probe,
-    ),
-  };
+    ) as CompatibilityProbeResult[],
+  });
   assert.equal(isCompatibilityAttestation(historicalProbeSchema), false);
   assert.equal(
     isPersistedCompatibilityAttestation(historicalProbeSchema),
     true,
   );
-  const historicalFailureCode = {
-    ...historicalProbeSchema,
-    tier: "incompatible" as const,
-    safeErrorCode: "FUTURE_MAJOR_UNSUPPORTED",
-  };
-  assert.equal(isCompatibilityAttestation(historicalFailureCode), false);
-  assert.equal(
-    isPersistedCompatibilityAttestation(historicalFailureCode),
-    true,
-  );
-  assert.equal(
-    isCompatibilityAttestation({
-      ...certifiedByEarlierRelease,
-      probes: [...certifiedByEarlierRelease.probes].reverse(),
-    }),
-    false,
-  );
-  assert.equal(
-    isPersistedCompatibilityAttestation({
-      ...certifiedByEarlierRelease,
-      probes: [...certifiedByEarlierRelease.probes].reverse(),
-    }),
-    true,
-  );
+
   assert.equal(
     isPersistedCompatibilityAttestation({
       ...historicalProbeSchema,
       probes: [
         ...historicalProbeSchema.probes,
-        { ...historicalProbeSchema.probes[0] },
+        historicalProbeSchema.probes[0],
       ],
     }),
     false,
   );
   assert.equal(
     isPersistedCompatibilityAttestation({
-      ...certifiedByLaterRelease,
+      ...certified,
       version: UNKNOWN_COMPATIBILITY_VERSION,
+    }),
+    false,
+  );
+  assert.equal(
+    isPersistedCompatibilityAttestation({
+      ...certified,
+      checkedAt: "not-a-timestamp",
     }),
     false,
   );
 });
 
-test("one failed bounded probe fails closed and malformed evidence is rejected", () => {
+test("legacy failure rows require an exact safe code", () => {
   const probes = passing("codex");
   probes[2] = {
     name: "initialize",
     outcome: "fail",
     safeErrorCode: "CODEX_INITIALIZE_SCHEMA_INVALID",
   };
-  const failed = evaluateCompatibilityAttestation({
+  const failed = attestation({
     surface: "codex",
     version: "0.148.0",
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["0.147.0"],
+    tier: "incompatible",
     probes,
+    safeErrorCode: "CODEX_INITIALIZE_SCHEMA_INVALID",
   });
-  assert.equal(failed.tier, "incompatible");
-  assert.equal(failed.safeErrorCode, "CODEX_INITIALIZE_SCHEMA_INVALID");
+  assert.equal(isPersistedCompatibilityAttestation(failed), true);
   assert.equal(isCompatibilityAttestation(failed), true);
   assert.equal(
-    isCompatibilityAttestation({ ...failed, probes: [...failed.probes].reverse() }),
+    isPersistedCompatibilityAttestation({
+      ...failed,
+      safeErrorCode: "CODEX_VERSION_DRIFT",
+    }),
     false,
   );
-  assert.throws(
-    () =>
-      evaluateCompatibilityAttestation({
-        surface: "codex",
-        version: "0.148.0",
-        checkedAt: "2026-08-09T12:00:00.000Z",
-        certifiedVersions: ["0.147.0"],
-        probes: passing("codex").slice(1),
-      }),
-    { message: /exact ordered surface probe set/ },
+  assert.equal(
+    isPersistedCompatibilityAttestation({
+      ...failed,
+      probes: [...failed.probes].reverse(),
+    }),
+    true,
   );
-  const codexUnsupported = evaluateCompatibilityAttestation({
+  assert.equal(
+    isCompatibilityAttestation({
+      ...failed,
+      probes: [...failed.probes].reverse(),
+    }),
+    false,
+  );
+});
+
+test("legacy writesCovered projection is inert and schema-derived", () => {
+  const writeAttested = attestation({
     surface: "codex",
-    version: "1.0.0",
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["0.147.0"],
-    probes: passing("codex"),
+    version: "0.147.1",
+    tier: "schema_attested",
+    probes: [
+      ...passing("codex"),
+      { name: "write_attestation", outcome: "pass" },
+    ],
   });
-  assert.equal(codexUnsupported.tier, "incompatible");
+  assert.equal(isPersistedCompatibilityAttestation(writeAttested), true);
+  assert.equal(isCompatibilityAttestation(writeAttested), true);
+  assert.equal(compatibilityCoversWrites(writeAttested), true);
   assert.equal(
-    codexUnsupported.safeErrorCode,
-    "CODEX_APP_SERVER_VERSION_UNSUPPORTED",
-  );
-  assert.equal(isCompatibilityAttestation(codexUnsupported), true);
-  assert.equal(
-    isCompatibilityAttestation({
-      ...codexUnsupported,
-      safeErrorCode: "CLAUDE_VERSION_DRIFT",
-    }),
+    compatibilityCoversWrites({ ...writeAttested, tier: "incompatible" }),
     false,
   );
   assert.equal(
-    isCompatibilityAttestation({
-      ...codexUnsupported,
-      safeErrorCode: "CODEX_VERSION_DRIFT",
-    }),
-    true,
+    compatibilityCoversWrites({ ...writeAttested, version: "0.147.1-rc.1" }),
+    false,
   );
+});
 
-  const passingUncertified = {
-    ...evaluateCompatibilityAttestation({
-      surface: "claude" as const,
-      version: "2.1.228",
-      checkedAt: "2026-08-09T12:00:00.000Z",
-      certifiedVersions: ["2.1.227"],
-      probes: passing("claude"),
-    }),
-    tier: "certified" as const,
-  };
-  assert.equal(isCompatibilityAttestation(passingUncertified), false);
-  assert.equal(isPersistedCompatibilityAttestation(passingUncertified), true);
+test("legacy persisted rows keep their stable bounded cache key", () => {
   assert.equal(
-    isCompatibilityAttestation({
-      ...passingUncertified,
-      version: UNKNOWN_COMPATIBILITY_VERSION,
-    }),
-    false,
-  );
-  assert.equal(
-    isCompatibilityAttestation({
-      ...passingUncertified,
-      version: UNKNOWN_COMPATIBILITY_VERSION,
-      tier: "incompatible",
-      safeErrorCode: "CLAUDE_VERSION_DRIFT",
-    }),
-    false,
-  );
-  assert.equal(
-    isCompatibilityAttestation({
-      ...passingUncertified,
-      version: "2.1.224",
-    }),
-    false,
-  );
-  assert.equal(
-    isCompatibilityAttestation({
-      ...passingUncertified,
-      version: "2.1.226",
-      tier: "incompatible",
-      safeErrorCode: "CLAUDE_VERSION_DRIFT",
-    }),
-    true,
-  );
-  assert.equal(
-    isCompatibilityAttestation({
-      ...passingUncertified,
-      version: "2.1.226",
-      tier: "incompatible",
-      safeErrorCode: "CODEX_VERSION_DRIFT",
-    }),
-    false,
-  );
-
-  assert.throws(
-    () =>
-      evaluateCompatibilityAttestation({
-        surface: "claude",
-        version: "development-build",
-        checkedAt: "2026-08-09T12:00:00.000Z",
-        certifiedVersions: ["2.1.227"],
-        probes: passing("claude"),
-      }),
-    { message: /semantic versions or explicit unknown evidence/ },
+    compatibilityCacheKey(attestation({ version: "2.1.226" })),
+    "claude\0" + "2.1.226",
   );
 });

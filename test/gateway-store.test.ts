@@ -21,11 +21,6 @@ import {
   GATEWAY_MAX_STATE_FILE_BYTES,
   GatewayStore,
 } from "../src/gateway/store.js";
-import {
-  certifiedCompatibilityVersions,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-} from "../src/gateway/compatibility.js";
 import type { ProgressWatch } from "../src/gateway/progress-watch-machine.js";
 import type {
   GatewayStoreDependencies,
@@ -135,6 +130,15 @@ const claudeBinding: PrivateRouteBinding = {
   routeHandle: "claude-session-private-0001",
   ownerLease: "claude-owner-lease-0001",
 };
+
+const legacyCompatibilityAttestation = {
+  schemaVersion: 1,
+  surface: "claude",
+  version: "2.1.226",
+  tier: "schema_attested",
+  checkedAt: "2026-08-09T12:00:00.000Z",
+  probes: [{ name: "launcher", outcome: "pass" }],
+} as const;
 
 const successorCodexBinding: PrivateRouteBinding = {
   ...codexBinding,
@@ -620,6 +624,66 @@ test("routes require explicit selection and immutable exact generations", async 
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "INVALID_PRIVATE_ROUTE_IDENTITY",
+  );
+  await store.close();
+});
+
+test("legacy compatibility shadows neither grant nor withhold route authority", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  for (const binding of [codexBinding, claudeBinding]) {
+    await store.observeConnector({
+      identity: endpoint(binding),
+      health: "healthy",
+      compatibility: "expired",
+      protocol:
+        binding.provider === "codex" ? "app-server-jsonrpc" : "claude-peer",
+      protocolVersion: "1",
+    });
+  }
+  await store.registerRoute({
+    alias: "reviewer@this-mac",
+    binding: codexBinding,
+    registrationMode: "explicit_opt_in",
+  });
+  await store.registerRoute({
+    alias: "advisor@this-mac",
+    binding: claudeBinding,
+    registrationMode: "selected_live_peer",
+  });
+  await store.pairRoutes({
+    claudeAlias: "advisor@this-mac",
+    codexAlias: "reviewer@this-mac",
+  });
+  for (const binding of [codexBinding, claudeBinding]) {
+    await store.observeRoute({
+      binding,
+      state: "idle",
+      compatibility: "expired" as "compatible",
+    });
+  }
+
+  assert.deepEqual(await store.resolveRoute("reviewer@this-mac"), codexBinding);
+  assert.equal(
+    (
+      await store.enqueueMessage({
+        sourceAlias: "reviewer@this-mac",
+        targetAlias: "advisor@this-mac",
+        body: "best-effort route",
+        dedupeKey: "legacy-compatibility-shadow",
+      })
+    ).accepted,
+    true,
+  );
+  await store.markConnectorOffline(endpoint(codexBinding));
+  await assert.rejects(
+    store.observeRoute({
+      binding: codexBinding,
+      state: "idle",
+      compatibility: "compatible",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "ROUTE_ENDPOINT_NOT_OBSERVED",
   );
   await store.close();
 });
@@ -5552,7 +5616,7 @@ test("one narrow migration adds zeroed unconfirmed counters to old dogfood state
   await migrated.close();
 });
 
-test("startup staging defers migrations and observations until one explicit commit", async () => {
+test("startup staging defers migration persistence until one explicit commit", async () => {
   const { store, config } = await fixture();
   await store.initialize();
   await store.close();
@@ -5569,53 +5633,30 @@ test("startup staging defers migrations and observations until one explicit comm
 
   const staged = new GatewayStore(config);
   await staged.initialize({ deferPersistence: true });
-  const attestation = evaluateCompatibilityAttestation({
-    surface: "claude",
-    version: "2.1.228",
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: certifiedCompatibilityVersions.claude,
-    probes: compatibilityProbeNames.claude.map((name) => ({
-      name,
-      outcome: "pass" as const,
-    })),
-  });
-  await staged.recordCompatibilityAttestation(attestation);
   assert.equal(await readFile(store.stateFilePath, "utf8"), legacyBytes);
 
   await staged.commitInitialization();
   const committed = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
   ) as { compatibilityAttestations?: unknown };
-  assert.deepEqual(committed.compatibilityAttestations, [attestation]);
+  assert.deepEqual(committed.compatibilityAttestations, []);
   await staged.close();
 });
 
-test("automatic compatibility evidence is strict, persistent, keyed by surface and version, and bounded", async () => {
+test("legacy compatibility shadows load strictly without entering the public model", async () => {
   const { store, config } = await fixture();
   await store.initialize();
-  const attestation = evaluateCompatibilityAttestation({
-    surface: "claude",
-    version: "2.1.228",
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: certifiedCompatibilityVersions.claude,
-    probes: compatibilityProbeNames.claude.map((name) => ({
-      name,
-      outcome: "pass" as const,
-    })),
-  });
-  await store.recordCompatibilityAttestation(attestation);
+  await store.recordCompatibilityAttestation(legacyCompatibilityAttestation);
   assert.deepEqual(
-    await store.inspectCompatibilityAttestation("claude", "2.1.228"),
-    attestation,
+    await store.inspectCompatibilityAttestation("claude", "2.1.226"),
+    legacyCompatibilityAttestation,
   );
-  await store.recordCompatibilityAttestation({
-    ...attestation,
-    checkedAt: "2026-08-09T12:01:00.000Z",
-  });
-  assert.equal((await store.inspectCompatibilityAttestations()).length, 1);
+  assert.deepEqual(await store.inspectCompatibilityAttestations(), [
+    legacyCompatibilityAttestation,
+  ]);
   await assert.rejects(
     store.recordCompatibilityAttestation({
-      ...attestation,
+      ...legacyCompatibilityAttestation,
       probes: [],
     }),
     (error: unknown) =>
@@ -5623,84 +5664,30 @@ test("automatic compatibility evidence is strict, persistent, keyed by surface a
       error.code === "COMPAT_ATTESTATION_INVALID",
   );
   await store.close();
-
-  const recovered = new GatewayStore(config);
-  await recovered.initialize();
-  assert.equal(
-    (
-      await recovered.inspectCompatibilityAttestation("claude", "2.1.228")
-    )?.checkedAt,
-    "2026-08-09T12:01:00.000Z",
-  );
-  assert.equal(
-    JSON.stringify(await recovered.publicSnapshot()).includes("2.1.228"),
-    false,
-  );
-  await recovered.close();
-});
-
-test("current persistence loads optional write evidence while malformed evidence fails closed", async () => {
-  const { store, config } = await fixture();
-  await store.initialize();
-  const passingProbes = compatibilityProbeNames.claude.map((name) => ({
-    name,
-    outcome: "pass" as const,
-  }));
-  const decertifiedLater = evaluateCompatibilityAttestation({
-    surface: "claude",
-    version: "2.1.226",
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["2.1.226"],
-    probes: passingProbes,
-  });
-  const certifiedLater = evaluateCompatibilityAttestation({
-    surface: "claude",
-    version: "2.1.227",
-    checkedAt: "2026-08-09T12:01:00.000Z",
-    certifiedVersions: ["2.1.226"],
-    probes: passingProbes,
-  });
-  const writeAttested = evaluateCompatibilityAttestation({
+  const writeAttested = {
+    schemaVersion: 1,
     surface: "codex",
     version: "0.148.0",
+    tier: "schema_attested",
     checkedAt: "2026-08-09T12:02:00.000Z",
-    certifiedVersions: certifiedCompatibilityVersions.codex,
-    probes: [...compatibilityProbeNames.codex.map((name) => ({
-      name,
-      outcome: "pass" as const,
-    })),
-      { name: "write_attestation", outcome: "pass" },
-    ],
-  });
-  assert.equal("writesCovered" in writeAttested, false);
-  for (const releaseRelative of [decertifiedLater, certifiedLater]) {
-    await assert.rejects(
-      store.recordCompatibilityAttestation(releaseRelative),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "COMPAT_ATTESTATION_INVALID",
-    );
-  }
-  await store.close();
-  const historicalCertified = {
-    ...decertifiedLater,
-    probes: decertifiedLater.probes.map((probe, index) =>
-      index === 0 ? { ...probe, name: "launcher_v0" } : probe,
-    ),
-  };
+    probes: [{ name: "write_attestation", outcome: "pass" }],
+  } as const;
   const persisted = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
     compatibilityAttestations: Array<Record<string, unknown>>;
   };
-  persisted.compatibilityAttestations = [historicalCertified, certifiedLater, writeAttested];
+  persisted.compatibilityAttestations = [
+    legacyCompatibilityAttestation,
+    writeAttested,
+  ];
   await writeFile(store.stateFilePath, `${JSON.stringify(persisted)}\n`, {
     mode: 0o600,
   });
 
   const recovered = new GatewayStore(config);
   await recovered.initialize();
-  assert.deepEqual(
-    await recovered.inspectCompatibilityAttestations(),
-    [historicalCertified, certifiedLater, writeAttested],
+  assert.equal(
+    JSON.stringify(await recovered.publicSnapshot()).includes("2.1.226"),
+    false,
   );
   await recovered.close();
   const recoveredBytes = await readFile(store.stateFilePath, "utf8");
@@ -5716,10 +5703,9 @@ test("current persistence loads optional write evidence while malformed evidence
     const invalid = JSON.parse(
       await readFile(current.store.stateFilePath, "utf8"),
     ) as { compatibilityAttestations: Array<Record<string, unknown>> };
-    const row = JSON.parse(JSON.stringify(decertifiedLater)) as Record<
-      string,
-      unknown
-    >;
+    const row = JSON.parse(
+      JSON.stringify(legacyCompatibilityAttestation),
+    ) as Record<string, unknown>;
     invalid.compatibilityAttestations = [row];
     if (variant === "failed") {
       const probes = row.probes as Array<Record<string, unknown>>;
@@ -5745,22 +5731,32 @@ test("current persistence loads optional write evidence while malformed evidence
       variant,
     );
   }
+
+  const duplicate = await fixture();
+  await duplicate.store.initialize();
+  await duplicate.store.close();
+  const duplicateState = JSON.parse(
+    await readFile(duplicate.store.stateFilePath, "utf8"),
+  ) as { compatibilityAttestations: Array<Record<string, unknown>> };
+  duplicateState.compatibilityAttestations = [
+    legacyCompatibilityAttestation,
+    legacyCompatibilityAttestation,
+  ];
+  await writeFile(
+    duplicate.store.stateFilePath,
+    `${JSON.stringify(duplicateState)}\n`,
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    new GatewayStore(duplicate.config).initialize(),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "CORRUPT_GATEWAY_STATE",
+  );
 });
 
-test("legacy manual certification evidence is stripped while automatic probes survive", async () => {
+test("legacy manual certification is stripped while its inert persisted shadow survives", async () => {
   const { store, config } = await fixture();
   await store.initialize();
-  const attestation = evaluateCompatibilityAttestation({
-    surface: "claude",
-    version: "2.1.226",
-    checkedAt: "2026-08-09T12:00:00.000Z",
-    certifiedVersions: ["2.1.227"],
-    probes: compatibilityProbeNames.claude.map((name) => ({
-      name,
-      outcome: "pass" as const,
-    })),
-  });
-  await store.recordCompatibilityAttestation(attestation);
   await store.close();
 
   const legacy = JSON.parse(
@@ -5768,22 +5764,24 @@ test("legacy manual certification evidence is stripped while automatic probes su
   ) as {
     compatibilityAttestations: Array<Record<string, unknown>>;
   };
-  assert.ok(legacy.compatibilityAttestations[0]);
-  legacy.compatibilityAttestations[0]!.tier = "certified";
-  legacy.compatibilityAttestations[0]!.certification = {
-    depth: "wire",
-    outcome: "pass",
-    certifiedAt: "2026-08-09T12:01:00.000Z",
-  };
+  legacy.compatibilityAttestations = [
+    {
+      ...legacyCompatibilityAttestation,
+      tier: "certified",
+      certification: {
+        depth: "wire",
+        outcome: "pass",
+        certifiedAt: "2026-08-09T12:01:00.000Z",
+      },
+    },
+  ];
   await writeFile(store.stateFilePath, `${JSON.stringify(legacy)}\n`, {
     mode: 0o600,
   });
 
   const migrated = new GatewayStore(config);
   await migrated.initialize();
-  assert.deepEqual(await migrated.inspectCompatibilityAttestations(), [
-    attestation,
-  ]);
+  await migrated.close();
   const persisted = JSON.parse(
     await readFile(store.stateFilePath, "utf8"),
   ) as {
@@ -5793,10 +5791,15 @@ test("legacy manual certification evidence is stripped while automatic probes su
     Object.hasOwn(persisted.compatibilityAttestations[0] ?? {}, "certification"),
     false,
   );
-  await migrated.close();
+  assert.deepEqual(persisted.compatibilityAttestations, [
+    legacyCompatibilityAttestation,
+  ]);
 
-  assert.ok(persisted.compatibilityAttestations[0]);
-  persisted.compatibilityAttestations[0]!.certification = {
+  const persistedRow = persisted.compatibilityAttestations[0] as
+    | Record<string, unknown>
+    | undefined;
+  assert.ok(persistedRow);
+  persistedRow.certification = {
     depth: "wire",
     outcome: "pass",
     certifiedAt: "2026-08-09T12:02:00.000Z",

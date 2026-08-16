@@ -1,13 +1,4 @@
 import path from "node:path";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
-  realpath,
-  rmdir,
-} from "node:fs/promises";
 
 import { BridgeError } from "../errors.js";
 import {
@@ -25,25 +16,8 @@ import {
 } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import {
-  certifiedCompatibilityVersions,
-  compatibilityCoversWrites,
-  compatibilityProbeNames,
-  evaluateCompatibilityAttestation,
-  isCompatibilityAttestation,
-  isCompatibilityVersion,
-  sharesCompatibilityMajor,
-  UNKNOWN_COMPATIBILITY_VERSION,
-  type CompatibilityAttestation,
-  type CompatibilityProbeName,
-  type CompatibilityProbeResult,
-  type CompatibilitySurfaceObservation,
-} from "./compatibility.js";
-import {
-  CODEX_APP_SERVER_WRITABLE_VERSIONS,
   CodexAppServerConnector,
   CodexConnectorError,
-  codexWriteProbeFailure,
-  type CodexWriteCompatibilityProbeResult,
   type CodexConnectorEvent,
   type CodexConnectorObservation,
   type CodexTransientTurnResult,
@@ -73,8 +47,6 @@ import type {
   GatewayAdapterRegistryObservation,
   GatewayAdapterStart,
   GatewayProviderAdapter,
-  GatewayCompatibilityProbeContext,
-  GatewayWriteCompatibilityProbeObservation,
 } from "./service.js";
 import type {
   PrivateEndpointIdentity,
@@ -98,14 +70,6 @@ const DEFAULT_CODEX_CLEANUP_POLL_MS = 25;
 const DEFAULT_CODEX_RECOVERY_INITIAL_MS = 250;
 const DEFAULT_CODEX_RECOVERY_MAX_MS = 5_000;
 const MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES = 3;
-const COMPATIBILITY_PROBE_THREAD_ID =
-  "00000000-0000-7000-8000-000000000000";
-const CODEX_WRITE_PROBE_DIRECTORY_PREFIX = ".codex-write-probe-";
-const CODEX_WRITE_PROBE_ROOT = "write-probes";
-const MAX_CODEX_WRITE_PROBE_ATTEMPTS = 16;
-const CODEX_WRITE_PROBE_TRANSIENT_ERRNOS = new Set([
-  "EAGAIN", "EIO", "EMFILE", "ENFILE",
-]);
 const CLAUDE_CLEAN_PREWRITE_RETRY_CODES = new Set([
   "CLAUDE_PEER_TARGET_UNKNOWN",
   "CLAUDE_PEER_TARGET_STALE",
@@ -174,159 +138,6 @@ function claudeCleanPrewriteResult(
   };
 }
 
-function passedProbe(name: CompatibilityProbeName): CompatibilityProbeResult {
-  return { name, outcome: "pass" };
-}
-
-function failedProbe(
-  name: CompatibilityProbeName,
-  safeErrorCode: string,
-): CompatibilityProbeResult {
-  return { name, outcome: "fail", safeErrorCode };
-}
-
-type CodexWriteProbeDirectoryEvidence = Readonly<{
-  dev: bigint;
-  ino: bigint;
-  mode: bigint;
-  mtimeNs: bigint;
-  uid: bigint;
-}>;
-
-type CodexWriteProbeRootEvidence = Omit<CodexWriteProbeDirectoryEvidence, "mtimeNs">;
-
-function systemErrorCode(error: unknown): string | undefined {
-  return typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string"
-    ? error.code
-    : undefined;
-}
-
-function transientCodexWriteProbeError(error: unknown): boolean {
-  return CODEX_WRITE_PROBE_TRANSIENT_ERRNOS.has(systemErrorCode(error) ?? "");
-}
-
-function safeCodexWriteProbeFilesystemFailure(error: unknown): boolean {
-  return (
-    transientCodexWriteProbeError(error) ||
-    systemErrorCode(error) === "ENOTEMPTY" ||
-    (error instanceof BridgeError &&
-      error.code === "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED")
-  );
-}
-
-async function attestCodexWriteProbeDirectory(
-  directory: string,
-): Promise<CodexWriteProbeDirectoryEvidence> {
-  try {
-    const resolved = path.resolve(directory);
-    const [metadata, canonical, entries] = await Promise.all([
-      lstat(resolved, { bigint: true }),
-      realpath(resolved),
-      readdir(resolved),
-    ]);
-    const uid = process.getuid?.();
-    if (
-      uid === undefined ||
-      !metadata.isDirectory() ||
-      canonical !== resolved ||
-      metadata.uid !== BigInt(uid) ||
-      (metadata.mode & 0o777n) !== 0o700n
-    ) {
-      throw new BridgeError(
-        "CODEX_FACTORY_ATTESTATION_INVALID",
-        "The disposable Codex probe directory crossed its ownership, mode, or canonical-path boundary.",
-      );
-    }
-    if (entries.length !== 0) {
-      throw new BridgeError(
-        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
-        "The disposable Codex probe directory was not empty.",
-      );
-    }
-    return {
-      dev: metadata.dev,
-      ino: metadata.ino,
-      mode: metadata.mode & 0o777n,
-      mtimeNs: metadata.mtimeNs,
-      uid: metadata.uid,
-    };
-  } catch (error) {
-    if (error instanceof BridgeError) throw error;
-    if (transientCodexWriteProbeError(error)) {
-      throw new BridgeError(
-        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
-        "A transient filesystem error prevented disposable probe attestation.",
-      );
-    }
-    throw new BridgeError(
-      "CODEX_FACTORY_ATTESTATION_INVALID",
-      "The disposable Codex probe directory could not be attested safely.",
-    );
-  }
-}
-
-async function attestCodexWriteProbeRoot(
-  root: string,
-): Promise<CodexWriteProbeRootEvidence | null> {
-  try {
-    const resolved = path.resolve(root);
-    const [metadata, canonical] = await Promise.all([
-      lstat(resolved, { bigint: true }),
-      realpath(resolved),
-    ]);
-    const uid = process.getuid?.();
-    if (
-      uid === undefined ||
-      !metadata.isDirectory() ||
-      canonical !== resolved ||
-      metadata.uid !== BigInt(uid) ||
-      (metadata.mode & 0o777n) !== 0o700n
-    ) {
-      throw new BridgeError(
-        "CODEX_FACTORY_ATTESTATION_INVALID",
-        "A controller-owned Codex probe root changed outside its exact owned-directory boundary.",
-      );
-    }
-    return {
-      dev: metadata.dev,
-      ino: metadata.ino,
-      mode: metadata.mode & 0o777n,
-      uid: metadata.uid,
-    };
-  } catch (error) {
-    if (error instanceof BridgeError) throw error;
-    if (transientCodexWriteProbeError(error)) {
-      return null;
-    }
-    throw new BridgeError(
-      "CODEX_FACTORY_ATTESTATION_INVALID",
-      "A controller-owned Codex probe root could not be attested.",
-    );
-  }
-}
-
-function sameCodexWriteProbeDirectory(
-  before: CodexWriteProbeDirectoryEvidence,
-  after: CodexWriteProbeDirectoryEvidence,
-): boolean {
-  return sameCodexWriteProbeRoot(before, after) && before.mtimeNs === after.mtimeNs;
-}
-
-function sameCodexWriteProbeRoot(
-  before: CodexWriteProbeRootEvidence,
-  after: CodexWriteProbeRootEvidence,
-): boolean {
-  return (
-    before.dev === after.dev &&
-    before.ino === after.ino &&
-    before.mode === after.mode &&
-    before.uid === after.uid
-  );
-}
-
 type ClaudePeerFactory = (
   runtime: AttestedClaudePeerRuntime,
   locale: DashboardLocale,
@@ -336,8 +147,6 @@ type ClaudePeerFactory = (
 export type LocalClaudeGatewayProviderOptions = {
   /** Exact result of attestClaudePeerRuntime; paths are never rediscovered. */
   runtime: AttestedClaudePeerRuntime;
-  /** OS-attested launcher version used only for compatibility classification. */
-  compatibilityVersion?: string;
   hostId?: "this-mac";
   /** Locale for bounded notices written into native Claude sessions. */
   locale?: DashboardLocale;
@@ -499,30 +308,6 @@ function invokeCallback(operation: () => void): void {
 function validateAttestedClaudeRuntime(
   runtime: AttestedClaudePeerRuntime,
 ): void {
-  if (runtime.versionEvidenceFailure !== undefined) {
-    throw new BridgeError(
-      runtime.versionEvidenceFailure,
-      "The local Claude provider requires bounded, internally consistent runtime version evidence.",
-    );
-  }
-  const majorEvidence =
-    runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
-      ? runtime.launcherVersionEvidence
-      : runtime.claudeCodeVersion;
-  if (
-    majorEvidence === undefined ||
-    !sharesCompatibilityMajor(
-      majorEvidence,
-      CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-    )
-  ) {
-    throw new BridgeError(
-      majorEvidence === undefined
-        ? "CLAUDE_VERSION_UNPARSEABLE"
-        : "CLAUDE_PEER_VERSION_UNSUPPORTED",
-      "The local Claude provider requires a positively observed supported runtime major.",
-    );
-  }
   validateClaudeRuntimePathEvidence(runtime);
 }
 
@@ -601,198 +386,12 @@ function isClaudeRegistryAvailabilityError(error: unknown): boolean {
   );
 }
 
-export type IncompatibleGatewayProviderOptions = Readonly<{
-  identity: PrivateEndpointIdentity;
-  version: string;
-  probes: readonly CompatibilityProbeResult[];
-  safeErrorCode: string;
-}>;
-
-/**
- * A bounded observation-only surface for an installed provider generation
- * whose protocol cannot be used safely. It deliberately performs no provider
- * discovery, listener construction, route selection, or message write.
- */
-export class IncompatibleGatewayProvider implements GatewayProviderAdapter {
-  readonly identity: PrivateEndpointIdentity;
-  readonly protocol = "not-attested";
-  readonly protocolVersion = "unknown";
-
-  private readonly version: string;
-  private readonly probes: readonly CompatibilityProbeResult[];
-  private readonly safeErrorCode: string;
-  private initialized = false;
-  private closed = false;
-
-  constructor(options: IncompatibleGatewayProviderOptions) {
-    const attestation = evaluateCompatibilityAttestation({
-      surface: options.identity.provider,
-      version: options.version,
-      checkedAt: "2000-01-01T00:00:00.000Z",
-      certifiedVersions: certifiedCompatibilityVersions[options.identity.provider],
-      probes: options.probes,
-    });
-    if (
-      attestation.tier !== "incompatible" ||
-      attestation.safeErrorCode !== options.safeErrorCode
-    ) {
-      throw new BridgeError(
-        "INCOMPATIBLE_PROVIDER_EVIDENCE_INVALID",
-        "A disabled provider requires exact bounded incompatibility evidence.",
-      );
-    }
-    exactLocalHost(options.identity.hostId);
-    this.identity = Object.freeze({ ...options.identity });
-    this.version = options.version;
-    this.probes = Object.freeze(options.probes.map((probe) => Object.freeze({ ...probe })));
-    this.safeErrorCode = options.safeErrorCode;
-  }
-
-  compatibilitySurface(): CompatibilitySurfaceObservation {
-    return { surface: this.identity.provider, version: this.version };
-  }
-
-  async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
-    return this.probes;
-  }
-
-  acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
-    if (
-      !isCompatibilityAttestation(attestation) ||
-      attestation.surface !== this.identity.provider ||
-      attestation.version !== this.version ||
-      attestation.tier !== "incompatible" ||
-      attestation.safeErrorCode !== this.safeErrorCode ||
-      attestation.probes.length !== this.probes.length ||
-      attestation.probes.some(
-        (probe, index) =>
-          probe.name !== this.probes[index]?.name ||
-          probe.outcome !== this.probes[index]?.outcome ||
-          probe.safeErrorCode !== this.probes[index]?.safeErrorCode,
-      )
-    ) {
-      throw new BridgeError(
-        "INCOMPATIBLE_PROVIDER_ATTESTATION_MISMATCH",
-        "The compatibility attestation does not match this disabled provider surface.",
-      );
-    }
-  }
-
-  async initialize(
-    _callbacks: GatewayAdapterCallbacks,
-  ): Promise<GatewayAdapterStart> {
-    if (this.closed || this.initialized) {
-      throw new BridgeError(
-        "INCOMPATIBLE_PROVIDER_UNAVAILABLE",
-        "The disabled provider surface cannot be initialized again.",
-      );
-    }
-    this.initialized = true;
-    return {
-      health: "degraded",
-      compatibility: "incompatible",
-      safeErrorCode: this.safeErrorCode,
-    };
-  }
-
-  async discoverClaudePeers(): Promise<GatewayAdapterDiscoverySnapshot> {
-    throw this.unavailable();
-  }
-
-  async selectRoute(_input: {
-    alias: string;
-    routeHandle: string;
-  }): Promise<{ routeHandle: string; state: GatewayAdapterRouteState }> {
-    throw this.unavailable();
-  }
-
-  async assertWorkspaceDisjoint(
-    _routeHandle: string,
-    _stateRoot: string,
-  ): Promise<void> {
-    throw this.unavailable();
-  }
-
-  async resolveReplyAddress(
-    _address: string,
-  ): Promise<{ routeHandle: string }> {
-    throw this.unavailable();
-  }
-
-  async advertiseNativeCodexPeer(_input: {
-    alias: string;
-    cwd: string;
-  }): Promise<void> {
-    throw this.unavailable();
-  }
-
-  async dispatch(
-    _input: GatewayAdapterDispatchInput,
-  ): Promise<GatewayAdapterDispatchResult> {
-    throw this.unavailable();
-  }
-
-  async releaseRoute(_routeHandle: string): Promise<void> {}
-
-  async close(): Promise<void> {
-    this.closed = true;
-  }
-
-  private unavailable(): BridgeError {
-    return new BridgeError(
-      this.safeErrorCode,
-      "This provider surface is observation-only because its compatibility boundary did not pass.",
-    );
-  }
-}
-
-export function createIncompatibleClaudeGatewayProvider(options: Readonly<{
-  runtime: AttestedClaudePeerRuntime;
-  version: string;
-  safeErrorCode: string;
-}>): IncompatibleGatewayProvider {
-  validateClaudeRuntimePathEvidence(options.runtime);
-  const [launcher, version, ...unobserved] = compatibilityProbeNames.claude;
-  return new IncompatibleGatewayProvider({
-    identity: {
-      provider: "claude",
-      hostId: LOCAL_HOST,
-      endpointGeneration: STABLE_CLAUDE_ENDPOINT_GENERATION,
-    },
-    version: options.version,
-    probes: [
-      passedProbe(launcher),
-      failedProbe(version, options.safeErrorCode),
-      ...unobserved.map((name) => failedProbe(name, options.safeErrorCode)),
-    ],
-    safeErrorCode: options.safeErrorCode,
-  });
-}
-
-export function createIncompatibleCodexGatewayProvider(options: Readonly<{
-  identity: PrivateEndpointIdentity;
-  version: string;
-  safeErrorCode: string;
-}>): IncompatibleGatewayProvider {
-  const [installation, ...unobserved] = compatibilityProbeNames.codex;
-  return new IncompatibleGatewayProvider({
-    identity: options.identity,
-    version: options.version,
-    probes: [
-      passedProbe(installation),
-      ...unobserved.map((name) => failedProbe(name, options.safeErrorCode)),
-    ],
-    safeErrorCode: options.safeErrorCode,
-  });
-}
-
 export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   readonly identity: PrivateEndpointIdentity;
   readonly protocol = "claude-peer";
   readonly protocolVersion = `${CLAUDE_PEER_COMPATIBILITY.peerProtocol}`;
 
   private readonly peer: ClaudePeerAdapter;
-  private readonly runtimeVersion: string;
   private readonly maxPending: number;
   private readonly discoveryPollMs: number;
   private readonly now: () => number;
@@ -845,34 +444,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   /** Fences discovery callbacks and monitor restarts across listener rotation. */
   private nativeCodexSuccessionFreeze: string | undefined;
-  /** A completed failed probe set fences every authority-bearing operation. */
-  private compatibilityBlocked = false;
-  private compatibilityFailureCode: string | undefined;
+  /** External registry trust/availability failures degrade Claude only. */
+  private unavailableCode: string | undefined;
   private initialized = false;
   private closed = false;
 
   constructor(options: LocalClaudeGatewayProviderOptions) {
     validateAttestedClaudeRuntime(options.runtime);
-    const compatibilityVersion =
-      options.compatibilityVersion ??
-      (options.runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
-        ? options.runtime.launcherVersionEvidence
-        : options.runtime.claudeCodeVersion);
-    if (
-      compatibilityVersion === undefined ||
-      !isCompatibilityVersion(compatibilityVersion) ||
-      (compatibilityVersion !== options.runtime.claudeCodeVersion &&
-        !(
-          options.runtime.claudeCodeVersion ===
-            UNKNOWN_COMPATIBILITY_VERSION &&
-          options.runtime.launcherVersionEvidence === compatibilityVersion
-        ))
-    ) {
-      throw new BridgeError(
-        "CLAUDE_RUNTIME_ATTESTATION_INVALID",
-        "Claude compatibility classification requires exact bounded launcher evidence.",
-      );
-    }
     if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
       throw new BridgeError(
         "DASHBOARD_LOCALE_UNSUPPORTED",
@@ -885,7 +463,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       hostId,
       endpointGeneration: STABLE_CLAUDE_ENDPOINT_GENERATION,
     };
-    this.runtimeVersion = compatibilityVersion;
     this.maxPending = positiveBounded(
       options.maxPendingMessages,
       MAX_CLAUDE_PENDING,
@@ -899,10 +476,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.now = options.now ?? Date.now;
     const protocolRuntime: AttestedClaudePeerRuntime = {
       claudeExecutable: options.runtime.claudeExecutable,
-      claudeCodeVersion:
-        options.runtime.claudeCodeVersion === UNKNOWN_COMPATIBILITY_VERSION
-          ? options.runtime.launcherVersionEvidence!
-          : options.runtime.claudeCodeVersion,
+      claudeCodeVersion: options.runtime.claudeCodeVersion,
       sessionsDir: options.runtime.sessionsDir,
       socketDir: options.runtime.socketDir,
     };
@@ -933,68 +507,23 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
               256,
               128,
             ),
-            callbacks: () =>
-              this.compatibilityBlocked ? undefined : this.callbacks,
+            callbacks: () => this.callbacks,
             ...(options.nativeHelpers.factory === undefined
               ? {}
               : { factory: options.nativeHelpers.factory }),
           });
   }
 
-  compatibilitySurface(): CompatibilitySurfaceObservation {
-    return { surface: "claude", version: this.runtimeVersion };
-  }
-
-  async runCompatibilityProbes(): Promise<readonly CompatibilityProbeResult[]> {
-    const [launcher, version, registry, socket, protocol] =
-      compatibilityProbeNames.claude;
-    try {
-      const discovery = await this.peer.discover();
-      this.registryObservation = claudeRegistryObservation(discovery);
-      return [
-        passedProbe(launcher),
-        passedProbe(version),
-        passedProbe(registry),
-        passedProbe(socket),
-        passedProbe(protocol),
-      ];
-    } catch (error) {
-      if (!isClaudeRegistryAvailabilityError(error)) throw error;
-      this.registryObservation = unavailableClaudeRegistryObservation();
-      // A missing or unreadable registry is provider-local incompatibility:
-      // keep the broker and the other surface alive, but fence this provider
-      // before listener construction can turn the same missing path into a
-      // broker-wide startup failure.
-      return [
-        passedProbe(launcher),
-        passedProbe(version),
-        failedProbe(registry, "CLAUDE_REGISTRY_UNAVAILABLE"),
-        failedProbe(socket, "CLAUDE_REGISTRY_UNAVAILABLE"),
-        passedProbe(protocol),
-      ];
-    }
-  }
-
   latestRegistryObservation(): GatewayAdapterRegistryObservation | undefined {
     return this.registryObservation;
   }
 
-  acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
-    if (
-      !isCompatibilityAttestation(attestation) ||
-      attestation.surface !== "claude" ||
-      attestation.version !== this.runtimeVersion
-    ) {
+  activateEndpointGeneration(endpointGeneration: string): void {
+    if (endpointGeneration !== this.identity.endpointGeneration) {
       throw new BridgeError(
-        "CLAUDE_COMPATIBILITY_ATTESTATION_MISMATCH",
-        "The Claude compatibility attestation does not match this runtime.",
+        "CLAUDE_ENDPOINT_ACTIVATION_MISMATCH",
+        "Only the exact current Claude endpoint generation can be activated.",
       );
-    }
-    this.compatibilityBlocked = attestation.tier === "incompatible";
-    this.compatibilityFailureCode = attestation.safeErrorCode;
-    if (this.compatibilityBlocked) {
-      if (this.monitorTimer !== undefined) clearTimeout(this.monitorTimer);
-      this.monitorTimer = undefined;
     }
   }
 
@@ -1014,15 +543,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       );
     }
     this.callbacks = callbacks;
-    if (this.compatibilityBlocked) {
-      this.initialized = true;
-      return {
-        health: "degraded",
-        compatibility: "incompatible",
-        safeErrorCode:
-          this.compatibilityFailureCode ?? "CLAUDE_COMPATIBILITY_CHECK_FAILED",
-      };
-    }
     if (this.nativeHelpers !== undefined) {
       this.initialized = true;
       return { health: "healthy", compatibility: "compatible" };
@@ -1069,8 +589,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         error instanceof BridgeError &&
         error.code === "UNSAFE_PEER_DIRECTORY"
       ) {
-        this.compatibilityBlocked = true;
-        this.compatibilityFailureCode = "CLAUDE_REGISTRY_UNAVAILABLE";
+        this.unavailableCode = "CLAUDE_REGISTRY_UNAVAILABLE";
         this.registryObservation = unavailableClaudeRegistryObservation();
         this.initialized = true;
         return {
@@ -1758,11 +1277,10 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   async dispatch(
     input: GatewayAdapterDispatchInput,
   ): Promise<GatewayAdapterDispatchResult> {
-    if (this.compatibilityBlocked) {
+    if (this.unavailableCode !== undefined) {
       return {
         state: "failed",
-        safeErrorCode:
-          this.compatibilityFailureCode ?? "CLAUDE_COMPATIBILITY_CHECK_FAILED",
+        safeErrorCode: this.unavailableCode,
       };
     }
     if (this.nativeHelpers !== undefined) {
@@ -2114,7 +1632,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   }
 
   private assertReady(): void {
-    if (!this.initialized || this.closed || this.compatibilityBlocked) {
+    if (!this.initialized || this.closed || this.unavailableCode !== undefined) {
       throw new BridgeError(
         "CLAUDE_PROVIDER_UNAVAILABLE",
         "The local Claude provider is not available.",
@@ -2231,7 +1749,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       }
     };
     if (
-      this.compatibilityBlocked ||
+      this.unavailableCode !== undefined ||
       this.closed ||
       listenerGeneration.listener.closed ||
       !this.ownsNativeCodexListener(listenerGeneration)
@@ -2840,94 +2358,19 @@ type CodexEndpointRefreshResult = {
   published: boolean;
 };
 
-function codexVersionFailureCode(version: string): string | undefined {
-  if (version === UNKNOWN_COMPATIBILITY_VERSION) {
-    return "CODEX_APP_SERVER_VERSION_UNPARSEABLE";
-  }
-  if (!isCompatibilityVersion(version)) {
-    throw new BridgeError(
-      "CODEX_FACTORY_ATTESTATION_INVALID",
-      "The local Codex factory version evidence is malformed.",
-    );
-  }
-  return CODEX_APP_SERVER_WRITABLE_VERSIONS.some((certifiedVersion) =>
-    sharesCompatibilityMajor(certifiedVersion, version),
-  )
-    ? undefined
-    : "CODEX_APP_SERVER_VERSION_UNSUPPORTED";
-}
-
-function validateCodexFactory(
-  factory: LocalCodexTransportFactory,
-  options: { allowUnsupportedVersion?: boolean } = {},
-): void {
-  const schema = factory.schemaCompatibility;
-  const write = factory.writeCompatibility;
-  const versionFailure = codexVersionFailureCode(factory.appServerVersion);
-  const certified = CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
-    factory.appServerVersion as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
-  );
-  const schemaCandidate =
-    schema.observedSchemaCandidate === true &&
-    CODEX_APP_SERVER_WRITABLE_VERSIONS.some((version) =>
-      sharesCompatibilityMajor(version, factory.appServerVersion),
-    );
-  const unsupportedVersionInvalid =
-    versionFailure !== undefined &&
-    (options.allowUnsupportedVersion !== true ||
-      write !== null ||
-      factory.writableReady);
-  const supportedSchemaInvalid =
-    versionFailure === undefined &&
-    ((!certified &&
-      (!schemaCandidate || write !== null || factory.writableReady)) ||
-      schema.protocol !== "app-server-v2-stable" ||
-      schema.steering?.method !== "turn/steer" ||
-      schema.steering.requestSchema !== "expected-turn-id-text-v1" ||
-      schema.steering.deliveryBoundary !== "next-tool-call-boundary" ||
-      (write !== null &&
-        (write.appServerVersion !== schema.appServerVersion ||
-          write.endpointGeneration !== schema.endpointGeneration ||
-          write.protocol !== schema.protocol ||
-          write.observedSchemaCandidate !== schema.observedSchemaCandidate ||
-          write.steering?.method !== schema.steering.method ||
-          write.steering.requestSchema !== schema.steering.requestSchema ||
-          write.steering.deliveryBoundary !==
-            schema.steering.deliveryBoundary)) ||
-      factory.writableReady !== (write !== null));
+function validateCodexFactory(factory: LocalCodexTransportFactory): void {
   if (
     factory.hostId !== LOCAL_HOST ||
     factory.protocol !== "codex-app-server" ||
     factory.protocolVersion !== factory.appServerVersion ||
-    schema.appServerVersion !== factory.appServerVersion ||
-    schema.endpointGeneration !== factory.endpointGeneration ||
-    unsupportedVersionInvalid ||
-    supportedSchemaInvalid
+    factory.appServerVersion.length === 0 ||
+    factory.endpointGeneration.length === 0
   ) {
     throw new BridgeError(
       "CODEX_FACTORY_ATTESTATION_INVALID",
-      "The local Codex provider requires exact schema and write attestations.",
+      "The local Codex provider requires exact managed endpoint identity.",
     );
   }
-}
-
-function codexFactoryWritesEnabled(
-  factory: LocalCodexTransportFactory,
-  attestation: CompatibilityAttestation,
-  writeProbePassed = false,
-): boolean {
-  return (
-    (attestation.tier === "certified" &&
-      CODEX_APP_SERVER_WRITABLE_VERSIONS.includes(
-        attestation.version as (typeof CODEX_APP_SERVER_WRITABLE_VERSIONS)[number],
-      ) &&
-      factory.writableReady &&
-      factory.writeCompatibility !== null) ||
-    (!factory.writableReady &&
-      factory.writeCompatibility === null &&
-      writeProbePassed &&
-      compatibilityCoversWrites(attestation))
-  );
 }
 
 function codexRouteState(
@@ -2955,9 +2398,6 @@ function codexRouteSafeCode(
 ): string | undefined {
   if (codexRouteState(observation) === "stale") {
     return "CODEX_ROUTE_STALE";
-  }
-  if (!observation.writableReady) {
-    return "CODEX_WRITES_DISABLED";
   }
   return undefined;
 }
@@ -3002,34 +2442,8 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     | undefined;
   private endpointActivationRetryTimer: NodeJS.Timeout | undefined;
   private callbackDrainFrozen = false;
-  private readonly writeProbeObservationsByGeneration = new Map<
-    string,
-    GatewayWriteCompatibilityProbeObservation
-  >();
-  private readonly writeProbeResults = new Map<
-    string,
-    Promise<CodexWriteCompatibilityProbeResult>
-  >();
-  private writeProbeDecline:
-    | Readonly<{
-        endpointGeneration: string;
-        observation: GatewayWriteCompatibilityProbeObservation;
-      }>
-    | undefined;
-  private writeProbeOverflow:
-    | Readonly<{
-        endpointGeneration: string;
-        key: string;
-        observation: GatewayWriteCompatibilityProbeObservation;
-      }>
-    | undefined;
-  private compatibilityAttested: boolean;
-  private compatibilityFailureCode: string | undefined;
   private endpointUnavailable = false;
-  private pendingEndpointAttestation: CompatibilityAttestation | undefined;
-  private pendingEndpointRefreshEvent:
-    | Extract<GatewayAdapterEndpointRefresh, { outcome: "compatible" }>
-    | undefined;
+  private pendingEndpointRefreshEvent: GatewayAdapterEndpointRefresh | undefined;
   private pendingEndpointRefreshSelectorClaimed = false;
   private initialized = false;
   private closing = false;
@@ -3040,9 +2454,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.factory = options.factory;
     this.refreshFactory = options.refreshFactory;
     exactLocalHost(options.factory.hostId);
-    this.compatibilityAttested =
-      options.factory.writableReady &&
-      options.factory.writeCompatibility !== null;
     this.maxCallbacks = positiveBounded(
       options.maxCallbackEvents,
       MAX_CODEX_CALLBACKS,
@@ -3109,82 +2520,27 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     return this.factory.protocolVersion;
   }
 
-  compatibilitySurface(): CompatibilitySurfaceObservation {
-    return { surface: "codex", version: this.factory.appServerVersion };
-  }
-
-  acceptCompatibilityAttestation(attestation: CompatibilityAttestation): void {
-    const pending = this.pendingEndpointAttestation;
-    const pendingMatches =
-      pending === undefined ||
-      (attestation.checkedAt === pending.checkedAt &&
-        attestation.tier === pending.tier &&
-        attestation.safeErrorCode === pending.safeErrorCode &&
-        attestation.probes.length === pending.probes.length &&
-        attestation.probes.every(
-          (probe, index) =>
-            probe.name === pending.probes[index]?.name &&
-            probe.outcome === pending.probes[index]?.outcome &&
-            probe.safeErrorCode === pending.probes[index]?.safeErrorCode,
-        ));
+  activateEndpointGeneration(endpointGeneration: string): void {
+    const event = this.pendingEndpointRefreshEvent;
     if (
-      !isCompatibilityAttestation(attestation) ||
-      attestation.surface !== "codex" ||
-      attestation.version !== this.factory.appServerVersion ||
-      !pendingMatches
+      event === undefined ||
+      event.current.endpointGeneration !== endpointGeneration ||
+      this.factory.endpointGeneration !== endpointGeneration
     ) {
       throw new BridgeError(
-        "CODEX_COMPATIBILITY_ATTESTATION_MISMATCH",
-        "The Codex compatibility attestation does not match this endpoint.",
+        "CODEX_ENDPOINT_ACTIVATION_MISMATCH",
+        "Only the exact pending managed Codex generation can be activated.",
       );
     }
-    if (attestation.tier === "incompatible") {
-      this.pendingEndpointAttestation = undefined;
-      this.pendingEndpointRefreshEvent = undefined;
-      this.pendingEndpointRefreshSelectorClaimed = false;
-      this.clearEndpointActivationRetry();
-      this.compatibilityAttested = false;
-      this.endpointUnavailable = true;
-      this.compatibilityFailureCode =
-        attestation.safeErrorCode ?? "CODEX_COMPATIBILITY_CHECK_FAILED";
-      return;
-    }
-    const writesEnabled = codexFactoryWritesEnabled(
-      this.factory,
-      attestation,
-      this.latestWriteCompatibilityProbeObservation(
-        this.factory.endpointGeneration,
-      )?.outcome === "pass",
-    );
-    const schemaObserved =
-      attestation.tier === "schema_attested" &&
-      !this.factory.writableReady &&
-      this.factory.writeCompatibility === null;
-    if (
-      (!writesEnabled && !schemaObserved) ||
-      (this.endpointUnavailable && pending === undefined) ||
-      !pendingMatches
-    ) {
-      throw new BridgeError(
-        "CODEX_COMPATIBILITY_ATTESTATION_MISMATCH",
-        "The Codex compatibility attestation does not match this endpoint.",
-      );
-    }
-    this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
     this.pendingEndpointRefreshSelectorClaimed = false;
     this.clearEndpointActivationRetry();
-    this.compatibilityAttested = writesEnabled;
-    this.endpointUnavailable = !writesEnabled;
-    this.compatibilityFailureCode = undefined;
+    this.endpointUnavailable = false;
   }
 
   releaseEndpointRefreshSelectorClaim(endpointGeneration: string): void {
     const event = this.pendingEndpointRefreshEvent;
-    if (
-      event?.current.endpointGeneration === endpointGeneration &&
-      this.pendingEndpointAttestation !== undefined
-    ) {
+    if (event?.current.endpointGeneration === endpointGeneration) {
       this.pendingEndpointRefreshSelectorClaimed = false;
     }
   }
@@ -3193,341 +2549,11 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const event = this.pendingEndpointRefreshEvent;
     if (
       event?.current.endpointGeneration === endpointGeneration &&
-      this.pendingEndpointAttestation !== undefined &&
       !this.closing &&
       !this.closed
     ) {
       this.publishEndpointRefresh(event);
     }
-  }
-
-  latestWriteCompatibilityProbeObservation(
-    endpointGeneration: string,
-  ):
-    | GatewayWriteCompatibilityProbeObservation
-    | undefined {
-    return (
-      this.writeProbeObservationsByGeneration.get(endpointGeneration) ??
-      (this.writeProbeOverflow?.endpointGeneration === endpointGeneration
-        ? this.writeProbeOverflow.observation
-        : undefined) ??
-      (this.writeProbeDecline?.endpointGeneration === endpointGeneration
-        ? this.writeProbeDecline.observation
-        : undefined)
-    );
-  }
-
-  async runCompatibilityProbes(
-    context?: GatewayCompatibilityProbeContext,
-  ): Promise<readonly CompatibilityProbeResult[]> {
-    return await this.runCompatibilityProbesFor(
-      this.factory,
-      context === undefined
-        ? undefined
-        : {
-            stateRoot: path.resolve(context.stateRoot),
-            forbiddenCodexThreadIds: [...context.forbiddenCodexThreadIds],
-          },
-    );
-  }
-
-  private async runCompatibilityProbesFor(
-    factory: LocalCodexTransportFactory,
-    context?: GatewayCompatibilityProbeContext,
-  ): Promise<readonly CompatibilityProbeResult[]> {
-    const [installation, control, initialize, threadList] =
-      compatibilityProbeNames.codex;
-    let transport: LocalCodexOwnedTransport | undefined;
-    let connector: CodexAppServerConnector | undefined;
-    let stage: "transport" | "initialize" | "thread_list" = "transport";
-    try {
-      transport = await factory.connectTransport();
-      stage = "initialize";
-      connector = await CodexAppServerConnector.connect({
-        compatibility: factory.schemaCompatibility,
-        ...(context === undefined
-          ? {}
-          : { writeCompatibilityProbe: true as const }),
-        writesEnabled: false,
-        route: {
-          endpointGeneration: factory.endpointGeneration,
-          threadId: COMPATIBILITY_PROBE_THREAD_ID,
-        },
-        transport,
-        maxReplyBytes: this.maxReplyBytes,
-        now: this.now,
-        onEvent: () => undefined,
-        onTurnResult: () => undefined,
-      });
-      stage = "thread_list";
-      await connector.observeLoadedThread(connector.guard());
-      const requiredProbes = [
-        passedProbe(installation),
-        passedProbe(control),
-        passedProbe(initialize),
-        passedProbe(threadList),
-      ];
-      if (context === undefined) return requiredProbes;
-      const result = await this.runCodexWriteProbe(factory, connector, context);
-      return result.outcome === "pass"
-        ? [...requiredProbes, passedProbe("write_attestation")]
-        : requiredProbes;
-    } catch (error) {
-      if (
-        this.isEndpointGenerationChanged(error) ||
-        (error instanceof BridgeError &&
-          error.code === "CODEX_FACTORY_ATTESTATION_INVALID")
-      ) {
-        throw error;
-      }
-      if (stage === "transport") {
-        const availabilityFailure =
-          error instanceof LocalCodexTransportError &&
-          [
-            "MANAGED_CODEX_UNAVAILABLE",
-            "LOCAL_APP_SERVER_NOT_RUNNING",
-            "SPAWN_FAILED",
-            "SPAWN_TIMEOUT",
-            "PROXY_STDERR_LIMIT",
-            "TRANSPORT_CONNECT_FAILED",
-          ].includes(error.code);
-        if (!availabilityFailure) throw error;
-        const installationUnavailable =
-          error instanceof LocalCodexTransportError &&
-          error.code === "MANAGED_CODEX_UNAVAILABLE";
-        return [
-          installationUnavailable
-            ? failedProbe(installation, "CODEX_INSTALLATION_INVALID")
-            : passedProbe(installation),
-          failedProbe(
-            control,
-            installationUnavailable
-              ? "CODEX_COMPAT_PROBE_BLOCKED"
-              : "CODEX_CONTROL_SOCKET_UNAVAILABLE",
-          ),
-          failedProbe(initialize, "CODEX_COMPAT_PROBE_BLOCKED"),
-          failedProbe(threadList, "CODEX_COMPAT_PROBE_BLOCKED"),
-        ];
-      }
-      return [
-        passedProbe(installation),
-        passedProbe(control),
-        stage === "initialize"
-          ? failedProbe(initialize, "CODEX_INITIALIZE_SCHEMA_REJECTED")
-          : passedProbe(initialize),
-        failedProbe(threadList, "CODEX_THREAD_LIST_SCHEMA_REJECTED"),
-      ];
-    } finally {
-      if (connector !== undefined) {
-        await connector.close();
-      } else if (transport !== undefined) {
-        await transport.close();
-      }
-    }
-  }
-
-  private async runCodexWriteProbe(
-    factory: LocalCodexTransportFactory,
-    connector: CodexAppServerConnector,
-    context: GatewayCompatibilityProbeContext,
-  ): Promise<CodexWriteCompatibilityProbeResult> {
-    const key = `${factory.appServerVersion}\0${factory.endpointGeneration}`;
-    const cached = this.writeProbeResults.get(key);
-    if (cached !== undefined) return await cached;
-    if (this.writeProbeOverflow?.key === key) {
-      if (this.writeProbeResults.size >= MAX_CODEX_WRITE_PROBE_ATTEMPTS) {
-        return this.writeProbeOverflow.observation;
-      }
-      this.writeProbeOverflow = undefined;
-    }
-    if (this.writeProbeResults.size >= MAX_CODEX_WRITE_PROBE_ATTEMPTS) {
-      const observation = Object.freeze(
-        codexWriteProbeFailure("CODEX_WRITE_PROBE_CAPACITY_EXHAUSTED"),
-      );
-      this.writeProbeOverflow = Object.freeze({
-        endpointGeneration: factory.endpointGeneration,
-        key,
-        observation,
-      });
-      if (this.callbacks !== undefined) {
-        invokeCallback(() =>
-          this.callbacks?.onProtocolNotice?.({
-            code: observation.safeErrorCode,
-          }),
-        );
-      }
-      return observation;
-    }
-
-    const pending = this.executeCodexWriteProbe(
-      connector,
-      context,
-    ).then((result) => {
-      const observation = Object.freeze({ ...result });
-      if (
-        observation.outcome === "fail" &&
-        (observation.safeErrorCode ===
-          "CODEX_WRITE_PROBE_MODEL_PIN_UNAVAILABLE" ||
-          observation.safeErrorCode ===
-            "CODEX_WRITE_PROBE_RATE_LIMIT_CONSTRAINED")
-      ) {
-        this.writeProbeResults.delete(key);
-        this.writeProbeDecline = Object.freeze({
-          endpointGeneration: factory.endpointGeneration,
-          observation,
-        });
-      } else {
-        this.writeProbeObservationsByGeneration.set(
-          factory.endpointGeneration,
-          observation,
-        );
-      }
-      if (observation.outcome === "fail" && this.callbacks !== undefined) {
-        invokeCallback(() =>
-          this.callbacks?.onProtocolNotice?.({
-            code: observation.safeErrorCode,
-          }),
-        );
-      }
-      return observation;
-    });
-    this.writeProbeResults.set(key, pending);
-    return await pending;
-  }
-
-  private async executeCodexWriteProbe(
-    connector: CodexAppServerConnector,
-    context: GatewayCompatibilityProbeContext,
-  ): Promise<CodexWriteCompatibilityProbeResult> {
-    const stateRoot = path.resolve(context.stateRoot);
-    const rootBefore = await attestCodexWriteProbeRoot(stateRoot);
-    if (rootBefore === null) {
-      return codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED");
-    }
-
-    const probeRoot = path.join(stateRoot, CODEX_WRITE_PROBE_ROOT);
-    let probeRootBefore: CodexWriteProbeRootEvidence;
-    try {
-      let created = false;
-      try {
-        await mkdir(probeRoot, { mode: 0o700 });
-        created = true;
-      } catch (error) {
-        if (systemErrorCode(error) !== "EEXIST") throw error;
-      }
-      if (created) await chmod(probeRoot, 0o700);
-      const evidence = await attestCodexWriteProbeRoot(probeRoot);
-      if (evidence === null) {
-        return codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED");
-      }
-      probeRootBefore = evidence;
-    } catch (error) {
-      if (
-        error instanceof BridgeError &&
-        error.code === "CODEX_FACTORY_ATTESTATION_INVALID"
-      ) {
-        throw error;
-      }
-      if (transientCodexWriteProbeError(error)) {
-        return codexWriteProbeFailure("CODEX_WRITE_PROBE_THREAD_SETUP_FAILED");
-      }
-      throw new BridgeError(
-        "CODEX_FACTORY_ATTESTATION_INVALID",
-        "The controller-owned Codex probe root could not be established safely.",
-      );
-    }
-
-    let cwd: string | undefined;
-    let before: CodexWriteProbeDirectoryEvidence | undefined;
-    let result: CodexWriteCompatibilityProbeResult = codexWriteProbeFailure(
-      "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
-    );
-    try {
-      cwd = await mkdtemp(
-        path.join(probeRoot, CODEX_WRITE_PROBE_DIRECTORY_PREFIX),
-      );
-      if (path.dirname(cwd) !== probeRoot) {
-        throw new Error("probe directory escaped its dedicated root");
-      }
-      await chmod(cwd, 0o700);
-      before = await attestCodexWriteProbeDirectory(cwd);
-      result = await connector.runWriteCompatibilityProbe({
-        cwd,
-        forbiddenThreadIds: [
-          ...new Set([
-            COMPATIBILITY_PROBE_THREAD_ID,
-            ...context.forbiddenCodexThreadIds,
-            ...this.trackedRoutes,
-          ]),
-        ],
-      });
-    } catch (error) {
-      if (!safeCodexWriteProbeFilesystemFailure(error)) {
-        if (error instanceof BridgeError) throw error;
-        throw new BridgeError(
-          "CODEX_FACTORY_ATTESTATION_INVALID",
-          "The disposable Codex probe directory could not be established safely.",
-        );
-      }
-      result = codexWriteProbeFailure(
-        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
-      );
-    }
-
-    let unchanged = false;
-    let removed = false;
-    if (cwd !== undefined && before !== undefined) {
-      try {
-        const after = await attestCodexWriteProbeDirectory(cwd);
-        unchanged = sameCodexWriteProbeDirectory(before, after);
-        await rmdir(cwd);
-        try {
-          await lstat(cwd);
-        } catch (error) {
-          removed = systemErrorCode(error) === "ENOENT";
-        }
-      } catch (error) {
-        if (!safeCodexWriteProbeFilesystemFailure(error)) {
-          if (error instanceof BridgeError) throw error;
-          throw new BridgeError(
-            "CODEX_FACTORY_ATTESTATION_INVALID",
-            "The disposable Codex probe directory could not be re-attested safely.",
-          );
-        }
-        // Never remove a path after its exact ownership evidence changed.
-      }
-    }
-    if (cwd !== undefined && !removed) {
-      result = codexWriteProbeFailure(
-        "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED",
-        result,
-      );
-    } else if (cwd !== undefined && !unchanged) {
-      result = codexWriteProbeFailure(
-        "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED",
-        result,
-      );
-    }
-    const [probeRootAfter, rootAfter] = await Promise.all([
-      attestCodexWriteProbeRoot(probeRoot),
-      attestCodexWriteProbeRoot(stateRoot),
-    ]);
-    if (probeRootAfter === null || rootAfter === null) {
-      return codexWriteProbeFailure(
-        "CODEX_WRITE_PROBE_THREAD_SETUP_FAILED",
-        result,
-      );
-    }
-    if (
-      !sameCodexWriteProbeRoot(probeRootBefore, probeRootAfter) ||
-      !sameCodexWriteProbeRoot(rootBefore, rootAfter)
-    ) {
-      throw new BridgeError(
-        "CODEX_FACTORY_ATTESTATION_INVALID",
-        "A controller-owned Codex probe root changed while the disposable probe ran.",
-      );
-    }
-    return result;
   }
 
   async initialize(
@@ -3541,20 +2567,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     this.callbacks = callbacks;
     this.initialized = true;
-    if (this.compatibilityFailureCode !== undefined) {
-      return {
-        health: "degraded",
-        compatibility: "incompatible",
-        safeErrorCode: this.compatibilityFailureCode,
-      };
-    }
-    return !this.compatibilityAttested
-      ? {
-          health: "degraded",
-          compatibility: "compatible",
-          safeErrorCode: "CODEX_MONITOR_ONLY",
-        }
-      : { health: "healthy", compatibility: "compatible" };
+    return { health: "healthy", compatibility: "compatible" };
   }
 
   async selectRoute(input: {
@@ -3601,13 +2614,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     const stageRefreshedRoute = async (
       result: CodexEndpointRefreshResult | undefined,
     ): Promise<CodexRoute> => {
-      if (
-        result === undefined ||
-        result.event.outcome !== "compatible"
-      ) {
+      if (result === undefined) {
         throw new BridgeError(
           "CODEX_ROUTE_SETUP_REJECTED",
-          "The exact Codex endpoint replacement was not compatibility-attested.",
+          "The exact Codex endpoint replacement could not be established.",
         );
       }
       refreshResult = result;
@@ -3636,7 +2646,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       route = await stageRefreshedRoute(retainedEndpointRefresh);
     } else if (
       this.endpointUnavailable &&
-      this.pendingEndpointAttestation === undefined
+      this.pendingEndpointRefreshEvent === undefined
     ) {
       route = await stageRefreshedRoute(
         await this.refreshEndpoint("selector"),
@@ -3790,7 +2800,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       this.closed ||
       this.endpointUnavailable ||
       this.endpointRefresh !== undefined ||
-      !this.compatibilityAttested ||
       input.authorization !== "selected_route" ||
       !sameEndpoint(input.binding, this.identity)
     ) {
@@ -3807,9 +2816,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       return { state: "failed", safeErrorCode: "CODEX_ROUTE_UNAVAILABLE" };
     }
     const guard = route.connector.guard();
-    if (!guard.writableReady) {
-      return { state: "failed", safeErrorCode: "CODEX_WRITES_DISABLED" };
-    }
     if (strictDeadline(input.deadlineAt, this.now().getTime()) === undefined) {
       return { state: "failed", safeErrorCode: "MESSAGE_EXPIRED" };
     }
@@ -3934,7 +2940,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.clearEndpointActivationRetry();
     this.pendingEndpointRefreshEvent = undefined;
     this.pendingEndpointRefreshSelectorClaimed = false;
-    this.pendingEndpointAttestation = undefined;
     const refreshResult =
       this.endpointRefresh === undefined
         ? []
@@ -3970,7 +2975,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     this.closed = true;
     this.closing = false;
     this.callbackQueue.length = 0;
-    this.pendingEndpointAttestation = undefined;
     this.pendingEndpointRefreshEvent = undefined;
     this.pendingEndpointRefreshSelectorClaimed = false;
     this.trackedRoutes.clear();
@@ -3985,8 +2989,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       this.closing ||
       this.closed ||
       this.endpointUnavailable ||
-      this.endpointRefresh !== undefined ||
-      !this.compatibilityAttested
+      this.endpointRefresh !== undefined
     ) {
       throw new BridgeError(
         "CODEX_PROVIDER_UNAVAILABLE",
@@ -3999,9 +3002,9 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
   private async ensureRoute(
     threadId: string,
     queueInitialObservation = true,
-    allowPendingEndpointAttestation = false,
+    allowPendingEndpointActivation = false,
   ): Promise<CodexRoute> {
-    if (allowPendingEndpointAttestation) {
+    if (allowPendingEndpointActivation) {
       if (!this.initialized || this.closing || this.closed) {
         throw new BridgeError(
           "CODEX_PROVIDER_UNAVAILABLE",
@@ -4018,7 +3021,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       return await this.ensureRoute(
         threadId,
         queueInitialObservation,
-        allowPendingEndpointAttestation,
+        allowPendingEndpointActivation,
       );
     }
     const existing = this.routes.get(threadId);
@@ -4034,7 +3037,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       return await this.ensureRoute(
         threadId,
         queueInitialObservation,
-        allowPendingEndpointAttestation,
+        allowPendingEndpointActivation,
       );
     }
     const pending = this.routeCreations.get(threadId);
@@ -4052,15 +3055,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         threadId,
         admittedFactory,
         queueInitialObservation,
-        this.pendingEndpointAttestation === undefined
-          ? this.compatibilityAttested
-          : codexFactoryWritesEnabled(
-              admittedFactory,
-              this.pendingEndpointAttestation,
-              this.latestWriteCompatibilityProbeObservation(
-                admittedFactory.endpointGeneration,
-              )?.outcome === "pass",
-            ),
       );
       if (this.closing || this.closed) {
         await this.closeRoute(route);
@@ -4070,7 +3064,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         );
       }
       if (
-        !allowPendingEndpointAttestation &&
+        !allowPendingEndpointActivation &&
         (this.endpointUnavailable ||
           this.endpointRefresh !== undefined ||
           admittedFactory !== this.factory ||
@@ -4098,7 +3092,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     threadId: string,
     factory: LocalCodexTransportFactory,
     queueInitialObservation: boolean,
-    writesEnabled: boolean,
   ): Promise<CodexRoute> {
     let transport: LocalCodexOwnedTransport | undefined;
     let connector: CodexAppServerConnector | undefined;
@@ -4106,9 +3099,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     try {
       transport = await factory.connectTransport();
       connector = await CodexAppServerConnector.connect({
-        compatibility:
-          factory.writeCompatibility ?? factory.schemaCompatibility,
-        writesEnabled,
+        compatibility: { endpointGeneration: factory.endpointGeneration },
         route: {
           endpointGeneration: factory.endpointGeneration,
           threadId,
@@ -4236,7 +3227,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     }
     try {
       if (this.endpointUnavailable) {
-        if (this.pendingEndpointAttestation !== undefined) {
+        if (this.pendingEndpointRefreshEvent !== undefined) {
           throw new BridgeError(
             "CODEX_ENDPOINT_REFRESH_PENDING",
             "The replacement Codex endpoint is awaiting controller activation.",
@@ -4245,8 +3236,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         }
         const refreshed = await this.refreshEndpoint("callback");
         if (
-          refreshed?.event.outcome === "compatible" &&
-          refreshed.event.routes.some(
+          refreshed?.event.routes.some(
             (route) => route.routeHandle === threadId,
           )
         ) {
@@ -4289,8 +3279,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
           () => undefined,
         );
         if (
-          refreshed?.event.outcome === "compatible" &&
-          refreshed.event.routes.some(
+          refreshed?.event.routes.some(
             (route) => route.routeHandle === threadId,
           )
         ) {
@@ -4337,7 +3326,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     if (
       event === undefined ||
       this.pendingEndpointRefreshSelectorClaimed ||
-      this.pendingEndpointAttestation === undefined ||
       event.current.endpointGeneration !== this.factory.endpointGeneration
     ) {
       return undefined;
@@ -4392,42 +3380,10 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         previous,
       );
       candidate = resolved.factory;
-      const { attestation, identity: candidateIdentity } = resolved;
       await this.retireEndpointGeneration(
         previousFactory,
         previous.endpointGeneration,
       );
-      if (attestation.tier === "incompatible") {
-        await candidate.close();
-        candidate = undefined;
-        this.compatibilityAttested = false;
-        this.pendingEndpointAttestation = undefined;
-        this.pendingEndpointRefreshEvent = undefined;
-        this.pendingEndpointRefreshSelectorClaimed = false;
-        for (const routeHandle of this.trackedRoutes) {
-          this.routesRequiringRecovery.add(routeHandle);
-        }
-        if (this.closing || this.closed) return undefined;
-        const result: CodexEndpointRefreshResult = {
-          event: {
-            outcome: "incompatible",
-            previous,
-            candidate: candidateIdentity,
-            attestation,
-          },
-          delivery: "callback",
-          selectorClaimed: true,
-          published: false,
-        };
-        result.published = true;
-        this.emitEndpointRefresh(result.event);
-        for (const routeHandle of this.routesRequiringRecovery) {
-          if (this.trackedRoutes.has(routeHandle)) {
-            this.scheduleRouteRecovery(routeHandle);
-          }
-        }
-        return result;
-      }
       if (this.closing || this.closed) {
         await candidate.close();
         candidate = undefined;
@@ -4451,13 +3407,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
             routeHandle,
             replacementFactory,
             false,
-            codexFactoryWritesEnabled(
-              replacementFactory,
-              attestation,
-              this.latestWriteCompatibilityProbeObservation(
-                replacementFactory.endpointGeneration,
-              )?.outcome === "pass",
-            ),
           );
           if (this.closing || this.closed) {
             await this.closeRoute(route);
@@ -4485,9 +3434,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       this.factory = replacementFactory;
       candidate = undefined;
       this.retiredEndpointGeneration = undefined;
-      this.compatibilityAttested = false;
       this.endpointUnavailable = true;
-      this.pendingEndpointAttestation = attestation;
       for (const staged of stagedRoutes) {
         this.routes.set(staged.routeHandle, staged.route);
         this.routesRequiringRecovery.delete(staged.routeHandle);
@@ -4499,20 +3446,16 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       }
       const result: CodexEndpointRefreshResult = {
         event: {
-          outcome: "compatible",
           previous,
           current: this.identity,
-          attestation,
           routes: refreshedRoutes,
         },
         delivery: this.endpointRefreshDelivery ?? "callback",
         selectorClaimed: false,
         published: false,
       };
-      if (result.event.outcome === "compatible") {
-        this.pendingEndpointRefreshEvent = result.event;
-        this.pendingEndpointRefreshSelectorClaimed = false;
-      }
+      this.pendingEndpointRefreshEvent = result.event;
+      this.pendingEndpointRefreshSelectorClaimed = false;
       if (result.delivery === "callback") {
         result.selectorClaimed = true;
         result.published = true;
@@ -4543,8 +3486,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     previous: PrivateEndpointIdentity,
   ): Promise<Readonly<{
     factory: LocalCodexTransportFactory;
-    identity: PrivateEndpointIdentity;
-    attestation: CompatibilityAttestation;
   }>> {
     for (
       let attempt = 0;
@@ -4554,12 +3495,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       let candidate: LocalCodexTransportFactory | undefined;
       try {
         candidate = await refreshFactory();
-        const versionFailure = codexVersionFailureCode(
-          candidate.appServerVersion,
-        );
-        validateCodexFactory(candidate, {
-          allowUnsupportedVersion: versionFailure !== undefined,
-        });
+        validateCodexFactory(candidate);
         if (
           candidate.hostId !== previous.hostId ||
           candidate.protocol !== previousFactory.protocol
@@ -4575,17 +3511,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         ) {
           if (candidate !== previousFactory) await candidate.close();
           candidate = undefined;
-          if (
-            this.endpointUnavailable &&
-            this.compatibilityFailureCode === undefined &&
-            !this.factory.writableReady &&
-            this.factory.writeCompatibility === null
-          ) {
-            throw new BridgeError(
-              "CODEX_MONITOR_ONLY",
-              "This Codex App Server remains monitor-only until a write-attested generation is available.",
-            );
-          }
           if (attempt + 1 < MAX_CODEX_ENDPOINT_REFRESH_CANDIDATES) {
             continue;
           }
@@ -4596,33 +3521,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
           );
         }
 
-        // Endpoint generations never inherit cached compatibility. A version
-        // outside the tested major is classified from OS-attested factory
-        // evidence alone; no connector or transport may touch that protocol.
-        const probes =
-          versionFailure === undefined
-            ? await this.runCompatibilityProbesFor(candidate)
-            : compatibilityProbeNames.codex.map((name, index) =>
-                index === 0
-                  ? passedProbe(name)
-                  : failedProbe(name, versionFailure),
-              );
-        const attestation = evaluateCompatibilityAttestation({
-          surface: "codex",
-          version: candidate.appServerVersion,
-          checkedAt: this.now().toISOString(),
-          certifiedVersions: certifiedCompatibilityVersions.codex,
-          probes,
-        });
-        return {
-          factory: candidate,
-          identity: {
-            provider: "codex",
-            hostId: previous.hostId,
-            endpointGeneration: candidate.endpointGeneration,
-          },
-          attestation,
-        };
+        return { factory: candidate };
       } catch (error) {
         if (candidate !== undefined && candidate !== previousFactory) {
           await candidate.close();
@@ -4692,7 +3591,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     let event = result.event;
     if (
       staleRouteHandle !== undefined &&
-      event.outcome === "compatible" &&
       event.routes.some((route) => route.routeHandle === staleRouteHandle)
     ) {
       event = {
@@ -4710,9 +3608,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   private publishEndpointRefresh(event: GatewayAdapterEndpointRefresh): void {
     this.emitEndpointRefresh(event);
-    if (event.outcome === "compatible") {
-      this.armEndpointActivationRetry(event);
-    }
+    this.armEndpointActivationRetry(event);
   }
 
   private armEndpointActivationRetry(
@@ -4730,8 +3626,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       this.closing ||
       this.closed ||
       pending.attempt >= 3 ||
-      (pending.event.outcome === "compatible" &&
-        this.pendingEndpointAttestation === undefined)
+      this.pendingEndpointRefreshEvent !== pending.event
     ) {
       this.clearEndpointActivationRetry();
       return;
@@ -4748,10 +3643,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       this.endpointActivationRetryTimer = undefined;
       const current = this.endpointActivationRetry;
       if (current === undefined || current.event !== pending.event) return;
-      if (
-        current.event.outcome === "compatible" &&
-        this.pendingEndpointAttestation === undefined
-      ) {
+      if (this.pendingEndpointRefreshEvent !== current.event) {
         this.clearEndpointActivationRetry();
         return;
       }

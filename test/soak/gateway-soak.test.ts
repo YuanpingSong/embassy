@@ -19,7 +19,6 @@ import {
   type GatewayProviderAdapter,
 } from "../../src/gateway/service.js";
 import type { PrivateEndpointIdentity } from "../../src/gateway/types.js";
-import { compatibilityProbeNames } from "../../src/gateway/compatibility.js";
 
 /**
  * Deliverability soak: the v1.2 gate instrument.
@@ -141,28 +140,8 @@ class SoakProvider implements GatewayProviderAdapter {
     this.protocol = provider === "codex" ? "codex-app-server" : "claude-peer";
   }
 
-  compatibilitySurface = (): { surface: "codex" | "claude"; version: string } => ({
-    surface: this.identity.provider,
-    version: this.identity.provider === "codex" ? "0.147.0" : "2.1.226",
-  });
-
-  runCompatibilityProbes = async (): Promise<
-    ReadonlyArray<
-      Readonly<{
-        name: (typeof compatibilityProbeNames)[
-          "codex" | "claude"
-        ][number];
-        outcome: "pass";
-      }>
-    >
-  > =>
-    compatibilityProbeNames[this.identity.provider].map((name) => ({
-      name,
-      outcome: "pass" as const,
-    }));
-
-  acceptCompatibilityAttestation(): void {
-    // Soak accepts every attestation.
+  activateEndpointGeneration(endpointGeneration: string): void {
+    assert.equal(endpointGeneration, this.identity.endpointGeneration);
   }
 
   #trace(name: string): void {
