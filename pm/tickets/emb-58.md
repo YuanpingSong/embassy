@@ -3,7 +3,7 @@ id: emb-58
 title: Write-evidence ladder plumbing (49A): optional probes + derived writesCovered
 kind: normal
 size: 2
-status: draft
+status: dispatched
 release: v1.6
 updated: 2026-08-16
 ---
@@ -25,3 +25,10 @@ updated: 2026-08-16
 ## Background
 
 Derived from emb-49's completion report §3/§9 (49A) — the probe-name design exists precisely because adding any persisted field or fourth tier is downgrade-fatal via the exact key-set validator (compatibility.ts:258+) and the closed tier union. Re-verify cited line numbers against HEAD.
+## Dispatch note (2026-08-16, to codex-embassy-main)
+
+Re-routed from swe3-when-free to codex-embassy-main: emb-59 (sensitive, size 5) now enters v1.6 on
+founder ruling and needs this ticket's plumbing first — main runs emb-58 then emb-59 sequentially,
+separate handoffs. Scope contract (emb-58): src/gateway/compatibility.ts, src/gateway/types.ts,
+src/gateway/dashboard-model.ts, dashboard copy files (en/zh-CN), live-dashboard-app/app-types.d.ts,
+test/**. Outside: contest before writing.
