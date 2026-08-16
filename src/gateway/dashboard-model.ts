@@ -75,6 +75,7 @@ export type DashboardAttentionItem = Readonly<{
     | "consent_edge_unavailable"
     | "claude_not_observed"
     | "codex_stale"
+    | "codex_app_reconnect_required"
     | "connector_offline"
     | "route_stale"
     | "queue_stalled"
@@ -432,6 +433,7 @@ const guidanceCopyKeys = {
   consent_edge_unavailable: "consentEdgeUnavailable",
   claude_not_observed: "claudeNotObserved",
   codex_stale: "codexStale",
+  codex_app_reconnect_required: "codexAppReconnectRequired",
   connector_offline: "connectorOffline",
   route_stale: "routeStale",
   queue_stalled: "queueStalled",
@@ -466,6 +468,8 @@ const attentionCommands = {
   consent_edge_unavailable: "embassy refresh-dashboard",
   claude_not_observed: "embassy select-claude --alias {alias}",
   codex_stale: "embassy register-codex --alias {alias}",
+  codex_app_reconnect_required:
+    "/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT",
   connector_offline: "embassy status",
   route_stale: "embassy status",
   queue_stalled: "embassy status",
@@ -760,6 +764,33 @@ function routePriority(route: DashboardRouteRow): number {
   if (route.state === "awaiting_approval") return 2;
   if (route.state === "busy") return 3;
   return 4;
+}
+
+const CODEX_APP_RECONNECT_GUIDANCE_AFTER_MS = 2_000;
+
+function needsCodexAppReconnect(
+  route: DashboardRouteRow,
+  connectors: readonly DashboardConnectorRow[],
+  generatedAt: string | undefined,
+): boolean {
+  if (
+    route.provider !== "codex" ||
+    route.state !== "stale" ||
+    route.safeErrorCode !== "CODEX_ROUTE_STALE" ||
+    route.lastSeenAt === undefined ||
+    generatedAt === undefined ||
+    Date.parse(generatedAt) - Date.parse(route.lastSeenAt) <
+      CODEX_APP_RECONNECT_GUIDANCE_AFTER_MS
+  ) {
+    return false;
+  }
+  return connectors.some(
+    (connector) =>
+      connector.provider === "codex" &&
+      connector.host === route.host &&
+      connector.health === "healthy" &&
+      connector.compatibility === "compatible",
+  );
 }
 
 function alertPriority(severity: AlertSeverity): number {
@@ -1391,6 +1422,10 @@ function buildProjectedDashboardViewModel(
           code === "QUEUE_STALLED" && typeof alert.alias === "string"
             ? routeByAlias.get(alert.alias)
             : undefined;
+        const alertRoute =
+          typeof alert.alias === "string"
+            ? routeByAlias.get(alert.alias)
+            : undefined;
         return {
           kind: "alert",
           ...(code === undefined ? {} : { code }),
@@ -1422,14 +1457,17 @@ function buildProjectedDashboardViewModel(
               ? { queueDepth: route.queueDepth }
               : {}),
           guidance:
-            !providerWritesCovered &&
-            alert.provider !== undefined &&
-            quarantinedProviders.has(alert.provider)
-              ? "provider_incompatible"
-              : providerWritesCovered &&
-                  guidanceFor(code, alert.provider) === "provider_incompatible"
-                ? "degraded"
-                : guidanceFor(code, alert.provider),
+            alertRoute !== undefined &&
+            needsCodexAppReconnect(alertRoute, connectors, generatedAt)
+              ? "codex_app_reconnect_required"
+              : !providerWritesCovered &&
+                  alert.provider !== undefined &&
+                  quarantinedProviders.has(alert.provider)
+                ? "provider_incompatible"
+                : providerWritesCovered &&
+                    guidanceFor(code, alert.provider) === "provider_incompatible"
+                  ? "degraded"
+                  : guidanceFor(code, alert.provider),
         };
       }),
     allRoutes,
@@ -1539,9 +1577,11 @@ function buildProjectedDashboardViewModel(
         route.state === "stale" &&
         route.safeErrorCode === "REOBSERVATION_REQUIRED"
           ? "codex_reactivation_required"
-          : route.provider === "codex" && route.state === "stale"
-            ? "codex_stale"
-            : "route_stale",
+          : needsCodexAppReconnect(route, connectors, generatedAt)
+            ? "codex_app_reconnect_required"
+            : route.provider === "codex" && route.state === "stale"
+              ? "codex_stale"
+              : "route_stale",
     });
     representedScopes.add(scope);
   }

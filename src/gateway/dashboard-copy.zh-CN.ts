@@ -96,6 +96,11 @@ export const dashboardCopyZhCn = {
   "guidance.codexStale.body": "已注册的 Codex 任务不再具有就绪的 App Server 连接。",
   "guidance.codexStale.action":
     "在该 Codex 任务内使用同一别名重新运行 register-codex；不要先注销。",
+  "guidance.codexAppReconnectRequired.title": "正在等待 Codex 应用重新连接",
+  "guidance.codexAppReconnectRequired.body":
+    "托管 App Server 可以访问，但仍观察不到这个已保存任务；应用或任务可能尚未重新连接。",
+  "guidance.codexAppReconnectRequired.action":
+    "打开 Codex 应用和这个确切任务。如果守护进程重启时应用已打开，请运行 /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT 重新启动应用。不要重发排队邮件。",
   "guidance.connectorOffline.title": "提供方连接器离线",
   "guidance.connectorOffline.body": "Embassy 当前无法访问本地提供方连接器。",
   "guidance.connectorOffline.action":

@@ -890,6 +890,58 @@ test("route-derived reactivation guidance requires an actually stale Codex route
   );
 });
 
+test("aged Codex staleness points at Desktop while the recovery burst remains transient", () => {
+  const snapshot = dashboardFixture();
+  const route = snapshot.routes.find((candidate) => candidate.provider === "codex");
+  assert.ok(route);
+  route.state = "stale";
+  route.compatibility = "expired";
+  route.safeErrorCode = "CODEX_ROUTE_STALE";
+  route.lastSeenAt = "2026-08-08T11:59:59.000Z";
+  snapshot.alerts = [{
+    code: "CODEX_ROUTE_STALE",
+    severity: "error",
+    timestamp: route.lastSeenAt,
+    provider: "codex",
+    host: route.host,
+    alias: route.alias,
+  }];
+
+  assert.equal(
+    buildDashboardViewModel(snapshot).attention[0]?.guidance,
+    "codex_stale",
+  );
+
+  route.lastSeenAt = "2026-08-08T11:59:57.000Z";
+  snapshot.alerts[0]!.timestamp = route.lastSeenAt;
+  const connector = snapshot.connectors.find(
+    (candidate) => candidate.provider === "codex",
+  );
+  assert.ok(connector);
+  connector.health = "degraded";
+  connector.compatibility = "expired";
+  assert.equal(
+    buildDashboardViewModel(snapshot).attention[0]?.guidance,
+    "codex_stale",
+  );
+  connector.health = "healthy";
+  connector.compatibility = "compatible";
+  const model = buildDashboardViewModel(snapshot);
+  assert.equal(
+    model.attention[0]?.guidance,
+    "codex_app_reconnect_required",
+  );
+
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
+  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
+  assert.match(en, /Waiting for the Codex app/);
+  assert.match(en, /managed App Server is reachable/);
+  assert.match(en, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
+  assert.match(zh, /正在等待 Codex 应用重新连接/);
+  assert.match(zh, /托管 App Server 可以访问/);
+  assert.equal(en.includes("Re-run register-codex"), false);
+});
+
 test("an aged Claude mailbox write surfaces one notice only while its exact recipient is unobserved", () => {
   const snapshot = dashboardFixture();
   snapshot.routes[0] = {
