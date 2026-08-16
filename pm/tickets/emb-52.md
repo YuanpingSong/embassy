@@ -178,3 +178,23 @@ Independent gate: PASS (758/758, isolated worktree). Review verdict adopted — 
 - **F4 (accepted as intended, document-only)**: the stale-route requeue widening is truthful and
   fail-closed; document in the completion report and release notes — no code change.
 Budget: corrections expected within the existing E5; contest if not. Window unchanged.
+
+## Bounded follow-up review verdict + landing authorization (2026-08-16)
+
+**F1 CLOSED, F2 CLOSED** — reviewer traced both fixes against the original repro recipes with
+ablation proofs (commenting each fix out reproduces its exact failure signature; restoring passes),
+verified the migrated binding key is byte-identical to the one rememberBinding installs, re-audited
+all six publication-state sites (including the close()-entry site the prior round found missing),
+and ran an instrumented desync probe: 229/229, zero hits, instrumentation removed, md5s re-verified.
+Two contained degradations on the F2 gate examined and bounded (recovery channel survives via the
+original callback-armed retry; stale-handle reanchor fails closed while recovery recreates). Gate v2:
+759/759 isolated.
+
+**Backlog (filed, not blocking)**: (1) pre-existing F1-shaped residual on the requiredRoute-alias
+path (provider-omitted-but-recreated handles never key-migrate) — follow-up ticket next release;
+(2) new provider test at :4549 is timing-marginal (1000ms recovery vs 1000ms waitFor default) —
+one-line widen, immediate follow-up if release CI flakes; (3) comment drift at providers.ts:3225;
+(4) derive→record hardening for the publication flag; (5) F5-body stickiness (out of scope, known).
+
+**Landing authorized**: live drill next (broker on the v2 build, daemon kill+restart under the live
+pair); public main receives the code only after the drill passes.
