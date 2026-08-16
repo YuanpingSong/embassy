@@ -3,9 +3,9 @@ id: emb-52
 title: Runtime re-anchor must outlive the endpoint transition
 kind: normal
 size: 5
-status: draft
+status: dispatched
 release: v1.6
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 ## Binding
@@ -27,3 +27,14 @@ updated: 2026-08-15
 ## Background (hypotheses — re-verify against current code; stop and report if stale)
 
 Root-cause trace from the v1.5 retro: the transition freezes the route set at T+250ms; a same-generation CHURN wall then rejects the re-anchor; fresh evidence is discarded at `service.ts:8364` (line number from 2026-08 trace — re-locate before relying on it). Ranked fix shape from the retro: let runtime re-anchor evidence survive the transition window rather than widening the wall.
+
+---
+
+## Dispatch note (2026-08-16, to codex-embassy-swe3)
+
+Scope contract: `src/gateway/service.ts`, `src/gateway/store.ts`, `src/gateway/codex-local-transport.ts`,
+`src/gateway/types.ts` (new journal event kind only), `test/**`. Anything beyond: contest before writing.
+Handoff per house protocol: declared file list, evidence per promise, and the full `npm run check`
+verdict printed as a value. Liveness confirmed this conversation (READY, conv_2ziJHYk0eS3_7oX3wL28TRts).
+PM runs the live drill at landing (daemon kill+restart under the live pair) under founder-granted
+restart authority.
