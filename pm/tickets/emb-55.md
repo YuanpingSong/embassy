@@ -3,7 +3,7 @@ id: emb-55
 title: Compatibility surface set tolerates optional and absent surfaces
 kind: normal
 size: 3
-status: review
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -52,3 +52,7 @@ with never floors, capacity derives from surface set — the ruling's constraint
 766/766, budget 413/500, concepts 1/1. Committed locally on the drill-gated stack. Watch-item
 carried to emb-56: an adapter exposing an UNDECLARED surface boots without attesting — unreachable
 in production today; emb-56's surface registration must keep it so.
+
+## Shipped in v1.6.0 (2026-08-16)
+
+Tagged on public main d22ddf0; pipeline-verified tarball published as agent-embassy@1.6.0 (npm trusted publishing, provenance). Optional compatibility surfaces shipped; the published broker boots with both providers rendered from the observed surface set.

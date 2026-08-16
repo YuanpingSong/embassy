@@ -3,7 +3,7 @@ id: emb-63
 title: Stale-route guidance names the actual blocker (waiting for Codex app)
 kind: normal
 size: 2
-status: review
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -36,3 +36,7 @@ Accepted: PM diff read (honest-conjunction detector: stale + CODEX_ROUTE_STALE +
 762/762, budget 135/200, one declared guidance concept. Committed locally behind emb-62; both go
 public together after the release drill — which will render this exact guidance live during the
 slow-reattach window, making the drill the experiential check too.
+
+## Shipped in v1.6.0 (2026-08-16)
+
+Tagged on public main d22ddf0; pipeline-verified tarball published as agent-embassy@1.6.0 (npm trusted publishing, provenance). The drill's stale window surfaced honest per-route safe codes throughout; the guidance mechanism itself is verified by its reproduction tests.

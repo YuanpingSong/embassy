@@ -3,7 +3,7 @@ id: emb-56
 title: DeepSeek harness monitor-only attestation (Shape A)
 kind: normal
 size: 3
-status: review
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -118,3 +118,7 @@ Accepted after two correction cycles (boot-safety catch; manifest allowlist): PM
 detector and correction hunks, gate 773/773 from full captured log (counts, per the sharpened
 rule the engineer adopted in the same handoff), budget 577/500 as accepted ground truth,
 concepts 1/1. Committed locally on the drill-gated stack; goes public with the release sequence.
+
+## Shipped in v1.6.0 (2026-08-16)
+
+Tagged on public main d22ddf0; pipeline-verified tarball published as agent-embassy@1.6.0 (npm trusted publishing, provenance). DeepSeek detection shipped monitor-only; a machine without the harness renders 'Not detected' honestly.
