@@ -3840,7 +3840,7 @@ test("Codex endpoint refresh probes once, coalesces route recovery, and reanchor
       routeHandle: "00000000-0000-7000-8000-000000000709",
     }),
     (error: unknown) =>
-      error instanceof BridgeError && error.code === "CODEX_PROVIDER_UNAVAILABLE",
+      error instanceof BridgeError && error.code === "CODEX_THREAD_NOT_OBSERVED",
   );
   assert.equal(
     secondFactory.transports.flatMap((transport) => transport.sent).some(
@@ -4497,6 +4497,89 @@ test("an unaccepted automatic Codex endpoint callback is retried with identical 
     }),
     { state: "accepted" },
   );
+  await provider.close();
+});
+
+test("a fresh selector claims retained evidence after the endpoint transition completes", async () => {
+  const freshThread = "00000000-0000-7000-8000-000000000713";
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-retained-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID, freshThread], true),
+    "local-retained-generation-2",
+  );
+  let refreshCalls = 0;
+  const provider = codexProvider(firstFactory, {
+    refreshFactory: async () => {
+      refreshCalls += 1;
+      return secondFactory as unknown as LocalCodexTransportFactory;
+    },
+    recoveryInitialMs: 1,
+    recoveryMaxMs: 2,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => observed.endpointRefreshes.length === 1);
+
+  const selected = await provider.selectRoute({
+    alias: "codex-fresh@this-mac",
+    routeHandle: freshThread,
+  });
+  assert.strictEqual(selected.endpointRefresh, observed.endpointRefreshes[0]);
+  assert.equal(selected.state, "idle");
+  assert.equal(refreshCalls, 1);
+  provider.acceptCompatibilityAttestation(
+    selected.endpointRefresh!.attestation,
+  );
+  assert.equal(
+    provider.observeRouteSuccessionBarrier(freshThread).clean,
+    true,
+  );
+  await provider.close();
+});
+
+test("callback-published endpoint evidence is never republished by a retained selector", async () => {
+  const firstFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-retained-callback-generation-1",
+  );
+  const secondFactory = retargetCodexFactory(
+    new FakeCodexFactory([THREAD_ID], true),
+    "local-retained-callback-generation-2",
+  );
+  const provider = codexProvider(firstFactory, {
+    refreshFactory: async () =>
+      secondFactory as unknown as LocalCodexTransportFactory,
+    recoveryInitialMs: 1_000,
+    recoveryMaxMs: 1_000,
+  });
+  const observed = callbacks();
+  await provider.initialize(observed.callbacks);
+  await provider.selectRoute({
+    alias: "codex-main@this-mac",
+    routeHandle: THREAD_ID,
+  });
+  firstFactory.endpointGenerationChanged = true;
+  firstFactory.transports[0]!.disconnectUnexpectedly();
+  await waitFor(() => observed.endpointRefreshes.length === 1);
+
+  secondFactory.transports.at(-1)!.disconnectUnexpectedly();
+  secondFactory.endpointGenerationChanged = true;
+  await assert.rejects(
+    provider.selectRoute({
+      alias: "codex-main@this-mac",
+      routeHandle: THREAD_ID,
+    }),
+  );
+  assert.equal(observed.endpointRefreshes.length, 1);
   await provider.close();
 });
 

@@ -460,8 +460,6 @@ type MessageContext = {
   authorization: "selected_route" | "native_reply";
   targetAlias: string;
   deadlineAt: string;
-  /** Rebuilt from durable queued mail after a broker restart. */
-  recovered?: true;
 };
 
 type DeliveryTerminalState =
@@ -1812,6 +1810,10 @@ export class GatewayService {
       await this.publish();
     }
     this.pruneTransient();
+    const deferredRouteObservations: Extract<
+      CallbackEvent,
+      { type: "route" }
+    >[] = [];
     while (this.hasPendingCallbackWork()) {
       // Preserve the complete ordinary queue order. In particular, every
       // delivery observation already retained before endpoint replacement is
@@ -1820,11 +1822,28 @@ export class GatewayService {
         0,
         this.callbackQueue.length,
       );
+      const pendingRefresh = this.endpointRefreshCallback?.value;
       for (const event of ordinaryBatch) {
         try {
           if (event.type === "delivery") {
             await this.onDelivery(event.source, event.value, event.receivedAt);
           } else if (event.type === "route") {
+            if (
+              pendingRefresh?.outcome === "compatible" &&
+              event.source.provider === "codex" &&
+              event.source.hostId === pendingRefresh.current.hostId &&
+              event.source.endpointGeneration ===
+                pendingRefresh.current.endpointGeneration &&
+              pendingRefresh.routes.some(
+                (route) => route.routeHandle === event.value.routeHandle,
+              )
+            ) {
+              // The provider can observe G2 after staging it but before this
+              // worker installs G2's durable binding. Preserve that fresher
+              // state until the exact transition evidence has been reduced.
+              deferredRouteObservations.push(event);
+              continue;
+            }
             await this.onRouteState(event.source, event.value);
           } else if (event.type === "claude_reply") {
             await this.onClaudeReply(event.value);
@@ -1886,6 +1905,13 @@ export class GatewayService {
         requestedRetry !== undefined
       ) {
         this.endpointRefreshCallback = requestedRetry;
+      }
+    }
+    for (const event of deferredRouteObservations) {
+      try {
+        await this.onRouteState(event.source, event.value);
+      } catch {
+        this.dashboardHealthy = false;
       }
     }
   }
@@ -5043,6 +5069,23 @@ export class GatewayService {
     this.bindingAliases.set(bindingKey(binding), alias);
   }
 
+  private reanchorQueuedMessageContexts(
+    alias: string,
+    previous: PrivateRouteBinding,
+    current: PrivateRouteBinding,
+  ): void {
+    const previousKey = bindingKey(previous);
+    const currentKey = bindingKey(current);
+    for (const context of this.messageContexts.values()) {
+      if (
+        context.targetAlias === alias &&
+        context.targetBindingKey === previousKey
+      ) {
+        context.targetBindingKey = currentKey;
+      }
+    }
+  }
+
   private forgetBinding(alias: string): void {
     const heldTimer = this.heldRedispatchTimers.get(alias);
     if (heldTimer !== undefined) {
@@ -6793,7 +6836,6 @@ export class GatewayService {
       authorization: "selected_route",
       targetAlias: item.targetAlias,
       deadlineAt: item.deadlineAt,
-      recovered: true,
     };
     this.conversations.set(conversationId, conversation);
     this.messageContexts.set(item.messageId, context);
@@ -6909,25 +6951,14 @@ export class GatewayService {
           inspection?.state === "stale" ||
           inspection?.safeErrorCode === "CODEX_ROUTE_STALE");
       if (codexRouteStale) {
-        if (context.recovered === true) {
-          const result = await this.store.requeueInFlightMessage(
-            item.messageId,
-            item.body,
-          );
-          if (result.status === "settled") {
-            await this.applyTerminalSettlementLocked(result.settlement);
-          }
-          await this.changed();
-          return;
+        const result = await this.store.requeueInFlightMessage(
+          item.messageId,
+          item.body,
+        );
+        if (result.status === "settled") {
+          await this.applyTerminalSettlementLocked(result.settlement);
         }
-        await this.advanceDeliveryLocked(item.messageId, {
-          type: "route_terminated",
-          at: this.now().getTime(),
-          unwrittenOutcome: "failed",
-          safeErrorCode: "CODEX_ROUTE_STALE",
-        });
         await this.changed();
-        this.scheduleDispatch(targetAlias);
         return;
       }
       const storedDispatchable =
@@ -8033,6 +8064,19 @@ export class GatewayService {
             },
           ];
     });
+    const reanchorPendingMessageContexts = (): void => {
+      for (const route of pendingReanchors) {
+        const previous = previousRoutes.find(
+          (candidate) => candidate.alias === route.alias,
+        )?.binding;
+        if (previous === undefined) continue;
+        this.reanchorQueuedMessageContexts(route.alias, previous, {
+          ...event.current,
+          routeHandle: route.threadId,
+          ownerLease: route.ownerLease,
+        });
+      }
+    };
     if (pendingReanchors.length > 0) {
       try {
         await this.store.reanchorCodexRoutes({
@@ -8040,6 +8084,7 @@ export class GatewayService {
           newEndpoint: event.current,
           routes: pendingReanchors,
         });
+        reanchorPendingMessageContexts();
         this.durablyAppliedEndpointRefreshes.set(
           event.current.hostId,
           transitionKey,
@@ -8066,6 +8111,7 @@ export class GatewayService {
           return matches.length === 1;
         });
         if (committedExactly) {
+          reanchorPendingMessageContexts();
           this.durablyAppliedEndpointRefreshes.set(
             event.current.hostId,
             transitionKey,

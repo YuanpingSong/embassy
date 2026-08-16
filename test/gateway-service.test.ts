@@ -1018,6 +1018,12 @@ function schemaAttestedCodexAttestation(
   };
 }
 
+type SyntheticServiceCodexTransport = LocalCodexOwnedTransport & {
+  readonly sent: Array<Record<string, unknown>>;
+  disconnectUnexpectedly(): void;
+  emit(message: unknown): void;
+};
+
 function syntheticServiceCodexFactory(input: Readonly<{
   version: string;
   endpointGeneration: string;
@@ -1027,9 +1033,19 @@ function syntheticServiceCodexFactory(input: Readonly<{
   closeFailureAt?: Readonly<{ attempt: number; error: Error }>;
 }>): {
   factory: LocalCodexTransportFactory;
-  evidence: { connectAttempts: number; methods: string[] };
+  evidence: {
+    connectAttempts: number;
+    endpointGenerationChanged: boolean;
+    methods: string[];
+    transports: SyntheticServiceCodexTransport[];
+  };
 } {
-  const evidence = { connectAttempts: 0, methods: [] as string[] };
+  const evidence = {
+    connectAttempts: 0,
+    endpointGenerationChanged: false,
+    methods: [] as string[],
+    transports: [] as SyntheticServiceCodexTransport[],
+  };
   const compatibility = {
     appServerVersion: input.version,
     endpointGeneration: input.endpointGeneration,
@@ -1054,6 +1070,9 @@ function syntheticServiceCodexFactory(input: Readonly<{
     connectTransport: async (): Promise<LocalCodexOwnedTransport> => {
       evidence.connectAttempts += 1;
       const attempt = evidence.connectAttempts;
+      if (evidence.endpointGenerationChanged) {
+        throw new LocalCodexTransportError("ENDPOINT_GENERATION_CHANGED");
+      }
       if (input.connectFailureAt?.attempt === attempt) {
         throw input.connectFailureAt.error;
       }
@@ -1061,7 +1080,9 @@ function syntheticServiceCodexFactory(input: Readonly<{
       const messageListeners = new Set<(payload: string) => void>();
       const closeListeners = new Set<() => void>();
       const errorListeners = new Set<() => void>();
+      const sent: Array<Record<string, unknown>> = [];
       const transport = {
+        sent,
         get cleanupConfirmed() {
           return cleanupConfirmed;
         },
@@ -1082,6 +1103,7 @@ function syntheticServiceCodexFactory(input: Readonly<{
             id?: unknown;
             method?: unknown;
           };
+          sent.push(request);
           const method =
             typeof request.method === "string" ? request.method : "";
           evidence.methods.push(method);
@@ -1105,6 +1127,8 @@ function syntheticServiceCodexFactory(input: Readonly<{
             };
           } else if (method === "thread/unsubscribe") {
             result = { status: "unsubscribed" };
+          } else if (method === "turn/start") {
+            result = { turn: { id: "turn-service-1", status: "inProgress" } };
           } else {
             result = {};
           }
@@ -1112,6 +1136,13 @@ function syntheticServiceCodexFactory(input: Readonly<{
             const response = JSON.stringify({ id: request.id, result });
             for (const listener of messageListeners) listener(response);
           }
+        },
+        disconnectUnexpectedly(): void {
+          for (const listener of [...closeListeners]) listener();
+        },
+        emit(message: unknown): void {
+          const payload = JSON.stringify(message);
+          for (const listener of [...messageListeners]) listener(payload);
         },
         async close(): Promise<void> {
           if (cleanupConfirmed) return;
@@ -1121,7 +1152,8 @@ function syntheticServiceCodexFactory(input: Readonly<{
           cleanupConfirmed = true;
           for (const listener of closeListeners) listener();
         },
-      } satisfies LocalCodexOwnedTransport;
+      } satisfies SyntheticServiceCodexTransport;
+      evidence.transports.push(transport);
       return transport;
     },
   } as unknown as LocalCodexTransportFactory;
@@ -3234,8 +3266,11 @@ test("a compatible Codex endpoint refresh reanchors exact tasks and preserves pa
     previous,
     current: { ...codex.identity },
     attestation: compatibleCodexAttestation(codex.protocolVersion),
-    routes: [{ routeHandle: THREAD_ID, state: "idle" }],
+    routes: [{ routeHandle: THREAD_ID, state: "busy" }],
   });
+  // G2 can become idle after the provider freezes its transition evidence but
+  // before the controller installs G2's durable binding.
+  codex.emitRouteState(THREAD_ID, "idle");
 
   await waitForAsync(async () =>
     (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
@@ -3367,6 +3402,160 @@ test("a compatible Codex endpoint refresh reanchors exact tasks and preserves pa
   ]) {
     assert.equal(publicText.includes(privateValue), false);
   }
+});
+
+test("a real Codex provider reanchors runtime routes and drains mail after endpoint restart", async (t) => {
+  const { root, stateDir } = await fixture();
+  const first = syntheticServiceCodexFactory({
+    version: "0.147.0",
+    endpointGeneration: "codex_runtime_reanchor_g1",
+    writable: true,
+  });
+  const second = syntheticServiceCodexFactory({
+    version: "0.147.0",
+    endpointGeneration: "codex_runtime_reanchor_g2",
+    writable: true,
+  });
+  let refreshCalls = 0;
+  const codex = createLocalCodexGatewayProvider({
+    factory: first.factory,
+    refreshFactory: async () => {
+      refreshCalls += 1;
+      return second.factory;
+    },
+    recoveryInitialMs: 60_000,
+    recoveryMaxMs: 60_000,
+  });
+  const claude = new FakeProvider("claude");
+  claude.discoveries = [
+    {
+      alias: "claude-one@this-mac",
+      routeHandle: "claude_target_1",
+      kind: "interactive",
+      state: "idle",
+      compatibility: "compatible",
+    },
+  ];
+  const service = new GatewayService({
+    config: loadGatewayConfig({
+      EMBASSY_STATE_DIR: stateDir,
+      EMBASSY_HOSTS: "this-mac",
+    }),
+    adapters: [claude, codex],
+  });
+  await service.start();
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const handlers = service.handlers();
+  await selectAndRegister(handlers);
+
+  const firstRoute = first.evidence.transports.find((transport) =>
+    transport.sent.some((message) => message.method === "thread/resume"),
+  )!;
+  firstRoute.emit({
+    method: "thread/status/changed",
+    params: { status: { type: "active" }, threadId: THREAD_ID },
+  });
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      (route) => route.alias === "codex-main@this-mac" && route.state === "busy",
+    ),
+  );
+  const queued = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    text: "queued across the endpoint restart",
+    expectsReply: false,
+  });
+  assert.equal(queued.accepted, true, JSON.stringify(queued));
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      (route) => route.alias === "codex-main@this-mac" && route.queueDepth === 1,
+    ),
+  );
+
+  first.evidence.endpointGenerationChanged = true;
+  firstRoute.disconnectUnexpectedly();
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      (route) =>
+        route.alias === "codex-main@this-mac" &&
+        route.state === "stale" &&
+        route.safeErrorCode === "CODEX_ROUTE_STALE",
+    ),
+  );
+  const degraded = await handlers.listSnapshot();
+  assert.equal(
+    degraded.routes.some((route) => route.alias === "codex-main@this-mac"),
+    true,
+  );
+
+  assert.deepEqual(await handlers.registerCodex(codexRegistration()), {
+    accepted: true,
+    code: "ok",
+  });
+  await waitForAsync(
+    async () =>
+      (await service.store.inspectPrivateRoute("codex-main@this-mac"))?.binding
+        .endpointGeneration === "codex_runtime_reanchor_g2",
+  );
+  await waitFor(() =>
+    second.evidence.transports.some((transport) =>
+      transport.sent.some((message) => message.method === "turn/start"),
+    ),
+  );
+  assert.equal(refreshCalls, 1);
+  const queuedStatus = await handlers.deliveryStatus({
+    token: queued.deliveryToken,
+  });
+  assert.equal(queuedStatus.found, true);
+  if (!queuedStatus.found) assert.fail("queued delivery status was evicted");
+  assert.equal(queuedStatus.state, "delivered");
+
+  const secondRoute = second.evidence.transports.find((transport) =>
+    transport.sent.some((message) => message.method === "turn/start"),
+  )!;
+  secondRoute.emit({
+    method: "turn/completed",
+    params: {
+      threadId: THREAD_ID,
+      turn: { id: "turn-service-1", status: "completed" },
+    },
+  });
+  await waitForAsync(async () =>
+    (await handlers.listSnapshot()).routes.some(
+      (route) => route.alias === "codex-main@this-mac" && route.state === "idle",
+    ),
+  );
+  const fresh = await handlers.sendToCodex({
+    ...toCodex("uds:/synthetic/claude.sock"),
+    text: "new mail after the endpoint restart",
+    expectsReply: false,
+  });
+  assert.equal(fresh.accepted, true);
+  await waitFor(
+    () =>
+      second.evidence.transports
+        .flatMap((transport) => transport.sent)
+        .filter((message) => message.method === "turn/start").length >= 2,
+  );
+  const freshStatus = await handlers.deliveryStatus({
+    token: fresh.deliveryToken,
+  });
+  assert.equal(freshStatus.found, true);
+  if (!freshStatus.found) assert.fail("fresh delivery status was evicted");
+  assert.equal(freshStatus.state, "delivered");
+  assert.equal(
+    (await handlers.listSnapshot()).activityEvents?.some(
+      (event) => event.action === "endpoint_refreshed",
+    ),
+    true,
+  );
+  const persisted = JSON.parse(
+    await readFile(service.store.stateFilePath, "utf8"),
+  ) as { codexEndpointRefreshEvents: unknown[] };
+  assert.equal(persisted.codexEndpointRefreshEvents.length, 1);
 });
 
 test("a schema-attested Codex endpoint refresh stays monitor-only without a durable G2 reanchor", async (t) => {
@@ -8134,7 +8323,7 @@ test("a Codex deferral inside the last retry slice settles failed, not expired",
   assert.equal(codex.dispatches.length, 1);
 });
 
-test("a stale Codex route terminally fails held work and rejects new sends", async (t) => {
+test("a stale Codex route preserves held work and rejects new sends", async (t) => {
   const { root, stateDir } = await fixture();
   const claude = new FakeProvider("claude");
   claude.discoveries = [
@@ -8164,12 +8353,12 @@ test("a stale Codex route terminally fails held work and rejects new sends", asy
   await selectAndRegister(handlers);
 
   const accepted = await handlers.sendToCodex(
-    toCodex("uds:/synthetic/claude.sock"),
+    { ...toCodex("uds:/synthetic/claude.sock"), expectsReply: false },
   );
   assert.equal(accepted.accepted, true);
   if (!accepted.accepted) return;
   const secondAccepted = await handlers.sendToCodex(
-    toCodex("uds:/synthetic/claude.sock"),
+    { ...toCodex("uds:/synthetic/claude.sock"), expectsReply: false },
   );
   assert.equal(secondAccepted.accepted, true);
   if (!secondAccepted.accepted) return;
@@ -8182,32 +8371,25 @@ test("a stale Codex route terminally fails held work and rejects new sends", asy
 
   codex.emitRouteState(THREAD_ID, "stale", "CODEX_ROUTE_STALE");
   await waitForAsync(async () => {
-    const current = await handlers.deliveryStatus({
-      token: accepted.deliveryToken,
-    });
-    return current.found && current.terminal;
-  }, 5_000);
-  await waitForAsync(async () => {
-    const current = await handlers.deliveryStatus({
-      token: secondAccepted.deliveryToken,
-    });
-    return current.found && current.terminal;
-  }, 5_000);
+    const current = await handlers.listSnapshot();
+    return current.routes.some(
+      (route) =>
+        route.alias === "codex-main@this-mac" && route.state === "stale",
+    );
+  });
   const status = await handlers.deliveryStatus({
     token: accepted.deliveryToken,
   });
-  assert.equal(status.found && status.terminal, true);
+  assert.equal(status.found && !status.terminal, true);
   if (status.found) {
-    assert.equal(status.state, "failed");
-    assert.equal(status.safeErrorCode, "CODEX_ROUTE_STALE");
+    assert.equal(status.state, "queued");
   }
   const secondStatus = await handlers.deliveryStatus({
     token: secondAccepted.deliveryToken,
   });
-  assert.equal(secondStatus.found && secondStatus.terminal, true);
+  assert.equal(secondStatus.found && !secondStatus.terminal, true);
   if (secondStatus.found) {
-    assert.equal(secondStatus.state, "failed");
-    assert.equal(secondStatus.safeErrorCode, "CODEX_ROUTE_STALE");
+    assert.equal(secondStatus.state, "queued");
   }
   assert.equal(codex.dispatches.length, 0);
   const snapshot = await handlers.listSnapshot();
@@ -8235,8 +8417,7 @@ test("a stale Codex route terminally fails held work and rejects new sends", asy
     snapshot.messages.some(
       (event) =>
         event.direction === "claude_to_codex" &&
-        event.state === "failed" &&
-        event.safeErrorCode === "CODEX_ROUTE_STALE",
+        event.state === "held",
     ),
     true,
   );
@@ -8272,6 +8453,20 @@ test("a stale Codex route terminally fails held work and rejects new sends", asy
       )
     );
   });
+  await waitFor(() => codex.dispatches.length === 1);
+  const delivered = await handlers.deliveryStatus({
+    token: accepted.deliveryToken,
+  });
+  assert.equal(delivered.found && delivered.state === "delivered", true);
+  const stillQueued = await handlers.deliveryStatus({
+    token: secondAccepted.deliveryToken,
+  });
+  assert.equal(
+    stillQueued.found &&
+      !stillQueued.terminal &&
+      stillQueued.state === "queued",
+    true,
+  );
 });
 
 test("idle Codex re-registration wakes an already-held native message without another route notification", async (t) => {
