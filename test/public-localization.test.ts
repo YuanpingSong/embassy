@@ -330,7 +330,7 @@ test("current compatibility docs expose the evidence-gated forward contract", as
   assert.match(englishConfiguration, /certified version on the supported major is writable/i);
   assert.match(englishConfiguration, /same-major build outside the tested inventory appears as `schema_attested`/i);
   assert.match(englishConfiguration, /writable only when those probes cover its write path/i);
-  assert.match(englishConfiguration, /bounded pre-write reads may include `initialize`, `thread\/loaded\/list`, and registration-time `thread\/resume`, but never `turn\/start`/i);
+  assert.match(englishConfiguration, /Ordinary Codex compatibility and registration reads remain read-only.{0,240}do not invoke `turn\/start`.{0,160}optional Codex write-attestation probe is the sole exception.{0,300}at most one disposable broker-owned thread per attempt.{0,180}bounded write fence with zero user-thread contact.{0,180}every created probe thread is archived and confirmed absent from the loaded set.{0,180}resolves the pinned model's lowest advertised effort.{0,180}Whenever that model\/effort pin cannot resolve, it declines in a zero-spend fail-safe before creating any thread or model turn/is);
   assert.match(englishConfiguration, /untested Codex build therefore stays monitor-only pending a certified write schema/i);
   assert.match(englishConfiguration, /probes fail stays degraded, monitor-only, and write-fenced/i);
   assert.match(englishConfiguration, /different major or version evidence that cannot establish a safe major/i);
@@ -345,7 +345,7 @@ test("current compatibility docs expose the evidence-gated forward contract", as
   assert.match(englishConfiguration, /rejectedCodesOmitted/);
   assert.match(chineseConfiguration, /已认证版本.{0,16}可写/u);
   assert.match(chineseConfiguration, /schema_attested.{0,24}只有探测覆盖写入路径时才可写/u);
-  assert.match(chineseConfiguration, /有界写入前读取可能包括 `initialize`、`thread\/loaded\/list` 与注册时的 `thread\/resume`，但绝不包括 `turn\/start`/u);
+  assert.match(chineseConfiguration, /常规 Codex 兼容性与注册读取仍保持只读.{0,160}不会调用 `turn\/start`.{0,100}唯一例外是可选的 Codex 写入认证探测.{0,220}每次尝试最多可创建一个代理自有的临时线程.{0,160}有界写入围栏下运行且绝不接触用户线程.{0,160}每个已创建的探测线程都会被归档，并确认已从已加载集合中清除.{0,160}解析固定模型所公布的最低 effort.{0,160}模型\/effort 固定项无法解析.{0,160}以零消耗故障安全方式拒绝.{0,100}不会创建任何线程或模型轮次/us);
   assert.match(chineseConfiguration, /未测试的 Codex 构建.{0,20}保持仅监控/u);
   assert.match(chineseConfiguration, /探测失败.{0,24}降级、仅监控并禁止写入/u);
   assert.match(chineseConfiguration, /主版本不同或版本证据无法建立安全主版本/u);
@@ -399,7 +399,7 @@ test("current compatibility docs expose the evidence-gated forward contract", as
   assert.match(skill, /Compatibility is automatic and evidence-gated/);
   assert.match(skill, /certified same-major provider is writable/i);
   assert.match(skill, /schema-attested \(`schema_attested`\) and writable only when those probes cover the write path/);
-  assert.match(skill, /untested Codex 0\.x therefore stays monitor-only/);
+  assert.match(skill, /untested Codex 0\.x therefore stays monitor-only/i);
   assert.match(skill, /version evidence that cannot establish a safe major/);
   assert.match(skill, /never promote across a major or unknown major/);
   assert.match(skill, /Embassy release supporting the observed major is required/);

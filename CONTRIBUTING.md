@@ -71,9 +71,17 @@ may be ignored; required and consumed fields remain strict, and rejection or
 observed-empty counts must stay loud. A certified same-major build is writable;
 a same-major build whose probes all pass is `schema_attested`, but it is
 writable only when those probes cover the write path. Claude's probes do.
-Codex's bounded pre-write reads may include `initialize`, `thread/loaded/list`,
-and registration-time `thread/resume`, but never `turn/start`; untested Codex
-0.x therefore remains monitor-only pending a certified write schema. Failed
+Ordinary Codex compatibility and registration reads remain read-only: they may
+include `initialize`, `thread/loaded/list`, and registration-time
+`thread/resume`, but do not invoke `turn/start`. The optional Codex
+write-attestation probe is the sole exception. It may create at most one
+disposable broker-owned thread per attempt, under a bounded write fence with
+zero user-thread contact; every created probe thread is archived and confirmed
+absent from the loaded set. The probe resolves the pinned model's lowest
+advertised effort. Whenever that model/effort pin cannot resolve, it declines
+in a zero-spend fail-safe before creating any thread or model turn. Untested
+Codex 0.x therefore remains monitor-only pending a certified write schema.
+Failed
 probes, a different major, or version evidence that cannot establish a safe
 major leave only that
 provider degraded, monitor-only, and write-fenced while the broker,

@@ -78,10 +78,10 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /Compatibility is automatic and evidence-gated/);
   assert.match(skill, /certified same-major provider is writable/i);
   assert.match(skill, /schema-attested \(`schema_attested`\) and writable only when those probes cover the write path/);
-  assert.match(skill, /untested Codex 0\.x therefore stays monitor-only/);
+  assert.match(skill, /untested Codex 0\.x therefore stays monitor-only/i);
   assert.match(
     skill,
-    /bounded pre-write reads may include `initialize`, `thread\/loaded\/list`, and registration-time `thread\/resume`, but never `turn\/start`/,
+    /Ordinary Codex compatibility and registration reads remain read-only.{0,240}do not invoke `turn\/start`.{0,160}optional Codex write-attestation probe is the sole exception.{0,300}at most one disposable broker-owned thread per attempt.{0,180}bounded write fence with zero user-thread contact.{0,180}every created probe thread is archived and confirmed no longer loaded.{0,180}resolves the pinned model's lowest advertised effort.{0,180}Whenever that model\/effort pin cannot resolve, it declines in a zero-spend fail-safe before creating any thread or model turn/is,
   );
   assert.match(skill, /Failed probes, a different major/);
   assert.match(skill, /version evidence that cannot establish a safe major/);

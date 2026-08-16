@@ -33,10 +33,17 @@ Provider compatibility follows exact OS-boundary attestation, version-major
 evidence, and bounded live-schema probes. A certified same-major build is
 writable; a same-major build whose probes all pass is `schema_attested` and
 writable only when the probes cover the write path. Current Claude probes cover
-their native write path. Codex's bounded pre-write reads may include
-`initialize`, `thread/loaded/list`, and registration-time `thread/resume`, but
-never `turn/start`; an untested Codex 0.x build therefore stays monitor-only
-pending a certified write schema. Failed
+their native write path. Ordinary Codex compatibility and registration reads
+remain read-only: they may include `initialize`, `thread/loaded/list`, and
+registration-time `thread/resume`, but do not invoke `turn/start`. The optional
+Codex write-attestation probe is the sole exception. It may create at most one
+disposable broker-owned thread per attempt, under a bounded write fence with
+zero user-thread contact; every created probe thread is archived and confirmed
+absent from the loaded set. The probe resolves the pinned model's lowest
+advertised effort. Whenever that model/effort pin cannot resolve, it declines
+in a zero-spend fail-safe before creating any thread or model turn. An untested
+Codex 0.x build therefore stays monitor-only pending a certified write schema.
+Failed
 probes, a different major, or version evidence that
 cannot establish a safe major leave only that provider degraded, monitor-only,
 and write-fenced while the
@@ -748,11 +755,16 @@ any NVM-managed `codex` on the user's `PATH` (for example
 it, and does not edit a shell profile. The two installations therefore do not
 conflict.
 
-The connector has a fixed App Server method allowlist. It may initialize,
-observe loaded tasks, resume/unsubscribe the exact registered task, start a
-dedicated turn, and interrupt only its own confirmed turn. Archive, delete,
+The connector has a fixed App Server method allowlist. An ordinary connector
+may initialize, observe loaded tasks, resume/unsubscribe the exact registered
+task, start a dedicated turn, and interrupt only its own confirmed turn. The
+optional write-attestation probe alone may call `thread/archive`, only for its
+validated disposable broker-owned probe thread, then confirms that thread is
+absent from the loaded set. The probe resolves the pinned model's lowest
+advertised effort. Whenever that model/effort pin cannot resolve, it declines
+in a zero-spend fail-safe before creating any thread or model turn. Delete,
 history, shell, configuration, authentication, plugin, approval-response, and
-generic RPC methods are excluded.
+generic RPC methods remain excluded everywhere.
 
 The App Server capability first tested with 0.147.0 gates the privacy-preserving
 `thread/resume.excludeTurns` field behind initialization capability
@@ -769,9 +781,16 @@ gates. A replacement connector may initialize, list, resume, and expose
 normalized monitor state while still reporting its write gate as unavailable.
 A certified same-major Codex build may activate after the exact generation
 checks pass. A fully probed untested same-major `schema_attested` build does not
-authorize Codex writes. Its bounded pre-write reads may include `initialize`,
-`thread/loaded/list`, and registration-time `thread/resume`, but never
-`turn/start`. That build, failed probes, a different major, or version evidence
+authorize Codex writes. Its ordinary compatibility and registration reads
+remain read-only: they may include `initialize`, `thread/loaded/list`, and
+registration-time `thread/resume`, but do not invoke `turn/start`. The optional
+Codex write-attestation probe is the sole exception. It may create at most one
+disposable broker-owned thread per attempt, under a bounded write fence with
+zero user-thread contact; every created probe thread is archived and confirmed
+absent from the loaded set. The probe resolves the pinned model's lowest
+advertised effort. Whenever that model/effort pin cannot resolve, it declines
+in a zero-spend fail-safe before creating any thread or model turn. That build,
+failed probes, a different major, or version evidence
 that cannot establish a safe major remain on the monitor-only path and cannot
 be promoted by probes. No Claude-initiated turn
 can start until the controller activates that exact endpoint generation and
@@ -1049,9 +1068,16 @@ the preferred least-context setup, but it is not mandatory.
 
 - A certified same-major provider build is writable; a fully probed same-major
   build is `schema_attested` and writable only where the probes cover writes.
-  Codex's bounded pre-write reads may include `initialize`,
-  `thread/loaded/list`, and registration-time `thread/resume`, but never
-  `turn/start`; current untested Codex 0.x therefore stays monitor-only. Failed
+  Ordinary Codex compatibility and registration reads remain read-only: they
+  may include `initialize`, `thread/loaded/list`, and registration-time
+  `thread/resume`, but do not invoke `turn/start`. The optional Codex
+  write-attestation probe is the sole exception. It may create at most one
+  disposable broker-owned thread per attempt, under a bounded write fence with
+  zero user-thread contact; every created probe thread is archived and
+  confirmed absent from the loaded set. The probe resolves the pinned model's
+  lowest advertised effort. Whenever that model/effort pin cannot resolve, it
+  declines in a zero-spend fail-safe before creating any thread or model turn.
+  Current untested Codex 0.x therefore stays monitor-only. Failed
   probes, a different major, or
   version evidence that cannot establish a safe major leave only that provider
   monitor-only and write-fenced. Probes never promote across a major or
