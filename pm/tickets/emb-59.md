@@ -68,3 +68,13 @@ loaded-set cleanup confirmed; the persisted attestation + generation binding + T
 re-probes the exception, not the rule.** The completion report must state the observed archive count
 from the live proof. **This interpretation goes to the founder in the morning summary — if a hard
 one-per-version cap is wanted, that is a repriced follow-up with a different persistence design.**
+
+## Concurrent-seam partition (2026-08-16, PM-brokered)
+
+main (emb-59) reserves: codex-app-server.ts entirely; in providers.ts only imports/constants for
+the write-probe result, LocalCodexGatewayProvider compatibility-probe state,
+runCompatibilityProbes/runCompatibilityProbesFor, and an owned-cwd helper adjacent; in service.ts
+only the GatewayProviderAdapter compatibility-probe interface/context and
+runAutomaticCompatibilityProbesLocked. swe3 (emb-62) owns: route recovery, endpoint-transition,
+dispatch, and delivery-settlement neighborhoods. Neither enters the other's symbols; any collision
+stops and contests through the PM. Landing order decided by the PM at handoff time.
