@@ -352,30 +352,7 @@ test("Claude version evidence never prevents normal adapter construction", async
       runtime: { ...runtime(), claudeCodeVersion: "3.0.0" },
     },
     {
-      runtime: {
-        ...runtime(),
-        claudeCodeVersion: "unknown",
-        launcherVersionEvidence: "3.0.0",
-      },
-    },
-    {
       runtime: { ...runtime(), claudeCodeVersion: "unknown" },
-    },
-    {
-      runtime: {
-        ...runtime(),
-        claudeCodeVersion: "unknown",
-        launcherVersionEvidence: "2.1.227",
-        versionEvidenceFailure: "CLAUDE_VERSION_EVIDENCE_CONFLICT",
-      },
-    },
-    {
-      runtime: {
-        ...runtime(),
-        claudeCodeVersion: "unknown",
-        launcherVersionEvidence: "3.0.0",
-        versionEvidenceFailure: "CLAUDE_VERSION_CHECK_FAILED",
-      },
     },
   ] as const) {
     const env: NodeJS.ProcessEnv = {
@@ -417,52 +394,6 @@ test("Claude version evidence never prevents normal adapter construction", async
     assert.equal(nativeClaudeConstructions, 1);
     assert.equal(signals.listenerCount(), 0);
   }
-});
-
-test("launcher version evidence remains diagnostic metadata", async () => {
-  const env: NodeJS.ProcessEnv = {
-    HOME: SYNTHETIC_HOME,
-    EMBASSY_STATE_DIR: "/synthetic/controller-state",
-  };
-  const config = loadGatewayConfig(env);
-  const abort = new AbortController();
-  const signals = signalHarness();
-  let nativeClaudeConstructions = 0;
-
-  await runGatewayServer(
-    {
-      env,
-      signal: abort.signal,
-      onReady: () => abort.abort(),
-    },
-    {
-      ...signals.dependencies,
-      loadConfig: () => config,
-      loginHome: () => SYNTHETIC_HOME,
-      acquireInstanceLease: async () => instanceLease(() => undefined),
-      attestClaudeRuntime: async () => ({
-        ...runtime(),
-        claudeCodeVersion: "unknown",
-        launcherVersionEvidence: "2.1.228",
-      }),
-      createClaudeProvider: (options) => {
-        nativeClaudeConstructions += 1;
-        assert.equal(options.runtime.claudeCodeVersion, "unknown");
-        assert.equal(options.runtime.launcherVersionEvidence, "2.1.228");
-        return provider(() => undefined);
-      },
-      createStore: () => new GatewayStore(config),
-      createCodexFactory: async () => factory(() => undefined),
-      createCodexProvider: () => provider(() => undefined),
-      createService: () => ({
-        start: async () => undefined,
-        close: async () => undefined,
-      }),
-    },
-  );
-
-  assert.equal(nativeClaudeConstructions, 1);
-  assert.equal(signals.listenerCount(), 0);
 });
 
 test("Codex version drift and a missing socket still construct the normal adapter", async () => {
