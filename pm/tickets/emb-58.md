@@ -32,3 +32,21 @@ founder ruling and needs this ticket's plumbing first — main runs emb-58 then 
 separate handoffs. Scope contract (emb-58): src/gateway/compatibility.ts, src/gateway/types.ts,
 src/gateway/dashboard-model.ts, dashboard copy files (en/zh-CN), live-dashboard-app/app-types.d.ts,
 test/**. Outside: contest before writing.
+
+## Contest and ruling (2026-08-16)
+
+**Contest (main, before any edit)**: promise 3 (writes-covered tier-pill variant) cannot be
+satisfied inside the declared window — both renderers resolve `compatibilityTier.${tier}` directly
+(static: dashboard.ts:633; live: live-dashboard-app/tab-diagnostics.tsx:240), so model/copy changes
+alone cannot select a sibling label without falsifying the closed tier union or changing all
+schema_attested copy globally. Proposed: derived `writesCovered` on the model row; renderers choose
+the sibling key.
+
+**Ruling: option (a) ACCEPTED — window expanded** to add `src/gateway/dashboard.ts`,
+`src/gateway/live-dashboard-app/tab-diagnostics.tsx`, and their focused tests. Both render sites
+verified by PM. The proposed seam (derived flag on the model row, renderer selects the key) is the
+right shape — it matches promise 2's derived-only rule. **One correction**: option (b)'s premise is
+wrong — swe3's concurrent emb-52 window contains no dashboard files (its scope is runtime/route
+modules only), so there is no live-app collision and no sequencing needed. Budget unchanged: the
+design's 49A estimate already priced "dashboard model + render." Contest record: 7/7 engineer-correct
+on the core claim; the collision half was checked and cleared rather than inherited.
