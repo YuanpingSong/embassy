@@ -3,7 +3,7 @@ id: emb-67
 title: ACP client transport — minimal, ceremony-free, spawn-owned
 kind: normal
 size: 5
-status: dispatched
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -58,3 +58,25 @@ approvals in another session's environment — and ruled unnecessary: emb-67's
 gate is unit-test counts; live-broker checks are PM-side at landing. Standing
 offer recorded: engineer states WHAT live data it needs and why; PM runs it
 and returns output. Codex-side approvals surfaced to founder as operator.
+
+## Landed (2026-08-16)
+
+SLICE READY v1 (swe3, ~35 min from dispatch): base ebb65b9 verified, patch
+frozen (SHA-256 27968aa8…), diffstat exact (+962/-0, 3 files). PM gate v1:
+isolated worktree, check 845/0, soak 1/0. Code review CLEAN on all
+load-bearing requirements; TWO corrections issued: F1 close-and-inform on
+unsupported negotiated protocolVersion (spec SHOULD + specced surface);
+F2 byte cap on chunk accumulation (KEEP-list anti-runaway gap — the client
+is the only layer that sees chunks).
+
+SLICE READY v2 (one correction cycle): patch frozen (SHA-256 2f368edb…),
++1054/-0. Interdiff verified = exactly F1+F2: version mismatch throws one
+clear both-versions error inside initialize (failure path kills the owned
+child); ACP_MAX_REPLY_BYTES = 64 KiB with UTF-8 continuation-byte walk-back,
+post-cap chunks ignored, textTruncated on every receipt variant; two new
+tests. PM gate v2: isolated worktree, check 847 pass / 0 fail, soak 1/0
+(counts from output). Landed on dev as be87554.
+
+Note for the record: emb-70's Codex-side user authorization was reported
+received by main during this landing (its environment's security-boundary
+gate, adjudicated there); emb-70 resumed from its clean lane.
