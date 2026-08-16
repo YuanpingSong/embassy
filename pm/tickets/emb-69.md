@@ -3,7 +3,7 @@ id: emb-69
 title: DeepSeek and Grok Build as routable ACP providers
 kind: normal
 size: 3
-status: dispatched
+status: landed
 release: v1.7
 updated: 2026-08-16
 ---
@@ -67,3 +67,23 @@ added source + ~180–230 added tests. Ceiling revised to ≤800 changed lines
 total (adds+deletes), behavior level and window unchanged, actual counts at
 freeze. Cap-from-remainder-map rule working as designed on its third use.
 Ledger: 14/14.
+
+## Landed (2026-08-16)
+
+SLICE READY from lane /private/tmp/emb69-freeze at exact tip a0ec524;
++556/−241 = 797 changed (≤800), 10 files, one concept. Freeze-note anomaly
+resolved: the lane's "unrelated histories" was an artifact of its temp-lane
+provisioning — PM verified 60848a1 is an ancestor of both branches in the
+real repo; the engineer's remedy (byte-identical base-blob proof + transplant
+to the true tip) was sound. PM review: COARSE mapping exact (deepseek
+end_turn → unconfirmed/ACP_OUTCOME_COARSE, grok delivered, cancelled stays);
+backoff ladder verbatim (250/500/1000/2000/5000); config defaults boot-
+register dsh-main/grok-main under the prefix table with launch defaults in
+reviewed server assembly (Grok = @xai-official/grok@1.0.5 agent stdio, the
+registry's exact pin, test-asserted); DeepSeek launch = converted
+deepseek-detect resolver (DSH_HOME/~/.dsh root, pnpm --dir <root> run
+demo:acp only); credential sentinel test plants a real 0600 secret and
+proves it unread; acp-provider.ts is 212 lines. PM gate: isolated worktree,
+check 738 pass / 0 fail (+3 net tests), soak 1/0, every accepted message
+settled exactly once. Landed as one commit from the frozen patch
+(SHA 53acb2d8…). v1.7's CODE IS COMPLETE — emb-72 surfaces remain.
