@@ -59,6 +59,7 @@ import {
   createCodexRegistrationGeneration,
   isCodexRegistrationGeneration,
 } from "./codex-registration-generation.js";
+import type { CodexWriteCompatibilityProbeResult } from "./codex-app-server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 import {
   GatewayStore,
@@ -310,6 +311,14 @@ export type GatewayAdapterDispatchInput = {
   queuedAhead?: number;
 };
 
+export type GatewayCompatibilityProbeContext = Readonly<{
+  stateRoot: string;
+  forbiddenCodexThreadIds: readonly string[];
+}>;
+
+export type GatewayWriteCompatibilityProbeObservation =
+  Readonly<CodexWriteCompatibilityProbeResult>;
+
 /**
  * Narrow provider boundary. Production adapters wrap ClaudePeerAdapter or one
  * exact CodexAppServerConnector; tests use in-memory fakes. Implementations
@@ -321,7 +330,13 @@ export interface GatewayProviderAdapter {
   readonly protocolVersion: string;
   /** Version identity is cheap; bounded probes run fresh on every startup. */
   compatibilitySurface?(): CompatibilitySurfaceObservation;
-  runCompatibilityProbes?(): Promise<readonly CompatibilityProbeResult[]>;
+  runCompatibilityProbes?(context?: GatewayCompatibilityProbeContext): Promise<readonly CompatibilityProbeResult[]>;
+  /** Process-local write-probe cost/failure evidence; never persisted or projected. */
+  latestWriteCompatibilityProbeObservation?(
+    endpointGeneration: string,
+  ):
+    | GatewayWriteCompatibilityProbeObservation
+    | undefined;
   /** Latest already-read Claude registry evidence; this accessor performs no I/O. */
   latestRegistryObservation?(): GatewayAdapterRegistryObservation | undefined;
   acceptCompatibilityAttestation(
@@ -1308,6 +1323,13 @@ export class GatewayService {
       );
     }
 
+    const forbiddenCodexThreadIds = (
+      await this.store.inspectPrivateCodexRoutes()
+    ).map((route) => route.binding.routeHandle);
+    const probeContext: GatewayCompatibilityProbeContext = {
+      stateRoot: this.store.rootDir,
+      forbiddenCodexThreadIds,
+    };
     const attestations: CompatibilityAttestation[] = [];
     for (const definition of this.compatibilitySurfaceDefinitions) {
       const { surface } = definition;
@@ -1319,8 +1341,24 @@ export class GatewayService {
           "A required compatibility surface is unavailable.",
         );
       }
-      const probes = await entry.observer.runCompatibilityProbes();
+      const probes = entry.adapter === undefined
+        ? await entry.observer.runCompatibilityProbes()
+        : await entry.adapter.runCompatibilityProbes!(probeContext);
       if (entry.adapter !== undefined) {
+        const writeProbe =
+          entry.adapter.latestWriteCompatibilityProbeObservation?.(
+            entry.adapter.identity.endpointGeneration,
+          );
+        if (writeProbe?.outcome === "fail") {
+          this.addRuntimeAlert(
+            writeProbe.safeErrorCode,
+            writeProbe.safeErrorCode === "CODEX_WRITE_PROBE_TOOL_ACTIVITY_OBSERVED" ||
+              writeProbe.safeErrorCode === "CODEX_WRITE_PROBE_CLEANUP_UNCONFIRMED"
+              ? "error"
+              : "warning",
+            { provider: "codex", host: entry.adapter.identity.hostId },
+          );
+        }
         this.captureRegistryObservation(
           entry.adapter,
           entry.adapter.latestRegistryObservation?.(),
