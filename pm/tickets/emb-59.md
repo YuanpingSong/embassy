@@ -3,7 +3,7 @@ id: emb-59
 title: Bounded Codex write probe (49B): records evidence, unlocks nothing
 kind: sensitive
 size: 5
-status: dispatched
+status: landed
 release: v1.6
 updated: 2026-08-16
 ---
@@ -550,3 +550,12 @@ plus an over-broad tool-notification gate; both corrected and regression-tested 
 subset atop 316/316 focused). **Cap revised ≤1,150** on the standing precedent: the delta is the
 F6 ruling implemented correctly, and merging the differently-classified root/child attestors would
 recreate the laundering the challenger just killed. Exact actuals in SLICE READY.
+
+## Completion (2026-08-16) — LANDED
+
+PM authoritative pair on the frozen diff (SHA-256 verified against the handoff): check 833/833,
+soak 1/1, zero not-ok lines. Correction shapes spot-read (boot-local contexts, validated-only
+archive, four-errno transient split). **Live proof: PASS, first attempt — measured token count
+17,942; one disposable thread created and archive-confirmed; settings echo observed and matched
+the founder's lowest-advertised policy.** That number is the price of write authority per Codex
+generation, now a measured fact. emb-60's preconditions are fully met.
