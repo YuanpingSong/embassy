@@ -541,3 +541,12 @@ errno/trust split). **Cap revised to ≤1,110 post-diet** on the standing ground
 ruled finding yields — each closes a reproduced-or-traced defect. Exact final actuals in the
 replacement SLICE READY; the refusal to compress away assertions or disguise overage is the
 required posture, as before.
+
+## Correction-budget update ruling (2026-08-16)
+
+Main's internal challenger found the first F6 implementation laundered disposable-CHILD
+uid/mode/canonicality changes into safe results — the wrong side of the ratified trust line —
+plus an over-broad tool-notification gate; both corrected and regression-tested (27/27 adversarial
+subset atop 316/316 focused). **Cap revised ≤1,150** on the standing precedent: the delta is the
+F6 ruling implemented correctly, and merging the differently-classified root/child attestors would
+recreate the laundering the challenger just killed. Exact actuals in SLICE READY.
