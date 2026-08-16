@@ -50,3 +50,21 @@ MUST appear in the completion report and will be surfaced to the founder before 
 Durable cost observability, if ever wanted, is its own priced ticket.
 
 Budget unchanged. Implementation begins when emb-52 lands and the tree is clean.
+
+## Cardinality ruling (2026-08-16) — PM interpretation of a founder sentence, flagged for morning ratification
+
+**Contest (main)**: the founder ruling's wording ("one archived probe thread per Codex version") and
+the specified bound (one attempt per (version, endpointGeneration) per broker process) are different
+cardinalities — ordinary broker/App Server restarts can leave multiple archives per version, and a
+literal one-per-version lifetime cap needs new persistence + history enumeration, outside budget and
+against the freshness rule.
+
+**Ruling: main's recommendation ADOPTED.** The founder sentence approves the artifact class, not a
+lifetime cardinality guarantee — read with its own rationale ("token consumption immaterial, bias
+toward building and shipping if no other issues"), the intent is acceptance of small durable residue,
+not a negotiated cap. The shipped bound is stated honestly: **at most one probe attempt per
+(version, endpointGeneration) per broker process; every created probe thread is archived and its
+loaded-set cleanup confirmed; the persisted attestation + generation binding + TTL make boot-time
+re-probes the exception, not the rule.** The completion report must state the observed archive count
+from the live proof. **This interpretation goes to the founder in the morning summary — if a hard
+one-per-version cap is wanted, that is a repriced follow-up with a different persistence design.**
