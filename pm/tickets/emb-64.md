@@ -3,7 +3,7 @@ id: emb-64
 title: Published no-write claims must survive the write probe (docs truth sweep)
 kind: docs
 size: 2
-status: dispatched
+status: review
 release: v1.6
 updated: 2026-08-16
 ---
@@ -76,3 +76,11 @@ Replace the posture sentence on every surface carrying it with the CONDITIONAL f
 worlds: the probe resolves the pinned model's lowest advertised effort; whenever the pin cannot
 resolve, it declines in a zero-spend fail-safe before any thread or turn is created. Then re-run
 the sweeps + contracts and hand back.
+
+## Landing state (2026-08-16)
+
+Accepted after two window expansions and one posture correction: PM independent sweeps (only
+survivor = DECLINED.md's approved still-true statement), copy sampled and read, contracts 12/12,
+lane checks 773/773 (one disclosed flake of the known 1s timing test whose fix rides emb-59's
+unlanded lane — rerun green). 172/200, zero source lines, zero concepts. Committed locally on the
+drill-gated stack, adjacent to emb-59 per the ordering requirement.
