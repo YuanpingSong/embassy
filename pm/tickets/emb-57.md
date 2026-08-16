@@ -24,3 +24,9 @@ updated: 2026-08-16
 ## Background
 
 From the emb-54 report §3: certified-set entries are themselves pattern-checked (compatibility.ts:208) and the inventory must be nonempty (:207) — both interact with any prerelease decision.
+## Sequencing note (2026-08-16, from emb-49 design report §8)
+
+Rule 3 (0.x minors are major-equivalent) is correct on safety and for DeepSeek — but it deletes
+exactly the population (Codex same-major untested builds) that write attestation serves. Landing
+emb-57 without emb-60 converts a soft fence into a hard one: every Codex minor bump would mean
+monitor-only until an Embassy release. Decide rule 3 first, knowing emb-60 is the release valve.
