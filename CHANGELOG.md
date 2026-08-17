@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.9.0] - 2026-08-17
+
+### Added
+
+- **SSH broker federation.** Declare peers in `<stateDir>/nodes.json` (each token is an OpenSSH Host alias; your SSH config owns keys, users, and ports — Embassy opens no listener and adds no auth system). Brokers exchange a strict three-method protocol (`initialize`, `catalog/get`, `handoff`) over `ssh <node> embassy peer-stdio`; remote routes appear as `alias@host` mirrors behind opaque references, consent edges have exactly one owner broker, and a handoff is `delivered` when the destination durably accepts it — after which the destination owns provider delivery. Anything lost after authorization settles ambiguous and is never replayed. Same-provider directions across different hosts are now routable; one-hop mesh only, no forwarding.
+- **Universal shell peer ingress.** Any harness that can run a shell can be a Embassy peer: `embassy register-peer` mints a token (only its hash is ever persisted), `embassy await` long-polls the peer's ordinary durable queue with flush-before-receipt settlement, and the alias+token principal (supplied via stdin per call) works even in harnesses that give every tool call a fresh shell. One new safe code: `PEER_NOT_AWAITING`.
+- SECURITY.md now documents the configured-SSH networking doctrine: user-owned peers only, local attestation unchanged, body-free network projections, ambiguity never replays.
+
 ## [1.8.2] - 2026-08-17
 
 ### Fixed
