@@ -75,3 +75,7 @@ frame, single TTL-bounded prepared item, opaque ID + exact evidence;
 perform_dispatch: consume exactly once; denial/expiry/close cancels;
 foreign/duplicate IDs fail closed). Peer-only compliance rejected as
 test-only theatre. Revised delta +180–320 src / +220–380 tests, in-cap.
+Evidence note CONFIRMED: per the accepted design (report lines 123/283/297),
+Claude mailbox write-completion = terminal delivered; no onAccepted, no
+later receipt authority; ACP shares armed→terminal; Codex alone keeps the
+intermediate accepted. Ruling A is deletion-led.
