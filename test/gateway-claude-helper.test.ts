@@ -256,10 +256,12 @@ test("production helper child owns TTL and non-consuming foreign preparation fen
     });
   });
   const routeHandle = "00000000-0000-7000-8000-000000000111";
-  await writeFile(path.join(sessionsDir, `${peer.pid}.json`), JSON.stringify({ pid: peer.pid, sessionId: routeHandle,
+  const recordPath = path.join(sessionsDir, `${peer.pid}.json`);
+  const record = { pid: peer.pid, sessionId: routeHandle,
     cwd: workspace, startedAt: Date.now(), procStart: ready.procStart, version: "test", peerProtocol: 1,
     kind: "interactive", entrypoint: "cli", messagingSocketPath: ready.socketPath, name: "claude-fake", status: "idle",
-    updatedAt: Date.now(), statusUpdatedAt: Date.now() }), { mode: 0o600 });
+    updatedAt: Date.now(), statusUpdatedAt: Date.now() };
+  await writeFile(recordPath, JSON.stringify(record), { mode: 0o600 });
   let helper: ClaudeNativeHelperClient | undefined;
   const command = { ...prepare, binding: { ...route, routeHandle }, sourceAlias: "codex-real@this-mac",
     targetAlias: "claude-fake@this-mac", stateRoot, deadlineAt: new Date(Date.now() + 30_000).toISOString() } as const;
@@ -281,6 +283,14 @@ test("production helper child owns TTL and non-consuming foreign preparation fen
       assert.deepEqual(await helper.request({ method, preparationId: held.preparationId }),
         method === "perform_dispatch" ? { state: "delivered" } : { ok: true });
     }
+    await chmod(workspace, 0o777);
+    await assert.rejects(helper.request({ ...command, messageId: "workspace-drift" }),
+      (error: unknown) => error instanceof BridgeError && error.code === "CLAUDE_PEER_WORKSPACE_UNSAFE");
+    await chmod(workspace, 0o700); assert.equal(wires.length, 1);
+    await writeFile(recordPath, JSON.stringify({ ...record,
+      sessionId: "00000000-0000-7000-8000-000000000222", updatedAt: Date.now() }), { mode: 0o600 });
+    await assert.rejects(helper.request({ ...command, messageId: "stale-uuid" }),
+      (error: unknown) => error instanceof BridgeError && error.code === "CLAUDE_ROUTE_MISMATCH");
     await delay(20); assert.equal(wires.length, 1);
   } finally {
     await helper?.forceClose().catch(() => undefined); if (peer.connected) peer.send("close");

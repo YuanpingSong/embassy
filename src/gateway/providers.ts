@@ -152,6 +152,8 @@ type ClaudePeerFactory = (
 export type LocalClaudeGatewayProviderOptions = {
   /** Exact result of attestClaudePeerRuntime; paths are never rediscovered. */
   runtime: AttestedClaudePeerRuntime;
+  /** Fixed controller-owned root re-attested by each selected-route dispatch. */
+  stateRoot: string;
   hostId?: "this-mac";
   /** Locale for bounded notices written into native Claude sessions. */
   locale?: DashboardLocale;
@@ -300,6 +302,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   readonly protocolVersion = `${CLAUDE_PEER_COMPATIBILITY.peerProtocol}`;
 
   private readonly peer: ClaudePeerAdapter;
+  private readonly stateRoot: string;
   private readonly maxPending: number;
   private readonly discoveryPollMs: number;
   private readonly now: () => number;
@@ -318,6 +321,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
 
   constructor(options: LocalClaudeGatewayProviderOptions) {
     validateClaudeRuntimePathEvidence(options.runtime);
+    if (!path.isAbsolute(options.stateRoot) || options.stateRoot.includes("\0")) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_PROVIDER_CONFIGURATION",
+        "The Claude provider state root must be an absolute path.",
+      );
+    }
     if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
       throw new BridgeError(
         "DASHBOARD_LOCALE_UNSUPPORTED",
@@ -329,6 +338,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       provider: "claude",
       hostId,
     };
+    this.stateRoot = options.stateRoot;
     this.maxPending = positiveBounded(
       options.maxPendingMessages,
       MAX_CLAUDE_PENDING,
@@ -466,9 +476,9 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.selected.set(input.routeHandle, {
       alias: input.alias,
       registrationId: input.registrationId,
+      stateRoot: this.stateRoot,
       dispatchEpoch: route?.dispatchEpoch ?? 0,
       observationDirty: route?.observationDirty ?? false,
-      ...(route?.stateRoot === undefined ? {} : { stateRoot: route.stateRoot }),
       ...(route?.observation === undefined ? {} : { observation: route.observation }),
     });
   }
