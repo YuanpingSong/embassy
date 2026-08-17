@@ -28,3 +28,31 @@ HOLD items byte-hold, INTENTIONAL/DELETE items match the preclassification.
 figures are estimates, per standing rule). The deterministic 90s-pause
 headline test lands here. Live drill (state conversion, split-brain matrix,
 restart taxonomy) is PM-side at landing under itemized standing authority.
+
+## Pre-cut remainder map + cap + six bindings RULED (2026-08-16 night)
+
+Engineer's read-only map at exact base d5d983a pinned the accepted-core
+metric to a reproducible command (39,883 physical lines; the command is the
+metric of record for this slice). CAP GRANTED as requested: ≤10,000 added
+source (src/**+scripts/**), ≤7,000 added tests, deletions unbounded,
+REQUIRED net core reduction ≥10,000, REQUIRED post-slice core ≤29,000;
+projections +7.2–9.85k/−20.4–23.3k source, post-slice 25.5–27k (stages 6–8
+own the remaining path to 18,850). Self-binding cap shape (net-reduction
+floor + ceiling) noted for the work model as the new standard.
+
+SIX BINDINGS CONFIRMED: R1 steer on the exact active operation connector
+(cap 3, thread+turn+registration+attempt; observation connector = candidates
+never authority); R2 turn/steer correlated rejection = AMBIGUOUS no-replay
+unless the landing gate proves atomic no-effect; R3 closed clean-prewrite
+retry enumeration (additions require a ruling); R4 suffix-only v2 terminal
+history, no fabricated IDs, v2 inFlight → terminal ambiguous; R5 packaged
+offline `embassy convert-state-v2-to-v3` (fsynced 0600 backup, one strict
+pass, never starts providers; runtime = v3-only +
+GATEWAY_STATE_CONVERSION_REQUIRED pre-provider — structurally fixes the
+cleanup-masking scar; FLAGGED to founder: deliberate divergence from the
+v1→v2 re-pair precedent, justified by v3 preserving in-flight mail/consent);
+R6 atomic --succeeds (queued/reserved→cancelled ROUTE_UNREGISTERED,
+armed→ambiguous, accepted→unconfirmed, idempotent retry, no journal).
+Mechanical must-have confirmed: attempt-bound correlated acceptance before
+terminal. Four R4 review rounds + 90s headline + byte-held emb-76 goldens +
+HOLD-proven-before-deletion accepted as the verification price.
