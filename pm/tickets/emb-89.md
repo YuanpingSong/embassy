@@ -65,3 +65,45 @@ riders: (a) the freeze must itemize src changes per file so taste can
 verify every touch is an identity seam, no drive-bys; (b) this is the
 LAST ceiling escalation — a third re-price converts to a re-scope
 discussion (slice split), not a bump.
+
+## Gate rulings (v1 freeze, 2026-08-17)
+
+Independent gate: SHA 8395b412; src 223/≤235 net +1, tests/docs 220/≤220,
+total 443/≤500, all reproduced; per-file itemization matches numstat;
+554/554. Adversarial: GO — single identity source with zero surviving
+fallbacks; refusal purity verified on empty AND established installs
+(fires ahead of lease acquisition); host rename refuses reversibly with
+state intact; screen asserted exactly both locales with a private-message
+canary. Taste: land-with-corrections — do-not-golf passed emphatically
+(TWO this-mac attestation bypasses deleted, new helper host-mismatch
+refusal added, literal checks degraded to pattern not typeof); rider
+satisfied, all 16 src files identity seams, no drive-bys.
+
+**Record correction**: taste's "untracked debris" finding
+(test/zz-emb89.test.ts in the gate worktree) was the adversarial
+reviewer's own attack suite left in shared gate infrastructure — PM
+cleaned it; the engineer's "no untracked files" freeze claim stands; the
+ceiling-truncation inference is withdrawn.
+
+**Rulings**:
+1. store.ts:2793 ownership-guard relaxation (adopt pre-existing state dir
+   containing exactly nodes.json) RETROACTIVELY AUTHORIZED — design-
+   forced by the documented boot order — CONTINGENT on test coverage:
+   the guard must be exercised both ways (tolerates only-nodes.json;
+   refuses any other pre-existing entry).
+2. CORRECTION BUNDLE before landing: (a) the guard tests above; (b) a
+   negative test for the new CLAUDE_ROUTE_MISMATCH host check
+   (claude-helper.ts:93); (c) the refusal hint must NAME the state
+   directory path (exact-fix standard; both locales); (d) delete the
+   three stale configured:true fixtures (gateway-cli.test.ts:2010, 2028,
+   2050). Optional, engineer's call: dedupe the "nodes.json" literal.
+3. Ceilings for the bundle: tests/docs raised to ≤260 (the bundle is
+   test-heavy by construction — this is not an emb-89 third escalation,
+   it is PM-added scope); src ceiling unchanged 235 (223 + ~6 copy).
+4. Docs line for the pre-existing de-federation sharp edge (remove a
+   peer → mirrors persist → reset required) — one sentence in the
+   federation section, ride this bundle.
+
+Adversarial notes recorded: de-federation edge (pre-existing, not a
+regression), error-ordering nit (cosmetic, declined). Gauntlet-file
+entries: bare-HOME boot opacity; de-federation reset severity.
