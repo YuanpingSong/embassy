@@ -23,7 +23,10 @@ the official installer** (`curl -fsSL https://claude.ai/install.sh | bash` —
 Embassy attests the in-home launcher layout; Homebrew installs live outside
 your home directory and fail `CLAUDE_EXECUTABLE_OUTSIDE_HOME` by design) and
 **a managed Codex App Server standalone install** (created by the ChatGPT
-desktop app or `codex app-server daemon start`). Without either, `embassy
+desktop app, or by the official installer `curl -fsSL
+https://chatgpt.com/codex/install.sh | sh` followed by `codex app-server
+daemon start` — the daemon alone does not provision the layout). Without
+either, `embassy
 serve` currently refuses to boot — v1.8 relaxes both to per-provider
 degradation. pnpm users: pin the version (`pnpm install -g
 agent-embassy@latest` can resolve stale metadata; prefer an explicit
