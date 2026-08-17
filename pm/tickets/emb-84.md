@@ -3,7 +3,7 @@ id: emb-84
 title: peer-stdio collapses broker rejections into "Local broker unavailable"
 kind: bug
 size: 2
-status: dispatched
+status: landed
 release: v1.9.3
 updated: 2026-08-17
 ---
@@ -64,3 +64,12 @@ the line. Taste: land-with-corrections (record-only). Rulings:
    catalog/get serves it, cleared thereafter) was unasked-for. Authorized
    retroactively CONTINGENT on a test asserting the cached-then-cleared
    sequence; otherwise remove it. Engineer's choice.
+
+## Landing (v2 freeze, 2026-08-17)
+
+Landed in v1.9.3 (e0d8f3b) with emb-85; see emb-85 landing record for the
+combined gate. emb-84 specifics: initialize sources broker authority;
+three distinguishable peer errors (-32603 unreachable / -32001
+not-configured / -32000 refused); one-shot catalog cache retained with
+cached-then-cleared test evidence (one control request after initialize,
+cache consumed on first catalog/get, fresh request on second).

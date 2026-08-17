@@ -3,7 +3,7 @@ id: emb-85
 title: v2→v3 converter emits state the same-version loader rejects (host identity never reconciled)
 kind: bug
 size: 2
-status: dispatched
+status: landed
 release: v1.9.3
 updated: 2026-08-17
 ---
@@ -92,3 +92,21 @@ naming footgun.
 +17 (total ≤ +77, under the original +120); tests uncapped within
 reason; re-freeze with new SHA; combined E2 changed-lines ceiling lifted
 to 320 to accommodate H1+N1+cache-test.
+
+## Landing (v2 freeze, 2026-08-17)
+
+v2 correction bundle: GO. Patch SHA 76e9e379; source net +45 (+77 cap),
+combined 263 changed (320 ceiling); independent gate 575/575. Adversarial
+re-verify: H1/N1 closed — recovery reads and mutates the INSTALLED v3;
+byte-verified mode-0600 gateway-state.v3.backup.json written before any
+mutation; whole-JSON-value reference scan (stronger than the enumerated
+version reviewed); armed/history ablations refuse with installed bytes
+unchanged; no-v2-backup case recovers in place; original repro correctly
+inverted; 10 seam attacks clean (stale-backup mismatch refusal, resume,
+idempotence, complete-backup-on-refusal). Catalog cache kept with
+cached-then-cleared test. Zero new public concepts confirmed
+(GATEWAY_STATE_BACKUP_MISMATCH pre-existing at base). Released as v1.9.3
+(commit e0d8f3b). Deferred nits recorded in gate rulings thread: v3
+backup filename is single-use (safe-direction block, ergonomics ruling
+later); ENOENT guard coupling; converter lock lacks stale-pid reaping
+(pre-existing).
