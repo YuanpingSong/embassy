@@ -53,3 +53,15 @@ emb-88 screen pattern; overloading catch-all
 INVALID_GATEWAY_CONFIGURATION would either fire the hint on unrelated
 config failures or require message-based discrimination. Concept count
 for the slice: one.
+
+## Second contest ruling (2026-08-17)
+
+Measured at checkpoint: 203 src changed (net -5, 13 files), excess from
+signature/call-site changes forced by making identity required — the
+point of the slice, and do-not-golf bars compressing trust seams to fit
+a bucket. GRANTED: src changed ≤235 (target ≤225); tests/docs ≤220 and
+E3 ≤500 unchanged; net -5 already meets the original expectation. Two
+riders: (a) the freeze must itemize src changes per file so taste can
+verify every touch is an identity seam, no drive-bys; (b) this is the
+LAST ceiling escalation — a third re-price converts to a re-scope
+discussion (slice split), not a bump.
