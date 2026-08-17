@@ -10,7 +10,7 @@ import { deliveryStates, directionId, gatewayActivityActions, gatewayActivityKin
   gatewayProviders, gatewayPublicSnapshotLimits, gatewayRegistrationIngressPrefixes,
   parseDirection, projectGatewayPublicSnapshot, routeRegistrationModes } from "./types.js";
 import type { AcceptMessageInput, AcceptMessageResult, AuthorizeMessageInput,
-  AuthorizeMessageResult, DedupeRecord, DeliveryState, EnqueueMessageInput,
+  AuthorizeMessageResult, DeadlinePressureBucket, DedupeRecord, DeliveryState, EnqueueMessageInput,
   EnqueueMessageResult, EnqueueNativeIngressInput, EnqueueNativeReplyInput,
   GatewayAccounting, GatewayConsentEdgeRecord, GatewayConsentEndpoint,
   GatewayLegacyMessageActivity, GatewayMessageRecord, GatewayMessageState,
@@ -1718,6 +1718,23 @@ export class GatewayStore {
       const messages = [...legacyEvents, ...currentEvents]
         .sort((left, right) => left.sequence - right.sequence)
         .slice(-gatewayPublicSnapshotLimits.messages);
+      const pressureBuckets: DeadlinePressureBucket[] = [
+        { bucket: "under_1m", settled: 0, expired: 0 },
+        { bucket: "1m_to_5m", settled: 0, expired: 0 },
+        { bucket: "5m_to_15m", settled: 0, expired: 0 },
+        { bucket: "15m_to_60m", settled: 0, expired: 0 },
+        { bucket: "over_60m", settled: 0, expired: 0 },
+      ];
+      const terminalEvidence = messages.filter((event) =>
+        event.latencyMs !== undefined && ["delivered", "unconfirmed", "failed", "ambiguous",
+          "expired", "cancelled", "abandoned"].includes(event.state));
+      for (const event of terminalEvidence) {
+        const latency = event.latencyMs ?? 0;
+        const index = latency < 60_000 ? 0 : latency < 300_000 ? 1 :
+          latency < 900_000 ? 2 : latency < 3_600_000 ? 3 : 4;
+        pressureBuckets[index]!.settled += 1;
+        if (event.state === "expired") pressureBuckets[index]!.expired += 1;
+      }
       return projectGatewayPublicSnapshot({
         schemaVersion: 2, generatedAt: now.toISOString(),
         inboundMode: this.config.inboundMode, health: "offline",
@@ -1730,20 +1747,9 @@ export class GatewayStore {
           ...(messages[0]?.timestamp === undefined
             ? {}
             : { retainedSince: messages[0].timestamp }),
-          terminalEvents: messages.filter((event) =>
-            [
-              "delivered",
-              "unconfirmed",
-              "failed",
-              "ambiguous",
-              "expired",
-              "cancelled",
-              "abandoned",
-            ].includes(event.state),
-          ).length,
-          expiredEvents: messages.filter((event) => event.state === "expired")
-            .length,
-          buckets: [],
+          terminalEvents: terminalEvidence.length,
+          expiredEvents: terminalEvidence.filter((event) => event.state === "expired").length,
+          buckets: pressureBuckets,
         },
         messages,
         accounting: { ...state.accounting }, alerts: [],

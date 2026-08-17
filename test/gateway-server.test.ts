@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
@@ -8,7 +9,9 @@ import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js
 import { LocalCodexTransportError, managedCodexControlSocketPath,
   type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
+import { runGatewayCli, gatewayCliExitCodes } from "../src/gateway/cli.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
+import { sendGatewayControlRequest } from "../src/gateway/control.js";
 import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
 import type {
@@ -20,6 +23,7 @@ import {
   type GatewayServerDependencies,
   type GatewayServerReadyResult,
 } from "../src/gateway/server.js";
+import type { GatewayProviderAdapter } from "../src/gateway/service.js";
 import { GatewayStore } from "../src/gateway/store.js";
 import { dashboardFixture } from "./dashboard-fixture.js";
 
@@ -40,6 +44,31 @@ function provider(
   return {
     close: async () => onClose(),
   } as unknown as LocalClaudeGatewayProvider & LocalCodexGatewayProvider;
+}
+
+function liveSnapshotProvider(
+  provider: "claude" | "codex",
+): GatewayProviderAdapter {
+  return {
+    identity: { provider, hostId: "this-mac" },
+    protocol: provider === "claude" ? "claude-peer" : "codex-app-server",
+    protocolVersion: provider === "claude" ? "1" : SYNTHETIC_CODEX_VERSION,
+    initialize: async () => ({ health: "healthy" }),
+    ...(provider === "claude" ? {
+      latestRegistryObservation: () => ({
+        entriesScanned: 0,
+        parseableRecords: 0,
+        rejected: [],
+      }),
+      discoverClaudePeers: async () => ({
+        peers: [],
+        complete: true,
+        registry: { entriesScanned: 0, parseableRecords: 0, rejected: [] },
+      }),
+    } : {}),
+    dispatch: async () => ({ state: "deferred", safeErrorCode: "ROUTE_BUSY" }),
+    close: async () => undefined,
+  };
 }
 
 function factory(
@@ -350,6 +379,95 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   doctorResolutionError = new LocalCodexTransportError("MANAGED_CODEX_INVALID");
   assert.deepEqual(await (serviceOptions?.codexDoctor as (() => Promise<unknown>))(), { conditions: ["unknown"] });
   assert.equal(doctorInspections, 1);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("a real boot snapshot passes the strict status and doctor clients", async (t) => {
+  const home = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-live-snapshot-"));
+  await chmod(home, 0o700);
+  t.after(async () => rm(home, { recursive: true, force: true }));
+  const stateDir = path.join(home, "state");
+  const env: NodeJS.ProcessEnv = {
+    HOME: home,
+    USER: "synthetic-user",
+    LOGNAME: "synthetic-user",
+    EMBASSY_STATE_DIR: stateDir,
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+
+  await runGatewayServer(
+    {
+      env,
+      signal: abort.signal,
+      onReady: async () => {
+        const response = await sendGatewayControlRequest({
+          socketPath: config.controlSocketPath,
+          request: {
+            protocolVersion: 1,
+            method: "list_snapshot",
+            params: {},
+          },
+        });
+        assert.equal(response.ok, true);
+        if (!response.ok) assert.fail("status snapshot must be successful");
+        assert.deepEqual(
+          response.result.routes.map(({ alias }) => alias),
+          ["dsh-main@this-mac", "grok-main@this-mac"],
+        );
+        const deepseek = response.result.connectors.find(
+          ({ provider }) => provider === "deepseek",
+        );
+        assert.equal(deepseek?.health, "degraded");
+        assert.equal(
+          deepseek?.safeErrorCode,
+          "DEEPSEEK_HARNESS_HOME_UNSAFE",
+        );
+        assert.equal(
+          response.result.connectors.every(
+            ({ observationAgeMs }) => observationAgeMs !== undefined,
+          ),
+          true,
+        );
+
+        const stdout: string[] = [];
+        const stderr: string[] = [];
+        assert.equal(await runGatewayCli(["doctor"], {
+          env,
+          stdout: { write: (chunk) => stdout.push(String(chunk)) },
+          stderr: { write: (chunk) => stderr.push(String(chunk)) },
+        }), gatewayCliExitCodes.ok);
+        assert.deepEqual(JSON.parse(stdout.join("")), {
+          ok: true,
+          command: "doctor",
+          result: { conditions: ["unknown"] },
+        });
+        assert.deepEqual(stderr, []);
+        abort.abort();
+      },
+    },
+    {
+      ...signals.dependencies,
+      loginHome: () => home,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => liveSnapshotProvider("claude"),
+      createCodexOperation: () => statelessOperation(),
+      createCodexObservationFactory: async () =>
+        assert.fail("startup must not attach to a live App Server"),
+      createCodexProvider: () => liveSnapshotProvider("codex"),
+      resolveCodexInstallation: async () => {
+        throw new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
+      },
+      createCodexDoctorInspector: () => ({
+        inspect: async () => ({ processes: [], socketHolderPids: [] }),
+      }),
+      resolveDeepSeekAcpLaunch: async () => ({
+        safeErrorCode: "DEEPSEEK_HARNESS_HOME_UNSAFE",
+      }),
+    },
+  );
   assert.equal(signals.listenerCount(), 0);
 });
 
