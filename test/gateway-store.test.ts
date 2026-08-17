@@ -22,6 +22,7 @@ import type {
   LogicalRouteBinding,
   RegisterRouteInput,
 } from "../src/gateway/types.js";
+import { deadlinePressureBucketNames } from "../src/gateway/types.js";
 
 type Clock = {
   now: () => Date;
@@ -247,6 +248,10 @@ test("new stores are strict native v3 and public projection redacts private IDs"
   }
   assert.equal(snapshot.schemaVersion, 2);
   assert.equal(snapshot.messages[0]?.body, "hello v3");
+  assert.deepEqual(
+    snapshot.deadlinePressure?.buckets.map(({ bucket }) => bucket),
+    deadlinePressureBucketNames,
+  );
   await store.close();
 });
 
@@ -580,6 +585,11 @@ test("attempt authority advances exactly and late or mismatched evidence is a no
     (await store.deliveryStatus(admitted.deliveryToken!))?.state.phase,
     "terminal",
   );
+  const pressure = (await store.publicSnapshot()).deadlinePressure;
+  assert.equal(pressure?.terminalEvents, 1);
+  assert.deepEqual(pressure?.buckets[0], {
+    bucket: "under_1m", settled: 1, expired: 0,
+  });
   await store.close();
 });
 
