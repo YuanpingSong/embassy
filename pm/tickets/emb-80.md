@@ -3,7 +3,7 @@ id: emb-80
 title: v1.8.1 — live status/doctor response fails the shared strict client decoder
 kind: bug
 size: 3
-status: dispatched
+status: landed
 release: v1.8.1
 updated: 2026-08-17
 ---
@@ -27,3 +27,9 @@ strict decoder; ships as v1.8.1 immediately, ahead of v1.9.
 
 **Budgets**: size 3, remainder-map before cutting. Dispatched to main on
 conv_ijGrzkONU1ChA9RATwwG9__Q during the drill.
+
+## Landed (2026-08-17): fix = restore strict snapshot deadline buckets
+(716f959); PM gate TMPDIR=/tmp 519/0 + soak; real-boot snapshot fixture
+added. Converted-selection CLAUDE_ROUTE_UNAVAILABLE recorded as a separate
+repro lead (evidence: dlv_HujgJu… failed terminal; reselect fixed).
+Ships as v1.8.1.
