@@ -79,3 +79,8 @@ Evidence note CONFIRMED: per the accepted design (report lines 123/283/297),
 Claude mailbox write-completion = terminal delivered; no onAccepted, no
 later receipt authority; ACP shares armed→terminal; Codex alone keeps the
 intermediate accepted. Ruling A is deletion-led.
+R3 clarification RULED A: seven provider-specific clean pre-write temporary
+codes join the closed retry table (Claude: PEER_TARGET_UNKNOWN/STALE/
+CHANGED, WORKSPACE_UNATTESTED; ACP: LAUNCH_UNAVAILABLE, RESTART_BACKOFF,
+SESSION_BUSY). Normalization (B) rejected — it would discard honest queued
+reasons. Table remains closed; unknown codes terminal.
