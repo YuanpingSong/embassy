@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.8.2] - 2026-08-17
+
+### Fixed
+
+- A persisted Claude selection survives broker restarts without manual reselection: the controller state-root evidence is now immutable provider construction context for restored selections, so the first delivery after any restart validates and flows. Per-operation UUID/workspace attestation is unchanged; drift still fails closed with zero writes. (This was the last "route went stale" class left standing.)
+
 ## [1.8.1] - 2026-08-17
 
 ### Fixed
