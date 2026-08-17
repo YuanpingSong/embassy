@@ -84,3 +84,10 @@ codes join the closed retry table (Claude: PEER_TARGET_UNKNOWN/STALE/
 CHANGED, WORKSPACE_UNATTESTED; ACP: LAUNCH_UNAVAILABLE, RESTART_BACKOFF,
 SESSION_BUSY). Normalization (B) rejected — it would discard honest queued
 reasons. Table remains closed; unknown codes terminal.
+CROSSED + AMENDED: main built B (adapter-side normalization to ROUTE_BUSY,
+permanent absence terminal, NO table expansion) before ruling A arrived.
+B-as-built ACCEPTED — closed table valued over per-code retry reasons;
+rework rejected as over-engineering. Landing-gate check item: the specific
+underlying conditions must still surface honestly in some bounded surface
+(route/connector safeErrorCode, alert, or doctor); vanishing entirely =
+correction.
