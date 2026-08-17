@@ -68,8 +68,9 @@ hundred wrong lines of copy:
 **Region defaults** (apply mechanically; the ticket may override):
 
 - R4: `store.ts` settlement/persistence/migration paths,
-  `provenance-envelope.ts`, `instance-lease.ts`, runtime attestation in
-  `claude-runtime.ts`, `.github/workflows/release.yml`, package manifest.
+  `provenance-envelope.ts`, `instance-lease.ts`, current-user Claude root
+  derivation in `claude-runtime.ts`, `.github/workflows/release.yml`, package
+  manifest.
 - R3: `service.ts` dispatch/scheduling, `claude-peer.ts`,
   `codex-app-server.ts`, `codex-local-transport.ts`, `server.ts` boot,
   `control.ts`, `config.ts`.

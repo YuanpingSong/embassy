@@ -21,7 +21,7 @@ import type { GatewayProvider } from "./types.js";
 type AcpOwnedProvider = Extract<GatewayProvider, "deepseek" | "grok">;
 type Client = Pick<
   AcpClient,
-  "close" | "connectionInfo" | "newSession" | "preparePrompt"
+  "close" | "newSession" | "preparePrompt"
 >;
 
 export type AcpGatewayProviderOptions = Readonly<{
@@ -33,8 +33,6 @@ export type AcpGatewayProviderOptions = Readonly<{
   workspace?: string;
   spawnClient?: (launch: AcpLaunchSpec) => Promise<Client>;
   now?: () => number;
-  setTimeout?: typeof setTimeout;
-  clearTimeout?: typeof clearTimeout;
 }>;
 
 const BACKOFF_MS = [250, 500, 1_000, 2_000, 5_000] as const;
@@ -47,14 +45,11 @@ export class AcpGatewayProvider implements GatewayProviderAdapter {
   private readonly routeHandle: string;
   private readonly spawnClient;
   private readonly now;
-  private readonly setTimer;
-  private readonly clearTimer;
   private callbacks: GatewayAdapterCallbacks | undefined;
   private client: Client | undefined;
   private sessionId: string | undefined;
   private retryAt = 0;
   private failures = 0;
-  private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private registrationId: string | undefined;
   private closed = false;
 
@@ -66,8 +61,6 @@ export class AcpGatewayProvider implements GatewayProviderAdapter {
     this.routeHandle = `acp_${createHash("sha256").update(options.alias).digest("base64url").slice(0, 24)}`;
     this.spawnClient = options.spawnClient ?? ((launch) => spawnAcpClient(launch));
     this.now = options.now ?? Date.now;
-    this.setTimer = options.setTimeout ?? setTimeout;
-    this.clearTimer = options.clearTimeout ?? clearTimeout;
   }
 
   async initialize(callbacks: GatewayAdapterCallbacks) {
@@ -237,8 +230,6 @@ export class AcpGatewayProvider implements GatewayProviderAdapter {
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.recoveryTimer !== undefined) this.clearTimer(this.recoveryTimer);
-    this.recoveryTimer = undefined;
     this.registrationId = undefined;
     this.callbacks = undefined;
     this.dropClient();
@@ -248,12 +239,10 @@ export class AcpGatewayProvider implements GatewayProviderAdapter {
     if (this.closed || this.registrationId !== registrationId) return undefined;
     if (this.client !== undefined) return this.client;
     if (this.options.launch === undefined || this.now() < this.retryAt) {
-      if (this.recoveryTimer === undefined) {
-        this.markStale(
-          this.options.unavailableCode ?? "ACP_LAUNCH_UNAVAILABLE",
-          registrationId,
-        );
-      }
+      this.markStale(
+        this.options.unavailableCode ?? "ACP_LAUNCH_UNAVAILABLE",
+        registrationId,
+      );
       return undefined;
     }
     let client: Client | undefined;
@@ -288,14 +277,6 @@ export class AcpGatewayProvider implements GatewayProviderAdapter {
     const delay = BACKOFF_MS[Math.min(this.failures++, BACKOFF_MS.length - 1)]!;
     this.retryAt = this.now() + delay;
     this.emitState("unobserved", code, registrationId);
-    if (this.recoveryTimer !== undefined) this.clearTimer(this.recoveryTimer);
-    this.recoveryTimer = this.setTimer(() => {
-      this.recoveryTimer = undefined;
-      if (!this.closed && this.registrationId === registrationId) {
-        this.emitState("idle", undefined, registrationId);
-      }
-    }, delay);
-    (this.recoveryTimer as { unref?: () => void }).unref?.();
   }
 
   private dropClient(): void {
@@ -305,10 +286,6 @@ export class AcpGatewayProvider implements GatewayProviderAdapter {
   }
 
   private resetRegistrationClient(): void {
-    if (this.recoveryTimer !== undefined) {
-      this.clearTimer(this.recoveryTimer);
-      this.recoveryTimer = undefined;
-    }
     this.failures = 0;
     this.retryAt = 0;
     this.dropClient();

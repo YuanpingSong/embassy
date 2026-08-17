@@ -52,6 +52,7 @@ import {
   type GatewayPublicSnapshot,
   type LogicalRouteBinding,
   type PublicAvailablePeerSnapshot,
+  type PublicCodexDoctorCondition,
   type PublicConnectorSnapshot,
   type PublicRegistryObservationSnapshot,
   type PublicProgressWatchEventSnapshot,
@@ -88,92 +89,56 @@ export type GatewayAdapterRouteObservationState =
   | "unobserved";
 
 export type GatewayAdapterDiscovery = Readonly<{
-  alias: string;
-  routeHandle: string;
-  kind: "interactive";
-  state: GatewayAdapterRouteState;
+  alias: string; routeHandle: string; kind: "interactive"; state: GatewayAdapterRouteState;
 }>;
 
 export type GatewayAdapterRegistryObservation = Readonly<{
-  entriesScanned: number;
-  parseableRecords: number;
+  entriesScanned: number; parseableRecords: number;
   rejected: readonly Readonly<{ safeErrorCode: string; count: number }>[];
 }>;
 
 export type GatewayAdapterDiscoverySnapshot = Readonly<{
-  peers: readonly GatewayAdapterDiscovery[];
-  complete: boolean;
+  peers: readonly GatewayAdapterDiscovery[]; complete: boolean;
   registry?: GatewayAdapterRegistryObservation;
 }>;
 
 export type GatewayAdapterRouteObservation = Readonly<{
-  route: LogicalRouteBinding;
-  state: GatewayAdapterRouteObservationState;
-  observedAt: string;
+  route: LogicalRouteBinding; state: GatewayAdapterRouteObservationState; observedAt: string;
   safeErrorCode?: string;
 }>;
 
 export type GatewayAdapterNativeEndpoint = Readonly<{
-  provider: GatewayProvider;
-  hostId: string;
-  routeHandle: string;
+  provider: GatewayProvider; hostId: string; routeHandle: string;
 }>;
 
 export type GatewayAdapterCallbacks = Readonly<{
   onRouteState: (event: GatewayAdapterRouteObservation) => void;
-  onClaudeReply: (event: Readonly<{
-    endpoint: GatewayAdapterNativeEndpoint;
-    text: string;
-  }>) => void;
+  onClaudeReply: (event: Readonly<{ endpoint: GatewayAdapterNativeEndpoint; text: string }>) => void;
   onClaudeMessage?: (event: Readonly<{
-    endpoint: GatewayAdapterNativeEndpoint;
-    sourceAlias: string;
-    targetAlias: string;
-    text: string;
+    endpoint: GatewayAdapterNativeEndpoint; sourceAlias: string; targetAlias: string; text: string;
     receiptHandle?: string;
   }>) => void;
   onProtocolNotice?: (event: Readonly<{ code: string }>) => void;
 }>;
 
 export type GatewayAdapterStart = Readonly<{
-  health: "healthy" | "degraded";
-  safeErrorCode?: string;
-  ownedRoute?: Readonly<{
-    alias: string;
-    routeHandle: string;
-    state: GatewayAdapterRouteState;
-  }>;
+  health: "healthy" | "degraded"; safeErrorCode?: string;
+  ownedRoute?: Readonly<{ alias: string; routeHandle: string; state: GatewayAdapterRouteState }>;
 }>;
 
 export type GatewayAdapterDispatchResult =
   | Readonly<{ state: "deferred"; safeErrorCode?: string }>
   | Readonly<{
-      state:
-        | "delivered"
-        | "unconfirmed"
-        | "failed"
-        | "ambiguous"
-        | "expired"
-        | "cancelled";
-      safeErrorCode?: string;
-      replyText?: string;
+      state: "delivered" | "unconfirmed" | "failed" | "ambiguous" | "expired" | "cancelled";
+      safeErrorCode?: string; replyText?: string;
     }>;
 
 export type GatewayAdapterDispatchInput = Readonly<{
-  attemptId: string;
-  sourceAlias: string;
-  sourceProvider: GatewayProvider;
-  targetAlias: string;
-  conversationId: string;
-  binding: LogicalRouteBinding;
+  attemptId: string; sourceAlias: string; sourceProvider: GatewayProvider; targetAlias: string;
+  conversationId: string; binding: LogicalRouteBinding;
   authorization: "selected_route" | "native_reply";
-  messageId: string;
-  text: string;
-  expectsReply: boolean;
-  deadlineAt: string;
-  steer?: true;
-  progressWatchActive?: true;
-  queuedAhead?: number;
+  messageId: string; text: string; expectsReply: boolean; deadlineAt: string;
+  steer?: true; progressWatchActive?: true; queuedAhead?: number;
   authorizeWrite: (
     evidence: GatewayPreparedWriteEvidence & Readonly<{ attemptId: string }>,
   ) => Promise<boolean>;
@@ -187,9 +152,7 @@ export interface GatewayProviderAdapter {
   latestRegistryObservation?(): GatewayAdapterRegistryObservation | undefined;
   initialize(callbacks: GatewayAdapterCallbacks): Promise<GatewayAdapterStart>;
   observeLogicalRoute?(input: Readonly<{
-    alias: string;
-    routeHandle: string;
-    registrationId: string;
+    alias: string; routeHandle: string; registrationId: string;
   }>): void;
   forgetLogicalRoute?(registrationId: string): void;
   discoverClaudePeers?(): Promise<GatewayAdapterDiscoverySnapshot>;
@@ -200,9 +163,7 @@ export interface GatewayProviderAdapter {
   assertWorkspaceDisjoint?(routeHandle: string, stateRoot: string): Promise<void>;
   resolveReplyAddress?(address: string): Promise<{ routeHandle: string }>;
   advertiseNativeSourcePeer?(input: Readonly<{
-    alias: string;
-    sourceProvider: GatewayProvider;
-    cwd: string;
+    alias: string; sourceProvider: GatewayProvider; cwd: string;
   }>): Promise<void>;
   unadvertiseNativeSourcePeer?(alias: string): Promise<void>;
   updateNativeSourcePeerStatus?(
@@ -217,11 +178,7 @@ export interface GatewayProviderAdapter {
   notifyNativeInboundProgress?(
     receiptHandle: string,
     progress: Readonly<{
-      kind: "stall";
-      reason:
-        | "ROUTE_BUSY"
-        | "ROUTE_UNAVAILABLE"
-        | "AWAITING_EXTERNAL_APPROVAL";
+      kind: "stall"; reason: "ROUTE_BUSY" | "ROUTE_UNAVAILABLE" | "AWAITING_EXTERNAL_APPROVAL";
       queuedForMs: number;
     }>,
   ): Promise<void>;
@@ -238,79 +195,44 @@ type GatewayServiceTimers = Readonly<{
 }>;
 
 export type GatewayServiceOptions = Readonly<{
-  config: GatewayConfig;
-  adapters?: readonly GatewayProviderAdapter[];
-  store?: GatewayStore;
-  publishDashboard?: typeof publishGatewayDashboard;
-  now?: () => Date;
-  nativePeerCwd?: string;
-  timers?: GatewayServiceTimers;
+  config: GatewayConfig; adapters?: readonly GatewayProviderAdapter[]; store?: GatewayStore;
+  publishDashboard?: typeof publishGatewayDashboard; now?: () => Date;
+  nativePeerCwd?: string; timers?: GatewayServiceTimers;
   codexDoctor?: () => Promise<CodexDoctorResult>;
 }>;
 
 type ConnectorRuntime = {
-  adapter: GatewayProviderAdapter;
-  health: "healthy" | "degraded";
-  safeErrorCode?: string;
-  observedAt?: string;
-  registry?: PublicRegistryObservationSnapshot;
+  adapter: GatewayProviderAdapter; health: "healthy" | "degraded";
+  safeErrorCode?: string; observedAt?: string; registry?: PublicRegistryObservationSnapshot;
 };
 
 type Candidate = GatewayAdapterDiscovery & {
-  adapter: GatewayProviderAdapter;
-  observedAt: string;
+  adapter: GatewayProviderAdapter; observedAt: string;
 };
 
 type Conversation = {
-  id: string;
-  sourceAlias: string;
-  targetAlias: string;
-  sourceBinding?: LogicalRouteBinding;
-  targetBinding?: LogicalRouteBinding;
-  expectsReply: boolean;
-  pair?: true;
+  id: string; sourceAlias: string; targetAlias: string;
+  sourceBinding?: LogicalRouteBinding; targetBinding?: LogicalRouteBinding;
+  expectsReply: boolean; pair?: true;
   nativeTarget?: Readonly<{ alias: string; binding: LogicalRouteBinding }>;
   nextSequence: number;
 };
 
-type MessageContext = Readonly<{
-  conversationId: string;
-  sourceAlias: string;
-  targetAlias: string;
-  sourceBinding?: LogicalRouteBinding;
-  targetBinding?: LogicalRouteBinding;
-  nativeTarget?: Readonly<{ alias: string; binding: LogicalRouteBinding }>;
-  expectsReply: boolean;
-}>;
+type MessageContext = Readonly<{ conversationId: string; expectsReply: boolean }>;
 
 type PendingClaudeReply = {
-  messageId: string;
-  attemptId: string;
-  conversationId: string;
-  sourceAlias: string;
-  targetAlias: string;
-  sourceBinding: LogicalRouteBinding;
-  targetBinding: LogicalRouteBinding;
-  deadlineAt: string;
+  messageId: string; conversationId: string; sourceAlias: string; targetAlias: string;
+  sourceBinding: LogicalRouteBinding; targetBinding: LogicalRouteBinding; deadlineAt: string;
   state: "armed" | "delivered" | "retired";
   bufferedReply?: string;
 };
 
-type ActiveAttempt = {
-  messageId: string;
-  attemptId: string;
-  targetAlias: string;
-};
+type ActiveAttempt = { messageId: string; attemptId: string };
 
 type NativeReceipt = {
-  adapter: GatewayProviderAdapter;
-  receiptHandle: string;
-  targetAlias: string;
-  enqueuedAt: number;
-  heldWrite: Promise<void>;
-  heldTimer?: GatewayServiceTimer;
-  stallTimer?: GatewayServiceTimer;
-  settled: boolean;
+  adapter: GatewayProviderAdapter; receiptHandle: string; targetAlias: string;
+  enqueuedAt: number; heldWrite: Promise<void>; heldTimer?: GatewayServiceTimer;
+  stallTimer?: GatewayServiceTimer; settled: boolean;
 };
 
 type RuntimeWatch = ProgressWatch & Readonly<{
@@ -335,21 +257,13 @@ function decisionFor(error: unknown): Extract<GatewayDecision, { accepted: false
   if (error.code.includes("NOT_FOUND") || error.code.includes("NOT_AVAILABLE")) {
     return { accepted: false, code: "not_found" };
   }
-  if (
-    error.code.includes("COLLISION") ||
-    error.code.includes("ALREADY") ||
-    error.code.includes("OWNER")
-  ) {
+  if (error.code.includes("COLLISION") || error.code.includes("ALREADY") || error.code.includes("OWNER")) {
     return { accepted: false, code: "conflict" };
   }
   if (error.code.includes("BUSY") || error.code.includes("CAPACITY")) {
     return { accepted: false, code: "busy" };
   }
-  if (
-    error.code.includes("UNAVAILABLE") ||
-    error.code.includes("OFFLINE") ||
-    error.code.includes("UNOBSERVED")
-  ) {
+  if (error.code.includes("UNAVAILABLE") || error.code.includes("OFFLINE") || error.code.includes("UNOBSERVED")) {
     return { accepted: false, code: "unavailable" };
   }
   if (error.code.includes("MISMATCH") || error.code.includes("ADDRESS")) {
@@ -359,12 +273,8 @@ function decisionFor(error: unknown): Extract<GatewayDecision, { accepted: false
 }
 
 function sameBinding(left: LogicalRouteBinding, right: LogicalRouteBinding): boolean {
-  return (
-    left.provider === right.provider &&
-    left.hostId === right.hostId &&
-    left.routeHandle === right.routeHandle &&
-    left.registrationId === right.registrationId
-  );
+  return left.provider === right.provider && left.hostId === right.hostId &&
+    left.routeHandle === right.routeHandle && left.registrationId === right.registrationId;
 }
 
 function connectorKey(identity: Readonly<{ provider: GatewayProvider; hostId: string }>): string {
@@ -410,24 +320,17 @@ export class GatewayService {
   private readonly routeObservations = new Map<string, GatewayAdapterRouteObservation>();
   private readonly candidates = new Map<string, Candidate>();
   private readonly conversations = new Map<string, Conversation>();
-  private readonly conversationByMessage = new Map<string, string>();
   private readonly messageContexts = new Map<string, MessageContext>();
   private readonly activeAttempts = new Map<string, ActiveAttempt>();
   private readonly reserveOperations = new Set<Promise<void>>();
   private readonly inboundOperations = new Set<Promise<void>>();
-  private readonly transientTargets = new Map<string, Conversation["nativeTarget"]>();
-  private readonly pendingClaudeReplies = new Map<
-    string,
-    PendingClaudeReply[]
-  >();
+  private readonly pendingClaudeReplies = new Map<string, PendingClaudeReply[]>();
   private readonly nativeReceipts = new Map<string, NativeReceipt>();
   private readonly progressWatches = new Map<string, RuntimeWatch>();
   private readonly progressWatchEvents: PublicProgressWatchEventSnapshot[] = [];
-  private progressWatchSequence = 0;
   private readonly dispatchRunners = new Map<string, Promise<void>>();
   private readonly steerRunners = new Map<string, Promise<void>>();
   private readonly startingTargets = new Set<string>();
-  private readonly retryTargets = new Set<string>();
   private readonly runtimeAlerts: SafeGatewayAlert[] = [];
   private control: GatewayControlServer | undefined;
   private wakeTimer: GatewayServiceTimer | undefined;
@@ -627,17 +530,13 @@ export class GatewayService {
       const current = this.routeObservationStillCurrent(persisted);
       if (!current) return route;
       const age = now.getTime() - Date.parse(persisted.observedAt);
-      const state: "stale" | GatewayAdapterRouteState =
-        persisted.state === "unobserved" || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS
-          ? "stale"
-          : persisted.state;
+      const state: "stale" | GatewayAdapterRouteState = persisted.state === "unobserved" ||
+        age > CONNECTOR_OBSERVATION_STALE_AFTER_MS ? "stale" : persisted.state;
       return {
         ...route,
         state,
         lastSeenAt: persisted.observedAt,
-        ...(persisted.safeErrorCode === undefined
-          ? {}
-          : { safeErrorCode: persisted.safeErrorCode }),
+        ...(persisted.safeErrorCode === undefined ? {} : { safeErrorCode: persisted.safeErrorCode }),
       };
     });
     const connectors = [...this.connectors.values()].map((runtime): PublicConnectorSnapshot => {
@@ -645,21 +544,27 @@ export class GatewayService {
       const age = observedAt === undefined ? undefined : Math.max(0, now.getTime() - Date.parse(observedAt));
       const stale = runtime.health === "healthy" &&
         (age === undefined || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS);
+      const doctor = runtime.adapter.identity.provider === "codex" ? this.codexDoctorResult : undefined;
+      const doctorConditions: PublicCodexDoctorCondition[] = doctor === undefined
+        ? [] : [...new Set(doctor.conditions)];
+      if (doctor !== undefined && stale && !doctorConditions.includes("observation_stale"))
+        doctorConditions.push("observation_stale");
+      const managedLayoutMissing = doctorConditions.includes("managed_layout_missing");
+      const connectorCode = stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode ??
+        (managedLayoutMissing ? "MANAGED_CODEX_UNAVAILABLE" : undefined);
       return {
         provider: runtime.adapter.identity.provider,
         host: runtime.adapter.identity.hostId,
-        health: stale ? "degraded" : runtime.health,
+        health: stale || managedLayoutMissing ? "degraded" : runtime.health,
         protocol: runtime.adapter.protocol,
         protocolVersion: runtime.adapter.protocolVersion,
         ...(observedAt === undefined ? {} : { lastSeenAt: observedAt }),
         ...(age === undefined ? {} : { observationAgeMs: age }),
-        ...(runtime.adapter.identity.provider !== "codex" || this.codexDoctorResult === undefined
-          ? {}
-          : { codexDoctor: this.codexDoctorResult }),
+        ...(doctorConditions.length === 0 ? {} : {
+          codexDoctor: { conditions: doctorConditions.slice(0, 2) },
+        }),
         ...(runtime.registry === undefined ? {} : { registry: runtime.registry }),
-        ...((stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode) === undefined
-          ? {}
-          : { safeErrorCode: stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode }),
+        ...(connectorCode === undefined ? {} : { safeErrorCode: connectorCode }),
       };
     });
     const availablePeers = [...this.candidates.values()]
@@ -730,15 +635,11 @@ export class GatewayService {
 
   private health(): "ok" | "degraded" {
     return this.connectors.size > 0 &&
-      [...this.connectors.values()].every((runtime) => runtime.health === "healthy")
-      ? "ok"
-      : "degraded";
+      [...this.connectors.values()].every((runtime) => runtime.health === "healthy") ? "ok" : "degraded";
   }
 
-  private async installOwnedRoute(
-    adapter: GatewayProviderAdapter,
-    owned: NonNullable<GatewayAdapterStart["ownedRoute"]>,
-  ): Promise<void> {
+  private async installOwnedRoute(adapter: GatewayProviderAdapter,
+    owned: NonNullable<GatewayAdapterStart["ownedRoute"]>): Promise<void> {
     const prefix = gatewayRegistrationIngressPrefixes[adapter.identity.provider];
     if (
       !PUBLIC_ALIAS.test(owned.alias) ||
@@ -830,6 +731,28 @@ export class GatewayService {
     void this.unadvertise(route).catch((error) =>
       this.alert("NATIVE_UNADVERTISEMENT_FAILED", route, error),
     );
+  }
+
+  private async removeOwnedRoute(
+    route: GatewayPrivateRouteInspection,
+    notFoundCode: "CODEX_REGISTRATION_NOT_FOUND" | "CLAUDE_ROUTE_NOT_FOUND",
+    releaseProviderRoute: boolean,
+  ): Promise<void> {
+    this.assertWritable();
+    const result = await this.store.removeOwnedRouteAtomic({
+      alias: route.alias,
+      binding: route.binding,
+      activity: { operatorAction: true },
+    });
+    if (!result.removed) throw new BridgeError(notFoundCode, "The exact route is absent.");
+    await this.finishSettlements(result.settlements);
+    this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
+    this.forgetRoute(route);
+    if (releaseProviderRoute) {
+      await this.adapterFor(route.binding)?.releaseRoute?.(route.binding.routeHandle);
+    } else {
+      this.reconcileUnadvertisement(route);
+    }
   }
 
   private async recordActivity(
@@ -924,17 +847,7 @@ export class GatewayService {
     ) {
       throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The exact Codex registration is absent.");
     }
-    this.assertWritable();
-    const result = await this.store.removeOwnedRouteAtomic({
-      alias: route.alias,
-      binding: route.binding,
-      activity: { operatorAction: true },
-    });
-    if (!result.removed) throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The exact Codex registration is absent.");
-    await this.finishSettlements(result.settlements);
-    this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
-    this.forgetRoute(route);
-    this.reconcileUnadvertisement(route);
+    await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
   }
 
   private async removeCodexRegistration(alias: string): Promise<void> {
@@ -942,17 +855,7 @@ export class GatewayService {
     if (route === undefined || route.binding.provider !== "codex") {
       throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The Codex registration is absent.");
     }
-    this.assertWritable();
-    const result = await this.store.removeOwnedRouteAtomic({
-      alias: route.alias,
-      binding: route.binding,
-      activity: { operatorAction: true },
-    });
-    if (!result.removed) throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The Codex registration is absent.");
-    await this.finishSettlements(result.settlements);
-    this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
-    this.forgetRoute(route);
-    this.reconcileUnadvertisement(route);
+    await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
   }
 
   private async selectClaude(params: SelectClaudeParams): Promise<void> {
@@ -1013,17 +916,7 @@ export class GatewayService {
   private async unselectClaude(params: SelectClaudeParams): Promise<void> {
     const route = await this.resolveSelectedClaudeRoute(params.alias);
     if (route === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
-    this.assertWritable();
-    const result = await this.store.removeOwnedRouteAtomic({
-      alias: route.alias,
-      binding: route.binding,
-      activity: { operatorAction: true },
-    });
-    if (!result.removed) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
-    await this.finishSettlements(result.settlements);
-    this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
-    this.forgetRoute(route);
-    await this.adapterFor(route.binding)?.releaseRoute?.(route.binding.routeHandle);
+    await this.removeOwnedRoute(route, "CLAUDE_ROUTE_NOT_FOUND", true);
   }
 
   private async pair(params: PairParams): Promise<void> {
@@ -1081,10 +974,7 @@ export class GatewayService {
     };
   }
 
-  private async assertThread(
-    alias: string,
-    threadId: string,
-  ): Promise<GatewayPrivateRouteInspection> {
+  private async assertThread(alias: string, threadId: string): Promise<GatewayPrivateRouteInspection> {
     const route = await this.store.inspectPrivateRoute(alias);
     if (route?.binding.provider !== "codex" || route.binding.routeHandle !== threadId) {
       throw new BridgeError("CODEX_THREAD_MISMATCH", "The task attestation does not match the route.");
@@ -1286,7 +1176,6 @@ export class GatewayService {
     };
     const previousWatch = this.progressWatches.get(conversation.id);
     const previousWatchEvents = this.progressWatchEvents.length;
-    const previousWatchSequence = this.progressWatchSequence;
     if (input.skipWatch !== true) {
       await this.updateProgressWatch(
         conversation,
@@ -1320,7 +1209,6 @@ export class GatewayService {
         conversation.id,
         previousWatch,
         previousWatchEvents,
-        previousWatchSequence,
       );
       conversation.nextSequence -= 1;
       throw error;
@@ -1330,27 +1218,15 @@ export class GatewayService {
         conversation.id,
         previousWatch,
         previousWatchEvents,
-        previousWatchSequence,
       );
       conversation.nextSequence -= 1;
       throw new BridgeError("MESSAGE_NOT_ACCEPTED", "The message was not accepted.");
     }
     this.rememberConversation(conversation);
-    this.conversationByMessage.set(enqueued.messageId, conversation.id);
     this.messageContexts.set(enqueued.messageId, {
       conversationId: conversation.id,
-      sourceAlias: input.sourceAlias,
-      targetAlias: input.targetAlias,
-      ...(sourceBinding === undefined ? {} : { sourceBinding: { ...sourceBinding } }),
-      ...(targetBinding === undefined ? {} : { targetBinding: { ...targetBinding } }),
-      ...(conversation.nativeTarget === undefined
-        ? {}
-        : { nativeTarget: conversation.nativeTarget }),
       expectsReply: input.expectsReply,
     });
-    if (conversation.nativeTarget !== undefined && target === undefined) {
-      this.transientTargets.set(enqueued.messageId, conversation.nativeTarget);
-    }
     if (enqueued.supersededSettlement !== undefined) {
       await this.finishSettlement(enqueued.supersededSettlement);
     }
@@ -1437,59 +1313,61 @@ export class GatewayService {
   ): Promise<void> {
     if (!this.running || this.closing) return;
     const route = await this.store.inspectPrivateRoute(targetAlias);
-    const transient = [...this.transientTargets.values()].find(
-      (candidate) => candidate?.alias === targetAlias,
+    const transient = [...this.messageContexts.values()].find(
+      (context) => this.conversations.get(context.conversationId)?.nativeTarget?.alias === targetAlias,
     );
+    const transientTarget = transient === undefined
+      ? undefined
+      : this.conversations.get(transient.conversationId)?.nativeTarget;
     const registration = preferredRegistrationId ?? route?.binding.registrationId ??
-      transient?.binding.registrationId;
+      transientTarget?.binding.registrationId;
     if (registration === undefined) return;
-    const runnerKey = `${targetAlias}\0${registration}`;
-    if (this.dispatchRunners.has(runnerKey)) return;
-    const runner = this.runTarget(targetAlias, registration, "any", runnerKey).finally(() => {
-      if (this.dispatchRunners.get(runnerKey) !== runner) return;
-      this.dispatchRunners.delete(runnerKey);
-      if (this.retryTargets.delete(runnerKey)) {
-        this.scheduleTargetRetry(targetAlias, registration);
-      }
-      else if (this.running) void this.store.inspectDispatchableTargets().then((targets) => {
-        if (targets.includes(targetAlias)) this.kick(targetAlias);
-      }).catch(() => undefined);
-    });
-    this.dispatchRunners.set(runnerKey, runner);
-    void runner.catch((error) => this.alert("DISPATCH_RUNNER_FAILED", undefined, error));
+    this.startRunner(targetAlias, registration, "any");
   }
 
   private kickSteer(targetAlias: string): void {
     if (!this.running || this.closing) return;
     void this.store.inspectPrivateRoute(targetAlias).then((route) => {
       if (route === undefined || route.binding.provider !== "codex") return;
-      const runnerKey = `${targetAlias}\0${route.binding.registrationId}\0steer`;
-      if (this.steerRunners.has(runnerKey)) return;
-      const runner = this.runTarget(
-        targetAlias,
-        route.binding.registrationId,
-        "steer_only",
-        runnerKey,
-      ).finally(() => {
-        if (this.steerRunners.get(runnerKey) !== runner) return;
-        this.steerRunners.delete(runnerKey);
-        if (this.retryTargets.delete(runnerKey)) {
-          this.scheduleTargetRetry(targetAlias, route.binding.registrationId, true);
-        } else if (this.running && !this.closing) {
-          this.kickSteer(targetAlias);
-        }
-      });
-      this.steerRunners.set(runnerKey, runner);
-      void runner.catch((error) => this.alert("STEER_RUNNER_FAILED", route, error));
+      this.startRunner(targetAlias, route.binding.registrationId, "steer_only", route);
     }).catch((error) => this.alert("STEER_RUNNER_FAILED", undefined, error));
+  }
+
+  private startRunner(
+    targetAlias: string,
+    registrationId: string,
+    mode: "any" | "steer_only",
+    route?: GatewayPrivateRouteInspection,
+  ): void {
+    const steer = mode === "steer_only";
+    const runners = steer ? this.steerRunners : this.dispatchRunners;
+    const key = `${targetAlias}\0${registrationId}${steer ? "\0steer" : ""}`;
+    if (runners.has(key)) return;
+    let retry = false;
+    const runner = this.runTarget(targetAlias, registrationId, mode)
+      .then((value) => { retry = value; })
+      .finally(() => {
+        if (runners.get(key) !== runner) return;
+        runners.delete(key);
+        if (retry) this.scheduleTargetRetry(targetAlias, registrationId, steer);
+        else if (steer && this.running && !this.closing) this.kickSteer(targetAlias);
+        else if (this.running) void this.store.inspectDispatchableTargets().then((targets) => {
+          if (targets.includes(targetAlias)) this.kick(targetAlias);
+        }).catch(() => undefined);
+      });
+    runners.set(key, runner);
+    void runner.catch((error) => this.alert(
+      steer ? "STEER_RUNNER_FAILED" : "DISPATCH_RUNNER_FAILED",
+      route,
+      error,
+    ));
   }
 
   private async runTarget(
     targetAlias: string,
     runnerRegistrationId: string,
     mode: "any" | "steer_only",
-    runnerKey: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     while (this.running && !this.closing) {
       let reserved: Awaited<ReturnType<GatewayStore["reserveMessage"]>> | undefined;
       const reserveOperation = this.store.reserveMessage(targetAlias, mode).then((result) => {
@@ -1498,7 +1376,6 @@ export class GatewayService {
           this.activeAttempts.set(result.attempt.messageId, {
             messageId: result.attempt.messageId,
             attemptId: result.attempt.attemptId,
-            targetAlias,
           });
         }
       });
@@ -1509,32 +1386,27 @@ export class GatewayService {
         this.reserveOperations.delete(reserveOperation);
       }
       if (reserved === undefined) throw new RangeError("RESERVE_RESULT_MISSING");
-      if (reserved.status === "empty") return;
+      if (reserved.status === "empty") return false;
       if (reserved.status === "terminal") {
         await this.finishSettlement(reserved.settlement);
-        return;
+        return false;
       }
       const attempt = reserved.attempt;
       if (this.closing || !this.running) {
-        const shutdown = await this.store.settleAttemptForShutdown({
-          messageId: attempt.messageId,
-          attemptId: attempt.attemptId,
-        });
-        if (shutdown.status === "settled") await this.finishSettlement(shutdown.settlement);
-        return;
+        await this.settleAttemptForShutdown(attempt.messageId, attempt.attemptId);
+        return false;
       }
       if (attempt.targetRegistrationId !== runnerRegistrationId) {
-        const resolution = await this.store.resolvePrewriteAttempt({
-          messageId: attempt.messageId,
-          attemptId: attempt.attemptId,
-          outcome: "requeue",
-          safeErrorCode: "ENDPOINT_GENERATION_CHANGED",
-        });
-        if (resolution.status === "settled") await this.finishSettlement(resolution.settlement);
-        else this.activeAttempts.delete(attempt.messageId);
-        return;
+        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "ENDPOINT_GENERATION_CHANGED");
+        return false;
       }
-      const transientTarget = this.transientTargets.get(attempt.messageId);
+      const messageContext = this.messageContexts.get(attempt.messageId);
+      const conversation = messageContext === undefined
+        ? undefined
+        : this.conversations.get(messageContext.conversationId);
+      const transientTarget = conversation?.nativeTarget?.alias === attempt.targetAlias
+        ? conversation.nativeTarget
+        : undefined;
       const persistedTarget = await this.store.inspectPrivateRoute(attempt.targetAlias);
       const target = transientTarget !== undefined
         ? {
@@ -1548,49 +1420,29 @@ export class GatewayService {
           : persistedTarget);
       const source = await this.store.inspectPrivateRoute(attempt.sourceAlias);
       if (this.closing || !this.running) {
-        const shutdown = await this.store.settleAttemptForShutdown({
-          messageId: attempt.messageId,
-          attemptId: attempt.attemptId,
-        });
-        if (shutdown.status === "settled") await this.finishSettlement(shutdown.settlement);
-        return;
+        await this.settleAttemptForShutdown(attempt.messageId, attempt.attemptId);
+        return false;
       }
       if (
         target === undefined ||
         target.binding.registrationId !== attempt.targetRegistrationId ||
         (attempt.sourceRegistrationId !== null && source?.binding.registrationId !== attempt.sourceRegistrationId)
       ) {
-        const resolution = await this.store.resolvePrewriteAttempt({
-          messageId: attempt.messageId,
-          attemptId: attempt.attemptId,
-          outcome: "failed",
-          safeErrorCode: "ROUTE_UNREGISTERED",
-        });
-        if (resolution.status === "settled") await this.finishSettlement(resolution.settlement);
-        else this.activeAttempts.delete(attempt.messageId);
-        return;
+        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "ROUTE_UNREGISTERED");
+        return false;
       }
       const adapter = this.adapterFor(target.binding);
       if (adapter === undefined) {
-        const resolution = await this.store.resolvePrewriteAttempt({
-          messageId: attempt.messageId,
-          attemptId: attempt.attemptId,
-          outcome: "failed",
-          safeErrorCode: "PROVIDER_UNAVAILABLE",
-        });
-        if (resolution.status === "settled") await this.finishSettlement(resolution.settlement);
-        else this.activeAttempts.delete(attempt.messageId);
-        return;
+        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "PROVIDER_UNAVAILABLE");
+        return false;
       }
       const active = this.activeAttempts.get(attempt.messageId)!;
       let authorizationUncertain = false;
       let armed = false;
       let accepted = false;
-      const conversationId = this.conversationByMessage.get(attempt.messageId) ??
+      const conversationId = messageContext?.conversationId ??
         conversationIdForSuffix(attempt.conversationIdSuffix);
       const parsed = parseDirection(attempt.direction)!;
-      const conversation = this.conversations.get(conversationId);
-      const messageContext = this.messageContexts.get(attempt.messageId);
       if (
         target.binding.provider === "claude" &&
         messageContext?.expectsReply === true &&
@@ -1602,16 +1454,8 @@ export class GatewayService {
           0,
         ) >= MAX_PENDING_CLAUDE_REPLIES
       ) {
-        const resolution = await this.store.resolvePrewriteAttempt({
-          messageId: attempt.messageId,
-          attemptId: attempt.attemptId,
-          outcome: "requeue",
-          safeErrorCode: "ROUTE_BUSY",
-        });
-        if (resolution.status === "settled") await this.finishSettlement(resolution.settlement);
-        else this.activeAttempts.delete(attempt.messageId);
-        this.retryTargets.add(runnerKey);
-        return;
+        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "ROUTE_BUSY");
+        return true;
       }
       let result: GatewayAdapterDispatchResult;
       try {
@@ -1661,7 +1505,6 @@ export class GatewayService {
                 ) {
                   this.installPendingClaudeReply({
                     messageId: attempt.messageId,
-                    attemptId: attempt.attemptId,
                     conversationId,
                     sourceAlias: attempt.sourceAlias,
                     targetAlias: attempt.targetAlias,
@@ -1717,14 +1560,32 @@ export class GatewayService {
         attempt.attemptId,
         result,
         armed,
+        conversation,
+        attempt.sourceAlias,
+        attempt.targetAlias,
       );
       if (this.activeAttempts.get(attempt.messageId) === active) this.activeAttempts.delete(attempt.messageId);
-      if (requeued) {
-        this.retryTargets.add(runnerKey);
-        return;
-      }
-      return;
+      return requeued;
     }
+    return false;
+  }
+
+  private async settleAttemptForShutdown(messageId: string, attemptId: string): Promise<void> {
+    const result = await this.store.settleAttemptForShutdown({ messageId, attemptId });
+    if (result.status === "settled") await this.finishSettlement(result.settlement);
+  }
+
+  private async resolvePrewrite(
+    messageId: string,
+    attemptId: string,
+    outcome: "requeue" | "failed",
+    safeErrorCode: string,
+  ): Promise<void> {
+    const result = await this.store.resolvePrewriteAttempt({
+      messageId, attemptId, outcome, safeErrorCode,
+    });
+    if (result.status === "settled") await this.finishSettlement(result.settlement);
+    else this.activeAttempts.delete(messageId);
   }
 
   private async applyDispatchResult(
@@ -1732,6 +1593,9 @@ export class GatewayService {
     attemptId: string,
     result: GatewayAdapterDispatchResult,
     armed: boolean,
+    conversation: Conversation | undefined,
+    sourceAlias: string,
+    targetAlias: string,
   ): Promise<boolean> {
     if (result.state === "deferred" && armed) {
       result = {
@@ -1772,17 +1636,16 @@ export class GatewayService {
       ...(resultCode === undefined ? {} : { safeErrorCode: safeCode(resultCode, "PROVIDER_DISPATCH_FAILED") }),
     });
     if (settlement.status === "settled") {
-      const context = this.messageContexts.get(messageId);
       await this.finishSettlement(settlement.settlement);
       if (settlement.settlement.state === "delivered") {
         await this.activatePendingClaudeReply(messageId);
       }
       if (
-        context !== undefined &&
+        conversation !== undefined &&
         "replyText" in result &&
         result.replyText !== undefined
       ) {
-        await this.enqueueCorrelatedReply(context, result.replyText);
+        await this.enqueueCorrelatedReply(conversation, sourceAlias, targetAlias, result.replyText);
       }
     }
     return false;
@@ -1881,6 +1744,7 @@ export class GatewayService {
       registrationId: `native_${bodyHash(`${event.endpoint.routeHandle}\0${event.sourceAlias}`).slice(0, 32)}`,
     };
     const conversationId = createGatewayConversationId();
+    const steer = event.text.startsWith("STEER:") && this.config.steeringEnabled;
     this.assertWritable();
     const enqueued = await this.store.enqueueNativeIngress({
       source: { alias: event.sourceAlias, binding: sourceBinding },
@@ -1889,7 +1753,7 @@ export class GatewayService {
       body: event.text,
       dedupeKey: `${conversationId}:0`,
       conversationIdSuffix: conversationId.slice(-8),
-      ...(event.text.startsWith("STEER:") && this.config.steeringEnabled ? { steer: true as const } : {}),
+      ...(steer ? { steer: true as const } : {}),
     });
     if (!enqueued.accepted || enqueued.messageId === undefined) {
       throw new BridgeError("MESSAGE_NOT_ACCEPTED", "The native message was not accepted.");
@@ -1906,15 +1770,7 @@ export class GatewayService {
       nextSequence: 1,
     };
     this.rememberConversation(conversation);
-    this.conversationByMessage.set(enqueued.messageId, conversationId);
-    this.messageContexts.set(enqueued.messageId, {
-      conversationId,
-      sourceAlias: event.sourceAlias,
-      targetAlias: event.targetAlias,
-      targetBinding: target.binding,
-      nativeTarget: conversation.nativeTarget!,
-      expectsReply: true,
-    });
+    this.messageContexts.set(enqueued.messageId, { conversationId, expectsReply: true });
     if (event.receiptHandle !== undefined) {
       const adapter = this.claudeAdapter(event.endpoint.hostId);
       if (adapter !== undefined) {
@@ -1960,6 +1816,7 @@ export class GatewayService {
         this.nativeReceipts.set(enqueued.messageId, receipt);
       }
     }
+    if (steer) this.kickSteer(event.targetAlias);
     this.kick(event.targetAlias);
     this.scheduleWake();
   }
@@ -2007,38 +1864,44 @@ export class GatewayService {
   }
 
   private async enqueueCorrelatedReply(
-    context: MessageContext,
+    conversation: Conversation,
+    sourceAlias: string,
+    targetAlias: string,
     text: string,
   ): Promise<void> {
-    const conversation = this.conversations.get(context.conversationId);
-    if (conversation === undefined) return;
+    const sourceBinding = sourceAlias === conversation.sourceAlias
+      ? conversation.sourceBinding
+      : conversation.targetBinding;
+    const targetBinding = targetAlias === conversation.targetAlias
+      ? conversation.targetBinding
+      : conversation.sourceBinding;
     if (
-      context.nativeTarget === undefined ||
-      context.sourceAlias !== context.nativeTarget.alias
+      conversation.nativeTarget === undefined ||
+      sourceAlias !== conversation.nativeTarget.alias
     ) {
-      if (context.sourceBinding === undefined || context.targetBinding === undefined) return;
-      const currentSource = await this.store.inspectPrivateRoute(context.sourceAlias);
+      if (sourceBinding === undefined || targetBinding === undefined) return;
+      const currentSource = await this.store.inspectPrivateRoute(sourceAlias);
       if (
         currentSource === undefined ||
-        !sameBinding(currentSource.binding, context.sourceBinding)
+        !sameBinding(currentSource.binding, sourceBinding)
       ) return;
       await this.enqueueConversation({
-        sourceAlias: context.targetAlias,
-        targetAlias: context.sourceAlias,
+        sourceAlias: targetAlias,
+        targetAlias: sourceAlias,
         text,
         expectsReply: true,
-        expectedSourceBinding: context.targetBinding,
-        expectedTargetBinding: context.sourceBinding,
+        expectedSourceBinding: targetBinding,
+        expectedTargetBinding: sourceBinding,
         existingConversation: conversation,
       });
       return;
     }
-    if (context.targetBinding === undefined) return;
+    if (targetBinding === undefined) return;
     await this.enqueueNativeConversationReply({
       conversation,
-      sourceAlias: context.targetAlias,
-      sourceBinding: context.targetBinding,
-      target: context.nativeTarget,
+      sourceAlias: targetAlias,
+      sourceBinding: targetBinding,
+      target: conversation.nativeTarget,
       text,
     });
   }
@@ -2072,17 +1935,10 @@ export class GatewayService {
       input.conversation.nextSequence -= 1;
       throw new BridgeError("MESSAGE_NOT_ACCEPTED", "The message was not accepted.");
     }
-    this.conversationByMessage.set(enqueued.messageId, input.conversation.id);
     this.messageContexts.set(enqueued.messageId, {
       conversationId: input.conversation.id,
-      sourceAlias: input.sourceAlias,
-      targetAlias: input.target.alias,
-      sourceBinding: input.sourceBinding,
-      targetBinding: input.target.binding,
-      nativeTarget: input.target,
       expectsReply: true,
     });
-    this.transientTargets.set(enqueued.messageId, input.target);
     this.kick(input.target.alias, input.target.binding.registrationId);
     this.scheduleWake();
     return enqueued;
@@ -2214,8 +2070,6 @@ export class GatewayService {
       conversationId: conversation.id,
       ownerAlias: actorAlias,
       workerAlias,
-      ownerLease: owner.binding.registrationId,
-      workerLease: worker.binding.registrationId,
       idleMs,
       at: this.now().getTime(),
     });
@@ -2235,12 +2089,10 @@ export class GatewayService {
     conversationId: string,
     previous: RuntimeWatch | undefined,
     eventLength: number,
-    sequence: number,
   ): void {
     if (previous === undefined) this.progressWatches.delete(conversationId);
     else this.progressWatches.set(conversationId, previous);
     this.progressWatchEvents.length = eventLength;
-    this.progressWatchSequence = sequence;
   }
 
   private untrack(conversationId: string): void {
@@ -2285,7 +2137,7 @@ export class GatewayService {
     reason?: PublicProgressWatchEventSnapshot["reason"];
   }>): void {
     this.progressWatchEvents.push({
-      sequence: ++this.progressWatchSequence,
+      sequence: (this.progressWatchEvents.at(-1)?.sequence ?? 0) + 1,
       timestamp: this.now().toISOString(),
       conversationIdSuffix: input.watch.conversationId.slice(-8),
       ownerAlias: input.watch.ownerAlias,
@@ -2361,17 +2213,13 @@ export class GatewayService {
     }
   }
 
-  private async finishSettlements(
-    settlements: readonly TerminalMessageSettlement[],
-  ): Promise<void> {
+  private async finishSettlements(settlements: readonly TerminalMessageSettlement[]): Promise<void> {
     await Promise.all(settlements.map(async (settlement) => this.finishSettlement(settlement)));
   }
 
   private async finishSettlement(settlement: TerminalMessageSettlement): Promise<void> {
     this.activeAttempts.delete(settlement.messageId);
-    this.conversationByMessage.delete(settlement.messageId);
     this.messageContexts.delete(settlement.messageId);
-    this.transientTargets.delete(settlement.messageId);
     const receipt = this.nativeReceipts.get(settlement.messageId);
     if (receipt !== undefined) {
       this.nativeReceipts.delete(settlement.messageId);
@@ -2400,12 +2248,11 @@ export class GatewayService {
     registrationId: string,
     steer = false,
   ): void {
-    const delay = CLEAN_RETRY_DELAY_MS;
     this.timers.setTimeout(
       () => steer
         ? this.kickSteer(targetAlias)
         : this.kick(targetAlias, registrationId),
-      delay,
+      CLEAN_RETRY_DELAY_MS,
     );
   }
 

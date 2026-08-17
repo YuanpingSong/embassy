@@ -20,11 +20,6 @@ import {
   type SocketCompatibleDuplex,
   type WebSocketDuplexTransportOptions,
 } from "./codex-app-server.js";
-import {
-  isCompatibilityVersion,
-  UNKNOWN_COMPATIBILITY_VERSION,
-} from "./compatibility.js";
-
 const APP_SERVER_CONTROL_DIRECTORY = "app-server-control";
 const APP_SERVER_CONTROL_SOCKET = "app-server-control.sock";
 const DEFAULT_MAX_STDERR_BYTES = 64 * 1024;
@@ -32,11 +27,21 @@ const DEFAULT_SPAWN_TIMEOUT_MS = 5_000;
 const DEFAULT_GRACEFUL_EXIT_MS = 2_000;
 const DEFAULT_SIGNAL_TIMEOUT_MS = 750;
 const RELEASE_LEAF_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$/;
+const VERSION_PATTERN = /^(?=.{1,128}$)\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z-]{1,64}(?:\.[0-9A-Za-z-]{1,64}){0,7})?$/;
 const MANAGED_TARGET_TRIPLES = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
 ] as const;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
+
+export function managedCodexControlSocketPath(home: string): string {
+  return path.join(
+    home,
+    ".codex",
+    APP_SERVER_CONTROL_DIRECTORY,
+    APP_SERVER_CONTROL_SOCKET,
+  );
+}
 
 export type LocalCodexTransportErrorCode =
   | "HOME_INVALID"
@@ -258,9 +263,12 @@ export async function resolveManagedLocalCodexInstallation(
   }
   return await resolveManagedLocalCodexInstallationWithReleaseLeaves(
     home,
-    isCompatibilityVersion(observedVersion)
+    VERSION_PATTERN.test(observedVersion) &&
+      !observedVersion.split("-", 2)[1]?.split(".").some(
+        (part) => /^0\d+$/u.test(part),
+      )
       ? observedVersion
-      : UNKNOWN_COMPATIBILITY_VERSION,
+      : "unknown",
     new Set([releaseLeaf]),
   );
 }
@@ -334,10 +342,7 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
     ".codex",
     APP_SERVER_CONTROL_DIRECTORY,
   );
-  const controlSocketPath = path.join(
-    controlDirectory,
-    APP_SERVER_CONTROL_SOCKET,
-  );
+  const controlSocketPath = managedCodexControlSocketPath(home);
   let socketMetadata: Awaited<ReturnType<typeof lstat>> | undefined;
   let availabilityFailure:
     | "CODEX_CONTROL_SOCKET_UNAVAILABLE"

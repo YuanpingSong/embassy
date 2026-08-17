@@ -4,9 +4,9 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
-import { CLAUDE_PEER_COMPATIBILITY } from "../src/gateway/claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
-import type { LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
+import { LocalCodexTransportError, managedCodexControlSocketPath,
+  type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
 import { renderDashboardHtml } from "../src/gateway/dashboard.js";
@@ -16,7 +16,6 @@ import type {
   LocalCodexGatewayProvider,
 } from "../src/gateway/providers.js";
 import {
-  resolveGatewayClaudeLauncher,
   runGatewayServer,
   type GatewayServerDependencies,
   type GatewayServerReadyResult,
@@ -25,16 +24,11 @@ import { GatewayStore } from "../src/gateway/store.js";
 import { dashboardFixture } from "./dashboard-fixture.js";
 
 const SYNTHETIC_HOME = "/synthetic/login-home";
-const SYNTHETIC_LAUNCHER = "/synthetic/login-home/.local/bin/claude";
 const SYNTHETIC_SECRET = "SYNTHETIC_CREDENTIAL_MUST_NOT_BE_FORWARDED";
 const SYNTHETIC_CODEX_VERSION = "0.147.0";
 
 function runtime(): AttestedClaudePeerRuntime {
-  const version = CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion;
   return {
-    claudeExecutable:
-      `/synthetic/login-home/.local/share/claude/versions/${version}`,
-    claudeCodeVersion: version,
     sessionsDir: "/synthetic/login-home/.claude/sessions",
     socketDir: "/synthetic/tmp/cc-socks",
   };
@@ -73,6 +67,7 @@ function statelessOperation(): StatelessCodexOperationTransport {
       safeErrorCode: "THREAD_NOT_OBSERVED",
       state: "deferred",
     }),
+    observe: async () => ({ state: "unobserved", safeErrorCode: "THREAD_NOT_OBSERVED" }),
   };
 }
 
@@ -163,7 +158,6 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
     USER: "synthetic-user",
     LOGNAME: "synthetic-user",
     EMBASSY_STATE_DIR: stateDir,
-    EMBASSY_CLAUDE_BIN: SYNTHETIC_LAUNCHER,
     EMBASSY_DELIVERY_NOTICES: "quiet",
     ANTHROPIC_API_KEY: SYNTHETIC_SECRET,
     CLAUDE_CODE_MESSAGING_SOCKET: "/synthetic/private/provider.sock",
@@ -176,12 +170,14 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   const signals = signalHarness();
   const events: string[] = [];
   const ready: GatewayServerReadyResult[] = [];
-  let claudeOptions: unknown;
+  let claudeAttestations = 0;
   let codexOperationOptions: Record<string, unknown> | undefined;
   let codexProviderOptions: Record<string, unknown> | undefined;
   let codexObservationAttempts = 0;
   const acpProviderOptions: Record<string, unknown>[] = [];
   let serviceOptions: Record<string, unknown> | undefined;
+  let doctorResolutionError: unknown = new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
+  let doctorInspections = 0;
 
   await runGatewayServer(
     {
@@ -209,9 +205,9 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
         events.push("acquire-instance");
         return instanceLease(() => events.push("close-instance"));
       },
-      attestClaudeRuntime: async (options) => {
+      attestClaudeRuntime: async () => {
         events.push("attest-claude");
-        claudeOptions = options;
+        claudeAttestations += 1;
         return runtime();
       },
       createClaudeProvider: (options) => {
@@ -240,6 +236,13 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
         codexProviderOptions = options as unknown as Record<string, unknown>;
         return provider(() => events.push("close-codex"));
       },
+      resolveCodexInstallation: async () => { throw doctorResolutionError; },
+      createCodexDoctorInspector: () => ({ inspect: async (request) => {
+        doctorInspections += 1;
+        assert.equal(request.socketPath, managedCodexControlSocketPath(SYNTHETIC_HOME));
+        const holder = process.pid + 1;
+        return { processes: [{ pid: holder, parentPid: 1, executablePath: "/synthetic/stale-codex" }], socketHolderPids: [holder] };
+      } }),
       resolveDeepSeekAcpLaunch: async (options) => {
         assert.equal(options.loginHome, SYNTHETIC_HOME);
         assert.equal(options.env, env);
@@ -265,9 +268,7 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
     },
   );
 
-  assert.deepEqual(claudeOptions, {
-    claudeExecutable: SYNTHETIC_LAUNCHER,
-  });
+  assert.equal(claudeAttestations, 1);
   const localOperation = codexOperationOptions?.local as
     | Record<string, unknown>
     | undefined;
@@ -345,6 +346,10 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
     "close-service",
     "close-instance",
   ]);
+  assert.deepEqual(await (serviceOptions?.codexDoctor as (() => Promise<unknown>))(), { conditions: ["managed_layout_missing"] });
+  doctorResolutionError = new LocalCodexTransportError("MANAGED_CODEX_INVALID");
+  assert.deepEqual(await (serviceOptions?.codexDoctor as (() => Promise<unknown>))(), { conditions: ["unknown"] });
+  assert.equal(doctorInspections, 1);
   assert.equal(signals.listenerCount(), 0);
 });
 
@@ -408,56 +413,6 @@ test("assembly constructs inert operations and keeps observation attestation laz
   assert.equal(operationCalls, 1);
   assert.equal(observationCalls, 1);
   assert.equal(signals.listenerCount(), 0);
-});
-
-test("Claude version evidence never prevents normal adapter construction", async () => {
-  for (const current of [
-    {
-      runtime: { ...runtime(), claudeCodeVersion: "3.0.0" },
-    },
-    {
-      runtime: { ...runtime(), claudeCodeVersion: "unknown" },
-    },
-  ] as const) {
-    const env: NodeJS.ProcessEnv = {
-      HOME: SYNTHETIC_HOME,
-      EMBASSY_STATE_DIR: "/synthetic/controller-state",
-    };
-    const config = loadGatewayConfig(env);
-    const abort = new AbortController();
-    const signals = signalHarness();
-    let nativeClaudeConstructions = 0;
-
-    await runGatewayServer(
-      {
-        env,
-        signal: abort.signal,
-        onReady: () => abort.abort(),
-      },
-      {
-        ...signals.dependencies,
-        loadConfig: () => config,
-        loginHome: () => SYNTHETIC_HOME,
-        acquireInstanceLease: async () => instanceLease(() => undefined),
-        attestClaudeRuntime: async () => current.runtime,
-        createClaudeProvider: (options) => {
-          nativeClaudeConstructions += 1;
-          assert.deepEqual(options.runtime, current.runtime);
-          return provider(() => undefined);
-        },
-        createStore: () => inertStore(config),
-        createCodexOperation: () => statelessOperation(),
-        createCodexProvider: () => provider(() => undefined),
-        createService: () => ({
-          start: async () => undefined,
-          close: async () => undefined,
-        }),
-      },
-    );
-
-    assert.equal(nativeClaudeConstructions, 1);
-    assert.equal(signals.listenerCount(), 0);
-  }
 });
 
 test("Codex startup performs no installation resolution or App Server I/O", async () => {
@@ -1015,31 +970,3 @@ test(
     await first;
   },
 );
-
-test("launcher resolution uses only an explicit path or the official local default", () => {
-  assert.equal(
-    resolveGatewayClaudeLauncher({}, SYNTHETIC_HOME),
-    SYNTHETIC_LAUNCHER,
-  );
-  assert.equal(
-    resolveGatewayClaudeLauncher(
-      { EMBASSY_CLAUDE_BIN: "/synthetic/custom/bin/claude" },
-      SYNTHETIC_HOME,
-    ),
-    "/synthetic/custom/bin/claude",
-  );
-  assert.throws(
-    () =>
-      resolveGatewayClaudeLauncher(
-        { EMBASSY_CLAUDE_BIN: "claude" },
-        SYNTHETIC_HOME,
-      ),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "INVALID_CLAUDE_EXECUTABLE",
-  );
-  assert.throws(
-    () => resolveGatewayClaudeLauncher({}, path.relative("/", SYNTHETIC_HOME)),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "INVALID_CLAUDE_EXECUTABLE",
-  );
-});

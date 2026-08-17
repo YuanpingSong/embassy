@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { GatewayConfig } from "../src/gateway/config.js";
+import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
@@ -16,6 +17,7 @@ import {
   type GatewayProviderAdapter,
 } from "../src/gateway/service.js";
 import { GatewayStore } from "../src/gateway/store.js";
+import { CONNECTOR_OBSERVATION_STALE_AFTER_MS } from "../src/gateway/types.js";
 import type {
   GatewayPreparedWriteEvidence,
   GatewayProvider,
@@ -342,6 +344,7 @@ async function fixture(
     deadlineMs?: number;
     inboundMode?: GatewayConfig["inboundMode"];
     seed?: (store: GatewayStore) => Promise<void>;
+    codexDoctor?: () => Promise<CodexDoctorResult>;
   }> = {},
 ): Promise<Fixture> {
   const temporary = await realpath(os.tmpdir());
@@ -368,6 +371,7 @@ async function fixture(
     store,
     now: clock.now,
     timers,
+    ...(options.codexDoctor === undefined ? {} : { codexDoctor: options.codexDoctor }),
     publishDashboard: async () => path.join(stateDir, "gateway-dashboard.html"),
   });
   await service.start();
@@ -477,16 +481,16 @@ test("stale removal and succession controls preserve a same-alias replacement", 
     ], { seed: async (store) => paired(store, claude, codex) });
     const entered = deferred<void>();
     const release = deferred<void>();
+    const removeOwnedRoute = subject.store.removeOwnedRouteAtomic.bind(subject.store);
     try {
       const pending = operation === "remove"
         ? (() => {
-            const original = subject.store.removeOwnedRouteAtomic.bind(subject.store);
             subject.store.removeOwnedRouteAtomic = async (input) => {
               if (input.alias === codex.alias) {
                 entered.resolve();
                 await release.promise;
               }
-              return await original(input);
+              return await removeOwnedRoute(input);
             };
             return subject.handlers.removeCodexRegistration({ alias: codex.alias });
           })()
@@ -506,9 +510,9 @@ test("stale removal and succession controls preserve a same-alias replacement", 
             });
           })();
       await entered.promise;
-      await subject.store.removeRouteAtomic({
+      await removeOwnedRoute({
         alias: codex.alias,
-        activity: { operatorAction: true },
+        binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
       });
       const unrelated = route("codex", codex.alias, THREAD_C, `reg-${operation}-replacement`);
       await subject.store.registerRoute(unrelated);
@@ -576,9 +580,9 @@ test("stale pair and unpair controls cannot act on replacement endpoints", async
             return subject.handlers.unpair({ aliases: [claude.alias, codex.alias] });
           })();
       await entered.promise;
-      await subject.store.removeRouteAtomic({
+      await subject.store.removeOwnedRouteAtomic({
         alias: codex.alias,
-        activity: { operatorAction: true },
+        binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
       });
       const replacement = route("codex", codex.alias, THREAD_C, `reg-${operation}-pair`);
       await subject.store.registerRoute(replacement);
@@ -588,7 +592,7 @@ test("stale pair and unpair controls cannot act on replacement endpoints", async
         (await subject.store.inspectPrivateRoute(codex.alias))?.binding.registrationId,
         replacement.binding.registrationId,
       );
-      assert.equal((await subject.store.inspectConsentEdges()).length, 0);
+      assert.equal((await subject.store.publicSnapshot()).consentEdges.length, 0);
     } finally {
       release.resolve();
       await subject.close();
@@ -649,7 +653,7 @@ test("confirmed removal atomically terminalizes phase truth and drops consent", 
     });
     const removed = await subject.handlers.removeCodexRegistration({ alias: codex.alias });
     assert.deepEqual(removed, { accepted: true, code: "ok" });
-    assert.equal((await subject.store.inspectConsentEdges()).length, 0);
+    assert.equal((await subject.store.publicSnapshot()).consentEdges.length, 0);
     const messages = await subject.store.publicSnapshot();
     const byBody = new Map(messages.messages.map((message) => [message.body, message]));
     assert.equal(byBody.get("accepted")?.state, "cancelled");
@@ -1024,6 +1028,55 @@ test("three STEER writes reach the exact accepted Codex operation while ordinary
   }
 });
 
+test("exact-leading native STEER uses the separate lane while native mail stays FIFO", async () => {
+  const codexProvider = new FakeProvider(
+    { provider: "codex", hostId: "this-mac" },
+    "pause_accepted",
+  );
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider], {
+    seed: async (store) => paired(store, claude, codex),
+  });
+  const native = (text: string): void => claudeProvider.callbacks?.onClaudeMessage?.({
+    endpoint: {
+      provider: "claude",
+      hostId: "this-mac",
+      routeHandle: claude.binding.routeHandle,
+    },
+    sourceAlias: claude.alias,
+    targetAlias: codex.alias,
+    text,
+  });
+  try {
+    assert.equal((await subject.handlers.sendToCodex({
+      fromAlias: claude.alias,
+      toAlias: codex.alias,
+      text: "paused native lane owner",
+      replyAddress: "uds:/test/claude-reply.sock",
+      expectsReply: false,
+    })).accepted, true);
+    await codexProvider.pauseEntered.promise;
+    native("ordinary native FIFO");
+    await eventually(async () => (await subject.store.publicSnapshot()).messages.some(
+      (message) => message.body === "ordinary native FIFO" && message.state === "queued",
+    ));
+    native("STEER: exact native correction");
+    await eventually(() => codexProvider.dispatches.some(
+      (dispatch) => dispatch.text === "STEER: exact native correction" && dispatch.steer === true,
+    ));
+    assert.equal(codexProvider.dispatches.some(
+      (dispatch) => dispatch.text === "ordinary native FIFO",
+    ), false);
+    codexProvider.pauseRelease.resolve();
+    await eventually(() => codexProvider.dispatches.some(
+      (dispatch) => dispatch.text === "ordinary native FIFO" && dispatch.steer !== true,
+    ));
+  } finally {
+    codexProvider.pauseRelease.resolve();
+    await subject.close();
+  }
+});
+
 test("unpair after authorization makes the exact armed attempt ambiguous", async () => {
   const source = route("codex", "codex-source@this-mac", THREAD_A, "reg-source");
   const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg-dsh-one");
@@ -1098,6 +1151,42 @@ test("delivery status and public observations stay native-ID-free", async () => 
     });
   } finally {
     codexProvider.pauseRelease.resolve();
+    await subject.close();
+  }
+});
+
+test("Codex doctor health composes managed-layout and stale observation evidence", async () => {
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([codexProvider], {
+    seed: async (store) => store.registerRoute(codex),
+    codexDoctor: async () => ({
+      conditions: ["managed_layout_missing"],
+    }) as unknown as CodexDoctorResult,
+  });
+  const connector = async () => (await subject.service.snapshot()).connectors[0]!;
+  try {
+    assert.equal((await connector()).health, "degraded");
+    assert.equal((await connector()).safeErrorCode, "MANAGED_CODEX_UNAVAILABLE");
+    codexProvider.callbacks?.onRouteState({
+      route: codex.binding,
+      state: "unobserved",
+      observedAt: subject.clock.now().toISOString(),
+      safeErrorCode: "THREAD_NOT_OBSERVED",
+    });
+    await eventually(async () => (await connector()).safeErrorCode === "THREAD_NOT_OBSERVED");
+    codexProvider.callbacks?.onRouteState({
+      route: codex.binding,
+      state: "idle",
+      observedAt: subject.clock.now().toISOString(),
+    });
+    await eventually(async () => (await connector()).safeErrorCode === "MANAGED_CODEX_UNAVAILABLE");
+    subject.clock.advance(CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1);
+    assert.deepEqual((await connector()).codexDoctor?.conditions, [
+      "managed_layout_missing",
+      "observation_stale",
+    ]);
+    assert.equal((await connector()).safeErrorCode, "CONNECTOR_OBSERVATION_STALE");
+  } finally {
     await subject.close();
   }
 });
@@ -1197,7 +1286,7 @@ test("live-only progress watches open, settle, and disappear across every owners
   }
 });
 
-test("a progress-watch nudge cannot cross an endpoint replacement after its lease check", async () => {
+test("a progress-watch nudge cannot cross an endpoint replacement after its registration check", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
@@ -1967,9 +2056,9 @@ test("provider replyText reverses an exact native ingress through native_reply a
       receiptHandle: "receipt-native-race",
     });
     await receiptEntered.promise;
-    await subject.store.removeRouteAtomic({
+    await subject.store.removeOwnedRouteAtomic({
       alias: codex.alias,
-      activity: { operatorAction: true },
+      binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
     });
     const replacement = route("codex", codex.alias, THREAD_B, "reg-codex-race");
     await subject.store.registerRoute(replacement);

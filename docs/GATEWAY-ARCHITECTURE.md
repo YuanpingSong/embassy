@@ -174,7 +174,7 @@ The status below is intentionally narrower than the target architecture.
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the stable loopback listener, direct multi-browser access, projection, request guards, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter with strict peer protocol 1 and per-operation validation | **Implemented** and live-tested through Claude Code 2.1.227, including discovery, native status frames, cancellation, and accessible-workspace validation |
-| Claude binary/runtime metadata | **Implemented**; validates the exact owned path and records launcher-leaf metadata without granting it routing authority |
+| Claude current-user runtime roots | **Implemented**; derives the registry and callback roots from the verified OS user without inspecting a launcher or configuration file |
 | Stateless allowlisted Codex App Server transport with bounded busy behavior | **Implemented**; every operation opens and attests its own transport, and the conformance suite covers idle gating, exact `STEER:` behavior, clean retry, and ambiguous no-replay settlement |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, and lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup; remote adapters remain disabled |
@@ -271,7 +271,7 @@ closed. A name alone never restores or retargets a durable selection.
 
 The dashboard is the single pane for the human. It shows both sanitized
 available/selected Claude aliases and explicitly registered Codex aliases,
-including their host, compatibility, state, last-seen age, and queue depth.
+including their host, current state, last-seen age, and queue depth.
 The thin skill/CLI exposes the same safe alias list to either provider.
 
 ## Message flows
@@ -392,7 +392,7 @@ its mutable name, PID, registry record, or socket. Before every stall or
 terminal receipt write, the adapter performs bounded discovery and revalidates
 the UUID's current exact coordinates. This permits a receipt to follow ordinary
 process/socket rotation without writing to a stale generation. If the UUID is
-not uniquely and compatibly re-observed, the write fails closed. A terminal
+not uniquely re-observed with peer protocol 1, the write fails closed. A terminal
 write whose outcome is ambiguous is never replayed; only a proven pre-write
 failure may be retried while the bounded in-memory receipt remains live. The
 receipt correlation does not add the UUID or receipt handle to public output
@@ -988,8 +988,7 @@ paths, peers, and transports:
 
 | Path/capability | Minimum purpose |
 | --- | --- |
-| `~/.local/bin/claude` (or the absolute `EMBASSY_CLAUDE_BIN` override) and its derived current target under `~/.local/share/claude/versions/` | Stat the owned launcher/path components and read/execute only the resolved version target for bounded `--version`; `PATH` and interactive shell profiles are never searched; live launcher validation succeeded |
-| `~/.claude/sessions` | Read/enumerate only live registry JSON during the separately authorized passive-discovery gate |
+| `~/.claude/sessions` | Derive from the verified current OS user's normalized home; read/enumerate only live registry JSON during the separately authorized passive-discovery gate, and validate exact records, PIDs, workspaces, and peer sockets used by the current operation. An absent or unsafe root degrades only Claude |
 | `/tmp/cc-socks` | At foreground startup, validate the private directory and create/remove only `/tmp/cc-socks/<gateway-pid>.sock` after inode/generation checks; search/stat genuine peers at passive discovery and connect one validated target only at the separately authorized send gate |
 | `~/.local/state/agent-embassy/.agent-embassy-state` | Validate or establish the exact ownership marker before creating the fixed host lease; an existing non-empty unmarked root is rejected without mutation |
 | `/usr/bin/lockf` and `/bin/cat` | Hold one fixed, non-waiting macOS advisory lease for the foreground controller; the helper receives no shell text, provider data, or model-supplied argument |

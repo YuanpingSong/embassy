@@ -254,6 +254,7 @@ export type DashboardConnectorRow = Readonly<{
       | "orphaned"
       | "attached"
       | "observation_stale"
+      | "managed_layout_missing"
       | "unknown"
     )[];
   }>;
@@ -524,32 +525,6 @@ function semanticPresentation(
   return Object.prototype.hasOwnProperty.call(table, state)
     ? table[state]
     : undefined;
-}
-
-export function dashboardChipKind(
-  domain: DashboardSemanticDomain,
-  state: string,
-  direction?: MessageDirection,
-  safeErrorCode?: string,
-): DashboardChipKind {
-  if (domain === "delivery") {
-    const byCode = DASHBOARD_SEMANTICS.deliveryChipBySafeErrorCode as Readonly<
-      Record<string, Readonly<Record<string, DashboardChipKind>>>
-    >;
-    const byTarget = DASHBOARD_SEMANTICS.deliveryChipByTargetProvider as Readonly<
-      Record<string, Readonly<Partial<Record<GatewayProvider, DashboardChipKind>>>>
-    >;
-    if (safeErrorCode !== undefined) {
-      const override = byCode[state]?.[safeErrorCode];
-      if (override !== undefined) return override;
-    }
-    if (direction !== undefined) {
-      const target = parseDirection(direction)?.targetProvider;
-      const override = target === undefined ? undefined : byTarget[state]?.[target];
-      if (override !== undefined) return override;
-    }
-  }
-  return semanticPresentation(domain, state)?.chip ?? "unknown";
 }
 
 export function dashboardTone(

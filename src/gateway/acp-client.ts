@@ -113,19 +113,6 @@ export type AcpPreparedPrompt = Readonly<{
   perform: () => Promise<AcpPromptReceipt>;
 }>;
 
-export type AcpOptionalResult<T> =
-  | Readonly<{ available: true; value: T }>
-  | Readonly<{
-      available: false;
-      reason: "not_advertised" | "method_not_found";
-    }>;
-
-export type AcpSessionOptions = Readonly<{
-  sessionId: string;
-  cwd: string;
-  mcpServers?: readonly unknown[];
-}>;
-
 export class AcpRequestError extends Error {
   readonly detail: AcpRpcErrorDetail;
 
@@ -282,42 +269,6 @@ export class AcpClient {
     return this.notify("session/cancel", { sessionId });
   }
 
-  async authenticate(methodId: string): Promise<void> {
-    await this.request("authenticate", { methodId });
-  }
-
-  listSessions(
-    params: Readonly<{ cwd?: string; cursor?: string }> = {},
-  ): Promise<AcpOptionalResult<unknown>> {
-    return this.optionalRequest(
-      "session/list",
-      hasObjectCapability(this.infoValue.agentCapabilities, [
-        "sessionCapabilities",
-        "list",
-      ]),
-      params,
-    );
-  }
-
-  resumeSession(options: AcpSessionOptions): Promise<AcpOptionalResult<unknown>> {
-    return this.optionalRequest(
-      "session/resume",
-      hasObjectCapability(this.infoValue.agentCapabilities, [
-        "sessionCapabilities",
-        "resume",
-      ]),
-      sessionLifecycleParams(options),
-    );
-  }
-
-  loadSession(options: AcpSessionOptions): Promise<AcpOptionalResult<unknown>> {
-    return this.optionalRequest(
-      "session/load",
-      this.infoValue.agentCapabilities.loadSession === true,
-      sessionLifecycleParams(options),
-    );
-  }
-
   close(): void {
     if (this.exited) return;
     this.handleProcessExit();
@@ -394,28 +345,6 @@ export class AcpClient {
       agentCapabilities: Object.freeze({ ...agentCapabilities }),
       authMethods: Object.freeze(authMethods),
     });
-  }
-
-  private async optionalRequest(
-    method: string,
-    advertised: boolean,
-    params: unknown,
-  ): Promise<AcpOptionalResult<unknown>> {
-    if (!advertised) return { available: false, reason: "not_advertised" };
-    if (this.disabledMethods.has(method)) {
-      return { available: false, reason: "method_not_found" };
-    }
-    try {
-      return { available: true, value: await this.request(method, params) };
-    } catch (error) {
-      if (
-        error instanceof AcpRequestError &&
-        error.detail.code === METHOD_NOT_FOUND
-      ) {
-        return { available: false, reason: "method_not_found" };
-      }
-      throw error;
-    }
   }
 
   private request(method: string, params: unknown): Promise<unknown> {
@@ -571,14 +500,6 @@ function resolveLaunch(launch: AcpLaunchSpec): {
   return { command: launch.command, args };
 }
 
-function sessionLifecycleParams(options: AcpSessionOptions): JsonObject {
-  return {
-    sessionId: options.sessionId,
-    cwd: options.cwd,
-    mcpServers: [...(options.mcpServers ?? [])],
-  };
-}
-
 function mapPromptResult(
   stopReason: unknown,
   active: ActivePrompt,
@@ -620,15 +541,6 @@ function appendPromptText(active: ActivePrompt, text: string): void {
   active.text += bytes.subarray(0, end).toString("utf8");
   active.bytes += end;
   active.truncated = true;
-}
-
-function hasObjectCapability(value: unknown, path: readonly string[]): boolean {
-  let current = value;
-  for (const segment of path) {
-    if (!isObject(current)) return false;
-    current = current[segment];
-  }
-  return isObject(current);
 }
 
 function rpcErrorDetail(value: unknown): AcpRpcErrorDetail {

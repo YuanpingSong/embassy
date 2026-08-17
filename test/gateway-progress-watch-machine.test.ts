@@ -5,10 +5,8 @@ import {
   createProgressWatch,
   deferProgressWatchNudge,
   inspectProgressWatchDue,
-  progressWatchJournalKinds,
   recordProgressWatchActivity,
   type ProgressWatch,
-  type ProgressWatchJournalEvent,
 } from "../src/gateway/progress-watch-machine.js";
 
 const START = Date.parse("2026-08-09T12:00:00.000Z");
@@ -19,20 +17,16 @@ function initial(): ProgressWatch {
     conversationId: "conv_abcdefghijklmnop",
     ownerAlias: "codex-owner@this-mac",
     workerAlias: "claude-worker@this-mac",
-    ownerLease: "lease_owner",
-    workerLease: "lease_worker",
     idleMs: IDLE,
     at: START,
   });
 }
 
-test("active watches retain only the nine fields required for supervision", () => {
+test("active watches retain only the seven fields required for supervision", () => {
   assert.deepEqual(initial(), {
     conversationId: "conv_abcdefghijklmnop",
     ownerAlias: "codex-owner@this-mac",
     workerAlias: "claude-worker@this-mac",
-    ownerLease: "lease_owner",
-    workerLease: "lease_worker",
     lastActivityAt: "2026-08-09T12:00:00.000Z",
     idleMs: IDLE,
     nudgeCount: 0,
@@ -138,32 +132,6 @@ test("not-due, deferred, and stale nudge decisions are exact", () => {
       }),
     /INVALID_PROGRESS_WATCH_NUDGE/,
   );
-});
-
-test("journal inventory records only open, replace, and attributed settlement", () => {
-  const valid: ProgressWatchJournalEvent[] = [
-    {
-      sequence: 1,
-      timestamp: new Date(START).toISOString(),
-      conversationId: initial().conversationId,
-      ownerAlias: initial().ownerAlias,
-      workerAlias: initial().workerAlias,
-      kind: "opened",
-      actor: "owner",
-    },
-    {
-      sequence: 2,
-      timestamp: new Date(START + 1).toISOString(),
-      conversationId: initial().conversationId,
-      ownerAlias: initial().ownerAlias,
-      workerAlias: initial().workerAlias,
-      kind: "settled",
-      actor: "worker",
-      reason: "done",
-    },
-  ];
-  assert.equal(valid.length, 2);
-  assert.deepEqual(progressWatchJournalKinds, ["opened", "replaced", "settled"]);
 });
 
 test("all pure operations are deterministic and nonmutating", () => {

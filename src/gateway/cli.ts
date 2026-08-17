@@ -1,64 +1,28 @@
 #!/usr/bin/env node
 
-/**
- * Local gateway foreground launcher and metadata-only control client.
- *
- * Provider identities and message bodies are accepted only from inherited
- * process state and stdin respectively. They are never reflected in output or
- * error text. Only `serve` owns the long-lived provider capabilities and
- * private control server. The state converter is an offline one-shot; every
- * other command is a bounded client operation.
- */
+/** Foreground broker plus bounded metadata-only control client. */
 import { realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
-import {
-  getCliCopy,
-  type CliCopyKey,
-  type CliStderrKind,
-} from "./cli-copy.js";
+import { getCliCopy, type CliCopyKey, type CliStderrKind } from "./cli-copy.js";
 import { callerIdentityConflictHintEn } from "./cli-copy.en.js";
 import { callerIdentityConflictHintZhCn } from "./cli-copy.zh-CN.js";
-import {
-  GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS,
-  GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
-  GATEWAY_CONTROL_MAX_RESPONSE_BYTES,
-  GATEWAY_CONTROL_PROTOCOL_VERSION,
-  GatewayControlTransportError,
-  isClaudeSessionSelector,
-  isGatewayAlias,
-  isGatewayConversationId,
-  isGatewayDeliveryToken,
-  isGatewayHostId,
-  isGatewayReplyAddress,
-  sendGatewayControlRequest,
-  type GatewayControlMethod,
-  type GatewayControlRequest,
-  type GatewayControlResponse,
-  type SendGatewayControlRequestOptions,
-} from "./control.js";
+import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
+  GATEWAY_CONTROL_MAX_RESPONSE_BYTES, GATEWAY_CONTROL_PROTOCOL_VERSION,
+  GatewayControlTransportError, isClaudeSessionSelector, isGatewayAlias,
+  isGatewayConversationId, isGatewayDeliveryToken, isGatewayHostId,
+  isGatewayReplyAddress, sendGatewayControlRequest, type GatewayControlMethod,
+  type GatewayControlRequest, type GatewayControlResponse,
+  type SendGatewayControlRequestOptions } from "./control.js";
 import { loadGatewayConfig, type GatewayConfig } from "./config.js";
-import {
-  isDashboardLocale,
-  type DashboardLocale,
-} from "./locale.js";
-import {
-  DEFAULT_LIVE_DASHBOARD_PORT,
-  runLiveDashboardCommand,
-  type LiveDashboardCommandOutcome,
-  type LiveDashboardCommandOptions,
-} from "./live-dashboard-command.js";
-import {
-  runGatewayServer,
-  type GatewayServerOptions,
-} from "./server.js";
+import { isDashboardLocale, type DashboardLocale } from "./locale.js";
+import { DEFAULT_LIVE_DASHBOARD_PORT, runLiveDashboardCommand,
+  type LiveDashboardCommandOutcome, type LiveDashboardCommandOptions } from "./live-dashboard-command.js";
+import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
-import {
-  convertGatewayStateV2ToV3,
-  type GatewayStateV2ToV3Result,
-} from "./state-v2-to-v3.js";
+import { convertGatewayStateV2ToV3, type GatewayStateV2ToV3Result } from "./state-v2-to-v3.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -73,25 +37,10 @@ export const EMBASSY_VERSION = "1.7.1";
 const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
-  "serve",
-  "health",
-  "status",
-  "doctor",
-  "convert-state-v2-to-v3",
-  "delivery-status",
-  "wait-delivery",
-  "untrack",
-  "refresh-dashboard",
-  "dashboard",
-  "register-codex",
-  "unregister-codex",
-  "select-claude",
-  "unselect-claude",
-  "pair",
-  "unpair",
-  "send-to-claude",
-  "send-to-codex",
-  "reply",
+  "serve", "health", "status", "doctor", "convert-state-v2-to-v3", "delivery-status",
+  "wait-delivery", "untrack", "refresh-dashboard", "dashboard", "register-codex",
+  "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
+  "send-to-claude", "send-to-codex", "reply",
 ] as const;
 
 export type GatewayCliCommand = (typeof gatewayCliCommands)[number];
@@ -105,21 +54,11 @@ export const gatewayCliExitCodes = Object.freeze({
   failure: 6,
 } as const);
 
-type Writable = {
-  write(chunk: string): unknown;
-};
-
-type GatewayControlSender = <M extends GatewayControlMethod>(
-  options: SendGatewayControlRequestOptions<M>,
-) => Promise<GatewayControlResponse<M>>;
-
+type Writable = { write(chunk: string): unknown };
+type GatewayControlSender = <M extends GatewayControlMethod>(options: SendGatewayControlRequestOptions<M>) => Promise<GatewayControlResponse<M>>;
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
-type LiveDashboardRunner = (
-  options: LiveDashboardCommandOptions,
-) => Promise<LiveDashboardCommandOutcome | void>;
-type GatewayStateConverter = (
-  options: Readonly<{ stateDir: string }>,
-) => Promise<GatewayStateV2ToV3Result>;
+type LiveDashboardRunner = (options: LiveDashboardCommandOptions) => Promise<LiveDashboardCommandOutcome | void>;
+type GatewayStateConverter = (options: Readonly<{ stateDir: string }>) => Promise<GatewayStateV2ToV3Result>;
 
 export type GatewayCliDependencies = {
   env?: NodeJS.ProcessEnv;
@@ -133,635 +72,317 @@ export type GatewayCliDependencies = {
   convertState?: GatewayStateConverter;
   serverSignal?: AbortSignal;
   liveDashboardSignal?: AbortSignal;
-  validateControlSocket?: (
-    stateDir: string,
-    socketPath: string,
-  ) => Promise<void>;
+  validateControlSocket?: (stateDir: string, socketPath: string) => Promise<void>;
   now?: () => number;
   delay?: (milliseconds: number) => Promise<void>;
 };
 
 type ParsedOptions = Readonly<Record<string, string | true>>;
-
-type CommonCliOptions = Readonly<{
-  args: readonly string[];
-  locale: DashboardLocale;
-}>;
-
+type CliFaultHint = CliCopyKey | "callerIdentityConflict";
 class CliFault extends Error {
-  readonly code: string;
-  readonly retryable: boolean;
-  readonly hint: CliFaultHint | undefined;
-  readonly kind: CliStderrKind | undefined;
-
   constructor(
-    code: string,
-    retryable = false,
-    hint?: CliFaultHint,
-    kind?: CliStderrKind,
+    readonly code: string,
+    readonly retryable = false,
+    readonly hint?: CliFaultHint,
+    readonly kind?: CliStderrKind,
   ) {
     super("The gateway client rejected the request.");
     this.name = "CliFault";
-    this.code = code;
-    this.retryable = retryable;
-    this.hint = hint;
-    this.kind = kind;
   }
 }
-
-type CliFaultHint = CliCopyKey | "callerIdentityConflict";
-
-function isCommand(value: string | undefined): value is GatewayCliCommand {
-  return (
-    value !== undefined &&
-    (gatewayCliCommands as readonly string[]).includes(value)
-  );
-}
+function fault(code = "INVALID_ARGUMENTS"): never { throw new CliFault(code); }
+const isCommand = (value: string | undefined): value is GatewayCliCommand =>
+  value !== undefined && (gatewayCliCommands as readonly string[]).includes(value);
 
 function parseOptions(
   args: readonly string[],
   valueNames: readonly string[],
   flagNames: readonly string[] = [],
 ): ParsedOptions {
-  const values = new Set(valueNames);
-  const flags = new Set(flagNames);
-  const parsed: Record<string, string | true> = Object.create(null) as Record<
-    string,
-    string | true
-  >;
-
+  const values = new Set(valueNames), flags = new Set(flagNames);
+  const parsed: Record<string, string | true> = Object.create(null);
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
-    if (token === undefined || !token.startsWith("--") || token.length <= 2) {
-      throw new CliFault("INVALID_ARGUMENTS");
-    }
+    if (token === undefined || !token.startsWith("--") || token.length <= 2) fault();
     const name = token.slice(2);
-    if (Object.hasOwn(parsed, name)) {
-      throw new CliFault("INVALID_ARGUMENTS");
-    }
-    if (flags.has(name)) {
-      parsed[name] = true;
-      continue;
-    }
-    if (!values.has(name)) {
-      throw new CliFault("INVALID_ARGUMENTS");
-    }
+    if (Object.hasOwn(parsed, name)) fault();
+    if (flags.has(name)) { parsed[name] = true; continue; }
+    if (!values.has(name)) fault();
     const value = args[index + 1];
-    if (value === undefined || value.startsWith("--") || value.length === 0) {
-      throw new CliFault("INVALID_ARGUMENTS");
-    }
+    if (value === undefined || value.startsWith("--") || value.length === 0) fault();
     parsed[name] = value;
     index += 1;
   }
-
   return parsed;
 }
-
-function environmentLocale(env: NodeJS.ProcessEnv): DashboardLocale {
-  const value = env.EMBASSY_LOCALE;
-  if (value === undefined || value.length === 0) return DEFAULT_CLI_LOCALE;
-  if (!isDashboardLocale(value)) throw new CliFault("INVALID_ARGUMENTS");
-  return value;
-}
-
-function resolveCommonCliOptions(
-  args: readonly string[],
-  env: NodeJS.ProcessEnv,
-): CommonCliOptions {
+function commonOptions(args: readonly string[], env: NodeJS.ProcessEnv) {
   const stripped: string[] = [];
   let locale: DashboardLocale | undefined;
-  let sawLocale = false;
-
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
-    if (token !== "--lang") {
-      if (token !== undefined) stripped.push(token);
-      continue;
-    }
-    if (sawLocale) throw new CliFault("INVALID_ARGUMENTS");
-    sawLocale = true;
+    if (token !== "--lang") { if (token !== undefined) stripped.push(token); continue; }
+    if (locale !== undefined) fault();
     const value = args[index + 1];
-    if (value === undefined || value.startsWith("--") || value.length === 0) {
-      throw new CliFault("INVALID_ARGUMENTS");
-    }
-    if (!isDashboardLocale(value)) {
-      throw new CliFault("INVALID_ARGUMENTS");
-    }
+    if (!isDashboardLocale(value)) fault();
     locale = value;
     index += 1;
   }
-
+  const inherited = env.EMBASSY_LOCALE;
+  if (locale === undefined && inherited !== undefined && inherited.length > 0 && !isDashboardLocale(inherited)) fault();
   return {
     args: stripped,
-    // Resolve the environment only when no valid explicit flag exists. This
-    // lets an exact flag intentionally override even a malformed environment.
-    locale: locale ?? environmentLocale(env),
+    locale: locale ?? (isDashboardLocale(inherited) ? inherited : DEFAULT_CLI_LOCALE),
   };
 }
-
-function fallbackCliLocale(
-  args: readonly string[],
-  env: NodeJS.ProcessEnv,
-): DashboardLocale {
-  const localeFlagIndices: number[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "--lang") localeFlagIndices.push(index);
-  }
-  if (localeFlagIndices.length === 1) {
-    const value = args[(localeFlagIndices[0] ?? -1) + 1];
-    if (isDashboardLocale(value)) return value;
-  }
-  return isDashboardLocale(env.EMBASSY_LOCALE)
-    ? env.EMBASSY_LOCALE
-    : DEFAULT_CLI_LOCALE;
+function fallbackCliLocale(args: readonly string[], env: NodeJS.ProcessEnv): DashboardLocale {
+  const indices = args.flatMap((value, index) => value === "--lang" ? [index] : []);
+  const flagged = indices.length === 1 ? args[indices[0]! + 1] : undefined;
+  return isDashboardLocale(flagged) ? flagged
+    : isDashboardLocale(env.EMBASSY_LOCALE) ? env.EMBASSY_LOCALE : DEFAULT_CLI_LOCALE;
 }
-
-function fixedStderr(
-  locale: DashboardLocale,
-  kind: CliStderrKind,
-): string {
-  return `[embassy] ${getCliCopy(locale)[`error.${kind}`]}\n`;
-}
-
-function requireString(
-  options: ParsedOptions,
-  name: string,
-): string {
+const fixedStderr = (locale: DashboardLocale, kind: CliStderrKind): string =>
+  `[embassy] ${getCliCopy(locale)[`error.${kind}`]}\n`;
+function requireString(options: ParsedOptions, name: string): string {
   const value = options[name];
-  if (typeof value !== "string") throw new CliFault("INVALID_ARGUMENTS");
+  if (typeof value !== "string") fault();
   return value;
 }
-
-function assertExactOptionCount(
-  options: ParsedOptions,
-  minimum: number,
-  maximum: number = minimum,
-): void {
+function count(options: ParsedOptions, minimum: number, maximum = minimum): void {
   const count = Object.keys(options).length;
-  if (count < minimum || count > maximum) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (count < minimum || count > maximum) fault();
 }
-
 function requireAlias(options: ParsedOptions, name: string): string {
   const alias = requireString(options, name);
-  if (!isGatewayAlias(alias)) throw new CliFault("INVALID_ARGUMENTS");
+  if (!isGatewayAlias(alias)) fault();
   return alias;
 }
-
 function requireCodexAlias(options: ParsedOptions, name: string): string {
   const alias = requireAlias(options, name);
-  if (!alias.startsWith("codex-")) throw new CliFault("INVALID_ARGUMENTS");
+  if (!alias.startsWith("codex-")) fault();
   return alias;
 }
-
-function gatewayAliasHost(alias: string): string {
-  return alias.slice(alias.lastIndexOf("@") + 1);
-}
-
-function requirePairAliases(
-  options: ParsedOptions,
-): readonly [string, string] {
+const gatewayAliasHost = (alias: string): string => alias.slice(alias.lastIndexOf("@") + 1);
+function requirePairAliases(options: ParsedOptions): readonly [string, string] {
   const from = requireAlias(options, "from");
   const to = requireAlias(options, "to");
-  if (from === to || gatewayAliasHost(from) !== gatewayAliasHost(to)) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (from === to || gatewayAliasHost(from) !== gatewayAliasHost(to)) fault();
   return [from, to];
 }
-
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
-  if (!isClaudeSessionSelector(selector)) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (!isClaudeSessionSelector(selector)) fault();
   return selector;
 }
-
 function trackIdleMinutes(options: ParsedOptions): number | undefined {
   const tracking = options.track === true;
   const raw = options["idle-minutes"];
-  if (raw !== undefined && !tracking) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (raw !== undefined && !tracking) fault();
   if (!tracking) return undefined;
   if (raw === undefined) return PROGRESS_WATCH_DEFAULT_IDLE_MS / 60_000;
-  if (
-    typeof raw !== "string" ||
-    !/^[1-9][0-9]{0,3}$/.test(raw)
-  ) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (typeof raw !== "string" || !/^[1-9][0-9]{0,3}$/.test(raw)) fault();
   const minutes = Number(raw);
-  if (!Number.isSafeInteger(minutes) || minutes > 24 * 60) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (!Number.isSafeInteger(minutes) || minutes > 24 * 60) fault();
   return minutes;
 }
-
 function requireDeliveryToken(options: ParsedOptions, name: string): string {
   const token = requireString(options, name);
-  if (!isGatewayDeliveryToken(token)) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (!isGatewayDeliveryToken(token)) fault();
   return token;
 }
-
 function requireCodexThreadId(env: NodeJS.ProcessEnv): string {
   const threadId = env.CODEX_THREAD_ID;
-  if (typeof threadId !== "string" || !THREAD_ID_PATTERN.test(threadId)) {
-    throw new CliFault("CODEX_IDENTITY_REQUIRED");
-  }
+  if (typeof threadId !== "string" || !THREAD_ID_PATTERN.test(threadId)) fault("CODEX_IDENTITY_REQUIRED");
   return threadId.toLowerCase();
 }
-
-function hasInheritedIdentity(value: string | undefined): boolean {
-  return typeof value === "string" && value.length > 0;
-}
-
+const hasIdentity = (value: string | undefined): boolean => typeof value === "string" && value.length > 0;
 function callerIdentityConflictFault(env: NodeJS.ProcessEnv): CliFault {
-  const hasBothIdentities =
-    hasInheritedIdentity(env.CODEX_THREAD_ID) &&
-    hasInheritedIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET);
-  return new CliFault(
-    "CALLER_IDENTITY_CONFLICT",
-    false,
-    hasBothIdentities ? "callerIdentityConflict" : undefined,
-  );
+  const both = hasIdentity(env.CODEX_THREAD_ID) && hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET);
+  return new CliFault("CALLER_IDENTITY_CONFLICT", false, both ? "callerIdentityConflict" : undefined);
 }
-
 function requireExclusiveCodexThreadId(env: NodeJS.ProcessEnv): string {
-  if (hasInheritedIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) {
-    throw callerIdentityConflictFault(env);
-  }
+  if (hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
   return requireCodexThreadId(env);
 }
-
 function optionalCodexThreadId(env: NodeJS.ProcessEnv): string | undefined {
   const threadId = env.CODEX_THREAD_ID;
   if (threadId === undefined || threadId.length === 0) return undefined;
-  if (!THREAD_ID_PATTERN.test(threadId)) {
-    throw new CliFault("CODEX_IDENTITY_REQUIRED");
-  }
+  if (!THREAD_ID_PATTERN.test(threadId)) fault("CODEX_IDENTITY_REQUIRED");
   return threadId.toLowerCase();
 }
-
-function optionalClaudeReplyAddress(
-  env: NodeJS.ProcessEnv,
-): string | undefined {
+function optionalClaudeReplyAddress(env: NodeJS.ProcessEnv): string | undefined {
   const socketPath = env.CLAUDE_CODE_MESSAGING_SOCKET;
   if (socketPath === undefined || socketPath.length === 0) return undefined;
-  // Claude Code 2.1.225 exports the raw socket path. The peer protocol's
-  // transient callback capability is the same path with an explicit UDS
-  // scheme; form it only in memory and leave generation validation to the
-  // broker's pinned Claude adapter.
-  if (
-    socketPath.includes("\0") ||
-    !path.isAbsolute(socketPath) ||
-    path.resolve(socketPath) !== socketPath
-  ) {
-    throw new CliFault("CLAUDE_IDENTITY_INVALID");
-  }
+  if (socketPath.includes("\0") || !path.isAbsolute(socketPath) || path.resolve(socketPath) !== socketPath) fault("CLAUDE_IDENTITY_INVALID");
   const replyAddress = `uds:${socketPath}`;
-  if (!isGatewayReplyAddress(replyAddress)) {
-    throw new CliFault("CLAUDE_IDENTITY_INVALID");
-  }
+  if (!isGatewayReplyAddress(replyAddress)) fault("CLAUDE_IDENTITY_INVALID");
   return replyAddress;
 }
-
 function requireClaudeReplyAddress(env: NodeJS.ProcessEnv): string {
   const replyAddress = optionalClaudeReplyAddress(env);
-  if (replyAddress === undefined) {
-    throw new CliFault("CLAUDE_IDENTITY_REQUIRED");
-  }
+  if (replyAddress === undefined) fault("CLAUDE_IDENTITY_REQUIRED");
   return replyAddress;
 }
-
 function requireExclusiveClaudeReplyAddress(env: NodeJS.ProcessEnv): string {
-  if (hasInheritedIdentity(env.CODEX_THREAD_ID)) {
-    throw callerIdentityConflictFault(env);
-  }
+  if (hasIdentity(env.CODEX_THREAD_ID)) throw callerIdentityConflictFault(env);
   return requireClaudeReplyAddress(env);
 }
-
 async function readMessageBody(stdin: AsyncIterable<unknown>): Promise<string> {
   const chunks: Buffer[] = [];
   let length = 0;
   for await (const chunk of stdin) {
-    if (typeof chunk !== "string" && !Buffer.isBuffer(chunk)) {
-      throw new CliFault("INVALID_MESSAGE_INPUT");
-    }
-    const buffer = Buffer.isBuffer(chunk)
-      ? Buffer.from(chunk)
-      : Buffer.from(chunk, "utf8");
+    if (typeof chunk !== "string" && !Buffer.isBuffer(chunk)) fault("INVALID_MESSAGE_INPUT");
+    const buffer = Buffer.from(chunk);
     length += buffer.length;
-    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES) {
-      throw new CliFault("MESSAGE_TOO_LARGE", false, "hint.messageTooLarge");
-    }
+    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES) throw new CliFault("MESSAGE_TOO_LARGE", false, "hint.messageTooLarge");
     chunks.push(buffer);
   }
-
   let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(
-      Buffer.concat(chunks, length),
-    );
-  } catch {
-    throw new CliFault("INVALID_MESSAGE_INPUT");
-  }
-  if (text.trim().length === 0 || text.includes("\0")) {
-    throw new CliFault("MESSAGE_REQUIRED");
-  }
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, length)); }
+  catch { fault("INVALID_MESSAGE_INPUT"); }
+  if (text.trim().length === 0 || text.includes("\0")) fault("MESSAGE_REQUIRED");
   return text;
 }
-
-function emptyParams(args: readonly string[]): Record<string, never> {
-  if (args.length !== 0) throw new CliFault("INVALID_ARGUMENTS");
-  return {};
-}
-
+const emptyParams = (args: readonly string[]): Record<string, never> => args.length === 0 ? {} : fault();
 function parseServeInboundMode(args: readonly string[]): "paired" | "open" {
   const options = parseOptions(args, ["inbound"]);
   if (Object.keys(options).length === 0) return "paired";
-  assertExactOptionCount(options, 1);
-  if (options.inbound !== "open") throw new CliFault("INVALID_ARGUMENTS");
+  count(options, 1);
+  if (options.inbound !== "open") fault();
   return "open";
 }
-
 function parseLiveDashboardPort(value: string | true | undefined): number {
   if (value === undefined) return DEFAULT_LIVE_DASHBOARD_PORT;
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) fault();
   const port = Number(value);
-  if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535) {
-    throw new CliFault("INVALID_ARGUMENTS");
-  }
+  if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535) fault();
   return port;
 }
-
 function parseLiveDashboardArgs(args: readonly string[]): number {
-  if (args.length === 0) {
-    throw new CliFault(
-      "INVALID_ARGUMENTS",
-      false,
-      "hint.dashboardLiveRequired",
-    );
-  }
+  if (args.length === 0) throw new CliFault("INVALID_ARGUMENTS", false, "hint.dashboardLiveRequired");
   const options = parseOptions(args, ["port"], ["live"]);
-  assertExactOptionCount(options, 1, 2);
-  if (options.live !== true) throw new CliFault("INVALID_ARGUMENTS");
+  count(options, 1, 2);
+  if (options.live !== true) fault();
   return parseLiveDashboardPort(options.port);
 }
-
+const envelope = (method: GatewayControlMethod, params: unknown): GatewayControlRequest =>
+  ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params }) as GatewayControlRequest;
 async function buildRequest(
   command: GatewayCliCommand,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   stdin: AsyncIterable<unknown>,
 ): Promise<GatewayControlRequest> {
+  const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
+    health: "health", status: "list_snapshot", doctor: "list_snapshot",
+    "refresh-dashboard": "refresh_dashboard",
+  };
+  const simpleMethod = simple[command];
+  if (simpleMethod !== undefined) return envelope(simpleMethod, emptyParams(args));
   switch (command) {
     case "serve":
     case "dashboard":
     case "convert-state-v2-to-v3":
-      throw new CliFault("INVALID_ARGUMENTS");
-    case "health":
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "health",
-        params: emptyParams(args),
-      };
-    case "status":
-    case "doctor":
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "list_snapshot",
-        params: emptyParams(args),
-      };
+      return fault();
+    case "health": case "status": case "doctor": case "refresh-dashboard": return fault();
     case "delivery-status":
     case "wait-delivery": {
       const options = parseOptions(args, ["token"]);
-      assertExactOptionCount(options, 1);
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "delivery_status",
-        params: { token: requireDeliveryToken(options, "token") },
-      };
+      count(options, 1);
+      return envelope("delivery_status", { token: requireDeliveryToken(options, "token") });
     }
     case "untrack": {
       const options = parseOptions(args, ["conversation"]);
-      assertExactOptionCount(options, 1);
+      count(options, 1);
       const conversationId = requireString(options, "conversation");
-      if (!isGatewayConversationId(conversationId)) {
-        throw new CliFault("INVALID_ARGUMENTS");
-      }
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "untrack",
-        params: { conversationId },
-      };
+      if (!isGatewayConversationId(conversationId)) fault();
+      return envelope("untrack", { conversationId });
     }
-    case "refresh-dashboard":
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "refresh_dashboard",
-        params: emptyParams(args),
-      };
     case "register-codex": {
       const options = parseOptions(args, ["alias", "host", "succeeds"]);
       const alias = requireCodexAlias(options, "alias");
-      const succeedsAlias =
-        options.succeeds === undefined
-          ? undefined
-          : requireCodexAlias(options, "succeeds");
-      if (succeedsAlias === undefined) {
-        assertExactOptionCount(options, 1, 2);
-      } else {
-        assertExactOptionCount(options, 2);
-        if (options.host !== undefined) {
-          throw new CliFault("INVALID_ARGUMENTS");
-        }
-      }
-      const host =
-        succeedsAlias === undefined
-          ? (options.host ?? DEFAULT_HOST_ID)
-          : gatewayAliasHost(alias);
+      const succeedsAlias = options.succeeds === undefined ? undefined : requireCodexAlias(options, "succeeds");
+      count(options, succeedsAlias === undefined ? 1 : 2, 2);
+      if (succeedsAlias !== undefined && options.host !== undefined) fault();
+      const host = succeedsAlias === undefined ? (options.host ?? DEFAULT_HOST_ID) : gatewayAliasHost(alias);
       if (
         typeof host !== "string" ||
         !isGatewayHostId(host) ||
         !alias.endsWith(`@${host}`) ||
-        (succeedsAlias !== undefined &&
-          (succeedsAlias === alias ||
-            gatewayAliasHost(succeedsAlias) !== host))
-      ) {
-        throw new CliFault("INVALID_ARGUMENTS");
-      }
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "register_codex",
-        params: {
-          alias,
-          threadId: requireExclusiveCodexThreadId(env),
-          hostId: host,
-          busyPolicy: "queue",
-          ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
-        },
-      };
+        (succeedsAlias !== undefined && (succeedsAlias === alias || gatewayAliasHost(succeedsAlias) !== host))
+      ) fault();
+      return envelope("register_codex", {
+        alias, threadId: requireExclusiveCodexThreadId(env), hostId: host, busyPolicy: "queue",
+        ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
+      });
     }
     case "unregister-codex": {
       const options = parseOptions(args, ["alias"]);
-      assertExactOptionCount(options, 1);
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "unregister_codex",
-        params: {
-          alias: requireCodexAlias(options, "alias"),
-          threadId: requireExclusiveCodexThreadId(env),
-        },
-      };
+      count(options, 1);
+      return envelope("unregister_codex", { alias: requireCodexAlias(options, "alias"), threadId: requireExclusiveCodexThreadId(env) });
     }
     case "select-claude":
     case "unselect-claude": {
       const options = parseOptions(args, ["alias", "session"]);
-      assertExactOptionCount(options, 1);
-      const selector =
-        options.alias === undefined
-          ? requireClaudeSelector(options, "session")
-          : requireClaudeSelector(options, "alias");
+      count(options, 1);
+      const selector = requireClaudeSelector(options, options.alias === undefined ? "session" : "alias");
       const codexThreadId = optionalCodexThreadId(env);
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method:
-          command === "select-claude" ? "select_claude" : "unselect_claude",
-        params: {
-          alias: selector,
-          ...(codexThreadId === undefined ? {} : { codexThreadId }),
-        },
-      };
+      return envelope(command === "select-claude" ? "select_claude" : "unselect_claude", {
+        alias: selector, ...(codexThreadId === undefined ? {} : { codexThreadId }),
+      });
     }
     case "pair":
     case "unpair": {
       const options = parseOptions(args, ["claude", "codex", "from", "to"]);
-      assertExactOptionCount(options, 2);
+      count(options, 2);
       const legacyArm = options.claude !== undefined || options.codex !== undefined;
       if (legacyArm) {
-        if (options.from !== undefined || options.to !== undefined) {
-          throw new CliFault("INVALID_ARGUMENTS");
-        }
-        return {
-          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-          method: command,
-          params: {
-            claudeAlias: requireClaudeSelector(options, "claude"),
-            codexAlias: requireCodexAlias(options, "codex"),
-            codexThreadId: requireExclusiveCodexThreadId(env),
-          },
-        };
+        if (options.from !== undefined || options.to !== undefined) fault();
+        return envelope(command, {
+          claudeAlias: requireClaudeSelector(options, "claude"), codexAlias: requireCodexAlias(options, "codex"),
+          codexThreadId: requireExclusiveCodexThreadId(env),
+        });
       }
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: command,
-        params: {
-          aliases: requirePairAliases(options),
-        },
-      };
+      return envelope(command, { aliases: requirePairAliases(options) });
     }
-    case "send-to-claude": {
-      const options = parseOptions(
-        args,
-        ["from", "to", "idle-minutes"],
-        ["expects-reply", "track"],
-      );
-      assertExactOptionCount(options, 2, 5);
-      const threadId = requireExclusiveCodexThreadId(env);
-      const idleMinutes = trackIdleMinutes(options);
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "send_to_claude",
-        params: {
-          fromAlias: requireAlias(options, "from"),
-          threadId,
-          toAlias: requireClaudeSelector(options, "to"),
-          text: await readMessageBody(stdin),
-          expectsReply: options["expects-reply"] === true,
-          ...(idleMinutes === undefined
-            ? {}
-            : { trackIdleMinutes: idleMinutes }),
-        },
-      };
-    }
+    case "send-to-claude":
     case "send-to-codex": {
       const options = parseOptions(
-        args,
-        ["from", "to", "idle-minutes"],
-        ["expects-reply", "track"],
+        args, ["from", "to", "idle-minutes"], ["expects-reply", "track"],
       );
-      assertExactOptionCount(options, 2, 5);
-      const replyAddress = requireExclusiveClaudeReplyAddress(env);
+      count(options, 2, 5);
+      const authority = command === "send-to-claude"
+        ? requireExclusiveCodexThreadId(env) : requireExclusiveClaudeReplyAddress(env);
       const idleMinutes = trackIdleMinutes(options);
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "send_to_codex",
-        params: {
-          fromAlias: requireAlias(options, "from"),
-          toAlias: requireAlias(options, "to"),
-          text: await readMessageBody(stdin),
-          replyAddress,
-          expectsReply: options["expects-reply"] === true,
-          ...(idleMinutes === undefined
-            ? {}
-            : { trackIdleMinutes: idleMinutes }),
-        },
+      const common = {
+        fromAlias: requireAlias(options, "from"),
+        toAlias: command === "send-to-claude" ? requireClaudeSelector(options, "to") : requireAlias(options, "to"),
+        text: await readMessageBody(stdin),
+        expectsReply: options["expects-reply"] === true,
+        ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
       };
+      return command === "send-to-claude"
+        ? envelope("send_to_claude", { ...common, threadId: authority })
+        : envelope("send_to_codex", { ...common, replyAddress: authority });
     }
     case "reply": {
-      const options = parseOptions(
-        args,
-        ["conversation", "alias", "idle-minutes"],
-        ["track"],
-      );
-      assertExactOptionCount(options, 2, 4);
+      const options = parseOptions(args, ["conversation", "alias", "idle-minutes"], ["track"]);
+      count(options, 2, 4);
       const conversationId = requireString(options, "conversation");
-      if (!isGatewayConversationId(conversationId)) {
-        throw new CliFault("INVALID_ARGUMENTS");
-      }
+      if (!isGatewayConversationId(conversationId)) fault();
       const alias = requireAlias(options, "alias");
       const idleMinutes = trackIdleMinutes(options);
       const threadId = env.CODEX_THREAD_ID;
-      if (
-        hasInheritedIdentity(threadId) &&
-        hasInheritedIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)
-      ) {
-        throw callerIdentityConflictFault(env);
-      }
+      if (hasIdentity(threadId) && hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
       const replyAddress = optionalClaudeReplyAddress(env);
-      const hasCodexIdentity = hasInheritedIdentity(threadId);
-      const hasClaudeIdentity = replyAddress !== undefined;
-      if (!hasCodexIdentity && !hasClaudeIdentity) {
-        throw new CliFault("CALLER_IDENTITY_REQUIRED");
-      }
-      return {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "reply",
-        params: {
-          conversationId,
-          text: await readMessageBody(stdin),
-          ...(idleMinutes === undefined
-            ? {}
-            : { trackIdleMinutes: idleMinutes }),
-          caller: hasCodexIdentity
-            ? {
-                kind: "codex",
-                alias,
-                threadId: requireCodexThreadId(env),
-              }
-            : {
-                kind: "claude",
-                alias,
-                replyAddress: requireClaudeReplyAddress(env),
-              },
-        },
-      };
+      const codex = hasIdentity(threadId);
+      if (!codex && replyAddress === undefined) fault("CALLER_IDENTITY_REQUIRED");
+      return envelope("reply", {
+        conversationId, text: await readMessageBody(stdin),
+        ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
+        caller: codex
+          ? { kind: "codex", alias, threadId: requireCodexThreadId(env) }
+          : { kind: "claude", alias, replyAddress: requireClaudeReplyAddress(env) },
+      });
     }
   }
 }
@@ -770,63 +391,29 @@ export async function validatePrivateGatewayControlSocket(
   stateDir: string,
   socketPath: string,
 ): Promise<void> {
-  if (process.platform === "win32") {
-    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
-  }
-  let state;
-  let socket;
+  if (process.platform === "win32") throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
+  let state, socket;
   try {
     [state, socket] = await Promise.all([lstat(stateDir), lstat(socketPath)]);
-  } catch {
-    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
-  }
-  const getuid = process.getuid;
-  const expectedUid = getuid?.call(process);
-  if (
-    state.isSymbolicLink() ||
-    !state.isDirectory() ||
-    (state.mode & 0o700) !== 0o700 ||
-    (state.mode & 0o077) !== 0 ||
-    (expectedUid !== undefined && state.uid !== expectedUid)
-  ) {
+  } catch { throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true); }
+  const uid = process.getuid?.();
+  if (state.isSymbolicLink() || !state.isDirectory() || (state.mode & 0o777) !== 0o700 || (uid !== undefined && state.uid !== uid)) {
     throw new CliFault("CONTROL_STATE_UNSAFE", false, undefined, "unsafe");
   }
-  if (
-    socket.isSymbolicLink() ||
-    !socket.isSocket() ||
-    (socket.mode & 0o777) !== 0o600 ||
-    (expectedUid !== undefined && socket.uid !== expectedUid)
-  ) {
+  if (socket.isSymbolicLink() || !socket.isSocket() || (socket.mode & 0o777) !== 0o600 || (uid !== undefined && socket.uid !== uid)) {
     throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe");
   }
-
-  let stateReal: string;
-  let socketParentReal: string;
+  let stateReal: string, parentReal: string;
   try {
-    [stateReal, socketParentReal] = await Promise.all([
-      realpath(stateDir),
-      realpath(path.dirname(socketPath)),
-    ]);
-  } catch {
-    throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe");
-  }
-  if (
-    path.dirname(socketPath) !== stateDir ||
-    stateReal !== socketParentReal
-  ) {
+    [stateReal, parentReal] = await Promise.all([realpath(stateDir), realpath(path.dirname(socketPath))]);
+  } catch { throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe"); }
+  if (path.dirname(socketPath) !== stateDir || stateReal !== parentReal) {
     throw new CliFault("CONTROL_SOCKET_UNSAFE", false, undefined, "unsafe");
   }
 }
-
-function safeCommandLabel(command: GatewayCliCommand | undefined): string {
-  return command ?? "unknown";
-}
-
 function serializedOutput(value: unknown): string {
   const line = `${JSON.stringify(value)}\n`;
-  if (Buffer.byteLength(line, "utf8") > CLI_MAX_OUTPUT_BYTES) {
-    throw new CliFault("OUTPUT_TOO_LARGE");
-  }
+  if (Buffer.byteLength(line, "utf8") > CLI_MAX_OUTPUT_BYTES) fault("OUTPUT_TOO_LARGE");
   return line;
 }
 
@@ -838,106 +425,47 @@ function writeFailure(
   code: string,
   options: { ambiguous?: boolean; retryable?: boolean; kind: CliStderrKind },
 ): void {
-  const ambiguous = options.ambiguous ?? false;
-  const retryable = options.retryable ?? false;
-  stdout.write(
-    serializedOutput({
-      ok: false,
-      command: safeCommandLabel(command),
-      error: { code, ambiguous, retryable },
-    }),
-  );
+  stdout.write(serializedOutput({ ok: false, command: command ?? "unknown", error: {
+    code, ambiguous: options.ambiguous ?? false, retryable: options.retryable ?? false,
+  } }));
   stderr.write(fixedStderr(locale, options.kind));
 }
-
 function isRejectedResult(result: unknown): boolean {
-  return (
-    result !== null &&
-    typeof result === "object" &&
-    Object.hasOwn(result, "accepted") &&
-    (result as { accepted?: unknown }).accepted === false
-  );
+  return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
 }
-
 function isProgressWatchOwnerConflict(result: unknown): boolean {
-  return (
-    result !== null &&
-    typeof result === "object" &&
-    Object.hasOwn(result, "accepted") &&
-    Object.hasOwn(result, "code") &&
-    (result as { accepted?: unknown }).accepted === false &&
-    (result as { code?: unknown }).code === "watch_owner_conflict"
-  );
+  return isRejectedResult(result) && (result as { code?: unknown }).code === "watch_owner_conflict";
 }
-
 function responseExitCode(response: GatewayControlResponse): number {
-  if (!response.ok) return gatewayCliExitCodes.failure;
-  if (isRejectedResult(response.result)) return gatewayCliExitCodes.rejected;
-  return gatewayCliExitCodes.ok;
+  return !response.ok ? gatewayCliExitCodes.failure
+    : isRejectedResult(response.result) ? gatewayCliExitCodes.rejected : gatewayCliExitCodes.ok;
 }
-
 function codexDoctorConditions(result: unknown): readonly string[] {
-  if (
-    result === null ||
-    typeof result !== "object" ||
-    !Object.hasOwn(result, "connectors") ||
-    !Array.isArray((result as { connectors?: unknown }).connectors)
-  ) {
-    return ["unknown"];
-  }
-  const connector = (result as { connectors: unknown[] }).connectors.find(
-    (row) =>
-      row !== null &&
-      typeof row === "object" &&
-      (row as { provider?: unknown }).provider === "codex",
-  );
-  const doctor =
-    connector !== null && typeof connector === "object"
-      ? (connector as { codexDoctor?: unknown }).codexDoctor
-      : undefined;
-  if (
-    doctor === null ||
-    typeof doctor !== "object" ||
-    !Array.isArray((doctor as { conditions?: unknown }).conditions)
-  ) {
-    return ["unknown"];
-  }
-  return (doctor as { conditions: unknown[] }).conditions.filter(
-    (condition): condition is string => typeof condition === "string",
-  );
+  const connectors = result !== null && typeof result === "object"
+    ? (result as { connectors?: unknown }).connectors : undefined;
+  const connector = Array.isArray(connectors) ? connectors.find((row) =>
+    row !== null && typeof row === "object" && (row as { provider?: unknown }).provider === "codex") : undefined;
+  const doctor = connector !== null && typeof connector === "object"
+    ? (connector as { codexDoctor?: unknown }).codexDoctor : undefined;
+  const conditions = doctor !== null && typeof doctor === "object"
+    ? (doctor as { conditions?: unknown }).conditions : undefined;
+  return Array.isArray(conditions)
+    ? conditions.filter((value): value is string => typeof value === "string") : ["unknown"];
 }
 
 function waitDeliveryExitCode(
   response: GatewayControlResponse<"delivery_status">,
 ): number {
-  if (
-    !response.ok ||
-    !response.result.found ||
-    !response.result.terminal
-  ) {
-    return gatewayCliExitCodes.failure;
-  }
-  return response.result.state === "delivered"
-    ? gatewayCliExitCodes.ok
-    : gatewayCliExitCodes.failure;
+  return response.ok && response.result.found && response.result.terminal && response.result.state === "delivered"
+    ? gatewayCliExitCodes.ok : gatewayCliExitCodes.failure;
 }
-
-type DeliveryStatusRequest = Extract<
-  GatewayControlRequest,
-  { method: "delivery_status" }
->;
-
+type DeliveryStatusRequest = Extract<GatewayControlRequest, { method: "delivery_status" }>;
 type WaitDeliveryOutcome =
-  | {
-      kind: "response";
-      response: GatewayControlResponse<"delivery_status">;
-    }
+  | { kind: "response"; response: GatewayControlResponse<"delivery_status"> }
   | { kind: "unknown" }
   | { kind: "timeout" };
-
-async function defaultDelay(milliseconds: number): Promise<void> {
+const defaultDelay = async (milliseconds: number): Promise<void> =>
   await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
 
 async function waitForDelivery(
   socketPath: string,
@@ -946,74 +474,36 @@ async function waitForDelivery(
   now: () => number,
   delay: (milliseconds: number) => Promise<void>,
 ): Promise<WaitDeliveryOutcome> {
-  let clientDeadlineMs: number | undefined;
-
+  let deadline: number | undefined;
   while (true) {
-    const beforeRequest = now();
-    let requestTimeoutMs = GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS;
-    if (clientDeadlineMs !== undefined) {
-      const remainingMs = clientDeadlineMs - beforeRequest;
-      if (remainingMs <= 0) return { kind: "timeout" };
-      if (remainingMs < DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS) {
-        await delay(remainingMs);
-        return { kind: "timeout" };
-      }
-      requestTimeoutMs = Math.min(
-        GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS,
-        Math.floor(remainingMs),
-      );
+    const remaining = deadline === undefined ? undefined : deadline - now();
+    if (remaining !== undefined && remaining <= 0) return { kind: "timeout" };
+    if (remaining !== undefined && remaining < DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS) {
+      await delay(remaining); return { kind: "timeout" };
     }
-
     let response: GatewayControlResponse<"delivery_status">;
     try {
       response = await sendRequest({
-        socketPath,
-        request,
-        timeoutMs: requestTimeoutMs,
+        socketPath, request,
+        timeoutMs: remaining === undefined ? GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS
+          : Math.min(GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, Math.floor(remaining)),
       });
     } catch (error) {
-      if (
-        clientDeadlineMs !== undefined &&
-        now() >= clientDeadlineMs &&
-        error instanceof GatewayControlTransportError &&
-        error.recoverable
-      ) {
-        return { kind: "timeout" };
-      }
+      if (deadline !== undefined && now() >= deadline && error instanceof GatewayControlTransportError && error.recoverable) return { kind: "timeout" };
       throw error;
     }
-
     if (!response.ok) {
-      if (
-        response.error.code === "REQUEST_TIMEOUT" &&
-        clientDeadlineMs !== undefined &&
-        now() >= clientDeadlineMs
-      ) {
-        return { kind: "timeout" };
-      }
+      if (response.error.code === "REQUEST_TIMEOUT" && deadline !== undefined && now() >= deadline) return { kind: "timeout" };
       return { kind: "response", response };
     }
     if (!response.result.found) return { kind: "unknown" };
-    // A retained terminal decision is authoritative even when the command is
-    // invoked after the original delivery deadline and client grace window.
-    if (response.result.terminal) {
-      return { kind: "response", response };
-    }
-
-    const parsedDeadlineMs = Date.parse(response.result.deadlineAt);
-    if (!Number.isFinite(parsedDeadlineMs)) {
-      throw new Error("invalid validated delivery deadline");
-    }
-    const observedClientDeadlineMs =
-      parsedDeadlineMs + GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS;
-    clientDeadlineMs =
-      clientDeadlineMs === undefined
-        ? observedClientDeadlineMs
-        : Math.min(clientDeadlineMs, observedClientDeadlineMs);
-    const afterRequest = now();
-    const remainingMs = clientDeadlineMs - afterRequest;
-    if (remainingMs <= 0) return { kind: "timeout" };
-    await delay(Math.min(DELIVERY_POLL_INTERVAL_MS, remainingMs));
+    if (response.result.terminal) return { kind: "response", response };
+    const observed = Date.parse(response.result.deadlineAt) + GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS;
+    if (!Number.isFinite(observed)) throw new Error("invalid validated delivery deadline");
+    deadline = deadline === undefined ? observed : Math.min(deadline, observed);
+    const after = deadline - now();
+    if (after <= 0) return { kind: "timeout" };
+    await delay(Math.min(DELIVERY_POLL_INTERVAL_MS, after));
   }
 }
 
@@ -1023,273 +513,140 @@ export async function runGatewayCli(
   dependencies: GatewayCliDependencies = {},
 ): Promise<number> {
   const env = dependencies.env ?? process.env;
-  const stdin = dependencies.stdin ?? process.stdin;
-  const stdout = dependencies.stdout ?? process.stdout;
-  const stderr = dependencies.stderr ?? process.stderr;
-  const loadConfig = dependencies.loadConfig ?? loadGatewayConfig;
+  const stdin = dependencies.stdin ?? process.stdin, stdout = dependencies.stdout ?? process.stdout;
+  const stderr = dependencies.stderr ?? process.stderr, loadConfig = dependencies.loadConfig ?? loadGatewayConfig;
   const sendRequest = dependencies.sendRequest ?? sendGatewayControlRequest;
-  const validateControlSocket =
-    dependencies.validateControlSocket ?? validatePrivateGatewayControlSocket;
-  const runServer = dependencies.runServer ?? runGatewayServer;
-  const runLiveDashboard =
-    dependencies.runLiveDashboard ?? runLiveDashboardCommand;
-  const convertState = dependencies.convertState ?? convertGatewayStateV2ToV3;
-  const now = dependencies.now ?? Date.now;
-  const delay = dependencies.delay ?? defaultDelay;
-  if (
-    argv.length === 1 &&
-    (argv[0] === "--version" || argv[0] === "-v")
-  ) {
+  const validateSocket = dependencies.validateControlSocket ?? validatePrivateGatewayControlSocket;
+  if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v")) {
     stdout.write(`embassy ${EMBASSY_VERSION}\n`);
     return gatewayCliExitCodes.ok;
   }
   const command = isCommand(argv[0]) ? argv[0] : undefined;
   let locale = fallbackCliLocale(argv.slice(1), env);
-  let serverReadyEmitted = false;
-  let liveDashboardReadyEmitted = false;
+  let serverReady = false, dashboardReady = false;
   let liveDashboardPort: number | undefined;
-
+  const success = (result: unknown): void => {
+    stdout.write(serializedOutput({ ok: true, command: command!, result }));
+  };
   try {
-    const common = resolveCommonCliOptions(argv.slice(1), env);
+    const common = commonOptions(argv.slice(1), env);
     locale = common.locale;
-    if (
-      argv.length === 0 ||
-      argv[0] === "--help" ||
-      argv[0] === "-h"
-    ) {
+    if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
       emptyParams(common.args);
       stdout.write(getCliCopy(locale)["help.usage"]);
       return gatewayCliExitCodes.ok;
     }
-    if (command === undefined) throw new CliFault("UNKNOWN_COMMAND");
+    if (command === undefined) fault("UNKNOWN_COMMAND");
     if (command === "serve") {
-      const inboundMode = parseServeInboundMode(common.args);
-      await runServer({
-        env,
-        locale,
-        inboundMode,
-        ...(dependencies.serverSignal === undefined
-          ? {}
-          : { signal: dependencies.serverSignal }),
+      await (dependencies.runServer ?? runGatewayServer)({
+        env, locale, inboundMode: parseServeInboundMode(common.args),
+        ...(dependencies.serverSignal === undefined ? {} : { signal: dependencies.serverSignal }),
         onReady: async (result) => {
-          if (serverReadyEmitted) {
-            throw new CliFault("SERVER_READY_ALREADY_EMITTED");
-          }
-          stdout.write(
-            serializedOutput({
-              ok: true,
-              command,
-              result,
-            }),
-          );
-          serverReadyEmitted = true;
+          if (serverReady) fault("SERVER_READY_ALREADY_EMITTED");
+          success(result); serverReady = true;
         },
       });
-      if (!serverReadyEmitted) {
-        throw new CliFault("SERVER_NOT_READY");
-      }
+      if (!serverReady) fault("SERVER_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
     if (command === "convert-state-v2-to-v3") {
       emptyParams(common.args);
       const config = loadConfig(env);
-      const converted = await convertState({ stateDir: config.stateDir });
-      stdout.write(
-        serializedOutput({
-          ok: true,
-          command,
-          result: {
-            converted: true,
-            backupFile: path.basename(converted.backupFile),
-          },
-        }),
-      );
+      const converted = await (dependencies.convertState ?? convertGatewayStateV2ToV3)({ stateDir: config.stateDir });
+      success({ converted: true, backupFile: path.basename(converted.backupFile) });
       return gatewayCliExitCodes.ok;
     }
     if (command === "dashboard") {
-      const port = parseLiveDashboardArgs(common.args);
-      liveDashboardPort = port;
-      const outcome = await runLiveDashboard({
-        env,
-        locale,
-        port,
-        ...(dependencies.liveDashboardSignal === undefined
-          ? {}
-          : { signal: dependencies.liveDashboardSignal }),
-        loadConfig,
-        validateControlSocket,
-        sendRequest,
+      liveDashboardPort = parseLiveDashboardArgs(common.args);
+      const outcome = await (dependencies.runLiveDashboard ?? runLiveDashboardCommand)({
+        env, locale, port: liveDashboardPort, loadConfig, sendRequest, validateControlSocket: validateSocket,
+        ...(dependencies.liveDashboardSignal === undefined ? {} : { signal: dependencies.liveDashboardSignal }),
         onReady: async (result) => {
-          if (liveDashboardReadyEmitted) {
-            throw new CliFault("LIVE_DASHBOARD_READY_ALREADY_EMITTED");
-          }
-          stdout.write(
-            serializedOutput({
-              ok: true,
-              command,
-              result,
-            }),
-          );
-          liveDashboardReadyEmitted = true;
+          if (dashboardReady) fault("LIVE_DASHBOARD_READY_ALREADY_EMITTED");
+          success(result); dashboardReady = true;
         },
       });
-      if (!liveDashboardReadyEmitted) {
-        if (outcome?.status === "cancelled") {
-          return gatewayCliExitCodes.ok;
-        }
-        throw new Error("LIVE_DASHBOARD_NOT_READY");
-      }
+      if (!dashboardReady && outcome?.status === "cancelled") return gatewayCliExitCodes.ok;
+      if (!dashboardReady) throw new Error("LIVE_DASHBOARD_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
     const request = await buildRequest(command, common.args, env, stdin);
     const config = loadConfig(env);
-    await validateControlSocket(config.stateDir, config.controlSocketPath);
+    await validateSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;
-    let waitedDeliveryResponse:
-      | GatewayControlResponse<"delivery_status">
-      | undefined;
+    let waited: GatewayControlResponse<"delivery_status"> | undefined;
     if (command === "wait-delivery") {
-      if (request.method !== "delivery_status") {
-        throw new CliFault("INVALID_ARGUMENTS");
-      }
-      const outcome = await waitForDelivery(
-        config.controlSocketPath,
-        request,
-        sendRequest,
-        now,
-        delay,
-      );
+      if (request.method !== "delivery_status") fault();
+      const outcome = await waitForDelivery(config.controlSocketPath, request, sendRequest,
+        dependencies.now ?? Date.now, dependencies.delay ?? defaultDelay);
       if (outcome.kind === "unknown") {
-        writeFailure(stdout, stderr, locale, command, "DELIVERY_TOKEN_UNKNOWN", {
-          kind: "tokenUnknown",
-        });
+        writeFailure(stdout, stderr, locale, command, "DELIVERY_TOKEN_UNKNOWN", { kind: "tokenUnknown" });
         return gatewayCliExitCodes.rejected;
       }
       if (outcome.kind === "timeout") {
-        writeFailure(stdout, stderr, locale, command, "DELIVERY_WAIT_TIMEOUT", {
-          retryable: true,
-          kind: "deliveryTimeout",
-        });
+        writeFailure(stdout, stderr, locale, command, "DELIVERY_WAIT_TIMEOUT", { retryable: true, kind: "deliveryTimeout" });
         return gatewayCliExitCodes.unavailable;
       }
-      waitedDeliveryResponse = outcome.response;
-      response = waitedDeliveryResponse;
+      waited = outcome.response; response = waited;
     } else {
-      response = await sendRequest({
-        socketPath: config.controlSocketPath,
-        request,
-      });
+      response = await sendRequest({ socketPath: config.controlSocketPath, request });
     }
     if (!response.ok) {
-      writeFailure(stdout, stderr, locale, command, response.error.code, {
-        kind: "failure",
-      });
+      writeFailure(stdout, stderr, locale, command, response.error.code, { kind: "failure" });
       return gatewayCliExitCodes.failure;
     }
-
-    const result =
-      command === "doctor"
-        ? { conditions: codexDoctorConditions(response.result) }
-        : response.result;
-    stdout.write(
-      serializedOutput({
-        ok: true,
-        command,
-        result,
-      }),
-    );
-    const exitCode =
-      waitedDeliveryResponse === undefined
-        ? responseExitCode(response)
-        : waitDeliveryExitCode(waitedDeliveryResponse);
+    success(command === "doctor" ? { conditions: codexDoctorConditions(response.result) } : response.result);
+    const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr(locale, "decision"));
       if (isProgressWatchOwnerConflict(response.result)) {
-        stderr.write(
-          `[embassy] ${getCliCopy(locale)["hint.progressWatchOwnerConflict"]}\n`,
-        );
+        stderr.write(`[embassy] ${getCliCopy(locale)["hint.progressWatchOwnerConflict"]}\n`);
       }
-    } else if (
-      command === "wait-delivery" &&
-      exitCode === gatewayCliExitCodes.failure
-    ) {
-      stderr.write(fixedStderr(locale, "failure"));
-    }
+    } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr(locale, "failure"));
     return exitCode;
   } catch (error) {
-    if (
-      (command === "serve" && serverReadyEmitted) ||
-      (command === "dashboard" && liveDashboardReadyEmitted)
-    ) {
+    if ((command === "serve" && serverReady) || (command === "dashboard" && dashboardReady)) {
       stderr.write(fixedStderr(locale, "failure"));
       return gatewayCliExitCodes.failure;
     }
     if (error instanceof GatewayControlTransportError) {
       const ambiguous = error.ambiguous;
       writeFailure(stdout, stderr, locale, command, error.code, {
-        ambiguous,
-        retryable: ambiguous ? false : error.recoverable,
+        ambiguous, retryable: ambiguous ? false : error.recoverable,
         kind: ambiguous ? "ambiguous" : "unavailable",
       });
       if (error.code === "CONTROL_INVALID_RESPONSE") {
-        stderr.write(
-          `[embassy] ${getCliCopy(locale)["hint.controlInvalidResponse"]}\n`,
-        );
+        stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlInvalidResponse"]}\n`);
       }
-      return ambiguous
-        ? gatewayCliExitCodes.ambiguous
-        : gatewayCliExitCodes.unavailable;
+      return ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable;
     }
     if (error instanceof CliFault) {
       writeFailure(stdout, stderr, locale, command, error.code, {
-        retryable: error.retryable,
-        kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
+        retryable: error.retryable, kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
       if (error.hint !== undefined) {
-        const hint =
-          error.hint === "callerIdentityConflict"
-            ? locale === "zh-CN"
-              ? callerIdentityConflictHintZhCn
-              : callerIdentityConflictHintEn
-            : getCliCopy(locale)[error.hint];
+        const hint = error.hint === "callerIdentityConflict"
+          ? locale === "zh-CN" ? callerIdentityConflictHintZhCn : callerIdentityConflictHintEn
+          : getCliCopy(locale)[error.hint];
         stderr.write(`[embassy] ${hint}\n`);
       }
-      return error.retryable
-        ? gatewayCliExitCodes.unavailable
-        : gatewayCliExitCodes.invalidInput;
+      return error.retryable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
     if (error instanceof BridgeError) {
       if (error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN") {
-        writeFailure(stdout, stderr, locale, command, error.code, {
-          ambiguous: true,
-          retryable: false,
-          kind: "ambiguous",
-        });
+        writeFailure(stdout, stderr, locale, command, error.code, { ambiguous: true, kind: "ambiguous" });
         return gatewayCliExitCodes.ambiguous;
       }
       writeFailure(stdout, stderr, locale, command, error.code, {
-        retryable: error.recoverable,
-        kind: error.recoverable ? "unavailable" : "input",
+        retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
-      if (
-        error.code === "LIVE_DASHBOARD_PORT_IN_USE" &&
-        liveDashboardPort !== undefined
-      ) {
-        const hint = getCliCopy(locale)["hint.dashboardPortInUse"].replace(
-          "{port}",
-          String(liveDashboardPort),
-        );
-        stderr.write(
-          `[embassy] ${hint}\n`,
-        );
+      if (error.code === "LIVE_DASHBOARD_PORT_IN_USE" && liveDashboardPort !== undefined) {
+        const hint = getCliCopy(locale)["hint.dashboardPortInUse"].replace("{port}", String(liveDashboardPort));
+        stderr.write(`[embassy] ${hint}\n`);
       }
-      return error.recoverable
-        ? gatewayCliExitCodes.unavailable
-        : gatewayCliExitCodes.invalidInput;
+      return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
-    writeFailure(stdout, stderr, locale, command, "INTERNAL_ERROR", {
-      kind: "failure",
-    });
+    writeFailure(stdout, stderr, locale, command, "INTERNAL_ERROR", { kind: "failure" });
     return gatewayCliExitCodes.failure;
   }
 }

@@ -16,6 +16,18 @@
 
 ```bash
 npm install -g agent-embassy
+```
+
+如实说明前置要求：Claude 路由需要一个使用对等协议 1 的同用户在线 Claude
+Code 会话。Embassy 从当前 OS 用户派生外部注册表与对等套接字根目录；它不会
+检查 Claude 启动器或配置。Codex 路由需要托管独立 App Server 安装（可由
+ChatGPT 桌面应用创建，或运行官方安装器 `curl -fsSL
+https://chatgpt.com/codex/install.sh | sh`，再运行 `codex app-server daemon
+start`；单独启动守护进程不会配置该布局）。Claude 注册表缺失时，Embassy
+会将 Claude 报告为降级，同时保持代理与其他提供方可用。pnpm 用户应固定
+版本；非交互式 shell 中还需确保 `PNPM_HOME/bin` 位于 `PATH`。
+
+```bash
 embassy serve
 ```
 
@@ -36,7 +48,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 Desktop 仅在启动时附着到托管独立 App Server。如果 Desktop 已打开时守护进程重启，单纯等待不会让该应用进程重新连接：请完全退出 Desktop，重新运行 `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`，再打开该确切任务。
 
-运行时投递采用尽力而为模式。版本与构建字符串只是未经验证的元数据，绝不授予或撤销路由权限。同意加上精确的逻辑路由/会话身份会授权一次尝试；当前逐操作传输与相关证据决定诚实结果。接口不受支持或发生变化时，Embassy 会返回提供方局部的安全代码，而不是在线兼容性等级。Embassy 仍会验证信任边界：精确自有的可执行文件与状态路径、实际使用构件的代际、被消费协议字段的严格结构、Claude 对等协议 1、有界队列，以及结果不确定的写入绝不重放。
+运行时投递采用尽力而为模式。版本与构建字符串只是未经验证的元数据，绝不授予或撤销路由权限。同意加上精确的逻辑路由/会话身份会授权一次尝试；当前逐操作传输与相关证据决定诚实结果。接口不受支持或发生变化时，Embassy 会返回提供方局部的安全代码，而不是在线兼容性等级。Embassy 仍会验证信任边界：精确自有或执行的构件与状态路径、实际使用构件的代际、被消费协议字段的严格结构、Claude 对等协议 1、有界队列，以及结果不确定的写入绝不重放。
 
 > **已知限制：** 仅当 Desktop 使用托管独立 App Server 时，Embassy 才能访问 Codex 任务。在该模式下，任务目前无法连接 Desktop 内置的应用内浏览器（`@Browser` 可加载但无法附着）。将 Desktop 切换回其默认的私有 App Server 会立即恢复内置浏览器——但会使这些任务对 Embassy 不可达。目前未发现其他能力回退，但这并非穷尽的能力对比测试。
 
@@ -225,7 +237,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | --- | --- |
 | [架构](docs/GATEWAY-ARCHITECTURE.md) | 完整设计：拓扑、适配器、控制平面、威胁模型，以及基于配对同意的入站模型 |
 | [投递](docs/DELIVERY.zh-CN.md) | 投递语义、令牌、结算状态与重试规则 |
-| [配置](docs/CONFIGURATION.zh-CN.md) | 环境变量、兼容性约定与寻址规则 |
+| [配置](docs/CONFIGURATION.zh-CN.md) | 环境变量、提供方契约与寻址规则 |
 | [仪表盘](docs/DASHBOARD.zh-CN.md) | 静态与实时仪表盘设置、安全模型与变更操作 |
 | [安全策略](SECURITY.md) | 如何报告漏洞，以及详细的安全边界 |
 | [贡献指南](CONTRIBUTING.md) | 变更的归属位置，以及如何运行确定性测试套件 |

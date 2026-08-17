@@ -60,7 +60,7 @@ export const dashboardCopyEn = {
   "next.pairRoutes":
     "Create an explicit edge with embassy pair --from <alias> --to <alias>.",
   "next.restoreClaude":
-    "Refresh discovery, then explicitly select the current Claude alias if it is not restored.",
+    "Refresh discovery to update observation, then explicitly select the current Claude alias.",
   "next.repairClaude":
     "No live, collision-free session is selectable. Resolve the issue shown in Sessions & routes, then refresh discovery.",
   "next.registerCodex":
@@ -279,6 +279,8 @@ export const dashboardCopyEn = {
   "diagnostics.codexDoctor.attached": "Desktop is attached to the managed App Server.",
   "diagnostics.codexDoctor.observation_stale":
     "Connector observation is stale; current health is not proven.",
+  "diagnostics.codexDoctor.managed_layout_missing":
+    "The managed App Server layout is missing while another process holds the fixed private Codex control socket. Run embassy doctor, then reinstall the managed App Server or stop the ghost process before retrying.",
   "diagnostics.codexDoctor.unknown": "Desktop attachment could not be determined.",
   "diagnostics.registry.title": "Registry observation",
   "diagnostics.registry.entriesScanned": "Entries scanned",
@@ -350,7 +352,8 @@ export const dashboardCopyEn = {
   "route.meaning.busy": "The endpoint is occupied; delivery timing follows the target provider's transport.",
   "route.meaning.awaitingApproval":
     "Waiting on the provider's native approval.",
-  "route.meaning.stale": "No current endpoint proof; refresh and restore it.",
+  "route.meaning.stale":
+    "Current provider observation is unavailable; refresh updates evidence only, and the next operation checks again.",
   "route.meaning.offline": "The route's connector is unreachable.",
   "route.meaning.disabled": "Administratively disabled; not a fault.",
   "peer.idle": "Idle",
@@ -542,7 +545,7 @@ export const dashboardCopyEn = {
   "app.routes.unselectCmd.consequenceOpen":
     "Remove only this outbound edge. Open inbound remains enabled for every live Claude session under this OS user.",
   "app.routes.refreshCmd":
-    "Re-read local discovery and rewrite the static dashboard file.",
+    "Observation only: re-read local discovery and rewrite the static dashboard file; do not select or restore a route.",
   "app.routes.removeCodex.consequence":
     "Remove {alias}, delete all of its consent edges, and settle its active work by durable write phase. Queued or reserved work is cancelled; armed work becomes ambiguous; accepted work becomes unconfirmed.",
   "app.routes.noPeers": "No Claude session was discovered in this snapshot.",

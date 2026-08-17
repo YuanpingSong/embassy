@@ -54,6 +54,7 @@ test("exact npm manifest names every runtime artifact and canonical public asset
   for (const removedPath of [
     "dist/src/gateway/codex-registration-generation.js",
     "dist/src/gateway/codex-registration-succession.js",
+    "dist/src/gateway/compatibility.js",
   ]) {
     assert.ok(!expected.includes(removedPath), removedPath);
   }

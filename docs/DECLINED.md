@@ -23,9 +23,9 @@ means addressing its reason, not ignoring it.
 - **Cosmetic backlog held out of v1.4/v1.5** (stale `live-*` state-directory
   sweep; dashboard `GET /?query` → `404`; leading-zero port parse) — Correctness
   and honesty shipped first; these wait without shame.
-- **Cross-layer launcher-banner provenance policy** — Deferred from CO #39
-  because a parser-only patch would have been false; the honest fix spans
-  server/provider classification.
+- **Cross-layer launcher-banner provenance policy** — Superseded in v1.8 when
+  Embassy stopped inspecting the unused Claude launcher; current routing uses
+  only actual registry, socket, PID, workspace, and state-root evidence.
 - **Claude endpoint-generation deleted-as-churn via constant sentinel** —
   Superseded by native state schema 3, which removed persisted endpoint
   generations instead of adding another compatibility sentinel.
