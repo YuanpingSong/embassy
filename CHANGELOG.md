@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.8.0] - 2026-08-17
+
+### Changed
+
+- The core was rebuilt from first principles around three primitives: durable logical routes with explicit consent edges; one durable message/attempt state machine (`queued -> reserved -> armed -> accepted -> terminal`, authorization as the consent linearization point, first terminal wins, ambiguous-after-arm with no replay ever); and small per-operation transports with no provider I/O under the durable commit lane. The gateway core shrank from 39,883 to 18,595 lines while keeping four providers, twelve directions, and every trust boundary.
+- Codex delivery is stateless: registration records an alias and durable thread ID with zero App Server I/O; each delivery freshly attests the managed install, connects, resumes the exact thread (`excludeTurns`), performs one turn, and closes. Daemon and Desktop restarts are invisible to the next dispatch — the entire generation/reactivation/re-anchor lifecycle is deleted.
+- Claude delivery goes through an exact prepared-frame boundary (immutable one-shot frames, in the production helper too); the launcher/version attestation is deleted entirely — Embassy validates only the artifacts it consumes, so any Claude Code install channel works and a missing registry degrades without blocking boot.
+- Persisted state is strict schema v3 with one packaged offline command, `embassy convert-state-v2-to-v3` (backup-first, one strict pass, never starts providers); the runtime accepts only v3 and names `GATEWAY_STATE_CONVERSION_REQUIRED` for well-formed v2 state.
+- A slow provider turn can no longer starve the control plane: reads never join the commit lane, unrelated targets run concurrently, and a deterministic 90-second-pause test holds it that way.
+
+### Added
+
+- `embassy doctor` gains `managed_layout_missing` (a running server claims a managed layout that does not exist on disk) alongside the orphaned-Desktop, split-brain, and observation-age findings.
+- A production-backed Claude wire conformance oracle and a frozen Codex wire contract anchor the per-provider release gates.
+
+### Removed
+
+- `compatibility.ts`, the delivery machine, registration succession/generation journals, endpoint-refresh choreography, runtime version authority of any kind, and `EMBASSY_CLAUDE_BIN`. About 35,800 net lines left the repository across the v1.8 slices.
+
 ## [1.7.1] - 2026-08-16
 
 ### Fixed
