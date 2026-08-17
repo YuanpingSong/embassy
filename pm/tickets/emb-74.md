@@ -3,7 +3,7 @@ id: emb-74
 title: v1.9 — Embassy is a network: SSH broker federation + universal peer ingress
 kind: design
 size: 8
-status: draft
+status: landed
 release: v1.9
 updated: 2026-08-16
 ---
@@ -81,3 +81,24 @@ kind and a transport, never a second delivery system.
 
 MANDATE: founder directs execution through the full v1.9 release
 (v1.7 → v1.8 → v1.9), budgets as above.
+
+## Design ACCEPTED (2026-08-17 ~03:20) — report on conv_3vX7ptBdAWnnpjO9dF-DR05O
+
+Both pillars on the v3 kernel, no new machinery classes. P1: nodes.json in
+the attested state root (SSH config owns SSH); registrationMode
+federated_peer (NO v4 state); opaque reg_* refs; 3-method peer-stdio
+(initialize/catalog/handoff, acp-client discipline, 32KiB/256KiB caps);
+one-hop mesh, no forwarding; consent via lexicographic edge OWNER (no
+distributed tx); destination-durable-accept = origin delivered
+(PEER_HANDOFF_CONFIRMED); post-arm faults ambiguous PEER_HANDOFF_OUTCOME_
+UNKNOWN, never replayed; same-provider cross-host directions added;
+host-scoped read-only dashboard aggregation. P2: provider peer, token
+principal (hash-only persistence), await long-poll + stdout-flush-then-ack
+receipt, exact settlement mapping, Cursor-premise early gate. RULINGS:
+SECURITY.md networking amendment approved (charter-grounded); P1 cap +600
+(target 540); P2 cap 500 (target 450); three founder Qs adopted as
+recommended; contest triggers ratified. IMPLEMENTATION: emb-81 (P1) → swe3,
+lands FIRST; emb-82 (P2) → main (conv_n-0kvS0y2f8GRNuUsx23wrLG), rebases
+over P1's shared files. m5dev drill PM-side after both land (upgrade
+1.7.1→1.8.2 + convert; drain @this-mac identities; canonical inventories;
+no-model proofs then separately-authorized live sends).
