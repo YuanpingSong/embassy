@@ -69,3 +69,20 @@ recorded: per-candidate re-hash in find() predicates; PeerProtocolError
 vs BridgeError on host regex; randomized forged-token fixture class
 (z-suffix recurrence) queued for one deterministic sweep. Released as
 v1.9.5.
+
+## Drill completion (2026-08-17 ~18:30)
+
+FIRST CROSS-MACHINE HANDOFF COMPLETE, WITH RECEIPT, on published v1.9.5.
+Reverse initialize + mixed-provider catalog round-trip clean; reverse
+mirrors of all five this-mac routes on m5dev within 10s; first cross-host
+consent edge paired on the owner broker; THREE handoffs delivered
+(PEER_HANDOFF_CONFIRMED) and the third consumed end-to-end by `embassy
+await` on m5dev — full broker-owned frame with provenance and reply hint
+intact across machines. Operational finds for retro: (1) ghost-broker
+kill pattern must cover BOTH command shapes ("embassy serve" nvm shim AND
+"cli.js serve" pnpm) — a 1.9.4 ghost served for hours and reproduced the
+pre-fix -32603, nearly misdiagnosed as a fix failure; (2) peer token
+ergonomics — --emit-env quoting + fresh-shell-per-call cost three lost
+tokens before a clean one-shell pattern landed (drill2/drill3 messages
+remain queued until deadline expiry, harmless); (3) GitHub 503 on release
+creation twice in one night — rerun-until-green is now routine.
