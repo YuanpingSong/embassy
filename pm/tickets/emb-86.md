@@ -3,7 +3,7 @@ id: emb-86
 title: reverse federation dial fails against mixed-provider brokers (peer-stdio initialize -32603)
 kind: bug
 size: 2
-status: dispatched
+status: landed
 release: v1.9.5
 updated: 2026-08-17
 ---
@@ -41,3 +41,31 @@ is real-shape-no-fixture.
 **Caps**: E2, net ≤ +80 src, tests uncapped within reason, freeze with
 patch SHA. First cross-machine handoff follows immediately: reverse dial
 → embassy-pm mirror on m5dev → owner-side pair → send → await.
+
+## Landing (v1 freeze, 2026-08-17)
+
+GO first pass. Patch SHA 8965b0cb; source +12/-7 (net +5 of +80 cap);
+independent check 576/576; base contest (engineer-raised) resolved: the
+records branch had been offered as lane base and was DIVERGED — product
+base corrected to public main a7902e8 before any edit.
+
+Root cause (engineer, offline repro): buildPeerCatalog exported private
+lease_* registrationIds as wire refs; the strict token("reg_") contract
+rejected them in the helper's own control client during initialize (the
+emb-84 initialize-fetches-catalog change is why it surfaced there).
+Forward direction had worked by COINCIDENCE: fresh installs mint
+reg_-shaped random ids (service.ts:254-256) while v2-migrated states
+carry lease_* ownerLease ids (state-v2-to-v3.ts:389) — m5dev was fresh
+post-recovery, this-mac migrated. Fix: peerRouteRef(host, regId) =
+reg_ + SHA-256(host\0regId) base64url at all nine wire sites, projection
+and admission symmetric (adversarial reviewer proved with a live
+two-broker round trip incl. handoff admission); no raw id or native
+handle crosses the wire.
+
+Release-note item (shipped in CHANGELOG + notes): upgrade rebuilds
+federated mirrors; in-flight settles ROUTE_UNREGISTERED; locally-owned
+cross-host edges drop — one re-pair after both sides upgrade. Nits
+recorded: per-candidate re-hash in find() predicates; PeerProtocolError
+vs BridgeError on host regex; randomized forged-token fixture class
+(z-suffix recurrence) queued for one deterministic sweep. Released as
+v1.9.5.
