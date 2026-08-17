@@ -451,13 +451,15 @@ test("peer registration persists only its hash and exact token owns idempotence 
     assert.equal(state.includes(expected), true);
     assert.equal(state.includes(token), false);
     await eventually(() => claudeProvider.advertised.includes("peer-shell@this-mac"));
+    const foreignToken = `${token.slice(0, -1)}${token.endsWith("x") ? "y" : "x"}`;
+    assert.notEqual(foreignToken, token);
     assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac", token }), {
       accepted: true, code: "ok",
     });
-    assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac", token: `${token.slice(0, -1)}x` }), {
+    assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac", token: foreignToken }), {
       accepted: false, code: "route_mismatch",
     });
-    assert.deepEqual(await subject.handlers.unregisterPeer({ alias: "peer-shell@this-mac", token: `${token.slice(0, -1)}y` }), {
+    assert.deepEqual(await subject.handlers.unregisterPeer({ alias: "peer-shell@this-mac", token: foreignToken }), {
       accepted: false, code: "route_mismatch",
     });
     assert.notEqual(await subject.store.inspectPrivateRoute("peer-shell@this-mac"), undefined);
