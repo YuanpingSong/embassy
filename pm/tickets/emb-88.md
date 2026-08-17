@@ -3,7 +3,7 @@ id: emb-88
 title: v2.0 R4 — state guillotine: delete the v2 converter stack, fresh strict schema, reset-only runbook
 kind: normal
 size: 5
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-17
 ---
@@ -73,3 +73,22 @@ converter suite.
 Intended-behavior classifications and remaining gaps recorded by taste
 (native_ invariant naming, EMBASSY_VERSION/changelog at release time,
 unbucketed script -2) ride the release checklist or emb-89.
+
+## Landing (v2 freeze, 2026-08-17)
+
+LANDED on public main 4a69c27. v2 correction bundle verified: SHA
+ac9c023a; src +41/-1,381 net -1,340 (floor met by 40; new code 41/120);
+553/553 in gate AND landing trees. The reset instruction now prints on
+the reachable serve failure screen for both refusal codes in both
+locales, with the abandon-unsettled-work caveat and the
+inspection-requires-1.9.x note; 33-test CLI matrix asserts exact stdout/
+stderr and absence of the private BridgeError message. Engineer contest
+SUSTAINED inside the bundle: the control-response hint branch is
+unreachable (closed 11-member wire-code union; store schema codes cannot
+reach decodeResponse) — unreachable hint call removed rather than shipped
+dead. Mirror-id reg_* regression assertion added. PM probe note (honest
+record): four attempts to reproduce the refusal screen in a synthetic
+HOME failed at config validation before state load (bare HOME lacks the
+provider config a real install carries) — screen evidence rests on the
+CLI matrix, which ran green inside the independent full check. Ships in
+v2.0.0 after emb-89/90/91.
