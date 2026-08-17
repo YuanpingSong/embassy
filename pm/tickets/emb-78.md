@@ -3,9 +3,9 @@ id: emb-78
 title: Fresh-machine setup dogfood — boot-mandatory legacy providers, error opacity, install-channel gaps
 kind: bug
 size: 3
-status: draft
-release: v1.8
-updated: 2026-08-16
+status: landed
+release: v1.8.0
+updated: 2026-08-17
 ---
 
 ## Binding
@@ -66,3 +66,28 @@ README prerequisites patched same-day (see commit). Items 1-3 ride v1.8
 Result on m5dev: broker healthy, four connectors (deepseek honestly
 degraded), ACP routes registered. Second network node live — v1.9 ground
 truth acquired en route.
+
+## Resolution (2026-08-17) — absorbed, all five findings closed
+
+Never dispatched as its own slice; every finding landed elsewhere:
+
+1. Boot-mandatory legacy providers — CLOSED by v1.8.0: launcher/version
+   authority deleted entirely, Codex delivery stateless; claude/codex
+   absence now degrades that provider only, broker boots.
+2. CLI error opacity — CLOSED across v1.8.0–v1.9.5: the rebuilt serve
+   path renders named codes (every failure in the v1.9 drills surfaced as
+   one: GATEWAY_STATE_CONVERSION_REQUIRED, CORRUPT_GATEWAY_STATE,
+   GATEWAY_INSTANCE_IN_USE); the raw-ENOENT class on the converter
+   recovery path was typed in v1.9.5 (emb-85 N1).
+3. Homebrew Claude decision — OVERTAKEN by deletion in v1.8.0: any
+   install channel works, EMBASSY_CLAUDE_BIN removed; the queued
+   override-attestation decision is moot.
+4. pnpm stale-metadata + PATH docs — CLOSED same-day: README
+   prerequisites rewritten (explicit version pin, PNPM_HOME note); the
+   non-interactive-PATH remedy (~/.zshenv) is now proven on BOTH install
+   channels (m5dev pnpm, this-mac nvm — emb-86 drill).
+5. Ghost daemon detection — CLOSED by v1.8.0: doctor gained
+   managed_layout_missing, exactly this finding.
+
+The proven fresh-machine recipe above remains the canonical setup
+reference; superseded only by README updates since.
