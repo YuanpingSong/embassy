@@ -662,6 +662,38 @@ test("prepared evidence is bound to the exact raw body and transport kind", asyn
   await store.close();
 });
 
+test("peer targets require peer mailbox prepared evidence", async () => {
+  const { store } = await fixture();
+  await store.initialize();
+  const peer = route("peer", "peer-shell@this-mac", "reg-peer-0001",
+    `peer:${"a".repeat(64)}`);
+  await assert.rejects(store.registerRoute({ ...peer, binding: {
+    ...peer.binding, routeHandle: `peer_${"a".repeat(32)}`,
+  } }), (error: unknown) => error instanceof Error && "code" in error &&
+    error.code === "INVALID_ROUTE_BINDING");
+  await store.registerRoute(codex);
+  await store.registerRoute(peer);
+  const hostile = JSON.parse(await readFile(store.stateFilePath, "utf8"));
+  hostile.routes.find((candidate: { alias: string }) => candidate.alias === peer.alias)
+    .binding.routeHandle = `peer_${"a".repeat(32)}`;
+  assert.equal(isGatewayPersistedStateV3(hostile), false);
+  await store.addConsentEdge(consentInput(codex, peer));
+  await store.enqueueMessage({ sourceAlias: codex.alias, targetAlias: peer.alias,
+    body: "peer body", dedupeKey: "peer-prepared" });
+  const attempt = await reserve(store, peer.alias);
+  await assert.rejects(store.authorizeMessage({ messageId: attempt.messageId,
+    attemptId: attempt.attemptId, sourceRegistrationId: attempt.sourceRegistrationId,
+    targetRegistrationId: attempt.targetRegistrationId, prepared: preparedFor(attempt.body) }),
+  (error: unknown) => error instanceof Error && "code" in error &&
+    error.code === "INVALID_PREPARED_WRITE_EVIDENCE");
+  assert.deepEqual(await store.authorizeMessage({ messageId: attempt.messageId,
+    attemptId: attempt.attemptId, sourceRegistrationId: attempt.sourceRegistrationId,
+    targetRegistrationId: attempt.targetRegistrationId,
+    prepared: { ...preparedFor(attempt.body), kind: "peer_mailbox" } }),
+  { status: "authorized" });
+  await store.close();
+});
+
 test("armed ACP coarse terminal is the sole pre-acceptance unconfirmed arm", async () => {
   const { store } = await fixture();
   await store.initialize();
@@ -1580,7 +1612,9 @@ test("federated routes admit same-provider cross-host mail through peer_handoff 
     binding: { provider: "codex", hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } };
   const remote: RegisterRouteInput = { alias: "codex-remote@m5dev", registrationMode: "federated_peer",
     binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
-  await store.registerRoute(local); await store.registerRoute(remote);
+  const peerMirror: RegisterRouteInput = { alias: "peer-shell@m5dev", registrationMode: "federated_peer",
+    binding: { provider: "peer", hostId: "m5dev", routeHandle: "reg_peer_remote", registrationId: "reg_peer_mirror" } };
+  await store.registerRoute(local); await store.registerRoute(remote); await store.registerRoute(peerMirror);
   await store.addConsentEdge(consentInput(local, remote));
   const admitted = await store.enqueueMessage({ sourceAlias: local.alias, targetAlias: remote.alias,
     expectedSourceRegistrationId: local.binding.registrationId, expectedTargetRegistrationId: remote.binding.registrationId,
@@ -1633,6 +1667,10 @@ test("federated routes admit same-provider cross-host mail through peer_handoff 
       prepared: { kind: "codex_turn_start", bodyBytes: 17, bodySha256: localSha, frameBytes: 22, sha256: localSha } })).status, "authorized");
   }
   await store.close();
+  const reopened = new GatewayStore(config, { now: setup.clock.now, randomId: setup.clock.randomId });
+  await reopened.initialize();
+  assert.deepEqual((await reopened.inspectPrivateRoute(peerMirror.alias))?.binding, peerMirror.binding);
+  await reopened.close();
 });
 
 test("configured canonical host rejects retained local routes from the legacy host", async () => {

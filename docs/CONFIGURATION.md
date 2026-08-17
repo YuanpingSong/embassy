@@ -1,10 +1,10 @@
 # Configuration and provider contracts
 
-Embassy is configured through environment variables read when each command
-starts. This document collects every variable, provider transport contracts,
-provider runtime rules, and
-the addressing model. There is no configuration file; all values are env vars
-or CLI flags.
+Embassy is configured primarily through environment variables read when each
+command starts. This document collects every variable, provider transport
+contract, provider runtime rule, and the addressing model. Values are env vars
+or CLI flags except for the private `nodes.json` federation inventory described
+below.
 
 ---
 
@@ -18,7 +18,15 @@ or CLI flags.
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
 | `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts. Active watches are memory-only and end with the broker process; they are never restored after restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
 | `EMBASSY_LOCALE` | `en` | CLI output language, exactly `en` or `zh-CN`. The `--lang` flag overrides it for the invocation that carries it; an unset or empty value means `en`, and any other value is an argument error |
-| `EMBASSY_HOSTS` | `this-mac` | Comma-separated list of 1 through 32 unique lowercase host aliases. **The v1 launcher accepts only the single exact value `this-mac`**: any other list — including a longer one that contains `this-mac` — fails `embassy serve` closed with `GATEWAY_REMOTE_PROVIDER_DISABLED`. The variable exists for the deferred remote-consulate work and has no useful setting today |
+| `EMBASSY_HOSTS` | `this-mac` | Legacy host-list parser: the value must still be 1 through 32 unique lowercase aliases, but it is not federation authority. Without `nodes.json`, `serve` remains local-only as `this-mac` regardless of this value. When `nodes.json` is configured, explicitly setting this variable fails closed with `INVALID_GATEWAY_CONFIGURATION` |
+
+Federation authority comes only from `nodes.json` in `EMBASSY_STATE_DIR`. It
+must be a current-user-owned mode-0600 regular file whose exact object shape is
+`{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`.
+`host` names this broker; `nodes` contains 1 through 31 unique OpenSSH aliases,
+omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
+node is the fixed SSH destination for `embassy peer-stdio`. A missing file keeps
+the broker local-only as `this-mac`.
 
 ### Offline state upgrade
 
@@ -76,7 +84,7 @@ two hours.
 
 A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity replacement.
 
-The public launcher accepts only host `this-mac`; remote connectors remain a future capability. `register-codex` therefore takes an optional `--host <id>`, but `this-mac` is the only value the broker will admit, and the alias must end in `@<id>` to match. `--host` is also mutually exclusive with `--succeeds`, which always inherits the succeeded alias's host.
+The public launcher remains host-local. Under the implemented allowlisted SSH federation, each broker serves one local host identity and exchanges only bounded route catalogs and destination-owned handoffs with configured Embassy nodes. `register-codex` remains a local task registration: its optional `--host <id>` and alias suffix must name that broker's local host. `--host` is also mutually exclusive with `--succeeds`, which always inherits the succeeded alias's host.
 
 ## Claude Code's own setting: `crossSessionInbound`
 
@@ -97,7 +105,7 @@ the destination session before suspecting the route.
 
 ## Provider and runtime contract
 
-Embassy routes four providers: Claude over peer protocol 1, Codex over the managed App Server, and DeepSeek plus Grok Build over ACP v1. The release-owned [support matrix](../support/provider-support-matrix.json) records the exact artifacts, protocols, capabilities, stop fidelity, limitations, and test date exercised offline. Runtime never imports that file. A build or version fact can qualify the release's “tested with” claim, but it never grants or withholds routing authority.
+Embassy routes five providers: Claude over peer protocol 1, Codex over the managed App Server, DeepSeek plus Grok Build over ACP v1, and universal shell peers over the private control socket. The release-owned [support matrix](../support/provider-support-matrix.json) records the exact artifacts, protocols, capabilities, stop fidelity, limitations, and test date exercised offline. Runtime never imports that file. A build or version fact can qualify the release's “tested with” claim, but it never grants or withholds routing authority.
 
 Runtime is best effort: an explicit consent edge plus the exact owned route/session identity authorizes an attempt. The current per-operation transport, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health and an exact safe code; it does not create a compatibility tier or block unrelated providers.
 
@@ -114,3 +122,10 @@ Claude sessions are addressed by their current `name@host` or by a user-supplied
 Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name.
 
 Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server, Desktop, and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration and consent edge remain.
+
+Shell routes use `peer-*` aliases and a `peer_` token minted at registration.
+The broker persists only its UID/alias/token hash route handle, never the raw
+token. Authenticated calls accept the token on the first stdin line with
+`--token-stdin`; body-bearing calls use the remaining bytes as the body.
+`--emit-env` remains optional for stable-shell harnesses. There is no PID
+binding, token file, Keychain entry, daemon, or alternate persistence path.

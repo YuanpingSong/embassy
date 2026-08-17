@@ -32,6 +32,7 @@ const DEFAULT_HOST_ID = "this-mac";
 const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
 const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
+const PEER_AWAIT_REQUEST_TIMEOUT_MS = 35_000;
 export const EMBASSY_VERSION = "1.8.2";
 // RELEASE VERSION SWEEP — every place the version lives: package.json,
 // npm-shrinkwrap.json (x2), this constant,
@@ -43,6 +44,7 @@ export const gatewayCliCommands = [
   "wait-delivery", "untrack", "refresh-dashboard", "dashboard", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send-to-claude", "send-to-codex", "reply",
+  "register-peer", "unregister-peer", "await",
   "peer-stdio",
 ] as const;
 
@@ -57,7 +59,7 @@ export const gatewayCliExitCodes = Object.freeze({
   failure: 6,
 } as const);
 
-type Writable = { write(chunk: string): unknown };
+type Writable = { write(chunk: string, callback?: (error?: Error | null) => void): unknown };
 type GatewayControlSender = <M extends GatewayControlMethod>(options: SendGatewayControlRequestOptions<M>) => Promise<GatewayControlResponse<M>>;
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
 type LiveDashboardRunner = (options: LiveDashboardCommandOptions) => Promise<LiveDashboardCommandOutcome | void>;
@@ -201,6 +203,20 @@ function requireCodexThreadId(env: NodeJS.ProcessEnv): string {
   return threadId.toLowerCase();
 }
 const hasIdentity = (value: string | undefined): boolean => typeof value === "string" && value.length > 0;
+const PEER_TOKEN_PATTERN = /^peer_[A-Za-z0-9_-]{32}$/;
+function peerTokenSource(options: ParsedOptions, env: NodeJS.ProcessEnv): string | "stdin" | undefined {
+  const inherited = env.EMBASSY_PEER_TOKEN;
+  if ((options["token-stdin"] === true || hasIdentity(inherited)) &&
+      (hasIdentity(env.CODEX_THREAD_ID) || hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET))) throw callerIdentityConflictFault(env);
+  if (options["token-stdin"] === true && hasIdentity(inherited)) throw callerIdentityConflictFault(env);
+  if (hasIdentity(inherited) && !PEER_TOKEN_PATTERN.test(inherited!)) fault("CALLER_IDENTITY_REQUIRED");
+  return options["token-stdin"] === true ? "stdin" : hasIdentity(inherited) ? inherited : undefined;
+}
+function requirePeerAlias(options: ParsedOptions): string {
+  const alias = requireAlias(options, "alias");
+  if (!alias.startsWith("peer-")) fault();
+  return alias;
+}
 function callerIdentityConflictFault(env: NodeJS.ProcessEnv): CliFault {
   const both = hasIdentity(env.CODEX_THREAD_ID) && hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET);
   return new CliFault("CALLER_IDENTITY_CONFLICT", false, both ? "callerIdentityConflict" : undefined);
@@ -247,6 +263,25 @@ async function readMessageBody(stdin: AsyncIterable<unknown>): Promise<string> {
   catch { fault("INVALID_MESSAGE_INPUT"); }
   if (text.trim().length === 0 || text.includes("\0")) fault("MESSAGE_REQUIRED");
   return text;
+}
+async function readPeerInput(stdin: AsyncIterable<unknown>, source: string | "stdin", body: boolean) {
+  if (source !== "stdin") return { token: source, ...(body ? { text: await readMessageBody(stdin) } : {}) };
+  const chunks: Buffer[] = []; let length = 0;
+  for await (const chunk of stdin) {
+    if (typeof chunk !== "string" && !Buffer.isBuffer(chunk)) fault("INVALID_MESSAGE_INPUT");
+    const buffer = Buffer.from(chunk); length += buffer.length;
+    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES + 38) throw new CliFault("MESSAGE_TOO_LARGE", false, "hint.messageTooLarge");
+    chunks.push(buffer);
+  }
+  const value = Buffer.concat(chunks, length), newline = value.indexOf(0x0a);
+  if (newline !== 37 || !PEER_TOKEN_PATTERN.test(value.subarray(0, newline).toString("utf8")) || (!body && newline !== value.length - 1)) fault("INVALID_MESSAGE_INPUT");
+  const token = value.subarray(0, newline).toString("utf8");
+  if (!body) return { token };
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(value.subarray(newline + 1)); }
+  catch { fault("INVALID_MESSAGE_INPUT"); }
+  if (text.trim().length === 0 || text.includes("\0")) fault("MESSAGE_REQUIRED");
+  return { token, text };
 }
 const emptyParams = (args: readonly string[]): Record<string, never> => args.length === 0 ? {} : fault();
 function parseServeInboundMode(args: readonly string[]): "paired" | "open" {
@@ -327,6 +362,22 @@ async function buildRequest(
       count(options, 1);
       return envelope("unregister_codex", { alias: requireCodexAlias(options, "alias"), threadId: requireExclusiveCodexThreadId(env) });
     }
+    case "register-peer":
+    case "unregister-peer":
+    case "await": {
+      const options = parseOptions(args, ["alias"], ["token-stdin", "emit-env"]);
+      count(options, 1, 3);
+      const alias = requirePeerAlias(options), source = peerTokenSource(options, env);
+      if (hasIdentity(env.CODEX_THREAD_ID) || hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
+      if (command !== "register-peer" && options["emit-env"] === true) fault();
+      if (options["emit-env"] === true && source !== undefined) fault();
+      if (source === undefined) {
+        if (command !== "register-peer") fault("CALLER_IDENTITY_REQUIRED");
+        return envelope("register_peer", { alias });
+      }
+      const { token } = await readPeerInput(stdin, source, false);
+      return envelope(command === "register-peer" ? "register_peer" : command === "unregister-peer" ? "unregister_peer" : "await_peer", { alias, token });
+    }
     case "select-claude":
     case "unselect-claude": {
       const options = parseOptions(args, ["alias", "session"]);
@@ -354,39 +405,45 @@ async function buildRequest(
     case "send-to-claude":
     case "send-to-codex": {
       const options = parseOptions(
-        args, ["from", "to", "idle-minutes"], ["expects-reply", "track"],
+        args, ["from", "to", "idle-minutes"], ["expects-reply", "track", "token-stdin"],
       );
-      count(options, 2, 5);
-      const authority = command === "send-to-claude"
-        ? requireExclusiveCodexThreadId(env) : requireExclusiveClaudeReplyAddress(env);
+      count(options, 2, 6);
+      const source = peerTokenSource(options, env);
+      const principals = Number(hasIdentity(env.CODEX_THREAD_ID)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
+      if (principals > 1) throw callerIdentityConflictFault(env);
+      const fromAlias = requireAlias(options, "from");
+      const toAlias = command === "send-to-claude" ? requireClaudeSelector(options, "to") : requireAlias(options, "to");
       const idleMinutes = trackIdleMinutes(options);
+      const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
+      const authority = peer === undefined ? command === "send-to-claude"
+        ? requireExclusiveCodexThreadId(env) : requireExclusiveClaudeReplyAddress(env) : undefined;
       const common = {
-        fromAlias: requireAlias(options, "from"),
-        toAlias: command === "send-to-claude" ? requireClaudeSelector(options, "to") : requireAlias(options, "to"),
-        text: await readMessageBody(stdin),
+        fromAlias, toAlias, text: peer?.text ?? await readMessageBody(stdin),
         expectsReply: options["expects-reply"] === true,
         ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
       };
       return command === "send-to-claude"
-        ? envelope("send_to_claude", { ...common, threadId: authority })
-        : envelope("send_to_codex", { ...common, replyAddress: authority });
+        ? envelope("send_to_claude", { ...common, ...(peer === undefined ? { threadId: authority } : { peerToken: peer.token }) })
+        : envelope("send_to_codex", { ...common, ...(peer === undefined ? { replyAddress: authority } : { peerToken: peer.token }) });
     }
     case "reply": {
-      const options = parseOptions(args, ["conversation", "alias", "idle-minutes"], ["track"]);
-      count(options, 2, 4);
+      const options = parseOptions(args, ["conversation", "alias", "idle-minutes"], ["track", "token-stdin"]);
+      count(options, 2, 5);
       const conversationId = requireString(options, "conversation");
       if (!isGatewayConversationId(conversationId)) fault();
       const alias = requireAlias(options, "alias");
       const idleMinutes = trackIdleMinutes(options);
-      const threadId = env.CODEX_THREAD_ID;
-      if (hasIdentity(threadId) && hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
+      const threadId = env.CODEX_THREAD_ID, source = peerTokenSource(options, env);
+      const principals = Number(hasIdentity(threadId)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
+      if (principals > 1) throw callerIdentityConflictFault(env);
       const replyAddress = optionalClaudeReplyAddress(env);
       const codex = hasIdentity(threadId);
-      if (!codex && replyAddress === undefined) fault("CALLER_IDENTITY_REQUIRED");
+      if (!codex && replyAddress === undefined && source === undefined) fault("CALLER_IDENTITY_REQUIRED");
+      const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
       return envelope("reply", {
-        conversationId, text: await readMessageBody(stdin),
+        conversationId, text: peer?.text ?? await readMessageBody(stdin),
         ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
-        caller: codex
+        caller: peer !== undefined ? { kind: "peer", alias, token: peer.token } : codex
           ? { kind: "codex", alias, threadId: requireCodexThreadId(env) }
           : { kind: "claude", alias, replyAddress: requireClaudeReplyAddress(env) },
       });
@@ -422,6 +479,14 @@ function serializedOutput(value: unknown): string {
   const line = `${JSON.stringify(value)}\n`;
   if (Buffer.byteLength(line, "utf8") > CLI_MAX_OUTPUT_BYTES) fault("OUTPUT_TOO_LARGE");
   return line;
+}
+async function writeComplete(output: Writable, frame: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const done = (error?: Error | null) => { if (settled) return; settled = true; error ? reject(error) : resolve(); };
+    try { if (typeof output.write(frame, done) !== "boolean") done(); }
+    catch (error) { done(error instanceof Error ? error : new Error("stdout write failed")); }
+  });
 }
 
 function writeFailure(
@@ -616,7 +681,27 @@ export async function runGatewayCli(
     await validateSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;
     let waited: GatewayControlResponse<"delivery_status"> | undefined;
-    if (command === "wait-delivery") {
+    if (command === "await") {
+      if (request.method !== "await_peer") fault();
+      while (true) {
+        const current = await sendRequest({ socketPath: config.controlSocketPath, request, timeoutMs: PEER_AWAIT_REQUEST_TIMEOUT_MS });
+        if (!current.ok) { response = current; break; }
+        if (current.result.state === "timeout") continue;
+        try { await writeComplete(stdout, current.result.frame); }
+        catch { stderr.write(fixedStderr(locale, "failure")); return gatewayCliExitCodes.failure; }
+        try {
+          const receipt = await sendRequest({ socketPath: config.controlSocketPath,
+            request: envelope("peer_receipt", { alias: request.params.alias, token: request.params.token, receipt: current.result.receipt }) as Extract<GatewayControlRequest, { method: "peer_receipt" }> });
+          if (!receipt.ok) { stderr.write(fixedStderr(locale, "failure")); return gatewayCliExitCodes.failure; }
+          if (isRejectedResult(receipt.result)) { stderr.write(fixedStderr(locale, "decision")); return gatewayCliExitCodes.rejected; }
+          return gatewayCliExitCodes.ok;
+        } catch (error) {
+          const transport = error instanceof GatewayControlTransportError;
+          stderr.write(fixedStderr(locale, transport ? error.ambiguous ? "ambiguous" : "unavailable" : "failure"));
+          return transport ? error.ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable : gatewayCliExitCodes.failure;
+        }
+      }
+    } else if (command === "wait-delivery") {
       if (request.method !== "delivery_status") fault();
       const outcome = await waitForDelivery(config.controlSocketPath, request, sendRequest,
         dependencies.now ?? Date.now, dependencies.delay ?? defaultDelay);
@@ -635,6 +720,10 @@ export async function runGatewayCli(
     if (!response.ok) {
       writeFailure(stdout, stderr, locale, command, response.error.code, { kind: "failure" });
       return gatewayCliExitCodes.failure;
+    }
+    if (command === "register-peer" && common.args.includes("--emit-env") && "token" in response.result) {
+      stdout.write(`export EMBASSY_PEER_TOKEN='${response.result.token}'\n`);
+      return gatewayCliExitCodes.ok;
     }
     success(command === "doctor" ? { conditions: codexDoctorConditions(response.result) } : response.result);
     const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);

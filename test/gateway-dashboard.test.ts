@@ -57,7 +57,7 @@ test("snapshot evidence exposes suffix-only correlation, peer validation, operat
   const model = buildDashboardViewModel(snapshot);
   assert.deepEqual(
     model.exchange.parties.map(({ kind }) => kind),
-    ["claude", "codex", "deepseek", "grok"],
+    ["claude", "codex", "deepseek", "grok", "peer"],
   );
   assert.equal(model.peers.every((peer) => peer.validated), true);
   assert.equal(model.activity[0]?.conversationIdSuffix, "IjKl_789");
@@ -727,7 +727,7 @@ test("dashboard projects all-provider consent edges, directions, and declared pr
     consentEdgeCount: 3,
     readyConsentEdgeCount: 2,
     consentEdgeCountIsLowerBound: true,
-    unpairedReadyByProvider: { claude: 0, codex: 0, deepseek: 0, grok: 0 },
+    unpairedReadyByProvider: { claude: 0, codex: 0, deepseek: 0, grok: 0, peer: 0 },
   });
   const html = renderDashboardHtml(snapshot);
   assert.match(html, /Claude · codex-misleading@this-mac ↔ Codex · codex-builder@this-mac/);
@@ -746,7 +746,7 @@ test("consent-edge truncation remains evidence of consent when every row is omit
     consentEdgeCount: 0,
     readyConsentEdgeCount: 0,
     consentEdgeCountIsLowerBound: true,
-    unpairedReadyByProvider: { claude: 1, codex: 1, deepseek: 0, grok: 0 },
+    unpairedReadyByProvider: { claude: 1, codex: 1, deepseek: 0, grok: 0, peer: 0 },
   });
   assert.equal(model.overall, "ready");
   assert.equal(model.exchange.parties[0]?.nextAction, "none");

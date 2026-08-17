@@ -122,6 +122,12 @@ silently expand Embassy's claimed boundary.
 
 ## Routing and consent
 
+- A universal shell peer explicitly registers one `peer-*` alias. Its principal
+  is that alias plus a `peer_` token minted and printed exactly once. The token
+  is supplied on stdin (or inherited only by a harness with a stable shell),
+  compared in constant time, and rechecked immediately before effects. This is
+  same-UID attribution, not authentication against other same-user software;
+  there is deliberately no PID binding, token file, Keychain entry, or daemon.
 - A Codex task must explicitly self-register with a `codex-*` alias before it
   can participate.
 - Codex-to-Claude delivery requires an explicit operator-created pair with a
@@ -286,6 +292,13 @@ in the mode-0600 state file. A queued or reserved message may resume once after
 a broker restart against its still-exact logical route and consent edge. An
 armed or accepted message at crash settles ambiguous or unconfirmed and is
 never replayed.
+
+For a shell peer, durable route ownership stores only
+`peer:<sha256(uid NUL alias NUL token)>`; the raw peer token and private mailbox
+receipts never enter state, logs, snapshots, dashboards, or routed frames.
+Pending waiters, acknowledgements, and the bounded exact-duplicate receipt
+tombstone are memory-only. A restart therefore cannot falsely confirm a
+stdout write whose acknowledgement was not observed.
 
 The full `conv_` token exposed to a CLI initiator or routed recipient travels
 only inside the accepted CLI result or transient provider payload. It is never

@@ -30,6 +30,7 @@ import type {
 } from "./types.js";
 import { decodePeerParams, decodePeerResult, type PeerCatalogResult,
   type PeerHandoffParams, type PeerHandoffResult } from "./peer-protocol.js";
+import { isPeerMailboxAwaitResult, type PeerMailboxAwaitResult } from "./peer-mailbox.js";
 
 export const GATEWAY_CONTROL_PROTOCOL_VERSION = 1 as const;
 export const GATEWAY_CONTROL_MAX_FRAME_BYTES = 32 * 1024;
@@ -46,6 +47,8 @@ const ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const DELIVERY_TOKEN_PATTERN = /^dlv_[A-Za-z0-9_-]{24}$/;
+const PEER_TOKEN_PATTERN = /^peer_[A-Za-z0-9_-]{32}$/;
+const PEER_RECEIPT_PATTERN = /^prc_[A-Za-z0-9_-]{24}$/;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROTOCOL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -59,6 +62,7 @@ export const gatewayControlMethods = [
   "select_claude", "unselect_claude", "pair", "unpair", "list_snapshot",
   "observe_snapshot", "delivery_status", "untrack", "send_to_claude",
   "send_to_codex", "reply", "refresh_dashboard", "peer_catalog", "peer_handoff",
+  "register_peer", "unregister_peer", "await_peer", "peer_receipt",
 ] as const;
 export type GatewayControlMethod = (typeof gatewayControlMethods)[number];
 export type GatewayBusyPolicy = "queue";
@@ -92,25 +96,16 @@ export function pairParamThreadAttestation(
   return params.codexThreadId === undefined
     ? undefined : { alias: params.codexAlias, threadId: params.codexThreadId };
 }
-export type SendToClaudeParams = {
-  fromAlias: string; threadId: string; toAlias: string; text: string;
-  expectsReply?: boolean; trackIdleMinutes?: number;
-};
-export type ValidatedSendToClaudeParams = {
-  fromAlias: string; threadId: string; toAlias: string; text: string;
-  expectsReply: boolean; trackIdleMinutes?: number;
-};
-export type SendToCodexParams = {
-  fromAlias: string; toAlias: string; text: string; replyAddress?: string;
-  expectsReply?: boolean; trackIdleMinutes?: number;
-};
-export type ValidatedSendToCodexParams = {
-  fromAlias: string; toAlias: string; text: string; replyAddress?: string;
-  expectsReply: boolean; trackIdleMinutes?: number;
-};
+type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean; trackIdleMinutes?: number };
+type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
+export type SendToClaudeParams = SendBase & ({ threadId: string; peerToken?: never } | { peerToken: string; threadId?: never });
+export type ValidatedSendToClaudeParams = ValidatedSendBase & ({ threadId: string; peerToken?: never } | { peerToken: string; threadId?: never });
+export type SendToCodexParams = SendBase & ({ replyAddress: string; peerToken?: never } | { peerToken: string; replyAddress?: never });
+export type ValidatedSendToCodexParams = ValidatedSendBase & ({ replyAddress: string; peerToken?: never } | { peerToken: string; replyAddress?: never });
 export type GatewayReplyCaller =
   | { kind: "codex"; alias: string; threadId: string }
-  | { kind: "claude"; alias: string; replyAddress?: string };
+  | { kind: "claude"; alias: string; replyAddress?: string }
+  | { kind: "peer"; alias: string; token: string };
 export type ReplyParams = {
   conversationId: string; text: string; caller: GatewayReplyCaller;
   trackIdleMinutes?: number;
@@ -119,6 +114,9 @@ export type UntrackParams = { conversationId: string };
 export type DeliveryStatusParams = { token: string };
 export type PeerCatalogParams = { peerHost: string };
 export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
+export type RegisterPeerParams = { alias: string; token?: string };
+export type PeerPrincipalParams = { alias: string; token: string };
+export type PeerReceiptParams = PeerPrincipalParams & { receipt: string };
 
 type RequestParams = {
   health: Record<string, never>; register_codex: RegisterCodexParams;
@@ -130,6 +128,8 @@ type RequestParams = {
   send_to_codex: SendToCodexParams; reply: ReplyParams;
   refresh_dashboard: Record<string, never>; peer_catalog: PeerCatalogParams;
   peer_handoff: PeerHandoffControlParams;
+  register_peer: RegisterPeerParams; unregister_peer: PeerPrincipalParams;
+  await_peer: PeerPrincipalParams; peer_receipt: PeerReceiptParams;
 };
 type ValidatedParams = Omit<RequestParams, "register_codex" | "send_to_claude" | "send_to_codex"> & {
   register_codex: ValidatedRegisterCodexParams;
@@ -166,6 +166,7 @@ export type GatewayDeliveryStatusResult =
     };
 export type GatewaySnapshot = GatewayPublicSnapshot;
 export type GatewaySnapshotObservation = { snapshotRevision: number; snapshot: GatewaySnapshot };
+export type GatewayRegisterPeerResult = GatewayDecision | { accepted: true; code: "ok"; token: string };
 
 type ResultByMethod = {
   health: GatewayHealthResult; register_codex: GatewayDecision;
@@ -177,6 +178,8 @@ type ResultByMethod = {
   send_to_codex: GatewaySendResult; reply: GatewaySendResult;
   refresh_dashboard: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
   peer_handoff: PeerHandoffResult;
+  register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
+  await_peer: PeerMailboxAwaitResult; peer_receipt: GatewayDecision;
 };
 type MaybePromise<T> = T | Promise<T>;
 export type GatewayControlHandlers = {
@@ -198,6 +201,10 @@ export type GatewayControlHandlers = {
   refreshDashboard: () => MaybePromise<GatewayRefreshResult>;
   peerCatalog?: (params: Readonly<PeerCatalogParams>) => MaybePromise<PeerCatalogResult>;
   peerHandoff?: (params: Readonly<PeerHandoffControlParams>) => MaybePromise<PeerHandoffResult>;
+  registerPeer: (params: Readonly<RegisterPeerParams>) => MaybePromise<GatewayRegisterPeerResult>;
+  unregisterPeer: (params: Readonly<PeerPrincipalParams>) => MaybePromise<GatewayDecision>;
+  awaitPeer: (params: Readonly<PeerPrincipalParams>) => MaybePromise<PeerMailboxAwaitResult>;
+  peerReceipt: (params: Readonly<PeerReceiptParams>) => MaybePromise<GatewayDecision>;
 };
 
 export type GatewayWireErrorCode =
@@ -382,6 +389,8 @@ function arrayOf(value: unknown, maximum: number, check: Check): value is unknow
 function positive(value: unknown): value is number { return nonNegative(value) && value > 0; }
 function safeCode(value: unknown): value is string { return typeof value === "string" && SAFE_CODE_PATTERN.test(value); }
 const messageText = isMessageText;
+const peerToken: Check = (value) => typeof value === "string" && PEER_TOKEN_PATTERN.test(value);
+const peerAlias: Check = (value) => alias(value) && (value as string).startsWith("peer-");
 
 function emptyParams(value: unknown): Record<string, never> {
   if (!isRecord(value) || !exact(value, [])) invalid(); return {};
@@ -394,6 +403,19 @@ function decodePeerHandoff(value: unknown): PeerHandoffControlParams {
   if (!isRecord(value) || !exact(value, ["peerHost", "handoff"]) || !host(value.peerHost)) invalid();
   try { return { peerHost: value.peerHost, handoff: decodePeerParams("handoff", value.handoff) }; }
   catch { return invalid(); }
+}
+function decodeRegisterPeer(value: unknown): RegisterPeerParams {
+  if (!shape(value, { alias: peerAlias }, { token: peerToken })) invalid();
+  return { alias: value.alias as string, ...(value.token === undefined ? {} : { token: value.token as string }) };
+}
+function decodePeerPrincipal(value: unknown): PeerPrincipalParams {
+  if (!shape(value, { alias: peerAlias, token: peerToken })) invalid();
+  return { alias: value.alias as string, token: value.token as string };
+}
+function decodePeerReceipt(value: unknown): PeerReceiptParams {
+  if (!shape(value, { alias: peerAlias, token: peerToken,
+    receipt: (item) => typeof item === "string" && PEER_RECEIPT_PATTERN.test(item) })) invalid();
+  return { alias: value.alias as string, token: value.token as string, receipt: value.receipt as string };
 }
 const isPeerCatalog = (value: unknown): boolean => {
   try { decodePeerResult("catalog/get", value); return true; } catch { return false; }
@@ -461,22 +483,27 @@ function commonSend(value: unknown, required: readonly string[], optional: reado
       (value.trackIdleMinutes !== undefined && !trackMinutes(value.trackIdleMinutes))) invalid();
   return value; }
 function decodeSendClaude(value: unknown): ValidatedSendToClaudeParams {
-  if (!isRecord(value) || !exact(value, ["fromAlias", "threadId", "toAlias", "text"], ["expectsReply", "trackIdleMinutes"]) ||
-      !alias(value.fromAlias) || !uuid(value.threadId) || typeof value.toAlias !== "string" ||
+  if (!isRecord(value) || !exact(value, ["fromAlias", "toAlias", "text"], ["threadId", "peerToken", "expectsReply", "trackIdleMinutes"]) ||
+      !alias(value.fromAlias) || (value.threadId === undefined) === (value.peerToken === undefined) ||
+      (value.threadId !== undefined && !uuid(value.threadId)) ||
+      (value.peerToken !== undefined && !peerToken(value.peerToken)) || typeof value.toAlias !== "string" ||
       !isClaudeSessionSelector(value.toAlias) || !messageText(value.text) ||
       (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean") ||
       (value.trackIdleMinutes !== undefined && !trackMinutes(value.trackIdleMinutes))) invalid();
-  return { fromAlias: value.fromAlias, threadId: value.threadId.toLowerCase(),
+  return { fromAlias: value.fromAlias,
     toAlias: UUID_PATTERN.test(value.toAlias) ? value.toAlias.toLowerCase() : value.toAlias,
     text: value.text, expectsReply: value.expectsReply ?? false,
+    ...(typeof value.threadId === "string" ? { threadId: value.threadId.toLowerCase() } : { peerToken: value.peerToken as string }),
     ...(value.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: value.trackIdleMinutes }) };
 }
 function decodeSendCodex(value: unknown): ValidatedSendToCodexParams {
-  const row = commonSend(value, ["fromAlias", "toAlias", "text"], ["replyAddress", "expectsReply", "trackIdleMinutes"]);
-  if (row.replyAddress !== undefined &&
-      (typeof row.replyAddress !== "string" || !isGatewayReplyAddress(row.replyAddress))) invalid();
+  const row = commonSend(value, ["fromAlias", "toAlias", "text"], ["replyAddress", "peerToken", "expectsReply", "trackIdleMinutes"]);
+  if ((row.replyAddress === undefined) === (row.peerToken === undefined) ||
+      (row.replyAddress !== undefined && (typeof row.replyAddress !== "string" || !isGatewayReplyAddress(row.replyAddress))) ||
+      (row.peerToken !== undefined && !peerToken(row.peerToken))) invalid();
+  const replyAddress = row.replyAddress !== undefined;
   return { fromAlias: row.fromAlias as string, toAlias: row.toAlias as string, text: row.text as string,
-    ...(row.replyAddress === undefined ? {} : { replyAddress: row.replyAddress }),
+    ...(replyAddress ? { replyAddress: row.replyAddress as string } : { peerToken: row.peerToken as string }),
     expectsReply: row.expectsReply === true,
     ...(row.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: row.trackIdleMinutes as number }) };
 }
@@ -490,6 +517,8 @@ function normalizeReplyCaller(value: unknown): GatewayReplyCaller {
       (typeof value.replyAddress === "string" && isGatewayReplyAddress(value.replyAddress))))
     return { kind: "claude", alias: value.alias,
       ...(value.replyAddress === undefined ? {} : { replyAddress: value.replyAddress }) };
+  if (value.kind === "peer" && shape(value, { kind: oneOf("peer"), alias: peerAlias, token: peerToken }))
+    return { kind: "peer", alias: value.alias as string, token: value.token as string };
   return invalid();
 }
 function decodeReply(value: unknown): ReplyParams {
@@ -513,6 +542,9 @@ function isDecision(value: unknown): value is GatewayDecision {
   ) }, { ownerHost: host }) && (value.accepted === true
     ? value.code === "ok" && value.ownerHost === undefined
     : value.code !== "ok" && (value.ownerHost === undefined || value.code === "conflict"));
+}
+function isRegisterPeerResult(value: unknown): value is GatewayRegisterPeerResult {
+  return isDecision(value) || shape(value, { accepted: oneOf(true), code: oneOf("ok"), token: peerToken });
 }
 function isHealthResult(value: unknown): value is GatewayHealthResult {
   return shape(value, { status: oneOf("ok", "degraded"), revision: nonNegative }); }
@@ -694,6 +726,10 @@ const descriptors = {
   reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_dashboard: { handler: "refreshDashboard", decode: emptyParams, result: isRefreshResult, mutation: false },
   peer_catalog: { handler: "peerCatalog", decode: decodePeerCatalog, result: isPeerCatalog, mutation: false },
   peer_handoff: { handler: "peerHandoff", decode: decodePeerHandoff, result: isPeerHandoffResult, mutation: true },
+  register_peer: { handler: "registerPeer", decode: decodeRegisterPeer, result: isRegisterPeerResult, mutation: true },
+  unregister_peer: { handler: "unregisterPeer", decode: decodePeerPrincipal, result: isDecision, mutation: true },
+  await_peer: { handler: "awaitPeer", decode: decodePeerPrincipal, result: isPeerMailboxAwaitResult, mutation: false },
+  peer_receipt: { handler: "peerReceipt", decode: decodePeerReceipt, result: isDecision, mutation: true },
 } satisfies Record<GatewayControlMethod, Descriptor>;
 
 function parseRequestObject(value: unknown): ValidatedGatewayControlRequest {
@@ -1091,7 +1127,7 @@ export async function startGatewayControlServer(
   };
 }
 
-function decodeResponse<M extends GatewayControlMethod>(method: M, value: unknown): GatewayControlResponse<M> {
+function decodeResponse<M extends GatewayControlMethod>(method: M, params: RequestParams[M], value: unknown): GatewayControlResponse<M> {
   if (!isRecord(value) || value.protocolVersion !== 1) throw controlTransportError("CONTROL_INVALID_RESPONSE");
   if (value.ok === false) {
     if (!shape(value, { protocolVersion: oneOf(1), ok: oneOf(false), error: (item) =>
@@ -1102,6 +1138,13 @@ function decodeResponse<M extends GatewayControlMethod>(method: M, value: unknow
     return value as GatewayControlErrorResponse;
   }
   if (!shape(value, { protocolVersion: oneOf(1), ok: oneOf(true), result: descriptors[method].result }))
+    throw controlTransportError("CONTROL_INVALID_RESPONSE");
+  if (method === "register_peer" && isRecord(value.result) && value.result.accepted === true &&
+      Object.hasOwn(params, "token") === Object.hasOwn(value.result, "token"))
+    throw controlTransportError("CONTROL_INVALID_RESPONSE");
+  if (method === "await_peer" && isRecord(value.result) && value.result.state === "message" &&
+      (JSON.parse(value.result.frame as string) as { result: { toAlias: string } }).result.toAlias !==
+        (params as PeerPrincipalParams).alias)
     throw controlTransportError("CONTROL_INVALID_RESPONSE");
   return value as GatewayControlSuccessResponse<M>;
 }
@@ -1133,7 +1176,7 @@ export async function sendGatewayControlRequest<M extends GatewayControlMethod>(
     socket.once("connect", () => { writeStarted = true; socket.write(frame); });
     void readOneFrame(socket, maximum).then((responseFrame) => {
       try {
-        const response = decodeResponse(options.request.method, decodeJson(responseFrame, "INVALID_JSON"));
+        const response = decodeResponse(options.request.method, request.params as RequestParams[M], decodeJson(responseFrame, "INVALID_JSON"));
         if (!settled) { settled = true; socket.destroy(); resolve(response); }
       } catch { fail(controlTransportError("CONTROL_INVALID_RESPONSE")); }
     }, (error: unknown) => {

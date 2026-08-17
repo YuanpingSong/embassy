@@ -7,7 +7,7 @@
 // `nowMs` — the server's `queueAgeMs`/`oldestQueueAgeMs` are excluded from the
 // stream fingerprint, go stale between frames, and must never be displayed.
 namespace Embassy {
-  export const GATEWAY_PROVIDERS: readonly GatewayProvider[] = ["claude", "codex", "deepseek", "grok"];
+  export const GATEWAY_PROVIDERS: readonly GatewayProvider[] = ["claude", "codex", "deepseek", "grok", "peer"];
 
   export function parseDirection(direction: MessageDirection): Readonly<{
     sourceProvider: GatewayProvider; targetProvider: GatewayProvider;

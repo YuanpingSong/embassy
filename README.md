@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-43853d)](package.json)
 
-Your [Claude Code](https://code.claude.com) sessions, [Codex](https://chatgpt.com/codex) desktop tasks, local DeepSeek Harness, and Grok Build agent do not share one routing surface. Embassy is a small local broker that gives all four providers named routes and explicit consent edges — no plugins, no API keys handled by Embassy, and no cloud relay.
+Your [Claude Code](https://code.claude.com) sessions, [Codex](https://chatgpt.com/codex) desktop tasks, local DeepSeek Harness, Grok Build agent, and shell harnesses do not share one routing surface. Embassy is a small local broker that gives all five providers named routes and explicit consent edges — no plugins, no API keys handled by Embassy, and no cloud relay.
 
 ```bash
 npm install -g agent-embassy
@@ -41,7 +41,7 @@ Embassy is built for one person, one macOS account, and agents you already trust
 
 ## Quickstart
 
-**Requirements:** macOS and Node.js 20+. Claude routes require peer protocol 1; Codex routes require Desktop configured to use its managed standalone App Server. DeepSeek is optional and launches from `DSH_HOME` (default `~/.dsh`) through the checkout's `demo:acp` script; Grok Build is optional and launches the release-pinned ACP package. The release-owned [support matrix](support/provider-support-matrix.json) records the exact artifacts and capabilities tested for all four providers; it is release evidence, never a runtime allowlist:
+**Requirements:** macOS and Node.js 20+. Claude routes require peer protocol 1; Codex routes require Desktop configured to use its managed standalone App Server. DeepSeek is optional and launches from `DSH_HOME` (default `~/.dsh`) through the checkout's `demo:acp` script; Grok Build is optional and launches the release-pinned ACP package. A shell peer needs only the local CLI and its one-time token. The release-owned [support matrix](support/provider-support-matrix.json) records the exact tested provider artifacts and capabilities; it is release evidence, never a runtime allowlist:
 
 ```bash
 ~/.codex/packages/standalone/current/codex app-server daemon start
@@ -87,6 +87,24 @@ embassy register-codex --alias codex-reviewer@this-mac
 You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `embassy unregister-codex --alias codex-reviewer@this-mac` from inside that same task.
 
 Registration records the exact inherited task identity and performs no App Server I/O. Every delivery opens a fresh attested local transport, initializes it, resumes that exact task with history excluded, and authorizes the body write once. App Server and Desktop restarts therefore do not require re-registration or re-anchoring; a current unavailable or unobservable task keeps the logical route and consent edge while the attempt reports an exact safe code. Embassy never retargets by alias or replays an ambiguously written body.
+
+### Optional: register a universal shell peer
+
+A local shell harness can join as a `peer-*` route without a plugin, stable shell, daemon, PID binding, token file, or Keychain entry:
+
+```bash
+embassy register-peer --alias peer-reviewer@this-mac
+```
+
+Registration prints the `peer_` token exactly once. Keep it in the agent's context and provide it on the first stdin line of every authenticated peer command; when a command also carries a message body, the remaining stdin bytes are the body. Never put the token in argv. For example, wait for inbound mail:
+
+```bash
+embassy await --alias peer-reviewer@this-mac --token-stdin <<'TOKEN'
+peer_<32-character-token>
+TOKEN
+```
+
+`await` performs bounded 30-second long polls until mail arrives or the caller stops it. Each registration may have one waiter and the broker permits 16 in total. Embassy writes the complete framed message to stdout, waits for stdout to flush, and only then acknowledges its private receipt. A missing receipt is `unconfirmed`; uncertainty after write authorization is `ambiguous`, and neither is replayed after restart. `register-peer --emit-env` is an optional convenience for harnesses that really do retain one stable shell; stdin is the universal path.
 
 ### 3. Select a Claude destination
 
@@ -185,7 +203,7 @@ The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html`
   └───────────────────────────────────────────────────────────┘
 ```
 
-Embassy publishes each registered Codex task into Claude Code's live-session registry as its own `codex-*` peer. Claude sessions discover those tasks through `ListAgents`; Codex uses its managed App Server. DeepSeek and Grok Build are boot-registered ACP routes whose owned subprocess and one route-local session start lazily on first dispatch.
+Embassy publishes each registered Codex task into Claude Code's live-session registry as its own `codex-*` peer. Claude sessions discover those tasks through `ListAgents`; Codex uses its managed App Server. DeepSeek and Grok Build are boot-registered ACP routes whose owned subprocess and one route-local session start lazily on first dispatch. Universal shell peers use `peer-*` aliases and a pull mailbox authenticated by an alias plus one-time-minted token.
 
 A pair is one explicit permission edge between two named routes from different providers, bounded at 128 edges by default. Every edge is created explicitly with generic `pair --from/--to`; `select-claude` remains the one-Codex-task shorthand for a Claude↔Codex edge. Nothing is implied. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out for supported native inbound senders.
 
@@ -234,6 +252,8 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
 | `untrack` | either provider | Close one active progress watch: `embassy untrack --conversation conv_<token>` |
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
+| `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
+| `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
 | `pair` / `unpair` | endpoint participant | Add or remove one cross-provider edge by naming both ends: `embassy pair --from advisor@this-mac --to grok-main@this-mac`; the inherited caller must belong to the edge |
 | `select-claude` / `unselect-claude` | operator or Codex task | One-task shorthand for `pair`/`unpair`, taking `--alias <name@host>` or `--session <uuid>`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
 | `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session: `--from <codex-alias> --to <claude-alias>`, body on stdin, optional `--expects-reply` and `--track [--idle-minutes <n>]` |

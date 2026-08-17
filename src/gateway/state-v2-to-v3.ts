@@ -34,7 +34,7 @@ const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const MAX_MARKER_BYTES = 128;
 const MAX_LOCK_BYTES = 4 * 1024;
-const PROVIDERS = new Set(["claude", "codex", "deepseek", "grok"]);
+const PROVIDERS: ReadonlySet<string> = new Set(["claude", "codex", "deepseek", "grok"]);
 const ROUTE_STATES = new Set([
   "stale", "idle", "busy", "awaiting_approval", "offline", "disabled",
 ]);
@@ -60,6 +60,7 @@ const INGRESS_PREFIX: Readonly<Record<GatewayProvider, string | undefined>> = {
   codex: "codex-",
   deepseek: "dsh-",
   grok: "grok-",
+  peer: "peer-",
 };
 
 export const gatewayStateV2ToV3FaultStages = [

@@ -47,6 +47,8 @@ import {
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
 const DELIVERY_TOKEN = "dlv_0123456789abcdefghijklmn";
+const PEER_TOKEN = `peer_${"a".repeat(32)}`;
+const PEER_RECEIPT = `prc_${"b".repeat(24)}`;
 const NOW = "2026-08-07T12:34:56.000Z";
 const DEADLINE = "2026-08-07T12:35:56.000Z";
 
@@ -364,6 +366,10 @@ function handlers(
       code: "ok",
       revision: 8,
     }),
+    registerPeer: () => ({ accepted: true, code: "ok" }),
+    unregisterPeer: () => ({ accepted: true, code: "ok" }),
+    awaitPeer: () => ({ state: "timeout" }),
+    peerReceipt: () => ({ accepted: true, code: "ok" }),
     ...overrides,
   };
 }
@@ -859,6 +865,10 @@ test("only exposes queue-mode lifecycle methods", () => {
     "refresh_dashboard",
     "peer_catalog",
     "peer_handoff",
+    "register_peer",
+    "unregister_peer",
+    "await_peer",
+    "peer_receipt",
   ]);
   assert.equal(isGatewayAlias("codex-main@this-mac"), true);
   assert.equal(isGatewayAlias("codex-main"), false);
@@ -873,6 +883,99 @@ test("only exposes queue-mode lifecycle methods", () => {
   assert.equal(isGatewayReplyAddress("/tmp/cc-socks/123.sock"), false);
   assert.equal(isGatewayReplyAddress("uds:relative.sock"), false);
   assert.equal(isGatewayReplyAddress("uds:/tmp/cc-socks/bad\0.sock"), false);
+});
+
+test("strictly serves peer registration, long-poll, and receipt controls", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const calls: unknown[] = [];
+  const frame = `${JSON.stringify({ ok: true, command: "await", result: {
+    fromAlias: "codex-main@this-mac", toAlias: "peer-shell@this-mac",
+    conversationId: CONVERSATION_ID, text: "bounded frame", expectsReply: true,
+  } })}\n`;
+  const server = await startGatewayControlServer({ stateDir, socketPath, handlers: handlers({
+    registerPeer: (params) => { calls.push(params); return params.token === undefined
+      ? { accepted: true, code: "ok", token: PEER_TOKEN }
+      : { accepted: true, code: "ok" }; },
+    unregisterPeer: (params) => { calls.push(params); return { accepted: true, code: "ok" }; },
+    awaitPeer: (params) => { calls.push(params); return { state: "message", frame, receipt: PEER_RECEIPT }; },
+    peerReceipt: (params) => { calls.push(params); return { accepted: true, code: "ok" }; },
+  }) });
+  const alias = "peer-shell@this-mac";
+  assert.deepEqual((await sendGatewayControlRequest({ socketPath, request: {
+    protocolVersion: 1, method: "register_peer", params: { alias },
+  } })).ok, true);
+  assert.deepEqual((await sendGatewayControlRequest({ socketPath, request: {
+    protocolVersion: 1, method: "register_peer", params: { alias, token: PEER_TOKEN },
+  } })).ok, true);
+  for (const [method, params] of [
+    ["unregister_peer", { alias, token: PEER_TOKEN }],
+    ["await_peer", { alias, token: PEER_TOKEN }],
+    ["peer_receipt", { alias, token: PEER_TOKEN, receipt: PEER_RECEIPT }],
+  ] as const) assert.equal((await sendGatewayControlRequest({ socketPath, request: {
+    protocolVersion: 1, method, params,
+  } as never })).ok, true);
+  assert.deepEqual(calls, [
+    { alias }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN },
+    { alias, token: PEER_TOKEN, receipt: PEER_RECEIPT },
+  ]);
+  for (const request of [
+    { method: "send_to_claude", params: { fromAlias: alias, peerToken: PEER_TOKEN,
+      toAlias: "claude-main@this-mac", text: "hello" } },
+    { method: "send_to_codex", params: { fromAlias: alias, peerToken: PEER_TOKEN,
+      toAlias: "codex-main@this-mac", text: "hello" } },
+    { method: "reply", params: { conversationId: CONVERSATION_ID, text: "hello",
+      caller: { kind: "peer", alias, token: PEER_TOKEN } } },
+  ] as const) assert.equal((await sendGatewayControlRequest({ socketPath, request: {
+    protocolVersion: 1, ...request,
+  } as never })).ok, true);
+  for (const [method, params] of [
+    ["register_peer", { alias: "codex-main@this-mac" }],
+    ["register_peer", { alias, ownerPid: 123 }],
+    ["unregister_peer", { alias, token: `${PEER_TOKEN}x` }],
+    ["await_peer", { alias, token: PEER_TOKEN, extra: true }],
+    ["peer_receipt", { alias, token: PEER_TOKEN, receipt: `${PEER_RECEIPT}x` }],
+    ["send_to_claude", { fromAlias: alias, toAlias: "claude-main@this-mac", text: "x" }],
+    ["send_to_claude", { fromAlias: alias, threadId: THREAD_ID, peerToken: PEER_TOKEN,
+      toAlias: "claude-main@this-mac", text: "x" }],
+    ["send_to_codex", { fromAlias: alias, peerToken: PEER_TOKEN,
+      replyAddress: "uds:/tmp/reply.sock", toAlias: "codex-main@this-mac", text: "x" }],
+  ] as const) assertWireError(await rawRequest(socketPath, wireRequest(method, params)), "INVALID_REQUEST");
+  await server.close();
+});
+
+test("client rejects disclosure-bearing peer control results", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const wrongFrame = `${JSON.stringify({ ok: true, command: "await", result: {
+    fromAlias: "codex-main@this-mac", toAlias: "peer-other@this-mac",
+    conversationId: CONVERSATION_ID, text: "bounded frame", expectsReply: false,
+  } })}\n`;
+  const results: unknown[] = [
+    { accepted: false, code: "rejected", token: PEER_TOKEN },
+    { accepted: true, code: "ok" },
+    { accepted: true, code: "ok", token: PEER_TOKEN },
+    { state: "timeout", receipt: PEER_RECEIPT },
+    { state: "message", frame: wrongFrame, receipt: PEER_RECEIPT },
+  ];
+  const server = await startGatewayControlServer({ stateDir, socketPath, handlers: handlers({
+    registerPeer: () => results.shift() as never,
+    awaitPeer: () => results.shift() as never,
+  }) });
+  for (const [request, code] of [[
+    { method: "register_peer", params: { alias: "peer-shell@this-mac" } },
+    "CONTROL_OUTCOME_AMBIGUOUS"], [
+    { method: "register_peer", params: { alias: "peer-shell@this-mac" } },
+    "CONTROL_OUTCOME_AMBIGUOUS"], [
+    { method: "register_peer", params: { alias: "peer-shell@this-mac", token: PEER_TOKEN } },
+    "CONTROL_OUTCOME_AMBIGUOUS"], [
+    { method: "await_peer", params: { alias: "peer-shell@this-mac", token: PEER_TOKEN } },
+    "CONTROL_INVALID_RESPONSE"], [
+    { method: "await_peer", params: { alias: "peer-shell@this-mac", token: PEER_TOKEN } },
+    "CONTROL_INVALID_RESPONSE"],
+  ] as const) await assert.rejects(sendGatewayControlRequest({ socketPath, request: {
+    protocolVersion: 1, ...request,
+  } as never }), (error: unknown) => error instanceof GatewayControlTransportError &&
+    error.code === code);
+  await server.close();
 });
 
 test("rejects untrusted fields, invalid ownership, steering, and unsafe reply routing", async () => {
@@ -1402,7 +1505,7 @@ test("list_snapshot accepts all derived directions and rejects legacy authority 
   const compatibilityField = { ...snapshot(), compatibilityChecks: [] };
   const oldPairs = { ...snapshot(), pairs: [] };
   const invalidDirection = structuredClone(canonical);
-  invalidDirection.messages[0]!.direction = "codex_to_peer" as never;
+  invalidDirection.messages[0]!.direction = "codex_to_unknown" as never;
   assert.equal(isGatewaySnapshot(canonical), true);
   assert.deepEqual(canonical.messages.map(({ direction }) => direction), messageDirections);
   assert.ok([oldSchema, compatibilityField, oldPairs, invalidDirection].every(

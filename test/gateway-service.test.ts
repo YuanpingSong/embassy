@@ -9,6 +9,7 @@ import type { GatewayConfig } from "../src/gateway/config.js";
 import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
 import type { PeerClient } from "../src/gateway/peer-client.js";
 import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
+import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
@@ -430,6 +431,197 @@ async function paired(
 
 const claude = route("claude", "advisor@this-mac", "claude-session-a", "reg-claude-a");
 const codex = route("codex", "codex-main@this-mac", THREAD_A, "reg-codex-a");
+
+test("peer registration persists only its hash and exact token owns idempotence and removal", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const peer = new FakeProvider({ provider: "peer", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, peer]);
+  try {
+    const registered = await subject.handlers.registerPeer({ alias: "peer-shell@this-mac" });
+    assert.equal(registered.accepted, true);
+    assert.ok("token" in registered);
+    const token = registered.token;
+    assert.match(token, /^peer_[A-Za-z0-9_-]{32}$/);
+    const expected = `peer:${createHash("sha256").update(
+      `${process.getuid!()}\0peer-shell@this-mac\0${token}`,
+    ).digest("hex")}`;
+    const stored = await subject.store.inspectPrivateRoute("peer-shell@this-mac");
+    assert.equal(stored?.binding.routeHandle, expected);
+    const state = await readFile(subject.store.stateFilePath, "utf8");
+    assert.equal(state.includes(expected), true);
+    assert.equal(state.includes(token), false);
+    await eventually(() => claudeProvider.advertised.includes("peer-shell@this-mac"));
+    assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac", token }), {
+      accepted: true, code: "ok",
+    });
+    assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac", token: `${token.slice(0, -1)}x` }), {
+      accepted: false, code: "route_mismatch",
+    });
+    assert.deepEqual(await subject.handlers.unregisterPeer({ alias: "peer-shell@this-mac", token: `${token.slice(0, -1)}y` }), {
+      accepted: false, code: "route_mismatch",
+    });
+    assert.notEqual(await subject.store.inspectPrivateRoute("peer-shell@this-mac"), undefined);
+    const unadvertiseEntered = deferred<void>(); const releaseUnadvertise = deferred<void>();
+    claudeProvider.unadvertiseNativeSourcePeer = async (alias) => {
+      unadvertiseEntered.resolve(); await releaseUnadvertise.promise; claudeProvider.unadvertised.push(alias);
+    };
+    let removalSettled = false;
+    const removal = Promise.resolve(subject.handlers.unregisterPeer({ alias: "peer-shell@this-mac", token }))
+      .finally(() => { removalSettled = true; });
+    await unadvertiseEntered.promise; await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(removalSettled, false);
+    assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac" }), {
+      accepted: false, code: "busy",
+    });
+    assert.equal(await subject.store.inspectPrivateRoute("peer-shell@this-mac"), undefined);
+    releaseUnadvertise.resolve();
+    assert.deepEqual(await removal, {
+      accepted: true, code: "ok",
+    });
+    assert.equal(await subject.store.inspectPrivateRoute("peer-shell@this-mac"), undefined);
+    assert.equal(peer.forgotten.length, 1);
+    await eventually(() => claudeProvider.unadvertised.includes("peer-shell@this-mac"));
+    const priorAds = claudeProvider.advertised.length;
+    assert.equal((await subject.handlers.registerPeer({ alias: "peer-shell@this-mac" })).accepted, true);
+    await eventually(() => claudeProvider.advertised.length > priorAds);
+  } finally { await subject.close(); }
+});
+
+test("peer principals send both directions and reply through ordinary conversations", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const peerProvider = new FakeProvider({ provider: "peer", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider, peerProvider]);
+  try {
+    const minted = await subject.handlers.registerPeer({ alias: "peer-shell@this-mac" });
+    assert.ok(minted.accepted && "token" in minted);
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    await subject.handlers.selectClaude({ alias: claude.alias });
+    await subject.handlers.pair({ aliases: ["peer-shell@this-mac", codex.alias] });
+    await subject.handlers.pair({ aliases: ["peer-shell@this-mac", claude.alias] });
+    const toCodex = await subject.handlers.sendToCodex({ fromAlias: "peer-shell@this-mac",
+      peerToken: minted.token, toAlias: codex.alias, text: "STEER: peer stays ordinary", expectsReply: true });
+    const toClaude = await subject.handlers.sendToClaude({ fromAlias: "peer-shell@this-mac",
+      peerToken: minted.token, toAlias: claude.alias, text: "peer to claude", expectsReply: true });
+    assert.equal(toCodex.accepted, true); assert.equal(toClaude.accepted, true);
+    await eventually(() => codexProvider.dispatches.length === 1 && claudeProvider.dispatches.length === 1);
+    assert.equal(codexProvider.dispatches[0]?.sourceProvider, "peer");
+    assert.equal(codexProvider.dispatches[0]?.steer, undefined);
+    assert.equal(claudeProvider.dispatches[0]?.sourceProvider, "peer");
+    assert.ok(toClaude.accepted);
+    const reply = await subject.handlers.reply({ conversationId: toClaude.conversationId,
+      text: "peer follow-up", caller: { kind: "peer", alias: "peer-shell@this-mac", token: minted.token } });
+    assert.equal(reply.accepted, true);
+    await eventually(() => claudeProvider.dispatches.length === 2);
+    assert.equal(claudeProvider.dispatches[1]?.text, "peer follow-up");
+  } finally { await subject.close(); }
+});
+
+test("a peer waiter kicks cleanly deferred mail and exact receipt settles it once", async () => {
+  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
+    now: () => Date.parse("2026-08-16T12:00:00.000Z") });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([mailbox, codexProvider]);
+  try {
+    const minted = await subject.handlers.registerPeer({ alias: "peer-shell@this-mac" });
+    assert.ok(minted.accepted && "token" in minted);
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    await subject.handlers.pair({ aliases: [codex.alias, "peer-shell@this-mac"],
+      threadAttestation: { alias: codex.alias, threadId: THREAD_A } });
+    const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: "peer-shell@this-mac", text: "mailbox payload", expectsReply: true });
+    assert.ok(sent.accepted);
+    const received = await subject.handlers.awaitPeer({ alias: "peer-shell@this-mac", token: minted.token });
+    assert.equal(received.state, "message");
+    assert.match(received.frame, /mailbox payload/);
+    assert.deepEqual(await subject.handlers.peerReceipt({ alias: "peer-shell@this-mac",
+      token: minted.token, receipt: received.receipt }), { accepted: true, code: "ok" });
+    assert.deepEqual(await subject.handlers.peerReceipt({ alias: "peer-shell@this-mac",
+      token: minted.token, receipt: received.receipt }), { accepted: true, code: "ok" });
+    await eventually(async () => {
+      const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+      return status.found && status.state === "delivered";
+    });
+  } finally { await subject.close(); }
+});
+
+test("native Claude STEER text reaches a peer mailbox only through the ordinary lane", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
+    now: () => Date.parse("2026-08-16T12:00:00.000Z") });
+  let observedSteer: true | undefined;
+  const dispatch = mailbox.dispatch.bind(mailbox);
+  mailbox.dispatch = async (input) => { observedSteer = input.steer; return await dispatch(input); };
+  const subject = await fixture([claudeProvider, mailbox], {
+    seed: async (store) => store.registerRoute(claude),
+  });
+  try {
+    const minted = await subject.handlers.registerPeer({ alias: "peer-native@this-mac" });
+    assert.ok(minted.accepted && "token" in minted);
+    await subject.handlers.pair({ aliases: [claude.alias, "peer-native@this-mac"] });
+    const waiting = subject.handlers.awaitPeer({ alias: "peer-native@this-mac", token: minted.token });
+    claudeProvider.callbacks?.onClaudeMessage?.({ endpoint: { provider: "claude",
+      hostId: "this-mac", routeHandle: claude.binding.routeHandle }, sourceAlias: claude.alias,
+      targetAlias: "peer-native@this-mac", text: "STEER: ordinary peer mailbox" });
+    const received = await waiting;
+    assert.equal(received.state, "message");
+    assert.equal(observedSteer, undefined);
+    assert.match(received.frame, /STEER: ordinary peer mailbox/);
+    assert.deepEqual(await subject.handlers.peerReceipt({ alias: "peer-native@this-mac",
+      token: minted.token, receipt: received.receipt }), { accepted: true, code: "ok" });
+  } finally { await subject.close(); }
+});
+
+test("queued peer mail resumes once after restart under the same hash-only principal", async () => {
+  const firstMailbox = new LocalPeerMailboxProvider({ hostId: "this-mac",
+    now: () => Date.parse("2026-08-16T12:00:00.000Z") });
+  const firstCodex = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([firstMailbox, firstCodex]);
+  let replacement: GatewayService | undefined;
+  try {
+    const minted = await subject.handlers.registerPeer({ alias: "peer-restart@this-mac" });
+    assert.ok(minted.accepted && "token" in minted);
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    await subject.handlers.pair({ aliases: [codex.alias, "peer-restart@this-mac"],
+      threadAttestation: { alias: codex.alias, threadId: THREAD_A } });
+    const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: "peer-restart@this-mac", text: "survive restart", expectsReply: true });
+    assert.ok(sent.accepted);
+    await eventually(() => subject.timers.rows.some((row) =>
+      !row.cancelled && row.at === subject.clock.now().getTime() + 500));
+    await subject.service.close();
+
+    const store = new GatewayStore(subject.config, { now: subject.clock.now,
+      randomId: subject.clock.randomId });
+    const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
+      now: () => subject.clock.now().getTime() });
+    const replacementClaude = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+    replacement = new GatewayService({ config: subject.config, store,
+      adapters: [mailbox, replacementClaude, new FakeProvider({ provider: "codex", hostId: "this-mac" })],
+      now: subject.clock.now, timers: new TestTimers(subject.clock),
+      publishDashboard: async () => path.join(subject.config.stateDir, "gateway-dashboard.html") });
+    await replacement.start();
+    await eventually(() => replacementClaude.advertised.includes("peer-restart@this-mac"));
+    const handlers = replacement.handlers();
+    assert.deepEqual(await handlers.registerPeer({ alias: "peer-restart@this-mac", token: minted.token }), {
+      accepted: true, code: "ok",
+    });
+    assert.deepEqual(await handlers.registerPeer({ alias: "peer-restart@this-mac",
+      token: `${minted.token.slice(0, -1)}z` }), { accepted: false, code: "route_mismatch" });
+    const received = await handlers.awaitPeer({ alias: "peer-restart@this-mac", token: minted.token });
+    assert.equal(received.state, "message");
+    assert.match(received.frame, /survive restart/);
+    assert.deepEqual(await handlers.peerReceipt({ alias: "peer-restart@this-mac",
+      token: minted.token, receipt: received.receipt }), { accepted: true, code: "ok" });
+    await eventually(async () => {
+      const status = await handlers.deliveryStatus({ token: sent.deliveryToken });
+      return status.found && status.state === "delivered";
+    });
+  } finally { await replacement?.close(); await subject.close(); }
+});
 
 test("start restores logical observations and helper advertisements without provider construction", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });

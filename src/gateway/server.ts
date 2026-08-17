@@ -17,6 +17,7 @@ import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federatio
 import { resolveDeepSeekAcpLaunch, type DeepSeekAcpLaunch, type DeepSeekDetectOptions } from "./deepseek-detect.js";
 import { acquireGatewayInstanceLease, type GatewayInstanceLease } from "./instance-lease.js";
 import type { DashboardLocale } from "./locale.js";
+import { LocalPeerMailboxProvider } from "./peer-mailbox.js";
 import { createLocalClaudeGatewayProvider, createLocalCodexGatewayProvider,
   type LocalClaudeGatewayProviderOptions, type LocalCodexGatewayProviderOptions } from "./providers.js";
 import { GatewayService, type GatewayProviderAdapter, type GatewayServiceOptions } from "./service.js";
@@ -41,6 +42,7 @@ export type GatewayServerDependencies = {
   resolveCodexInstallation?: (home: string) => Promise<ManagedLocalCodexInstallation>; createCodexProvider?: (options: LocalCodexGatewayProviderOptions) => GatewayProviderAdapter;
   createCodexDoctorInspector?: () => CodexDoctorInspector;
   resolveDeepSeekAcpLaunch?: (options: DeepSeekDetectOptions) => Promise<DeepSeekAcpLaunch>; createAcpProvider?: (options: AcpGatewayProviderOptions) => GatewayProviderAdapter;
+  createPeerProvider?: (hostId: string) => GatewayProviderAdapter;
   createService?: (options: GatewayServiceOptions) => ServerService; addSignalListener?: (signal: Signal, listener: () => void) => void;
   removeSignalListener?: (signal: Signal, listener: () => void) => void;
 };
@@ -110,6 +112,7 @@ export async function runGatewayServer(
     createCodexProvider: dependencies.createCodexProvider ?? createLocalCodexGatewayProvider,
     resolveDeepSeek: dependencies.resolveDeepSeekAcpLaunch ?? resolveDeepSeekAcpLaunch,
     createAcpProvider: dependencies.createAcpProvider ?? createAcpGatewayProvider,
+    createPeerProvider: dependencies.createPeerProvider ?? ((hostId) => new LocalPeerMailboxProvider({ hostId })),
     createService: dependencies.createService ?? ((input: GatewayServiceOptions) => new GatewayService(input)),
     add: dependencies.addSignalListener ?? ((signal: Signal, listener: () => void) => process.on(signal, listener)),
     remove: dependencies.removeSignalListener ?? ((signal: Signal, listener: () => void) => process.off(signal, listener)),
@@ -191,6 +194,7 @@ export async function runGatewayServer(
       operation: d.createCodexOperation({ local: { environment: localEnvironment } }),
       createObservationFactory: () => d.createCodexObservationFactory(factoryOptions),
     }));
+    providers.push(d.createPeerProvider(localHost));
     for (const definition of config.acpProviders ?? []) {
       let resolved: DeepSeekAcpLaunch = definition.launch === undefined ? {} : { launch: definition.launch };
       if (definition.launch === undefined && definition.provider === "deepseek") {

@@ -34,6 +34,8 @@ const CLAUDE_SOCKET_PATH = "/tmp/cc-socks/45201.sock";
 const REPLY_ADDRESS = `uds:${CLAUDE_SOCKET_PATH}`;
 const CONVERSATION_ID = "conv_0123456789abcdef";
 const DELIVERY_TOKEN = "dlv_0123456789abcdefghijklmn";
+const PEER_TOKEN = `peer_${"a".repeat(32)}`;
+const PEER_RECEIPT = `prc_${"b".repeat(24)}`;
 const NOW = "2026-08-07T12:34:56.000Z";
 const DEADLINE = "2099-08-07T12:35:56.000Z";
 const SECRET_BODY = "BODY_SENTINEL_NEVER_RENDER";
@@ -118,6 +120,9 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.match(help, /convert-state-v2-to-v3/);
     assert.match(help, /wait-delivery/);
     assert.match(help, /untrack/);
+    assert.match(help, /register-peer/);
+    assert.match(help, /unregister-peer/);
+    assert.match(help, /--token-stdin/);
     assert.match(help, /dashboard --live \[--port <n>\]/);
     assert.match(help, /pair \[--from <[^>]+> --to <[^>]+>\]/);
     assert.match(help, /--port <n>.*1024.*65535.*41961/);
@@ -356,6 +361,170 @@ function input(body = ""): Readable {
   return Readable.from(body.length === 0 ? [] : [Buffer.from(body, "utf8")]);
 }
 
+test("peer registration emits its credential once and authenticated lifecycle never echoes it", async () => {
+  const config = { stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+    allowedHosts: ["this-mac"], steeringEnabled: true, inboundMode: "paired" as const,
+    stallNoticeMs: 30_000, limits: {} as never };
+  const requests: unknown[] = [];
+  const dependencies = (stdout: Capture, env: NodeJS.ProcessEnv = {}, stdin = input()): GatewayCliDependencies => ({
+    env, stdin, stdout, stderr: capture(), loadConfig: () => config,
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: { method: string; params: Record<string, unknown> } }) => {
+      requests.push(request);
+      return request.method === "register_peer" && !("token" in request.params)
+        ? { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok", token: PEER_TOKEN } }
+        : { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok" } };
+    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+
+  const minted = capture();
+  assert.equal(await runGatewayCli(["register-peer", "--alias", "peer-cursor@this-mac"], dependencies(minted)), 0);
+  assert.equal(minted.chunks.join("").split(PEER_TOKEN).length - 1, 1);
+  assert.equal(JSON.parse(minted.chunks.join("")).result.token, PEER_TOKEN);
+
+  const exported = capture();
+  assert.equal(await runGatewayCli(["register-peer", "--alias", "peer-shell@this-mac", "--emit-env"], dependencies(exported)), 0);
+  assert.equal(exported.chunks.join(""), `export EMBASSY_PEER_TOKEN='${PEER_TOKEN}'\n`);
+
+  const authenticated = capture();
+  assert.equal(await runGatewayCli(["register-peer", "--alias", "peer-cursor@this-mac"],
+    dependencies(authenticated, { EMBASSY_PEER_TOKEN: PEER_TOKEN })), 0);
+  assert.equal(authenticated.chunks.join("").includes(PEER_TOKEN), false);
+  assert.equal(await runGatewayCli(["unregister-peer", "--alias", "peer-cursor@this-mac", "--token-stdin"],
+    dependencies(capture(), {}, input(`${PEER_TOKEN}\n`))), 0);
+  const invalid = capture();
+  assert.equal(await runGatewayCli(["register-peer", "--alias", "peer-cursor@this-mac", "--emit-env"],
+    dependencies(invalid, { EMBASSY_PEER_TOKEN: PEER_TOKEN })), gatewayCliExitCodes.invalidInput);
+  assert.equal(JSON.parse(invalid.chunks.join("")).error.code, "INVALID_ARGUMENTS");
+  assert.deepEqual(requests, [
+    { protocolVersion: 1, method: "register_peer", params: { alias: "peer-cursor@this-mac" } },
+    { protocolVersion: 1, method: "register_peer", params: { alias: "peer-shell@this-mac" } },
+    { protocolVersion: 1, method: "register_peer", params: { alias: "peer-cursor@this-mac", token: PEER_TOKEN } },
+    { protocolVersion: 1, method: "unregister_peer", params: { alias: "peer-cursor@this-mac", token: PEER_TOKEN } },
+  ]);
+});
+
+test("peer stdin framing preserves the body and the three caller principals stay exclusive", async () => {
+  const requests: unknown[] = [], stdout = capture(); let control = 0;
+  const base: GatewayCliDependencies = {
+    env: {}, stdout, stderr: capture(), loadConfig: () => ({ stateDir: "/private/state",
+      controlSocketPath: "/private/state/control.sock", allowedHosts: ["this-mac"], steeringEnabled: true,
+      inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: unknown }) => { control += 1; requests.push(request);
+      return { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok",
+        conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  };
+  const fragmented = Readable.from([Buffer.from(PEER_TOKEN.slice(0, 9)), Buffer.from(`${PEER_TOKEN.slice(9)}\n`), Buffer.from("\nexact body")]);
+  assert.equal(await runGatewayCli(["send-to-claude", "--from", "peer-cursor@this-mac", "--to", "advisor@this-mac", "--token-stdin"],
+    { ...base, stdin: fragmented }), 0);
+  assert.deepEqual(requests[0], { protocolVersion: 1, method: "send_to_claude", params: {
+    fromAlias: "peer-cursor@this-mac", toAlias: "advisor@this-mac", text: "\nexact body",
+    expectsReply: false, peerToken: PEER_TOKEN } });
+
+  assert.equal(await runGatewayCli(["reply", "--conversation", CONVERSATION_ID, "--alias", "peer-cursor@this-mac"],
+    { ...base, env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, stdin: input("reply body") }), 0);
+  assert.deepEqual(requests[1], { protocolVersion: 1, method: "reply", params: {
+    conversationId: CONVERSATION_ID, text: "reply body",
+    caller: { kind: "peer", alias: "peer-cursor@this-mac", token: PEER_TOKEN } } });
+
+  for (const current of [
+    { env: { EMBASSY_PEER_TOKEN: PEER_TOKEN, CODEX_THREAD_ID: THREAD_ID }, body: "body" },
+    { env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, body: `${PEER_TOKEN}\nbody` },
+    { env: {}, body: `${PEER_TOKEN}\r\nbody` },
+  ]) {
+    const before = control, out = capture();
+    const code = await runGatewayCli(["send-to-codex", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
+      { ...base, ...current, stdin: input(current.body), stdout: out });
+    assert.equal(code, gatewayCliExitCodes.invalidInput);
+    assert.equal(control, before);
+  }
+});
+
+test("peer token framing is exact, bounded, and rejects before control work", async () => {
+  const highByte = Buffer.from(`${PEER_TOKEN}\n`);
+  highByte[5] = 0xe1;
+  const cases: Array<{ argv: string[]; chunks: Buffer[]; code: string }> = [
+    {
+      argv: ["unregister-peer", "--alias", "peer-cursor@this-mac", "--token-stdin"],
+      chunks: [Buffer.from(PEER_TOKEN)], code: "INVALID_MESSAGE_INPUT",
+    },
+    {
+      argv: ["unregister-peer", "--alias", "peer-cursor@this-mac", "--token-stdin"],
+      chunks: [Buffer.from(`${PEER_TOKEN}\ntrailing`)], code: "INVALID_MESSAGE_INPUT",
+    },
+    {
+      argv: ["unregister-peer", "--alias", "peer-cursor@this-mac", "--token-stdin"],
+      chunks: [highByte], code: "INVALID_MESSAGE_INPUT",
+    },
+    {
+      argv: ["send-to-codex", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
+      chunks: [Buffer.from(`${PEER_TOKEN}\n`), Buffer.alloc(16 * 1024 + 1, 0x61)], code: "MESSAGE_TOO_LARGE",
+    },
+    {
+      argv: ["send-to-codex", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
+      chunks: [Buffer.from(`${PEER_TOKEN}\n`), Buffer.from([0xc3, 0x28])], code: "INVALID_MESSAGE_INPUT",
+    },
+  ];
+  for (const current of cases) {
+    let configured = false, requested = false;
+    const stdout = capture();
+    const code = await runGatewayCli(current.argv, {
+      env: {}, stdin: Readable.from(current.chunks), stdout, stderr: capture(),
+      loadConfig: () => { configured = true; throw new Error("must not load"); },
+      sendRequest: async () => { requested = true; throw new Error("must not send"); },
+    });
+    assert.equal(code, gatewayCliExitCodes.invalidInput);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, current.code);
+    assert.equal(configured, false);
+    assert.equal(requested, false);
+  }
+});
+
+test("await long-polls silently and acknowledges only after the exact frame flushes", async () => {
+  const frame = "{\"from\":\"advisor@this-mac\",\"text\":\"hello\"}\n", methods: string[] = [];
+  let release: ((error?: Error | null) => void) | undefined, polls = 0;
+  const stdout = { chunks: [] as string[], write(chunk: string, callback?: (error?: Error | null) => void) {
+    this.chunks.push(chunk); release = callback; return true;
+  } };
+  const running = runGatewayCli(["await", "--alias", "peer-cursor@this-mac", "--token-stdin"], {
+    env: {}, stdin: input(`${PEER_TOKEN}\n`), stdout, stderr: capture(),
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["this-mac"], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: { method: string } }) => {
+      methods.push(request.method);
+      if (request.method === "await_peer" && polls++ === 0) return { protocolVersion: 1, ok: true, result: { state: "timeout" } };
+      if (request.method === "await_peer") return { protocolVersion: 1, ok: true, result: { state: "message", frame, receipt: PEER_RECEIPT } };
+      assert.deepEqual(request, { protocolVersion: 1, method: "peer_receipt", params: {
+        alias: "peer-cursor@this-mac", token: PEER_TOKEN, receipt: PEER_RECEIPT } });
+      return { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok" } };
+    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+  while (release === undefined) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(methods, ["await_peer", "await_peer"]);
+  assert.equal(stdout.chunks.join(""), frame);
+  release();
+  assert.equal(await running, gatewayCliExitCodes.ok);
+  assert.deepEqual(methods, ["await_peer", "await_peer", "peer_receipt"]);
+});
+
+test("await sends no receipt or second stdout frame when stdout fails", async () => {
+  const methods: string[] = [], stderr = capture();
+  const code = await runGatewayCli(["await", "--alias", "peer-cursor@this-mac"], {
+    env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, stdin: input(), stderr,
+    stdout: { write() { throw new Error("synthetic stdout failure"); } },
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["this-mac"], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: { method: string } }) => { methods.push(request.method);
+      return { protocolVersion: 1, ok: true, result: { state: "message", frame: "one frame\n", receipt: PEER_RECEIPT } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.deepEqual(methods, ["await_peer"]);
+  assert.equal(stderr.chunks.join(""), "[embassy] command failed.\n");
+});
+
 async function privateState(): Promise<{
   root: string;
   stateDir: string;
@@ -489,6 +658,10 @@ test("all client commands use one private control socket and expose only normali
       code: "ok",
       revision: 2,
     }),
+    registerPeer: () => ({ accepted: true, code: "ok", token: PEER_TOKEN }),
+    unregisterPeer: () => ({ accepted: true, code: "ok" }),
+    awaitPeer: () => ({ state: "timeout" }),
+    peerReceipt: () => ({ accepted: true, code: "ok" }),
   };
   const server = await startGatewayControlServer({
     stateDir: state.stateDir,
@@ -2198,6 +2371,10 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         code: "ok",
         revision: 2,
       }),
+      registerPeer: () => ({ accepted: true, code: "ok", token: PEER_TOKEN }),
+      unregisterPeer: () => ({ accepted: true, code: "ok" }),
+      awaitPeer: () => ({ state: "timeout" }),
+      peerReceipt: () => ({ accepted: true, code: "ok" }),
     },
   });
   t.after(async () => await server.close());

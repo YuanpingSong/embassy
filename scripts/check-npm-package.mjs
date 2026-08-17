@@ -77,6 +77,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "locale",
   "progress-watch-machine",
   "peer-client",
+  "peer-mailbox",
   "peer-protocol",
   "peer-stdio",
   "provenance-envelope",

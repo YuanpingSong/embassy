@@ -265,6 +265,11 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
         codexProviderOptions = options as unknown as Record<string, unknown>;
         return provider(() => events.push("close-codex"));
       },
+      createPeerProvider: (hostId) => {
+        assert.equal(hostId, "this-mac");
+        events.push("create-peer");
+        return provider(() => events.push("close-peer"));
+      },
       resolveCodexInstallation: async () => { throw doctorResolutionError; },
       createCodexDoctorInspector: () => ({ inspect: async (request) => {
         doctorInspections += 1;
@@ -323,7 +328,7 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
-    4,
+    5,
   );
   assert.deepEqual(
     acpProviderOptions.map(({ provider, alias, launch, unavailableCode }) => ({
@@ -368,6 +373,7 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
     "create-claude",
     "create-codex-operation",
     "create-codex",
+    "create-peer",
     "resolve-deepseek",
     "create-deepseek",
     "create-grok",

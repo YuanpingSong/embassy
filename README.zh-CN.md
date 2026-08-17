@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-43853d)](package.json)
 
-你的 [Claude Code](https://code.claude.com) 会话、[Codex](https://chatgpt.com/codex) 桌面任务、本地 DeepSeek Harness 与 Grok Build 代理没有共同路由面。Embassy 是一个小型本地代理，为四种提供方提供具名路由与显式同意边——无需插件，Embassy 不处理 API 密钥，也无需云端中继。
+你的 [Claude Code](https://code.claude.com) 会话、[Codex](https://chatgpt.com/codex) 桌面任务、本地 DeepSeek Harness、Grok Build 代理与 shell harness 没有共同路由面。Embassy 是一个小型本地代理，为五种提供方提供具名路由与显式同意边——无需插件，Embassy 不处理 API 密钥，也无需云端中继。
 
 ```bash
 npm install -g agent-embassy
@@ -37,7 +37,7 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 ## 快速开始
 
-**前置要求：** macOS 与 Node.js 20+。Claude 路由要求对等协议 1；Codex 路由要求 Desktop 使用托管独立 App Server。DeepSeek 是可选提供方，通过 `DSH_HOME`（默认 `~/.dsh`）指向的本地 checkout 中 `demo:acp` 脚本启动；Grok Build 也是可选提供方，通过发布版固定的 ACP 包启动。发布版自有的[支持矩阵](support/provider-support-matrix.json)记录四种提供方已测试的精确构件与能力；它只是发布证据，绝不是运行时允许列表：
+**前置要求：** macOS 与 Node.js 20+。Claude 路由要求对等协议 1；Codex 路由要求 Desktop 使用托管独立 App Server。DeepSeek 是可选提供方，通过 `DSH_HOME`（默认 `~/.dsh`）指向的本地 checkout 中 `demo:acp` 脚本启动；Grok Build 也是可选提供方，通过发布版固定的 ACP 包启动。Shell 对等方只需要本地 CLI 与其仅铸造一次的令牌。发布版自有的[支持矩阵](support/provider-support-matrix.json)记录精确已测的提供方构件与能力；它只是发布证据，绝不是运行时允许列表：
 
 ```bash
 ~/.codex/packages/standalone/current/codex app-server daemon start
@@ -80,6 +80,24 @@ embassy register-codex --alias codex-reviewer@this-mac
 你应看到 `"accepted":true`。`codex-` 前缀是 Claude 发现所必需的。之后若要注销该任务，请在同一个任务内运行 `embassy unregister-codex --alias codex-reviewer@this-mac`。
 
 注册会记录精确的继承任务身份，并且不执行 App Server I/O。每次投递都会打开并验证新的本地传输，初始化后在排除历史的前提下恢复精确任务，并仅授权一次正文写入。因此 App Server、Desktop 与 `embassy serve` 重启都不需要重新注册或重新锚定；当前任务不可用或无法观测时，尝试会返回精确安全代码，而逻辑路由与同意边保持不变。Embassy 绝不会按别名改投其他任务，也不会重放写入结果不明确的正文。
+
+### 可选：注册通用 shell 对等方
+
+本地 shell harness 可以作为 `peer-*` 路由加入，无需插件、稳定 shell、守护进程、PID 绑定、令牌文件或 Keychain 条目：
+
+```bash
+embassy register-peer --alias peer-reviewer@this-mac
+```
+
+注册只打印一次 `peer_` 令牌。将它保留在代理上下文中，并在每个需要认证的 peer 命令的标准输入第一行提供；若命令还携带消息正文，则其余标准输入字节就是正文。绝不要把令牌放进 argv。例如，等待入站邮件：
+
+```bash
+embassy await --alias peer-reviewer@this-mac --token-stdin <<'TOKEN'
+peer_<32-character-token>
+TOKEN
+```
+
+`await` 会进行有界的 30 秒长轮询，直到收到邮件或调用方停止。每条注册路由只能有一个等待者，broker 全局最多允许 16 个。Embassy 将完整带框消息写入 stdout，等待 stdout 刷新完成，之后才确认其私有回执。缺失回执会结算为 `unconfirmed`；写入授权后的不确定性会结算为 `ambiguous`，两者在重启后都不会重放。`register-peer --emit-env` 只是为确实保留稳定 shell 的 harness 提供的可选便利；标准输入是通用路径。
 
 ### 3. 选择 Claude 目的地
 
@@ -158,7 +176,7 @@ Embassy 会在实际写入提供方之前，为双向路由消息添加一个由
   └───────────────────────────────────────────────────────────┘
 ```
 
-Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份发布到 Claude Code 的实时会话注册表中。Claude 会话通过 `ListAgents` 发现这些任务；Codex 使用托管 App Server。DeepSeek 与 Grok Build 是启动时登记的 ACP 路由，其自有子进程与单个路由本地会话会在首次投递时惰性启动。
+Embassy 将每个已注册的 Codex 任务以各自的 `codex-*` 对等方身份发布到 Claude Code 的实时会话注册表中。Claude 会话通过 `ListAgents` 发现这些任务；Codex 使用托管 App Server。DeepSeek 与 Grok Build 是启动时登记的 ACP 路由，其自有子进程与单个路由本地会话会在首次投递时惰性启动。通用 shell 对等方使用 `peer-*` 别名与一个由别名加仅铸造一次的令牌认证的拉取邮箱。
 
 配对是来自不同提供方的两条具名路由之间的单一显式权限边，默认上限 128 条。每条边都通过通用的 `pair --from/--to` 显式创建；`select-claude` 保留为单 Codex 任务建立 Claude↔Codex 边的简写。一切都不会被隐式推断。没有边时，发送方以 `SENDER_NOT_PAIRED` 终局结算。`embassy serve --inbound open` 是针对受支持原生入站发送方的显式退出选项。
 
@@ -205,6 +223,8 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
 | `untrack` | 任一提供方 | 关闭一个活跃的进度监视：`embassy untrack --conversation conv_<token>` |
 | `register-codex` / `unregister-codex` | Codex 任务 | 通告或注销该任务；两者都需要 `--alias <codex-alias>`，而 `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` 会将注册转交给另一个任务 |
+| `register-peer` / `unregister-peer` | shell harness | 注册或注销一条 `peer-*` 路由；注册只输出一次原始令牌，已认证调用使用 `--token-stdin`（也可选用稳定 shell 环境形式） |
+| `await` | 已注册 shell 对等方 | 以有界 30 秒迭代长轮询 peer 邮箱；每条路由一个等待者、全局 16 个，且只在 stdout 刷新后确认回执 |
 | `pair` / `unpair` | 端点参与方 | 显式指定两端来添加或移除一条跨提供方边：`embassy pair --from advisor@this-mac --to grok-main@this-mac`；继承调用方必须属于该边 |
 | `select-claude` / `unselect-claude` | 操作员或 Codex 任务 | `pair`/`unpair` 的单任务简写，接受 `--alias <name@host>` 或 `--session <uuid>`：仅在 Codex 端无歧义（继承标识或唯一已注册任务）时解析，否则以关闭状态失败 |
 | `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息：`--from <codex-alias> --to <claude-alias>`，正文从标准输入读取，可选 `--expects-reply` 与 `--track [--idle-minutes <n>]` |
