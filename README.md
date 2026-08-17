@@ -16,6 +16,20 @@ Your [Claude Code](https://code.claude.com) sessions, [Codex](https://chatgpt.co
 
 ```bash
 npm install -g agent-embassy
+```
+
+Prerequisites, stated honestly: v1.7.x requires **Claude Code installed via
+the official installer** (`curl -fsSL https://claude.ai/install.sh | bash` —
+Embassy attests the in-home launcher layout; Homebrew installs live outside
+your home directory and fail `CLAUDE_EXECUTABLE_OUTSIDE_HOME` by design) and
+**a managed Codex App Server standalone install** (created by the ChatGPT
+desktop app or `codex app-server daemon start`). Without either, `embassy
+serve` currently refuses to boot — v1.8 relaxes both to per-provider
+degradation. pnpm users: pin the version (`pnpm install -g
+agent-embassy@latest` can resolve stale metadata; prefer an explicit
+version) and ensure `PNPM_HOME/bin` is on PATH in non-interactive shells.
+
+```bash
 embassy serve
 ```
 
