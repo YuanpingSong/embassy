@@ -69,3 +69,9 @@ route/peer drift fence, post-perform ambiguity frozen in focused tests.
 B (Claude-exempt preauthorization) rejected: provider-dependent armed
 semantics would gut the design'''s uniform authorization promise on the
 highest-traffic direction. Delta +80–150 src / +100–180 tests within caps.
+ADDENDUM APPROVED: ruling A extends through the production native-helper
+seam — two-stage bounded helper protocol (prepare_dispatch: one immutable
+frame, single TTL-bounded prepared item, opaque ID + exact evidence;
+perform_dispatch: consume exactly once; denial/expiry/close cancels;
+foreign/duplicate IDs fail closed). Peer-only compliance rejected as
+test-only theatre. Revised delta +180–320 src / +220–380 tests, in-cap.
