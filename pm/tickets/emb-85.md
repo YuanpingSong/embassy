@@ -111,3 +111,32 @@ its pinned test not bumped), no product defect, checklist amended. Deferred nits
 backup filename is single-use (safe-direction block, ergonomics ruling
 later); ENOENT guard coupling; converter lock lacks stale-pid reaping
 (pre-existing).
+
+## Live drill (v1.9.4, 2026-08-17)
+
+Product-path recovery executed on the real stranded machine: `pnpm
+install -g agent-embassy@1.9.4`, rerun `embassy convert-state-v2-to-v3` →
+`converted: true, backupFile: gateway-state.v3.backup.json` — first real
+execution of the in-place recovery, no hand-edits, classifier boundary
+fully respected. m5dev broker booted clean on the recovered state.
+
+Federation then proven live end-to-end through the consent gate:
+initialize + catalog round-trip returned m5dev's full connector
+projection (the emb-84 fix in production — the old failure was a bounded
+refusal at handshake in the one drill where the broker was stale);
+mirrors dsh-main@m5dev, grok-main@m5dev, and a freshly registered
+peer-drill@m5dev appeared on this-mac within 10s of registration.
+
+Handoff attempt then hit the DESIGNED boundary, three correct refusals in
+a row: send without edge → rejected (consent enforced);
+pair on m5dev → not_found (owner broker cannot see embassy-pm@this-mac
+without reverse federation); pair on this-mac → conflict, ownerHost:
+m5dev (non-owner broker refuses to mint an edge it does not own). Since
+"m5dev" < "this-mac", every mixed edge is m5dev-owned. First handoff is
+therefore founder-gated on Remote Login (System Settings → Sharing) on
+this-mac; once on, sequence = m5dev dials back (nodes.json + ssh config
+already in place) → my routes mirror on m5dev → `embassy pair --from
+embassy-pm@this-mac --to peer-drill@m5dev` ON m5dev → resend → `embassy
+await` receipt. Operational note for the record: broker restarts must
+wait for lock release (pkill; poll until GATEWAY_INSTANCE_IN_USE clears;
+a 2s sleep raced and the dying broker answered health).
