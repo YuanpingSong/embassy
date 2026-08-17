@@ -3,7 +3,7 @@ id: emb-89
 title: v2.0 R3 — host identity cut: mandatory nodes.json, delete EMBASSY_HOSTS and every this-mac default
 kind: normal
 size: 3
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-17
 ---
@@ -107,3 +107,14 @@ ceiling-truncation inference is withdrawn.
 Adversarial notes recorded: de-federation edge (pre-existing, not a
 regression), error-ordering nit (cosmetic, declined). Gauntlet-file
 entries: bare-HOME boot opacity; de-federation reset severity.
+
+## Landing (v2 freeze, 2026-08-17)
+
+LANDED on public main 788a6f3. v2 bundle verified: SHA 5df5d0ec; src 224
+changed net +2 (≤235); tests/docs 245 (≤260); 555/555 in gate AND landing
+trees. Bundle delivered all five ruled items: ownership guard proven both
+ways, CLAUDE_ROUTE_MISMATCH negative test at the production helper, state
+directory path named in the hint (EMBASSY_STATE_DIR/XDG_STATE_HOME aware),
+stale mocks deleted, de-federation edge documented in both locales.
+Concept count stayed exactly one. Two slices down, two to cut: emb-90
+(control cleanup), emb-91 (send verb), then v2.0.0 assembles.
