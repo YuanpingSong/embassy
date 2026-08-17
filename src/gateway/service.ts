@@ -2589,15 +2589,19 @@ export class GatewayService {
   private async refreshPeers(): Promise<void> {
     const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
     await Promise.all((this.config.peerNodes ?? []).map(async (peerHost) => {
+      let failureCode: "PEER_DIAL_FAILED" | "PEER_TUNNEL_UNAVAILABLE" = "PEER_TUNNEL_UNAVAILABLE";
       try {
         let client = this.peerClients.get(peerHost);
         if (client === undefined) {
+          failureCode = "PEER_DIAL_FAILED";
           client = await this.spawnPeer({ node: peerHost, localHost });
           if (!this.running || this.closing) { client.close(); return; }
           this.peerClients.set(peerHost, client);
         }
+        failureCode = "PEER_TUNNEL_UNAVAILABLE";
         const catalog = await client.catalog();
         if (!this.running || this.closing) return;
+        this.recordPeerFailure(peerHost);
         const prior = this.peerCatalogs.get(peerHost);
         let routes = await this.store.inspectPrivateRoutes().then((rows) => rows.filter((route) =>
           route.registrationMode === "federated_peer" && route.binding.hostId === peerHost));
@@ -2634,6 +2638,7 @@ export class GatewayService {
       } catch {
         this.peerClients.get(peerHost)?.close(); this.peerClients.delete(peerHost);
         if (!this.running || this.closing) return;
+        this.recordPeerFailure(peerHost, failureCode);
         const observedAt = this.now().toISOString();
         for (const route of await this.store.inspectPrivateRoutes()) if (route.registrationMode === "federated_peer" &&
           route.binding.hostId === peerHost) this.peerRouteViews.set(route.alias, { route: route.binding,
@@ -2721,5 +2726,14 @@ export class GatewayService {
       }),
     });
     while (this.runtimeAlerts.length > gatewayPublicSnapshotLimits.alerts) this.runtimeAlerts.shift();
+  }
+
+  private recordPeerFailure(host: string, code?: "PEER_DIAL_FAILED" | "PEER_TUNNEL_UNAVAILABLE"): void {
+    for (let index = this.runtimeAlerts.length - 1; index >= 0; index -= 1) {
+      const alert = this.runtimeAlerts[index];
+      if (alert?.host === host && (alert.code === "PEER_DIAL_FAILED" || alert.code === "PEER_TUNNEL_UNAVAILABLE"))
+        this.runtimeAlerts.splice(index, 1);
+    }
+    if (code !== undefined) this.runtimeAlerts.push({ code, severity: "warning", timestamp: this.now().toISOString(), host });
   }
 }

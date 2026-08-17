@@ -74,10 +74,19 @@ test("peer client owns the exact fixed SSH launch and correlates catalog and han
   assert.deepEqual(await prepared.perform(), { accepted: true }); assert.throws(() => prepared.cancel(), /already consumed/); client.close();
 });
 
+test("peer client exposes only a bounded spawn failure class", async () => {
+  await assert.rejects(spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: () => {
+    throw new Error("secret process detail");
+  } }), (error) => error instanceof PeerConnectionLostError && error.failureClass === "spawn" &&
+    !error.message.includes("secret process detail"));
+});
+
 test("peer client rejects host drift, unknown inbound requests, uncorrelated replies, and pipe death", async () => {
   const mismatch = new FakePeer((message, peer) => peer.result(message, {
     protocolVersion: 1, host: "wrong", capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } }));
-  await assert.rejects(spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(mismatch) }), /host mismatch/); assert.equal(mismatch.child.killed, true);
+  await assert.rejects(spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(mismatch) }),
+    (error) => error instanceof PeerConnectionLostError && error.failureClass === "initialize" && /host mismatch/.test(error.message));
+  assert.equal(mismatch.child.killed, true);
 
   const peer = initializedPeer((message, remote) => { if (message.method === "catalog/get")
     remote.send({ jsonrpc: "2.0", id: 91, method: "invented", params: {} });
