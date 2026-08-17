@@ -3,7 +3,7 @@ id: emb-77
 title: v1.8 stage 4 — activate the stateless transport, state v3, delete the lifecycle
 kind: normal
 size: 8
-status: dispatched
+status: landed
 release: v1.8
 updated: 2026-08-16
 ---
@@ -94,3 +94,21 @@ correction.
 FINAL: the crossing resolved as A-implemented (seven literal codes in the
 closed table, 537/537); the B-as-built amendment is superseded and its
 visibility gate-check is moot.
+
+## LANDED (2026-08-17) — the summit
+
+SLICE READY at fbda1c2 on base d5d983a: 78 paths, +15,958/−48,762 =
+NET −32,804. Pinned accepted core 39,883 → 26,421 (reduction 13,462;
+floor margin 3,462; ceiling margin 2,579). Caps honored: source +8,733/
+10,000; tests +6,793/7,000. All founder approvals in (kernel replacement,
+confirmed removal, three guidance files). PM gate: isolated worktree at
+fbda1c2, check 537 pass / 0 fail + soak 1/0 with every accepted delivery
+terminal — after one PM-environment false alarm (30 failures from the
+104-byte UDS path limit under a long scratchpad TMPDIR; the repo CI's
+TMPDIR=/tmp pin is now also the PM gate rule). Core metric verified with
+the pinned command; frozen v1.8 Codex contract byte-identical (SHA
+e0ade3a9…); deleted-lifecycle symbols grep zero. Clean cherry-pick over the
+post-base README patches. v1.8 remaining: stages 5-8 (Claude wire
+refactor-down, control/CLI cleanup) toward the 18,850 design target, then
+the itemized live drill (state conversion of this machine, split-brain
+matrix, restart taxonomy) at the v1.8.0 release.
