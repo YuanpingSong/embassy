@@ -63,7 +63,7 @@ type Writable = { write(chunk: string, callback?: (error?: Error | null) => void
 type GatewayControlSender = <M extends GatewayControlMethod>(options: SendGatewayControlRequestOptions<M>) => Promise<GatewayControlResponse<M>>;
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
 type LiveDashboardRunner = (options: LiveDashboardCommandOptions) => Promise<LiveDashboardCommandOutcome | void>;
-type GatewayStateConverter = (options: Readonly<{ stateDir: string }>) => Promise<GatewayStateV2ToV3Result>;
+type GatewayStateConverter = (options: Readonly<{ stateDir: string; hostId?: string }>) => Promise<GatewayStateV2ToV3Result>;
 type PeerStdioRunner = (options: Parameters<typeof runPeerStdio>[0]) => PeerStdioSession;
 
 export type GatewayCliDependencies = {
@@ -615,25 +615,27 @@ export async function runGatewayCli(
         const config = loadConfig(env);
         const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(config.stateDir);
         await validateSocket(config.stateDir, config.controlSocketPath);
-        let peerHost: string | undefined;
+        let peerHost: string | undefined, firstCatalog: import("./peer-protocol.js").PeerCatalogResult | undefined;
         const request = async <M extends "peer_catalog" | "peer_handoff">(
           method: M,
           params: M extends "peer_catalog" ? { peerHost: string } : { peerHost: string; handoff: import("./peer-protocol.js").PeerHandoffParams },
         ) => {
           const response = await sendRequest({ socketPath: config.controlSocketPath,
             request: { protocolVersion: 1, method, params } as Extract<GatewayControlRequest, { method: M }> });
-          if (!response.ok) throw new PeerHandlerError({ code: -32000, message: "Local broker unavailable" });
+          if (!response.ok) throw new PeerHandlerError({ code: -32000, message: "Local broker refused peer authority" });
           return response.result;
         };
         const session = (dependencies.runPeerStdio ?? runPeerStdio)({
           localHost: inventory.host, input: stdin as never, output: stdout as never,
           handlers: {
-            initialize: ({ host }) => {
+            initialize: async ({ host }) => {
               if (!inventory.nodes.includes(host)) throw new PeerHandlerError({ code: -32001, message: "Peer host not configured" });
-              peerHost = host;
+              peerHost = host; firstCatalog = await request("peer_catalog", { peerHost: host });
             },
-            catalog: async () => await request("peer_catalog", { peerHost: peerHost! }),
-            handoff: async (handoff) => await request("peer_handoff", { peerHost: peerHost!, handoff }),
+            catalog: async () => { const cached = firstCatalog; firstCatalog = undefined;
+              return cached ?? await request("peer_catalog", { peerHost: peerHost! }); },
+            handoff: async (handoff) => { firstCatalog = undefined;
+              return await request("peer_handoff", { peerHost: peerHost!, handoff }); },
           },
         });
         await session.done;
@@ -658,7 +660,8 @@ export async function runGatewayCli(
     if (command === "convert-state-v2-to-v3") {
       emptyParams(common.args);
       const config = loadConfig(env);
-      const converted = await (dependencies.convertState ?? convertGatewayStateV2ToV3)({ stateDir: config.stateDir });
+      const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(config.stateDir);
+      const converted = await (dependencies.convertState ?? convertGatewayStateV2ToV3)({ stateDir: config.stateDir, hostId: inventory.host });
       success({ converted: true, backupFile: path.basename(converted.backupFile) });
       return gatewayCliExitCodes.ok;
     }

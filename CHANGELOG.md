@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.9.3] - 2026-08-17
+
+### Fixed
+
+- A peer's `initialize` now consults the local broker's authority instead of answering from `nodes.json` alone, so a broker that refuses peer service is a bounded, explicit `Local broker refused peer authority` at the handshake — distinguishable from an unreachable broker — rather than a false "Local broker unavailable" at the first `catalog/get`.
+- The offline v2→v3 state converter reconciles route host identity with the machine's attested `nodes.json` host. A state stranded by the legacy default host identity (`this-mac`) recovers in place with the same command: only untouched config-declared lazy routes are dropped, a byte-verified v3 backup is written first, all accumulated state (messages, accounting, consent edges, commit sequence) survives verbatim, and anything with history or references refuses with installed bytes unchanged. A host-incompatible state with no v2 backup now recovers instead of failing opaquely.
+
 ## [1.9.2] - 2026-08-17
 
 Identical to the unpublished v1.9.1 (its pipeline was failed by a stochastic test flaw — a forged-token fixture that matched the real token 1 time in 64 — not by any product defect; the fixture now guarantees difference).

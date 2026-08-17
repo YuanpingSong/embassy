@@ -9,9 +9,11 @@ import {
   convertGatewayStateV2ToV3,
   type GatewayStateV2ToV3FaultStage,
 } from "../src/gateway/state-v2-to-v3.js";
+import { isGatewayPersistedStateV3 } from "../src/gateway/store.js";
 
 const STATE_FILE = "gateway-state.json";
 const BACKUP_FILE = "gateway-state.v2.backup.json";
+const V3_BACKUP_FILE = "gateway-state.v3.backup.json";
 const MARKER_FILE = ".agent-embassy-state";
 const LOCK_FILE = ".gateway-controller.lock";
 const NOW = "2026-08-17T01:00:00.000Z";
@@ -314,6 +316,91 @@ test("offline conversion backs up exact v2 bytes and installs strict logical v3 
     convertGatewayStateV2ToV3({ stateDir: root }),
     (error: unknown) => code(error) === "GATEWAY_STATE_CONVERSION_ALREADY_APPLIED",
   );
+});
+
+test("host reconciliation mutates installed v3, backs it up, and needs no v2 backup", async () => {
+  const state = v2State() as any;
+  state.routes = [
+    route("dsh-main@this-mac", "deepseek", "deepseek-handle", "lease-deepseek", 0),
+    route("grok-main@this-mac", "grok", "grok-handle", "lease-grok", 0),
+  ];
+  state.connectors = state.routes.map((item: any) => ({ provider: item.binding.provider, hostId: "this-mac",
+    endpointGeneration: `${item.binding.provider}_generation`, health: "healthy", protocol: "acp",
+    protocolVersion: "1", updatedAt: "2026-08-16T23:30:00.000Z" }));
+  state.consentEdges = []; state.queue = []; state.inFlight = []; state.events = [];
+  state.dedupe = []; state.rateBuckets = []; state.progressWatches = []; state.progressWatchEvents = [];
+  state.codexEndpointRefreshSequence = 0; state.codexEndpointRefreshEvents = [];
+  state.codexOrphanRemovalSequence = 0; state.codexOrphanRemovalEvents = [];
+  state.eventSequence = 0; state.watchSequence = 0;
+  state.accounting = { ...state.accounting, accepted: 0, bytesAccepted: 0, queuedBytes: 0 };
+  const { root } = await fixture(state);
+  await convertGatewayStateV2ToV3({ stateDir: root });
+  await unlink(path.join(root, BACKUP_FILE));
+  const accumulated = JSON.parse(await readFile(path.join(root, STATE_FILE), "utf8")) as any;
+  accumulated.commit = { sequence: 58, id: "accumulated-v3-state" };
+  const accumulatedBytes = Buffer.from(`${JSON.stringify(accumulated, null, 2)}\n`);
+  await writeFile(path.join(root, STATE_FILE), accumulatedBytes, { mode: 0o600 });
+
+  const result = await convertGatewayStateV2ToV3({ stateDir: root, hostId: "m5dev" });
+  const recovered = JSON.parse(await readFile(path.join(root, STATE_FILE), "utf8")) as any;
+  assert.deepEqual(recovered.routes, []);
+  assert.equal(recovered.commit.sequence, 59);
+  assert.equal(result.backupFile, V3_BACKUP_FILE);
+  assert.deepEqual(await readFile(path.join(root, V3_BACKUP_FILE)), accumulatedBytes);
+  assert.equal((await lstat(path.join(root, V3_BACKUP_FILE))).mode & 0o777, 0o600);
+  assert.equal(await lstat(path.join(root, BACKUP_FILE)).catch(() => undefined), undefined);
+});
+
+test("host reconciliation refuses installed v3 armed references and nonzero route history", async () => {
+  const state = v2State() as any;
+  state.routes = [
+    route("dsh-main@this-mac", "deepseek", "deepseek-handle", "lease-deepseek", 0),
+    route("grok-main@this-mac", "grok", "grok-handle", "lease-grok", 0),
+  ];
+  state.connectors = []; state.consentEdges = []; state.queue = []; state.inFlight = []; state.events = [];
+  state.dedupe = []; state.rateBuckets = []; state.progressWatches = []; state.progressWatchEvents = [];
+  state.codexEndpointRefreshSequence = 0; state.codexEndpointRefreshEvents = [];
+  state.codexOrphanRemovalSequence = 0; state.codexOrphanRemovalEvents = [];
+  state.eventSequence = 0; state.watchSequence = 0;
+  state.accounting = { ...state.accounting, accepted: 0, bytesAccepted: 0, queuedBytes: 0 };
+  const { root } = await fixture(state);
+  await convertGatewayStateV2ToV3({ stateDir: root });
+  const installed = JSON.parse(await readFile(path.join(root, STATE_FILE), "utf8")) as any;
+  installed.messages = [{
+    sequence: 1, messageId: "msg_00000000-0000-4000-8000-000000000009", messageIdSuffix: "00000009",
+    direction: "deepseek_to_grok", sourceAlias: "dsh-main@this-mac", targetAlias: "grok-main@this-mac",
+    enqueuedAt: NOW, deadlineAt: "2099-01-01T00:00:00.000Z", bytes: 14, body: "synthetic body",
+    sourceRegistrationId: "lease-deepseek", targetRegistrationId: "lease-grok", consentEdge: null,
+    state: { phase: "armed", attemptId: "attempt_0000000000000001", attemptCount: 1,
+      targetRegistrationId: "lease-grok", sourceRegistrationId: "lease-deepseek", consentEdge: null,
+      armedAt: NOW, prepared: { kind: "acp_prompt", bodyBytes: 14,
+        bodySha256: "7d05d9f66d59403802e2971f902654f5723c91e90eab4e5722145089dcae1bd7",
+        frameBytes: 120, sha256: "c".repeat(64) } },
+  }];
+  installed.eventSequence = 1;
+  const source = Buffer.from(`${JSON.stringify(installed, null, 2)}\n`);
+  assert.equal(isGatewayPersistedStateV3(installed), true);
+  await writeFile(path.join(root, STATE_FILE), source, { mode: 0o600 });
+
+  await assert.rejects(convertGatewayStateV2ToV3({ stateDir: root, hostId: "m5dev" }),
+    (error: unknown) => code(error) === "CORRUPT_GATEWAY_STATE");
+  assert.deepEqual(await readFile(path.join(root, STATE_FILE)), source);
+  assert.equal(await lstat(path.join(root, V3_BACKUP_FILE)).catch(() => undefined), undefined);
+
+  installed.messages = []; installed.routes[0].counters.delivered = 1; installed.accounting.delivered = 1;
+  const counted = Buffer.from(`${JSON.stringify(installed, null, 2)}\n`);
+  await writeFile(path.join(root, STATE_FILE), counted, { mode: 0o600 });
+  await assert.rejects(convertGatewayStateV2ToV3({ stateDir: root, hostId: "m5dev" }),
+    (error: unknown) => code(error) === "CORRUPT_GATEWAY_STATE");
+  assert.deepEqual(await readFile(path.join(root, STATE_FILE)), counted);
+});
+
+test("host reconciliation refuses owned route identity instead of laundering it", async () => {
+  const { root, source } = await fixture();
+  await assert.rejects(convertGatewayStateV2ToV3({ stateDir: root, hostId: "m5dev" }),
+    (error: unknown) => code(error) === "CORRUPT_GATEWAY_STATE");
+  assert.deepEqual(await readFile(path.join(root, STATE_FILE)), source);
+  assert.equal(await lstat(path.join(root, BACKUP_FILE)).catch(() => undefined), undefined);
 });
 
 test("transient, absent-target, bodyless, and expired queued rows become exact terminal rows", async () => {

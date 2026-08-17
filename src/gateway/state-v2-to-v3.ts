@@ -30,6 +30,7 @@ const STATE_MARKER = ".agent-embassy-state";
 const STATE_MARKER_BODY = "agent-embassy-state-v1\n";
 const STATE_FILE = "gateway-state.json";
 const BACKUP_FILE = "gateway-state.v2.backup.json";
+const V3_BACKUP_FILE = "gateway-state.v3.backup.json";
 const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const MAX_MARKER_BYTES = 128;
@@ -174,6 +175,13 @@ type V2State = Readonly<{
   codexSuccession: JsonRecord | null;
 }>;
 
+type HostBoundRoute = Readonly<{
+  alias: string;
+  binding: Readonly<{ provider: GatewayProvider; hostId: string }>;
+  registrationMode: string;
+  counters: RouteCounters;
+}>;
+
 class ConversionCommitError extends BridgeError {
   constructor(verified: boolean) {
     super(
@@ -187,12 +195,12 @@ class ConversionCommitError extends BridgeError {
 }
 
 /**
- * One-shot release-owned offline conversion. Callers must resolve the normal
+ * Release-owned offline conversion and bounded host reconciliation. Callers must resolve the normal
  * configured state directory before entering; this API never starts providers,
  * helpers, discovery, the control socket, or the broker runtime.
  */
 export async function convertGatewayStateV2ToV3(
-  options: Readonly<{ stateDir: string }>,
+  options: Readonly<{ stateDir: string; hostId?: string }>,
   dependencies: GatewayStateV2ToV3Dependencies = {},
 ): Promise<GatewayStateV2ToV3Result> {
   const now = dependencies.now ?? (() => new Date());
@@ -214,15 +222,25 @@ export async function convertGatewayStateV2ToV3(
   const lock = await acquireOfflineLock(root, nextRandomId(randomId));
   try {
     const statePath = path.join(root, STATE_FILE);
-    const source = await readPrivateFile(statePath, MAX_STATE_BYTES);
-    const v2 = decodeGatewayStateV2(source);
-    if (v2.codexSuccession !== null) {
-      throw conversionError(
-        "GATEWAY_STATE_CONVERSION_SUCCESSION_ACTIVE",
-        "State conversion requires the Codex succession journal to be inactive.",
-      );
+    const installedSource = await readPrivateFile(statePath, MAX_STATE_BYTES);
+    const installedValue = parseJson(installedSource);
+    const hostId = options.hostId ?? "this-mac";
+    const nativeV3 = isGatewayPersistedStateV3(installedValue);
+    const backupPath = path.join(root, nativeV3 ? V3_BACKUP_FILE : BACKUP_FILE);
+    let converted: GatewayPersistedState;
+    if (nativeV3) {
+      const routes = reconcileHostRoutes(installedValue.routes, hostId, { ...installedValue, routes: [] });
+      if (routes.length === installedValue.routes.length) throw conversionError("GATEWAY_STATE_CONVERSION_ALREADY_APPLIED",
+        "The gateway state is already native schema v3; a second conversion is forbidden.");
+      converted = { ...installedValue, routes, updatedAt: now().toISOString(),
+        commit: { sequence: installedValue.commit.sequence + 1, id: nextRandomId(randomId) } };
+    } else {
+      const v2 = decodeGatewayStateV2(installedSource);
+      if (v2.codexSuccession !== null) throw conversionError("GATEWAY_STATE_CONVERSION_SUCCESSION_ACTIVE",
+        "State conversion requires the Codex succession journal to be inactive.");
+      converted = convertState({ ...v2, routes: reconcileHostRoutes(v2.routes, hostId, { ...v2, routes: [] }) },
+        now(), nextRandomId(randomId));
     }
-    const converted = convertState(v2, now(), nextRandomId(randomId));
     if (!isGatewayPersistedStateV3(converted)) {
       throw conversionError(
         "CORRUPT_GATEWAY_STATE",
@@ -237,24 +255,27 @@ export async function convertGatewayStateV2ToV3(
       );
     }
 
-    const backupPath = path.join(root, BACKUP_FILE);
-    await writeExclusivePrivateFile(
-      backupPath,
-      source,
-      "backup",
-      fault,
-    );
+    if (nativeV3) {
+      try {
+        const existing = await readPrivateFile(backupPath, MAX_STATE_BYTES);
+        if (!existing.equals(installedSource)) throw conversionError("GATEWAY_STATE_BACKUP_MISMATCH",
+          "The fixed v3 recovery backup does not match the installed source.");
+      } catch (error) {
+        if (nodeCode(error) !== "ENOENT") throw error;
+        await writeExclusivePrivateFile(backupPath, installedSource, "backup", fault);
+      }
+    } else await writeExclusivePrivateFile(backupPath, installedSource, "backup", fault);
     await fault("before_backup_directory_sync");
     await syncDirectory(root);
     await fault("before_backup_readback");
     const backup = await readPrivateFile(backupPath, MAX_STATE_BYTES);
     if (
-      !backup.equals(source) ||
-      sha256(backup) !== sha256(source)
+      !backup.equals(installedSource) ||
+      sha256(backup) !== sha256(installedSource)
     ) {
       throw conversionError(
         "GATEWAY_STATE_BACKUP_MISMATCH",
-        "The byte-identical v2 backup could not be verified; the target was not mutated.",
+        "The byte-identical state backup could not be verified; the target was not mutated.",
       );
     }
 
@@ -276,17 +297,17 @@ export async function convertGatewayStateV2ToV3(
       // overwritten using stale evidence.
       await fault("before_target_rename");
       const current = await readPrivateFile(statePath, MAX_STATE_BYTES);
-      if (!current.equals(source) || sha256(current) !== sha256(source)) {
+      if (!current.equals(installedSource) || sha256(current) !== sha256(installedSource)) {
         throw conversionError(
           "GATEWAY_STATE_SOURCE_CHANGED",
-          "The v2 source changed after backup verification; conversion was not installed.",
+          "The state source changed after backup verification; conversion was not installed.",
         );
       }
       try {
         await renameState(temporary, statePath);
         renamed = true;
       } catch (renameError) {
-        const outcome = await reconcileRenameError(statePath, source, body, converted);
+        const outcome = await reconcileRenameError(statePath, installedSource, body, converted);
         if (outcome === "source") throw renameError;
         if (outcome === "unknown") throw new ConversionCommitError(false);
         renamed = true;
@@ -327,13 +348,34 @@ export async function convertGatewayStateV2ToV3(
     }
 
     return {
-      backupFile: BACKUP_FILE,
+      backupFile: path.basename(backupPath),
       commitId: converted.commit.id,
       commitSequence: converted.commit.sequence,
     };
   } finally {
     await releaseOfflineLock(root, lock);
   }
+}
+
+function reconcileHostRoutes<T extends HostBoundRoute>(
+  routes: readonly T[],
+  hostId: string,
+  remainder: unknown,
+): T[] {
+  const foreign = routes.filter((route) =>
+    route.registrationMode !== "federated_peer" && route.binding.hostId !== hostId);
+  if (foreign.length === 0) return [...routes];
+  const referenced = JSON.stringify(remainder);
+  const droppable = new Set(foreign.filter((route) =>
+    Object.values(route.counters).every((count) => count === 0) &&
+    ((route.binding.provider === "deepseek" && route.alias === `dsh-main@${route.binding.hostId}`) ||
+      (route.binding.provider === "grok" && route.alias === `grok-main@${route.binding.hostId}`)) &&
+    !referenced.includes(JSON.stringify(route.alias))).map((route) => route.alias));
+  if (droppable.size !== foreign.length) throw conversionError(
+    "CORRUPT_GATEWAY_STATE",
+    "Host reconciliation can remove only unused, unreferenced config-declared lazy routes.",
+  );
+  return routes.filter((route) => !droppable.has(route.alias));
 }
 
 function convertState(v2: V2State, convertedAt: Date, commitId: string): GatewayPersistedState {

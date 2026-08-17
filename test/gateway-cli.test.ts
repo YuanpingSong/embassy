@@ -26,6 +26,7 @@ import {
   gatewayCliExitCodes,
   runGatewayCli,
 } from "../src/gateway/cli.js";
+import { PeerHandlerError } from "../src/gateway/peer-stdio.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
@@ -135,7 +136,7 @@ test("offline state conversion uses only configured state and prints no private 
   const stdout = capture();
   const stderr = capture();
   const stateDir = "/private/fake-state";
-  let convertedStateDir: string | undefined;
+  let convertedStateDir: string | undefined, convertedHost: string | undefined;
   let unrelatedWork = false;
   const code = await runGatewayCli(["convert-state-v2-to-v3"], {
     env: { EMBASSY_STATE_DIR: stateDir },
@@ -150,8 +151,9 @@ test("offline state conversion uses only configured state and prints no private 
       stallNoticeMs: 30_000,
       limits: {} as never,
     }),
-    convertState: async ({ stateDir: actual }) => {
-      convertedStateDir = actual;
+    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"], configured: true }),
+    convertState: async ({ stateDir: actual, hostId }) => {
+      convertedStateDir = actual; convertedHost = hostId;
       return {
         backupFile: "gateway-state.v2.backup.json",
         commitId: "PRIVATE_COMMIT_ID",
@@ -175,6 +177,7 @@ test("offline state conversion uses only configured state and prints no private 
 
   assert.equal(code, gatewayCliExitCodes.ok);
   assert.equal(convertedStateDir, stateDir);
+  assert.equal(convertedHost, "m5dev");
   assert.equal(unrelatedWork, false);
   assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
     ok: true,
@@ -232,6 +235,7 @@ test("offline state conversion exposes commit uncertainty as non-retryable ambig
       stallNoticeMs: 30_000,
       limits: {} as never,
     }),
+    loadNodeInventory: async () => ({ host: "this-mac", nodes: [], configured: false }),
     convertState: async () => {
       throw new BridgeError(
         "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
@@ -2146,6 +2150,49 @@ test("peer-stdio attests the private control socket before opening the protocol"
   assert.equal(code, gatewayCliExitCodes.unavailable);
   assert.equal(requested, false);
   assert.equal(opened, false);
+});
+
+test("peer-stdio sources initialization authority from the running broker", async () => {
+  // The helper's fresh nodes.json is not enough: the running broker owns peer authority.
+  let handler: Parameters<NonNullable<GatewayCliDependencies["runPeerStdio"]>>[0] | undefined;
+  const code = await runGatewayCli(["peer-stdio"], {
+    env: {}, stdout: capture(), stderr: capture(),
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["m5dev", "this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,
+      inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
+    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"], configured: true }),
+    validateControlSocket: async () => undefined,
+    sendRequest: async () => ({ protocolVersion: 1, ok: false,
+      error: { code: "HANDLER_FAILURE", message: "The gateway could not complete the control request." } }),
+    runPeerStdio: (options) => { handler = options; return { done: Promise.resolve(), close: () => undefined }; },
+  });
+  assert.equal(code, gatewayCliExitCodes.ok);
+  assert.ok(handler);
+  await assert.rejects(Promise.resolve(handler.handlers.initialize({ protocolVersion: 1, host: "this-mac" })),
+    (error: unknown) => error instanceof PeerHandlerError && error.detail.code === -32000 &&
+      error.detail.message === "Local broker refused peer authority");
+});
+
+test("peer-stdio consumes its initialization catalog once, then returns to broker authority", async () => {
+  let handler: Parameters<NonNullable<GatewayCliDependencies["runPeerStdio"]>>[0] | undefined, requests = 0;
+  const catalog = { revision: 1, complete: true, truncated: false, generatedAt: "2026-08-17T12:00:00.000Z",
+    health: "healthy", connectors: [], routes: [], consentEdges: [], alerts: [] } as const;
+  const code = await runGatewayCli(["peer-stdio"], {
+    env: {}, stdout: capture(), stderr: capture(),
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["m5dev", "this-mac"], hostId: "m5dev", peerNodes: ["this-mac"], steeringEnabled: true,
+      inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
+    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"], configured: true }),
+    validateControlSocket: async () => undefined,
+    sendRequest: (async () => { requests += 1; return { protocolVersion: 1, ok: true, result: catalog }; }) as
+      NonNullable<GatewayCliDependencies["sendRequest"]>,
+    runPeerStdio: (options) => { handler = options; return { done: Promise.resolve(), close: () => undefined }; },
+  });
+  assert.equal(code, gatewayCliExitCodes.ok); assert.ok(handler);
+  await handler.handlers.initialize({ protocolVersion: 1, host: "this-mac" });
+  assert.equal(requests, 1);
+  assert.deepEqual(await handler.handlers.catalog(), catalog); assert.equal(requests, 1);
+  assert.deepEqual(await handler.handlers.catalog(), catalog); assert.equal(requests, 2);
 });
 
 test("pair and unpair preserve cross-host aliases and owner authority", async () => {

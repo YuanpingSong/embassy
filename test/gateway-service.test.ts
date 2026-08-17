@@ -865,6 +865,20 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
   assert.equal(closes, 2, "the failed client closes and the reconnected client closes at shutdown");
 });
 
+test("a fresh canonical-host broker exports its startup-owned routes to a configured peer", async () => {
+  const providers = (["deepseek", "grok"] as const).map((provider) => new FakeProvider(
+    { provider, hostId: "m5dev" }, "deliver",
+    { alias: `${provider === "deepseek" ? "dsh-main" : `${provider}-main`}@m5dev`, routeHandle: `${provider}-owned`, state: "idle" },
+  ));
+  const subject = await fixture(providers, { hostId: "m5dev", peerNodes: ["this-mac"] });
+  try {
+    assert.equal((await subject.service.snapshot()).routes.length, 2);
+    const catalog = await subject.handlers.peerCatalog?.({ peerHost: "this-mac" });
+    assert.deepEqual(catalog?.routes.map((route) => route.alias).sort(),
+      ["dsh-main@m5dev", "grok-main@m5dev"]);
+  } finally { await subject.close(); }
+});
+
 test("peer refresh closes a late spawned client before shutdown completes", async () => {
   const spawn = deferred<PeerClient>(); let spawnCalls = 0, closes = 0, catalogCalls = 0;
   const subject = await fixture([], { hostId: "studio", peerNodes: ["m5dev"], spawnPeer: async () => {
