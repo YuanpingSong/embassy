@@ -8,7 +8,7 @@ import path from "node:path";
 import type { GatewayConfig } from "../src/gateway/config.js";
 import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
 import type { PeerClient } from "../src/gateway/peer-client.js";
-import type { PeerHandoffParams } from "../src/gateway/peer-protocol.js";
+import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
@@ -17,6 +17,7 @@ import {
   type GatewayAdapterDispatchResult,
   type GatewayAdapterStart,
   type GatewayProviderAdapter,
+  type GatewayServiceOptions,
 } from "../src/gateway/service.js";
 import { GatewayStore } from "../src/gateway/store.js";
 import { CONNECTOR_OBSERVATION_STALE_AFTER_MS } from "../src/gateway/types.js";
@@ -347,6 +348,7 @@ async function fixture(
     inboundMode?: GatewayConfig["inboundMode"];
     hostId?: string;
     peerNodes?: readonly string[];
+    spawnPeer?: NonNullable<GatewayServiceOptions["spawnPeer"]>;
     seed?: (store: GatewayStore) => Promise<void>;
     codexDoctor?: () => Promise<CodexDoctorResult>;
   }> = {},
@@ -378,6 +380,7 @@ async function fixture(
     now: clock.now,
     timers,
     ...(options.codexDoctor === undefined ? {} : { codexDoctor: options.codexDoctor }),
+    ...(options.spawnPeer === undefined ? {} : { spawnPeer: options.spawnPeer }),
     publishDashboard: async () => path.join(stateDir, "gateway-dashboard.html"),
   });
   await service.start();
@@ -593,6 +596,112 @@ test("local Claude ingress advertises and hands off a federated Codex route", as
     await eventually(async () => (await subject.store.publicSnapshot()).messages.at(-1)?.state === "delivered");
     assert.equal((await subject.store.publicSnapshot()).messages.at(-1)?.safeErrorCode, "PEER_HANDOFF_CONFIRMED");
   } finally { await subject.close(); }
+});
+
+test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits inbound handoff before acceptance", async () => {
+  const local: RegisterRouteInput = { alias: "codex-local@studio", registrationMode: "explicit_opt_in",
+    binding: { provider: "codex", hostId: "studio", routeHandle: THREAD_A, registrationId: "reg_local" } };
+  const remote = { alias: "dsh-worker@m5dev", provider: "deepseek" as const, host: "m5dev", routeRef: "reg_remote_dsh" };
+  const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio", routeRef: local.binding.registrationId };
+  let current: PeerCatalogResult = { revision: 1, complete: true, truncated: false, generatedAt: "2026-08-16T12:00:00.000Z",
+    health: "healthy", connectors: [], routes: [{ ref: remote.routeRef, alias: remote.alias, provider: remote.provider,
+      host: remote.host, enabled: true, state: "idle", queueDepth: 0 }], consentEdges: [{ ref: peerEdgeRef([remote, localEndpoint]),
+      ownerHost: "m5dev", endpoints: [remote, localEndpoint] }], alerts: [] };
+  let catalogCalls = 0, closes = 0, failCatalog = false;
+  const peer = { close: () => { closes += 1; }, catalog: async () => {
+    catalogCalls += 1; if (failCatalog) throw new Error("synthetic tunnel loss"); return current;
+  },
+    prepareHandoff: () => { throw new Error("outbound handoff not expected"); } } as unknown as PeerClient;
+  const subject = await fixture([new FakeProvider({ provider: "claude", hostId: "studio" })], {
+    hostId: "studio", peerNodes: ["m5dev"], seed: async (store) => store.registerRoute(local),
+    spawnPeer: async ({ node, localHost }) => { assert.equal(node, "m5dev"); assert.equal(localHost, "studio"); return peer; },
+  });
+  try {
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(remote.alias))?.registrationMode === "federated_peer");
+    assert.equal(catalogCalls, 1);
+    const reconcile = subject.store.reconcilePeerCatalog.bind(subject.store); let reconcileCalls = 0;
+    subject.store.reconcilePeerCatalog = async (...args) => { reconcileCalls += 1; return reconcile(...args); };
+    current = { ...current, revision: 99,
+      generatedAt: "2026-08-16T12:00:01.000Z" };
+    subject.clock.advance(30_000);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue(); await eventually(() => catalogCalls === 2);
+    assert.equal(reconcileCalls, 0, "peer revision echoes must not create durable reconciliation commits");
+    current = { ...current, complete: false };
+    subject.clock.advance(30_000);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue();
+    assert.equal((await subject.store.inspectPrivateRoute(remote.alias))?.registrationMode, "federated_peer");
+    await eventually(async () => (await subject.service.snapshot()).routes.find((route) => route.alias === remote.alias)
+      ?.safeErrorCode === "PEER_CATALOG_INCOMPLETE");
+    current = { ...current, complete: true, routes: current.routes.map((route) => ({ ...route, enabled: false })) };
+    subject.clock.advance(30_000);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(remote.alias))?.enabled === false,
+      "same-revision authority changes must still reconcile");
+    const exported = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });
+    assert.ok(exported); assert.deepEqual(exported.routes.map((route) => route.alias), [local.alias]);
+    assert.equal(JSON.stringify(exported).includes(remote.alias), false); assert.equal(JSON.stringify(exported).includes("body"), false);
+    const handoff: PeerHandoffParams = { originAttemptId: "attempt_origin", originMessageId: "msg_origin", source: remote,
+      target: localEndpoint, edgeRef: peerEdgeRef([remote, localEndpoint]), edgeOwnerHost: "m5dev",
+      deadlineAt: new Date(subject.clock.now().getTime() + 5_000).toISOString(), expectsReply: false, body: "committed remotely" };
+    assert.deepEqual(await subject.handlers.peerHandoff?.({ peerHost: "m5dev", handoff }), { accepted: true });
+    assert.equal((JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as { messages: { body?: string }[] }).messages.at(-1)?.body,
+      "committed remotely");
+    assert.deepEqual(await subject.handlers.peerHandoff?.({ peerHost: "m5dev", handoff }), { accepted: true });
+    const afterHandoff = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });
+    assert.equal(JSON.stringify(afterHandoff).includes("committed remotely"), false);
+    assert.equal(JSON.stringify(afterHandoff).includes("msg_origin"), false);
+    failCatalog = true; subject.clock.advance(30_000);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue();
+    await eventually(async () => (await subject.service.snapshot()).routes.find((route) => route.alias === remote.alias)
+      ?.safeErrorCode === "PEER_TUNNEL_UNAVAILABLE");
+    assert.equal((await subject.store.inspectPrivateRoute(remote.alias))?.registrationMode, "federated_peer");
+    failCatalog = false;
+    current = { ...current, revision: 2, routes: [], consentEdges: [] };
+    subject.clock.advance(30_000);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(remote.alias)) === undefined);
+  } finally { await subject.close(); }
+  assert.equal(closes, 2, "the failed client closes and the reconnected client closes at shutdown");
+});
+
+test("peer refresh closes a late spawned client before shutdown completes", async () => {
+  const spawn = deferred<PeerClient>(); let spawnCalls = 0, closes = 0, catalogCalls = 0;
+  const subject = await fixture([], { hostId: "studio", peerNodes: ["m5dev"], spawnPeer: async () => {
+    spawnCalls += 1; return spawn.promise;
+  } });
+  await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+  await subject.timers.runDue(); await eventually(() => spawnCalls === 1);
+  let closed = false; const closing = subject.close().then(() => { closed = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve)); assert.equal(closed, false);
+  spawn.resolve(({ close: () => { closes += 1; }, catalog: async () => {
+    catalogCalls += 1; throw new Error("must not run");
+  } }) as unknown as PeerClient);
+  await closing; assert.equal(closes, 1); assert.equal(catalogCalls, 0);
+});
+
+test("one blocked peer does not prevent another peer catalog from reconciling", async () => {
+  const blocked = deferred<PeerCatalogResult>(); const remote = { alias: "dsh-worker@zdev", provider: "deepseek" as const,
+    host: "zdev", routeRef: "reg_remote_zdev" };
+  const healthy: PeerCatalogResult = { revision: 1, complete: true, truncated: false,
+    generatedAt: "2026-08-16T12:00:00.000Z", health: "healthy", connectors: [], routes: [{ ref: remote.routeRef,
+      alias: remote.alias, provider: remote.provider, host: remote.host, enabled: true, state: "idle", queueDepth: 0 }],
+    consentEdges: [], alerts: [] };
+  const clients = new Map<string, PeerClient>([["m5dev", { close: () => undefined, catalog: () => blocked.promise } as unknown as PeerClient],
+    ["zdev", { close: () => undefined, catalog: async () => healthy } as unknown as PeerClient]]);
+  const subject = await fixture([], { hostId: "studio", peerNodes: ["m5dev", "zdev"],
+    spawnPeer: async ({ node }) => clients.get(node)! });
+  await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+  await subject.timers.runDue();
+  await eventually(async () => (await subject.store.inspectPrivateRoute(remote.alias))?.registrationMode === "federated_peer");
+  blocked.resolve({ ...healthy, routes: [], revision: 0 });
+  await subject.close();
 });
 
 test("stale removal and succession controls preserve a same-alias replacement", async () => {

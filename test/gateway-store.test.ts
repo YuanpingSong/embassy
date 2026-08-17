@@ -13,6 +13,7 @@ import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayConfig } from "../src/gateway/config.js";
+import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import {
   GatewayStore,
   isGatewayPersistedStateV3,
@@ -1662,4 +1663,85 @@ test("federated native ingress always requires a durable selected-source edge", 
   assert.equal(rejected.length, 1); assert.equal(rejected[0]?.state, "rejected");
   assert.equal(rejected[0]?.safeErrorCode, "SENDER_NOT_PAIRED");
   await store.close();
+});
+
+test("peer catalog reconciliation and destination enqueue commit one destination-owned copy", async () => {
+  const setup = await fixture();
+  const store = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] },
+    { now: setup.clock.now, randomId: setup.clock.randomId });
+  await store.initialize();
+  const local = { alias: "codex-local@studio", registrationMode: "explicit_opt_in" as const,
+    binding: { provider: "codex" as const, hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } };
+  await store.registerRoute(local);
+  const remoteEndpoint = { alias: "dsh-worker@m5dev", provider: "deepseek" as const, host: "m5dev", routeRef: "reg_remote_dsh" };
+  const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio", routeRef: local.binding.registrationId };
+  const edgeRef = peerEdgeRef([remoteEndpoint, localEndpoint]);
+  const catalog = (revision: number, alias = remoteEndpoint.alias): PeerCatalogResult => { const remote = { ...remoteEndpoint, alias }; return {
+    revision, complete: true, truncated: false, generatedAt: setup.clock.now().toISOString(), health: "healthy", connectors: [],
+    routes: [{ ref: remote.routeRef, alias: remote.alias, provider: remote.provider, host: remote.host,
+      enabled: true, state: "idle", queueDepth: 0 }], consentEdges: [{ ref: peerEdgeRef([remote, localEndpoint]), ownerHost: "m5dev",
+      endpoints: [remote, localEndpoint] }], alerts: [] }; };
+  const first = await store.reconcilePeerCatalog("m5dev", { ...catalog(1), consentEdges: [] });
+  assert.equal(first.routes[0]?.alias, remoteEndpoint.alias); assert.equal(first.settlements.length, 0);
+  const handoff: PeerHandoffParams = { originAttemptId: "attempt_origin", originMessageId: "msg_origin",
+    source: remoteEndpoint, target: localEndpoint, edgeRef, edgeOwnerHost: "m5dev",
+    deadlineAt: new Date(setup.clock.now().getTime() + 5_000).toISOString(), expectsReply: false, body: "destination copy" };
+  const admitted = await store.enqueuePeerHandoff("m5dev", handoff);
+  assert.equal(admitted.accepted, true); assert.equal(admitted.duplicate, false);
+  assert.equal((await store.inspectPrivateConsentEdges()).length, 1,
+    "a canonical remote owner may install its lagging mirrored edge atomically with enqueue");
+  assert.deepEqual(await store.enqueuePeerHandoff("m5dev", handoff), { accepted: false, duplicate: true,
+    messageIdSuffix: admitted.messageIdSuffix });
+  assert.equal((JSON.parse(await readFile(store.stateFilePath, "utf8")) as { messages: { body?: string }[] }).messages[0]?.body, "destination copy");
+  const renamed = "dsh-renamed@m5dev"; await store.reconcilePeerCatalog("m5dev", catalog(2, renamed));
+  assert.equal((await store.inspectPrivateRoutes()).find((route) => route.registrationMode === "federated_peer")?.alias, renamed);
+  const mirror = (await store.inspectPrivateRoute(renamed))!;
+  const authorize = async (body: string, phase: "armed" | "accepted") => {
+    const reserved = await store.reserveMessage(local.alias); assert.equal(reserved.status, "reserved");
+    if (reserved.status !== "reserved") return;
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    await store.authorizeMessage({ messageId: reserved.attempt.messageId, attemptId: reserved.attempt.attemptId,
+      sourceRegistrationId: mirror.binding.registrationId, targetRegistrationId: local.binding.registrationId,
+      prepared: { kind: "codex_turn_start", bodyBytes: Buffer.byteLength(body), bodySha256: sha256,
+        frameBytes: Buffer.byteLength(body) + 1, sha256 } });
+    if (phase === "accepted") await store.acceptMessage({ messageId: reserved.attempt.messageId,
+      attemptId: reserved.attempt.attemptId, lossOutcome: "unconfirmed" });
+  };
+  await authorize("destination copy", "accepted");
+  const renamedEndpoint = { ...remoteEndpoint, alias: renamed };
+  const admit = async (id: string, body: string) => store.enqueuePeerHandoff("m5dev", { ...handoff,
+    originAttemptId: `attempt_${id}`, originMessageId: `msg_${id}`, source: renamedEndpoint,
+    edgeRef: peerEdgeRef([renamedEndpoint, localEndpoint]), body });
+  await admit("armed", "armed copy"); await authorize("armed copy", "armed");
+  await admit("reserved", "reserved copy"); assert.equal((await store.reserveMessage(local.alias)).status, "reserved");
+  await admit("queued", "queued copy");
+  const unpaired = await store.reconcilePeerCatalog("m5dev", { ...catalog(3, renamed), consentEdges: [] });
+  assert.deepEqual(unpaired.settlements.map((row) => row.state).sort(),
+    ["ambiguous", "cancelled", "cancelled", "unconfirmed"]);
+  const removed = await store.reconcilePeerCatalog("m5dev", { ...catalog(4, renamed), routes: [], consentEdges: [] });
+  assert.equal(removed.routes.length, 0);
+  await store.close();
+  const reopened = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] },
+    { now: setup.clock.now, randomId: setup.clock.randomId });
+  await reopened.initialize(); await reopened.close();
+
+  const ownerSetup = await fixture();
+  const ownerStore = new GatewayStore({ ...ownerSetup.config, hostId: "lab", allowedHosts: ["lab", "zdev"] },
+    { now: ownerSetup.clock.now, randomId: ownerSetup.clock.randomId });
+  await ownerStore.initialize();
+  const ownerLocal = { alias: "codex-local@lab", registrationMode: "explicit_opt_in" as const,
+    binding: { provider: "codex" as const, hostId: "lab", routeHandle: "thread-owner", registrationId: "reg_owner_local" } };
+  const ownerRemote = { alias: "dsh-worker@zdev", provider: "deepseek" as const, host: "zdev", routeRef: "reg_owner_remote" };
+  const ownerTarget = { alias: ownerLocal.alias, provider: ownerLocal.binding.provider, host: "lab",
+    routeRef: ownerLocal.binding.registrationId };
+  await ownerStore.registerRoute(ownerLocal);
+  await ownerStore.reconcilePeerCatalog("zdev", { revision: 1, complete: true, truncated: false,
+    generatedAt: ownerSetup.clock.now().toISOString(), health: "healthy", connectors: [], routes: [{ ref: ownerRemote.routeRef,
+      alias: ownerRemote.alias, provider: ownerRemote.provider, host: ownerRemote.host, enabled: true, state: "idle", queueDepth: 0 }],
+    consentEdges: [], alerts: [] });
+  await assert.rejects(ownerStore.enqueuePeerHandoff("zdev", { ...handoff, originMessageId: "msg_owner_missing",
+    source: ownerRemote, target: ownerTarget, edgeOwnerHost: "lab", edgeRef: peerEdgeRef([ownerRemote, ownerTarget]) }),
+  /current exact consent/iu);
+  assert.equal((await ownerStore.publicSnapshot()).messages.length, 0);
+  await ownerStore.close();
 });

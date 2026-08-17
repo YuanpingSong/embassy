@@ -35,7 +35,7 @@ export class PeerClient {
       [...result.routes, ...result.connectors].some((row) => row.host !== this.remoteHost) || result.consentEdges.some((edge) => {
         const hosts = edge.endpoints.map((endpoint) => endpoint.host).sort();
         return hosts[0] !== [this.localHost, this.remoteHost].sort()[0] || hosts[1] !== [this.localHost, this.remoteHost].sort()[1] ||
-          edge.ownerHost !== hosts[0] || edge.ref !== peerEdgeRef(edge.endpoints);
+          edge.ownerHost !== hosts[0] || edge.ownerHost !== this.remoteHost || edge.ref !== peerEdgeRef(edge.endpoints);
       }) || new Set(result.consentEdges.map((edge) => edge.ref)).size !== result.consentEdges.length ||
       result.alerts.some((alert) => (alert.host !== undefined && alert.host !== this.remoteHost) ||
         (alert.alias !== undefined && !alert.alias.endsWith(`@${this.remoteHost}`))) || result.consentEdges.some((edge) => edge.endpoints
