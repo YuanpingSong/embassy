@@ -56,3 +56,16 @@ armed→ambiguous, accepted→unconfirmed, idempotent retry, no journal).
 Mechanical must-have confirmed: attempt-bound correlated acceptance before
 terminal. Four R4 review rounds + 90s headline + byte-held emb-76 goldens +
 HOLD-proven-before-deletion accepted as the verification price.
+
+## R4 seam ruling: Claude final-authorization analogue (RULED A)
+
+ClaudePeerAdapter.send() was the only provider path without the
+prepare/authorize/perform split (it allocated ID + encoded + wrote in one
+call), so the kernel could not persist exact claude_mailbox prepared
+evidence before arming. RULED A: add the narrow analogue — exact validated
+frame prepared post-revalidation, bounded evidence exposed, authorize, one
+synchronous one-shot perform; wire bytes unchanged; denial=zero-write,
+route/peer drift fence, post-perform ambiguity frozen in focused tests.
+B (Claude-exempt preauthorization) rejected: provider-dependent armed
+semantics would gut the design'''s uniform authorization promise on the
+highest-traffic direction. Delta +80–150 src / +100–180 tests within caps.
