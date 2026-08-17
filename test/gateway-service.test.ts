@@ -878,6 +878,29 @@ test("peer refresh closes a late spawned client before shutdown completes", asyn
   await closing; assert.equal(closes, 1); assert.equal(catalogCalls, 0);
 });
 
+test("first peer dial failure is host-visible and the next cadence re-dials", async () => {
+  let attempts = 0;
+  const peer = { close: () => undefined, catalog: async (): Promise<PeerCatalogResult> => ({ revision: 1,
+    complete: true, truncated: false, generatedAt: "2026-08-16T12:00:00.000Z", health: "healthy",
+    connectors: [], routes: [], consentEdges: [], alerts: [] }) } as unknown as PeerClient;
+  const subject = await fixture([], { hostId: "studio", peerNodes: ["m5dev"], spawnPeer: async () => {
+    attempts += 1; if (attempts === 1) throw new Error("private ssh failure"); return peer;
+  } });
+  try {
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue(); await eventually(() => attempts === 1);
+    const failedSnapshot = await subject.service.snapshot();
+    assert.deepEqual(failedSnapshot.alerts.filter((alert) => alert.host === "m5dev")
+      .map(({ code, host }) => ({ code, host })), [{ code: "PEER_DIAL_FAILED", host: "m5dev" }]);
+    assert.equal(JSON.stringify(failedSnapshot).includes("private ssh failure"), false);
+    subject.clock.advance(30_000);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue(); await eventually(() => attempts === 2);
+    assert.equal((await subject.service.snapshot()).alerts.some((alert) => alert.host === "m5dev" &&
+      alert.code === "PEER_DIAL_FAILED"), false);
+  } finally { await subject.close(); }
+});
+
 test("one blocked peer does not prevent another peer catalog from reconciling", async () => {
   const blocked = deferred<PeerCatalogResult>(); const remote = { alias: "dsh-worker@zdev", provider: "deepseek" as const,
     host: "zdev", routeRef: "reg_remote_zdev" };

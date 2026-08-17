@@ -12,7 +12,8 @@ type PeerTimers = Readonly<{ setTimeout: typeof setTimeout; clearTimeout: typeof
 export type PeerPreparedHandoff = Readonly<{ bodyBytes: number; bodySha256: string; frameBytes: number; sha256: string; cancel: () => void; perform: () => Promise<PeerHandoffResult> }>;
 type Pending = Readonly<{ method: PeerMethod; timer: NodeJS.Timeout; resolve: (value: unknown) => void; reject: (error: Error) => void }>;
 export class PeerRequestError extends Error { constructor(readonly detail: PeerRpcError) { super(detail.message); this.name = "PeerRequestError"; } }
-export class PeerConnectionLostError extends Error { constructor(message = "Peer connection lost") { super(message); this.name = "PeerConnectionLostError"; } }
+export type PeerFailureClass = "spawn" | "initialize" | "transport";
+export class PeerConnectionLostError extends Error { constructor(message = "Peer connection lost", readonly failureClass: PeerFailureClass = "transport") { super(message); this.name = "PeerConnectionLostError"; } }
 
 export class PeerClient {
   private pending = new Map<PeerRpcId, Pending>(); private nextId = 1; private buffer = Buffer.alloc(0);
@@ -23,10 +24,11 @@ export class PeerClient {
     decodePeerParams("initialize", { protocolVersion: 1, host: options.node }); decodePeerParams("initialize", { protocolVersion: 1, host: options.localHost });
     let child: Child; try { child = (options.spawn ?? nodeSpawn)("/usr/bin/ssh",
       ["-T", "-x", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no", "-o", "SendEnv=-*", "-o", "Tunnel=no", options.node, "embassy", "peer-stdio"],
-      { env: peerEnvironment(process.env), shell: false, stdio: ["pipe", "pipe", "pipe"] }); } catch { throw new PeerConnectionLostError(); }
+      { env: peerEnvironment(process.env), shell: false, stdio: ["pipe", "pipe", "pipe"] }); } catch { throw new PeerConnectionLostError("Peer process could not be spawned", "spawn"); }
     const client = new PeerClient(child, options.localHost, options.timers ?? { setTimeout, clearTimeout }); try { const result = await client.request("initialize", { protocolVersion: 1, host: options.localHost });
       if (result.host !== options.node) throw new Error(`Peer host mismatch: expected ${options.node}, received ${result.host}`);
-      client.remoteHost = result.host; return client; } catch (error) { client.close(); throw error; }
+      client.remoteHost = result.host; return client; } catch (error) { client.close(); throw new PeerConnectionLostError(
+        error instanceof Error ? error.message : "Peer initialization failed", "initialize"); }
   }
   get connectionInfo(): Readonly<{ host: string; protocolVersion: 1 }> { return { host: this.remoteHost, protocolVersion: 1 }; }
   async catalog(): Promise<PeerCatalogResult> { const result = await this.request("catalog/get", {});
