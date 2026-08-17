@@ -168,6 +168,7 @@ export async function runGatewayServer(
     const runtime = await guarded(Promise.resolve().then(() => d.attestClaudeRuntime()));
     providers.push(d.createClaudeProvider({
       runtime,
+      stateRoot: config.stateDir,
       locale: options.locale ?? "en",
       nativeHelpers: { maxHelpers: config.limits.maxRoutes },
       ...(config.deliveryNotices === undefined ? {} : { deliveryNotices: config.deliveryNotices }),

@@ -44,6 +44,7 @@ import type {
 import { createStatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
 import { composeProvenanceEnvelope } from "../src/gateway/provenance-envelope.js";
+import { GatewayStore } from "../src/gateway/store.js";
 import {
   createLocalClaudeGatewayProvider,
   createLocalCodexGatewayProvider,
@@ -471,11 +472,11 @@ class RegistrationOnlyCodexProvider implements GatewayProviderAdapter {
 }
 
 async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs = 1_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error("synthetic wait timed out");
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
@@ -511,6 +512,7 @@ test("local Claude provider forwards the exact delivery notice policy", () => {
   let receivedDeliveryNotices: unknown;
   createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
+    stateRoot: "/synthetic/controller-state",
     locale: "zh-CN",
     deliveryNotices: "quiet",
     peerFactory: (_runtime, locale, deliveryNotices) => {
@@ -526,6 +528,7 @@ test("local Claude provider forwards the exact delivery notice policy", () => {
 test("Claude logical identity stays independent of runtime evidence", () => {
   const first = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
+    stateRoot: "/synthetic/controller-state",
     peerFactory: () => new FakeClaudePeer() as never,
   });
   const changedRuntime = {
@@ -535,10 +538,12 @@ test("Claude logical identity stays independent of runtime evidence", () => {
   };
   const changed = createLocalClaudeGatewayProvider({
     runtime: changedRuntime,
+    stateRoot: "/synthetic/controller-state",
     peerFactory: () => new FakeClaudePeer() as never,
   });
   const future = createLocalClaudeGatewayProvider({
     runtime: changedRuntime,
+    stateRoot: "/synthetic/controller-state",
     peerFactory: () => new FakeClaudePeer() as never,
   });
 
@@ -552,6 +557,7 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   const helpers: CapturingNativeHelper[] = [];
   const provider = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
+    stateRoot: "/synthetic/controller-state",
     discoveryPollMs: 30_000,
     peerFactory: () => fake as never,
     nativeHelpers: {
@@ -779,11 +785,59 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   await provider.close();
 });
 
+test("service restart restores selected Claude authority into per-operation preparation", async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "embassy-claude-restart-")));
+  const config = loadGatewayConfig({ EMBASSY_STATE_DIR: path.join(root, "state") });
+  const storedClaude = {
+    alias: "advisor@this-mac",
+    binding: { provider: "claude" as const, hostId: "this-mac", routeHandle: "target-selected",
+      registrationId: "registration_claude_restored" }, registrationMode: "selected_live_peer" as const,
+  };
+  const storedCodex = {
+    alias: "codex-main@this-mac",
+    binding: { provider: "codex" as const, hostId: "this-mac", routeHandle: THREAD_ID,
+      registrationId: "registration_codex_restored" }, registrationMode: "explicit_opt_in" as const,
+  };
+  const seed = new GatewayStore(config);
+  await seed.initialize();
+  await seed.registerRoute(storedClaude); await seed.registerRoute(storedCodex);
+  await seed.addConsentEdge({ aliases: [storedClaude.alias, storedCodex.alias],
+    expectedRegistrationIds: [storedClaude.binding.registrationId, storedCodex.binding.registrationId] });
+  await seed.close();
+
+  const peer = new FakeClaudePeer(), helpers: CapturingNativeHelper[] = [];
+  const provider = createLocalClaudeGatewayProvider({ runtime: claudeRuntime(), stateRoot: config.stateDir,
+    discoveryPollMs: 30_000, peerFactory: () => peer as never, nativeHelpers: { maxHelpers: 1,
+      factory: async (options) => { const helper = new CapturingNativeHelper(options, 1); helpers.push(helper); return helper; } } });
+  const service = new GatewayService({ config, adapters: [provider, new RegistrationOnlyCodexProvider()],
+    publishDashboard: async () => path.join(config.stateDir, "dashboard.html"), nativePeerCwd: root });
+  try {
+    await service.start(); await waitFor(() => helpers.length === 1);
+    const sent = await service.handlers().sendToClaude({ fromAlias: storedCodex.alias, threadId: THREAD_ID,
+      toAlias: storedClaude.alias, text: "post-restart", expectsReply: false });
+    assert.equal(sent.accepted, true);
+    await waitFor(() => helpers[0]!.commands.some((command) => command.method === "prepare_dispatch"));
+    const prepared = helpers[0]!.commands.find((command) => command.method === "prepare_dispatch");
+    assert.equal(prepared?.method, "prepare_dispatch");
+    if (prepared?.method !== "prepare_dispatch") assert.fail("expected restored preparation");
+    assert.deepEqual(prepared.binding, storedClaude.binding);
+    assert.equal(prepared.stateRoot, config.stateDir);
+    await waitFor(async () => {
+      if (!sent.accepted) return false;
+      const status = await service.handlers().deliveryStatus({ token: sent.deliveryToken });
+      return status.found && status.state === "delivered";
+    });
+  } finally {
+    await service.close().catch(() => undefined); await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Claude clean prewrite conditions retain exact diagnostics without authorization", async () => {
   const fake = new FakeClaudePeer();
   let helper: CapturingNativeHelper | undefined;
   const provider = createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
+    stateRoot: "/synthetic/controller-state",
     peerFactory: () => fake as never,
     nativeHelpers: {
       maxHelpers: 1,
