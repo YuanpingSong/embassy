@@ -6,6 +6,7 @@ import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
+import { peerEdgeRef, type PeerCatalogResult, type PeerEndpoint, type PeerHandoffParams } from "./peer-protocol.js";
 import { deliveryStates, directionId, gatewayActivityActions, gatewayActivityKinds,
   gatewayProviders, gatewayPublicSnapshotLimits, gatewayRegistrationIngressPrefixes,
   parseDirection, projectGatewayPublicSnapshot, routeRegistrationModes } from "./types.js";
@@ -187,6 +188,9 @@ function consentKey(
 }
 function edgeOwnerHost(endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint]): string {
   return endpoints.map((endpoint) => aliasHost(endpoint.alias)).sort()[0]!;
+}
+function peerMirrorRegistrationId(host: string, routeRef: string): string {
+  return `reg_peer_${createHash("sha256").update(`${host}\0${routeRef}`).digest("base64url").slice(0, 32)}`;
 }
 function sameConsent(
   left: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
@@ -908,6 +912,102 @@ export class GatewayStore {
           };
     });
   }
+  async reconcilePeerCatalog(peerHost: string, catalog: PeerCatalogResult): Promise<Readonly<{
+    settlements: readonly TerminalMessageSettlement[]; routes: readonly GatewayPrivateRouteInspection[];
+  }>> {
+    return this.mutate((state, now) => {
+      const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
+      if (!this.config.allowedHosts.includes(peerHost) || peerHost === localHost ||
+        !catalog.complete || catalog.truncated || catalog.routes.some((route) => route.host !== peerHost) ||
+        catalog.consentEdges.some((edge) => edge.ownerHost !== peerHost)) {
+        throw new BridgeError("INVALID_PEER_CATALOG", "The peer catalog is not an exact complete projection for this configured host.");
+      }
+      const desired = new Map(catalog.routes.map((route) => [route.ref, route]));
+      const existing = state.routes.filter((route) => route.registrationMode === "federated_peer" && route.binding.hostId === peerHost);
+      const settlements: TerminalMessageSettlement[] = [];
+      for (const route of existing) {
+        const row = desired.get(route.binding.routeHandle);
+        if (row !== undefined && row.provider === route.binding.provider) continue;
+        settlements.push(...this.terminalizeRegistration(state, route.binding.registrationId, now));
+        this.removeRegistrationMetadata(state, route);
+      }
+      for (const row of catalog.routes) {
+        let route = state.routes.find((candidate) => candidate.registrationMode === "federated_peer" &&
+          candidate.binding.hostId === peerHost && candidate.binding.routeHandle === row.ref &&
+          candidate.binding.provider === row.provider);
+        const collision = state.routes.find((candidate) => candidate.alias === row.alias && candidate !== route);
+        if (collision !== undefined) throw new BridgeError("ROUTE_ALIAS_ALREADY_REGISTERED", "A peer catalog alias conflicts with current local authority.");
+        if (route === undefined) {
+          if (state.routes.length >= this.config.limits.maxRoutes) throw new BridgeError("ROUTE_CAPACITY_REACHED", "The bounded logical route inventory is full.", true);
+          const input: RegisterRouteInput = { alias: row.alias, registrationMode: "federated_peer",
+            binding: { provider: row.provider, hostId: peerHost, routeHandle: row.ref,
+              registrationId: peerMirrorRegistrationId(peerHost, row.ref) } };
+          route = routeRecord(input, now); state.routes.push(route);
+        } else if (route.alias !== row.alias) {
+          this.renameRegistrationCoordinates(state, route.alias, row.alias, route.binding.registrationId);
+          route.alias = row.alias;
+        }
+        route.enabled = row.enabled; route.updatedAt = now.toISOString();
+      }
+      const peerOwned = (edge: GatewayConsentEdgeRecord): boolean => edgeOwnerHost(edge.endpoints) === peerHost &&
+        edge.endpoints.some((endpoint) => endpoint.alias.endsWith(`@${peerHost}`));
+      const desiredEdges: Array<readonly [GatewayConsentEndpoint, GatewayConsentEndpoint]> = [];
+      for (const edge of catalog.consentEdges) {
+        const resolved = edge.endpoints.map((endpoint) => state.routes.find((route) =>
+          route.alias === endpoint.alias && route.binding.provider === endpoint.provider &&
+          (endpoint.host === peerHost ? route.registrationMode === "federated_peer" && route.binding.hostId === peerHost &&
+            route.binding.routeHandle === endpoint.routeRef : endpoint.host === localHost &&
+            route.registrationMode !== "federated_peer" && route.binding.hostId === localHost &&
+            route.binding.registrationId === endpoint.routeRef))) as [GatewayRouteRecord | undefined, GatewayRouteRecord | undefined];
+        if (resolved[0] === undefined || resolved[1] === undefined || edge.ref !== peerEdgeRef(edge.endpoints))
+          throw new BridgeError("INVALID_PEER_CATALOG", "A peer consent edge does not match current endpoint authority.");
+        desiredEdges.push(canonicalConsentEndpoints(resolved[0], resolved[1]));
+      }
+      const removedEdges = state.consentEdges.filter((edge) => peerOwned(edge) &&
+        !desiredEdges.some((candidate) => sameConsent(edge.endpoints, candidate)));
+      for (const edge of removedEdges) settlements.push(...this.terminalizeConsentEdge(state, edge, now));
+      state.consentEdges = state.consentEdges.filter((edge) => !removedEdges.includes(edge));
+      for (const endpoints of desiredEdges) {
+        if (state.consentEdges.some((edge) => sameConsent(edge.endpoints, endpoints))) continue;
+        if (state.consentEdges.length >= this.config.limits.maxConsentEdges)
+          throw new BridgeError("CONSENT_EDGE_CAPACITY_REACHED", "The bounded consent-edge inventory is full.", true);
+        state.consentEdges.push({ endpoints, createdAt: now.toISOString(), updatedAt: now.toISOString(), counters: emptyCounters() });
+      }
+      return { settlements, routes: state.routes.filter((route) => route.registrationMode === "federated_peer" &&
+        route.binding.hostId === peerHost).map((route) => ({ alias: route.alias, binding: { ...route.binding },
+          registrationMode: route.registrationMode, enabled: route.enabled })) };
+    });
+  }
+  async enqueuePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<EnqueueMessageResult> {
+    return this.mutate((state, now) => {
+      const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
+      if (!this.config.allowedHosts.includes(peerHost) || peerHost === localHost || handoff.source.host !== peerHost ||
+        handoff.target.host !== localHost || handoff.edgeOwnerHost !== [peerHost, localHost].sort()[0] ||
+        handoff.edgeRef !== peerEdgeRef([handoff.source, handoff.target]))
+        throw new BridgeError("INVALID_PEER_HANDOFF", "The peer handoff does not match this configured direct link.");
+      const source = state.routes.find((route) => route.registrationMode === "federated_peer" && route.binding.hostId === peerHost &&
+        route.alias === handoff.source.alias && route.binding.provider === handoff.source.provider && route.binding.routeHandle === handoff.source.routeRef);
+      const target = state.routes.find((route) => route.registrationMode !== "federated_peer" && route.binding.hostId === localHost &&
+        route.alias === handoff.target.alias && route.binding.provider === handoff.target.provider &&
+        route.binding.registrationId === handoff.target.routeRef && route.enabled);
+      if (source === undefined || target === undefined) throw new BridgeError("ROUTE_UNREGISTERED", "The peer handoff endpoint is no longer current.");
+      const endpoints = canonicalConsentEndpoints(source, target);
+      let edge = state.consentEdges.find((candidate) => sameConsent(candidate.endpoints, endpoints));
+      if (edge === undefined && handoff.edgeOwnerHost === peerHost) {
+        if (state.consentEdges.length >= this.config.limits.maxConsentEdges)
+          throw new BridgeError("CONSENT_EDGE_CAPACITY_REACHED", "The bounded consent-edge inventory is full.", true);
+        edge = { endpoints, createdAt: now.toISOString(), updatedAt: now.toISOString(), counters: emptyCounters() };
+        state.consentEdges.push(edge);
+      }
+      if (edge === undefined) throw new BridgeError("SENDER_NOT_PAIRED", "The peer handoff lacks current exact consent.");
+      return this.enqueueResolved(state, now, { body: handoff.body, dedupeKey: `${peerHost}:${handoff.originMessageId}`,
+        deadlineAt: handoff.deadlineAt, ...(handoff.conversationCorrelation === undefined ? {} :
+          { conversationIdSuffix: handoff.conversationCorrelation }), ...(handoff.steer === true ? { steer: true as const } : {}) },
+      { sourceAlias: source.alias, targetAlias: target.alias, direction: directionId(source.binding.provider, target.binding.provider),
+        sourceRegistrationId: source.binding.registrationId, targetRegistrationId: target.binding.registrationId,
+        consentEdge: edge.endpoints, pair: true, exposeDeliveryToken: false });
+    });
+  }
   async registerRoute(input: RegisterRouteInput): Promise<void> {
     await this.mutate((state, now) => {
       this.validateRouteInput(input);
@@ -1184,34 +1284,7 @@ export class GatewayStore {
       );
       if (index < 0) return { settlements: [], unreferencedAliases: [] };
       const edge = state.consentEdges[index]!;
-      const settlements: TerminalMessageSettlement[] = [];
-      for (const message of state.messages) {
-        if (
-          message.state.phase === "terminal" ||
-          !sameConsent(message.consentEdge, edge.endpoints)
-        ) {
-          continue;
-        }
-        const outcome =
-          message.state.phase === "armed"
-            ? "ambiguous"
-            : message.state.phase === "accepted"
-              ? message.state.lossOutcome
-              : "cancelled";
-        settlements.push(
-          this.finishMessage(
-            state,
-            message,
-            outcome,
-            now,
-            outcome === "ambiguous"
-              ? "DISPATCH_OUTCOME_AMBIGUOUS"
-              : outcome === "unconfirmed"
-                ? "DELIVERY_UNCONFIRMED"
-                : "SENDER_NOT_PAIRED",
-          ),
-        );
-      }
+      const settlements = this.terminalizeConsentEdge(state, edge, now);
       state.consentEdges.splice(index, 1);
       return {
         settlements,
@@ -2148,6 +2221,18 @@ export class GatewayStore {
         ? {}
         : { supersededSettlement }),
     };
+  }
+  private terminalizeConsentEdge(
+    state: GatewayPersistedState, edge: GatewayConsentEdgeRecord, now: Date,
+  ): TerminalMessageSettlement[] {
+    return state.messages.filter((message) => message.state.phase !== "terminal" &&
+      sameConsent(message.consentEdge, edge.endpoints)).map((message) => {
+      const outcome = message.state.phase === "armed" ? "ambiguous" :
+        message.state.phase === "accepted" ? message.state.lossOutcome : "cancelled";
+      return this.finishMessage(state, message, outcome, now, outcome === "ambiguous"
+        ? "DISPATCH_OUTCOME_AMBIGUOUS" : outcome === "unconfirmed"
+          ? "DELIVERY_UNCONFIRMED" : "SENDER_NOT_PAIRED");
+    });
   }
   private allocateDeliveryToken(state: GatewayPersistedState): string {
     for (let attempt = 0; attempt < 8; attempt += 1) {

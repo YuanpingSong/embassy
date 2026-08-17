@@ -317,6 +317,29 @@ function bodyHash(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
 }
 
+function peerCatalogAuthorityChanged(
+  prior: PeerCatalogResult | undefined,
+  current: PeerCatalogResult,
+): boolean {
+  const authority = (catalog: PeerCatalogResult) => JSON.stringify([
+    catalog.routes.map(({ state: _state, queueDepth: _depth, lastSeenAt: _seen,
+      safeErrorCode: _code, ...route }) => route).sort((a, b) => a.ref.localeCompare(b.ref)),
+    [...catalog.consentEdges].sort((a, b) => a.ref.localeCompare(b.ref)),
+  ]);
+  return prior === undefined || authority(prior) !== authority(current);
+}
+
+function peerCatalogViewChanged(prior: PeerCatalogResult | undefined, current: PeerCatalogResult): boolean {
+  const view = (catalog: PeerCatalogResult) => JSON.stringify([
+    catalog.health,
+    catalog.connectors.map(({ lastSeenAt: _seen, observationAgeMs: _age, ...row }) => row),
+    catalog.routes.map(({ lastSeenAt: _seen, ...row }) => row).sort((a, b) => a.ref.localeCompare(b.ref)),
+    [...catalog.consentEdges].sort((a, b) => a.ref.localeCompare(b.ref)),
+    catalog.alerts.map(({ timestamp: _timestamp, ...row }) => row),
+  ]);
+  return prior === undefined || view(prior) !== view(current);
+}
+
 export class GatewayService {
   readonly config: GatewayConfig;
   readonly store: GatewayStore;
@@ -329,6 +352,8 @@ export class GatewayService {
   private readonly spawnPeer: typeof spawnPeerClient;
   private readonly peerClients = new Map<string, PeerClient>();
   private readonly peerCatalogs = new Map<string, PeerCatalogResult>();
+  /** View-only freshness; never consulted by routing or write authorization. */
+  private readonly peerRouteViews = new Map<string, GatewayAdapterRouteObservation>();
   private readonly connectors = new Map<string, ConnectorRuntime>();
   private readonly routeObservations = new Map<string, GatewayAdapterRouteObservation>();
   private readonly candidates = new Map<string, Candidate>();
@@ -337,6 +362,7 @@ export class GatewayService {
   private readonly activeAttempts = new Map<string, ActiveAttempt>();
   private readonly reserveOperations = new Set<Promise<void>>();
   private readonly inboundOperations = new Set<Promise<void>>();
+  private readonly peerRefreshOperations = new Set<Promise<void>>();
   private readonly pendingClaudeReplies = new Map<string, PendingClaudeReply[]>();
   private readonly nativeReceipts = new Map<string, NativeReceipt>();
   private readonly progressWatches = new Map<string, RuntimeWatch>();
@@ -434,7 +460,7 @@ export class GatewayService {
       const now = this.now().getTime();
       this.nextDiscoveryAt = now + DISCOVERY_INTERVAL_MS;
       this.nextDoctorAt = now + CODEX_DOCTOR_INTERVAL_MS;
-      this.nextPeerRefreshAt = now;
+      this.nextPeerRefreshAt = (this.config.peerNodes?.length ?? 0) > 0 ? now : 0;
       for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
       await this.publish();
       this.scheduleWake();
@@ -483,6 +509,9 @@ export class GatewayService {
     if (control !== undefined) await control.close().catch((error) => failures.push(error));
     for (const peer of this.peerClients.values()) peer.close();
     this.peerClients.clear();
+    await Promise.all([...this.peerRefreshOperations]).catch((error) => failures.push(error));
+    this.peerCatalogs.clear();
+    this.peerRouteViews.clear();
     // Provider close aborts exact owned operations. It must never join a turn.
     await Promise.all(
       this.adapters.map(async (adapter) => {
@@ -536,13 +565,79 @@ export class GatewayService {
         await this.publish();
         return { accepted: true, code: "ok", revision: this.revision };
       },
+      peerCatalog: ({ peerHost }) => this.buildPeerCatalog(peerHost),
+      peerHandoff: ({ peerHost, handoff }) => this.receivePeerHandoff(peerHost, handoff),
     };
+  }
+
+  private async buildPeerCatalog(peerHost: string): Promise<PeerCatalogResult> {
+    const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
+    if (!(this.config.peerNodes ?? []).includes(peerHost))
+      throw new BridgeError("PEER_NOT_CONFIGURED", "The requested peer host is not configured.");
+    const [snapshot, privateRoutes, privateEdges] = await Promise.all([
+      this.snapshot(), this.store.inspectPrivateRoutes(), this.store.inspectPrivateConsentEdges(),
+    ]);
+    const localRoutes = privateRoutes.filter((route) => route.registrationMode !== "federated_peer" && route.binding.hostId === localHost);
+    const publicRoutes = new Map(snapshot.routes.map((route) => [route.alias, route]));
+    const routeByAlias = new Map(privateRoutes.map((route) => [route.alias, route]));
+    const routes = localRoutes.map((route) => { const row = publicRoutes.get(route.alias)!; return {
+      ref: route.binding.registrationId, alias: route.alias, provider: route.binding.provider, host: localHost,
+      enabled: route.enabled, state: row?.state ?? (route.enabled ? "stale" as const : "disabled" as const),
+      queueDepth: row?.queueDepth ?? 0, ...(row?.lastSeenAt === undefined ? {} : { lastSeenAt: row.lastSeenAt }),
+      ...(row?.safeErrorCode === undefined ? {} : { safeErrorCode: row.safeErrorCode }),
+    }; });
+    const consentEdges = privateEdges.flatMap((edge) => {
+      if (edge.endpoints.map((endpoint) => aliasHost(endpoint.alias)).sort()[0] !== localHost) return [];
+      const rows = edge.endpoints.map((endpoint) => routeByAlias.get(endpoint.alias)) as
+        [GatewayPrivateRouteInspection | undefined, GatewayPrivateRouteInspection | undefined];
+      if (rows[0] === undefined || rows[1] === undefined ||
+        !rows.some((route) => route?.binding.hostId === peerHost) ||
+        !rows.some((route) => route?.binding.hostId === localHost)) return [];
+      const endpoint = (route: GatewayPrivateRouteInspection) => ({ alias: route.alias, provider: route.binding.provider,
+        host: route.binding.hostId, routeRef: route.registrationMode === "federated_peer"
+          ? route.binding.routeHandle : route.binding.registrationId });
+      const endpoints: Parameters<typeof peerEdgeRef>[0] = [endpoint(rows[0]), endpoint(rows[1])];
+      return [{ ref: peerEdgeRef(endpoints), ownerHost: localHost, endpoints }];
+    });
+    return { revision: this.revision, complete: true, truncated: false, generatedAt: snapshot.generatedAt,
+      health: snapshot.health, connectors: snapshot.connectors.filter((row) => row.host === localHost).map((row) => ({
+        provider: row.provider, host: row.host, health: row.health, protocol: row.protocol, protocolVersion: row.protocolVersion,
+        ...(row.lastSeenAt === undefined ? {} : { lastSeenAt: row.lastSeenAt }),
+        ...(row.observationAgeMs === undefined ? {} : { observationAgeMs: row.observationAgeMs }),
+        ...(row.safeErrorCode === undefined ? {} : { safeErrorCode: row.safeErrorCode }),
+      })), routes, consentEdges, alerts: snapshot.alerts.filter((alert) =>
+        (alert.host === undefined || alert.host === localHost) && (alert.alias === undefined || aliasHost(alert.alias) === localHost)), };
+  }
+
+  private async receivePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<Readonly<{ accepted: true }>> {
+    if (!(this.config.peerNodes ?? []).includes(peerHost))
+      throw new BridgeError("PEER_NOT_CONFIGURED", "The sending peer host is not configured.");
+    const enqueued = await this.store.enqueuePeerHandoff(peerHost, handoff);
+    if (enqueued.messageId !== undefined) {
+      const source = await this.store.inspectPrivateRoute(handoff.source.alias);
+      const target = await this.store.inspectPrivateRoute(handoff.target.alias);
+      if (source === undefined || target === undefined) throw new BridgeError("ROUTE_UNREGISTERED", "The committed peer handoff endpoint is no longer current.");
+      const conversationId = conversationIdForSuffix(handoff.conversationCorrelation);
+      this.rememberConversation({ id: conversationId, sourceAlias: source.alias, targetAlias: target.alias,
+        sourceBinding: source.binding, targetBinding: target.binding, expectsReply: handoff.expectsReply,
+        pair: true, nextSequence: 1 });
+      this.messageContexts.set(enqueued.messageId, { conversationId, expectsReply: handoff.expectsReply });
+      this.kick(target.alias, target.binding.registrationId);
+    }
+    this.revision += 1; await this.publish();
+    return { accepted: true };
   }
 
   async snapshot(): Promise<GatewayPublicSnapshot> {
     const base = await this.store.publicSnapshot();
     const now = this.now();
     const routes = base.routes.map((route) => {
+      const peer = this.peerRouteViews.get(route.alias);
+      if (peer !== undefined) {
+        const age = now.getTime() - Date.parse(peer.observedAt);
+        return { ...route, state: peer.state === "unobserved" || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS ? "stale" as const : peer.state,
+          lastSeenAt: peer.observedAt, ...(peer.safeErrorCode === undefined ? {} : { safeErrorCode: peer.safeErrorCode }) };
+      }
       const persisted = this.routeObservations.get(route.alias);
       if (persisted === undefined) return route;
       const current = this.routeObservationStillCurrent(persisted);
@@ -687,6 +782,8 @@ export class GatewayService {
 
   private async observeLoadedRoutes(): Promise<void> {
     for (const route of await this.store.listLogicalRoutes()) {
+      if (route.registrationMode === "federated_peer") this.peerRouteViews.set(route.alias, { route: route.binding,
+        state: "unobserved", observedAt: this.now().toISOString(), safeErrorCode: "PEER_TUNNEL_UNAVAILABLE" });
       this.observeRoute(route);
       if (route.binding.provider !== "claude") {
         this.reconcileAdvertisement(route);
@@ -2353,6 +2450,9 @@ export class GatewayService {
       const due = [
         this.nextDiscoveryAt || now + DISCOVERY_INTERVAL_MS,
         this.nextDoctorAt || now + CODEX_DOCTOR_INTERVAL_MS,
+        ...((this.config.peerNodes?.length ?? 0) > 0
+          ? [this.nextPeerRefreshAt || now + PEER_REFRESH_INTERVAL_MS]
+          : []),
         ...(deadlineAt === undefined ? [] : [Date.parse(deadlineAt)]),
         ...[...this.pendingClaudeReplies.values()].flatMap((rows) =>
           rows.map((row) => Date.parse(row.deadlineAt))
@@ -2381,9 +2481,72 @@ export class GatewayService {
       await this.refreshCodexDoctor().catch(() => undefined);
       this.nextDoctorAt = now.getTime() + CODEX_DOCTOR_INTERVAL_MS;
     }
+    if (this.nextPeerRefreshAt > 0 && now.getTime() >= this.nextPeerRefreshAt) {
+      const operation = this.refreshPeers();
+      this.peerRefreshOperations.add(operation);
+      try { await operation; } finally { this.peerRefreshOperations.delete(operation); }
+      this.nextPeerRefreshAt = now.getTime() + PEER_REFRESH_INTERVAL_MS;
+    }
+    if (!this.running || this.closing) return;
     for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
     await this.publish();
     this.scheduleWake();
+  }
+
+  private async refreshPeers(): Promise<void> {
+    const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
+    await Promise.all((this.config.peerNodes ?? []).map(async (peerHost) => {
+      try {
+        let client = this.peerClients.get(peerHost);
+        if (client === undefined) {
+          client = await this.spawnPeer({ node: peerHost, localHost });
+          if (!this.running || this.closing) { client.close(); return; }
+          this.peerClients.set(peerHost, client);
+        }
+        const catalog = await client.catalog();
+        if (!this.running || this.closing) return;
+        const prior = this.peerCatalogs.get(peerHost);
+        let routes = await this.store.inspectPrivateRoutes().then((rows) => rows.filter((route) =>
+          route.registrationMode === "federated_peer" && route.binding.hostId === peerHost));
+        if (!catalog.complete || catalog.truncated) {
+          const observedAt = this.now().toISOString();
+          for (const route of routes) this.peerRouteViews.set(route.alias, { route: route.binding,
+            state: "unobserved", observedAt, safeErrorCode: "PEER_CATALOG_INCOMPLETE" });
+          return;
+        }
+        const authorityChanged = peerCatalogAuthorityChanged(prior, catalog);
+        const viewChanged = peerCatalogViewChanged(prior, catalog);
+        if (authorityChanged) {
+          const before = routes;
+          const reconciled = await this.store.reconcilePeerCatalog(peerHost, catalog);
+          routes = [...reconciled.routes]; await this.finishSettlements(reconciled.settlements);
+          for (const old of before) if (!routes.some((route) => route.alias === old.alias &&
+            route.binding.registrationId === old.binding.registrationId)) {
+            this.peerRouteViews.delete(old.alias); this.reconcileUnadvertisement(old);
+          }
+          for (const route of routes) if (!before.some((old) => old.alias === route.alias &&
+            old.binding.registrationId === route.binding.registrationId)) this.reconcileAdvertisement(route);
+        }
+        this.peerCatalogs.set(peerHost, catalog);
+        const observedAt = this.now().toISOString();
+        for (const route of routes) {
+          const row = catalog.routes.find((candidate) => candidate.ref === route.binding.routeHandle);
+          const state = row?.state === "idle" || row?.state === "busy" || row?.state === "awaiting_approval"
+            ? row.state : "unobserved";
+          this.peerRouteViews.set(route.alias, { route: route.binding, state, observedAt,
+            ...(state === "unobserved" ? { safeErrorCode: row?.safeErrorCode ?? "PEER_ROUTE_STALE" } : {}) });
+          if (row?.enabled === true) this.kick(route.alias, route.binding.registrationId);
+        }
+        if (viewChanged) this.revision += 1;
+      } catch {
+        this.peerClients.get(peerHost)?.close(); this.peerClients.delete(peerHost);
+        if (!this.running || this.closing) return;
+        const observedAt = this.now().toISOString();
+        for (const route of await this.store.inspectPrivateRoutes()) if (route.registrationMode === "federated_peer" &&
+          route.binding.hostId === peerHost) this.peerRouteViews.set(route.alias, { route: route.binding,
+            state: "unobserved", observedAt, safeErrorCode: "PEER_TUNNEL_UNAVAILABLE" });
+      }
+    }));
   }
 
   private async refreshClaudeDiscovery(): Promise<void> {
