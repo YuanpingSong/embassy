@@ -8,7 +8,7 @@ import path from "node:path";
 import type { GatewayConfig } from "../src/gateway/config.js";
 import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
 import type { PeerClient } from "../src/gateway/peer-client.js";
-import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
+import { decodePeerResult, peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
 import {
   GatewayService,
@@ -707,6 +707,8 @@ test("peer handoff preserves every write boundary and never replays uncertainty"
       await subject.store.registerRoute(local); await subject.store.registerRoute(remote);
       await subject.store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
       const peer = { close: () => undefined, prepareHandoff: (params: PeerHandoffParams) => {
+        assert.equal(params.source.routeRef, peerRouteRef("studio", local.binding.registrationId));
+        assert.notEqual(params.source.routeRef, local.binding.registrationId);
         const bodySha256 = createHash("sha256").update(params.body).digest("hex");
         return { bodyBytes: Buffer.byteLength(params.body), bodySha256, frameBytes: 32, sha256: createHash("sha256").update("peer-frame").digest("hex"),
           cancel: () => undefined, perform: async () => { writes += 1; if (mode === "pipe") throw new Error("pipe lost"); return { accepted: true as const }; } };
@@ -796,7 +798,8 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
   const local: RegisterRouteInput = { alias: "codex-local@studio", registrationMode: "explicit_opt_in",
     binding: { provider: "codex", hostId: "studio", routeHandle: THREAD_A, registrationId: "reg_local" } };
   const remote = { alias: "dsh-worker@m5dev", provider: "deepseek" as const, host: "m5dev", routeRef: "reg_remote_dsh" };
-  const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio", routeRef: local.binding.registrationId };
+  const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio",
+    routeRef: peerRouteRef("studio", local.binding.registrationId) };
   let current: PeerCatalogResult = { revision: 1, complete: true, truncated: false, generatedAt: "2026-08-16T12:00:00.000Z",
     health: "healthy", connectors: [], routes: [{ ref: remote.routeRef, alias: remote.alias, provider: remote.provider,
       host: remote.host, enabled: true, state: "idle", queueDepth: 0 }], consentEdges: [{ ref: peerEdgeRef([remote, localEndpoint]),
@@ -876,6 +879,41 @@ test("a fresh canonical-host broker exports its startup-owned routes to a config
     const catalog = await subject.handlers.peerCatalog?.({ peerHost: "this-mac" });
     assert.deepEqual(catalog?.routes.map((route) => route.alias).sort(),
       ["dsh-main@m5dev", "grok-main@m5dev"]);
+  } finally { await subject.close(); }
+});
+
+test("a this-mac mixed-provider catalog is strict, opaque, and excludes local-only authority", async () => {
+  const routes = [
+    route("claude", "advisor@this-mac", "00000000-0000-4000-8000-000000000001", "lease_claude"),
+    route("codex", "codex-main@this-mac", THREAD_A, "lease_codex_main"),
+    route("codex", "codex-review@this-mac", THREAD_B, "lease_codex_review"),
+    route("deepseek", "dsh-main@this-mac", "deepseek-session", "lease_deepseek"),
+    route("grok", "grok-main@this-mac", "grok-session", "lease_grok"),
+  ];
+  const subject = await fixture((["claude", "codex", "deepseek", "grok"] as const)
+    .map((provider) => new FakeProvider({ provider, hostId: "this-mac" })), {
+    hostId: "this-mac", peerNodes: ["m5dev"], seed: async (store) => {
+      for (const candidate of routes) await store.registerRoute(candidate);
+      await store.addConsentEdge({ aliases: [routes[0]!.alias, routes[1]!.alias],
+        expectedRegistrationIds: [routes[0]!.binding.registrationId, routes[1]!.binding.registrationId] });
+    },
+  });
+  try {
+    const alerts = (subject.service as unknown as { runtimeAlerts: Array<Record<string, unknown>> }).runtimeAlerts;
+    alerts.push({ code: "INVALID_CODEX_PEER_ALIAS", severity: "warning", timestamp: subject.clock.now().toISOString(),
+      provider: "codex", host: "m5dev", alias: "codex-invalid@m5dev" });
+    alerts.push({ code: "LOCAL_TEST_NOTICE", severity: "warning", timestamp: subject.clock.now().toISOString(),
+      provider: "codex", host: "this-mac", alias: routes[1]!.alias });
+    const catalog = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });
+    assert.ok(catalog); assert.deepEqual(decodePeerResult("catalog/get", catalog), catalog);
+    assert.equal(catalog.routes.length, 5); assert.equal(catalog.consentEdges.length, 0);
+    assert.deepEqual(catalog.alerts.map((alert) => alert.code), ["LOCAL_TEST_NOTICE"]);
+    assert.ok(catalog.routes.every((row) => /^reg_[A-Za-z0-9_-]+$/.test(row.ref)));
+    const wire = JSON.stringify(catalog);
+    for (const candidate of routes) {
+      assert.equal(wire.includes(candidate.binding.registrationId), false);
+      assert.equal(wire.includes(candidate.binding.routeHandle), false);
+    }
   } finally { await subject.close(); }
 });
 

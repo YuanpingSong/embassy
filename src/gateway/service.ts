@@ -30,7 +30,7 @@ import { publishGatewayDashboard } from "./dashboard.js";
 import type { CodexDoctorResult } from "./codex-doctor.js";
 import { spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
-import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
+import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
   PROGRESS_WATCH_DEFAULT_IDLE_MS,
@@ -604,7 +604,7 @@ export class GatewayService {
     const publicRoutes = new Map(snapshot.routes.map((route) => [route.alias, route]));
     const routeByAlias = new Map(privateRoutes.map((route) => [route.alias, route]));
     const routes = localRoutes.map((route) => { const row = publicRoutes.get(route.alias)!; return {
-      ref: route.binding.registrationId, alias: route.alias, provider: route.binding.provider, host: localHost,
+      ref: peerRouteRef(localHost, route.binding.registrationId), alias: route.alias, provider: route.binding.provider, host: localHost,
       enabled: route.enabled, state: row?.state ?? (route.enabled ? "stale" as const : "disabled" as const),
       queueDepth: row?.queueDepth ?? 0, ...(row?.lastSeenAt === undefined ? {} : { lastSeenAt: row.lastSeenAt }),
       ...(row?.safeErrorCode === undefined ? {} : { safeErrorCode: row.safeErrorCode }),
@@ -618,7 +618,7 @@ export class GatewayService {
         !rows.some((route) => route?.binding.hostId === localHost)) return [];
       const endpoint = (route: GatewayPrivateRouteInspection) => ({ alias: route.alias, provider: route.binding.provider,
         host: route.binding.hostId, routeRef: route.registrationMode === "federated_peer"
-          ? route.binding.routeHandle : route.binding.registrationId });
+          ? route.binding.routeHandle : peerRouteRef(localHost, route.binding.registrationId) });
       const endpoints: Parameters<typeof peerEdgeRef>[0] = [endpoint(rows[0]), endpoint(rows[1])];
       return [{ ref: peerEdgeRef(endpoints), ownerHost: localHost, endpoints }];
     });
@@ -1655,7 +1655,7 @@ export class GatewayService {
           return false;
         }
         const sourceEndpoint = { alias: source.alias, provider: source.binding.provider,
-          host: source.binding.hostId, routeRef: source.binding.registrationId } as const;
+          host: source.binding.hostId, routeRef: peerRouteRef(source.binding.hostId, source.binding.registrationId) } as const;
         const targetEndpoint = { alias: target.alias, provider: target.binding.provider,
           host: target.binding.hostId, routeRef: target.binding.routeHandle } as const;
         const params: PeerHandoffParams = {

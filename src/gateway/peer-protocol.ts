@@ -53,6 +53,11 @@ const endpoint: Check = (v) => exact(v, { alias, provider: member(providers), ho
 
 export class PeerProtocolError extends Error { constructor(readonly code: string) { super(code); this.name = "PeerProtocolError"; } }
 export const isPeerMethod = (value: unknown): value is PeerMethod => value === "initialize" || value === "catalog/get" || value === "handoff";
+export function peerRouteRef(hostId: string, registrationId: string): string {
+  if (!host(hostId) || typeof registrationId !== "string" || registrationId.length === 0)
+    throw new PeerProtocolError("INVALID_ROUTE_AUTHORITY");
+  return `reg_${createHash("sha256").update(`${hostId}\0${registrationId}`).digest("base64url")}`;
+}
 export function peerEdgeRef(endpoints: readonly [PeerEndpoint, PeerEndpoint]): string { if (!endpoints.every(endpoint)) throw new PeerProtocolError("INVALID_ENDPOINT");
   const canonical = endpoints.map(({ host, alias, routeRef }) => `${host}\0${alias}\0${routeRef}`).sort().join("\0");
   return `edge_${createHash("sha256").update(canonical).digest("base64url")}`; }

@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.9.5] - 2026-08-17
+
+### Fixed
+
+- Federation dials no longer fail against brokers whose state was migrated from v2: the peer catalog previously exported private `lease_*` registration IDs as wire refs, which the strict `reg_*` wire contract rejected (surfacing as `-32603` at `initialize`; fresh installs passed only because their random IDs happened to be `reg_`-shaped). Local route authority is now projected as an opaque, deterministic, host-bound `reg_*` hash everywhere the peer wire consumes it — catalog routes, consent-edge endpoints, and handoff admission — and raw registration IDs and native provider handles never cross the wire.
+
+### Upgrade note
+
+- Upgrading a federated broker rebuilds its peers' mirrors of your routes (every wire ref changes): in-flight cross-host messages settle as `ROUTE_UNREGISTERED`, and cross-host consent edges owned by your broker are dropped — re-run `embassy pair` for them once after both sides upgrade. Mirrors themselves re-appear within one 30-second refresh.
+
 ## [1.9.4] - 2026-08-17
 
 Identical to the unpublished v1.9.3 (its pipeline was failed by a release-checklist miss — the embedded version constant and its pinned test were not bumped with the package version; no product defect).

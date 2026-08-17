@@ -4,7 +4,7 @@ import { PassThrough, type Writable } from "node:stream";
 import { setImmediate as immediate } from "node:timers/promises";
 import test from "node:test";
 import { PeerConnectionLostError, spawnPeerClient, type PeerSpawn } from "../src/gateway/peer-client.js";
-import { decodePeerParams, decodePeerResult, peerEdgeRef, PEER_MAX_BODY_BYTES, PEER_METHOD_NOT_FOUND,
+import { decodePeerParams, decodePeerResult, peerEdgeRef, peerRouteRef, PEER_MAX_BODY_BYTES, PEER_METHOD_NOT_FOUND,
   type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { PeerHandlerError, runPeerStdio } from "../src/gateway/peer-stdio.js";
 
@@ -33,6 +33,9 @@ test("peer codecs require exact body-free catalog and bounded opaque handoff fie
   assert.throws(() => decodePeerResult("catalog/get", { ...catalog(), alerts: [{ code: "SAFE", severity: "error", timestamp: now, alias: "/private/secret@m5dev" }] }), /INVALID_RESULT/);
   const left = endpoint(), right = endpoint("codex-main@m5dev", "reg_remote");
   assert.match(peerEdgeRef([left, right]), /^edge_[A-Za-z0-9_-]{43}$/); assert.equal(peerEdgeRef([left, right]), peerEdgeRef([right, left]));
+  assert.match(peerRouteRef("studio", "lease_private"), /^reg_[A-Za-z0-9_-]{43}$/);
+  assert.equal(peerRouteRef("studio", "lease_private"), peerRouteRef("studio", "lease_private"));
+  assert.notEqual(peerRouteRef("studio", "lease_private"), peerRouteRef("m5dev", "lease_private"));
 });
 
 class FakeChild extends EventEmitter {

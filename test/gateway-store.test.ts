@@ -13,7 +13,7 @@ import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayConfig } from "../src/gateway/config.js";
-import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
+import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import {
   GatewayStore,
   isGatewayPersistedStateV3,
@@ -1712,7 +1712,8 @@ test("peer catalog reconciliation and destination enqueue commit one destination
     binding: { provider: "codex" as const, hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } };
   await store.registerRoute(local);
   const remoteEndpoint = { alias: "dsh-worker@m5dev", provider: "deepseek" as const, host: "m5dev", routeRef: "reg_remote_dsh" };
-  const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio", routeRef: local.binding.registrationId };
+  const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio",
+    routeRef: peerRouteRef("studio", local.binding.registrationId) };
   const edgeRef = peerEdgeRef([remoteEndpoint, localEndpoint]);
   const catalog = (revision: number, alias = remoteEndpoint.alias): PeerCatalogResult => { const remote = { ...remoteEndpoint, alias }; return {
     revision, complete: true, truncated: false, generatedAt: setup.clock.now().toISOString(), health: "healthy", connectors: [],
@@ -1771,7 +1772,7 @@ test("peer catalog reconciliation and destination enqueue commit one destination
     binding: { provider: "codex" as const, hostId: "lab", routeHandle: "thread-owner", registrationId: "reg_owner_local" } };
   const ownerRemote = { alias: "dsh-worker@zdev", provider: "deepseek" as const, host: "zdev", routeRef: "reg_owner_remote" };
   const ownerTarget = { alias: ownerLocal.alias, provider: ownerLocal.binding.provider, host: "lab",
-    routeRef: ownerLocal.binding.registrationId };
+    routeRef: peerRouteRef("lab", ownerLocal.binding.registrationId) };
   await ownerStore.registerRoute(ownerLocal);
   await ownerStore.reconcilePeerCatalog("zdev", { revision: 1, complete: true, truncated: false,
     generatedAt: ownerSetup.clock.now().toISOString(), health: "healthy", connectors: [], routes: [{ ref: ownerRemote.routeRef,

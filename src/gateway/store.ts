@@ -6,7 +6,7 @@ import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
-import { peerEdgeRef, type PeerCatalogResult, type PeerEndpoint, type PeerHandoffParams } from "./peer-protocol.js";
+import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerEndpoint, type PeerHandoffParams } from "./peer-protocol.js";
 import { deliveryStates, directionId, gatewayActivityActions, gatewayActivityKinds,
   gatewayProviders, gatewayPublicSnapshotLimits, gatewayRegistrationIngressPrefixes,
   parseDirection, projectGatewayPublicSnapshot, routeRegistrationModes } from "./types.js";
@@ -963,7 +963,7 @@ export class GatewayStore {
           (endpoint.host === peerHost ? route.registrationMode === "federated_peer" && route.binding.hostId === peerHost &&
             route.binding.routeHandle === endpoint.routeRef : endpoint.host === localHost &&
             route.registrationMode !== "federated_peer" && route.binding.hostId === localHost &&
-            route.binding.registrationId === endpoint.routeRef))) as [GatewayRouteRecord | undefined, GatewayRouteRecord | undefined];
+            peerRouteRef(localHost, route.binding.registrationId) === endpoint.routeRef))) as [GatewayRouteRecord | undefined, GatewayRouteRecord | undefined];
         if (resolved[0] === undefined || resolved[1] === undefined || edge.ref !== peerEdgeRef(edge.endpoints))
           throw new BridgeError("INVALID_PEER_CATALOG", "A peer consent edge does not match current endpoint authority.");
         desiredEdges.push(canonicalConsentEndpoints(resolved[0], resolved[1]));
@@ -994,7 +994,7 @@ export class GatewayStore {
         route.alias === handoff.source.alias && route.binding.provider === handoff.source.provider && route.binding.routeHandle === handoff.source.routeRef);
       const target = state.routes.find((route) => route.registrationMode !== "federated_peer" && route.binding.hostId === localHost &&
         route.alias === handoff.target.alias && route.binding.provider === handoff.target.provider &&
-        route.binding.registrationId === handoff.target.routeRef && route.enabled);
+        peerRouteRef(localHost, route.binding.registrationId) === handoff.target.routeRef && route.enabled);
       if (source === undefined || target === undefined) throw new BridgeError("ROUTE_UNREGISTERED", "The peer handoff endpoint is no longer current.");
       const endpoints = canonicalConsentEndpoints(source, target);
       let edge = state.consentEdges.find((candidate) => sameConsent(candidate.endpoints, endpoints));
