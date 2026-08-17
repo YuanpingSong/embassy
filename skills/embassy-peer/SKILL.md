@@ -31,7 +31,7 @@ embassy health
 
 If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
-Embassy presents Claude, Codex, DeepSeek, and Grok as first-class providers. Runtime status is best-effort: use route staleness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed route.
+Embassy presents Claude, Codex, DeepSeek, and Grok as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
 
 List the public snapshot:
 
@@ -93,27 +93,25 @@ Register only from the Codex task being named:
 embassy register-codex --alias codex-reviewer@this-mac
 ```
 
-Let the CLI read that task's inherited `CODEX_THREAD_ID`. Never supply the thread ID as an argument, print it, persist it, or register another task by guessing its identity. The alias must start with `codex-`; a successful registration advertises that task for native inbound turns.
+Let the CLI read that task's inherited `CODEX_THREAD_ID`. Never supply the thread ID as an argument, print it, persist it, or register another task by guessing its identity. The alias must start with `codex-`. Registration commits only the logical route record and performs no provider or App Server I/O. Advertisement reconciles separately and best-effort; bounded observation is display-only and never routing authority or a dispatch gate. Every Codex operation independently attests the current interface and resumes the exact registered task before final write authorization.
 
 The first successful Codex registration fixes its exact alias, task, and host
-until it is explicitly succeeded. Exact re-registration remains available for
-connector recovery. To hand the registration to a different task on the same
-host, run this from inside the successor task:
+until it is removed or explicitly succeeded. To hand the registration to a
+different task on the same host, run this from inside the successor task:
 
 ```sh
 embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac
 ```
 
-This is the only supported identity change without restarting the broker.
-Embassy freezes the outgoing route, drains its accepted work to terminal
-settlement, and publishes the successor on a fresh listener generation.
-Nothing transfers: no queued body, conversation, reply capability, or delivery
-token. A succession that cannot be completed pins the identity fail-closed
-until manual recovery rather than leaving two live registrations.
-
-Embassy also pins the exact identity fail-closed when a retained route cannot fully reactivate or a fresh registration cannot confirm complete rollback. Retry only that exact identity; choose another only after the old route is confirmed unregistered and Embassy is restarted.
-
-A Codex App Server generation change or broker restart can reattach an exact registered task automatically. Each replacement generation negotiates its current interface and must observe the exact task before the controller re-anchors it. A normal broker restart therefore needs no manual registration. If boot reactivation cannot find the task exactly once, the route remains stale with `REOBSERVATION_REQUIRED`; once the task is observable, recover it only from that exact Codex task by rerunning `embassy register-codex --alias <same-alias>`. Do not unregister first, supply a thread ID, or replay any ambiguously written body.
+This is one atomic logical replacement. The commit cancels queued or reserved
+work with `ROUTE_UNREGISTERED`, settles armed work `ambiguous` and accepted
+work `unconfirmed`, removes every incident consent edge and capability, and
+installs only the successor. It never waits for a model turn and has no
+prepared listener, activation, re-anchoring, succession journal, or recovery
+generation. Nothing transfers: no conversation, reply or native capability,
+pairing authority, rate ownership, or deduplication ownership. Advertisement
+of the successor reconciles asynchronously and cannot roll back the committed
+logical identity.
 
 Unregister from the same Codex task:
 
@@ -122,6 +120,10 @@ embassy unregister-codex --alias codex-reviewer@this-mac
 ```
 
 If the task identity or selector does not match, stop on the fail-closed result.
+Successful unregister is the exact-owner form of the same atomic removal: it
+removes incident consent edges and conversation, reply, or native capabilities,
+cancels queued/reserved work, settles armed work `ambiguous`, and settles
+accepted work `unconfirmed`.
 
 ## Send a message
 
@@ -146,7 +148,7 @@ The foreground launcher supports native bidirectional messaging for each explici
 
 Direction determines timing. Once routing and pre-write checks pass, every Claude-bound send or correlated reply writes immediately to Claude's native mailbox regardless of its observed busy or idle state. Do not wait for Claude to become idle or report its busy state as a queue reason. `transport_written` is the terminal `delivered` boundary for that direction and means mailbox write, not read or consumption. Codex-bound ordinary work remains idle/turn-boundary gated; only the exact `STEER:` behavior below may target the active turn's next tool-call boundary.
 
-An accepted send returns a public conversation token and a fresh delivery token. The delivery token is an opaque, memory-only correlation handle, exactly `dlv_` plus 24 base64url characters. Use the exact returned values only for their intended CLI calls; do not construct, shorten, log, persist, or place either token in an agent-created file.
+An accepted send returns a public conversation token and a fresh delivery token. The conversation token and reply capability are memory-only. The delivery token is an opaque correlation handle, exactly `dlv_` plus 24 base64url characters, retained only with its bounded private v3 message row. Use the exact returned values only for their intended CLI calls; do not construct, shorten, log, persist yourself, or place either token in an agent-created file.
 
 Use exactly one send for one user-authorized message. A send never selects a Claude session automatically. Do not automatically retry, fan out, hand-roll a poll loop, or fall back to Claude Code's native `SendMessage`.
 
@@ -192,15 +194,15 @@ embassy wait-delivery --token dlv_0123456789abcdefghijklmn
 
 It checks every 250 ms and emits only a terminal result. It stops at the delivery deadline plus 3 seconds; an unknown token fails immediately. Exit `0` means `delivered`; every other terminal state (`unconfirmed`, `expired`, `failed`, `ambiguous`, or `cancelled`) preserves its exact JSON result and uses the shared delivery-failure exit `6`. An unknown token exits `3`. A local waiter timeout exits `4`, is not a terminal result, and is not permission to resend. A terminal result closes only that delivery attempt: `delivered` does not promise a reply, and `unconfirmed` or `ambiguous` must never be retried automatically.
 
-The in-memory status table is bounded. Under pressure, only its oldest terminal handle may be evicted; active `queued` or `stalled` handles are retained. An evicted handle returns `{"found":false}`.
+The private v3 message ledger is bounded. Under pressure, its oldest terminal row may be evicted while active `queued` or `stalled` rows are retained. A token absent from bounded retention returns `{"found":false}`.
 
 ## Interpret queue state
 
 Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `delivery-status` for the accepted delivery, or `status` and the dashboard for aggregate route state, when the user asks for progress. The optional `pendingForMs` field is age since acceptance, including in-flight time. `stalled` remains nonterminal. A Claude-bound tracker may be briefly `queued` for routing or pre-write work, but a busy Claude observation never idle-gates it: after those checks, the native mailbox write is immediate and `transport_written` settles `delivered`.
 
-For native Claude-to-Codex ingress, Embassy first attempts immediate dispatch. A terminal result observed before the one-second prompt boundary produces only its terminal acknowledgement; native `held` is sent only when the body truly remains queued or dispatch is still nonterminal at that boundary, followed later by the terminal acknowledgement. Claude's rendered “approved and released” notice means only that the paired-consent gateway accepted and released the body to the recipient queue — released is not read, and no human approval is implied. The default `merged` notice policy separately sends at most one nonterminal stall user frame exactly at `floor(messageDeadlineMs / 2)`, containing only a bounded pending age and allowlisted reason. The operator may choose `verbose` to retain the additional terminal diagnostic user frame or `quiet` to suppress gateway-authored user-frame notices; native status and dashboard truth do not change. Codex-bound ordinary work queues while the Codex task is active or temporarily unavailable. Only when the user explicitly asks to steer the active Codex turn may a Claude sender put the exact prefix `STEER:` at the beginning of the body. Embassy submits that input at the next tool-call boundary, never mid-generation or by interrupting; clean boundary refusal silently returns it to the normal queue. At most three steering messages remain queued per route, and the dashboard journal labels their lifecycle with `STEER`. If a registered Codex connector is closed or faulted, an explicit `register-codex` replaces it and wakes held work when the recovered route is idle; it never retries an ambiguous write.
+For native Claude-to-Codex ingress, Embassy first attempts immediate dispatch. A terminal result observed before the one-second prompt boundary produces only its terminal acknowledgement; native `held` is sent only when the body truly remains queued or dispatch is still nonterminal at that boundary, followed later by the terminal acknowledgement. Claude's rendered “approved and released” notice means only that the paired-consent gateway accepted and released the body to the recipient queue — released is not read, and no human approval is implied. The default `merged` notice policy separately sends at most one nonterminal stall user frame exactly at `floor(messageDeadlineMs / 2)`, containing only a bounded pending age and allowlisted reason. The operator may choose `verbose` to retain the additional terminal diagnostic user frame or `quiet` to suppress gateway-authored user-frame notices; native status and dashboard truth do not change. Codex-bound ordinary work queues while the Codex task is active or temporarily unavailable. Only when the user explicitly asks to steer the active Codex turn may a Claude sender put the exact prefix `STEER:` at the beginning of the body. Embassy uses the exact accepted operation's same-session capability at the next tool-call boundary, never mid-generation or by interruption. Clean boundary refusal returns it to the normal queue; the cap is three steers per exact active operation. Embassy never calls `turn/interrupt` and never retries an ambiguous write.
 
-Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, widen tools, alter inbound-message policy, or interrupt a turn to force delivery. Report `held`, refused, incompatible, full, expired, unavailable, or `STEER_QUEUE_SUPERSEDED` outcomes or safe error codes without treating them as additional `delivery-status` states and without retrying. Native receipt settlement follows the originating Claude session's stable UUID and revalidates its current endpoint before every stall or terminal write; names, PIDs, and sockets are not receipt identity. Ordinary process/socket rotation for the same Claude UUID is therefore refreshed automatically. After a gateway restart, the prior UUID-bound selection starts stale, but the next authorized complete discovery may reactivate exactly that UUID and adopt its latest name. A changed UUID, name or UUID collision, incomplete discovery, or failed workspace/provider revalidation stays stale; do not retry around it. Queued or in-flight text, callbacks, native receipt handles, delivery tokens/status trackers, pending replies, and conversation capabilities do not survive. A pre-restart delivery token is unknown and no body is replayed.
+Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, widen tools, alter inbound-message policy, or interrupt a turn to force delivery. Report `held`, refused, incompatible, full, expired, unavailable, or `STEER_QUEUE_SUPERSEDED` outcomes or safe error codes without treating them as additional `delivery-status` states and without retrying. Native receipt settlement follows the originating Claude session's stable UUID and revalidates its current endpoint before every stall or terminal write; names, PIDs, and sockets are not receipt identity. Ordinary process/socket rotation for the same Claude UUID is refreshed for that write. After a gateway restart, queued or reserved messages and their delivery tokens/status remain inspectable in the bounded private v3 ledger and may resume once within their deadline and attempt budget against the same exact route and consent edge. Armed work settles `ambiguous`; accepted work settles `unconfirmed`; neither is replayed. Conversations, reply/native capabilities, raw provider frames, callbacks, pending replies, and socket paths remain memory-only. Best-effort observation may refresh what status displays, but it never authorizes or gates delivery.
 
 ## Preserve the boundary
 
@@ -219,9 +221,13 @@ per-invocation `--port <n>`. It deliberately has no login, token, cookie, browse
 session, or local-process/UID authentication and assumes a trusted single-user
 machine; local software that can reach or spoof loopback can use it. Its only
 mutations are explicitly confirmed two-endpoint pair, unpair,
-refresh-discovery, and broker-guarded stale-registration-removal actions. It
-has no registration creation, live unregistration, send, reply, approval,
+refresh-discovery, and named Codex-registration-removal actions. Confirmed
+`remove_codex_registration` may remove any named Codex registration; its atomic
+commit removes incident consent edges and conversation, reply, or native
+capabilities, and settles queued/reserved work `cancelled`, armed work
+`ambiguous`, and accepted work `unconfirmed`. It has no registration creation,
+send, reply, approval,
 interruption, settings, or generic provider authority. Agent-facing paths
 remain `embassy status` for a sanitized snapshot and the static
 `gateway-dashboard.html` for offline metadata. A status snapshot observation
-may settle already-due lifecycle deliveries before projecting state.
+may settle already-due delivery deadlines before projecting state.

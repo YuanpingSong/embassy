@@ -3,6 +3,8 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import readline from "node:readline";
 
 const ACP_PROTOCOL_VERSION = 1;
@@ -100,6 +102,16 @@ export type AcpPromptReceipt =
       text: string;
       textTruncated: boolean;
     }>;
+
+export type AcpPreparedPrompt = Readonly<{
+  bodyBytes: number;
+  frameBytes: number;
+  sha256: string;
+  /** Release a prepared-but-unperformed prompt exactly once. */
+  cancel: () => void;
+  /** Enqueue the exact pre-serialized frame exactly once. */
+  perform: () => Promise<AcpPromptReceipt>;
+}>;
 
 export type AcpOptionalResult<T> =
   | Readonly<{ available: true; value: T }>
@@ -201,41 +213,69 @@ export class AcpClient {
   }
 
   async prompt(sessionId: string, text: string): Promise<AcpPromptReceipt> {
-    if (this.activePrompts.has(sessionId)) {
-      throw new Error("ACP session already has an outstanding prompt");
-    }
-    const active: ActivePrompt = { bytes: 0, text: "", truncated: false };
-    this.activePrompts.set(sessionId, active);
     try {
-      const result = asObject(
-        await this.request("session/prompt", {
-          sessionId,
-          prompt: [{ type: "text", text }],
-        }),
-        "session/prompt",
-      );
-      return mapPromptResult(result.stopReason, active);
+      return await this.preparePrompt(sessionId, text).perform();
     } catch (error) {
-      if (error instanceof AcpProcessExitedError) {
-        return {
-          terminalState: "unknown",
-          text: active.text,
-          textTruncated: active.truncated,
-        };
-      }
       if (error instanceof AcpRequestError) {
         return {
           terminalState: "failed",
           error: error.detail,
           reportOnly: error.detail.code === -32000,
-          text: active.text,
-          textTruncated: active.truncated,
+          text: "",
+          textTruncated: false,
         };
       }
       throw error;
-    } finally {
-      this.activePrompts.delete(sessionId);
     }
+  }
+
+  preparePrompt(sessionId: string, text: string): AcpPreparedPrompt {
+    const disabled = this.disabledMethods.get("session/prompt");
+    if (disabled !== undefined) throw new AcpRequestError(disabled);
+    if (this.activePrompts.has(sessionId)) {
+      throw new Error("ACP session already has an outstanding prompt");
+    }
+    if (
+      this.exited ||
+      typeof sessionId !== "string" ||
+      sessionId.length === 0 ||
+      typeof text !== "string" ||
+      text.length === 0
+    ) {
+      throw new Error("ACP prompt preparation is unavailable");
+    }
+    const active: ActivePrompt = { bytes: 0, text: "", truncated: false };
+    this.activePrompts.set(sessionId, active);
+    const id = this.nextRequestId++;
+    const serialized = `${JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text }] },
+    })}\n`;
+    let disposition: "prepared" | "performed" | "cancelled" = "prepared";
+    const rejectReuse = (): never => {
+      throw new Error("ACP prepared prompt was already consumed");
+    };
+    return Object.freeze({
+      bodyBytes: Buffer.byteLength(text, "utf8"),
+      frameBytes: Buffer.byteLength(serialized, "utf8"),
+      sha256: createHash("sha256").update(serialized).digest("hex"),
+      cancel: () => {
+        if (disposition !== "prepared") return rejectReuse();
+        disposition = "cancelled";
+        this.activePrompts.delete(sessionId);
+      },
+      perform: () => {
+        if (disposition !== "prepared") {
+          return Promise.reject(
+            new Error("ACP prepared prompt was already consumed"),
+          );
+        }
+        disposition = "performed";
+        return this.performPreparedPrompt(id, sessionId, active, serialized);
+      },
+    });
   }
 
   cancel(sessionId: string): Promise<void> {
@@ -282,6 +322,45 @@ export class AcpClient {
     if (this.exited) return;
     this.handleProcessExit();
     this.child.kill();
+  }
+
+  private async performPreparedPrompt(
+    id: JsonRpcId,
+    sessionId: string,
+    active: ActivePrompt,
+    serialized: string,
+  ): Promise<AcpPromptReceipt> {
+    try {
+      const result = asObject(
+        await this.requestSerialized(
+          id,
+          "session/prompt",
+          serialized,
+        ),
+        "session/prompt",
+      );
+      return mapPromptResult(result.stopReason, active);
+    } catch (error) {
+      if (error instanceof AcpProcessExitedError) {
+        return {
+          terminalState: "unknown",
+          text: active.text,
+          textTruncated: active.truncated,
+        };
+      }
+      if (error instanceof AcpRequestError) {
+        return {
+          terminalState: "failed",
+          error: error.detail,
+          reportOnly: error.detail.code === -32000,
+          text: active.text,
+          textTruncated: active.truncated,
+        };
+      }
+      throw error;
+    } finally {
+      this.activePrompts.delete(sessionId);
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -353,16 +432,39 @@ export class AcpClient {
     });
   }
 
+  private requestSerialized(
+    id: JsonRpcId,
+    method: string,
+    serialized: string,
+  ): Promise<unknown> {
+    if (this.exited) return Promise.reject(new AcpProcessExitedError());
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { method, resolve, reject });
+      void this.writeSerialized(serialized).catch((error) => {
+        this.pending.delete(id);
+        reject(error);
+      });
+    });
+  }
+
   private notify(method: string, params: unknown): Promise<void> {
     return this.write({ jsonrpc: "2.0", method, params });
   }
 
   private write(message: JsonObject): Promise<void> {
+    return this.writeSerialized(`${JSON.stringify(message)}\n`);
+  }
+
+  private writeSerialized(serialized: string): Promise<void> {
     if (this.exited) return Promise.reject(new AcpProcessExitedError());
     const operation = this.writeChain.then(
       () =>
         new Promise<void>((resolve, reject) => {
-          this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+          if (this.exited) {
+            reject(new AcpProcessExitedError());
+            return;
+          }
+          this.child.stdin.write(serialized, (error) => {
             if (error) {
               this.handleProcessExit();
               reject(new AcpProcessExitedError());
@@ -451,6 +553,7 @@ export class AcpClient {
     const error = new AcpProcessExitedError();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    this.activePrompts.clear();
   }
 }
 

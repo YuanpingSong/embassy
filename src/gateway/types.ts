@@ -1,8 +1,3 @@
-import type {
-  ProgressWatch,
-  ProgressWatchJournalEvent,
-} from "./progress-watch-machine.js";
-
 export const gatewayProviders = ["claude", "codex", "deepseek", "grok"] as const;
 
 export type GatewayProvider = (typeof gatewayProviders)[number];
@@ -142,23 +137,14 @@ export const gatewayPublicSnapshotLimits = Object.freeze({
 export const GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET = 240 * 1024;
 
 /**
- * Private connector identity. Values in this structure are permitted only in
- * controller-owned state and connector calls. They must never be copied into
- * public snapshots, normalized events, logs, or error messages.
+ * Durable logical registration. Provider endpoint generations are deliberately
+ * absent: they are operation-local evidence and never routing authority.
  */
-export type PrivateEndpointIdentity = {
+export type LogicalRouteBinding = {
   provider: GatewayProvider;
   hostId: string;
-  endpointGeneration: string;
-};
-
-/**
- * Private, immutable target binding. routeHandle may be a native provider
- * thread/session identifier; ownerLease proves which registration owns it.
- */
-export type PrivateRouteBinding = PrivateEndpointIdentity & {
   routeHandle: string;
-  ownerLease: string;
+  registrationId: string;
 };
 
 export type RouteCounters = {
@@ -176,17 +162,13 @@ export type RouteCounters = {
 
 export type GatewayRouteRecord = {
   alias: string;
-  binding: PrivateRouteBinding;
+  binding: LogicalRouteBinding;
   registrationMode: RouteRegistrationMode;
   enabled: boolean;
-  state: RouteState;
   busyPolicy: BusyPolicy;
   registeredAt: string;
   updatedAt: string;
-  lastSeenAt?: string;
-  queueDepth: number;
   counters: RouteCounters;
-  safeErrorCode?: string;
 };
 
 /**
@@ -194,7 +176,11 @@ export type GatewayRouteRecord = {
  * display coordinates; the private leases prevent an alias from silently
  * retargeting an existing permission edge.
  */
-export type GatewayConsentEndpoint = Readonly<{ alias: string; provider: GatewayProvider; ownerLease: string }>;
+export type GatewayConsentEndpoint = Readonly<{
+  alias: string;
+  provider: GatewayProvider;
+  registrationId: string;
+}>;
 
 export type GatewayConsentEdgeRecord = {
   /** Canonical order: provider order first, then alias. */
@@ -210,23 +196,9 @@ export type GatewayConsentEdgeRecord = {
  */
 export type GatewayPrivateRouteInspection = {
   alias: string;
-  binding: PrivateRouteBinding;
+  binding: LogicalRouteBinding;
   registrationMode: RouteRegistrationMode;
   enabled: boolean;
-  state: RouteState;
-  safeErrorCode?: string;
-};
-
-export type ConnectorRecord = {
-  provider: GatewayProvider;
-  hostId: string;
-  endpointGeneration: string;
-  health: ConnectorHealth;
-  protocol: string;
-  protocolVersion: string;
-  updatedAt: string;
-  lastSeenAt?: string;
-  safeErrorCode?: string;
 };
 
 /** Metadata persisted for a queued message. Legacy rows may be bodyless. */
@@ -254,10 +226,6 @@ export type QueuedMessageMetadata = {
 /** A dispatch value with the exact persisted body promoted to required. */
 export type TransientQueuedMessage = QueuedMessageMetadata & {
   body: string;
-};
-
-export type InFlightMessageMetadata = QueuedMessageMetadata & {
-  dispatchedAt: string;
 };
 
 export type DedupeRecord = {
@@ -310,66 +278,108 @@ export type GatewayAccounting = {
   queuedBytes: number;
 };
 
-/**
- * Private proof that one exact Codex task was re-anchored after its App Server
- * endpoint generation changed. Native task and endpoint identifiers in this
- * journal must never enter a public snapshot, event, error, or log.
- */
-export type CodexEndpointRefreshJournalEvent = {
-  sequence: number;
-  timestamp: string;
-  alias: string;
-  hostId: string;
-  threadId: string;
-  oldEndpointGeneration: string;
-  newEndpointGeneration: string;
-  /** Broker-start proof; absent for a live endpoint-generation refresh. */
-  reason?: "boot_reactivation";
+export type GatewayPreparedWriteEvidence = {
+  kind:
+    | "claude_mailbox"
+    | "codex_turn_start"
+    | "codex_turn_steer"
+    | "acp_prompt";
+  bodyBytes: number;
+  bodySha256: string;
+  frameBytes: number;
+  sha256: string;
 };
 
-export const CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY = 256;
-
-/**
- * Private durable evidence that an operator removed one safely proven stale
- * Codex registration. No native task or endpoint identifiers are retained.
- */
-export type CodexOrphanRemovalJournalEvent = {
-  sequence: number;
-  timestamp: string;
-  alias: string;
-  hostId: string;
+export type GatewayMessageAttemptAuthority = {
+  attemptId: string;
+  attemptCount: number;
+  targetRegistrationId: string;
+  /** Null is allowed only for admitted open-mode native Claude ingress. */
+  sourceRegistrationId: string | null;
+  /** Exact canonical consent endpoints captured at reservation. */
+  consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
 };
 
-export const CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY = 256;
+export type GatewayMessageState =
+  | { phase: "queued"; attemptCount: number }
+  | (GatewayMessageAttemptAuthority & {
+      phase: "reserved";
+      reservedAt: string;
+    })
+  | (GatewayMessageAttemptAuthority & {
+      phase: "armed";
+      armedAt: string;
+      prepared: GatewayPreparedWriteEvidence;
+    })
+  | (GatewayMessageAttemptAuthority & {
+      phase: "accepted";
+      acceptedAt: string;
+      prepared: GatewayPreparedWriteEvidence;
+      lossOutcome: "unconfirmed" | "ambiguous";
+    })
+  | {
+      phase: "terminal";
+      outcome: Extract<
+        DeliveryState,
+        | "delivered"
+        | "unconfirmed"
+        | "failed"
+        | "ambiguous"
+        | "expired"
+        | "cancelled"
+        | "abandoned"
+      >;
+      terminalAt: string;
+      safeErrorCode?: string;
+      latencyMs: number;
+    };
+
+export type GatewayMessageRecord = QueuedMessageMetadata & {
+  /** Latest durable transition sequence for deterministic public projection. */
+  sequence: number;
+  /** Bounded opaque status capability; absent for non-CLI provider ingress. */
+  deliveryToken?: string;
+  /** Exact admitted logical authority; never derived again from alias text. */
+  sourceRegistrationId: string | null;
+  /** Null is valid only after terminalizing a v2 transient-target row. */
+  targetRegistrationId: string | null;
+  consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+  state: GatewayMessageState;
+};
+
+/** Suffix-only v2 history is non-authoritative and can never be correlated. */
+export type GatewayLegacyMessageActivity = {
+  type: "legacy_message";
+  event: NormalizedMessageEvent;
+};
+
+export type GatewayRuntimeActivity = {
+  type: "activity";
+  event: PublicGatewayActivityEvent;
+};
+
+export type GatewayStateActivity =
+  | GatewayLegacyMessageActivity
+  | GatewayRuntimeActivity;
 
 export type GatewayPersistedState = {
-  schemaVersion: 2;
+  schemaVersion: 3;
+  commit: { sequence: number; id: string };
   createdAt: string;
   updatedAt: string;
   eventSequence: number;
   routes: GatewayRouteRecord[];
   consentEdges: GatewayConsentEdgeRecord[];
-  connectors: ConnectorRecord[];
-  queue: QueuedMessageMetadata[];
-  inFlight: InFlightMessageMetadata[];
-  events: NormalizedMessageEvent[];
+  messages: GatewayMessageRecord[];
   dedupe: DedupeRecord[];
   rateBuckets: RateBucket[];
+  /** Bounded, non-authoritative suffix-only history retained for v2 parity. */
+  activity: GatewayStateActivity[];
   accounting: GatewayAccounting;
-  watchSequence: number;
-  progressWatches: ProgressWatch[];
-  progressWatchEvents: ProgressWatchJournalEvent[];
-  /** Monotonic sequence for the bounded private endpoint-refresh journal. */
-  codexEndpointRefreshSequence: number;
-  /** Strictly private route-lifecycle evidence; never publicly projected. */
-  codexEndpointRefreshEvents: CodexEndpointRefreshJournalEvent[];
-  /** Monotonic sequence for bounded private operator-recovery evidence. */
-  codexOrphanRemovalSequence: number;
-  /** Strictly private orphan-removal evidence; never publicly projected. */
-  codexOrphanRemovalEvents: CodexOrphanRemovalJournalEvent[];
-  /** Strictly validated internal restart journal; never publicly projected. */
-  codexSuccession?: unknown;
 };
+
+export type GatewayMessageRecordV3 = GatewayMessageRecord;
+export type GatewayPersistedStateV3 = GatewayPersistedState;
 
 export type PublicRouteSnapshot = {
   alias: string;
@@ -472,8 +482,6 @@ export const gatewayActivityKinds = [
   "registration",
   "pairing",
   "watch",
-  "endpoint",
-  "recovery",
 ] as const;
 export type GatewayActivityKind = (typeof gatewayActivityKinds)[number];
 
@@ -487,8 +495,6 @@ export const gatewayActivityActions = [
   "routes_paired",
   "routes_unpaired",
   "watch_ended",
-  "endpoint_refreshed",
-  "codex_orphan_removed",
 ] as const;
 export type GatewayActivityAction = (typeof gatewayActivityActions)[number];
 
@@ -1092,116 +1098,168 @@ export function projectGatewayPublicSnapshot(
 
 export type RegisterRouteInput = {
   alias: string;
-  binding: PrivateRouteBinding;
+  binding: LogicalRouteBinding;
   registrationMode: RouteRegistrationMode;
-  state?: "idle" | "busy" | "awaiting_approval";
 };
 
-export type ObserveConnectorInput = {
-  identity: PrivateEndpointIdentity;
-  health: Exclude<ConnectorHealth, "offline">;
-  protocol: string;
-  protocolVersion: string;
+export type GatewayReservedAttempt = Readonly<{
+  messageId: string;
+  attemptId: string;
+  attemptCount: number;
+  body: string;
+  deadlineAt: string;
+  direction: MessageDirection;
+  sourceAlias: string;
+  targetAlias: string;
+  conversationIdSuffix?: string;
+  sourceRegistrationId: string | null;
+  targetRegistrationId: string;
+  consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+  bytes: number;
+  steer?: true;
+}>;
+
+export type ReserveMessageResult =
+  | Readonly<{ status: "empty" }>
+  | Readonly<{
+      status: "terminal";
+      settlement: TerminalMessageSettlement;
+    }>
+  | Readonly<{ status: "reserved"; attempt: GatewayReservedAttempt }>;
+
+export type AuthorizeMessageInput = Readonly<{
+  messageId: string;
+  attemptId: string;
+  sourceRegistrationId: string | null;
+  targetRegistrationId: string;
+  prepared: GatewayPreparedWriteEvidence;
+}>;
+
+export type AuthorizeMessageResult =
+  | Readonly<{ status: "authorized" }>
+  | Readonly<{
+      status: "stale";
+      reason:
+        | "not_reserved"
+        | "attempt_mismatch"
+        | "registration_changed"
+        | "consent_removed";
+    }>
+  | Readonly<{
+      status: "terminal";
+      reason: "expired" | "fenced";
+      settlement: TerminalMessageSettlement;
+    }>;
+
+export type AcceptMessageInput = Readonly<{
+  messageId: string;
+  attemptId: string;
+  lossOutcome: "unconfirmed" | "ambiguous";
+}>;
+
+export type AcceptMessageResult =
+  | Readonly<{ status: "accepted" }>
+  | Readonly<{ status: "stale" }>;
+
+export type ResolvePrewriteAttemptInput = Readonly<{
+  messageId: string;
+  attemptId: string;
+  outcome: "requeue" | "failed";
   safeErrorCode?: string;
-};
+}>;
 
-export type ObserveRouteInput =
-  | {
-      binding: PrivateRouteBinding;
-      state: "idle" | "busy" | "awaiting_approval";
-      safeErrorCode?: string;
-    }
-  | {
-      binding: PrivateRouteBinding;
-      state: "stale";
-      safeErrorCode: string;
-    };
+export type ResolvePrewriteAttemptResult =
+  | Readonly<{ status: "requeued" }>
+  | Readonly<{
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }>
+  | Readonly<{ status: "stale" }>;
 
-export type RebindStaleRouteInput = {
-  /** The currently persisted alias. */
+export type SettleAttemptInput = Readonly<{
+  messageId: string;
+  attemptId: string;
+  state: Extract<
+    DeliveryState,
+    | "delivered"
+    | "unconfirmed"
+    | "failed"
+    | "ambiguous"
+    | "expired"
+    | "cancelled"
+  >;
+  safeErrorCode?: string;
+}>;
+
+export type SettleAttemptResult =
+  | Readonly<{
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }>
+  | Readonly<{ status: "stale" }>;
+
+export type SettleAttemptForShutdownInput = Readonly<{
+  messageId: string;
+  attemptId: string;
+}>;
+
+export type SettleAttemptForShutdownResult =
+  | Readonly<{ status: "requeued" }>
+  | Readonly<{
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }>
+  | Readonly<{ status: "stale" }>;
+
+export type SettleQueuedMessageForShutdownInput = Readonly<{
+  messageId: string;
+}>;
+
+export type SettleQueuedMessageForShutdownResult =
+  | Readonly<{
+      status: "settled";
+      settlement: TerminalMessageSettlement;
+    }>
+  | Readonly<{ status: "stale" }>;
+
+export type RemoveRouteAtomicResult = Readonly<{
+  removed: boolean;
+  settlements: readonly TerminalMessageSettlement[];
+}>;
+
+export type GatewayAtomicActivityInput = Readonly<{
+  operatorAction: boolean;
+}>;
+
+export type RemoveRouteAtomicInput = Readonly<{
   alias: string;
-  /** The provider's latest live display name for the same logical route. */
-  newAlias?: string;
-  currentOwnerLease: string;
-  newBinding: PrivateRouteBinding;
-  reason:
-    | "endpoint_reobserved"
-    | "peer_explicitly_reselected"
-    | "peer_identity_reobserved";
-  /** Append exact private boot-recovery evidence in the refresh journal. */
-  journalReason?: "boot_reactivation";
-  state?: "idle" | "busy" | "awaiting_approval";
-};
+  activity: GatewayAtomicActivityInput;
+}>;
 
-export type ReanchorCodexRouteInput = {
-  alias: string;
-  /** Exact private App Server thread identifier proved present by loaded/list. */
-  threadId: string;
-  /** Existing registration authority; a refresh never rotates this lease. */
-  ownerLease: string;
-  state?: "idle" | "busy" | "awaiting_approval";
-};
+export type ReplaceCodexRegistrationAtomicInput = Readonly<{
+  oldAlias: string;
+  expectedOldRegistrationId: string;
+  replacement: RegisterRouteInput;
+  activity: GatewayAtomicActivityInput;
+}>;
 
-export type ReanchorCodexRoutesInput = {
-  oldEndpoint: PrivateEndpointIdentity;
-  newEndpoint: PrivateEndpointIdentity;
-  /** Only the exact loaded/list-present subset is named here. */
-  routes: readonly ReanchorCodexRouteInput[];
-};
-
-export type ReanchorCodexRoutesResult = {
-  reboundAliases: string[];
-};
-
-export type RemoveStaleCodexOrphanInput = {
-  /** Dashboard-confirmed exact public alias; no native identifier is accepted. */
-  alias: string;
-};
-
-export type StaleCodexOrphanRemovalAuthority = {
-  binding: PrivateRouteBinding;
-  previousSequence: number;
-};
-
-export type StaleCodexOrphanRemovalCommitProofInput = {
-  alias: string;
-  binding: PrivateRouteBinding;
-  previousSequence: number;
-};
-
-export type RemoveStaleCodexOrphanResult = {
-  alias: string;
-  /** Private result used only to reconcile in-process service bindings. */
-  binding: PrivateRouteBinding;
-  removedEdges: Array<{
-    aliases: readonly [string, string];
-  }>;
-};
+export type ReplaceCodexRegistrationAtomicResult = Readonly<{
+  replaced: boolean;
+  idempotent: boolean;
+  settlements: readonly TerminalMessageSettlement[];
+}>;
 
 export type EnqueueMessageInput = {
   sourceAlias: string;
   targetAlias: string;
+  expectedSourceRegistrationId?: string;
+  expectedTargetRegistrationId?: string;
   body: string;
   dedupeKey: string;
   /** Last eight opaque characters of the controller-owned conversation ID. */
   conversationIdSuffix?: string;
   deadlineAt?: string;
   steer?: true;
-  /**
-   * Controller-derived watch intent committed in the same mutation as the
-   * accepted message. Bodies and command flags are never persisted here.
-   */
-  progressWatch?: {
-    conversationId: string;
-    actorAlias: string;
-    openIdleMs?: number;
-    completionSignal?: true;
-  };
-  /** Controller-authored nudge committed atomically with its queued body. */
-  progressWatchNudge?: {
-    conversationId: string;
-    nudgeNumber: 1 | 2;
-  };
 };
 
 /**
@@ -1211,27 +1269,39 @@ export type EnqueueMessageInput = {
  */
 export type TransientNativeClaudePeer = {
   alias: string;
-  binding: PrivateRouteBinding;
+  binding: LogicalRouteBinding;
 };
 
 export type EnqueueNativeIngressInput = Omit<
   EnqueueMessageInput,
-  "sourceAlias" | "targetAlias"
+  | "sourceAlias"
+  | "targetAlias"
+  | "expectedSourceRegistrationId"
+  | "expectedTargetRegistrationId"
 > & {
   source: TransientNativeClaudePeer;
   targetAlias: string;
+  /** Exact target identity captured by the operation that owns this ingress. */
+  expectedTargetRegistrationId: string;
   /** Pre-deadline reply evidence retained across exact pair teardown. */
   authorizedPairTeardownReply?: true;
 };
 
 export type EnqueueNativeReplyInput = Omit<
   EnqueueMessageInput,
-  "sourceAlias" | "targetAlias"
+  | "sourceAlias"
+  | "targetAlias"
+  | "expectedSourceRegistrationId"
+  | "expectedTargetRegistrationId"
 > & {
   sourceAlias: string;
+  /** Exact source identity captured by the operation that owns this reply. */
+  expectedSourceRegistrationId: string;
   target: TransientNativeClaudePeer;
   /** Retain the original paired admission authority, when one existed. */
   pair?: true;
+  /** Explicit same-user reply commands receive durable status correlation. */
+  exposeDeliveryToken?: true;
 };
 
 export type EnqueueMessageResult = {
@@ -1239,6 +1309,7 @@ export type EnqueueMessageResult = {
   duplicate: boolean;
   messageId?: string;
   messageIdSuffix: string;
+  deliveryToken?: string;
   /** The accepted message is owned by one exact consent edge. */
   pair?: true;
   /** Exact older queued steer displaced by the per-edge cap, if any. */
@@ -1329,6 +1400,8 @@ export type GatewayStoreLimits = {
 export type GatewayStoreDependencies = {
   now?: () => Date;
   randomId?: () => string;
+  /** Deterministic rename-outcome seam; production callers leave this unset. */
+  renameStateFile?: (source: string, target: string) => Promise<void>;
   /** Deterministic durability-fault seam; production callers leave this unset. */
   afterStateFileRename?: () => void | Promise<void>;
 };

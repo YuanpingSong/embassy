@@ -913,11 +913,3 @@ export async function createLocalCodexTransportFactory(
     normalizedDependencies,
   );
 }
-
-/**
- * Resolve a replacement endpoint after an already-admitted factory reports a
- * generation change. The replacement is independently attested as the exact
- * current managed release.
- */
-export const createLocalCodexRefreshCandidateTransportFactory =
-  createLocalCodexTransportFactory;

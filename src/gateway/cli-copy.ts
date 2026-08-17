@@ -9,8 +9,6 @@ export const cliCopyKeys = [
   "hint.controlInvalidResponse",
   "hint.messageTooLarge",
   "hint.progressWatchOwnerConflict",
-  "hint.codexSplitBrain",
-  "hint.codexOrphaned",
   "error.input",
   "error.decision",
   "error.unavailable",

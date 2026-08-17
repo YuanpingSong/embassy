@@ -60,8 +60,6 @@ export const dashboardCopyZhCn = {
     "当前没有在线且无冲突的可选会话。请先解决“会话与路由”中显示的问题，再刷新发现。",
   "next.registerCodex":
     "在 Codex 任务内运行 embassy register-codex --alias codex-<name>@<host>。",
-  "next.restoreCodex":
-    "在该 Codex 任务内重新运行 embassy register-codex --alias <alias>。",
   "attention.eyebrow": "需要处理",
   "attention.title": "发送前请先解决",
   "attention.count": "{count} 项",
@@ -75,14 +73,6 @@ export const dashboardCopyZhCn = {
   "guidance.reobserveClaude.title": "需要重新观察 Claude 选择",
   "guidance.reobserveClaude.body": "已保存路由目前没有匹配的在线端点证明。",
   "guidance.reobserveClaude.action": "刷新发现并明确选择 Claude 当前别名。",
-  "guidance.reobserveCodex.title": "需要重新观察 Codex 注册",
-  "guidance.reobserveCodex.body": "已保存路由目前没有匹配的在线端点证明。",
-  "guidance.reobserveCodex.action": "在该 Codex 任务内重新运行 register-codex。",
-  "guidance.codexReactivationRequired.title": "已保存的 Codex 路由不在线",
-  "guidance.codexReactivationRequired.body":
-    "同意边仍然保留，但已保存的 Codex 路由当前没有在线端点证明。",
-  "guidance.codexReactivationRequired.action":
-    "在该 Codex 任务内运行 embassy register-codex --alias {alias}。",
   "guidance.consentEdgeUnavailable.title": "同意边端点不可用",
   "guidance.consentEdgeUnavailable.body":
     "同意边仍然保留，但当前有界快照中缺少这个已保存端点。",
@@ -92,22 +82,14 @@ export const dashboardCopyZhCn = {
   "guidance.claudeNotObserved.body": "当前本地发现中没有该会话。",
   "guidance.claudeNotObserved.action":
     "保持 Claude 运行并启用 crossSessionInbound，刷新后选择其当前别名。",
-  "guidance.codexStale.title": "Codex 路由需要重新观察",
-  "guidance.codexStale.body": "已注册的 Codex 任务不再具有就绪的 App Server 连接。",
-  "guidance.codexStale.action":
-    "在该 Codex 任务内使用同一别名重新运行 register-codex；不要先注销。",
-  "guidance.codexAppReconnectRequired.title": "正在等待 Codex 应用重新连接",
-  "guidance.codexAppReconnectRequired.body":
-    "托管 App Server 可以访问，但仍观察不到这个已保存任务；应用或任务可能尚未重新连接。",
-  "guidance.codexAppReconnectRequired.action":
-    "打开 Codex 应用和这个确切任务。如果守护进程重启时应用已打开，请运行 /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT 重新启动应用。不要重发排队邮件。",
   "guidance.connectorOffline.title": "提供方连接器离线",
   "guidance.connectorOffline.body": "Embassy 当前无法访问本地提供方连接器。",
   "guidance.connectorOffline.action":
-    "运行 embassy status。如果必须重启代理，排队邮件会保留并精确恢复一次；只有崩溃时正在写入的投递会以结果不确定结算。",
-  "guidance.routeStale.title": "路由需要重新观察",
-  "guidance.routeStale.body": "该路由不再具有当前端点证明。",
-  "guidance.routeStale.action": "刷新并恢复相应选择或注册。",
+    "运行 embassy status。代理重启后，排队或已保留的邮件可恢复一次；已武装或已接受的工作会以结果不确定或未确认结算，且绝不重放。",
+  "guidance.routeStale.title": "路由不可用",
+  "guidance.routeStale.body": "当前操作无法使用该提供方。",
+  "guidance.routeStale.action":
+    "运行 embassy refresh-dashboard，然后运行 embassy status。下一次操作会再次检查提供方连接。",
   "guidance.queueStalled.title": "排队投递停滞",
   "guidance.queueStalled.body": "最早接受的消息已排队超过投递截止时间的一半。",
   "guidance.queueStalled.action":
@@ -126,20 +108,10 @@ export const dashboardCopyZhCn = {
   "guidance.degraded.title": "交换状态降级",
   "guidance.degraded.body": "Embassy 保留了一条规范化的连接器警告。",
   "guidance.degraded.action":
-    "运行 embassy status。如果必须重启代理，排队邮件会保留并精确恢复一次；只有崩溃时正在写入的投递会以结果不确定结算。",
+    "运行 embassy status。代理重启后，排队或已保留的邮件可恢复一次；已武装或已接受的工作会以结果不确定或未确认结算，且绝不重放。",
   "guidance.generic.title": "Embassy 报告了规范化警告",
   "guidance.generic.body": "面板没有为此安全代码映射自动修复方案。",
   "guidance.generic.action": "检查 embassy status。绝不要自动重试结果不确定的投递。",
-  "guidance.codexSuccessionBusy.title": "更换 Codex 任务需要等待静默边界",
-  "guidance.codexSuccessionBusy.body":
-    "由于已接受或正在进行的工作尚未完全排空，Embassy 保留了当前 Codex 注册。",
-  "guidance.codexSuccessionBusy.action":
-    "等待当前工作进入终结状态，运行 embassy status，然后重试同一条 register-codex --alias <new> --succeeds <old> 命令。",
-  "guidance.codexSuccessionRecovery.title": "更换 Codex 任务需要手动恢复",
-  "guidance.codexSuccessionRecovery.body":
-    "任务更换未能到达安全的活跃代次。Embassy 会让 Codex 注册保持离线，而不会猜测哪个任务拥有路由。",
-  "guidance.codexSuccessionRecovery.action":
-    "请勿发送消息、重试任务更换或假定任一任务处于活跃状态。运行 embassy status，并保留当前状态以供手动恢复。",
   "guidance.progressWatch.title": "受监视的对话已安静",
   "guidance.progressWatch.body":
     "Embassy 正在监视这项以完成为终止条件的对话，并且已发送至少一次空闲提醒。",
@@ -377,16 +349,16 @@ export const dashboardCopyZhCn = {
   "live.label": "实时伴侣",
   "live.mastheadSubtitle": "实时元数据流，并提供有限的路由同意控制。serve 仍限套接字通道。",
   "live.readonlyFooter":
-    "此视图仅可配对、取消配对、刷新 Claude 发现结果，以及请求移除陈旧的 Codex 注册。",
+    "此视图仅可配对、取消配对、刷新发现结果，以及请求移除具名 Codex 注册。",
   "live.action.authorityLabel": "有限的操作权限",
   "live.action.authorityBody":
-    "此视图可配对或取消配对具名端点、刷新 Claude 发现结果，并且仅在代理确认具名 Codex 注册陈旧且其端点代际已失效时请求移除；不能注册任务、发送、回复、批准、中断或更改设置。",
+    "此视图可配对或取消配对具名端点、刷新发现结果，以及请求移除具名 Codex 注册。移除操作会按持久化写入阶段结算活动工作并删除相关同意边；不能注册任务、发送、回复、批准、中断或更改设置。",
   "live.action.sectionTitle": "有限的路由操作",
   "live.action.scope":
-    "可为具名 Claude 与 Codex 端点配对或取消配对、刷新发现结果，或回收孤立的 Codex 别名。每项操作都必须确认并由代理重新验证。",
+    "可为具名端点配对或取消配对、刷新发现结果，或移除具名 Codex 注册。每项操作都必须确认并由代理重新验证。",
   "live.action.pair": "配对端点",
   "live.action.unpair": "取消端点配对",
-  "live.action.removeStaleCodexRegistration": "移除陈旧注册",
+  "live.action.removeCodexRegistration": "移除注册",
   "live.action.refresh": "刷新发现结果",
   "live.action.confirm": "确认",
   "live.action.cancel": "取消",
@@ -529,14 +501,10 @@ export const dashboardCopyZhCn = {
   "app.routes.unselectCmd.consequenceOpen":
     "仅移除此出站边。开放入站仍对同一操作系统用户下的所有在线 Claude 会话启用。",
   "app.routes.refreshCmd": "重新读取本地发现结果，并重写静态面板文件。",
-  "app.routes.removeStaleCodex.consequence":
-    "仅当代理确认 {alias} 的注册已陈旧且其端点代际已失效时才会移除。相关同意边也会移除；在线注册绝不会被触碰。",
+  "app.routes.removeCodex.consequence":
+    "移除 {alias}，删除其所有同意边，并按持久化写入阶段结算活动工作。已排队或已保留的工作会取消；已武装的工作变为结果不确定；已接受的工作变为未确认。",
   "app.routes.noPeers": "此快照中没有发现任何 Claude 会话。",
   "app.routes.noCodex": "尚未注册任何 Codex 任务。",
-  "app.routes.successions": "继任历史",
-  "app.routes.successions.empty": "当前没有正在进行的任务更换。",
-  "app.routes.successions.note":
-    "任务更换只是把别名移交给新的 Codex 任务。不转移任何内容：排队的工作、历史与审批都留在旧任务上。",
   "app.routes.detail.absent": "实时契约不携带此信息。",
   "app.routes.expandDetails": "展开 {alias} 的详情",
   "app.routes.collapseDetails": "收起 {alias} 的详情",
@@ -562,8 +530,6 @@ export const dashboardCopyZhCn = {
   "app.activity.operation.routesPaired": "已建立同意边",
   "app.activity.operation.routesUnpaired": "已移除同意边",
   "app.activity.operation.watchEnded": "已结束进度监视",
-  "app.activity.operation.endpointRefreshed": "已刷新 Codex 端点",
-  "app.activity.operation.codexOrphanRemoved": "已移除陈旧的 Codex 注册",
   "app.activity.operation.operator": "操作者",
   "app.activity.operation.automatic": "自动",
   "app.activity.operation.accepted": "已接受",

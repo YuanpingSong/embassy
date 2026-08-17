@@ -14,7 +14,8 @@ export const cliCopyZhCn = {
   health                 检查代理健康状态
   status                 读取公开状态快照
   doctor                 诊断 Codex 桌面应用连接状态
-  refresh-dashboard      发布两份静态仪表盘文件
+  convert-state-v2-to-v3 备份后转换已停止代理的状态
+  refresh-dashboard      刷新发现结果并发布两份静态仪表盘
   dashboard --live [--port <n>]
                          打开实时状态与有限路由同意操作
   register-codex         注册或继任 Codex 任务
@@ -46,10 +47,6 @@ export const cliCopyZhCn = {
     "消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。",
   "hint.progressWatchOwnerConflict":
     "此配对已有由另一参与方拥有的监视；请先让该所有者运行 `embassy untrack --conversation <conversation-token>`。",
-  "hint.codexSplitBrain":
-    "桌面应用正在使用私有 App Server；Embassy 无法访问其任务。请重新启动：/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT",
-  "hint.codexOrphaned":
-    "守护进程正在运行，但没有桌面客户端连接；线程无法加载。请运行：/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT，然后打开你的 Codex 任务。",
   "error.input": "请求被拒绝。",
   "error.decision": "网关拒绝了该请求。",
   "error.unavailable": "网关不可用。",
@@ -57,7 +54,7 @@ export const cliCopyZhCn = {
   "error.failure": "命令失败。",
   "error.unsafe":
     "网关状态目录或套接字的权限或所有者异常。请先确认该路径未被其他进程控制，再运行 embassy serve。",
-  "error.tokenUnknown": "无法识别该投递令牌；它可能已过期，或属于上一次网关会话。",
+  "error.tokenUnknown": "无法识别该投递令牌；它可能已过期，或已超出有界保留范围。",
   "error.deliveryTimeout":
     "该投递尚未结算；网关仍在运行。请稍后使用 embassy delivery-status 再次查询。",
 } as const satisfies CliCopy;

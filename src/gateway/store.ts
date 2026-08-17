@@ -15,42 +15,22 @@ import os from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
-import { isCodexRegistrationGeneration } from "./codex-registration-generation.js";
 import type { GatewayConfig } from "./config.js";
 import {
-  PROGRESS_WATCH_DEFAULT_CAPACITY,
-  PROGRESS_WATCH_HARD_CAPACITY,
-  PROGRESS_WATCH_MAX_IDLE_MS,
-  PROGRESS_WATCH_MIN_IDLE_MS,
-  commitProgressWatchNudge,
-  createProgressWatch,
-  deferProgressWatchNudge,
-  inspectProgressWatchDue,
-  progressWatchJournalKinds,
-  recordProgressWatchActivity,
-  type ProgressWatch,
-  type ProgressWatchJournalEvent,
-  type ProgressWatchSettlement,
-} from "./progress-watch-machine.js";
-import {
-  CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY,
-  CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY,
-  CONNECTOR_OBSERVATION_STALE_AFTER_MS,
-  connectorHealthStates,
-  directionId,
   deliveryStates,
-  gatewayPublicSnapshotLimits,
+  directionId,
+  gatewayActivityActions,
+  gatewayActivityKinds,
   gatewayProviders,
+  gatewayPublicSnapshotLimits,
   gatewayRegistrationIngressPrefixes,
-  messageDirections,
   parseDirection,
   projectGatewayPublicSnapshot,
   routeRegistrationModes,
-  routeStates,
-  type ConnectorRecord,
-  type CodexEndpointRefreshJournalEvent,
-  type CodexOrphanRemovalJournalEvent,
-  type DeadlinePressureBucket,
+  type AcceptMessageInput,
+  type AcceptMessageResult,
+  type AuthorizeMessageInput,
+  type AuthorizeMessageResult,
   type DedupeRecord,
   type DeliveryState,
   type EnqueueMessageInput,
@@ -60,42 +40,38 @@ import {
   type GatewayAccounting,
   type GatewayConsentEdgeRecord,
   type GatewayConsentEndpoint,
-  type GatewayProvider,
+  type GatewayLegacyMessageActivity,
+  type GatewayMessageRecord,
+  type GatewayMessageState,
   type GatewayPersistedState,
+  type GatewayPreparedWriteEvidence,
   type GatewayPrivateRouteInspection,
   type GatewayPublicSnapshot,
   type GatewayRouteRecord,
+  type GatewayRuntimeActivity,
   type GatewayStoreDependencies,
-  type InFlightMessageMetadata,
-  type InFlightMessageProgressState,
+  type LogicalRouteBinding,
   type MessageDirection,
   type NormalizedMessageEvent,
-  type ObserveConnectorInput,
-  type ObserveRouteInput,
-  type PrivateEndpointIdentity,
-  type PrivateRouteBinding,
-  type PublicConnectorSnapshot,
   type PublicConsentEdgeSnapshot,
-  type PublicProgressWatchEventSnapshot,
-  type PublicProgressWatchSnapshot,
+  type PublicGatewayActivityEvent,
   type PublicRouteSnapshot,
-  type QueuedMessageMetadata,
-  type ReanchorCodexRoutesInput,
-  type ReanchorCodexRoutesResult,
-  type RebindStaleRouteInput,
   type RegisterRouteInput,
-  type RequeueInFlightMessageResult,
+  type RemoveRouteAtomicInput,
+  type RemoveRouteAtomicResult,
+  type ReplaceCodexRegistrationAtomicInput,
+  type ReplaceCodexRegistrationAtomicResult,
+  type ReserveMessageResult,
+  type ResolvePrewriteAttemptInput,
+  type ResolvePrewriteAttemptResult,
   type RouteCounters,
-  type RemoveStaleCodexOrphanInput,
-  type RemoveStaleCodexOrphanResult,
-  type SafeGatewayAlert,
-  type SettleMessageInput,
-  type SettleMessageResult,
-  type StaleCodexOrphanRemovalAuthority,
-  type StaleCodexOrphanRemovalCommitProofInput,
+  type SettleAttemptInput,
+  type SettleAttemptForShutdownInput,
+  type SettleAttemptForShutdownResult,
+  type SettleAttemptResult,
+  type SettleQueuedMessageForShutdownInput,
+  type SettleQueuedMessageForShutdownResult,
   type TerminalMessageSettlement,
-  type TransientNativeClaudePeer,
-  type TransientQueuedMessage,
 } from "./types.js";
 
 const STATE_MARKER = ".agent-embassy-state";
@@ -111,174 +87,31 @@ const ALIAS_PATTERN =
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const PRIVATE_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
-const PROTOCOL_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const PROTOCOL_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$/;
 const MESSAGE_ID_PATTERN =
   /^msg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MESSAGE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
-const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 const FINGERPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+// New/public tokens are exact 24-character handles. The wider private read
+// bound keeps pre-release v3 artifacts written before that correction bootable.
+const DELIVERY_TOKEN_PATTERN = /^dlv_[A-Za-z0-9_-]{24,128}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const PROVIDERS = new Set<string>(gatewayProviders);
+const REGISTRATION_MODES = new Set<string>(routeRegistrationModes);
 
 class PostRenamePersistenceError extends BridgeError {
-  constructor(verified: boolean) {
+  constructor() {
     super(
       "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
-      verified
-        ? "The gateway state rename was installed, but directory durability could not be confirmed. The exact installed state was retained; retry is forbidden until recovery is reconciled."
-        : "The gateway state rename was installed, but the exact installed state could not be verified. The controller was disabled and must be recovered before reuse.",
+      "The installed state commit could not be verified. The controller was disabled and requires recovery.",
     );
     this.name = "PostRenamePersistenceError";
   }
 }
 
-const PROVIDERS = new Set<string>(gatewayProviders);
-const CONNECTOR_HEALTH = new Set<string>(connectorHealthStates);
-const ROUTE_STATES = new Set<string>(routeStates);
-const REGISTRATION_MODES = new Set<string>(routeRegistrationModes);
-const DIRECTIONS = new Set<string>(messageDirections);
-const DELIVERY_STATES = new Set<string>(deliveryStates);
-const PROGRESS_WATCH_JOURNAL_KINDS = new Set<string>(
-  progressWatchJournalKinds,
-);
-
-type PendingProgressWatchJournalEvent =
-  ProgressWatchJournalEvent extends infer Event
-    ? Event extends ProgressWatchJournalEvent
-      ? Omit<Event, "sequence">
-      : never
-    : never;
-
-type ProgressWatchNudge = Readonly<{
-  conversationId: string;
-  ownerAlias: string;
-  workerAlias: string;
-  nudgeNumber: 1 | 2;
-}>;
-
-export type SettleQueuedMessageInput = {
-  messageId: string;
-  state: Extract<
-    DeliveryState,
-    "failed" | "expired" | "cancelled" | "abandoned"
-  >;
-  safeErrorCode?: string;
-};
-
-export type SettleQueuedMessageResult =
-  | {
-      status: "settled";
-      settlement: TerminalMessageSettlement;
-    }
-  | {
-      status: "not_queued";
-    };
-
-export type AffectedInFlightMessageInspection = Readonly<{
-  messageId: string;
-  deadlineAt: string;
-}>;
-
-export type RouteInFlightSettlementInput = Readonly<{
-  messageId: string;
-  state: SettleMessageInput["state"];
-  safeErrorCode?: string;
-}>;
-
-export type ReplaceClaudeSelectionInput = Readonly<{
-  replacement: RegisterRouteInput;
-  inFlightSettlements?: readonly RouteInFlightSettlementInput[];
-}>;
-
-export type GatewayConsentEdgeInput = Readonly<{
-  aliases: readonly [string, string];
-}>;
-
-export type RemoveConsentEdgeInput = GatewayConsentEdgeInput &
-  Readonly<{
-    inFlightSettlements?: readonly RouteInFlightSettlementInput[];
-  }>;
-
-export type RemoveConsentEdgeResult = Readonly<{
-  settlements: readonly TerminalMessageSettlement[];
-  unreferencedAliases: readonly string[];
-}>;
-
-export const codexSuccessionJournalStages = [
-  "prepared",
-  "publication_armed",
-  "published",
-  "activated",
-  "recovery_forbidden",
-] as const;
-
-export type CodexSuccessionJournalStage =
-  (typeof codexSuccessionJournalStages)[number];
-
-export type CodexSuccessionStoreIdentity = Readonly<{
-  alias: string;
-  threadId: string;
-  hostId: string;
-  /** Opaque exact ownership/listener generation; never interpreted as a path. */
-  generation: string;
-  /** Existing private route metadata only; never publicly projected. */
-  binding: PrivateRouteBinding;
-}>;
-
-type CodexSuccessionJournal = Readonly<{
-  schemaVersion: 1;
-  stage: CodexSuccessionJournalStage;
-  old: CodexSuccessionStoreIdentity;
-  new: CodexSuccessionStoreIdentity;
-  safeErrorCode?: string;
-}>;
-
-export type PrepareCodexSuccessionInput = Readonly<{
-  old: CodexSuccessionStoreIdentity;
-  new: CodexSuccessionStoreIdentity;
-}>;
-
-export type ExactCodexSuccessionInput = Readonly<{
-  oldGeneration: string;
-  newGeneration: string;
-}>;
-
-export type ClearCodexSuccessionInput = ExactCodexSuccessionInput &
-  Readonly<{
-    /** Required once the durable arm exists; ignored only before arming. */
-    publicationAbsenceConfirmed?: true;
-  }>;
-
-export type ActivateCodexSuccessionInput = ExactCodexSuccessionInput &
-  Readonly<{
-    state: "idle" | "busy" | "awaiting_approval";
-  }>;
-
-export type ForbidCodexSuccessionRecoveryInput =
-  ExactCodexSuccessionInput &
-    Readonly<{
-      safeErrorCode: string;
-    }>;
-
-export type CodexSuccessionRecoveryAuthority =
-  | Readonly<{ authority: "none" }>
-  | Readonly<{
-      authority: "old" | "new";
-      journal: CodexSuccessionJournal;
-    }>;
-
-export type CodexSuccessionBarrierInspection = Readonly<{
-  codexRouteCount: number;
-  queueCount: number;
-  inFlightCount: number;
-  transientBodyCount: number;
-  codexQueueDepth: number;
-  clean: boolean;
-}>;
-
-const CODEX_SUCCESSION_STAGES = new Set<string>(
-  codexSuccessionJournalStages,
-);
+class CommitAndThrow {
+  constructor(readonly error: BridgeError) {}
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -313,165 +146,36 @@ function isIsoTimestamp(value: unknown): value is string {
   );
 }
 
+function isPrivateToken(value: unknown): value is string {
+  return typeof value === "string" && PRIVATE_TOKEN_PATTERN.test(value);
+}
+
 function isSafeCode(value: unknown): value is string {
   return typeof value === "string" && SAFE_CODE_PATTERN.test(value);
 }
 
-function isPrivateToken(value: unknown): value is string {
-  // Intentionally excludes whitespace and path separators. Socket/reply paths
-  // must remain connector-memory-only and can never become route handles.
-  return typeof value === "string" && PRIVATE_TOKEN_PATTERN.test(value);
+function isProvider(value: unknown): boolean {
+  return typeof value === "string" && PROVIDERS.has(value);
 }
 
-function isCodexSuccessionIdentity(
-  value: unknown,
-): value is CodexSuccessionStoreIdentity {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, [
-      "alias",
-      "threadId",
-      "hostId",
-      "generation",
-      "binding",
-    ]) &&
-    typeof value.alias === "string" &&
-    ALIAS_PATTERN.test(value.alias) &&
-    value.alias.startsWith("codex-") &&
-    typeof value.hostId === "string" &&
-    HOST_PATTERN.test(value.hostId) &&
-    value.alias.endsWith(`@${value.hostId}`) &&
-    isPrivateToken(value.threadId) &&
-    isCodexRegistrationGeneration(value.generation) &&
-    isPrivateRouteBinding(value.binding) &&
-    value.binding.provider === "codex" &&
-    value.binding.hostId === value.hostId &&
-    value.binding.routeHandle === value.threadId
-  );
-}
-
-function isCodexSuccessionJournal(
-  value: unknown,
-): value is CodexSuccessionJournal {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(
-      value,
-      ["schemaVersion", "stage", "old", "new"],
-      ["safeErrorCode"],
-    ) ||
-    value.schemaVersion !== 1 ||
-    typeof value.stage !== "string" ||
-    !CODEX_SUCCESSION_STAGES.has(value.stage) ||
-    !isCodexSuccessionIdentity(value.old) ||
-    !isCodexSuccessionIdentity(value.new)
-  ) {
-    return false;
-  }
-  const oldIdentity = value.old;
-  const newIdentity = value.new;
-  if (
-    oldIdentity.hostId !== newIdentity.hostId ||
-    oldIdentity.alias === newIdentity.alias ||
-    oldIdentity.threadId === newIdentity.threadId ||
-    oldIdentity.generation === newIdentity.generation ||
-    oldIdentity.binding.ownerLease === newIdentity.binding.ownerLease
-  ) {
-    return false;
-  }
-  return value.stage === "recovery_forbidden"
-    ? isSafeCode(value.safeErrorCode)
-    : value.safeErrorCode === undefined;
-}
-
-function isPrivateEndpointIdentity(
-  value: unknown,
-): value is PrivateEndpointIdentity {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, ["provider", "hostId", "endpointGeneration"]) &&
-    typeof value.provider === "string" &&
-    PROVIDERS.has(value.provider) &&
-    typeof value.hostId === "string" &&
-    HOST_PATTERN.test(value.hostId) &&
-    isPrivateToken(value.endpointGeneration)
-  );
-}
-
-function isPrivateRouteBinding(value: unknown): value is PrivateRouteBinding {
+function isLogicalBinding(value: unknown): value is LogicalRouteBinding {
   return (
     isObject(value) &&
     hasOnlyKeys(value, [
       "provider",
       "hostId",
-      "endpointGeneration",
       "routeHandle",
-      "ownerLease",
+      "registrationId",
     ]) &&
-    isPrivateEndpointIdentity({
-      provider: value.provider,
-      hostId: value.hostId,
-      endpointGeneration: value.endpointGeneration,
-    }) &&
+    isProvider(value.provider) &&
+    typeof value.hostId === "string" &&
+    HOST_PATTERN.test(value.hostId) &&
     isPrivateToken(value.routeHandle) &&
-    isPrivateToken(value.ownerLease)
+    isPrivateToken(value.registrationId)
   );
 }
 
-function isCodexEndpointRefreshJournalEvent(
-  value: unknown,
-): value is CodexEndpointRefreshJournalEvent {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, [
-      "sequence",
-      "timestamp",
-      "alias",
-      "hostId",
-      "threadId",
-      "oldEndpointGeneration",
-      "newEndpointGeneration",
-    ], ["reason"]) &&
-    isPositiveInteger(value.sequence) &&
-    isIsoTimestamp(value.timestamp) &&
-    typeof value.alias === "string" &&
-    ALIAS_PATTERN.test(value.alias) &&
-    value.alias.startsWith("codex-") &&
-    typeof value.hostId === "string" &&
-    HOST_PATTERN.test(value.hostId) &&
-    value.alias.endsWith(`@${value.hostId}`) &&
-    isPrivateToken(value.threadId) &&
-    isPrivateToken(value.oldEndpointGeneration) &&
-    isPrivateToken(value.newEndpointGeneration) &&
-    (value.reason === undefined
-      ? value.oldEndpointGeneration !== value.newEndpointGeneration
-      : value.reason === "boot_reactivation")
-  );
-}
-
-function isCodexOrphanRemovalJournalEvent(
-  value: unknown,
-): value is CodexOrphanRemovalJournalEvent {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, [
-      "sequence",
-      "timestamp",
-      "alias",
-      "hostId",
-    ]) &&
-    isPositiveInteger(value.sequence) &&
-    isIsoTimestamp(value.timestamp) &&
-    typeof value.alias === "string" &&
-    ALIAS_PATTERN.test(value.alias) &&
-    value.alias.startsWith("codex-") &&
-    typeof value.hostId === "string" &&
-    HOST_PATTERN.test(value.hostId) &&
-    value.alias.endsWith(`@${value.hostId}`)
-  );
-}
-
-function isRouteCounters(value: unknown): value is RouteCounters {
+function isCounters(value: unknown): value is RouteCounters {
   if (
     !isObject(value) ||
     !hasOnlyKeys(value, [
@@ -492,404 +196,255 @@ function isRouteCounters(value: unknown): value is RouteCounters {
   return Object.values(value).every(isNonNegativeInteger);
 }
 
-function isRouteRecord(value: unknown): value is GatewayRouteRecord {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(
-      value,
-      [
-        "alias",
-        "binding",
-        "registrationMode",
-        "enabled",
-        "state",
-        "busyPolicy",
-        "registeredAt",
-        "updatedAt",
-        "queueDepth",
-        "counters",
-      ],
-      ["lastSeenAt", "safeErrorCode"],
-    )
-  ) {
-    return false;
-  }
-  return (
-    typeof value.alias === "string" &&
-    ALIAS_PATTERN.test(value.alias) &&
-    isPrivateRouteBinding(value.binding) &&
-    typeof value.registrationMode === "string" &&
-    REGISTRATION_MODES.has(value.registrationMode) &&
-    typeof value.enabled === "boolean" &&
-    typeof value.state === "string" &&
-    ROUTE_STATES.has(value.state) &&
-    value.busyPolicy === "queue" &&
-    isIsoTimestamp(value.registeredAt) &&
-    isIsoTimestamp(value.updatedAt) &&
-    (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
-    isNonNegativeInteger(value.queueDepth) &&
-    isRouteCounters(value.counters) &&
-    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
-  );
-}
-
-function isConsentEndpoint(value: unknown): boolean {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, ["alias", "provider", "ownerLease"]) &&
-    typeof value.alias === "string" && ALIAS_PATTERN.test(value.alias) &&
-    typeof value.provider === "string" && PROVIDERS.has(value.provider) &&
-    isPrivateToken(value.ownerLease)
-  );
-}
-
-function isConsentEdgeRecord(value: unknown): value is GatewayConsentEdgeRecord {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, ["endpoints", "createdAt", "updatedAt", "counters"]) &&
-    Array.isArray(value.endpoints) &&
-    value.endpoints.length === 2 &&
-    value.endpoints.every(isConsentEndpoint) &&
-    isIsoTimestamp(value.createdAt) &&
-    isIsoTimestamp(value.updatedAt) &&
-    isRouteCounters(value.counters)
-  );
-}
-
-function progressWatchPairKey(
-  watch: Pick<
-    ProgressWatch,
-    "ownerAlias" | "ownerLease" | "workerAlias" | "workerLease"
-  >,
-): string {
-  return [
-    `${watch.ownerAlias}\0${watch.ownerLease}`,
-    `${watch.workerAlias}\0${watch.workerLease}`,
-  ]
-    .sort()
-    .join("\0");
-}
-
-function progressWatchMatchesConsentEdge(
-  watch: Pick<
-    ProgressWatch,
-    "ownerAlias" | "ownerLease" | "workerAlias" | "workerLease"
-  >,
-  pair: GatewayConsentEdgeRecord,
-): boolean {
-  const [left, right] = pair.endpoints;
-  return (
-    (watch.ownerAlias === left.alias &&
-      watch.ownerLease === left.ownerLease &&
-      watch.workerAlias === right.alias &&
-      watch.workerLease === right.ownerLease) ||
-    (watch.ownerAlias === right.alias &&
-      watch.ownerLease === right.ownerLease &&
-      watch.workerAlias === left.alias &&
-      watch.workerLease === left.ownerLease)
-  );
-}
-
-function progressWatchJournalEvent(
-  watch: Pick<
-    ProgressWatch,
-    "conversationId" | "ownerAlias" | "workerAlias"
-  >,
-  timestamp: string,
-  transition:
-    | Readonly<{ kind: "opened" | "replaced"; actor: "owner" }>
-    | (Readonly<{ kind: "settled" }> & ProgressWatchSettlement),
-): PendingProgressWatchJournalEvent {
-  return {
-    timestamp,
-    conversationId: watch.conversationId,
-    ownerAlias: watch.ownerAlias,
-    workerAlias: watch.workerAlias,
-    ...transition,
-  };
-}
-
-type LegacyV14ProgressWatch = Readonly<{
-  conversationId: string;
-  ownerAlias: string;
-  workerAlias: string;
-  ownerLease: string;
-  workerLease: string;
-  createdAt: string;
-  updatedAt: string;
-  lastActivityAt: string;
-  idleMs: number;
-  phase: "quiet" | "episode";
-  nudgeCount: 0 | 1 | 2;
-  nextActionAt: string;
-  capability: "conversation" | "route";
-  degradedNoticeSent: boolean;
-}>;
-
-const LEGACY_V14_PROGRESS_WATCH_JOURNAL_KINDS = new Set([
-  "opened",
-  "replaced",
-  "activity",
-  "nudge",
-  "worker_reported_complete",
-  "capability_degraded",
-  "conversation_rebound",
-  "done",
-  "unresponsive",
-  "pair_removed",
-  "endpoint_retired",
-  "disabled",
-]);
-
-type LegacyV14ProgressWatchJournalEvent = Readonly<{
-  sequence: number;
-  timestamp: string;
-  conversationId: string;
-  ownerAlias: string;
-  workerAlias: string;
-  kind:
-    | "opened"
-    | "replaced"
-    | "activity"
-    | "nudge"
-    | "worker_reported_complete"
-    | "capability_degraded"
-    | "conversation_rebound"
-    | "done"
-    | "unresponsive"
-    | "pair_removed"
-    | "endpoint_retired"
-    | "disabled";
-  nudgeNumber?: 1 | 2;
-}>;
-
-function isLegacyV14ProgressWatch(
-  value: unknown,
-): value is LegacyV14ProgressWatch {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(value, [
-      "conversationId",
-      "ownerAlias",
-      "workerAlias",
-      "ownerLease",
-      "workerLease",
-      "createdAt",
-      "updatedAt",
-      "lastActivityAt",
-      "idleMs",
-      "phase",
-      "nudgeCount",
-      "nextActionAt",
-      "capability",
-      "degradedNoticeSent",
-    ])
-  ) {
-    return false;
-  }
-  return (
-    typeof value.conversationId === "string" &&
-    CONVERSATION_ID_PATTERN.test(value.conversationId) &&
-    typeof value.ownerAlias === "string" &&
-    ALIAS_PATTERN.test(value.ownerAlias) &&
-    typeof value.workerAlias === "string" &&
-    ALIAS_PATTERN.test(value.workerAlias) &&
-    value.ownerAlias !== value.workerAlias &&
-    isPrivateToken(value.ownerLease) &&
-    isPrivateToken(value.workerLease) &&
-    value.ownerLease !== value.workerLease &&
-    isIsoTimestamp(value.createdAt) &&
-    isIsoTimestamp(value.updatedAt) &&
-    isIsoTimestamp(value.lastActivityAt) &&
-    isPositiveInteger(value.idleMs) &&
-    value.idleMs >= PROGRESS_WATCH_MIN_IDLE_MS &&
-    value.idleMs <= PROGRESS_WATCH_MAX_IDLE_MS &&
-    (value.phase === "quiet" || value.phase === "episode") &&
-    (value.nudgeCount === 0 ||
-      value.nudgeCount === 1 ||
-      value.nudgeCount === 2) &&
-    (value.phase === "quiet"
-      ? value.nudgeCount === 0
-      : value.nudgeCount === 1 || value.nudgeCount === 2) &&
-    isIsoTimestamp(value.nextActionAt) &&
-    (value.capability === "conversation" || value.capability === "route") &&
-    typeof value.degradedNoticeSent === "boolean"
-  );
-}
-
-function isLegacyV14ProgressWatchJournalEvent(
-  value: unknown,
-): value is LegacyV14ProgressWatchJournalEvent {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(
-      value,
-      [
-        "sequence",
-        "timestamp",
-        "conversationId",
-        "ownerAlias",
-        "workerAlias",
-        "kind",
-      ],
-      ["nudgeNumber"],
-    ) &&
-    isPositiveInteger(value.sequence) &&
-    isIsoTimestamp(value.timestamp) &&
-    typeof value.conversationId === "string" &&
-    CONVERSATION_ID_PATTERN.test(value.conversationId) &&
-    typeof value.ownerAlias === "string" &&
-    ALIAS_PATTERN.test(value.ownerAlias) &&
-    typeof value.workerAlias === "string" &&
-    ALIAS_PATTERN.test(value.workerAlias) &&
-    value.ownerAlias !== value.workerAlias &&
-    typeof value.kind === "string" &&
-    LEGACY_V14_PROGRESS_WATCH_JOURNAL_KINDS.has(value.kind) &&
-    (value.kind === "nudge"
-      ? value.nudgeNumber === 1 || value.nudgeNumber === 2
-      : value.nudgeNumber === undefined)
-  );
-}
-
-function isProgressWatch(value: unknown): value is ProgressWatch {
+function isRoute(value: unknown): value is GatewayRouteRecord {
   return (
     isObject(value) &&
     hasOnlyKeys(value, [
-      "conversationId",
-      "ownerAlias",
-      "workerAlias",
-      "ownerLease",
-      "workerLease",
-      "lastActivityAt",
-      "idleMs",
-      "nudgeCount",
-      "nextActionAt",
+      "alias",
+      "binding",
+      "registrationMode",
+      "enabled",
+      "busyPolicy",
+      "registeredAt",
+      "updatedAt",
+      "counters",
     ]) &&
-    typeof value.conversationId === "string" &&
-    CONVERSATION_ID_PATTERN.test(value.conversationId) &&
-    typeof value.ownerAlias === "string" &&
-    ALIAS_PATTERN.test(value.ownerAlias) &&
-    typeof value.workerAlias === "string" &&
-    ALIAS_PATTERN.test(value.workerAlias) &&
-    value.ownerAlias !== value.workerAlias &&
-    isPrivateToken(value.ownerLease) &&
-    isPrivateToken(value.workerLease) &&
-    value.ownerLease !== value.workerLease &&
-    isIsoTimestamp(value.lastActivityAt) &&
-    isPositiveInteger(value.idleMs) &&
-    value.idleMs >= PROGRESS_WATCH_MIN_IDLE_MS &&
-    value.idleMs <= PROGRESS_WATCH_MAX_IDLE_MS &&
-    (value.nudgeCount === 0 ||
-      value.nudgeCount === 1 ||
-      value.nudgeCount === 2) &&
-    isIsoTimestamp(value.nextActionAt)
+    typeof value.alias === "string" &&
+    ALIAS_PATTERN.test(value.alias) &&
+    isLogicalBinding(value.binding) &&
+    typeof value.registrationMode === "string" &&
+    REGISTRATION_MODES.has(value.registrationMode) &&
+    typeof value.enabled === "boolean" &&
+    (value.busyPolicy === "queue" || value.busyPolicy === "refuse") &&
+    isIsoTimestamp(value.registeredAt) &&
+    isIsoTimestamp(value.updatedAt) &&
+    isCounters(value.counters)
   );
 }
 
-function isProgressWatchJournalEvent(
-  value: unknown,
-): value is ProgressWatchJournalEvent {
+function isConsentEndpoint(value: unknown): value is GatewayConsentEndpoint {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, ["alias", "provider", "registrationId"]) &&
+    typeof value.alias === "string" &&
+    ALIAS_PATTERN.test(value.alias) &&
+    isProvider(value.provider) &&
+    isPrivateToken(value.registrationId)
+  );
+}
+
+function compareConsentEndpoints(
+  left: GatewayConsentEndpoint,
+  right: GatewayConsentEndpoint,
+): number {
+  const providerOrder =
+    gatewayProviders.indexOf(left.provider) -
+    gatewayProviders.indexOf(right.provider);
+  return providerOrder !== 0 ? providerOrder : left.alias.localeCompare(right.alias);
+}
+
+function canonicalConsentEndpoints(
+  left: GatewayRouteRecord,
+  right: GatewayRouteRecord,
+): readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] {
+  const endpoints: [GatewayConsentEndpoint, GatewayConsentEndpoint] = [
+    {
+      alias: left.alias,
+      provider: left.binding.provider,
+      registrationId: left.binding.registrationId,
+    },
+    {
+      alias: right.alias,
+      provider: right.binding.provider,
+      registrationId: right.binding.registrationId,
+    },
+  ];
+  endpoints.sort(compareConsentEndpoints);
+  return endpoints;
+}
+
+function consentKey(
+  endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint],
+): string {
+  return endpoints
+    .map((endpoint) =>
+      [endpoint.provider, endpoint.alias, endpoint.registrationId].join("\0"),
+    )
+    .join("\0");
+}
+
+function sameConsent(
+  left: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
+  right: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  return consentKey(left) === consentKey(right);
+}
+
+function isConsentEdge(value: unknown): value is GatewayConsentEdgeRecord {
+  if (
+    !isObject(value) ||
+    !hasOnlyKeys(value, ["endpoints", "createdAt", "updatedAt", "counters"]) ||
+    !Array.isArray(value.endpoints) ||
+    value.endpoints.length !== 2 ||
+    !value.endpoints.every(isConsentEndpoint)
+  ) {
+    return false;
+  }
+  const endpoints = value.endpoints as unknown as readonly [
+    GatewayConsentEndpoint,
+    GatewayConsentEndpoint,
+  ];
+  return (
+    compareConsentEndpoints(endpoints[0], endpoints[1]) < 0 &&
+    endpoints[0].provider !== endpoints[1].provider &&
+    isIsoTimestamp(value.createdAt) &&
+    isIsoTimestamp(value.updatedAt) &&
+    isCounters(value.counters)
+  );
+}
+
+function isPrepared(value: unknown): value is GatewayPreparedWriteEvidence {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, [
+      "kind",
+      "bodyBytes",
+      "bodySha256",
+      "frameBytes",
+      "sha256",
+    ]) &&
+    (value.kind === "claude_mailbox" ||
+      value.kind === "codex_turn_start" ||
+      value.kind === "codex_turn_steer" ||
+      value.kind === "acp_prompt") &&
+    isPositiveInteger(value.bodyBytes) &&
+    typeof value.bodySha256 === "string" &&
+    SHA256_PATTERN.test(value.bodySha256) &&
+    isPositiveInteger(value.frameBytes) &&
+    value.frameBytes >= value.bodyBytes &&
+    typeof value.sha256 === "string" &&
+    SHA256_PATTERN.test(value.sha256)
+  );
+}
+
+function expectedPreparedKind(
+  message: Pick<GatewayMessageRecord, "direction" | "steer">,
+): GatewayPreparedWriteEvidence["kind"] {
+  const target = parseDirection(message.direction)!.targetProvider;
+  if (target === "claude") return "claude_mailbox";
+  if (target === "codex") {
+    return message.steer === true ? "codex_turn_steer" : "codex_turn_start";
+  }
+  return "acp_prompt";
+}
+
+function isAttemptAuthority(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.attemptId === "string" &&
+    isPrivateToken(value.attemptId) &&
+    isPositiveInteger(value.attemptCount) &&
+    typeof value.targetRegistrationId === "string" &&
+    isPrivateToken(value.targetRegistrationId) &&
+    (value.sourceRegistrationId === null ||
+      isPrivateToken(value.sourceRegistrationId)) &&
+    (value.consentEdge === null ||
+      (Array.isArray(value.consentEdge) &&
+        value.consentEdge.length === 2 &&
+        value.consentEdge.every(isConsentEndpoint) &&
+        compareConsentEndpoints(
+          value.consentEdge[0] as GatewayConsentEndpoint,
+          value.consentEdge[1] as GatewayConsentEndpoint,
+        ) < 0))
+  );
+}
+
+function isMessageState(value: unknown): value is GatewayMessageState {
+  if (!isObject(value) || typeof value.phase !== "string") return false;
+  if (value.phase === "queued") {
+    return hasOnlyKeys(value, ["phase", "attemptCount"]) &&
+      isNonNegativeInteger(value.attemptCount);
+  }
+  if (value.phase === "reserved") {
+    return (
+      hasOnlyKeys(value, [
+        "phase",
+        "attemptId",
+        "attemptCount",
+        "targetRegistrationId",
+        "sourceRegistrationId",
+        "consentEdge",
+        "reservedAt",
+      ]) &&
+      isAttemptAuthority(value) &&
+      isIsoTimestamp(value.reservedAt)
+    );
+  }
+  if (value.phase === "armed") {
+    return (
+      hasOnlyKeys(value, [
+        "phase",
+        "attemptId",
+        "attemptCount",
+        "targetRegistrationId",
+        "sourceRegistrationId",
+        "consentEdge",
+        "armedAt",
+        "prepared",
+      ]) &&
+      isAttemptAuthority(value) &&
+      isIsoTimestamp(value.armedAt) &&
+      isPrepared(value.prepared)
+    );
+  }
+  if (value.phase === "accepted") {
+    return (
+      hasOnlyKeys(value, [
+        "phase",
+        "attemptId",
+        "attemptCount",
+        "targetRegistrationId",
+        "sourceRegistrationId",
+        "consentEdge",
+        "acceptedAt",
+        "prepared",
+        "lossOutcome",
+      ]) &&
+      isAttemptAuthority(value) &&
+      isIsoTimestamp(value.acceptedAt) &&
+      isPrepared(value.prepared) &&
+      (value.lossOutcome === "unconfirmed" || value.lossOutcome === "ambiguous")
+    );
+  }
+  return (
+    value.phase === "terminal" &&
+    hasOnlyKeys(
+      value,
+      ["phase", "outcome", "terminalAt", "latencyMs"],
+      ["safeErrorCode"],
+    ) &&
+    [
+      "delivered",
+      "unconfirmed",
+      "failed",
+      "ambiguous",
+      "expired",
+      "cancelled",
+      "abandoned",
+    ].includes(String(value.outcome)) &&
+    isIsoTimestamp(value.terminalAt) &&
+    isNonNegativeInteger(value.latencyMs) &&
+    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
+  );
+}
+
+function isMessage(value: unknown): value is GatewayMessageRecord {
   if (
     !isObject(value) ||
     !hasOnlyKeys(
       value,
       [
         "sequence",
-        "timestamp",
-        "conversationId",
-        "ownerAlias",
-        "workerAlias",
-        "kind",
-        "actor",
-      ],
-      ["reason"],
-    ) ||
-    !isPositiveInteger(value.sequence) ||
-    !isIsoTimestamp(value.timestamp) ||
-    typeof value.conversationId !== "string" ||
-    !CONVERSATION_ID_PATTERN.test(value.conversationId) ||
-    typeof value.ownerAlias !== "string" ||
-    !ALIAS_PATTERN.test(value.ownerAlias) ||
-    typeof value.workerAlias !== "string" ||
-    !ALIAS_PATTERN.test(value.workerAlias) ||
-    value.ownerAlias === value.workerAlias ||
-    typeof value.kind !== "string" ||
-    !PROGRESS_WATCH_JOURNAL_KINDS.has(value.kind)
-  ) {
-    return false;
-  }
-  if (value.kind === "opened") {
-    return value.actor === "owner" && value.reason === undefined;
-  }
-  if (value.kind === "replaced") {
-    return (
-      (value.actor === "owner" || value.actor === "unknown") &&
-      value.reason === undefined
-    );
-  }
-  if (value.kind !== "settled" || typeof value.reason !== "string") {
-    return false;
-  }
-  if (value.reason === "done") {
-    return value.actor === "owner" || value.actor === "worker";
-  }
-  if (value.reason === "untracked") return value.actor === "operator";
-  if (value.reason === "pair_removed") return value.actor === "operator";
-  if (value.reason === "endpoint_retired") {
-    return value.actor === "gateway" || value.actor === "operator";
-  }
-  if (
-    value.reason === "idle_timeout" ||
-    value.reason === "tracking_disabled"
-  ) {
-    return value.actor === "gateway";
-  }
-  return false;
-}
-
-function isConnectorRecord(value: unknown): value is ConnectorRecord {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(
-      value,
-      [
-        "provider",
-        "hostId",
-        "endpointGeneration",
-        "health",
-        "protocol",
-        "protocolVersion",
-        "updatedAt",
-      ],
-      ["lastSeenAt", "safeErrorCode"],
-    )
-  ) {
-    return false;
-  }
-  return (
-    isPrivateEndpointIdentity({
-      provider: value.provider,
-      hostId: value.hostId,
-      endpointGeneration: value.endpointGeneration,
-    }) &&
-    typeof value.health === "string" &&
-    CONNECTOR_HEALTH.has(value.health) &&
-    typeof value.protocol === "string" &&
-    PROTOCOL_PATTERN.test(value.protocol) &&
-    typeof value.protocolVersion === "string" &&
-    PROTOCOL_VERSION_PATTERN.test(value.protocolVersion) &&
-    isIsoTimestamp(value.updatedAt) &&
-    (value.lastSeenAt === undefined || isIsoTimestamp(value.lastSeenAt)) &&
-    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
-  );
-}
-
-function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(
-      value,
-      [
         "messageId",
         "messageIdSuffix",
         "direction",
@@ -898,22 +453,32 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         "enqueuedAt",
         "deadlineAt",
         "bytes",
+        "sourceRegistrationId",
+        "targetRegistrationId",
+        "consentEdge",
+        "state",
       ],
-      ["conversationIdSuffix", "body", "pair", "transientTarget", "steer"],
+      [
+        "conversationIdSuffix",
+        "deliveryToken",
+        "body",
+        "pair",
+        "transientTarget",
+        "steer",
+      ],
     )
   ) {
     return false;
   }
   return (
+    isPositiveInteger(value.sequence) &&
     typeof value.messageId === "string" &&
     MESSAGE_ID_PATTERN.test(value.messageId) &&
     typeof value.messageIdSuffix === "string" &&
     MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
-    (value.conversationIdSuffix === undefined ||
-      (typeof value.conversationIdSuffix === "string" &&
-        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
-    typeof value.direction === "string" &&
-    DIRECTIONS.has(value.direction) &&
+    value.messageIdSuffix ===
+      value.messageId.replaceAll("-", "").slice(-8).toLowerCase() &&
+    parseDirection(value.direction) !== undefined &&
     typeof value.sourceAlias === "string" &&
     ALIAS_PATTERN.test(value.sourceAlias) &&
     typeof value.targetAlias === "string" &&
@@ -926,69 +491,45 @@ function isQueuedMetadata(value: unknown): value is QueuedMessageMetadata {
         value.body.length > 0 &&
         !value.body.includes("\u0000") &&
         Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
-    (value.pair === undefined || value.pair === true) &&
-    (value.transientTarget === undefined || value.transientTarget === true) &&
-    (value.steer === undefined || value.steer === true)
-  );
-}
-
-function isInFlightMetadata(
-  value: unknown,
-): value is InFlightMessageMetadata {
-  if (!isObject(value)) return false;
-  const { dispatchedAt, ...metadata } = value;
-  return isQueuedMetadata(metadata) && isIsoTimestamp(dispatchedAt);
-}
-
-function isEvent(value: unknown): value is NormalizedMessageEvent {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(
-      value,
-      [
-        "sequence",
-        "timestamp",
-        "messageIdSuffix",
-        "direction",
-        "sourceAlias",
-        "targetAlias",
-        "state",
-        "bytes",
-      ],
-      ["conversationIdSuffix", "body", "latencyMs", "safeErrorCode", "steer"],
-    )
-  ) {
-    return false;
-  }
-  return (
-    isPositiveInteger(value.sequence) &&
-    isIsoTimestamp(value.timestamp) &&
-    typeof value.messageIdSuffix === "string" &&
-    MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
     (value.conversationIdSuffix === undefined ||
       (typeof value.conversationIdSuffix === "string" &&
         CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
-    typeof value.direction === "string" &&
-    DIRECTIONS.has(value.direction) &&
-    typeof value.sourceAlias === "string" &&
-    ALIAS_PATTERN.test(value.sourceAlias) &&
-    typeof value.targetAlias === "string" &&
-    ALIAS_PATTERN.test(value.targetAlias) &&
-    typeof value.state === "string" &&
-    DELIVERY_STATES.has(value.state) &&
-    isPositiveInteger(value.bytes) &&
-    (value.body === undefined ||
-      (typeof value.body === "string" &&
-        value.body.length > 0 &&
-        !value.body.includes("\u0000") &&
-        Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
-    (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
-    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode)) &&
-    (value.steer === undefined || value.steer === true)
+    (value.deliveryToken === undefined ||
+      (typeof value.deliveryToken === "string" &&
+        DELIVERY_TOKEN_PATTERN.test(value.deliveryToken))) &&
+    (value.pair === undefined || value.pair === true) &&
+    (value.transientTarget === undefined || value.transientTarget === true) &&
+    (value.steer === undefined || value.steer === true) &&
+    (value.sourceRegistrationId === null ||
+      isPrivateToken(value.sourceRegistrationId)) &&
+    (value.targetRegistrationId === null ||
+      isPrivateToken(value.targetRegistrationId)) &&
+    (value.consentEdge === null ||
+      (Array.isArray(value.consentEdge) &&
+        value.consentEdge.length === 2 &&
+        value.consentEdge.every(isConsentEndpoint) &&
+        compareConsentEndpoints(
+          value.consentEdge[0] as GatewayConsentEndpoint,
+          value.consentEdge[1] as GatewayConsentEndpoint,
+        ) < 0)) &&
+    isMessageState(value.state) &&
+    (value.state.phase === "terminal" ||
+      value.state.attemptCount <=
+        1 +
+          Math.max(
+            0,
+            Math.ceil(
+              (Date.parse(value.deadlineAt as string) -
+                Date.parse(value.enqueuedAt as string)) /
+                500,
+            ),
+          )) &&
+    (value.state.phase === "terminal" ||
+      (value.targetRegistrationId !== null && value.body !== undefined))
   );
 }
 
-function isDedupeRecord(value: unknown): value is DedupeRecord {
+function isDedupe(value: unknown): value is DedupeRecord {
   return (
     isObject(value) &&
     hasOnlyKeys(
@@ -1008,25 +549,24 @@ function isDedupeRecord(value: unknown): value is DedupeRecord {
     FINGERPRINT_PATTERN.test(value.fingerprint) &&
     typeof value.messageIdSuffix === "string" &&
     MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
-    (value.conversationIdSuffix === undefined ||
-      (typeof value.conversationIdSuffix === "string" &&
-        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
     typeof value.sourceAlias === "string" &&
     ALIAS_PATTERN.test(value.sourceAlias) &&
     typeof value.targetAlias === "string" &&
     ALIAS_PATTERN.test(value.targetAlias) &&
-    typeof value.direction === "string" &&
-    DIRECTIONS.has(value.direction) &&
-    (value.pair === undefined || value.pair === true) &&
+    parseDirection(value.direction) !== undefined &&
     isIsoTimestamp(value.firstSeenAt) &&
-    isIsoTimestamp(value.expiresAt)
+    isIsoTimestamp(value.expiresAt) &&
+    (value.conversationIdSuffix === undefined ||
+      (typeof value.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
+    (value.pair === undefined || value.pair === true)
   );
 }
 
 function isAccounting(value: unknown): value is GatewayAccounting {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(value, [
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, [
       "accepted",
       "duplicates",
       "delivered",
@@ -1039,80 +579,150 @@ function isAccounting(value: unknown): value is GatewayAccounting {
       "rejected",
       "bytesAccepted",
       "queuedBytes",
-    ])
+    ]) &&
+    Object.values(value).every(isNonNegativeInteger)
+  );
+}
+
+function isNormalizedEvent(value: unknown): value is NormalizedMessageEvent {
+  if (
+    !isObject(value) ||
+    !hasOnlyKeys(
+      value,
+      [
+        "sequence",
+        "timestamp",
+        "messageIdSuffix",
+        "direction",
+        "sourceAlias",
+        "targetAlias",
+        "state",
+        "bytes",
+      ],
+      [
+        "conversationIdSuffix",
+        "body",
+        "steer",
+        "latencyMs",
+        "safeErrorCode",
+      ],
+    )
   ) {
     return false;
   }
-  return Object.values(value).every(isNonNegativeInteger);
+  return (
+    isPositiveInteger(value.sequence) &&
+    isIsoTimestamp(value.timestamp) &&
+    typeof value.messageIdSuffix === "string" &&
+    MESSAGE_SUFFIX_PATTERN.test(value.messageIdSuffix) &&
+    parseDirection(value.direction) !== undefined &&
+    typeof value.sourceAlias === "string" &&
+    ALIAS_PATTERN.test(value.sourceAlias) &&
+    typeof value.targetAlias === "string" &&
+    ALIAS_PATTERN.test(value.targetAlias) &&
+    deliveryStates.includes(value.state as DeliveryState) &&
+    isPositiveInteger(value.bytes) &&
+    (value.conversationIdSuffix === undefined ||
+      (typeof value.conversationIdSuffix === "string" &&
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
+    (value.body === undefined ||
+      (typeof value.body === "string" &&
+        value.body.length > 0 &&
+        !value.body.includes("\u0000") &&
+        Buffer.byteLength(value.body, "utf8") === value.bytes)) &&
+    (value.steer === undefined || value.steer === true) &&
+    (value.latencyMs === undefined || isNonNegativeInteger(value.latencyMs)) &&
+    (value.safeErrorCode === undefined || isSafeCode(value.safeErrorCode))
+  );
 }
 
-function isPersistedState(value: unknown): value is GatewayPersistedState {
+function isRuntimeActivity(value: unknown): value is GatewayRuntimeActivity {
+  if (
+    !isObject(value) ||
+    !hasOnlyKeys(value, ["type", "event"]) ||
+    value.type !== "activity" ||
+    !isObject(value.event) ||
+    !hasOnlyKeys(
+      value.event,
+      [
+        "sequence",
+        "timestamp",
+        "kind",
+        "action",
+        "outcome",
+        "aliases",
+        "operatorAction",
+      ],
+      ["safeErrorCode"],
+    )
+  ) {
+    return false;
+  }
+  const event = value.event;
+  return (
+    isPositiveInteger(event.sequence) &&
+    isIsoTimestamp(event.timestamp) &&
+    gatewayActivityKinds.includes(
+      event.kind as (typeof gatewayActivityKinds)[number],
+    ) &&
+    gatewayActivityActions.includes(
+      event.action as (typeof gatewayActivityActions)[number],
+    ) &&
+    (event.outcome === "accepted" || event.outcome === "rejected") &&
+    Array.isArray(event.aliases) &&
+    event.aliases.length <= 2 &&
+    event.aliases.every(
+      (alias) => typeof alias === "string" && ALIAS_PATTERN.test(alias),
+    ) &&
+    typeof event.operatorAction === "boolean" &&
+    (event.safeErrorCode === undefined || isSafeCode(event.safeErrorCode))
+  );
+}
+
+function isLegacyActivity(value: unknown): value is GatewayLegacyMessageActivity {
+  return (
+    isObject(value) &&
+    hasOnlyKeys(value, ["type", "event"]) &&
+    value.type === "legacy_message" &&
+    isNormalizedEvent(value.event)
+  );
+}
+
+export function isGatewayPersistedStateV3(
+  value: unknown,
+): value is GatewayPersistedState {
   if (
     !isObject(value) ||
     !hasOnlyKeys(value, [
       "schemaVersion",
+      "commit",
       "createdAt",
       "updatedAt",
       "eventSequence",
       "routes",
       "consentEdges",
-      "connectors",
-      "queue",
-      "inFlight",
-      "events",
+      "messages",
       "dedupe",
       "rateBuckets",
+      "activity",
       "accounting",
-      "watchSequence",
-      "progressWatches",
-      "progressWatchEvents",
-      "codexEndpointRefreshSequence",
-      "codexEndpointRefreshEvents",
-      "codexOrphanRemovalSequence",
-      "codexOrphanRemovalEvents",
-      "codexSuccession",
     ]) ||
-    value.schemaVersion !== 2 ||
+    value.schemaVersion !== 3 ||
+    !isObject(value.commit) ||
+    !hasOnlyKeys(value.commit, ["sequence", "id"]) ||
+    !isNonNegativeInteger(value.commit.sequence) ||
+    !isPrivateToken(value.commit.id) ||
     !isIsoTimestamp(value.createdAt) ||
     !isIsoTimestamp(value.updatedAt) ||
     !isNonNegativeInteger(value.eventSequence) ||
-    !isNonNegativeInteger(value.watchSequence) ||
-    !isNonNegativeInteger(value.codexEndpointRefreshSequence) ||
-    !isNonNegativeInteger(value.codexOrphanRemovalSequence) ||
     !Array.isArray(value.routes) ||
-    !value.routes.every(isRouteRecord) ||
+    !value.routes.every(isRoute) ||
     !Array.isArray(value.consentEdges) ||
-    value.consentEdges.length > gatewayPublicSnapshotLimits.consentEdges ||
-    !value.consentEdges.every(isConsentEdgeRecord) ||
-    !Array.isArray(value.progressWatches) ||
-    value.progressWatches.length > PROGRESS_WATCH_HARD_CAPACITY ||
-    !value.progressWatches.every(isProgressWatch) ||
-    !Array.isArray(value.progressWatchEvents) ||
-    value.progressWatchEvents.length > gatewayPublicSnapshotLimits.messages ||
-    !value.progressWatchEvents.every(isProgressWatchJournalEvent) ||
-    !Array.isArray(value.codexEndpointRefreshEvents) ||
-    value.codexEndpointRefreshEvents.length >
-      CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY ||
-    !value.codexEndpointRefreshEvents.every(
-      isCodexEndpointRefreshJournalEvent,
-    ) ||
-    !Array.isArray(value.codexOrphanRemovalEvents) ||
-    value.codexOrphanRemovalEvents.length >
-      CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY ||
-    !value.codexOrphanRemovalEvents.every(
-      isCodexOrphanRemovalJournalEvent,
-    ) ||
-    !Array.isArray(value.connectors) ||
-    !value.connectors.every(isConnectorRecord) ||
-    !Array.isArray(value.queue) ||
-    !value.queue.every(isQueuedMetadata) ||
-    !Array.isArray(value.inFlight) ||
-    !value.inFlight.every(isInFlightMetadata) ||
-    !Array.isArray(value.events) ||
-    value.events.length > gatewayPublicSnapshotLimits.messages ||
-    !value.events.every(isEvent) ||
+    !value.consentEdges.every(isConsentEdge) ||
+    !Array.isArray(value.messages) ||
+    !value.messages.every(isMessage) ||
     !Array.isArray(value.dedupe) ||
-    !value.dedupe.every(isDedupeRecord) ||
+    !value.dedupe.every(isDedupe) ||
     !Array.isArray(value.rateBuckets) ||
     !value.rateBuckets.every(
       (bucket) =>
@@ -1123,292 +733,203 @@ function isPersistedState(value: unknown): value is GatewayPersistedState {
         isIsoTimestamp(bucket.windowStartedAt) &&
         isNonNegativeInteger(bucket.count),
     ) ||
-    !isAccounting(value.accounting) ||
-    (value.codexSuccession !== null &&
-      !isCodexSuccessionJournal(value.codexSuccession))
+    !Array.isArray(value.activity) ||
+    !value.activity.every(
+      (entry) => isLegacyActivity(entry) || isRuntimeActivity(entry),
+    ) ||
+    !isAccounting(value.accounting)
   ) {
     return false;
   }
 
-  const candidate = value as unknown as GatewayPersistedState;
-  const aliases = new Set(candidate.routes.map((route) => route.alias));
-  const routeTargets = new Set(
-    candidate.routes.map(
-      (route) =>
-        `${route.binding.provider}\0${route.binding.hostId}\0${route.binding.endpointGeneration}\0${route.binding.routeHandle}`,
+  const state = value as unknown as GatewayPersistedState;
+  const routesByAlias = new Map(state.routes.map((route) => [route.alias, route]));
+  const registrationIds = state.routes.map(
+    (route) => route.binding.registrationId,
+  );
+  const routeTargets = state.routes.map((route) =>
+    [route.binding.provider, route.binding.hostId, route.binding.routeHandle].join(
+      "\0",
     ),
   );
-  const ownerLeases = new Set(
-    candidate.routes.map((route) => route.binding.ownerLease),
-  );
-  const watchConversationIds = new Set(
-    candidate.progressWatches.map((watch) => watch.conversationId),
-  );
-  if (watchConversationIds.size !== candidate.progressWatches.length) {
-    return false;
-  }
-  const watchPairKeys = new Set(
-    candidate.progressWatches.map(progressWatchPairKey),
-  );
-  if (watchPairKeys.size !== candidate.progressWatches.length) return false;
-  for (const watch of candidate.progressWatches) {
-    const owner = candidate.routes.find(
-      (route) =>
-        route.alias === watch.ownerAlias &&
-        route.binding.ownerLease === watch.ownerLease,
-    );
-    const worker = candidate.routes.find(
-      (route) =>
-        route.alias === watch.workerAlias &&
-        route.binding.ownerLease === watch.workerLease,
-    );
-    if (
-      owner === undefined ||
-      worker === undefined ||
-      owner.binding.provider === worker.binding.provider ||
-      owner.binding.hostId !== worker.binding.hostId
-    ) {
-      return false;
-    }
-    const endpoints = canonicalConsentEndpoints(owner, worker);
-    if (
-      !candidate.consentEdges.some(
-        (edge) => edge.endpoints.every((endpoint, index) =>
-          endpoint.alias === endpoints[index]!.alias &&
-          endpoint.provider === endpoints[index]!.provider &&
-          endpoint.ownerLease === endpoints[index]!.ownerLease),
-      )
-    ) {
-      return false;
-    }
-  }
-  const connectorKeys = new Set(
-    candidate.connectors.map(
-      (connector) => `${connector.provider}\0${connector.hostId}`,
-    ),
-  );
-  const messageIds = [
-    ...candidate.queue.map((item) => item.messageId),
-    ...candidate.inFlight.map((item) => item.messageId),
-  ];
-  const expectedQueuedBytes = candidate.queue.reduce(
-    (total, item) => total + item.bytes,
-    0,
-  );
-  const routeByAlias = new Map(
-    candidate.routes.map((route) => [route.alias, route]),
-  );
-  const edgeKeys = candidate.consentEdges.map((edge) => consentEdgeKey(edge.endpoints));
-  const edgesValid = candidate.consentEdges.every((edge) => {
-    const [leftEndpoint, rightEndpoint] = edge.endpoints;
-    const left = routeByAlias.get(leftEndpoint.alias);
-    const right = routeByAlias.get(rightEndpoint.alias);
-    return (
-      compareConsentEndpoints(leftEndpoint, rightEndpoint) < 0 &&
-      left?.binding.provider === leftEndpoint.provider &&
-      right?.binding.provider === rightEndpoint.provider &&
-      left.binding.provider !== right.binding.provider &&
-      left.binding.hostId === right.binding.hostId &&
-      left.binding.ownerLease === leftEndpoint.ownerLease &&
-      right.binding.ownerLease === rightEndpoint.ownerLease
-    );
-  });
-  const claudeConnectorHosts = new Set(
-    candidate.connectors
-      .filter((connector) => connector.provider === "claude")
-      .map((connector) => connector.hostId),
-  );
-  const aliasHost = (alias: string): string =>
-    alias.slice(alias.lastIndexOf("@") + 1);
-  const isValidPersistedMessagePair = (message: {
-    direction: MessageDirection;
-    sourceAlias: string;
-    targetAlias: string;
-    pair?: true;
-  }): boolean => {
-    const source = routeByAlias.get(message.sourceAlias);
-    const target = routeByAlias.get(message.targetAlias);
-    const parsed = parseDirection(message.direction);
-    if (parsed === undefined) return false;
-    const sourceValid = source?.binding.provider === parsed.sourceProvider ||
-      (source === undefined && parsed.sourceProvider === "claude" && target !== undefined &&
-        claudeConnectorHosts.has(target.binding.hostId) &&
-        aliasHost(message.sourceAlias) === target.binding.hostId);
-    const targetValid = target?.binding.provider === parsed.targetProvider ||
-      (target === undefined && parsed.targetProvider === "claude" && source !== undefined &&
-        claudeConnectorHosts.has(source.binding.hostId) &&
-        aliasHost(message.targetAlias) === source.binding.hostId);
-    const routeShapeValid = sourceValid && targetValid &&
-      (source === undefined || target === undefined ||
-        source.binding.hostId === target.binding.hostId);
-    return (
-      routeShapeValid &&
-      (message.pair !== true ||
-        candidate.consentEdges.some((edge) => consentEdgeMatchesMessage(edge, message)))
-    );
-  };
-  const sequencesStrictlyIncrease = candidate.events.every(
-    (event, index) =>
-      index === 0 ||
-      event.sequence > (candidate.events[index - 1]?.sequence ?? 0),
-  );
-  const progressWatchSequencesStrictlyIncrease =
-    candidate.progressWatchEvents.every(
-      (event, index) =>
-        event.sequence <= candidate.watchSequence &&
-        (index === 0 ||
-          event.sequence >
-            (candidate.progressWatchEvents[index - 1]?.sequence ?? 0)),
-    );
-  const endpointRefreshSequenceConsistent =
-    candidate.codexEndpointRefreshEvents.length === 0
-      ? candidate.codexEndpointRefreshSequence === 0
-      : candidate.codexEndpointRefreshEvents.at(-1)?.sequence ===
-          candidate.codexEndpointRefreshSequence &&
-        candidate.codexEndpointRefreshEvents.every(
-          (event, index) =>
-            index === 0 ||
-            event.sequence ===
-              (candidate.codexEndpointRefreshEvents[index - 1]?.sequence ??
-                0) +
-                1,
-        );
-  const orphanRemovalSequenceConsistent =
-    candidate.codexOrphanRemovalEvents.length === 0
-      ? candidate.codexOrphanRemovalSequence === 0
-      : candidate.codexOrphanRemovalEvents.at(-1)?.sequence ===
-          candidate.codexOrphanRemovalSequence &&
-        candidate.codexOrphanRemovalEvents.every(
-          (event, index) =>
-            index === 0 ||
-            event.sequence ===
-              (candidate.codexOrphanRemovalEvents[index - 1]?.sequence ?? 0) +
-                1,
-        );
-  return (
-    aliases.size === candidate.routes.length &&
-    new Set(edgeKeys).size === edgeKeys.length &&
-    edgesValid &&
-    routeTargets.size === candidate.routes.length &&
-    ownerLeases.size === candidate.routes.length &&
-    connectorKeys.size === candidate.connectors.length &&
-    new Set(messageIds).size === messageIds.length &&
-    new Set(candidate.dedupe.map((record) => record.fingerprint)).size ===
-      candidate.dedupe.length &&
-    new Set(candidate.rateBuckets.map((bucket) => bucket.sourceAlias)).size ===
-      candidate.rateBuckets.length &&
-    candidate.accounting.queuedBytes === expectedQueuedBytes &&
-    sequencesStrictlyIncrease &&
-    progressWatchSequencesStrictlyIncrease &&
-    candidate.events.every(
-      (event) => event.sequence <= candidate.eventSequence,
-    ) &&
-    endpointRefreshSequenceConsistent &&
-    orphanRemovalSequenceConsistent &&
-    candidate.routes.every(
-      (route) =>
-        route.alias.endsWith(`@${route.binding.hostId}`) &&
-        ((route.binding.provider === "claude" &&
-          route.registrationMode === "selected_live_peer") ||
-          (route.binding.provider !== "claude" &&
-            route.registrationMode === "explicit_opt_in")) &&
-        (gatewayRegistrationIngressPrefixes[route.binding.provider] === undefined ||
-          route.alias.startsWith(gatewayRegistrationIngressPrefixes[route.binding.provider]!)) &&
-        route.queueDepth ===
-          candidate.queue.filter((item) => item.targetAlias === route.alias)
-            .length,
-    ) &&
-    [...candidate.queue, ...candidate.inFlight].every((item) => {
-      return (
-        item.messageIdSuffix ===
-          item.messageId.replaceAll("-", "").slice(-8).toLowerCase() &&
-        isValidPersistedMessagePair(item)
-      );
-    }) &&
-    candidate.dedupe.every(isValidPersistedMessagePair) &&
-    candidate.rateBuckets.every(
-      (bucket) =>
-        aliases.has(bucket.sourceAlias) ||
-        candidate.routes.some(
-          (route) =>
-            claudeConnectorHosts.has(route.binding.hostId) &&
-            route.binding.hostId === aliasHost(bucket.sourceAlias),
-        ),
-    ) &&
-    isPersistedSuccessionConsistent(candidate)
-  );
-}
-
-function routeMatchesSuccessionIdentity(
-  route: GatewayRouteRecord,
-  identity: CodexSuccessionStoreIdentity,
-): boolean {
-  return (
-    route.alias === identity.alias &&
-    route.registrationMode === "explicit_opt_in" &&
-    route.binding.provider === "codex" &&
-    route.binding.hostId === identity.hostId &&
-    route.binding.routeHandle === identity.threadId &&
-    sameBinding(route.binding, identity.binding)
-  );
-}
-
-function isPersistedSuccessionConsistent(
-  state: GatewayPersistedState,
-): boolean {
-  if (state.codexSuccession === null) return true;
-  if (!isCodexSuccessionJournal(state.codexSuccession)) return false;
-  const journal = state.codexSuccession;
-  const matchingRoutes = state.routes.filter(
-    (candidate) =>
-      routeMatchesSuccessionIdentity(candidate, journal.old) ||
-      routeMatchesSuccessionIdentity(candidate, journal.new),
-  );
-  if (matchingRoutes.length !== 1 || matchingRoutes[0] === undefined) {
-    return false;
-  }
-  const route = matchingRoutes[0];
-  const successionAliases = new Set([journal.old.alias, journal.new.alias]);
+  const edgeKeys = state.consentEdges.map((edge) => consentKey(edge.endpoints));
+  const messages = state.messages;
+  const activitySequences = state.activity.map((entry) => entry.event.sequence);
+  const active = messages.filter((message) => message.state.phase !== "terminal");
+  const queuedBytes = messages
+    .filter((message) => message.state.phase === "queued")
+    .reduce((total, message) => total + message.bytes, 0);
   if (
-    state.queue.some(
-      (item) =>
-        successionAliases.has(item.sourceAlias) ||
-        successionAliases.has(item.targetAlias),
-    ) ||
-    state.inFlight.some(
-      (item) =>
-        successionAliases.has(item.sourceAlias) ||
-        successionAliases.has(item.targetAlias),
-    ) ||
-    route.queueDepth !== 0
+    routesByAlias.size !== state.routes.length ||
+    new Set(registrationIds).size !== registrationIds.length ||
+    new Set(routeTargets).size !== routeTargets.length ||
+    new Set(edgeKeys).size !== edgeKeys.length ||
+    new Set(messages.map((message) => message.messageId)).size !== messages.length ||
+    new Set(
+      messages
+        .map((message) => message.deliveryToken)
+        .filter((token): token is string => token !== undefined),
+    ).size !== messages.filter((message) => message.deliveryToken !== undefined).length ||
+    new Set(
+      messages
+        .filter((message) => message.state.phase !== "queued" && message.state.phase !== "terminal")
+        .map((message) =>
+          (message.state as Exclude<GatewayMessageState, { phase: "queued" } | { phase: "terminal" }>).attemptId,
+        ),
+    ).size !==
+      messages.filter(
+        (message) =>
+          message.state.phase !== "queued" && message.state.phase !== "terminal",
+      ).length ||
+    state.accounting.queuedBytes !== queuedBytes ||
+    messages.some((message) => message.sequence > state.eventSequence) ||
+    activitySequences.some((sequence) => sequence > state.eventSequence) ||
+    new Set([
+      ...messages.map((message) => message.sequence),
+      ...activitySequences,
+    ]).size !== messages.length + activitySequences.length ||
+    new Set(state.dedupe.map((entry) => entry.fingerprint)).size !==
+      state.dedupe.length ||
+    new Set(state.rateBuckets.map((entry) => entry.sourceAlias)).size !==
+      state.rateBuckets.length
   ) {
     return false;
   }
-  const oldMatches = routeMatchesSuccessionIdentity(route, journal.old);
-  const newMatches = routeMatchesSuccessionIdentity(route, journal.new);
-  const newConnectorGenerationExists = state.connectors.some((connector) =>
-    sameEndpoint(connector, journal.new.binding),
-  );
-  if (!newConnectorGenerationExists) return false;
-  const nonCodexCollision = state.routes.some(
-    (candidate) =>
-      candidate !== route &&
-      (candidate.alias === journal.new.alias ||
-        sameRouteTarget(candidate.binding, journal.new.binding) ||
-        candidate.binding.ownerLease === journal.new.binding.ownerLease),
-  );
-  if (nonCodexCollision) return false;
-  if (journal.stage === "activated") {
-    return newMatches && isZeroRouteCounters(route.counters);
+  for (const message of messages) {
+    const direction = parseDirection(message.direction)!;
+    if (
+      (message.pair === true) !== (message.consentEdge !== null) ||
+      (message.sourceRegistrationId === null &&
+        (direction.sourceProvider !== "claude" || message.pair === true)) ||
+      (message.transientTarget === true &&
+        (direction.targetProvider !== "claude" ||
+          message.pair === true ||
+          message.sourceRegistrationId === null))
+    ) {
+      return false;
+    }
+    if (message.consentEdge !== null) {
+      const source = message.consentEdge.find(
+        (endpoint) => endpoint.alias === message.sourceAlias,
+      );
+      const target = message.consentEdge.find(
+        (endpoint) => endpoint.alias === message.targetAlias,
+      );
+      if (
+        source?.provider !== direction.sourceProvider ||
+        target?.provider !== direction.targetProvider ||
+        source.registrationId !== message.sourceRegistrationId ||
+        target.registrationId !== message.targetRegistrationId
+      ) {
+        return false;
+      }
+    }
   }
-  if (journal.stage === "recovery_forbidden") {
-    return oldMatches || (newMatches && isZeroRouteCounters(route.counters));
+  for (const route of state.routes) {
+    if (
+      !route.alias.endsWith(`@${route.binding.hostId}`) ||
+      (route.binding.provider === "claude"
+        ? route.registrationMode !== "selected_live_peer"
+        : route.registrationMode !== "explicit_opt_in")
+    ) {
+      return false;
+    }
+    const prefix = gatewayRegistrationIngressPrefixes[route.binding.provider];
+    if (prefix !== undefined && !route.alias.startsWith(prefix)) return false;
   }
-  return oldMatches;
-}
-
-function isZeroRouteCounters(counters: RouteCounters): boolean {
-  return Object.values(counters).every((value) => value === 0);
+  for (const edge of state.consentEdges) {
+    const [leftEndpoint, rightEndpoint] = edge.endpoints;
+    const left = routesByAlias.get(leftEndpoint.alias);
+    const right = routesByAlias.get(rightEndpoint.alias);
+    if (
+      left?.binding.registrationId !== leftEndpoint.registrationId ||
+      right?.binding.registrationId !== rightEndpoint.registrationId ||
+      left.binding.provider !== leftEndpoint.provider ||
+      right.binding.provider !== rightEndpoint.provider ||
+      left.binding.hostId !== right.binding.hostId
+    ) {
+      return false;
+    }
+  }
+  for (const message of active) {
+    const target = routesByAlias.get(message.targetAlias);
+    const source = routesByAlias.get(message.sourceAlias);
+    const direction = parseDirection(message.direction)!;
+    if (
+      message.targetRegistrationId === null ||
+      (message.transientTarget !== true &&
+        (target?.binding.registrationId !== message.targetRegistrationId ||
+          target.binding.provider !== direction.targetProvider)) ||
+      (message.transientTarget === true && direction.targetProvider !== "claude")
+    ) {
+      return false;
+    }
+    if (message.sourceRegistrationId !== null) {
+      if (
+        source?.binding.registrationId !== message.sourceRegistrationId ||
+        source.binding.provider !== direction.sourceProvider ||
+        (target !== undefined && source.binding.hostId !== target.binding.hostId)
+      ) {
+        return false;
+      }
+    } else if (
+      direction.sourceProvider !== "claude" ||
+      target === undefined ||
+      aliasHost(message.sourceAlias) !== target.binding.hostId
+    ) {
+      return false;
+    }
+    if (message.transientTarget === true) {
+      if (
+        message.pair === true ||
+        message.consentEdge !== null ||
+        message.sourceRegistrationId === null ||
+        source === undefined ||
+        aliasHost(message.targetAlias) !== source.binding.hostId
+      ) {
+        return false;
+      }
+    }
+    if (message.pair === true) {
+      if (
+        message.consentEdge === null ||
+        source === undefined ||
+        target === undefined ||
+        !sameConsent(
+          message.consentEdge,
+          canonicalConsentEndpoints(source, target),
+        ) ||
+        !state.consentEdges.some((edge) =>
+          sameConsent(edge.endpoints, message.consentEdge),
+        )
+      ) {
+        return false;
+      }
+    } else if (message.consentEdge !== null) {
+      return false;
+    }
+    if (
+      (message.state.phase === "reserved" ||
+        message.state.phase === "armed" ||
+        message.state.phase === "accepted") &&
+      (message.state.sourceRegistrationId !== message.sourceRegistrationId ||
+        message.state.targetRegistrationId !== message.targetRegistrationId ||
+        !sameConsent(message.state.consentEdge, message.consentEdge))
+    ) {
+      return false;
+    }
+    if (
+      (message.state.phase === "armed" ||
+        message.state.phase === "accepted") &&
+      (message.state.prepared.kind !== expectedPreparedKind(message) ||
+        message.state.prepared.bodyBytes !== message.bytes ||
+        message.state.prepared.bodySha256 !==
+          createHash("sha256").update(message.body!, "utf8").digest("hex"))
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function emptyCounters(): RouteCounters {
@@ -1443,283 +964,88 @@ function emptyAccounting(): GatewayAccounting {
   };
 }
 
-async function canonicalFuturePath(candidate: string): Promise<string> {
-  const suffix: string[] = [];
-  let cursor = path.resolve(candidate);
-  while (true) {
-    try {
-      return path.join(await realpath(cursor), ...suffix);
-    } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        !("code" in error) ||
-        error.code !== "ENOENT"
-      ) {
-        throw error;
-      }
-      const parent = path.dirname(cursor);
-      if (parent === cursor) throw error;
-      suffix.unshift(path.basename(cursor));
-      cursor = parent;
-    }
-  }
+function terminalState(
+  outcome: Extract<
+    DeliveryState,
+    | "delivered"
+    | "unconfirmed"
+    | "failed"
+    | "ambiguous"
+    | "expired"
+    | "cancelled"
+    | "abandoned"
+  >,
+  now: Date,
+  enqueuedAt: string,
+  safeErrorCode?: string,
+): Extract<GatewayMessageState, { phase: "terminal" }> {
+  return {
+    phase: "terminal",
+    outcome,
+    terminalAt: now.toISOString(),
+    latencyMs: Math.max(0, now.getTime() - Date.parse(enqueuedAt)),
+    ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
+  };
+}
+
+function sameBinding(left: LogicalRouteBinding, right: LogicalRouteBinding): boolean {
+  return (
+    left.provider === right.provider &&
+    left.hostId === right.hostId &&
+    left.routeHandle === right.routeHandle &&
+    left.registrationId === right.registrationId
+  );
+}
+
+function aliasHost(alias: string): string {
+  return alias.slice(alias.lastIndexOf("@") + 1);
 }
 
 async function assertNoSymlinkComponents(candidate: string): Promise<void> {
-  const absolute = path.resolve(candidate);
-  const parsed = path.parse(absolute);
-  const relative = absolute.slice(parsed.root.length);
-  let cursor = parsed.root;
-  for (const component of relative.split(path.sep).filter(Boolean)) {
-    cursor = path.join(cursor, component);
+  let cursor = path.resolve(candidate);
+  while (true) {
     try {
       const info = await lstat(cursor);
       if (info.isSymbolicLink()) {
         throw new BridgeError(
           "UNSAFE_GATEWAY_STATE_DIRECTORY",
-          "The gateway state path must not contain symbolic links.",
+          "The gateway state path cannot contain symbolic links.",
         );
       }
     } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
-        return;
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+}
+
+async function canonicalFuturePath(candidate: string): Promise<string> {
+  const absolute = path.resolve(candidate);
+  const parsed = path.parse(absolute);
+  const parts = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let cursor = parsed.root;
+  for (let index = 0; index < parts.length; index += 1) {
+    const next = path.join(cursor, parts[index]!);
+    try {
+      cursor = await realpath(next);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        return path.join(cursor, ...parts.slice(index));
       }
       throw error;
     }
   }
+  return cursor;
 }
 
-function sameEndpoint(
-  left: PrivateEndpointIdentity,
-  right: PrivateEndpointIdentity,
-): boolean {
-  return (
-    left.provider === right.provider &&
-    left.hostId === right.hostId &&
-    left.endpointGeneration === right.endpointGeneration
-  );
-}
-
-function endpointOf(binding: PrivateRouteBinding): PrivateEndpointIdentity {
-  return {
-    provider: binding.provider,
-    hostId: binding.hostId,
-    endpointGeneration: binding.endpointGeneration,
-  };
-}
-
-function cloneSuccessionIdentity(
-  identity: CodexSuccessionStoreIdentity,
-): CodexSuccessionStoreIdentity {
-  return {
-    alias: identity.alias,
-    threadId: identity.threadId,
-    hostId: identity.hostId,
-    generation: identity.generation,
-    binding: { ...identity.binding },
-  };
-}
-
-function cloneSuccessionJournal(
-  journal: CodexSuccessionJournal,
-): CodexSuccessionJournal {
-  return {
-    schemaVersion: 1,
-    stage: journal.stage,
-    old: cloneSuccessionIdentity(journal.old),
-    new: cloneSuccessionIdentity(journal.new),
-    ...(journal.safeErrorCode === undefined
-      ? {}
-      : { safeErrorCode: journal.safeErrorCode }),
-  };
-}
-
-function sameBinding(
-  left: PrivateRouteBinding,
-  right: PrivateRouteBinding,
-): boolean {
-  return (
-    sameEndpoint(left, right) &&
-    left.routeHandle === right.routeHandle &&
-    left.ownerLease === right.ownerLease
-  );
-}
-
-function sameRouteTarget(
-  left: PrivateRouteBinding,
-  right: PrivateRouteBinding,
-): boolean {
-  return sameEndpoint(left, right) && left.routeHandle === right.routeHandle;
-}
-
-function renameRateBucket(
-  state: GatewayPersistedState,
-  previousAlias: string,
-  newAlias: string,
-): void {
-  const previous = state.rateBuckets.find(
-    (bucket) => bucket.sourceAlias === previousAlias,
-  );
-  if (previous === undefined) return;
-  const existing = state.rateBuckets.find(
-    (bucket) => bucket.sourceAlias === newAlias,
-  );
-  if (existing === undefined) {
-    previous.sourceAlias = newAlias;
-    return;
-  }
-  existing.windowStartedAt =
-    existing.windowStartedAt < previous.windowStartedAt
-      ? existing.windowStartedAt
-      : previous.windowStartedAt;
-  existing.count = Math.min(
-    Number.MAX_SAFE_INTEGER,
-    existing.count + previous.count,
-  );
-  state.rateBuckets = state.rateBuckets.filter(
-    (bucket) => bucket !== previous,
-  );
-}
-
-function compareConsentEndpoints(left: Pick<GatewayConsentEndpoint, "alias" | "provider">,
-  right: Pick<GatewayConsentEndpoint, "alias" | "provider">): number {
-  return gatewayProviders.indexOf(left.provider) -
-    gatewayProviders.indexOf(right.provider) || left.alias.localeCompare(right.alias);
-}
-
-function canonicalConsentEndpoints(
-  source: GatewayRouteRecord,
-  target: GatewayRouteRecord,
-): readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] {
-  const endpoints: [GatewayConsentEndpoint, GatewayConsentEndpoint] = [
-    { alias: source.alias, provider: source.binding.provider,
-      ownerLease: source.binding.ownerLease },
-    { alias: target.alias, provider: target.binding.provider,
-      ownerLease: target.binding.ownerLease },
-  ];
-  endpoints.sort(compareConsentEndpoints);
-  return endpoints;
-}
-
-function consentEdgeKey(endpoints: readonly [
-  Pick<GatewayConsentEndpoint, "alias" | "provider">,
-  Pick<GatewayConsentEndpoint, "alias" | "provider">,
-]): string {
-  return endpoints.map(({ provider, alias }) => `${provider}\0${alias}`).join("\0");
-}
-
-function consentEdgeMatchesMessage(
-  pair: GatewayConsentEdgeRecord | GatewayConsentEdgeInput,
-  message: Pick<
-    QueuedMessageMetadata,
-    "sourceAlias" | "targetAlias" | "pair"
-  >,
-): boolean {
-  const aliases = "endpoints" in pair
-    ? pair.endpoints.map((endpoint) => endpoint.alias)
-    : pair.aliases;
-  return message.pair === true &&
-    ((message.sourceAlias === aliases[0] && message.targetAlias === aliases[1]) ||
-      (message.sourceAlias === aliases[1] && message.targetAlias === aliases[0]));
-}
-
-function findConsentEdgeForMessage(
-  state: GatewayPersistedState,
-  message: Pick<QueuedMessageMetadata, "sourceAlias" | "targetAlias">,
-): GatewayConsentEdgeRecord | undefined {
-  return state.consentEdges.find((edge) => consentEdgeMatchesMessage(edge, message));
-}
-
-function renameConsentEdgeAlias(
-  state: GatewayPersistedState,
-  previousAlias: string,
-  newAlias: string,
-  now: Date,
-): void {
-  if (previousAlias === newAlias) return;
-  for (const edge of state.consentEdges) {
-    const endpoint = edge.endpoints.find(({ alias }) => alias === previousAlias);
-    if (endpoint !== undefined) {
-      const renamed = edge.endpoints.map((candidate) =>
-        candidate.alias === previousAlias
-          ? { ...candidate, alias: newAlias }
-          : candidate,
-      ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
-      renamed.sort(compareConsentEndpoints);
-      edge.endpoints = renamed;
-      edge.updatedAt = now.toISOString();
-    }
-  }
-}
-
-function renameProgressWatchAlias(
-  state: GatewayPersistedState,
-  previousAlias: string,
-  newAlias: string,
-): void {
-  if (previousAlias === newAlias) return;
-  state.progressWatches = state.progressWatches.map((watch) =>
-    watch.ownerAlias === previousAlias
-      ? { ...watch, ownerAlias: newAlias }
-      : watch.workerAlias === previousAlias
-        ? { ...watch, workerAlias: newAlias }
-        : watch,
-  );
-}
-
-function removeConsentEdgesForAliases(
-  state: GatewayPersistedState,
-  aliases: ReadonlySet<string>,
-): void {
-  state.consentEdges = state.consentEdges.filter(
-    (edge) => !edge.endpoints.some(({ alias }) => aliases.has(alias)),
-  );
-}
-
-function routeTerminationMatches(
-  state: GatewayPersistedState,
-  aliases: ReadonlySet<string>,
-  message: Pick<
-    QueuedMessageMetadata,
-    "sourceAlias" | "targetAlias" | "pair"
-  >,
-): boolean {
-  for (const alias of [message.sourceAlias, message.targetAlias]) {
-    if (!aliases.has(alias)) continue;
-    const route = state.routes.find((candidate) => candidate.alias === alias);
-    if (route?.binding.provider !== "claude" || message.pair === true) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function directionFor(
-  source: GatewayRouteRecord,
-  target: GatewayRouteRecord,
-): MessageDirection {
-  if (source.binding.provider !== target.binding.provider) {
-    return directionId(source.binding.provider, target.binding.provider);
-  }
-  throw new BridgeError(
-    "INVALID_GATEWAY_ROUTE_PAIR",
-    "Gateway messages must cross between distinct providers.",
-  );
-}
-
-type ResolvedEnqueueSides = {
-  sourceAlias: string;
-  targetAlias: string;
-  direction: MessageDirection;
-  pair?: true;
-  transientTarget?: true;
-  sourceRoute?: GatewayRouteRecord;
-  targetRoute?: GatewayRouteRecord;
-};
+type ConsentEdgeInput = Readonly<{
+  aliases: readonly [string, string];
+  expectedRegistrationIds: readonly [string, string];
+}>;
 
 export class GatewayStore {
   readonly config: GatewayConfig;
@@ -1729,12 +1055,11 @@ export class GatewayStore {
   private readonly afterStateFileRename:
     | (() => void | Promise<void>)
     | undefined;
+  private readonly renameStateFile: (source: string, target: string) => Promise<void>;
   private readonly mutex = new KeyedMutex();
-  private readonly transientBodies = new Map<string, string>();
   private state: GatewayPersistedState | undefined;
   private lockHandle: FileHandle | undefined;
   private lockToken: string | undefined;
-  /** Startup may defer the first native-v2 persistence until admission passes. */
   private persistenceDeferred = false;
 
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
@@ -1742,6 +1067,7 @@ export class GatewayStore {
     this.rootDir = path.resolve(config.stateDir);
     this.now = dependencies.now ?? (() => new Date());
     this.randomId = dependencies.randomId ?? randomUUID;
+    this.renameStateFile = dependencies.renameStateFile ?? rename;
     this.afterStateFileRename = dependencies.afterStateFileRename;
   }
 
@@ -1749,61 +1075,40 @@ export class GatewayStore {
     return path.join(this.rootDir, STATE_FILE);
   }
 
-  async initialize(options: Readonly<{ deferPersistence?: boolean }> = {}): Promise<void> {
+  async initialize(
+    options: Readonly<{ deferPersistence?: boolean }> = {},
+  ): Promise<void> {
     await this.mutex.run("gateway", async () => {
-      if (this.state) return;
+      if (this.state !== undefined) return;
       this.rootDir = await this.prepareOwnedDirectory();
-      const rootMetadata = await lstat(this.rootDir);
-      if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
-        throw new BridgeError(
-          "UNSAFE_GATEWAY_STATE_DIRECTORY",
-          "The prepared gateway controller root is no longer a real directory.",
-        );
-      }
       await this.acquireLock();
       try {
         const now = this.now();
-        const loaded = await this.loadStateFile(now);
+        const loaded = await this.loadStateFile();
         this.state = loaded ?? {
-          schemaVersion: 2,
+          schemaVersion: 3,
+          commit: { sequence: 0, id: this.randomId() },
           createdAt: now.toISOString(),
           updatedAt: now.toISOString(),
           eventSequence: 0,
           routes: [],
           consentEdges: [],
-          connectors: [],
-          queue: [],
-          inFlight: [],
-          events: [],
+          messages: [],
           dedupe: [],
           rateBuckets: [],
+          activity: [],
           accounting: emptyAccounting(),
-          watchSequence: 0,
-          progressWatches: [],
-          progressWatchEvents: [],
-          codexEndpointRefreshSequence: 0,
-          codexEndpointRefreshEvents: [],
-          codexOrphanRemovalSequence: 0,
-          codexOrphanRemovalEvents: [],
-          codexSuccession: null,
         };
-        if (this.state.consentEdges.length > this.config.limits.maxConsentEdges) {
-          throw new BridgeError(
-            "CONSENT_EDGE_CAPACITY_REACHED",
-            "The durable consent-edge inventory exceeds the configured bound.",
-          );
-        }
-        if (
-          this.state.progressWatches.length >
-          (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY)
-        ) {
-          throw new BridgeError(
-            "PROGRESS_WATCH_CAPACITY_REACHED",
-            "The durable progress-watch inventory exceeds the configured bound.",
-          );
-        }
+        this.assertConfiguredBounds(this.state);
         this.recoverAfterRestart(now);
-        this.prune(now);
+        this.prune(this.state, now);
+        if (loaded !== undefined) {
+          this.state.commit = {
+            sequence: this.state.commit.sequence + 1,
+            id: this.randomId(),
+          };
+          this.state.updatedAt = now.toISOString();
+        }
         this.persistenceDeferred = options.deferPersistence === true;
         if (!this.persistenceDeferred) await this.persist();
       } catch (error) {
@@ -1815,7 +1120,6 @@ export class GatewayStore {
     });
   }
 
-  /** Commit a successfully admitted startup exactly once. */
   async commitInitialization(): Promise<void> {
     await this.mutex.run("gateway", async () => {
       this.requireState();
@@ -1827,181 +1131,91 @@ export class GatewayStore {
 
   async close(): Promise<void> {
     await this.mutex.run("gateway", async () => {
-      this.transientBodies.clear();
       this.state = undefined;
       this.persistenceDeferred = false;
       await this.releaseControllerLock();
     });
   }
 
-  async observeConnector(input: ObserveConnectorInput): Promise<void> {
-    await this.mutate(async (state, now) => {
-      this.assertAllowedIdentity(input.identity);
-      if (
-        !PROTOCOL_PATTERN.test(input.protocol) ||
-        !PROTOCOL_VERSION_PATTERN.test(input.protocolVersion) ||
-        (input.safeErrorCode !== undefined &&
-          !SAFE_CODE_PATTERN.test(input.safeErrorCode))
-      ) {
-        throw new BridgeError(
-          "INVALID_CONNECTOR_OBSERVATION",
-          "The connector observation contains an unsupported normalized field.",
-        );
-      }
-      const existingIndex = state.connectors.findIndex(
-        (connector) =>
-          connector.provider === input.identity.provider &&
-          connector.hostId === input.identity.hostId,
-      );
-      const existing = state.connectors[existingIndex];
-      if (
-        existing &&
-        existing.endpointGeneration !== input.identity.endpointGeneration &&
-        existing.health !== "offline"
-      ) {
-        throw new BridgeError(
-          "ENDPOINT_GENERATION_MISMATCH",
-          "A live connector already owns this provider and host. It must be invalidated before a new endpoint generation is observed.",
-        );
-      }
-      const observed: ConnectorRecord = {
-        ...input.identity,
-        health: input.health,
-        protocol: input.protocol,
-        protocolVersion: input.protocolVersion,
-        updatedAt: now.toISOString(),
-        lastSeenAt: now.toISOString(),
-        ...(input.safeErrorCode ? { safeErrorCode: input.safeErrorCode } : {}),
-      };
-      if (existingIndex >= 0) state.connectors[existingIndex] = observed;
-      else {
-        if (
-          state.connectors.length >=
-          this.config.allowedHosts.length * gatewayProviders.length
-        ) {
-          throw new BridgeError(
-            "CONNECTOR_CAPACITY_REACHED",
-            "The bounded provider and host connector registry is full.",
-          );
-        }
-        state.connectors.push(observed);
-      }
+  async inspectPrivateRoutes(): Promise<GatewayPrivateRouteInspection[]> {
+    return this.read((state) =>
+      state.routes.map((route) => ({
+        alias: route.alias,
+        binding: { ...route.binding },
+        registrationMode: route.registrationMode,
+        enabled: route.enabled,
+      })),
+    );
+  }
+
+  async listLogicalRoutes(): Promise<GatewayPrivateRouteInspection[]> {
+    return this.inspectPrivateRoutes();
+  }
+
+  async inspectPrivateRoute(
+    alias: string,
+  ): Promise<GatewayPrivateRouteInspection | undefined> {
+    return this.read((state) => {
+      const route = state.routes.find((candidate) => candidate.alias === alias);
+      return route === undefined
+        ? undefined
+        : {
+            alias: route.alias,
+            binding: { ...route.binding },
+            registrationMode: route.registrationMode,
+            enabled: route.enabled,
+          };
     });
   }
 
-  async markConnectorOffline(
-    identity: PrivateEndpointIdentity,
-    safeErrorCode = "CONNECTOR_OFFLINE",
-    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
-    options: Readonly<{ preserveQueued?: boolean }> = {},
-  ): Promise<TerminalMessageSettlement[]> {
-    return await this.mutate(async (state, now) => {
-      this.assertAllowedIdentity(identity);
-      if (!SAFE_CODE_PATTERN.test(safeErrorCode)) {
-        throw new BridgeError(
-          "INVALID_SAFE_ERROR_CODE",
-          "Connector error codes must use the normalized safe-code grammar.",
-        );
-      }
-      const connector = state.connectors.find((candidate) =>
-        sameEndpoint(candidate, identity),
+  async resolveRoute(alias: string): Promise<LogicalRouteBinding> {
+    const route = await this.inspectPrivateRoute(alias);
+    if (route === undefined || !route.enabled) {
+      throw new BridgeError(
+        "ROUTE_NOT_AVAILABLE",
+        "The requested logical route is not registered and enabled.",
+        true,
       );
-      if (!connector) {
-        throw new BridgeError(
-          "CONNECTOR_NOT_FOUND",
-          "No connector matches the exact private endpoint generation.",
-        );
-      }
-      const affectedAliases = new Set<string>();
-      for (const route of state.routes) {
-        if (!sameEndpoint(route.binding, identity)) continue;
-        affectedAliases.add(route.alias);
-      }
-      const settlementPlan = this.validateAffectedInFlightSettlements(
-        state,
-        affectedAliases,
-        inFlightSettlements,
-      );
-      connector.health = "offline";
-      connector.updatedAt = now.toISOString();
-      connector.safeErrorCode = safeErrorCode;
-      for (const route of state.routes) {
-        if (!sameEndpoint(route.binding, identity)) continue;
-        route.state = route.enabled ? "stale" : "disabled";
-        route.updatedAt = now.toISOString();
-        route.safeErrorCode = safeErrorCode;
-      }
-      return this.terminateAffectedMessages(
-        state,
-        affectedAliases,
-        now,
-        safeErrorCode,
-        settlementPlan,
-        options.preserveQueued === true,
-      );
-    });
+    }
+    return route.binding;
   }
 
   async registerRoute(input: RegisterRouteInput): Promise<void> {
-    await this.mutate(async (state, now) => {
+    await this.mutate((state, now) => {
       this.validateRouteInput(input);
-      this.assertAllowedIdentity(endpointOf(input.binding));
-      const connector = state.connectors.find((candidate) =>
-        sameEndpoint(candidate, input.binding),
-      );
-      if (
-        !connector ||
-        !["healthy", "degraded"].includes(connector.health)
-      ) {
-        throw new BridgeError(
-          "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The exact live endpoint generation must be observed before a route can be registered.",
-        );
-      }
       const byAlias = state.routes.find((route) => route.alias === input.alias);
-      const byBinding = state.routes.find((route) =>
-        sameRouteTarget(route.binding, input.binding),
-      );
-      if (byAlias) {
-        if (!sameBinding(byAlias.binding, input.binding)) {
-          throw new BridgeError(
-            "ROUTE_ALIAS_COLLISION",
-            "The public alias is already bound to another private route.",
-          );
+      if (byAlias !== undefined) {
+        if (
+          sameBinding(byAlias.binding, input.binding) &&
+          byAlias.registrationMode === input.registrationMode
+        ) {
+          byAlias.enabled = true;
+          byAlias.updatedAt = now.toISOString();
+          return;
         }
-        if (byAlias.registrationMode !== input.registrationMode) {
-          throw new BridgeError(
-            "ROUTE_REGISTRATION_MISMATCH",
-            "The route registration mode cannot change for an existing binding.",
-          );
-        }
-        byAlias.enabled = true;
-        byAlias.state = input.state ?? "idle";
-        byAlias.updatedAt = now.toISOString();
-        byAlias.lastSeenAt = now.toISOString();
-        delete byAlias.safeErrorCode;
-        return;
-      }
-      if (byBinding) {
         throw new BridgeError(
-          "ROUTE_BINDING_COLLISION",
-          "The private route is already registered under another public alias.",
+          "ROUTE_ALIAS_ALREADY_REGISTERED",
+          "The route alias already belongs to another logical registration.",
         );
       }
       if (
         state.routes.some(
-          (route) => route.binding.ownerLease === input.binding.ownerLease,
+          (route) =>
+            route.binding.registrationId === input.binding.registrationId ||
+            (route.binding.provider === input.binding.provider &&
+              route.binding.hostId === input.binding.hostId &&
+              route.binding.routeHandle === input.binding.routeHandle),
         )
       ) {
         throw new BridgeError(
-          "ROUTE_LEASE_COLLISION",
-          "The private ownership lease already belongs to another route.",
+          "ROUTE_IDENTITY_ALREADY_REGISTERED",
+          "The logical provider identity is already registered under another alias.",
         );
       }
       if (state.routes.length >= this.config.limits.maxRoutes) {
         throw new BridgeError(
           "ROUTE_CAPACITY_REACHED",
-          "The bounded gateway route registry is full.",
+          "The bounded logical route inventory is full.",
           true,
         );
       }
@@ -2010,1964 +1224,968 @@ export class GatewayStore {
         binding: { ...input.binding },
         registrationMode: input.registrationMode,
         enabled: true,
-        state: input.state ?? "idle",
         busyPolicy: "queue",
         registeredAt: now.toISOString(),
         updatedAt: now.toISOString(),
-        lastSeenAt: now.toISOString(),
-        queueDepth: state.queue.filter(
-          (item) => item.targetAlias === input.alias,
-        ).length,
         counters: emptyCounters(),
       });
     });
   }
 
-  /**
-   * Replace the complete selected-Claude set with one exact live session in a
-   * single durable mutation. Work owned by every retired selection settles by
-   * the same evidence-aware rules as explicit unselection; no public snapshot
-   * can observe a two-selection intermediate state.
-   */
-  async replaceClaudeSelection(
-    input: ReplaceClaudeSelectionInput,
-  ): Promise<TerminalMessageSettlement[]> {
-    return await this.mutate(async (state, now) => {
-      const replacement = input.replacement;
-      this.validateRouteInput(replacement);
-      this.assertAllowedIdentity(endpointOf(replacement.binding));
-      if (
-        replacement.binding.provider !== "claude" ||
-        replacement.registrationMode !== "selected_live_peer"
-      ) {
+  async removeRouteAtomic(
+    input: RemoveRouteAtomicInput,
+  ): Promise<RemoveRouteAtomicResult> {
+    return this.mutate((state, now) => {
+      if (!ALIAS_PATTERN.test(input.alias)) {
         throw new BridgeError(
-          "INVALID_CLAUDE_SELECTION_REPLACEMENT",
-          "A Claude selection replacement must name one exact selected live peer.",
+          "INVALID_GATEWAY_ALIAS",
+          "The route alias is invalid.",
         );
       }
-      const connector = state.connectors.find((candidate) =>
-        sameEndpoint(candidate, replacement.binding),
+      const route = state.routes.find((candidate) => candidate.alias === input.alias);
+      if (route === undefined) return { removed: false, settlements: [] };
+      if (
+        route.binding.provider !== "codex" &&
+        route.binding.provider !== "claude"
+      ) {
+        throw new BridgeError(
+          "INVALID_ROUTE_BINDING",
+          "Only explicit Codex removal or Claude unselection uses this operator path.",
+        );
+      }
+      const settlements = this.terminalizeRegistration(
+        state,
+        route.binding.registrationId,
+        now,
       );
-      if (
-        !connector ||
-        !["healthy", "degraded"].includes(connector.health)
-      ) {
-        throw new BridgeError(
-          "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The exact live endpoint generation must be observed before a Claude selection can replace another.",
-        );
-      }
+      this.removeRegistrationMetadata(state, route);
+      this.appendRuntimeActivity(state, now, {
+        kind: route.binding.provider === "claude" ? "selection" : "registration",
+        action:
+          route.binding.provider === "claude"
+            ? "claude_unselected"
+            : "codex_unregistered",
+        outcome: "accepted",
+        aliases: [route.alias],
+        operatorAction: input.activity.operatorAction,
+      });
+      return { removed: true, settlements };
+    });
+  }
 
-      const selectedClaudeRoutes = state.routes.filter(
-        (route) =>
-          route.binding.provider === "claude" &&
-          route.registrationMode === "selected_live_peer",
-      );
-      const logicalMatches = selectedClaudeRoutes.filter(
-        (route) =>
-          route.binding.hostId === replacement.binding.hostId &&
-          route.binding.routeHandle === replacement.binding.routeHandle &&
-          route.binding.ownerLease === replacement.binding.ownerLease,
-      );
-      if (logicalMatches.length > 1) {
+  async removeOwnedRouteAtomic(
+    input: Readonly<{
+      alias: string;
+      binding: LogicalRouteBinding;
+      activity?: Readonly<{ operatorAction: boolean }>;
+    }>,
+  ): Promise<RemoveRouteAtomicResult> {
+    return this.mutate((state, now) => {
+      if (!ALIAS_PATTERN.test(input.alias) || !isLogicalBinding(input.binding)) {
         throw new BridgeError(
-          "CLAUDE_SELECTION_STATE_CORRUPT",
-          "More than one durable selection claims the same exact Claude session authority.",
+          "INVALID_ROUTE_BINDING",
+          "The exact-owned route cleanup authority is malformed.",
         );
       }
-      const retained = logicalMatches[0];
+      const route = state.routes.find((candidate) => candidate.alias === input.alias);
+      if (route === undefined || !sameBinding(route.binding, input.binding)) {
+        return { removed: false, settlements: [] };
+      }
       if (
-        retained !== undefined &&
-        !sameBinding(retained.binding, replacement.binding) &&
-        (!retained.enabled || retained.state !== "stale")
+        input.activity !== undefined &&
+        route.binding.provider !== "codex" &&
+        route.binding.provider !== "claude"
       ) {
         throw new BridgeError(
-          "ROUTE_REBIND_IDENTITY_MISMATCH",
-          "Only a stale exact Claude session may adopt a newly observed endpoint generation during replacement.",
+          "INVALID_ROUTE_BINDING",
+          "Only exact Codex unregister or Claude unselection has public activity.",
         );
       }
-      const aliasOwner = state.routes.find(
+      const settlements = this.terminalizeRegistration(
+        state,
+        route.binding.registrationId,
+        now,
+      );
+      this.removeRegistrationMetadata(state, route);
+      if (input.activity !== undefined) {
+        this.appendRuntimeActivity(state, now, {
+          kind:
+            route.binding.provider === "claude" ? "selection" : "registration",
+          action:
+            route.binding.provider === "claude"
+              ? "claude_unselected"
+              : "codex_unregistered",
+          outcome: "accepted",
+          aliases: [route.alias],
+          operatorAction: input.activity.operatorAction,
+        });
+      }
+      return { removed: true, settlements };
+    });
+  }
+
+  async replaceCodexRegistrationAtomic(
+    input: ReplaceCodexRegistrationAtomicInput,
+  ): Promise<ReplaceCodexRegistrationAtomicResult> {
+    return this.mutate((state, now) => {
+      this.validateRouteInput(input.replacement);
+      if (!isPrivateToken(input.expectedOldRegistrationId)) {
+        throw new BridgeError(
+          "INVALID_ROUTE_BINDING",
+          "The expected succeeded registration identity is malformed.",
+        );
+      }
+      if (input.replacement.binding.provider !== "codex") {
+        throw new BridgeError(
+          "CODEX_SUCCESSION_OWNER_MISMATCH",
+          "Only a Codex logical registration can succeed another Codex registration.",
+        );
+      }
+      const oldRoute = state.routes.find((route) => route.alias === input.oldAlias);
+      const installed = state.routes.find(
+        (route) => route.alias === input.replacement.alias,
+      );
+      if (oldRoute === undefined) {
+        if (
+          installed !== undefined &&
+          sameBinding(installed.binding, input.replacement.binding) &&
+          installed.registrationMode === input.replacement.registrationMode
+        ) {
+          return {
+            replaced: true,
+            idempotent: true,
+            settlements: [],
+          };
+        }
+        throw new BridgeError(
+          "CODEX_SUCCESSION_OWNER_MISMATCH",
+          "The succeeded Codex registration is no longer installed.",
+        );
+      }
+      if (
+        oldRoute.binding.registrationId !== input.expectedOldRegistrationId
+      ) {
+        throw new BridgeError(
+          "ROUTE_UNREGISTERED",
+          "The succeeded Codex registration is no longer the expected owner.",
+        );
+      }
+      if (
+        oldRoute.binding.provider !== "codex" ||
+        installed !== undefined ||
+        oldRoute.binding.hostId !== input.replacement.binding.hostId ||
+        oldRoute.alias === input.replacement.alias ||
+        oldRoute.binding.registrationId ===
+          input.replacement.binding.registrationId ||
+        oldRoute.binding.routeHandle === input.replacement.binding.routeHandle
+      ) {
+        throw new BridgeError(
+          "CODEX_SUCCESSION_OWNER_MISMATCH",
+          "The successor must be a distinct Codex task and alias on the same host.",
+        );
+      }
+      const collision = state.routes.some(
+        (route) =>
+          route !== oldRoute &&
+          (route.binding.registrationId ===
+            input.replacement.binding.registrationId ||
+            (route.binding.provider === "codex" &&
+              route.binding.hostId === input.replacement.binding.hostId &&
+              route.binding.routeHandle === input.replacement.binding.routeHandle)),
+      );
+      if (collision) {
+        throw new BridgeError(
+          "CODEX_SUCCESSION_OWNER_MISMATCH",
+          "The successor logical identity is already registered.",
+        );
+      }
+      const settlements = this.terminalizeRegistration(
+        state,
+        oldRoute.binding.registrationId,
+        now,
+      );
+      this.removeRegistrationMetadata(state, oldRoute);
+      state.routes.push({
+        alias: input.replacement.alias,
+        binding: { ...input.replacement.binding },
+        registrationMode: input.replacement.registrationMode,
+        enabled: true,
+        busyPolicy: oldRoute.busyPolicy,
+        registeredAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        counters: emptyCounters(),
+      });
+      this.appendRuntimeActivity(state, now, {
+        kind: "registration",
+        action: "codex_succeeded",
+        outcome: "accepted",
+        aliases: [oldRoute.alias, input.replacement.alias],
+        operatorAction: input.activity.operatorAction,
+      });
+      return { replaced: true, idempotent: false, settlements };
+    });
+  }
+
+  async replaceClaudeSelection(
+    replacement: RegisterRouteInput,
+  ): Promise<Readonly<{ settlements: readonly TerminalMessageSettlement[] }>> {
+    return this.mutate((state, now) => {
+      this.validateRouteInput(replacement);
+      if (replacement.binding.provider !== "claude") {
+        throw new BridgeError(
+          "INVALID_ROUTE_BINDING",
+          "Claude selection replacement requires a Claude logical route.",
+        );
+      }
+      const byAlias = state.routes.find(
         (route) => route.alias === replacement.alias,
       );
-      if (
-        aliasOwner !== undefined &&
-        aliasOwner !== retained &&
-        !selectedClaudeRoutes.includes(aliasOwner)
-      ) {
-        throw new BridgeError(
-          "ROUTE_ALIAS_COLLISION",
-          "The replacement alias belongs to a different non-retired route.",
-        );
-      }
-
-      // Replacing an endpoint is scoped to the replacement alias. Other
-      // selected Claude routes and their independent consent edges survive.
-      const retired = selectedClaudeRoutes.filter(
-        (route) => route !== retained && route === aliasOwner,
+      const byRegistration = state.routes.find(
+        (route) =>
+          route.binding.registrationId === replacement.binding.registrationId,
+      );
+      const byTarget = state.routes.find(
+        (route) =>
+          route.binding.provider === "claude" &&
+          route.binding.hostId === replacement.binding.hostId &&
+          route.binding.routeHandle === replacement.binding.routeHandle,
       );
       if (
-        state.routes.some(
-          (route) =>
-            route !== retained &&
-            !retired.includes(route) &&
-            (sameRouteTarget(route.binding, replacement.binding) ||
-              route.binding.ownerLease === replacement.binding.ownerLease),
-        )
+        (byRegistration === undefined) !== (byTarget === undefined) ||
+        (byRegistration !== undefined && byRegistration !== byTarget)
       ) {
         throw new BridgeError(
-          "ROUTE_BINDING_COLLISION",
-          "The replacement Claude authority collides with a non-retired route.",
+          "ROUTE_IDENTITY_ALREADY_REGISTERED",
+          "The Claude registration ID and native target do not identify one route.",
         );
       }
-      const retiredAliases = new Set(retired.map((route) => route.alias));
-      const settlementPlan = this.validateAffectedInFlightSettlements(
-        state,
-        retiredAliases,
-        input.inFlightSettlements ?? [],
-      );
-      this.settleProgressWatchesForAliases(state, retiredAliases, now);
-      const settlements = this.terminateAffectedMessages(
-        state,
-        retiredAliases,
-        now,
-        "ROUTE_UNREGISTERED",
-        settlementPlan,
-      );
-      state.routes = state.routes.filter((route) => !retired.includes(route));
-      removeConsentEdgesForAliases(state, retiredAliases);
-      state.rateBuckets = state.rateBuckets.filter(
-        (bucket) => !retiredAliases.has(bucket.sourceAlias),
-      );
-      state.dedupe = state.dedupe.filter(
-        (record) =>
-          !retiredAliases.has(record.sourceAlias) &&
-          !retiredAliases.has(record.targetAlias),
-      );
-
-      if (retained !== undefined) {
-        const previousAlias = retained.alias;
-        retained.alias = replacement.alias;
-        retained.binding = { ...replacement.binding };
-        retained.enabled = true;
-        retained.state = replacement.state ?? "idle";
-        retained.updatedAt = now.toISOString();
-        retained.lastSeenAt = now.toISOString();
-        delete retained.safeErrorCode;
-        if (previousAlias !== replacement.alias) {
-          for (const item of [...state.queue, ...state.inFlight]) {
-            if (item.sourceAlias === previousAlias) {
-              item.sourceAlias = replacement.alias;
-            }
-            if (item.targetAlias === previousAlias) {
-              item.targetAlias = replacement.alias;
-            }
-          }
-          for (const record of state.dedupe) {
-            if (record.sourceAlias === previousAlias) {
-              record.sourceAlias = replacement.alias;
-            }
-            if (record.targetAlias === previousAlias) {
-              record.targetAlias = replacement.alias;
-            }
-          }
-          renameRateBucket(state, previousAlias, replacement.alias);
-          renameConsentEdgeAlias(state, previousAlias, replacement.alias, now);
-          renameProgressWatchAlias(
-            state,
-            previousAlias,
-            replacement.alias,
-          );
-        }
-      } else {
+      const byIdentity = byRegistration;
+      if (
+        byAlias !== undefined &&
+        byIdentity !== undefined &&
+        byAlias !== byIdentity
+      ) {
+        throw new BridgeError(
+          "ROUTE_IDENTITY_ALREADY_REGISTERED",
+          "The Claude alias and logical identity belong to distinct selections.",
+        );
+      }
+      const current = byIdentity ?? byAlias;
+      if (current === undefined) {
         if (state.routes.length >= this.config.limits.maxRoutes) {
           throw new BridgeError(
             "ROUTE_CAPACITY_REACHED",
-            "The bounded gateway route registry is full.",
+            "The bounded logical route inventory is full.",
             true,
           );
         }
         state.routes.push({
           alias: replacement.alias,
           binding: { ...replacement.binding },
-          registrationMode: replacement.registrationMode,
+          registrationMode: "selected_live_peer",
           enabled: true,
-          state: replacement.state ?? "idle",
           busyPolicy: "queue",
           registeredAt: now.toISOString(),
           updatedAt: now.toISOString(),
-          lastSeenAt: now.toISOString(),
-          queueDepth: state.queue.filter(
-            (item) => item.targetAlias === replacement.alias,
-          ).length,
           counters: emptyCounters(),
         });
+        return { settlements: [] };
       }
-
       if (
-        state.routes.filter(
-          (route) =>
-            route.alias === replacement.alias &&
-            route.binding.provider === "claude" &&
-            route.registrationMode === "selected_live_peer" &&
-            sameBinding(route.binding, replacement.binding),
-        ).length !== 1
+        current.binding.routeHandle === replacement.binding.routeHandle &&
+        current.binding.registrationId === replacement.binding.registrationId
       ) {
-        throw new BridgeError(
-          "CLAUDE_SELECTION_STATE_CORRUPT",
-          "A successful endpoint replacement must leave exactly one matching Claude route.",
+        this.renameRegistrationCoordinates(
+          state,
+          current.alias,
+          replacement.alias,
+          current.binding.registrationId,
         );
+        current.alias = replacement.alias;
+        current.enabled = true;
+        current.updatedAt = now.toISOString();
+        return { settlements: [] };
       }
-      return settlements;
-    });
-  }
-
-  async observeRoute(input: ObserveRouteInput): Promise<void> {
-    await this.mutate(async (state, now) => {
-      if (
-        !isPrivateRouteBinding(input.binding) ||
-        (input.safeErrorCode !== undefined &&
-          !SAFE_CODE_PATTERN.test(input.safeErrorCode))
-      ) {
-        throw new BridgeError(
-          "INVALID_ROUTE_OBSERVATION",
-          "The exact route observation contains an unsupported private or normalized field.",
-        );
-      }
-      this.assertAllowedIdentity(endpointOf(input.binding));
-      const route = state.routes.find((candidate) =>
-        sameBinding(candidate.binding, input.binding),
-      );
-      const connector = state.connectors.find((candidate) =>
-        sameEndpoint(candidate, input.binding),
-      );
-      if (!route || !route.enabled) {
-        throw new BridgeError(
-          "ROUTE_OWNERSHIP_MISMATCH",
-          "No enabled route matches the exact private binding and ownership lease.",
-        );
-      }
-      const endpointObservationValid =
-        input.state === "stale"
-          ? connector?.health === "degraded"
-          : connector !== undefined &&
-            ["healthy", "degraded"].includes(connector.health);
-      if (!endpointObservationValid) {
-        throw new BridgeError(
-          "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The route observation must match the exact endpoint generation's current health.",
-        );
-      }
-      route.state = input.state;
-      route.lastSeenAt = now.toISOString();
-      route.updatedAt = now.toISOString();
-      if (input.safeErrorCode) route.safeErrorCode = input.safeErrorCode;
-      else delete route.safeErrorCode;
-    });
-  }
-
-  async invalidateRoute(
-    binding: PrivateRouteBinding,
-    safeErrorCode = "ROUTE_STALE",
-    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
-  ): Promise<TerminalMessageSettlement[]> {
-    return await this.mutate(async (state, now) => {
-      if (
-        !isPrivateRouteBinding(binding) ||
-        !SAFE_CODE_PATTERN.test(safeErrorCode)
-      ) {
-        throw new BridgeError(
-          "INVALID_ROUTE_INVALIDATION",
-          "Route invalidation requires an exact private binding and normalized safe code.",
-        );
-      }
-      this.assertAllowedIdentity(endpointOf(binding));
-      const route = state.routes.find((candidate) =>
-        sameBinding(candidate.binding, binding),
-      );
-      if (!route || !route.enabled) {
-        throw new BridgeError(
-          "ROUTE_OWNERSHIP_MISMATCH",
-          "No enabled route matches the exact private binding and ownership lease.",
-        );
-      }
-      const aliases = new Set([route.alias]);
-      const settlementPlan = this.validateAffectedInFlightSettlements(
+      const settlements = this.terminalizeRegistration(
         state,
-        aliases,
-        inFlightSettlements,
-      );
-      route.state = "stale";
-      route.updatedAt = now.toISOString();
-      route.safeErrorCode = safeErrorCode;
-      return this.terminateAffectedMessages(
-        state,
-        aliases,
+        current.binding.registrationId,
         now,
-        safeErrorCode,
-        settlementPlan,
       );
-    });
-  }
-
-  /**
-   * Replaces only an already-invalidated binding. Codex must retain the exact
-   * task handle. Claude must retain its exact session UUID and ownership lease;
-   * an authorized discovery may also atomically adopt that UUID's latest live
-   * display name. Names alone are never rebind authority.
-   */
-  async rebindStaleRoute(input: RebindStaleRouteInput): Promise<void> {
-    await this.mutate(async (state, now) => {
-      const newAlias = input.newAlias ?? input.alias;
-      if (
-        !ALIAS_PATTERN.test(input.alias) ||
-        !ALIAS_PATTERN.test(newAlias) ||
-        !isPrivateRouteBinding(input.newBinding) ||
-        !newAlias.endsWith(`@${input.newBinding.hostId}`) ||
-        (input.journalReason !== undefined &&
-          input.journalReason !== "boot_reactivation")
-      ) {
-        throw new BridgeError(
-          "INVALID_ROUTE_REBIND",
-          "The stale-route rebind request is malformed.",
-        );
-      }
-      this.assertAllowedIdentity(endpointOf(input.newBinding));
-      const route = this.requireOwnedRoute(
-        state,
-        input.alias,
-        input.currentOwnerLease,
-      );
-      if (
-        !route.enabled ||
-        route.state !== "stale" ||
-        state.inFlight.some(
-          (item) =>
-            item.sourceAlias === route.alias || item.targetAlias === route.alias,
-        )
-      ) {
-        throw new BridgeError(
-          "ROUTE_REBIND_NOT_SAFE",
-          "Only an enabled, expired stale route without in-flight work can be rebound.",
-        );
-      }
-      if (
-        route.binding.provider !== input.newBinding.provider ||
-        route.binding.hostId !== input.newBinding.hostId
-      ) {
-        throw new BridgeError(
-          "ROUTE_REBIND_SCOPE_MISMATCH",
-          "A route rebind cannot change provider or allowlisted host.",
-        );
-      }
-      const sameLogicalRoute =
-        route.binding.routeHandle === input.newBinding.routeHandle &&
-        route.binding.ownerLease === input.newBinding.ownerLease;
-      const claudeReasonAllowed =
-        input.reason === "peer_explicitly_reselected" ||
-        input.reason === "peer_identity_reobserved";
-      if (
-        (route.binding.provider === "codex" &&
-          (input.reason !== "endpoint_reobserved" || !sameLogicalRoute)) ||
-        (route.binding.provider === "claude" &&
-          (!claudeReasonAllowed || !sameLogicalRoute))
-      ) {
-        throw new BridgeError(
-          "ROUTE_RESELECTION_REQUIRED",
-          "A stale route may rebind only the same provider-native logical identity and ownership lease.",
-        );
-      }
-      if (
-        input.journalReason === "boot_reactivation" &&
-        route.binding.provider !== "codex"
-      ) {
-        throw new BridgeError(
-          "INVALID_ROUTE_REBIND",
-          "Only an exact retained Codex route may record boot reactivation.",
-        );
-      }
-      const connector = state.connectors.find((candidate) =>
-        sameEndpoint(candidate, input.newBinding),
-      );
-      if (
-        !connector ||
-        !["healthy", "degraded"].includes(connector.health)
-      ) {
-        throw new BridgeError(
-          "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The replacement endpoint generation must be positively observed and live.",
-        );
-      }
-      if (
-        state.routes.some(
-          (candidate) =>
-            candidate !== route &&
-            (candidate.alias === newAlias ||
-              sameRouteTarget(candidate.binding, input.newBinding) ||
-              candidate.binding.ownerLease === input.newBinding.ownerLease),
-        )
-      ) {
-        throw new BridgeError(
-          "ROUTE_BINDING_COLLISION",
-          "The replacement private binding already belongs to another alias.",
-        );
-      }
-      if (
-        input.journalReason === "boot_reactivation" &&
-        state.codexEndpointRefreshSequence >= Number.MAX_SAFE_INTEGER
-      ) {
-        throw new BridgeError(
-          "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
-          "The bounded Codex endpoint-refresh sequence is exhausted.",
-        );
-      }
-      const previousAlias = route.alias;
-      const oldEndpointGeneration = route.binding.endpointGeneration;
-      route.binding = { ...input.newBinding };
-      route.alias = newAlias;
-      route.state = input.state ?? "idle";
-      route.updatedAt = now.toISOString();
-      route.lastSeenAt = now.toISOString();
-      delete route.safeErrorCode;
-      if (previousAlias !== newAlias) {
-        // Retained queued mail follows only the exact re-observed logical
-        // route. In-flight work remains forbidden above.
-        for (const item of [...state.queue, ...state.inFlight]) {
-          if (item.sourceAlias === previousAlias) item.sourceAlias = newAlias;
-          if (item.targetAlias === previousAlias) item.targetAlias = newAlias;
-        }
-        for (const record of state.dedupe) {
-          if (record.sourceAlias === previousAlias) {
-            record.sourceAlias = newAlias;
-          }
-          if (record.targetAlias === previousAlias) {
-            record.targetAlias = newAlias;
-          }
-        }
-        renameRateBucket(state, previousAlias, newAlias);
-        renameConsentEdgeAlias(state, previousAlias, newAlias, now);
-      }
-      if (input.journalReason === "boot_reactivation") {
-        this.appendCodexEndpointRefreshEvent(state, {
-          timestamp: now.toISOString(),
-          alias: route.alias,
-          hostId: route.binding.hostId,
-          threadId: route.binding.routeHandle,
-          oldEndpointGeneration,
-          newEndpointGeneration: route.binding.endpointGeneration,
-          reason: "boot_reactivation",
-        });
-      }
-    });
-  }
-
-  /**
-   * Atomically re-anchor only the exact Codex tasks proved present on a newly
-   * compatible App Server generation. Omitted stale tasks stay untouched.
-   */
-  async reanchorCodexRoutes(
-    input: ReanchorCodexRoutesInput,
-  ): Promise<ReanchorCodexRoutesResult> {
-    return await this.mutate(async (state, now) => {
-      if (
-        !isObject(input) ||
-        !hasOnlyKeys(input, ["oldEndpoint", "newEndpoint", "routes"]) ||
-        !isPrivateEndpointIdentity(input.oldEndpoint) ||
-        !isPrivateEndpointIdentity(input.newEndpoint) ||
-        input.oldEndpoint.provider !== "codex" ||
-        input.newEndpoint.provider !== "codex" ||
-        input.oldEndpoint.hostId !== input.newEndpoint.hostId ||
-        input.oldEndpoint.endpointGeneration ===
-          input.newEndpoint.endpointGeneration ||
-        !Array.isArray(input.routes) ||
-        input.routes.length > this.config.limits.maxRoutes
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_ENDPOINT_REFRESH",
-          "Codex endpoint refresh requires two distinct exact generations on one allowlisted host and a bounded route subset.",
-        );
-      }
-      this.assertAllowedIdentity(input.oldEndpoint);
-      this.assertAllowedIdentity(input.newEndpoint);
-      const newConnector = state.connectors.find((candidate) =>
-        sameEndpoint(candidate, input.newEndpoint),
-      );
-      if (
-        newConnector === undefined ||
-        !["healthy", "degraded"].includes(newConnector.health)
-      ) {
-        throw new BridgeError(
-          "ROUTE_ENDPOINT_NOT_OBSERVED",
-          "The replacement Codex endpoint generation must be positively observed and live.",
-        );
-      }
-
-      const aliases = new Set<string>();
-      const threadIds = new Set<string>();
-      const ownerLeases = new Set<string>();
-      const replacements: Array<{
-        route: GatewayRouteRecord;
-        state: "idle" | "busy" | "awaiting_approval";
-      }> = [];
-      for (const candidate of input.routes) {
-        if (
-          !isObject(candidate) ||
-          !hasOnlyKeys(
-            candidate,
-            ["alias", "threadId", "ownerLease"],
-            ["state"],
-          ) ||
-          typeof candidate.alias !== "string" ||
-          !ALIAS_PATTERN.test(candidate.alias) ||
-          !candidate.alias.startsWith("codex-") ||
-          !candidate.alias.endsWith(`@${input.oldEndpoint.hostId}`) ||
-          !isPrivateToken(candidate.threadId) ||
-          !isPrivateToken(candidate.ownerLease) ||
-          (candidate.state !== undefined &&
-            candidate.state !== "idle" &&
-            candidate.state !== "busy" &&
-            candidate.state !== "awaiting_approval")
-        ) {
-          throw new BridgeError(
-            "INVALID_CODEX_ENDPOINT_REFRESH",
-            "A Codex endpoint refresh route proof is malformed.",
-          );
-        }
-        if (
-          aliases.has(candidate.alias) ||
-          threadIds.has(candidate.threadId) ||
-          ownerLeases.has(candidate.ownerLease)
-        ) {
-          throw new BridgeError(
-            "AMBIGUOUS_CODEX_ENDPOINT_REFRESH",
-            "A Codex endpoint refresh cannot contain duplicate alias, task, or lease claims.",
-          );
-        }
-        aliases.add(candidate.alias);
-        threadIds.add(candidate.threadId);
-        ownerLeases.add(candidate.ownerLease);
-        const route = state.routes.find(
-          (stored) => stored.alias === candidate.alias,
-        );
-        if (
-          route === undefined ||
-          route.binding.provider !== "codex" ||
-          route.registrationMode !== "explicit_opt_in" ||
-          !route.enabled ||
-          route.state !== "stale" ||
-          !sameEndpoint(route.binding, input.oldEndpoint) ||
-          route.binding.routeHandle !== candidate.threadId ||
-          route.binding.ownerLease !== candidate.ownerLease ||
-          state.inFlight.some(
-            (item) =>
-              item.sourceAlias === route.alias ||
-              item.targetAlias === route.alias,
-          )
-        ) {
-          throw new BridgeError(
-            "CODEX_ENDPOINT_REFRESH_NOT_SAFE",
-            "Only an exact enabled, expired stale Codex task without in-flight work may be refreshed.",
-          );
-        }
-        const newBinding: PrivateRouteBinding = {
-          ...route.binding,
-          endpointGeneration: input.newEndpoint.endpointGeneration,
-        };
-        if (
-          state.routes.some(
-            (stored) =>
-              stored !== route &&
-              (sameRouteTarget(stored.binding, newBinding) ||
-                stored.binding.ownerLease === newBinding.ownerLease),
-          )
-        ) {
-          throw new BridgeError(
-            "ROUTE_BINDING_COLLISION",
-            "A refreshed Codex task or ownership lease is already claimed by another route.",
-          );
-        }
-        replacements.push({ route, state: candidate.state ?? "idle" });
-      }
-
-      if (
-        state.codexEndpointRefreshSequence >
-        Number.MAX_SAFE_INTEGER - replacements.length
-      ) {
-        throw new BridgeError(
-          "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
-          "The bounded Codex endpoint-refresh sequence is exhausted.",
-        );
-      }
-
-      for (const replacement of replacements) {
-        const oldEndpointGeneration =
-          replacement.route.binding.endpointGeneration;
-        replacement.route.binding = {
-          ...replacement.route.binding,
-          endpointGeneration: input.newEndpoint.endpointGeneration,
-        };
-        replacement.route.state = replacement.state;
-        replacement.route.updatedAt = now.toISOString();
-        replacement.route.lastSeenAt = now.toISOString();
-        delete replacement.route.safeErrorCode;
-        this.appendCodexEndpointRefreshEvent(state, {
-          timestamp: now.toISOString(),
-          alias: replacement.route.alias,
-          hostId: replacement.route.binding.hostId,
-          threadId: replacement.route.binding.routeHandle,
-          oldEndpointGeneration,
-          newEndpointGeneration: input.newEndpoint.endpointGeneration,
-        });
-      }
-      return { reboundAliases: replacements.map(({ route }) => route.alias) };
-    });
-  }
-
-  /**
-   * Dashboard recovery primitive for one abandoned Codex registration. The
-   * alias is only authority to request evaluation; durable state must prove
-   * the task is empty, stale, expired, and on a dead or superseded generation.
-   */
-  async removeStaleCodexOrphan(
-    input: RemoveStaleCodexOrphanInput,
-  ): Promise<RemoveStaleCodexOrphanResult> {
-    return await this.mutate(async (state, now) => {
-      if (
-        !isObject(input) ||
-        !hasOnlyKeys(input, ["alias"]) ||
-        typeof input.alias !== "string"
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_ORPHAN_RECOVERY",
-          "Codex orphan recovery requires one exact Codex alias.",
-        );
-      }
-      const route = this.requireStaleCodexOrphan(state, input.alias);
-
-      const aliases = new Set([route.alias]);
-      const removedEdges = state.consentEdges
-        .filter((edge) => edge.endpoints.some(({ alias }) => alias === route.alias))
-        .map((edge) => ({ aliases: edge.endpoints.map(({ alias }) => alias) as [string, string] }));
-      if (state.codexOrphanRemovalSequence >= Number.MAX_SAFE_INTEGER) {
-        throw new BridgeError(
-          "CODEX_ORPHAN_REMOVAL_SEQUENCE_EXHAUSTED",
-          "The bounded Codex orphan-removal sequence is exhausted.",
-        );
-      }
-      this.settleProgressWatchesForAliases(state, aliases, now);
-      state.routes = state.routes.filter((candidate) => candidate !== route);
-      removeConsentEdgesForAliases(state, aliases);
-      state.rateBuckets = state.rateBuckets.filter(
-        (bucket) => bucket.sourceAlias !== route.alias,
-      );
-      state.dedupe = state.dedupe.filter(
-        (record) =>
-          record.sourceAlias !== route.alias &&
-          record.targetAlias !== route.alias,
-      );
-      this.appendCodexOrphanRemovalEvent(state, {
-        timestamp: now.toISOString(),
-        alias: route.alias,
-        hostId: route.binding.hostId,
+      this.removeRegistrationMetadata(state, current);
+      state.routes.push({
+        alias: replacement.alias,
+        binding: { ...replacement.binding },
+        registrationMode: "selected_live_peer",
+        enabled: true,
+        busyPolicy: "queue",
+        registeredAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        counters: emptyCounters(),
       });
-      return {
-        alias: route.alias,
-        binding: { ...route.binding },
-        removedEdges,
-      };
+      return { settlements };
     });
   }
 
-  async disableRoute(
-    alias: string,
-    ownerLease: string,
-    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
-  ): Promise<TerminalMessageSettlement[]> {
-    return await this.mutate(async (state, now) => {
-      const route = this.requireOwnedRoute(state, alias, ownerLease);
-      const aliases = new Set([route.alias]);
-      const settlementPlan = this.validateAffectedInFlightSettlements(
+  async inspectConsentEdges(): Promise<ConsentEdgeInput[]> {
+    return this.read((state) =>
+      state.consentEdges.map((edge) => ({
+        aliases: [edge.endpoints[0].alias, edge.endpoints[1].alias],
+        expectedRegistrationIds: [
+          edge.endpoints[0].registrationId,
+          edge.endpoints[1].registrationId,
+        ],
+      })),
+    );
+  }
+
+  async hasConsentEdge(input: ConsentEdgeInput): Promise<boolean> {
+    return this.read((state) => {
+      const pair = this.resolvePair(
         state,
-        aliases,
-        inFlightSettlements,
-      );
-      route.enabled = false;
-      route.state = "disabled";
-      route.updatedAt = now.toISOString();
-      return this.terminateAffectedMessages(
-        state,
-        aliases,
-        now,
-        "ROUTE_DISABLED",
-        settlementPlan,
-      );
-    });
-  }
-
-  async unregisterRoute(
-    alias: string,
-    ownerLease: string,
-    inFlightSettlements: readonly RouteInFlightSettlementInput[] = [],
-    progressWatchSettlementActor: "gateway" | "operator" = "gateway",
-  ): Promise<TerminalMessageSettlement[]> {
-    return await this.mutate(async (state, now) => {
-      const route = this.requireOwnedRoute(state, alias, ownerLease);
-      const aliases = new Set([route.alias]);
-      const settlementPlan = this.validateAffectedInFlightSettlements(
-        state,
-        aliases,
-        inFlightSettlements,
-      );
-      this.settleProgressWatchesForAliases(
-        state,
-        aliases,
-        now,
-        progressWatchSettlementActor,
-      );
-      const settlements = this.terminateAffectedMessages(
-        state,
-        aliases,
-        now,
-        "ROUTE_UNREGISTERED",
-        settlementPlan,
-      );
-      state.routes = state.routes.filter((candidate) => candidate !== route);
-      removeConsentEdgesForAliases(state, aliases);
-      const remainingCodexHosts = new Set(
-        state.routes
-          .filter((candidate) => candidate.binding.provider === "codex")
-          .map((candidate) => candidate.binding.hostId),
-      );
-      state.rateBuckets = state.rateBuckets.filter(
-        (bucket) =>
-          bucket.sourceAlias !== route.alias &&
-          (state.routes.some(
-            (candidate) => candidate.alias === bucket.sourceAlias,
-          ) ||
-            remainingCodexHosts.has(
-              bucket.sourceAlias.slice(bucket.sourceAlias.lastIndexOf("@") + 1),
-            )),
-      );
-      state.dedupe = state.dedupe.filter(
-        (record) =>
-          record.sourceAlias !== route.alias &&
-          record.targetAlias !== route.alias,
-      );
-      return settlements;
-    });
-  }
-
-  /**
-   * Move one owned route to its provider's latest live display name without
-   * changing the logical provider route binding. Historical normalized events
-   * retain the name that was true when they were emitted; active metadata is
-   * rewritten so subsequent settlement and dispatch use only the latest name.
-   */
-  async renameRoute(
-    alias: string,
-    newAlias: string,
-    ownerLease: string,
-  ): Promise<void> {
-    await this.mutate(async (state, now) => {
-      if (!ALIAS_PATTERN.test(newAlias)) {
-        throw new BridgeError(
-          "INVALID_ROUTE_ALIAS",
-          "The replacement route alias is invalid.",
-        );
-      }
-      const route = this.requireOwnedRoute(state, alias, ownerLease);
-      if (alias === newAlias) return;
-      if (state.routes.some((candidate) => candidate.alias === newAlias)) {
-        throw new BridgeError(
-          "ROUTE_ALIAS_COLLISION",
-          "The replacement alias already belongs to another route.",
-        );
-      }
-
-      route.alias = newAlias;
-      route.updatedAt = now.toISOString();
-      route.lastSeenAt = now.toISOString();
-      for (const item of [...state.queue, ...state.inFlight]) {
-        if (item.sourceAlias === alias) item.sourceAlias = newAlias;
-        if (item.targetAlias === alias) item.targetAlias = newAlias;
-      }
-      for (const record of state.dedupe) {
-        if (record.sourceAlias === alias) record.sourceAlias = newAlias;
-        if (record.targetAlias === alias) record.targetAlias = newAlias;
-      }
-      renameRateBucket(state, alias, newAlias);
-      renameConsentEdgeAlias(state, alias, newAlias, now);
-      renameProgressWatchAlias(state, alias, newAlias);
-    });
-  }
-
-  async resolveRoute(alias: string): Promise<PrivateRouteBinding> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      const route = state.routes.find((candidate) => candidate.alias === alias);
-      if (
-        route?.enabled === true &&
-        route.binding.provider === "codex" &&
-        route.state === "stale" &&
-        route.safeErrorCode === "CODEX_ROUTE_STALE"
-      ) {
-        throw new BridgeError(
-          "CODEX_ROUTE_STALE",
-          "The selected Codex route exists but its connector is stale.",
-          true,
-        );
-      }
-      if (
-        !route ||
-        !route.enabled ||
-        !["idle", "busy", "awaiting_approval"].includes(route.state)
-      ) {
-        throw new BridgeError(
-          "ROUTE_UNAVAILABLE",
-          "The selected route is not currently enabled and positively observed.",
-          true,
-        );
-      }
-      return { ...route.binding };
-    });
-  }
-
-  /**
-   * Controller-internal ownership lookup used for explicit reactivation and
-   * unregister after restart. Callers must never return this value through a
-   * control response, dashboard projection, log, or normalized event.
-   */
-  async inspectPrivateRoute(
-    alias: string,
-  ): Promise<GatewayPrivateRouteInspection | undefined> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      if (!ALIAS_PATTERN.test(alias)) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_ALIAS",
-          "The selected alias does not use the required lowercase ASCII grammar.",
-        );
-      }
-      const route = state.routes.find((candidate) => candidate.alias === alias);
-      if (!route) return undefined;
-      return {
-        alias: route.alias,
-        binding: { ...route.binding },
-        registrationMode: route.registrationMode,
-        enabled: route.enabled,
-        state: route.state,
-        ...(route.safeErrorCode === undefined
-          ? {}
-          : { safeErrorCode: route.safeErrorCode }),
-      };
-    });
-  }
-
-  /**
-   * Read-only preflight for service-side provider cleanup. Removal repeats the
-   * identical proof atomically so no intervening state change can authorize it.
-   */
-  async inspectStaleCodexOrphan(
-    alias: string,
-  ): Promise<PrivateRouteBinding> {
-    return this.mutex.run("gateway", async () => {
-      const route = this.requireStaleCodexOrphan(this.requireState(), alias);
-      return { ...route.binding };
-    });
-  }
-
-  /**
-   * Capture the exact pre-mutation authority needed to reconcile a possible
-   * post-rename orphan-removal commit. This value remains controller-private.
-   */
-  async inspectStaleCodexOrphanRemovalAuthority(
-    alias: string,
-  ): Promise<StaleCodexOrphanRemovalAuthority> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      const route = this.requireStaleCodexOrphan(state, alias);
-      return {
-        binding: { ...route.binding },
-        previousSequence: state.codexOrphanRemovalSequence,
-      };
-    });
-  }
-
-  /**
-   * Fail-closed reconciliation for one exact removal whose durable rename may
-   * have committed before a directory-sync error. The latest private journal
-   * row, monotonic predecessor, alias absence, and native authority absence
-   * must all corroborate the same mutation.
-   */
-  async wasStaleCodexOrphanRemovalCommitted(
-    input: StaleCodexOrphanRemovalCommitProofInput,
-  ): Promise<boolean> {
-    return this.mutex.run("gateway", async () => {
-      if (
-        !isObject(input) ||
-        !hasOnlyKeys(input, ["alias", "binding", "previousSequence"]) ||
-        typeof input.alias !== "string" ||
-        !ALIAS_PATTERN.test(input.alias) ||
-        !input.alias.startsWith("codex-") ||
-        !isPrivateRouteBinding(input.binding) ||
-        input.binding.provider !== "codex" ||
-        !input.alias.endsWith(`@${input.binding.hostId}`) ||
-        !isNonNegativeInteger(input.previousSequence) ||
-        input.previousSequence >= Number.MAX_SAFE_INTEGER
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_ORPHAN_COMMIT_PROOF",
-          "Codex orphan-removal reconciliation requires one exact private pre-mutation authority.",
-        );
-      }
-      this.assertAllowedIdentity(endpointOf(input.binding));
-      const state = this.requireState();
-      const expectedSequence = input.previousSequence + 1;
-      const latest = state.codexOrphanRemovalEvents.at(-1);
-      const routeOrAuthorityPresent = state.routes.some(
-        (route) =>
-          route.alias === input.alias ||
-          sameRouteTarget(route.binding, input.binding) ||
-          route.binding.ownerLease === input.binding.ownerLease,
+        input.aliases,
+        false,
+        input.expectedRegistrationIds,
       );
       return (
-        !routeOrAuthorityPresent &&
-        state.codexOrphanRemovalSequence === expectedSequence &&
-        latest?.sequence === expectedSequence &&
-        latest.alias === input.alias &&
-        latest.hostId === input.binding.hostId
-      );
-    });
-  }
-
-  /**
-   * Controller-internal inventory used to preserve exact Codex registration
-   * identities across restart. Native task handles never cross the control
-   * protocol or enter a public projection.
-   */
-  async inspectPrivateCodexRoutes(): Promise<
-    GatewayPrivateRouteInspection[]
-  > {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      return state.routes
-        .filter(
-          (route) =>
-            route.binding.provider === "codex" &&
-            route.registrationMode === "explicit_opt_in",
+        pair !== undefined &&
+        state.consentEdges.some((edge) =>
+          sameConsent(edge.endpoints, pair.endpoints),
         )
-        .slice(0, this.config.limits.maxRoutes)
-        .map((route) => ({
-          alias: route.alias,
-          binding: { ...route.binding },
-          registrationMode: route.registrationMode,
-          enabled: route.enabled,
-          state: route.state,
-        }));
+      );
     });
   }
 
-  /**
-   * Bounded, metadata-only barrier observation for the succession controller.
-   * No route, message, conversation, or listener identifier is returned.
-   */
-  async inspectCodexSuccessionBarrier(
-    alias: string,
-  ): Promise<CodexSuccessionBarrierInspection> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      const codexRoutes = state.routes.filter(
-        (route) =>
-          route.binding.provider === "codex" && route.alias === alias,
-      );
-      const codexQueueDepth = codexRoutes.reduce(
-        (total, route) => total + route.queueDepth,
-        0,
-      );
-      const queued = state.queue.filter(
-        (item) => item.sourceAlias === alias || item.targetAlias === alias,
-      );
-      const inFlight = state.inFlight.filter(
-        (item) => item.sourceAlias === alias || item.targetAlias === alias,
-      );
-      const ownedMessageIds = new Set([
-        ...queued.map((item) => item.messageId),
-        ...inFlight.map((item) => item.messageId),
-      ]);
-      const transientBodyCount = [...this.transientBodies.keys()].filter(
-        (messageId) => ownedMessageIds.has(messageId),
-      ).length;
-      const inspection: CodexSuccessionBarrierInspection = {
-        codexRouteCount: codexRoutes.length,
-        queueCount: queued.length,
-        inFlightCount: inFlight.length,
-        transientBodyCount,
-        codexQueueDepth,
-        clean:
-          codexRoutes.length === 1 &&
-          queued.length === 0 &&
-          inFlight.length === 0 &&
-          transientBodyCount === 0 &&
-          codexQueueDepth === 0,
-      };
-      return inspection;
-    });
-  }
-
-  /** Begin one exact, same-host Codex registration succession. */
-  async prepareCodexSuccession(
-    input: PrepareCodexSuccessionInput,
-  ): Promise<void> {
-    await this.mutate(async (state) => {
+  async addConsentEdge(input: ConsentEdgeInput): Promise<void> {
+    await this.mutate((state, now) => {
+      const pair = this.resolvePair(
+        state,
+        input.aliases,
+        true,
+        input.expectedRegistrationIds,
+      )!;
       if (
-        !isObject(input) ||
-        !hasOnlyKeys(input, ["old", "new"]) ||
-        !isCodexSuccessionIdentity(input.old) ||
-        !isCodexSuccessionIdentity(input.new) ||
-        !isCodexSuccessionJournal({
-          schemaVersion: 1,
-          stage: "prepared",
-          old: input.old,
-          new: input.new,
-        })
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_SUCCESSION",
-          "The Codex succession identities are malformed, non-distinct, or cross-host.",
-        );
-      }
-      this.assertAllowedIdentity(endpointOf(input.old.binding));
-      this.assertAllowedIdentity(endpointOf(input.new.binding));
-      if (state.codexSuccession !== null) {
-        throw new BridgeError(
-          "CODEX_SUCCESSION_ALREADY_ACTIVE",
-          "A durable Codex succession journal already exists.",
-        );
-      }
-      this.assertSuccessionLedgerEmpty(state, input.old.alias);
-      const route = this.requireCodexRouteForIdentity(state, input.old);
-      if (!routeMatchesSuccessionIdentity(route, input.old)) {
-        throw new BridgeError(
-          "CODEX_SUCCESSION_OWNER_MISMATCH",
-          "The old succession identity does not exactly own its Codex route.",
-        );
-      }
-      this.requireObservedEndpoint(state, input.new.binding);
-      this.assertNewSuccessionIdentityAvailable(state, route, input.new);
-      state.codexSuccession = {
-        schemaVersion: 1,
-        stage: "prepared",
-        old: cloneSuccessionIdentity(input.old),
-        new: cloneSuccessionIdentity(input.new),
-      };
-    });
-  }
-
-  /** Durably closes the rollback-to-old boundary before registry publication. */
-  async armCodexSuccessionPublication(
-    input: ExactCodexSuccessionInput,
-  ): Promise<void> {
-    await this.mutate(async (state) => {
-      const journal = this.requireExactSuccession(
-        state,
-        input,
-        ["prepared"],
-      );
-      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
-      this.requireJournalRoute(state, journal, "old");
-      state.codexSuccession = { ...journal, stage: "publication_armed" };
-    });
-  }
-
-  /** Record that the exact new registry generation is externally visible. */
-  async markCodexSuccessionPublished(
-    input: ExactCodexSuccessionInput,
-  ): Promise<void> {
-    await this.mutate(async (state) => {
-      const journal = this.requireExactSuccession(
-        state,
-        input,
-        ["publication_armed"],
-      );
-      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
-      this.requireJournalRoute(state, journal, "old");
-      state.codexSuccession = { ...journal, stage: "published" };
-    });
-  }
-
-  /**
-   * Atomically replace the sole old Codex route with the exact journaled new
-   * private binding. No route gap is ever persisted.
-   */
-  async activateCodexSuccession(
-    input: ActivateCodexSuccessionInput,
-  ): Promise<void> {
-    await this.mutate(async (state, now) => {
-      if (
-        !isObject(input) ||
-        !hasOnlyKeys(input, ["oldGeneration", "newGeneration", "state"]) ||
-        !["idle", "busy", "awaiting_approval"].includes(input.state)
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_SUCCESSION",
-          "The Codex succession activation request is malformed.",
-        );
-      }
-      const journal = this.requireExactSuccession(
-        state,
-        {
-          oldGeneration: input.oldGeneration,
-          newGeneration: input.newGeneration,
-        },
-        ["published"],
-      );
-      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
-      const route = this.requireJournalRoute(state, journal, "old");
-      this.requireObservedEndpoint(state, journal.new.binding);
-      this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
-      this.replaceCodexRouteForSuccession(
-        state,
-        route,
-        journal.new,
-        now,
-        input.state,
-      );
-      state.codexSuccession = { ...journal, stage: "activated" };
-    });
-  }
-
-  /** Record an armed-or-later failure for fail-closed restart authority. */
-  async forbidCodexSuccessionRecovery(
-    input: ForbidCodexSuccessionRecoveryInput,
-  ): Promise<void> {
-    await this.mutate(async (state) => {
-      if (
-        !isObject(input) ||
-        !hasOnlyKeys(input, [
-          "oldGeneration",
-          "newGeneration",
-          "safeErrorCode",
-        ]) ||
-        !isSafeCode(input.safeErrorCode)
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_SUCCESSION",
-          "The Codex recovery-forbidden request is malformed.",
-        );
-      }
-      const journal = this.requireExactSuccession(
-        state,
-        {
-          oldGeneration: input.oldGeneration,
-          newGeneration: input.newGeneration,
-        },
-        [
-          "publication_armed",
-          "published",
-          "activated",
-          "recovery_forbidden",
-        ],
-      );
-      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
-      const expected =
-        journal.stage === "activated" ? "new" : undefined;
-      if (expected !== undefined) this.requireJournalRoute(state, journal, expected);
-      else {
-        this.requireAnyJournalRoute(state, journal);
-      }
-      state.codexSuccession = {
-        ...journal,
-        stage: "recovery_forbidden",
-        safeErrorCode: input.safeErrorCode,
-      };
-    });
-  }
-
-  /** Clear before arming, or after positive proof that an arm was unpublished. */
-  async clearCodexSuccession(
-    input: ClearCodexSuccessionInput,
-  ): Promise<void> {
-    await this.mutate(async (state) => {
-      if (
-        !isObject(input) ||
-        !hasOnlyKeys(
-          input,
-          ["oldGeneration", "newGeneration"],
-          ["publicationAbsenceConfirmed"],
-        ) ||
-        (input.publicationAbsenceConfirmed !== undefined &&
-          input.publicationAbsenceConfirmed !== true)
-      ) {
-        throw new BridgeError(
-          "INVALID_CODEX_SUCCESSION",
-          "The Codex succession clear request is malformed.",
-        );
-      }
-      const journal = this.requireExactSuccession(
-        state,
-        {
-          oldGeneration: input.oldGeneration,
-          newGeneration: input.newGeneration,
-        },
-        ["prepared", "publication_armed"],
-      );
-      if (
-        journal.stage === "publication_armed" &&
-        input.publicationAbsenceConfirmed !== true
-      ) {
-        throw new BridgeError(
-          "CODEX_SUCCESSION_PUBLICATION_PROOF_REQUIRED",
-          "Clearing an armed succession requires positive proof that publication is absent.",
-        );
-      }
-      this.assertSuccessionLedgerEmpty(state, journal.old.alias);
-      this.requireJournalRoute(state, journal, "old");
-      state.codexSuccession = null;
-    });
-  }
-
-  /** Complete an activated or restart-canonicalized new generation. */
-  async completeCodexSuccession(
-    input: ExactCodexSuccessionInput,
-  ): Promise<void> {
-    await this.mutate(async (state) => {
-      const journal = this.requireExactSuccession(state, input, [
-        "activated",
-        "recovery_forbidden",
-      ]);
-      this.assertSuccessionLedgerEmpty(state, journal.new.alias);
-      this.requireJournalRoute(state, journal, "new");
-      state.codexSuccession = null;
-    });
-  }
-
-  /** Controller-private restart authority; omitted from every public view. */
-  async inspectCodexSuccessionRecoveryAuthority(): Promise<CodexSuccessionRecoveryAuthority> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      const journal = this.journal(state);
-      if (journal === null) return { authority: "none" };
-      return {
-        authority: journal.stage === "prepared" ? "old" : "new",
-        journal: cloneSuccessionJournal(journal),
-      };
-    });
-  }
-
-  /**
-   * Controller-internal inventory used only for exact-UUID Claude restoration
-   * and explicit offline unselection. The result is bounded by maxRoutes and
-   * must never cross the control protocol or enter a public projection.
-   */
-  async inspectPrivateClaudeRoutes(): Promise<
-    GatewayPrivateRouteInspection[]
-  > {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      return state.routes
-        .filter(
-          (route) =>
-            route.binding.provider === "claude" &&
-            route.registrationMode === "selected_live_peer",
+        state.consentEdges.some((edge) =>
+          sameConsent(edge.endpoints, pair.endpoints),
         )
-        .slice(0, this.config.limits.maxRoutes)
-        .map((route) => ({
-          alias: route.alias,
-          binding: { ...route.binding },
-          registrationMode: route.registrationMode,
-          enabled: route.enabled,
-          state: route.state,
-        }));
-    });
-  }
-
-  /** Create one explicit, durable consent edge between distinct providers. */
-  async addConsentEdge(
-    input: GatewayConsentEdgeInput,
-  ): Promise<{ created: boolean }> {
-    return this.mutate(async (state, now) => {
-      const [left, right] = this.requireConsentEdgeRoutes(state, input);
-      const endpoints = canonicalConsentEndpoints(left, right);
-      const key = consentEdgeKey(endpoints);
-      const existing = state.consentEdges.find(
-        (edge) => consentEdgeKey(edge.endpoints) === key,
-      );
-      if (existing !== undefined) {
-        if (
-          existing.endpoints.some(
-            (endpoint, index) =>
-              endpoint.ownerLease !== endpoints[index]!.ownerLease,
-          )
-        ) {
-          throw new BridgeError(
-            "CONSENT_EDGE_AUTHORITY_MISMATCH",
-            "The edge aliases no longer match their exact route authorities.",
-          );
-        }
-        return { created: false };
+      ) {
+        return;
       }
       if (state.consentEdges.length >= this.config.limits.maxConsentEdges) {
         throw new BridgeError(
           "CONSENT_EDGE_CAPACITY_REACHED",
-          "The bounded permission graph cannot accept another consent edge.",
+          "The bounded consent-edge inventory is full.",
           true,
         );
       }
       state.consentEdges.push({
-        endpoints,
+        endpoints: pair.endpoints,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         counters: emptyCounters(),
       });
-      return { created: true };
     });
   }
 
-  /** Bounded metadata-only graph inventory for controller inference. */
-  async inspectConsentEdges(): Promise<GatewayConsentEdgeInput[]> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      return state.consentEdges
-        .map(({ endpoints }) => ({
-          aliases: endpoints.map(({ alias }) => alias) as [string, string],
-        }))
-        .sort((left, right) => left.aliases.join("\0").localeCompare(right.aliases.join("\0")));
-    });
-  }
-
-  /** Resolve only an exact live watch; recovery may substitute its suffix. */
-  async resolveProgressWatchDispatch(
-    input: Readonly<{
-      sourceAlias: string;
-      targetAlias: string;
-    }> &
-      (
-        | Readonly<{
-            conversationId: string;
-            recoveredConversationIdSuffix?: never;
-          }>
-        | Readonly<{
-            conversationId?: never;
-            recoveredConversationIdSuffix: string;
-          }>
-      ),
-  ): Promise<Readonly<{ conversationId?: string; markerActive: boolean }>> {
-    return this.mutex.run("gateway", async () => {
-      if (
-        !ALIAS_PATTERN.test(input.sourceAlias) ||
-        !ALIAS_PATTERN.test(input.targetAlias) ||
-        input.sourceAlias === input.targetAlias ||
-        (input.conversationId === undefined) ===
-          (input.recoveredConversationIdSuffix === undefined) ||
-        (input.conversationId !== undefined &&
-          !CONVERSATION_ID_PATTERN.test(input.conversationId)) ||
-        (input.recoveredConversationIdSuffix !== undefined &&
-          !CONVERSATION_SUFFIX_PATTERN.test(
-            input.recoveredConversationIdSuffix,
-          ))
-      ) {
-        throw new BridgeError(
-          "INVALID_PROGRESS_WATCH",
-          "The progress-watch dispatch lookup is malformed.",
-        );
+  async removeConsentEdge(
+    input: ConsentEdgeInput,
+  ): Promise<Readonly<{
+    settlements: readonly TerminalMessageSettlement[];
+    unreferencedAliases: readonly string[];
+  }>> {
+    return this.mutate((state, now) => {
+      const pair = this.resolvePair(
+        state,
+        input.aliases,
+        false,
+        input.expectedRegistrationIds,
+      );
+      if (pair === undefined) {
+        return { settlements: [], unreferencedAliases: [] };
       }
-      const state = this.requireState();
-      const watch = state.progressWatches.find(
-        (watch) =>
-          (input.conversationId !== undefined
-            ? watch.conversationId === input.conversationId
-            : watch.conversationId.endsWith(
-                input.recoveredConversationIdSuffix!,
-              )) &&
-          ((watch.ownerAlias === input.sourceAlias &&
-            watch.workerAlias === input.targetAlias) ||
-            (watch.ownerAlias === input.targetAlias &&
-              watch.workerAlias === input.sourceAlias)),
+      const index = state.consentEdges.findIndex((edge) =>
+        sameConsent(edge.endpoints, pair.endpoints),
       );
-      if (watch === undefined) return { markerActive: false };
-      const hasExactPair = state.consentEdges.some(
-        (candidate) =>
-          consentEdgeMatchesMessage(candidate, {
-            sourceAlias: input.sourceAlias,
-            targetAlias: input.targetAlias,
-            pair: true,
-          }) && progressWatchMatchesConsentEdge(watch, candidate),
-      );
-      if (!hasExactPair) return { markerActive: false };
-      return {
-        conversationId: watch.conversationId,
-        markerActive:
-          watch.ownerAlias === input.sourceAlias &&
-          watch.workerAlias === input.targetAlias,
-      };
-    });
-  }
-
-  async touchProgressWatchesForAlias(alias: string): Promise<number> {
-    return this.mutate(async (state, now) => {
-      if (!ALIAS_PATTERN.test(alias)) return 0;
-      let changed = 0;
-      for (let index = 0; index < state.progressWatches.length; index += 1) {
-        const watch = state.progressWatches[index];
+      if (index < 0) return { settlements: [], unreferencedAliases: [] };
+      const edge = state.consentEdges[index]!;
+      const settlements: TerminalMessageSettlement[] = [];
+      for (const message of state.messages) {
         if (
-          watch === undefined ||
-          (watch.ownerAlias !== alias && watch.workerAlias !== alias)
+          message.state.phase === "terminal" ||
+          !sameConsent(message.consentEdge, edge.endpoints)
         ) {
           continue;
         }
-        state.progressWatches[index] = recordProgressWatchActivity(
-          watch,
-          now.getTime(),
+        const outcome =
+          message.state.phase === "armed"
+            ? "ambiguous"
+            : message.state.phase === "accepted"
+              ? message.state.lossOutcome
+              : "cancelled";
+        settlements.push(
+          this.finishMessage(
+            state,
+            message,
+            outcome,
+            now,
+            outcome === "ambiguous"
+              ? "DISPATCH_OUTCOME_AMBIGUOUS"
+              : outcome === "unconfirmed"
+                ? "DELIVERY_UNCONFIRMED"
+                : "SENDER_NOT_PAIRED",
+          ),
         );
-        changed += 1;
       }
-      return changed;
-    });
-  }
-
-  async endProgressWatch(conversationId: string): Promise<boolean> {
-    return this.mutate(async (state, now) => {
-      if (!CONVERSATION_ID_PATTERN.test(conversationId)) {
-        throw new BridgeError(
-          "INVALID_PROGRESS_WATCH",
-          "The progress-watch conversation token is malformed.",
-        );
-      }
-      const index = state.progressWatches.findIndex(
-        (watch) => watch.conversationId === conversationId,
-      );
-      const watch = state.progressWatches[index];
-      if (watch === undefined) return false;
-      this.appendProgressWatchEvents(state, [
-        progressWatchJournalEvent(watch, now.toISOString(), {
-          kind: "settled",
-          actor: "operator",
-          reason: "untracked",
-        }),
-      ]);
-      state.progressWatches.splice(index, 1);
-      return true;
-    });
-  }
-
-  /** Advance every due watch once under one durable store mutation. */
-  async advanceDueProgressWatches(): Promise<ProgressWatchNudge[]> {
-    return this.mutate(async (state, now) => {
-      const actions: ProgressWatchNudge[] = [];
-      const retained: ProgressWatch[] = [];
-      const events: PendingProgressWatchJournalEvent[] = [];
-      for (const watch of state.progressWatches) {
-        if (Date.parse(watch.nextActionAt) > now.getTime()) {
-          retained.push(watch);
-          continue;
-        }
-        const due = this.inspectProgressWatchDue(state, watch, now);
-        if (due.kind === "not_due" || due.kind === "nudge") {
-          retained.push(watch);
-        } else if (due.kind === "rescheduled") {
-          retained.push(due.watch);
-        }
-        if (due.kind === "nudge") {
-          actions.push({
-            conversationId: watch.conversationId,
-            ownerAlias: watch.ownerAlias,
-            workerAlias: watch.workerAlias,
-            nudgeNumber: due.nudgeNumber,
-          });
-        } else if (due.kind === "settled") {
-          events.push(
-            progressWatchJournalEvent(watch, now.toISOString(), {
-              kind: "settled",
-              actor: "gateway",
-              reason: "idle_timeout",
-            }),
-          );
-        }
-      }
-      this.appendProgressWatchEvents(state, events);
-      state.progressWatches = retained;
-      return actions;
-    });
-  }
-
-  async nextProgressWatchActionAt(): Promise<string | undefined> {
-    return this.mutex.run("gateway", async () =>
-      this.requireState().progressWatches.reduce<string | undefined>(
-        (earliest, watch) =>
-          earliest === undefined || watch.nextActionAt < earliest
-            ? watch.nextActionAt
-            : earliest,
-        undefined,
-      ),
-    );
-  }
-
-  async deferProgressWatchNudge(
-    conversationId: string,
-    nudgeNumber: 1 | 2,
-  ): Promise<boolean> {
-    return this.mutate(async (state, now) => {
-      const index = state.progressWatches.findIndex(
-        (watch) => watch.conversationId === conversationId,
-      );
-      const watch = state.progressWatches[index];
-      if (watch === undefined) return false;
-      const due = this.inspectProgressWatchDue(state, watch, now);
-      if (due.kind !== "nudge" || due.nudgeNumber !== nudgeNumber) {
-        return false;
-      }
-      state.progressWatches[index] = deferProgressWatchNudge(
-        watch,
-        now.getTime(),
-      );
-      return true;
-    });
-  }
-
-  async hasConsentEdge(input: GatewayConsentEdgeInput): Promise<boolean> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      try {
-        const [left, right] = this.requireConsentEdgeRoutes(state, input, false);
-        const endpoints = canonicalConsentEndpoints(left, right);
-        return state.consentEdges.some((edge) => edge.endpoints.every(
-          (endpoint, index) =>
-            endpoint.alias === endpoints[index]!.alias &&
-            endpoint.provider === endpoints[index]!.provider &&
-            endpoint.ownerLease === endpoints[index]!.ownerLease,
-        ));
-      } catch (error) {
-        if (error instanceof BridgeError) return false;
-        throw error;
-      }
-    });
-  }
-
-  async inspectAffectedConsentEdgeInFlightMessages(
-    input: GatewayConsentEdgeInput,
-  ): Promise<AffectedInFlightMessageInspection[]> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      const routes = this.requireConsentEdgeRoutes(state, input, false);
-      const edge = this.requireExactConsentEdge(state, ...routes);
-      return state.inFlight
-        .filter((item) => consentEdgeMatchesMessage(edge, item))
-        .map(({ messageId, deadlineAt }) => ({ messageId, deadlineAt }));
-    });
-  }
-
-  /**
-   * Remove exactly one consent edge and settle only work owned by that edge.
-   * Adjacent edges, terminal token metadata, and unrelated messages survive.
-   */
-  async removeConsentEdge(
-    input: RemoveConsentEdgeInput,
-  ): Promise<RemoveConsentEdgeResult> {
-    return this.mutate(async (state, now) => {
-      const routes = this.requireConsentEdgeRoutes(state, input, false);
-      const pair = this.requireExactConsentEdge(state, ...routes);
-      const plan = this.validateAffectedConsentEdgeInFlightSettlements(
-        state,
-        pair,
-        input.inFlightSettlements ?? [],
-      );
-      this.settleProgressWatchesForConsentEdge(state, pair, now);
-      const settlements = this.terminateAffectedConsentEdgeMessages(
-        state,
-        pair,
-        now,
-        "PAIR_REMOVED",
-        plan,
-      );
-      state.consentEdges = state.consentEdges.filter((candidate) => candidate !== pair);
-      state.dedupe = state.dedupe.filter(
-        (record) => !consentEdgeMatchesMessage(pair, record),
-      );
+      state.consentEdges.splice(index, 1);
       return {
         settlements,
-        unreferencedAliases: pair.endpoints
-          .filter(({ alias }) => !state.consentEdges.some((edge) =>
-            edge.endpoints.some((endpoint) => endpoint.alias === alias),
-          ))
-          .map(({ alias }) => alias),
+        unreferencedAliases: edge.endpoints
+          .map((endpoint) => endpoint.alias)
+          .filter(
+            (alias) =>
+              !state.consentEdges.some((candidate) =>
+                candidate.endpoints.some((endpoint) => endpoint.alias === alias),
+              ),
+          ),
       };
-    });
-  }
-
-  /**
-   * Controller-internal inventory used to prepare an exact, evidence-aware
-   * terminal plan before a route mutation. Message bodies and route handles
-   * never cross this boundary. The route mutation validates the returned set
-   * again so a stale or incomplete plan cannot partially settle the ledger.
-   */
-  async inspectAffectedInFlightMessages(
-    aliases: readonly string[],
-  ): Promise<AffectedInFlightMessageInspection[]> {
-    if (
-      aliases.length < 1 ||
-      aliases.length > this.config.limits.maxRoutes ||
-      aliases.some((alias) => !ALIAS_PATTERN.test(alias))
-    ) {
-      throw new BridgeError(
-        "INVALID_ROUTE_TERMINATION_SCOPE",
-        "Affected in-flight inspection requires a bounded list of valid route aliases.",
-      );
-    }
-    const scope = new Set(aliases);
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      return state.inFlight
-        .filter((item) => routeTerminationMatches(state, scope, item))
-        .map(({ messageId, deadlineAt }) => ({ messageId, deadlineAt }));
     });
   }
 
   async enqueueMessage(
     input: EnqueueMessageInput,
   ): Promise<EnqueueMessageResult> {
-    return this.mutate(async (state, now) => {
-      const source = this.requireAvailableRoute(state, input.sourceAlias);
-      const target = this.requireAvailableRoute(state, input.targetAlias);
-      const sides: ResolvedEnqueueSides = {
+    return this.mutate((state, now) => {
+      const hasExpectedSource = input.expectedSourceRegistrationId !== undefined;
+      const hasExpectedTarget = input.expectedTargetRegistrationId !== undefined;
+      if (
+        hasExpectedSource !== hasExpectedTarget ||
+        (hasExpectedSource &&
+          (!isPrivateToken(input.expectedSourceRegistrationId) ||
+            !isPrivateToken(input.expectedTargetRegistrationId)))
+      ) {
+        throw new BridgeError(
+          "INVALID_GATEWAY_MESSAGE",
+          "Expected source and target registrations must be supplied together.",
+        );
+      }
+      const source = this.requireRoute(state, input.sourceAlias);
+      const target = this.requireRoute(state, input.targetAlias);
+      if (
+        hasExpectedSource &&
+        (source.binding.registrationId !== input.expectedSourceRegistrationId ||
+          target.binding.registrationId !== input.expectedTargetRegistrationId)
+      ) {
+        throw new BridgeError(
+          "ROUTE_UNREGISTERED",
+          "The correlated source or target registration is no longer installed.",
+        );
+      }
+      const edge = this.requireConsent(state, source, target);
+      return this.enqueueResolved(state, now, input, {
         sourceAlias: source.alias,
         targetAlias: target.alias,
-        direction: directionFor(source, target),
-        sourceRoute: source,
-        targetRoute: target,
-      };
-      try {
-        this.requireExactConsentEdge(state, source, target);
-        sides.pair = true;
-      } catch (error) {
-        if (error instanceof BridgeError && error.code === "SENDER_NOT_PAIRED") {
-          this.recordRejection(
-            state,
-            sides,
-            typeof input.body === "string"
-              ? Math.max(1, Buffer.byteLength(input.body, "utf8"))
-              : 1,
-            now,
-            "SENDER_NOT_PAIRED",
-            input.steer,
-            input.conversationIdSuffix,
-          );
-        }
-        throw error;
-      }
-      return this.enqueueResolvedMessage(state, now, input, sides);
+        direction: directionId(source.binding.provider, target.binding.provider),
+        sourceRegistrationId: source.binding.registrationId,
+        targetRegistrationId: target.binding.registrationId,
+        consentEdge: edge.endpoints,
+        pair: true,
+        exposeDeliveryToken: true,
+      });
     });
   }
 
-  /**
-   * Accept one message from a caller-attested native Claude peer without
-   * registering or persisting that peer as a route. The exact private binding
-   * is used only to prove a live same-host connector generation for this call.
-   */
   async enqueueNativeIngress(
     input: EnqueueNativeIngressInput,
   ): Promise<EnqueueMessageResult> {
-    return this.mutate(async (state, now) => {
-      const target = this.requireAvailableRoute(state, input.targetAlias);
-      this.validateTransientNativeClaudePeer(state, input.source, target);
-      const direction = directionId("claude", target.binding.provider);
-      const selectedClaude = state.routes.find(
+    return this.mutate((state, now) => {
+      if (
+        !ALIAS_PATTERN.test(input.targetAlias) ||
+        !isPrivateToken(input.expectedTargetRegistrationId)
+      ) {
+        throw new BridgeError(
+          "INVALID_ROUTE_BINDING",
+          "The native ingress target authority is malformed.",
+        );
+      }
+      const target = state.routes.find(
+        (route) => route.alias === input.targetAlias && route.enabled,
+      );
+      if (
+        target === undefined ||
+        target.binding.registrationId !== input.expectedTargetRegistrationId
+      ) {
+        throw new BridgeError(
+          "ROUTE_UNREGISTERED",
+          "The native ingress target registration is no longer current.",
+        );
+      }
+      if (
+        input.source.binding.provider !== "claude" ||
+        input.source.binding.hostId !== target.binding.hostId ||
+        input.source.alias.endsWith(`@${target.binding.hostId}`) === false
+      ) {
+        throw new BridgeError(
+          "INVALID_NATIVE_PEER",
+          "The native Claude sender does not match the target host.",
+        );
+      }
+      const selected = state.routes.find(
         (route) =>
           route.alias === input.source.alias &&
           route.binding.provider === "claude" &&
-          route.registrationMode === "selected_live_peer" &&
-          route.enabled &&
-          ["idle", "busy", "awaiting_approval"].includes(route.state) &&
-          sameBinding(route.binding, input.source.binding),
+          route.binding.routeHandle === input.source.binding.routeHandle &&
+          route.binding.registrationId === input.source.binding.registrationId,
       );
-      const pair =
-        selectedClaude === undefined
+      const edge =
+        selected === undefined
           ? undefined
-          : (() => {
-              try {
-                return this.requireExactConsentEdge(state, selectedClaude, target);
-              } catch (error) {
-                if (error instanceof BridgeError) return undefined;
-                throw error;
-              }
-            })();
-      if (
-        input.authorizedPairTeardownReply === true &&
-        selectedClaude === undefined
-      ) {
-        throw new BridgeError(
+          : state.consentEdges.find((candidate) =>
+              sameConsent(
+                candidate.endpoints,
+                canonicalConsentEndpoints(selected, target),
+              ),
+            );
+      if (this.config.inboundMode === "paired" && edge === undefined) {
+        this.recordRejection(
+          state,
+          {
+            sourceAlias: input.source.alias,
+            targetAlias: target.alias,
+            direction: directionId("claude", target.binding.provider),
+            sourceRegistrationId: selected?.binding.registrationId ?? null,
+            targetRegistrationId: target.binding.registrationId,
+            consentEdge: null,
+          },
+          Buffer.byteLength(input.body, "utf8"),
+          now,
           "SENDER_NOT_PAIRED",
-          "The retained reply no longer matches the exact selected Claude route.",
+          input,
+        );
+        throw new CommitAndThrow(
+          new BridgeError(
+            "SENDER_NOT_PAIRED",
+            "The native Claude sender lacks exact durable consent.",
+          ),
         );
       }
-      if (
-        this.config.inboundMode === "paired" &&
-        pair === undefined &&
-        input.authorizedPairTeardownReply !== true
-      ) {
-          const bytes =
-            typeof input.body === "string"
-              ? Math.max(1, Buffer.byteLength(input.body, "utf8"))
-              : 1;
-          this.recordRejection(
-            state,
-            {
-              sourceAlias: input.source.alias,
-              targetAlias: target.alias,
-              direction,
-              targetRoute: target,
-            },
-            bytes,
-            now,
-            "SENDER_NOT_PAIRED",
-            input.steer,
-            input.conversationIdSuffix,
-          );
-          throw new BridgeError(
-            "SENDER_NOT_PAIRED",
-            "The native Claude sender does not share exact consent with this route.",
-          );
-      }
-      return this.enqueueResolvedMessage(state, now, input, {
+      return this.enqueueResolved(state, now, input, {
         sourceAlias: input.source.alias,
         targetAlias: target.alias,
-        direction,
-        targetRoute: target,
-        ...(pair === undefined ? {} : { pair: true as const }),
+        direction: directionId("claude", target.binding.provider),
+        sourceRegistrationId:
+          selected?.binding.registrationId ?? null,
+        targetRegistrationId: target.binding.registrationId,
+        consentEdge: edge?.endpoints ?? null,
+        ...(edge === undefined ? {} : { pair: true as const }),
+        exposeDeliveryToken: false,
       });
     });
   }
 
-  /**
-   * Queue a correlated provider reply for a caller-attested transient Claude
-   * peer. The service owns conversation correlation and the live dispatch
-   * capability; the store retains only bounded public-alias metadata.
-   */
   async enqueueNativeReply(
     input: EnqueueNativeReplyInput,
   ): Promise<EnqueueMessageResult> {
-    return this.mutate(async (state, now) => {
-      const source = this.requireAvailableRoute(state, input.sourceAlias);
-      this.validateTransientNativeClaudePeer(state, input.target, source);
-      const target = input.pair === true
-        ? state.routes.find((route) =>
-            route.alias === input.target.alias &&
-            route.binding.provider === "claude" &&
-            sameBinding(route.binding, input.target.binding))
-        : undefined;
+    return this.mutate((state, now) => {
+      if (
+        !ALIAS_PATTERN.test(input.sourceAlias) ||
+        !isPrivateToken(input.expectedSourceRegistrationId)
+      ) {
+        throw new BridgeError(
+          "INVALID_ROUTE_BINDING",
+          "The native reply source authority is malformed.",
+        );
+      }
+      const source = state.routes.find(
+        (route) => route.alias === input.sourceAlias && route.enabled,
+      );
+      if (
+        source === undefined ||
+        source.binding.registrationId !== input.expectedSourceRegistrationId
+      ) {
+        throw new BridgeError(
+          "ROUTE_UNREGISTERED",
+          "The native reply source registration is no longer current.",
+        );
+      }
+      if (
+        !isLogicalBinding(input.target.binding) ||
+        input.target.binding.provider !== "claude" ||
+        input.target.binding.hostId !== source.binding.hostId ||
+        !input.target.alias.endsWith(`@${source.binding.hostId}`)
+      ) {
+        throw new BridgeError(
+          "INVALID_NATIVE_PEER",
+          "The native Claude reply target does not match the source host.",
+        );
+      }
+      const selectedTarget = state.routes.find(
+        (route) =>
+          route.alias === input.target.alias &&
+          route.binding.provider === "claude" &&
+          route.binding.routeHandle === input.target.binding.routeHandle &&
+          route.binding.registrationId === input.target.binding.registrationId,
+      );
+      let edge: GatewayConsentEdgeRecord | undefined;
       if (input.pair === true) {
-        if (target === undefined) {
+        if (selectedTarget === undefined) {
           throw new BridgeError(
             "SENDER_NOT_PAIRED",
-            "The correlated reply no longer has its exact paired Claude route.",
+            "The reply no longer matches an exact selected Claude route.",
           );
         }
-        this.requireExactConsentEdge(state, target, source);
+        edge = this.requireConsent(state, source, selectedTarget);
       }
-      return this.enqueueResolvedMessage(state, now, input, {
+      return this.enqueueResolved(state, now, input, {
         sourceAlias: source.alias,
         targetAlias: input.target.alias,
         direction: directionId(source.binding.provider, "claude"),
-        sourceRoute: source,
-        ...(target !== undefined
-          ? { pair: true as const, targetRoute: target }
-          : { transientTarget: true as const }),
+        sourceRegistrationId: source.binding.registrationId,
+        targetRegistrationId:
+          selectedTarget?.binding.registrationId ?? input.target.binding.registrationId,
+        consentEdge: edge?.endpoints ?? null,
+        ...(edge === undefined ? { transientTarget: true as const } : { pair: true as const }),
+        exposeDeliveryToken: input.exposeDeliveryToken === true,
       });
     });
   }
 
-  async dequeueMessage(
+  async inspectDispatchableTargets(): Promise<string[]> {
+    return this.read((state) =>
+      [...new Set(
+        state.messages
+          .filter((message) => message.state.phase === "queued")
+          .map((message) => message.targetAlias),
+      )],
+    );
+  }
+
+  async inspectQueuedMessageIds(): Promise<string[]> {
+    return this.read((state) =>
+      state.messages
+        .filter((message) => message.state.phase === "queued")
+        .map((message) => message.messageId),
+    );
+  }
+
+  async nextDeadlineAt(): Promise<string | undefined> {
+    return this.read((state) =>
+      state.messages
+        .filter((message) => message.state.phase !== "terminal")
+        .map((message) => message.deadlineAt)
+        .sort()[0],
+    );
+  }
+
+  async deliveryStatus(token: string): Promise<GatewayMessageRecord | undefined> {
+    if (!DELIVERY_TOKEN_PATTERN.test(token)) {
+      throw new BridgeError(
+        "INVALID_DELIVERY_TOKEN",
+        "The delivery-status token is malformed.",
+      );
+    }
+    return this.read((state) => {
+      const message = state.messages.find(
+        (candidate) => candidate.deliveryToken === token,
+      );
+      return message === undefined ? undefined : structuredClone(message);
+    });
+  }
+
+  async reserveMessage(
     targetAlias?: string,
     mode: "any" | "steer_only" = "any",
-  ): Promise<
-    (TransientQueuedMessage & { queuedAhead?: number }) | undefined
-  > {
-    return this.mutate(async (state, now) => {
+  ): Promise<ReserveMessageResult> {
+    return this.mutate((state, now) => {
       if (targetAlias !== undefined && !ALIAS_PATTERN.test(targetAlias)) {
         throw new BridgeError(
           "INVALID_GATEWAY_ALIAS",
-          "The target alias does not use the required lowercase ASCII grammar.",
+          "The dispatch target alias is invalid.",
         );
       }
-      if (mode !== "any" && mode !== "steer_only") {
-        throw new BridgeError(
-          "INVALID_GATEWAY_DISPATCH_MODE",
-          "The gateway dispatch selector is not recognized.",
-        );
+      const inFlight = state.messages.filter(
+        (candidate) =>
+          candidate.state.phase === "reserved" ||
+          candidate.state.phase === "armed" ||
+          candidate.state.phase === "accepted",
+      ).length;
+      if (inFlight >= this.config.limits.maxInFlightMessages) {
+        return { status: "empty" };
       }
-      const index = state.queue.findIndex(
-        (item) =>
-          (targetAlias === undefined || item.targetAlias === targetAlias) &&
-          (mode === "any" || item.steer === true),
+      const message = state.messages.find(
+        (candidate) =>
+          candidate.state.phase === "queued" &&
+          (targetAlias === undefined || candidate.targetAlias === targetAlias) &&
+          (mode === "any" || candidate.steer === true),
       );
-      if (index < 0) return undefined;
-      if (state.inFlight.length >= this.config.limits.maxInFlightMessages) {
-        throw new BridgeError(
-          "GATEWAY_IN_FLIGHT_FULL",
-          "The bounded gateway dispatch set is at capacity.",
-          true,
+      if (message === undefined) return { status: "empty" };
+      if (Date.parse(message.deadlineAt) <= now.getTime()) {
+        return {
+          status: "terminal",
+          settlement: this.finishMessage(
+            state,
+            message,
+            "expired",
+            now,
+            "MESSAGE_EXPIRED",
+          ),
+        };
+      }
+      if (message.targetRegistrationId === null) {
+        return {
+          status: "terminal",
+          settlement: this.finishMessage(
+            state,
+            message,
+            "abandoned",
+            now,
+            "CONTROLLER_RESTARTED",
+          ),
+        };
+      }
+      if (message.state.phase !== "queued") return { status: "empty" };
+      const maximumAttemptCount =
+        1 +
+        Math.max(
+          0,
+          Math.ceil(
+            (Date.parse(message.deadlineAt) - Date.parse(message.enqueuedAt)) /
+              500,
+          ),
         );
+      if (message.state.attemptCount >= maximumAttemptCount) {
+        throw new RangeError("GATEWAY_ATTEMPT_BUDGET_EXHAUSTED");
       }
-      const metadata = state.queue[index];
-      if (!metadata) return undefined;
-      const queuedAhead = state.queue
-        .slice(0, index)
-        .filter((candidate) => candidate.targetAlias === metadata.targetAlias)
-        .length;
-      state.queue.splice(index, 1);
-      state.accounting.queuedBytes -= metadata.bytes;
-      const target = state.routes.find(
-        (route) => route.alias === metadata.targetAlias,
-      );
-      if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      const body = this.transientBodies.get(metadata.messageId) ?? metadata.body;
-      this.transientBodies.delete(metadata.messageId);
-      if (body === undefined) {
-        this.finishMetadata(state, metadata, "abandoned", now, "TRANSIENT_BODY_UNAVAILABLE");
-        return undefined;
-      }
-      state.inFlight.push({ ...metadata, dispatchedAt: now.toISOString() });
-      this.appendEvent(state, {
-        timestamp: now.toISOString(),
-        messageIdSuffix: metadata.messageIdSuffix,
-        ...(metadata.conversationIdSuffix === undefined
-          ? {}
-          : { conversationIdSuffix: metadata.conversationIdSuffix }),
-        direction: metadata.direction,
-        sourceAlias: metadata.sourceAlias,
-        targetAlias: metadata.targetAlias,
-        state: "dispatching",
-        bytes: metadata.bytes,
-        body,
-        ...(metadata.steer === true ? { steer: true as const } : {}),
-        latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
-      });
+      const attemptId = `attempt_${this.randomId()}`;
+      const attemptCount = message.state.attemptCount + 1;
+      message.state = {
+        phase: "reserved",
+        attemptId,
+        attemptCount,
+        reservedAt: now.toISOString(),
+        sourceRegistrationId: message.sourceRegistrationId,
+        targetRegistrationId: message.targetRegistrationId,
+        consentEdge: message.consentEdge,
+      };
+      state.accounting.queuedBytes -= message.bytes;
+      this.touchMessage(state, message);
       return {
-        ...metadata,
-        body,
-        ...(queuedAhead === 0 ? {} : { queuedAhead }),
+        status: "reserved",
+        attempt: {
+          messageId: message.messageId,
+          attemptId,
+          attemptCount,
+          body: message.body!,
+          deadlineAt: message.deadlineAt,
+          direction: message.direction,
+          sourceAlias: message.sourceAlias,
+          targetAlias: message.targetAlias,
+          ...(message.conversationIdSuffix === undefined
+            ? {}
+            : { conversationIdSuffix: message.conversationIdSuffix }),
+          sourceRegistrationId: message.sourceRegistrationId,
+          targetRegistrationId: message.targetRegistrationId,
+          consentEdge: message.consentEdge,
+          bytes: message.bytes,
+          ...(message.steer === true ? { steer: true as const } : {}),
+        },
       };
     });
   }
 
-  /** Controller-private shutdown inventory; full IDs never cross control output. */
-  async inspectQueuedMessageIds(): Promise<string[]> {
-    return this.mutex.run("gateway", async () =>
-      this.requireState().queue.map((item) => item.messageId),
-    );
-  }
-
-  /**
-   * Atomically terminalizes every message whose delivery deadline is due.
-   * Returned settlements are emitted only by the mutation that removed the
-   * message, so callers can release service-owned capabilities exactly once.
-   *
-   * @deprecated GatewayService must arbitrate deadlines through the delivery
-   * reducer because only the service owns transport-write evidence. Retained
-   * temporarily as a store-level recovery/test primitive; production service
-   * code must not call it.
-   */
-  async expireDueMessages(now?: Date): Promise<TerminalMessageSettlement[]> {
-    const requestedTime = now instanceof Date ? now.getTime() : undefined;
-    if (
-      now !== undefined &&
-      (!(now instanceof Date) || !Number.isFinite(requestedTime))
-    ) {
-      throw new BridgeError(
-        "INVALID_GATEWAY_TIMESTAMP",
-        "The gateway expiry time must be a valid Date.",
+  async authorizeMessage(
+    input: AuthorizeMessageInput,
+  ): Promise<AuthorizeMessageResult> {
+    return this.mutate((state, now) => {
+      const message = state.messages.find(
+        (candidate) => candidate.messageId === input.messageId,
       );
-    }
-    return this.mutate(async (state, mutationNow) => {
-      const effectiveNow =
-        requestedTime === undefined ? mutationNow : new Date(requestedTime);
-      const settlements: TerminalMessageSettlement[] = [];
-      const retainedQueue: QueuedMessageMetadata[] = [];
-      for (const item of state.queue) {
-        if (Date.parse(item.deadlineAt) > effectiveNow.getTime()) {
-          retainedQueue.push(item);
-          continue;
-        }
-        this.transientBodies.delete(item.messageId);
-        state.accounting.queuedBytes -= item.bytes;
-        const target = state.routes.find(
-          (route) => route.alias === item.targetAlias,
-        );
-        if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-        settlements.push(
-          this.finishMetadata(
+      if (message?.state.phase !== "reserved") {
+        return { status: "stale", reason: "not_reserved" };
+      }
+      if (message.state.attemptId !== input.attemptId) {
+        return { status: "stale", reason: "attempt_mismatch" };
+      }
+      if (Date.parse(message.deadlineAt) <= now.getTime()) {
+        return {
+          status: "terminal",
+          reason: "expired",
+          settlement: this.finishMessage(
             state,
-            item,
+            message,
             "expired",
-            effectiveNow,
+            now,
             "MESSAGE_EXPIRED",
           ),
+        };
+      }
+      const bodySha256 = createHash("sha256")
+        .update(message.body ?? "", "utf8")
+        .digest("hex");
+      if (
+        !isPrepared(input.prepared) ||
+        input.prepared.kind !== expectedPreparedKind(message) ||
+        input.prepared.bodyBytes !== message.bytes ||
+        input.prepared.bodySha256 !== bodySha256
+      ) {
+        throw new BridgeError(
+          "INVALID_PREPARED_WRITE_EVIDENCE",
+          "The prepared payload evidence does not match the admitted message.",
         );
       }
-      state.queue = retainedQueue;
-
-      const retainedInFlight: InFlightMessageMetadata[] = [];
-      for (const item of state.inFlight) {
-        if (Date.parse(item.deadlineAt) > effectiveNow.getTime()) {
-          retainedInFlight.push(item);
-          continue;
+      const target = state.routes.find(
+        (route) =>
+          route.alias === message.targetAlias &&
+          route.binding.registrationId === message.targetRegistrationId &&
+          route.enabled,
+      );
+      if (
+        input.sourceRegistrationId !== message.sourceRegistrationId ||
+        input.targetRegistrationId !== message.targetRegistrationId ||
+        (message.transientTarget !== true && target === undefined)
+      ) {
+        return { status: "stale", reason: "registration_changed" };
+      }
+      if (message.sourceRegistrationId !== null) {
+        const source = state.routes.find(
+          (route) =>
+            route.alias === message.sourceAlias &&
+            route.binding.registrationId === message.sourceRegistrationId &&
+            route.enabled,
+        );
+        if (source === undefined) {
+          return { status: "stale", reason: "registration_changed" };
         }
-        settlements.push(
-          this.finishMetadata(
-            state,
-            item,
-            "ambiguous",
-            effectiveNow,
-            "DELIVERY_DEADLINE_EXPIRED",
-          ),
-        );
       }
-      state.inFlight = retainedInFlight;
-      return settlements;
+      if (
+        message.consentEdge !== null &&
+        !state.consentEdges.some((edge) =>
+          sameConsent(edge.endpoints, message.consentEdge),
+        )
+      ) {
+        return { status: "stale", reason: "consent_removed" };
+      }
+      const authority = message.state;
+      message.state = {
+        phase: "armed",
+        attemptId: authority.attemptId,
+        attemptCount: authority.attemptCount,
+        targetRegistrationId: authority.targetRegistrationId,
+        sourceRegistrationId: authority.sourceRegistrationId,
+        consentEdge: authority.consentEdge,
+        armedAt: now.toISOString(),
+        prepared: { ...input.prepared },
+      };
+      this.touchMessage(state, message);
+      return { status: "authorized" };
     });
   }
 
-  async settleMessage(input: SettleMessageInput): Promise<SettleMessageResult> {
-    return this.mutate(async (state, now) => {
-      if (!MESSAGE_ID_PATTERN.test(input.messageId)) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_MESSAGE_ID",
-          "The gateway message identifier is invalid.",
-        );
-      }
+  async acceptMessage(input: AcceptMessageInput): Promise<AcceptMessageResult> {
+    return this.mutate((state, now) => {
+      const message = state.messages.find(
+        (candidate) => candidate.messageId === input.messageId,
+      );
       if (
-        input.safeErrorCode !== undefined &&
-        !SAFE_CODE_PATTERN.test(input.safeErrorCode)
+        message?.state.phase !== "armed" ||
+        message.state.attemptId !== input.attemptId
       ) {
+        return { status: "stale" };
+      }
+      const authority = message.state;
+      message.state = {
+        phase: "accepted",
+        attemptId: authority.attemptId,
+        attemptCount: authority.attemptCount,
+        targetRegistrationId: authority.targetRegistrationId,
+        sourceRegistrationId: authority.sourceRegistrationId,
+        consentEdge: authority.consentEdge,
+        acceptedAt: now.toISOString(),
+        prepared: authority.prepared,
+        lossOutcome: input.lossOutcome,
+      };
+      this.touchMessage(state, message);
+      return { status: "accepted" };
+    });
+  }
+
+  async resolvePrewriteAttempt(
+    input: ResolvePrewriteAttemptInput,
+  ): Promise<ResolvePrewriteAttemptResult> {
+    return this.mutate((state, now) => {
+      if (input.safeErrorCode !== undefined && !isSafeCode(input.safeErrorCode)) {
         throw new BridgeError(
           "INVALID_SAFE_ERROR_CODE",
-          "Delivery error codes must use the normalized safe-code grammar.",
+          "The pre-write result safe code is malformed.",
         );
       }
-      if (
-        input.state !== "delivered" &&
-        input.state !== "unconfirmed" &&
-        input.state !== "failed" &&
-        input.state !== "ambiguous" &&
-        input.state !== "expired" &&
-        input.state !== "cancelled"
-      ) {
-        throw new BridgeError(
-          "INVALID_DELIVERY_SETTLEMENT",
-          "Gateway delivery settlement must use a fixed terminal state.",
-        );
-      }
-      const index = state.inFlight.findIndex(
-        (item) => item.messageId === input.messageId,
+      const message = state.messages.find(
+        (candidate) => candidate.messageId === input.messageId,
       );
-      const metadata = state.inFlight[index];
-      if (!metadata || index < 0) {
-        return { status: "not_in_flight" };
+      if (
+        message?.state.phase !== "reserved" ||
+        message.state.attemptId !== input.attemptId
+      ) {
+        return { status: "stale" };
       }
-      state.inFlight.splice(index, 1);
+      if (input.outcome === "requeue" && Date.parse(message.deadlineAt) > now.getTime()) {
+        const attemptCount = message.state.attemptCount;
+        message.state = { phase: "queued", attemptCount };
+        state.accounting.queuedBytes += message.bytes;
+        this.touchMessage(state, message);
+        return { status: "requeued" };
+      }
       return {
         status: "settled",
-        settlement: this.finishMetadata(
+        settlement: this.finishMessage(
           state,
-          metadata,
+          message,
+          Date.parse(message.deadlineAt) <= now.getTime() ? "expired" : "failed",
+          now,
+          Date.parse(message.deadlineAt) <= now.getTime()
+            ? "MESSAGE_EXPIRED"
+            : input.safeErrorCode,
+        ),
+      };
+    });
+  }
+
+  async settleAttempt(input: SettleAttemptInput): Promise<SettleAttemptResult> {
+    return this.mutate((state, now) => {
+      if (input.safeErrorCode !== undefined && !isSafeCode(input.safeErrorCode)) {
+        throw new BridgeError(
+          "INVALID_SAFE_ERROR_CODE",
+          "The settlement safe code is malformed.",
+        );
+      }
+      const message = state.messages.find(
+        (candidate) => candidate.messageId === input.messageId,
+      );
+      if (
+        message === undefined ||
+        (message.state.phase !== "armed" && message.state.phase !== "accepted") ||
+        message.state.attemptId !== input.attemptId
+      ) {
+        return { status: "stale" };
+      }
+      if (
+        (message.state.phase === "armed" &&
+          (input.state === "expired" ||
+            (input.state === "unconfirmed" &&
+              (input.safeErrorCode !== "ACP_OUTCOME_COARSE" ||
+                message.state.prepared.kind !== "acp_prompt")))) ||
+        (message.state.phase === "accepted" &&
+          (input.state === "expired" ||
+            (input.state === "unconfirmed" &&
+              message.state.lossOutcome !== "unconfirmed") ||
+            (input.state === "ambiguous" &&
+              message.state.lossOutcome !== "ambiguous")))
+      ) {
+        throw new RangeError("INVALID_ATTEMPT_SETTLEMENT_PHASE");
+      }
+      return {
+        status: "settled",
+        settlement: this.finishMessage(
+          state,
+          message,
           input.state,
           now,
           input.safeErrorCode,
@@ -3976,1219 +2194,600 @@ export class GatewayStore {
     });
   }
 
-  async requeueInFlightMessage(
-    messageId: string,
-    body: string,
-    safeErrorCode?: string,
-  ): Promise<RequeueInFlightMessageResult> {
-    return this.mutate(async (state, now) => {
+  async settleAttemptForShutdown(
+    input: SettleAttemptForShutdownInput,
+  ): Promise<SettleAttemptForShutdownResult> {
+    return this.mutate((state, now) => {
+      const message = state.messages.find(
+        (candidate) => candidate.messageId === input.messageId,
+      );
       if (
-        !MESSAGE_ID_PATTERN.test(messageId) ||
-        typeof body !== "string" ||
-        body.length === 0 ||
-        body.includes("\u0000") ||
-        (safeErrorCode !== undefined && !SAFE_CODE_PATTERN.test(safeErrorCode))
+        message === undefined ||
+        message.state.phase === "queued" ||
+        message.state.phase === "terminal" ||
+        message.state.attemptId !== input.attemptId
       ) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_MESSAGE",
-          "Only an exact in-flight message can be returned to the queue.",
-        );
+        return { status: "stale" };
       }
-      const index = state.inFlight.findIndex(
-        (item) => item.messageId === messageId,
-      );
-      const metadata = state.inFlight[index];
-      if (metadata === undefined || index < 0) {
-        return { status: "not_in_flight" };
+      if (message.state.phase === "reserved") {
+        const attemptCount = message.state.attemptCount;
+        message.state = { phase: "queued", attemptCount };
+        state.accounting.queuedBytes += message.bytes;
+        this.touchMessage(state, message);
+        return { status: "requeued" };
       }
-      if (Buffer.byteLength(body, "utf8") !== metadata.bytes) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_MESSAGE",
-          "A requeued message body must exactly match its admitted byte count.",
-        );
-      }
-      state.inFlight.splice(index, 1);
-      if (Date.parse(metadata.deadlineAt) <= now.getTime()) {
-        return {
-          status: "settled",
-          settlement: this.finishMetadata(
-            state,
-            metadata,
-            "expired",
-            now,
-            "MESSAGE_EXPIRED",
-          ),
-        };
-      }
-      const { dispatchedAt: _dispatchedAt, ...queuedMetadata } = metadata;
-      queuedMetadata.body = body;
-      state.queue.unshift(queuedMetadata);
-      this.transientBodies.set(messageId, body);
-      state.accounting.queuedBytes += metadata.bytes;
-      const target = state.routes.find(
-        (route) => route.alias === metadata.targetAlias,
-      );
-      if (target !== undefined) target.queueDepth += 1;
-      this.appendEvent(state, {
-        timestamp: now.toISOString(),
-        messageIdSuffix: metadata.messageIdSuffix,
-        ...(metadata.conversationIdSuffix === undefined
-          ? {}
-          : { conversationIdSuffix: metadata.conversationIdSuffix }),
-        direction: metadata.direction,
-        sourceAlias: metadata.sourceAlias,
-        targetAlias: metadata.targetAlias,
-        state: "held",
-        bytes: metadata.bytes,
-        body,
-        ...(metadata.steer === true ? { steer: true as const } : {}),
-        ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
-        latencyMs: Math.max(
-          0,
-          now.getTime() - Date.parse(metadata.enqueuedAt),
-        ),
-      });
-      return { status: "requeued" };
-    });
-  }
-
-  async markMessageProgress(
-    messageId: string,
-    progress: InFlightMessageProgressState,
-  ): Promise<void> {
-    await this.mutate(async (state, now) => {
-      if (!MESSAGE_ID_PATTERN.test(messageId)) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_MESSAGE_ID",
-          "The gateway message identifier is invalid.",
-        );
-      }
-      if (progress !== "transport_written" && progress !== "held") {
-        throw new BridgeError(
-          "INVALID_DELIVERY_PROGRESS",
-          "Gateway delivery progress must use a fixed nonterminal state.",
-        );
-      }
-      const metadata = state.inFlight.find(
-        (item) => item.messageId === messageId,
-      );
-      if (!metadata) {
-        throw new BridgeError(
-          "MESSAGE_NOT_IN_FLIGHT",
-          "The gateway message is not owned by an active dispatch.",
-        );
-      }
-      this.appendEvent(state, {
-        timestamp: now.toISOString(),
-        messageIdSuffix: metadata.messageIdSuffix,
-        ...(metadata.conversationIdSuffix === undefined
-          ? {}
-          : { conversationIdSuffix: metadata.conversationIdSuffix }),
-        direction: metadata.direction,
-        sourceAlias: metadata.sourceAlias,
-        targetAlias: metadata.targetAlias,
-        state: progress,
-        bytes: metadata.bytes,
-        ...(metadata.body === undefined ? {} : { body: metadata.body }),
-        ...(metadata.steer === true ? { steer: true as const } : {}),
-        latencyMs: Math.max(
-          0,
-          now.getTime() - Date.parse(metadata.enqueuedAt),
-        ),
-      });
-    });
-  }
-
-  /**
-   * Atomically terminalize one queued message and return the authoritative
-   * settlement produced by the winning mutation. A later contender observes
-   * `not_queued` and must not infer or publish another terminal outcome. At
-   * or beyond the delivery deadline, expiry is authoritative regardless of
-   * the caller's requested terminal state.
-   */
-  async settleQueuedMessage(
-    input: SettleQueuedMessageInput,
-  ): Promise<SettleQueuedMessageResult> {
-    return this.mutate(async (state, now) => {
-      if (!MESSAGE_ID_PATTERN.test(input.messageId)) {
-        throw new BridgeError(
-          "INVALID_GATEWAY_MESSAGE_ID",
-          "The gateway message identifier is invalid.",
-        );
-      }
-      if (
-        input.safeErrorCode !== undefined &&
-        !SAFE_CODE_PATTERN.test(input.safeErrorCode)
-      ) {
-        throw new BridgeError(
-          "INVALID_SAFE_ERROR_CODE",
-          "Delivery error codes must use the normalized safe-code grammar.",
-        );
-      }
-      if (
-        input.state !== "failed" &&
-        input.state !== "expired" &&
-        input.state !== "cancelled" &&
-        input.state !== "abandoned"
-      ) {
-        throw new BridgeError(
-          "INVALID_DELIVERY_SETTLEMENT",
-          "Queued delivery settlement must use an applicable terminal state.",
-        );
-      }
-      const index = state.queue.findIndex(
-        (item) => item.messageId === input.messageId,
-      );
-      const metadata = state.queue[index];
-      if (!metadata || index < 0) return { status: "not_queued" };
-      state.queue.splice(index, 1);
-      this.transientBodies.delete(input.messageId);
-      state.accounting.queuedBytes -= metadata.bytes;
-      const target = state.routes.find(
-        (route) => route.alias === metadata.targetAlias,
-      );
-      if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      const deadlineReached = Date.parse(metadata.deadlineAt) <= now.getTime();
+      const outcome =
+        message.state.phase === "armed"
+          ? "ambiguous"
+          : message.state.lossOutcome;
       return {
         status: "settled",
-        settlement: this.finishMetadata(
+        settlement: this.finishMessage(
           state,
-          metadata,
-          deadlineReached ? "expired" : input.state,
+          message,
+          outcome,
           now,
-          deadlineReached ? "MESSAGE_EXPIRED" : input.safeErrorCode,
+          outcome === "ambiguous"
+            ? "DISPATCH_OUTCOME_AMBIGUOUS"
+            : "DELIVERY_UNCONFIRMED",
         ),
       };
     });
   }
 
-  /** @deprecated Prefer settleQueuedMessage so callers retain terminal proof. */
-  async cancelQueuedMessage(messageId: string): Promise<boolean> {
-    const result = await this.settleQueuedMessage({
-      messageId,
-      state: "cancelled",
-      safeErrorCode: "MESSAGE_CANCELLED",
+  async settleQueuedMessageForShutdown(
+    input: SettleQueuedMessageForShutdownInput,
+  ): Promise<SettleQueuedMessageForShutdownResult> {
+    return this.mutate((state, now) => {
+      const message = state.messages.find(
+        (candidate) => candidate.messageId === input.messageId,
+      );
+      if (message?.state.phase !== "queued") return { status: "stale" };
+      return {
+        status: "settled",
+        settlement: this.finishMessage(
+          state,
+          message,
+          "cancelled",
+          now,
+          "GATEWAY_SHUTDOWN",
+        ),
+      };
     });
-    return result.status === "settled";
+  }
+
+  async expireDueMessages(now?: Date): Promise<TerminalMessageSettlement[]> {
+    return this.mutate((state, mutationNow) => {
+      const effective = now ?? mutationNow;
+      const settlements: TerminalMessageSettlement[] = [];
+      for (const message of state.messages) {
+        if (
+          message.state.phase === "terminal" ||
+          Date.parse(message.deadlineAt) > effective.getTime()
+        ) {
+          continue;
+        }
+        const outcome =
+          message.state.phase === "accepted"
+            ? message.state.lossOutcome
+            : message.state.phase === "armed"
+              ? "ambiguous"
+              : "expired";
+        settlements.push(
+          this.finishMessage(
+            state,
+            message,
+            outcome,
+            effective,
+            outcome === "ambiguous"
+              ? "DISPATCH_OUTCOME_AMBIGUOUS"
+              : outcome === "unconfirmed"
+                ? "DELIVERY_UNCONFIRMED"
+                : "MESSAGE_EXPIRED",
+          ),
+        );
+      }
+      return settlements;
+    });
+  }
+
+  async recordActivity(
+    event: Omit<PublicGatewayActivityEvent, "sequence" | "timestamp">,
+  ): Promise<PublicGatewayActivityEvent> {
+    return this.mutate((state, now) => {
+      return this.appendRuntimeActivity(state, now, event);
+    });
   }
 
   async publicSnapshot(): Promise<GatewayPublicSnapshot> {
-    return this.mutate(async (state, now) => {
-      const connectors: PublicConnectorSnapshot[] = state.connectors
-        .map((connector) => {
-          const observedAt = connector.lastSeenAt === undefined
-            ? undefined
-            : Date.parse(connector.lastSeenAt);
-          const observationAgeMs = observedAt === undefined || !Number.isFinite(observedAt)
-            ? undefined
-            : Math.min(
-                Number.MAX_SAFE_INTEGER,
-                Math.max(0, now.getTime() - observedAt),
-              );
-          const health = connector.health === "healthy" &&
-              (observationAgeMs === undefined ||
-                observationAgeMs > CONNECTOR_OBSERVATION_STALE_AFTER_MS)
-            ? "degraded"
-            : connector.health;
-          return {
-            provider: connector.provider,
-            host: connector.hostId,
-            health,
-            protocol: connector.protocol,
-            protocolVersion: connector.protocolVersion,
-            ...(connector.lastSeenAt ? { lastSeenAt: connector.lastSeenAt } : {}),
-            ...(observationAgeMs === undefined ? {} : { observationAgeMs }),
-            ...(connector.safeErrorCode
-              ? { safeErrorCode: connector.safeErrorCode }
-              : {}),
-          };
-        })
-        .sort((left, right) =>
-          `${left.provider}:${left.host}`.localeCompare(
-            `${right.provider}:${right.host}`,
-          ),
+    return this.read((state) => {
+      const now = this.now();
+      const routes: PublicRouteSnapshot[] = state.routes.map((route) => {
+        const queued = state.messages.filter(
+          (message) =>
+            message.targetRegistrationId === route.binding.registrationId &&
+            message.state.phase === "queued",
         );
-      const oldestQueuedAtByTarget = new Map<string, string>();
-      for (const item of state.queue) {
-        const oldest = oldestQueuedAtByTarget.get(item.targetAlias);
-        if (
-          oldest === undefined ||
-          Date.parse(item.enqueuedAt) < Date.parse(oldest)
-        ) {
-          oldestQueuedAtByTarget.set(item.targetAlias, item.enqueuedAt);
-        }
-      }
-      const routes: PublicRouteSnapshot[] = state.routes
-        .map((route) => {
-          const oldestQueuedAt = oldestQueuedAtByTarget.get(route.alias);
-          return {
-            alias: route.alias,
-            provider: route.binding.provider,
-            host: route.binding.hostId,
-            enabled: route.enabled,
-            state: route.state,
-            busyPolicy: route.busyPolicy,
-            ...(route.lastSeenAt ? { lastSeenAt: route.lastSeenAt } : {}),
-            queueDepth: route.queueDepth,
-            ...(oldestQueuedAt === undefined ? {} : { oldestQueuedAt }),
-            counters: { ...route.counters },
-            ...(route.safeErrorCode
-              ? { safeErrorCode: route.safeErrorCode }
-              : {}),
-          };
-        })
-        .sort((left, right) => left.alias.localeCompare(right.alias));
-      const consentEdges: PublicConsentEdgeSnapshot[] = state.consentEdges
-        .map((edge) => ({
-          endpoints: edge.endpoints.map(({ alias, provider }) => ({ alias, provider })) as [
-            { alias: string; provider: GatewayProvider },
-            { alias: string; provider: GatewayProvider },
+        return {
+          alias: route.alias,
+          provider: route.binding.provider,
+          host: route.binding.hostId,
+          enabled: route.enabled,
+          state: route.enabled ? "idle" : "disabled",
+          busyPolicy: route.busyPolicy,
+          queueDepth: queued.length,
+          ...(queued[0]?.enqueuedAt === undefined
+            ? {}
+            : { oldestQueuedAt: queued[0].enqueuedAt }),
+          counters: { ...route.counters },
+        };
+      });
+      const consentEdges: PublicConsentEdgeSnapshot[] = state.consentEdges.map(
+        (edge) => ({
+          endpoints: [
+            {
+              alias: edge.endpoints[0].alias,
+              provider: edge.endpoints[0].provider,
+            },
+            {
+              alias: edge.endpoints[1].alias,
+              provider: edge.endpoints[1].provider,
+            },
           ],
-          host: edge.endpoints[0].alias.slice(edge.endpoints[0].alias.lastIndexOf("@") + 1),
+          host: aliasHost(edge.endpoints[0].alias),
           counters: { ...edge.counters },
-        }))
-        .sort((left, right) =>
-          consentEdgeKey(left.endpoints).localeCompare(consentEdgeKey(right.endpoints)),
-        );
-      const progressWatches: PublicProgressWatchSnapshot[] =
-        state.progressWatches
-          .map((watch) => ({
-            conversationIdSuffix: watch.conversationId.slice(-8),
-            ownerAlias: watch.ownerAlias,
-            workerAlias: watch.workerAlias,
-            lastActivityAt: watch.lastActivityAt,
-            nextActionAt: watch.nextActionAt,
-            nudgeCount: watch.nudgeCount,
-          }))
-          .sort((left, right) =>
-            `${left.nextActionAt}\0${left.ownerAlias}\0${left.workerAlias}`.localeCompare(
-              `${right.nextActionAt}\0${right.ownerAlias}\0${right.workerAlias}`,
-            ),
-          );
-      const progressWatchEvents: PublicProgressWatchEventSnapshot[] =
-        state.progressWatchEvents.map((event) => ({
-          sequence: event.sequence,
-          timestamp: event.timestamp,
-          conversationIdSuffix: event.conversationId.slice(-8),
-          ownerAlias: event.ownerAlias,
-          workerAlias: event.workerAlias,
-          kind: event.kind,
-          actor: event.actor,
-          ...(event.kind === "settled" ? { reason: event.reason } : {}),
-        }));
-      const pressureBuckets: DeadlinePressureBucket[] = [
-        { bucket: "under_1m", settled: 0, expired: 0 },
-        { bucket: "1m_to_5m", settled: 0, expired: 0 },
-        { bucket: "5m_to_15m", settled: 0, expired: 0 },
-        { bucket: "15m_to_60m", settled: 0, expired: 0 },
-        { bucket: "over_60m", settled: 0, expired: 0 },
-      ];
-      const terminalEvidence = state.events.filter(
-        (event) =>
-          event.latencyMs !== undefined &&
-          (event.state === "delivered" ||
-            event.state === "unconfirmed" ||
-            event.state === "failed" ||
-            event.state === "ambiguous" ||
-            event.state === "expired" ||
-            event.state === "cancelled" ||
-            event.state === "abandoned"),
+        }),
       );
-      for (const event of terminalEvidence) {
-        const latency = event.latencyMs ?? 0;
-        const index =
-          latency < 60_000
-            ? 0
-            : latency < 300_000
-              ? 1
-              : latency < 900_000
-                ? 2
-                : latency < 3_600_000
-                  ? 3
-                  : 4;
-        const bucket = pressureBuckets[index];
-        if (bucket === undefined) continue;
-        bucket.settled += 1;
-        if (event.state === "expired") bucket.expired += 1;
-      }
-      const health = this.aggregateHealth(connectors);
-      const unsortedAlerts: SafeGatewayAlert[] = [
-        ...connectors.flatMap((connector) =>
-          connector.safeErrorCode
-            ? [
-                {
-                  code: connector.safeErrorCode,
-                  severity: connector.health === "offline" ? "error" : "warning",
-                  timestamp: connector.lastSeenAt ?? now.toISOString(),
-                  provider: connector.provider,
-                  host: connector.host,
-                } satisfies SafeGatewayAlert,
-              ]
-            : [],
-        ),
-        ...routes.flatMap((route) =>
-          route.safeErrorCode
-            ? [
-                {
-                  code: route.safeErrorCode,
-                  severity: "warning",
-                  timestamp: route.lastSeenAt ?? now.toISOString(),
-                  provider: route.provider,
-                  host: route.host,
-                  alias: route.alias,
-                } satisfies SafeGatewayAlert,
-              ]
-            : [],
-        ),
-      ];
-      const alerts = unsortedAlerts
-        .sort((left, right) => {
-          const byTime = left.timestamp.localeCompare(right.timestamp);
-          if (byTime !== 0) return byTime;
-          return `${left.code}\0${left.provider ?? ""}\0${left.host ?? ""}\0${left.alias ?? ""}`.localeCompare(
-            `${right.code}\0${right.provider ?? ""}\0${right.host ?? ""}\0${right.alias ?? ""}`,
-          );
-        });
+      const currentEvents = state.messages.map((message) =>
+        this.projectMessageEvent(message),
+      );
+      const legacyEvents = state.activity
+        .filter(
+          (entry): entry is GatewayLegacyMessageActivity =>
+            entry.type === "legacy_message",
+        )
+        .map((entry) => structuredClone(entry.event));
+      const activityEvents = state.activity
+        .filter(
+          (entry): entry is GatewayRuntimeActivity => entry.type === "activity",
+        )
+        .map((entry) => structuredClone(entry.event));
+      const messages = [...legacyEvents, ...currentEvents]
+        .sort((left, right) => left.sequence - right.sequence)
+        .slice(-gatewayPublicSnapshotLimits.messages);
       return projectGatewayPublicSnapshot({
         schemaVersion: 2,
         generatedAt: now.toISOString(),
         inboundMode: this.config.inboundMode,
-        health,
-        connectors,
+        health: "offline",
+        connectors: [],
         availablePeers: [],
         routes,
         consentEdges,
-        progressWatches,
-        progressWatchEvents,
+        activityEvents,
         deadlinePressure: {
           configuredDeadlineMs: this.config.limits.messageDeadlineMs,
-          ...(state.events[0]?.timestamp === undefined
+          ...(messages[0]?.timestamp === undefined
             ? {}
-            : { retainedSince: state.events[0].timestamp }),
-          terminalEvents: terminalEvidence.length,
-          expiredEvents: terminalEvidence.filter(
-            (event) => event.state === "expired",
+            : { retainedSince: messages[0].timestamp }),
+          terminalEvents: messages.filter((event) =>
+            [
+              "delivered",
+              "unconfirmed",
+              "failed",
+              "ambiguous",
+              "expired",
+              "cancelled",
+              "abandoned",
+            ].includes(event.state),
           ).length,
-          buckets: pressureBuckets,
+          expiredEvents: messages.filter((event) => event.state === "expired")
+            .length,
+          buckets: [],
         },
-        messages: state.events.map((event) => ({ ...event })),
+        messages,
         accounting: { ...state.accounting },
-        alerts,
+        alerts: [],
         truncation: {
           connectors: 0,
           availablePeers: 0,
           routes: 0,
           consentEdges: 0,
-          progressWatches: 0,
-          progressWatchEvents: 0,
-          messages: 0,
+          activityEvents: 0,
+          messages: Math.max(
+            0,
+            legacyEvents.length + currentEvents.length - messages.length,
+          ),
           alerts: 0,
         },
       });
     });
   }
 
-  private async mutate<T>(
-    operation: (state: GatewayPersistedState, now: Date) => Promise<T> | T,
-  ): Promise<T> {
-    return this.mutex.run("gateway", async () => {
-      const state = this.requireState();
-      const stateBefore = structuredClone(state);
-      const bodiesBefore = new Map(this.transientBodies);
-      const now = this.now();
-      this.prune(now);
-      let outcome:
-        | { ok: true; value: T }
-        | { ok: false; error: unknown };
-      try {
-        outcome = { ok: true, value: await operation(state, now) };
-      } catch (error) {
-        outcome = { ok: false, error };
-      }
-      state.updatedAt = now.toISOString();
-      try {
-        await this.persist();
-      } catch (persistError) {
-        if (persistError instanceof PostRenamePersistenceError) {
-          // Rename is the commit point. `persist` reloaded and verified the
-          // installed state, so restoring `stateBefore` would create two
-          // conflicting authorities inside one controller.
-          throw persistError;
-        }
-        // A failed durable commit must not leave a newer in-memory authority.
-        this.state = stateBefore;
-        this.transientBodies.clear();
-        for (const [messageId, body] of bodiesBefore) {
-          this.transientBodies.set(messageId, body);
-        }
-        throw persistError;
-      }
-      // Rejection accounting/events deliberately survive operation errors that
-      // occur after both selected routes have been safely resolved.
-      if (!outcome.ok) throw outcome.error;
-      return outcome.value;
-    });
-  }
-
-  private requireState(): GatewayPersistedState {
-    if (!this.state || !this.lockHandle) {
-      throw new BridgeError(
-        "GATEWAY_NOT_INITIALIZED",
-        "The gateway store must hold its controller lock before use.",
-      );
-    }
-    return this.state;
-  }
-
-  private journal(state: GatewayPersistedState): CodexSuccessionJournal | null {
-    if (state.codexSuccession === null) return null;
-    if (!isCodexSuccessionJournal(state.codexSuccession)) {
-      throw new BridgeError(
-        "CORRUPT_GATEWAY_STATE",
-        "The in-memory Codex succession journal is invalid.",
-      );
-    }
-    return state.codexSuccession;
-  }
-
-  private requireExactSuccession(
-    state: GatewayPersistedState,
-    input: ExactCodexSuccessionInput,
-    allowedStages: readonly CodexSuccessionJournalStage[],
-  ): CodexSuccessionJournal {
-    if (
-      !isObject(input) ||
-      !hasOnlyKeys(input, ["oldGeneration", "newGeneration"]) ||
-      !isCodexRegistrationGeneration(input.oldGeneration) ||
-      !isCodexRegistrationGeneration(input.newGeneration)
-    ) {
-      throw new BridgeError(
-        "INVALID_CODEX_SUCCESSION",
-        "The exact Codex succession generations are malformed.",
-      );
-    }
-    const journal = this.journal(state);
-    if (journal === null) {
-      throw new BridgeError(
-        "CODEX_SUCCESSION_NOT_FOUND",
-        "No durable Codex succession journal exists.",
-      );
-    }
-    if (
-      journal.old.generation !== input.oldGeneration ||
-      journal.new.generation !== input.newGeneration ||
-      !allowedStages.includes(journal.stage)
-    ) {
-      throw new BridgeError(
-        "CODEX_SUCCESSION_OWNER_MISMATCH",
-        "The succession stage or exact generation ownership does not match.",
-      );
-    }
-    return journal;
-  }
-
-  private assertSuccessionLedgerEmpty(
-    state: GatewayPersistedState,
-    alias: string,
-  ): void {
-    const queued = state.queue.filter(
-      (item) => item.sourceAlias === alias || item.targetAlias === alias,
-    );
-    const inFlight = state.inFlight.filter(
-      (item) => item.sourceAlias === alias || item.targetAlias === alias,
-    );
-    const ownedMessageIds = new Set([
-      ...queued.map((item) => item.messageId),
-      ...inFlight.map((item) => item.messageId),
-    ]);
-    if (
-      queued.length !== 0 ||
-      inFlight.length !== 0 ||
-      [...this.transientBodies.keys()].some((messageId) =>
-        ownedMessageIds.has(messageId),
-      ) ||
-      state.routes.some(
-        (route) =>
-          route.binding.provider === "codex" &&
-          route.alias === alias &&
-          route.queueDepth !== 0,
-      )
-    ) {
-      throw new BridgeError(
-        "CODEX_SUCCESSION_LEDGER_NOT_EMPTY",
-        "Codex succession requires the replaced route's queue and in-flight ledger to be drained.",
-        true,
-      );
-    }
-  }
-
-  private requireCodexRouteForIdentity(
-    state: GatewayPersistedState,
-    identity: CodexSuccessionStoreIdentity,
-  ): GatewayRouteRecord {
-    const route = state.routes.find(
-      (candidate) => routeMatchesSuccessionIdentity(candidate, identity),
-    );
-    if (route === undefined) {
-      throw new BridgeError(
-        "CODEX_SUCCESSION_OWNER_MISMATCH",
-        "Codex succession requires the exact persisted Codex route.",
-      );
-    }
-    return route;
-  }
-
-  private requireJournalRoute(
-    state: GatewayPersistedState,
-    journal: CodexSuccessionJournal,
-    side: "old" | "new",
-  ): GatewayRouteRecord {
-    return this.requireCodexRouteForIdentity(state, journal[side]);
-  }
-
-  private requireAnyJournalRoute(
-    state: GatewayPersistedState,
-    journal: CodexSuccessionJournal,
-  ): GatewayRouteRecord {
-    const routes = state.routes.filter(
-      (candidate) =>
-        routeMatchesSuccessionIdentity(candidate, journal.old) ||
-        routeMatchesSuccessionIdentity(candidate, journal.new),
-    );
-    if (routes.length !== 1 || routes[0] === undefined) {
-      throw new BridgeError(
-        "CODEX_SUCCESSION_OWNER_MISMATCH",
-        "The succession journal must own exactly one persisted Codex route.",
-      );
-    }
-    return routes[0];
-  }
-
-  private assertNewSuccessionIdentityAvailable(
-    state: GatewayPersistedState,
-    oldRoute: GatewayRouteRecord,
-    identity: CodexSuccessionStoreIdentity,
-  ): void {
-    if (
-      state.routes.some(
-        (candidate) =>
-          candidate !== oldRoute &&
-          (candidate.alias === identity.alias ||
-            sameRouteTarget(candidate.binding, identity.binding) ||
-            candidate.binding.ownerLease === identity.binding.ownerLease),
-      )
-    ) {
-      throw new BridgeError(
-        "CODEX_SUCCESSION_BINDING_COLLISION",
-        "The new Codex identity collides with another persisted route.",
-      );
-    }
-  }
-
-  private replaceCodexRouteForSuccession(
-    state: GatewayPersistedState,
-    route: GatewayRouteRecord,
-    identity: CodexSuccessionStoreIdentity,
-    now: Date,
-    routeState: "idle" | "busy" | "awaiting_approval" | "stale",
-  ): void {
-    const oldAlias = route.alias;
-    const affectedAliases = new Set([oldAlias, identity.alias]);
-    this.settleProgressWatchesForAliases(state, affectedAliases, now);
-    route.alias = identity.alias;
-    route.binding = { ...identity.binding };
-    route.registrationMode = "explicit_opt_in";
-    route.enabled = true;
-    route.state = routeState;
-    route.registeredAt = now.toISOString();
-    route.updatedAt = now.toISOString();
-    route.queueDepth = 0;
-    route.counters = emptyCounters();
-    if (routeState === "stale") {
-      delete route.lastSeenAt;
-      route.safeErrorCode = "REOBSERVATION_REQUIRED";
-    } else {
-      route.lastSeenAt = now.toISOString();
-      delete route.safeErrorCode;
-    }
-    state.dedupe = state.dedupe.filter(
-      (record) =>
-        record.sourceAlias !== oldAlias &&
-        record.targetAlias !== oldAlias &&
-        record.sourceAlias !== identity.alias &&
-        record.targetAlias !== identity.alias,
-    );
-    state.rateBuckets = state.rateBuckets.filter(
-      (bucket) =>
-        bucket.sourceAlias !== oldAlias &&
-        bucket.sourceAlias !== identity.alias,
-    );
-    removeConsentEdgesForAliases(state, affectedAliases);
-  }
-
-  private assertAllowedIdentity(identity: PrivateEndpointIdentity): void {
-    if (!isPrivateEndpointIdentity(identity)) {
-      throw new BridgeError(
-        "INVALID_PRIVATE_ROUTE_IDENTITY",
-        "The private route identity is malformed or contains a path-like value.",
-      );
-    }
-    if (!this.config.allowedHosts.includes(identity.hostId)) {
-      throw new BridgeError(
-        "GATEWAY_HOST_NOT_ALLOWED",
-        "The route host is not in the fixed gateway allowlist.",
-      );
-    }
-  }
-
-  private requireObservedEndpoint(
-    state: GatewayPersistedState,
-    binding: PrivateRouteBinding,
-  ): void {
-    const connector = state.connectors.find((candidate) =>
-      sameEndpoint(candidate, binding),
-    );
-    if (
-      !connector ||
-      !["healthy", "degraded"].includes(connector.health)
-    ) {
-      throw new BridgeError(
-        "ROUTE_ENDPOINT_NOT_OBSERVED",
-        "The exact live endpoint generation must be observed before Codex succession can publish or activate it.",
-      );
-    }
+  private projectMessageEvent(
+    message: GatewayMessageRecord,
+  ): NormalizedMessageEvent {
+    const state: DeliveryState =
+      message.state.phase === "queued"
+        ? "queued"
+        : message.state.phase === "reserved"
+          ? "dispatching"
+          : message.state.phase === "armed" || message.state.phase === "accepted"
+            ? "transport_written"
+            : message.state.outcome;
+    return {
+      sequence: message.sequence,
+      timestamp:
+        message.state.phase === "queued"
+          ? message.enqueuedAt
+          : message.state.phase === "reserved"
+            ? message.state.reservedAt
+            : message.state.phase === "armed"
+              ? message.state.armedAt
+              : message.state.phase === "accepted"
+                ? message.state.acceptedAt
+                : message.state.terminalAt,
+      messageIdSuffix: message.messageIdSuffix,
+      ...(message.conversationIdSuffix === undefined
+        ? {}
+        : { conversationIdSuffix: message.conversationIdSuffix }),
+      direction: message.direction,
+      sourceAlias: message.sourceAlias,
+      targetAlias: message.targetAlias,
+      state,
+      bytes: message.bytes,
+      ...(message.body === undefined ? {} : { body: message.body }),
+      ...(message.steer === true ? { steer: true as const } : {}),
+      ...(message.state.phase === "terminal"
+        ? {
+            latencyMs: message.state.latencyMs,
+            ...(message.state.safeErrorCode === undefined
+              ? {}
+              : { safeErrorCode: message.state.safeErrorCode }),
+          }
+        : {}),
+    };
   }
 
   private validateRouteInput(input: RegisterRouteInput): void {
-    if (!ALIAS_PATTERN.test(input.alias)) {
-      throw new BridgeError(
-        "INVALID_GATEWAY_ALIAS",
-        "Gateway aliases must use lowercase ASCII name@host syntax.",
-      );
-    }
-    if (!isPrivateRouteBinding(input.binding)) {
-      throw new BridgeError(
-        "INVALID_PRIVATE_ROUTE_IDENTITY",
-        "The private route binding is malformed or contains a path-like value.",
-      );
-    }
-    const aliasHost = input.alias.slice(input.alias.lastIndexOf("@") + 1);
-    if (aliasHost !== input.binding.hostId) {
-      throw new BridgeError(
-        "ROUTE_HOST_MISMATCH",
-        "The public alias host must match the allowlisted private route host.",
-      );
-    }
-    const requiredPrefix =
-      gatewayRegistrationIngressPrefixes[input.binding.provider];
-    if (requiredPrefix !== undefined && !input.alias.startsWith(requiredPrefix)) {
-      throw new BridgeError(
-        "INVALID_GATEWAY_ALIAS",
-        `The ${input.binding.provider} registration alias must use its required ingress prefix.`,
-      );
-    }
     if (
-      (input.binding.provider === "claude" &&
-        input.registrationMode !== "selected_live_peer") ||
-      (input.binding.provider !== "claude" &&
-        input.registrationMode !== "explicit_opt_in")
+      !isObject(input) ||
+      !ALIAS_PATTERN.test(input.alias) ||
+      !isLogicalBinding(input.binding) ||
+      !REGISTRATION_MODES.has(input.registrationMode) ||
+      !input.alias.endsWith(`@${input.binding.hostId}`) ||
+      !this.config.allowedHosts.includes(input.binding.hostId) ||
+      (input.binding.provider === "claude"
+        ? input.registrationMode !== "selected_live_peer"
+        : input.registrationMode !== "explicit_opt_in")
     ) {
       throw new BridgeError(
-        "ROUTE_OPT_IN_REQUIRED",
-        "Non-Claude routes require explicit opt-in and Claude routes require a selected live peer.",
+        "INVALID_ROUTE_BINDING",
+        "The logical route binding is invalid for this gateway.",
+      );
+    }
+    const prefix = gatewayRegistrationIngressPrefixes[input.binding.provider];
+    if (prefix !== undefined && !input.alias.startsWith(prefix)) {
+      throw new BridgeError(
+        "INVALID_ROUTE_BINDING",
+        "The route alias does not match its provider ingress convention.",
       );
     }
   }
 
-  private requireOwnedRoute(
-    state: GatewayPersistedState,
-    alias: string,
-    ownerLease: string,
-  ): GatewayRouteRecord {
-    const route = state.routes.find((candidate) => candidate.alias === alias);
-    if (!route || route.binding.ownerLease !== ownerLease) {
-      throw new BridgeError(
-        "ROUTE_OWNERSHIP_MISMATCH",
-        "The route does not exist or the private ownership lease does not match.",
-      );
-    }
-    return route;
-  }
-
-  private requireStaleCodexOrphan(
+  private requireRoute(
     state: GatewayPersistedState,
     alias: string,
   ): GatewayRouteRecord {
-    if (
-      typeof alias !== "string" ||
-      !ALIAS_PATTERN.test(alias) ||
-      !alias.startsWith("codex-")
-    ) {
-      throw new BridgeError(
-        "INVALID_CODEX_ORPHAN_RECOVERY",
-        "Codex orphan recovery requires one exact Codex alias.",
-      );
-    }
-    const route = state.routes.find((candidate) => candidate.alias === alias);
+    const route = state.routes.find(
+      (candidate) => candidate.alias === alias && candidate.enabled,
+    );
     if (route === undefined) {
       throw new BridgeError(
-        "CODEX_ORPHAN_NOT_FOUND",
-        "No Codex registration matches the requested alias.",
-      );
-    }
-    if (
-      route.binding.provider !== "codex" ||
-      route.registrationMode !== "explicit_opt_in" ||
-      !route.enabled ||
-      route.state !== "stale" ||
-      route.queueDepth !== 0 ||
-      state.queue.some(
-        (item) =>
-          item.sourceAlias === route.alias || item.targetAlias === route.alias,
-      ) ||
-      state.inFlight.some(
-        (item) =>
-          item.sourceAlias === route.alias || item.targetAlias === route.alias,
-      )
-    ) {
-      throw new BridgeError(
-        "CODEX_ORPHAN_RECOVERY_NOT_SAFE",
-        "Only an enabled, expired, empty stale Codex registration can be removed as an orphan.",
-      );
-    }
-    const connector = state.connectors.find(
-      (candidate) =>
-        candidate.provider === "codex" &&
-        candidate.hostId === route.binding.hostId,
-    );
-    const generationProvedDead =
-      connector !== undefined &&
-      (connector.endpointGeneration !== route.binding.endpointGeneration ||
-        connector.health === "offline");
-    if (!generationProvedDead) {
-      throw new BridgeError(
-        "CODEX_ORPHAN_GENERATION_LIVE",
-        "The Codex registration cannot be removed while its endpoint generation may still be live.",
-      );
-    }
-    const succession = this.journal(state);
-    if (
-      succession !== null &&
-      (routeMatchesSuccessionIdentity(route, succession.old) ||
-        routeMatchesSuccessionIdentity(route, succession.new))
-    ) {
-      throw new BridgeError(
-        "CODEX_ORPHAN_RECOVERY_BLOCKED",
-        "A Codex registration owned by an active succession cannot be removed as an orphan.",
-      );
-    }
-    return route;
-  }
-
-  private requireAvailableRoute(
-    state: GatewayPersistedState,
-    alias: string,
-  ): GatewayRouteRecord {
-    if (!ALIAS_PATTERN.test(alias)) {
-      throw new BridgeError(
-        "INVALID_GATEWAY_ALIAS",
-        "The selected alias does not use the required lowercase ASCII grammar.",
-      );
-    }
-    const route = state.routes.find((candidate) => candidate.alias === alias);
-    if (
-      !route ||
-      !route.enabled ||
-      !["idle", "busy", "awaiting_approval"].includes(route.state)
-    ) {
-      throw new BridgeError(
-        "ROUTE_UNAVAILABLE",
-        "The selected route is not currently enabled and positively observed.",
+        "ROUTE_NOT_AVAILABLE",
+        "The exact logical route is not registered and enabled.",
         true,
       );
     }
     return route;
   }
 
-  private requireConsentEdgeRoutes(
+  private resolvePair(
     state: GatewayPersistedState,
-    input: GatewayConsentEdgeInput,
-    requireAvailable = true,
-  ): readonly [GatewayRouteRecord, GatewayRouteRecord] {
+    aliases: readonly [string, string],
+    required: boolean,
+    expectedRegistrationIds?: readonly [string, string],
+  ):
+    | Readonly<{
+        left: GatewayRouteRecord;
+        right: GatewayRouteRecord;
+        endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint];
+      }>
+    | undefined {
     if (
-      !isObject(input) ||
-      !Array.isArray(input.aliases) ||
-      input.aliases.length !== 2 ||
-      input.aliases.some((alias) => typeof alias !== "string" || !ALIAS_PATTERN.test(alias)) ||
-      input.aliases[0] === input.aliases[1]
+      aliases.length !== 2 ||
+      aliases[0] === aliases[1] ||
+      !aliases.every((alias) => ALIAS_PATTERN.test(alias))
     ) {
-      throw new BridgeError(
-        "INVALID_CONSENT_EDGE",
-        "A consent edge requires two distinct normalized aliases.",
-      );
-    }
-    const resolve = (alias: string): GatewayRouteRecord => {
-      if (requireAvailable) return this.requireAvailableRoute(state, alias);
-      const route = state.routes.find((candidate) => candidate.alias === alias);
-      if (route === undefined) {
+      if (required) {
         throw new BridgeError(
-          "CONSENT_EDGE_ROUTE_NOT_FOUND",
-          "The consent edge references a route that is not registered.",
+          "INVALID_CONSENT_EDGE",
+          "Consent requires two distinct exact route aliases.",
         );
       }
-      return route;
-    };
-    const left = resolve(input.aliases[0]);
-    const right = resolve(input.aliases[1]);
+      return undefined;
+    }
+    const left = state.routes.find((route) => route.alias === aliases[0]);
+    const right = state.routes.find((route) => route.alias === aliases[1]);
     if (
+      expectedRegistrationIds === undefined ||
+      !expectedRegistrationIds.every(isPrivateToken)
+    ) {
+      if (required) {
+        throw new BridgeError(
+          "INVALID_CONSENT_EDGE",
+          "Consent requires both exact registration identities.",
+        );
+      }
+      return undefined;
+    }
+    if (
+      left?.binding.registrationId !== expectedRegistrationIds[0] ||
+      right?.binding.registrationId !== expectedRegistrationIds[1]
+    ) {
+      throw new BridgeError(
+        "ROUTE_UNREGISTERED",
+        "A consent endpoint registration is no longer current.",
+      );
+    }
+    if (
+      left === undefined ||
+      right === undefined ||
       left.binding.provider === right.binding.provider ||
       left.binding.hostId !== right.binding.hostId
     ) {
-      throw new BridgeError(
-        "INVALID_CONSENT_EDGE",
-        "A consent edge must connect distinct providers on the same host.",
-      );
+      if (required) {
+        throw new BridgeError(
+          "INVALID_CONSENT_EDGE",
+          "Consent requires exact same-host routes from distinct providers.",
+        );
+      }
+      return undefined;
     }
-    return [left, right];
+    return {
+      left,
+      right,
+      endpoints: canonicalConsentEndpoints(left, right),
+    };
   }
 
-  private requireExactConsentEdge(
+  private requireConsent(
     state: GatewayPersistedState,
-    left: GatewayRouteRecord,
-    right: GatewayRouteRecord,
+    source: GatewayRouteRecord,
+    target: GatewayRouteRecord,
   ): GatewayConsentEdgeRecord {
-    const endpoints = canonicalConsentEndpoints(left, right);
-    const pair = state.consentEdges.find(
-      (candidate) => consentEdgeKey(candidate.endpoints) === consentEdgeKey(endpoints),
+    const endpoints = canonicalConsentEndpoints(source, target);
+    const edge = state.consentEdges.find((candidate) =>
+      sameConsent(candidate.endpoints, endpoints),
     );
-    if (
-      pair === undefined ||
-      pair.endpoints.some((endpoint, index) =>
-        endpoint.ownerLease !== endpoints[index]!.ownerLease)
-    ) {
+    if (edge === undefined) {
       throw new BridgeError(
         "SENDER_NOT_PAIRED",
-        "The two exact route authorities do not share a consent edge.",
+        "The exact logical routes do not share consent.",
       );
     }
-    return pair;
+    return edge;
   }
 
-  private validateTransientNativeClaudePeer(
-    state: GatewayPersistedState,
-    peer: TransientNativeClaudePeer,
-    route: GatewayRouteRecord,
-  ): void {
-    if (
-      !isObject(peer) ||
-      !hasOnlyKeys(peer, ["alias", "binding"]) ||
-      typeof peer.alias !== "string" ||
-      !ALIAS_PATTERN.test(peer.alias) ||
-      !isPrivateRouteBinding(peer.binding) ||
-      peer.binding.provider !== "claude"
-    ) {
-      throw new BridgeError(
-        "INVALID_NATIVE_CLAUDE_PEER",
-        "Native ingress requires a normalized alias and a private Claude binding.",
-      );
-    }
-    this.assertAllowedIdentity(endpointOf(peer.binding));
-    const aliasHost = peer.alias.slice(peer.alias.lastIndexOf("@") + 1);
-    if (
-      route.binding.provider === "claude" ||
-      aliasHost !== peer.binding.hostId ||
-      peer.binding.hostId !== route.binding.hostId ||
-      peer.alias === route.alias
-    ) {
-      throw new BridgeError(
-        "NATIVE_PEER_SCOPE_MISMATCH",
-        "The transient Claude peer and registered route must be distinct providers on the same allowlisted host.",
-      );
-    }
-    const connector = state.connectors.find((candidate) =>
-      sameEndpoint(candidate, peer.binding),
-    );
-    if (
-      !connector ||
-      !["healthy", "degraded"].includes(connector.health)
-    ) {
-      throw new BridgeError(
-        "NATIVE_PEER_ENDPOINT_NOT_OBSERVED",
-        "The transient Claude peer's exact connector generation is not live.",
-        true,
-      );
-    }
-  }
-
-  private enqueueResolvedMessage(
+  private enqueueResolved(
     state: GatewayPersistedState,
     now: Date,
-    input: Pick<
-      EnqueueMessageInput,
-      | "body"
-      | "dedupeKey"
-      | "conversationIdSuffix"
-      | "deadlineAt"
-      | "steer"
-      | "progressWatch"
-      | "progressWatchNudge"
-    >,
-    sides: ResolvedEnqueueSides,
+    input: Omit<EnqueueMessageInput, "sourceAlias" | "targetAlias">,
+    authority: Readonly<{
+      sourceAlias: string;
+      targetAlias: string;
+      direction: MessageDirection;
+      sourceRegistrationId: string | null;
+      targetRegistrationId: string;
+      consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+      pair?: true;
+      transientTarget?: true;
+      exposeDeliveryToken: boolean;
+    }>,
   ): EnqueueMessageResult {
-    if (
-      input.conversationIdSuffix !== undefined &&
-      !CONVERSATION_SUFFIX_PATTERN.test(input.conversationIdSuffix)
-    ) {
-      throw new BridgeError(
-        "INVALID_CONVERSATION_SUFFIX",
-        "Conversation correlation requires an eight-character opaque suffix.",
-      );
-    }
     if (
       typeof input.body !== "string" ||
       input.body.length === 0 ||
-      input.body.includes("\u0000")
+      input.body.includes("\u0000") ||
+      typeof input.dedupeKey !== "string" ||
+      input.dedupeKey.length === 0 ||
+      (input.conversationIdSuffix !== undefined &&
+        !CONVERSATION_SUFFIX_PATTERN.test(input.conversationIdSuffix))
     ) {
       throw new BridgeError(
         "INVALID_GATEWAY_MESSAGE",
-        "Gateway messages must contain a non-empty text body without NUL bytes.",
+        "The gateway message body or correlation metadata is invalid.",
       );
     }
     const bytes = Buffer.byteLength(input.body, "utf8");
     if (bytes > this.config.limits.maxMessageBytes) {
-      this.recordRejection(
-        state,
-        sides,
-        bytes,
-        now,
-        "MESSAGE_TOO_LARGE",
-        input.steer,
-        input.conversationIdSuffix,
-      );
-      throw new BridgeError(
-        "MESSAGE_TOO_LARGE",
-        "The transient message exceeds the configured byte limit.",
+      this.recordRejection(state, authority, bytes, now, "MESSAGE_TOO_LARGE", input);
+      throw new CommitAndThrow(
+        new BridgeError(
+          "MESSAGE_TOO_LARGE",
+          "The message exceeds the configured byte bound.",
+        ),
       );
     }
-    if (
-      typeof input.dedupeKey !== "string" ||
-      input.dedupeKey.length === 0 ||
-      Buffer.byteLength(input.dedupeKey) > 512
-    ) {
+    if (Buffer.byteLength(input.dedupeKey, "utf8") > 512) {
       throw new BridgeError(
         "INVALID_DEDUPE_KEY",
         "A bounded, non-empty deduplication key is required.",
       );
     }
+    const deadlineAt =
+      input.deadlineAt ??
+      new Date(now.getTime() + this.config.limits.messageDeadlineMs).toISOString();
+    if (
+      !isIsoTimestamp(deadlineAt) ||
+      Date.parse(deadlineAt) <= now.getTime() ||
+      Date.parse(deadlineAt) > now.getTime() + this.config.limits.messageDeadlineMs
+    ) {
+      this.recordRejection(state, authority, bytes, now, "INVALID_DEADLINE", input);
+      throw new CommitAndThrow(
+        new BridgeError(
+          "INVALID_DEADLINE",
+          "The message deadline must fall inside the configured delivery window.",
+        ),
+      );
+    }
     const fingerprint = createHash("sha256")
-      .update(sides.sourceAlias)
-      .update("\0")
-      .update(sides.targetAlias)
-      .update("\0")
-      .update(input.dedupeKey)
+      .update(
+        [
+          authority.sourceAlias,
+          authority.targetAlias,
+          authority.direction,
+          input.dedupeKey,
+        ].join("\0"),
+      )
       .digest("base64url");
     const duplicate = state.dedupe.find(
-      (record) =>
-        record.fingerprint === fingerprint &&
-        Date.parse(record.expiresAt) > now.getTime(),
+      (entry) =>
+        entry.fingerprint === fingerprint &&
+        Date.parse(entry.expiresAt) > now.getTime(),
     );
-    if (duplicate) {
+    if (duplicate !== undefined) {
       state.accounting.duplicates += 1;
-      this.appendEvent(state, {
-        timestamp: now.toISOString(),
-        messageIdSuffix: duplicate.messageIdSuffix,
-        direction: sides.direction,
-        sourceAlias: sides.sourceAlias,
-        targetAlias: sides.targetAlias,
-        state: "duplicate",
-        ...(duplicate.conversationIdSuffix === undefined
-          ? {}
-          : { conversationIdSuffix: duplicate.conversationIdSuffix }),
-        bytes,
-        ...(input.steer === true ? { steer: true as const } : {}),
-      });
       return {
         accepted: false,
         duplicate: true,
         messageIdSuffix: duplicate.messageIdSuffix,
       };
     }
-    this.consumeRateLimit(state, sides.sourceAlias, now);
-    const deadline = input.deadlineAt
-      ? new Date(input.deadlineAt)
-      : new Date(now.getTime() + this.config.limits.messageDeadlineMs);
-    if (
-      !Number.isFinite(deadline.getTime()) ||
-      deadline.getTime() <= now.getTime() ||
-      deadline.getTime() > now.getTime() + this.config.limits.messageDeadlineMs
-    ) {
-      this.recordRejection(
-        state,
-        sides,
-        bytes,
-        now,
-        "INVALID_DEADLINE",
-        input.steer,
-        input.conversationIdSuffix,
-      );
-      throw new BridgeError(
-        "INVALID_DEADLINE",
-        "The message deadline must be in the future and within the configured maximum.",
+    if (!this.consumeRate(state, authority.sourceAlias, now)) {
+      this.recordRejection(state, authority, bytes, now, "GATEWAY_RATE_LIMITED", input);
+      throw new CommitAndThrow(
+        new BridgeError(
+          "GATEWAY_RATE_LIMITED",
+          "The source exceeded the bounded gateway rate window.",
+          true,
+        ),
       );
     }
-    let oldestSteerIndex = -1;
-    if (input.steer === true) {
-      let oldestSteerAt = Number.POSITIVE_INFINITY;
-      for (const [index, item] of state.queue.entries()) {
-        if (
-          item.sourceAlias !== sides.sourceAlias ||
-          item.targetAlias !== sides.targetAlias ||
-          item.steer !== true
-        ) {
-          continue;
-        }
-        const enqueuedAt = Date.parse(item.enqueuedAt);
-        if (enqueuedAt < oldestSteerAt) {
-          oldestSteerAt = enqueuedAt;
-          oldestSteerIndex = index;
-        }
-      }
-      const steerDepth = state.queue.filter(
-        (item) =>
-          item.sourceAlias === sides.sourceAlias &&
-          item.targetAlias === sides.targetAlias &&
-          item.steer === true,
-      ).length;
-      if (steerDepth < 3) oldestSteerIndex = -1;
-    }
-    const superseded =
-      oldestSteerIndex < 0 ? undefined : state.queue[oldestSteerIndex];
-    const targetDepthBefore = state.queue.filter(
-      (item) => item.targetAlias === sides.targetAlias,
-    ).length;
-    const queueLengthAfterSupersession =
-      state.queue.length - (superseded === undefined ? 0 : 1);
-    const targetDepthAfterSupersession =
-      targetDepthBefore - (superseded === undefined ? 0 : 1);
-    const queuedBytesAfterSupersession =
-      state.accounting.queuedBytes - (superseded?.bytes ?? 0);
+    const active = state.messages.filter(
+      (message) => message.state.phase !== "terminal",
+    );
+    const queuedSteers =
+      input.steer === true
+        ? active
+            .filter(
+              (message) =>
+                message.state.phase === "queued" &&
+                message.steer === true &&
+                message.sourceAlias === authority.sourceAlias &&
+                message.targetAlias === authority.targetAlias,
+            )
+            .sort(
+              (left, right) =>
+                Date.parse(left.enqueuedAt) - Date.parse(right.enqueuedAt) ||
+                left.sequence - right.sequence,
+            )
+        : [];
+    const superseded = queuedSteers.length >= 3 ? queuedSteers[0] : undefined;
     if (
-      queueLengthAfterSupersession + state.inFlight.length >=
+      active.length - (superseded === undefined ? 0 : 1) >=
         this.config.limits.maxQueueMessages ||
-      targetDepthAfterSupersession >=
+      active.filter((message) => message.targetAlias === authority.targetAlias)
+        .length - (superseded === undefined ? 0 : 1) >=
         this.config.limits.maxQueueMessagesPerRoute ||
-      queuedBytesAfterSupersession + bytes >
+      state.accounting.queuedBytes - (superseded?.bytes ?? 0) + bytes >
         this.config.limits.maxQueueBytes
     ) {
-      this.recordRejection(
-        state,
-        sides,
-        bytes,
-        now,
-        "QUEUE_FULL",
-        input.steer,
-        input.conversationIdSuffix,
-      );
-      throw new BridgeError(
-        "GATEWAY_QUEUE_FULL",
-        "The bounded gateway queue cannot accept another message.",
-        true,
+      this.recordRejection(state, authority, bytes, now, "GATEWAY_QUEUE_FULL", input);
+      throw new CommitAndThrow(
+        new BridgeError(
+          "GATEWAY_QUEUE_FULL",
+          "The bounded gateway queue is full.",
+          true,
+        ),
       );
     }
-    if (
-      input.progressWatch !== undefined &&
-      input.progressWatchNudge !== undefined
-    ) {
-      throw new BridgeError(
-        "INVALID_PROGRESS_WATCH",
-        "A queued message cannot be both endpoint activity and a controller nudge.",
-      );
-    }
-    const opaque = this.randomId();
-    const messageId = `msg_${opaque}`;
+    const messageId = `msg_${this.randomId()}`;
     if (!MESSAGE_ID_PATTERN.test(messageId)) {
       throw new BridgeError(
-        "INVALID_RANDOM_ID_SOURCE",
-        "The gateway random identifier source did not return a UUID.",
+        "GATEWAY_ID_ALLOCATION_FAILED",
+        "A valid message identifier could not be allocated.",
       );
     }
-    const messageIdSuffix = opaque.replaceAll("-", "").slice(-8).toLowerCase();
-    const metadata: QueuedMessageMetadata = {
+    const messageIdSuffix = messageId.replaceAll("-", "").slice(-8).toLowerCase();
+    const deliveryToken = authority.exposeDeliveryToken
+      ? this.allocateDeliveryToken(state)
+      : undefined;
+    const supersededSettlement =
+      superseded === undefined
+        ? undefined
+        : this.finishMessage(
+            state,
+            superseded,
+            "cancelled",
+            now,
+            "STEER_QUEUE_SUPERSEDED",
+          );
+    state.eventSequence += 1;
+    const message: GatewayMessageRecord = {
+      sequence: state.eventSequence,
       messageId,
       messageIdSuffix,
       ...(input.conversationIdSuffix === undefined
         ? {}
         : { conversationIdSuffix: input.conversationIdSuffix }),
-      direction: sides.direction,
-      sourceAlias: sides.sourceAlias,
-      targetAlias: sides.targetAlias,
+      ...(deliveryToken === undefined ? {} : { deliveryToken }),
+      direction: authority.direction,
+      sourceAlias: authority.sourceAlias,
+      targetAlias: authority.targetAlias,
       enqueuedAt: now.toISOString(),
-      deadlineAt: deadline.toISOString(),
+      deadlineAt,
       bytes,
       body: input.body,
-      ...(sides.pair === true ? { pair: true as const } : {}),
-      ...(sides.transientTarget === true
+      ...(authority.pair === true ? { pair: true as const } : {}),
+      ...(authority.transientTarget === true
         ? { transientTarget: true as const }
         : {}),
       ...(input.steer === true ? { steer: true as const } : {}),
+      sourceRegistrationId: authority.sourceRegistrationId,
+      targetRegistrationId: authority.targetRegistrationId,
+      consentEdge: authority.consentEdge,
+      state: { phase: "queued", attemptCount: 0 },
     };
-    this.applyProgressWatchMessageActivity(
-      state,
-      now,
-      input.progressWatch,
-      sides,
-    );
-    this.commitProgressWatchNudge(
-      state,
-      now,
-      input.progressWatchNudge,
-      sides,
-    );
-    let supersededSettlement: TerminalMessageSettlement | undefined;
-    if (superseded !== undefined) {
-      state.queue.splice(oldestSteerIndex, 1);
-      this.transientBodies.delete(superseded.messageId);
-      state.accounting.queuedBytes -= superseded.bytes;
-      const oldestTarget = state.routes.find(
-        (route) => route.alias === superseded.targetAlias,
-      );
-      if (oldestTarget) {
-        oldestTarget.queueDepth = Math.max(0, oldestTarget.queueDepth - 1);
-      }
-      supersededSettlement = this.finishMetadata(
-        state,
-        superseded,
-        "cancelled",
-        now,
-        "STEER_QUEUE_SUPERSEDED",
-      );
-    }
-    state.queue.push(metadata);
-    this.transientBodies.set(messageId, input.body);
+    state.messages.push(message);
     state.accounting.accepted += 1;
     state.accounting.bytesAccepted += bytes;
-    const pair = findConsentEdgeForMessage(state, metadata);
-    if (pair !== undefined) {
-      pair.counters.accepted += 1;
-      pair.counters.bytesAccepted += bytes;
-      pair.updatedAt = now.toISOString();
-    }
     state.accounting.queuedBytes += bytes;
-    if (sides.sourceRoute) {
-      sides.sourceRoute.counters.accepted += 1;
-      sides.sourceRoute.counters.bytesAccepted += bytes;
+    const source = state.routes.find(
+      (route) => route.binding.registrationId === authority.sourceRegistrationId,
+    );
+    if (source !== undefined) {
+      source.counters.accepted += 1;
+      source.counters.bytesAccepted += bytes;
     }
-    if (sides.targetRoute) sides.targetRoute.queueDepth += 1;
+    const edge = state.consentEdges.find((candidate) =>
+      sameConsent(candidate.endpoints, authority.consentEdge),
+    );
+    if (edge !== undefined) {
+      edge.counters.accepted += 1;
+      edge.counters.bytesAccepted += bytes;
+      edge.updatedAt = now.toISOString();
+    }
     state.dedupe.push({
       fingerprint,
       messageIdSuffix,
       ...(input.conversationIdSuffix === undefined
         ? {}
         : { conversationIdSuffix: input.conversationIdSuffix }),
-      sourceAlias: sides.sourceAlias,
-      targetAlias: sides.targetAlias,
-      direction: sides.direction,
-      ...(sides.pair === true ? { pair: true as const } : {}),
+      sourceAlias: authority.sourceAlias,
+      targetAlias: authority.targetAlias,
+      direction: authority.direction,
+      ...(authority.pair === true ? { pair: true as const } : {}),
       firstSeenAt: now.toISOString(),
       expiresAt: new Date(
         now.getTime() + this.config.limits.dedupeTtlMs,
@@ -5197,42 +2796,49 @@ export class GatewayStore {
     while (state.dedupe.length > this.config.limits.dedupeCapacity) {
       state.dedupe.shift();
     }
-    this.appendEvent(state, {
-      timestamp: now.toISOString(),
-      messageIdSuffix,
-      ...(input.conversationIdSuffix === undefined
-        ? {}
-        : { conversationIdSuffix: input.conversationIdSuffix }),
-      direction: sides.direction,
-      sourceAlias: sides.sourceAlias,
-      targetAlias: sides.targetAlias,
-      state: "queued",
-      bytes,
-      body: input.body,
-      ...(input.steer === true ? { steer: true as const } : {}),
-    });
     return {
       accepted: true,
       duplicate: false,
       messageId,
       messageIdSuffix,
-      ...(sides.pair === true ? { pair: true as const } : {}),
+      ...(deliveryToken === undefined ? {} : { deliveryToken }),
+      ...(authority.pair === true ? { pair: true as const } : {}),
       ...(supersededSettlement === undefined
         ? {}
         : { supersededSettlement }),
     };
   }
 
-  private consumeRateLimit(
+  private allocateDeliveryToken(state: GatewayPersistedState): string {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const token = `dlv_${createHash("sha256")
+        .update(this.randomId(), "utf8")
+        .digest("base64url")
+        .slice(0, 24)}`;
+      if (
+        DELIVERY_TOKEN_PATTERN.test(token) &&
+        !state.messages.some((message) => message.deliveryToken === token)
+      ) {
+        return token;
+      }
+    }
+    throw new BridgeError(
+      "DELIVERY_TOKEN_CAPACITY_REACHED",
+      "A unique bounded delivery-status token could not be allocated.",
+      true,
+    );
+  }
+
+  private consumeRate(
     state: GatewayPersistedState,
     sourceAlias: string,
     now: Date,
-  ): void {
+  ): boolean {
     let bucket = state.rateBuckets.find(
       (candidate) => candidate.sourceAlias === sourceAlias,
     );
     if (
-      !bucket ||
+      bucket === undefined ||
       now.getTime() - Date.parse(bucket.windowStartedAt) >=
         this.config.limits.rateWindowMs
     ) {
@@ -5240,16 +2846,7 @@ export class GatewayStore {
         (candidate) => candidate.sourceAlias !== sourceAlias,
       );
       if (state.rateBuckets.length >= this.config.limits.maxRoutes) {
-        state.accounting.rejected += 1;
-        const route = state.routes.find(
-          (candidate) => candidate.alias === sourceAlias,
-        );
-        if (route) route.counters.rejected += 1;
-        throw new BridgeError(
-          "GATEWAY_RATE_LIMITED",
-          "The bounded gateway rate window cannot admit another source.",
-          true,
-        );
+        return false;
       }
       bucket = {
         sourceAlias,
@@ -5259,448 +2856,71 @@ export class GatewayStore {
       state.rateBuckets.push(bucket);
     }
     if (bucket.count >= this.config.limits.rateLimitPerRoute) {
-      state.accounting.rejected += 1;
-      const route = state.routes.find((candidate) => candidate.alias === sourceAlias);
-      if (route) route.counters.rejected += 1;
-      throw new BridgeError(
-        "GATEWAY_RATE_LIMITED",
-        "The source route exceeded its bounded gateway rate window.",
-        true,
-      );
+      return false;
     }
     bucket.count += 1;
+    return true;
   }
 
   private recordRejection(
     state: GatewayPersistedState,
-    sides: ResolvedEnqueueSides,
+    authority: Readonly<{
+      sourceAlias: string;
+      targetAlias: string;
+      direction: MessageDirection;
+      sourceRegistrationId: string | null;
+      targetRegistrationId: string;
+      consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+      pair?: true;
+      transientTarget?: true;
+    }>,
     bytes: number,
     now: Date,
     safeErrorCode: string,
-    steer?: true,
-    conversationIdSuffix?: string,
+    input: Pick<EnqueueMessageInput, "conversationIdSuffix" | "steer">,
   ): void {
+    state.accounting.rejected += 1;
+    const source = state.routes.find(
+      (route) => route.binding.registrationId === authority.sourceRegistrationId,
+    );
+    if (source !== undefined) source.counters.rejected += 1;
+    const edge = state.consentEdges.find((candidate) =>
+      sameConsent(candidate.endpoints, authority.consentEdge),
+    );
+    if (edge !== undefined) {
+      edge.counters.rejected += 1;
+      edge.updatedAt = now.toISOString();
+    }
     const suffix = this.randomId().replaceAll("-", "").slice(-8).toLowerCase();
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
-    state.accounting.rejected += 1;
-    if (sides.sourceRoute) sides.sourceRoute.counters.rejected += 1;
-    const pair = findConsentEdgeForMessage(state, sides);
-    if (pair !== undefined) {
-      pair.counters.rejected += 1;
-      pair.updatedAt = now.toISOString();
-    }
-    this.appendEvent(state, {
-      timestamp: now.toISOString(),
-      messageIdSuffix: suffix,
-      ...(conversationIdSuffix === undefined
-        ? {}
-        : { conversationIdSuffix }),
-      direction: sides.direction,
-      sourceAlias: sides.sourceAlias,
-      targetAlias: sides.targetAlias,
-      state: "rejected",
-      bytes: Math.max(1, bytes),
-      safeErrorCode,
-      ...(steer === true ? { steer: true as const } : {}),
-    });
-  }
-
-  private appendEvent(
-    state: GatewayPersistedState,
-    event: Omit<NormalizedMessageEvent, "sequence">,
-  ): void {
-    if (event.body !== undefined) {
-      for (const retained of state.events) {
-        if (
-          retained.body !== undefined &&
-          retained.messageIdSuffix === event.messageIdSuffix &&
-          retained.direction === event.direction &&
-          retained.sourceAlias === event.sourceAlias &&
-          retained.targetAlias === event.targetAlias &&
-          retained.conversationIdSuffix === event.conversationIdSuffix
-        ) {
-          delete retained.body;
-        }
-      }
-    }
     state.eventSequence += 1;
-    state.events.push({ sequence: state.eventSequence, ...event });
-    while (state.events.length > this.config.limits.eventCapacity) {
-      state.events.shift();
-    }
-    this.pruneRetainedEventBodies(state);
-  }
-
-  private pruneRetainedEventBodies(state: GatewayPersistedState): void {
-    const configured =
-      this.config.limits.maxRetainedBodyBytes ??
-      DEFAULT_RETAINED_BODY_BYTES;
-    if (
-      !Number.isSafeInteger(configured) ||
-      configured < 1 ||
-      configured > GATEWAY_MAX_STATE_FILE_BYTES
-    ) {
-      throw new BridgeError(
-        "INVALID_GATEWAY_CONFIGURATION",
-        "The retained message-body byte limit is invalid.",
-      );
-    }
-    let retainedBytes = state.events.reduce(
-      (total, event) =>
-        total +
-        (event.body === undefined
-          ? 0
-          : Buffer.byteLength(event.body, "utf8")),
-      0,
-    );
-    for (const event of state.events) {
-      if (retainedBytes <= configured) break;
-      if (event.body === undefined) continue;
-      retainedBytes -= Buffer.byteLength(event.body, "utf8");
-      delete event.body;
-    }
-  }
-
-  private appendCodexEndpointRefreshEvent(
-    state: GatewayPersistedState,
-    event: Omit<CodexEndpointRefreshJournalEvent, "sequence">,
-  ): void {
-    if (state.codexEndpointRefreshSequence >= Number.MAX_SAFE_INTEGER) {
-      throw new BridgeError(
-        "CODEX_ENDPOINT_REFRESH_SEQUENCE_EXHAUSTED",
-        "The bounded Codex endpoint-refresh sequence is exhausted.",
-      );
-    }
-    state.codexEndpointRefreshSequence += 1;
-    state.codexEndpointRefreshEvents.push({
-      sequence: state.codexEndpointRefreshSequence,
-      ...event,
+    state.activity.push({
+      type: "legacy_message",
+      event: {
+        sequence: state.eventSequence,
+        timestamp: now.toISOString(),
+        messageIdSuffix: suffix,
+        ...(input.conversationIdSuffix === undefined
+          ? {}
+          : { conversationIdSuffix: input.conversationIdSuffix }),
+        direction: authority.direction,
+        sourceAlias: authority.sourceAlias,
+        targetAlias: authority.targetAlias,
+        state: "rejected",
+        bytes: Math.max(1, bytes),
+        safeErrorCode,
+        ...(input.steer === true ? { steer: true as const } : {}),
+      },
     });
-    while (
-      state.codexEndpointRefreshEvents.length >
-      CODEX_ENDPOINT_REFRESH_JOURNAL_CAPACITY
-    ) {
-      state.codexEndpointRefreshEvents.shift();
+    while (state.activity.length > gatewayPublicSnapshotLimits.activityEvents) {
+      state.activity.shift();
     }
   }
 
-  private appendCodexOrphanRemovalEvent(
+  private finishMessage(
     state: GatewayPersistedState,
-    event: Omit<CodexOrphanRemovalJournalEvent, "sequence">,
-  ): void {
-    if (state.codexOrphanRemovalSequence >= Number.MAX_SAFE_INTEGER) {
-      throw new BridgeError(
-        "CODEX_ORPHAN_REMOVAL_SEQUENCE_EXHAUSTED",
-        "The bounded Codex orphan-removal sequence is exhausted.",
-      );
-    }
-    state.codexOrphanRemovalSequence += 1;
-    state.codexOrphanRemovalEvents.push({
-      sequence: state.codexOrphanRemovalSequence,
-      ...event,
-    });
-    while (
-      state.codexOrphanRemovalEvents.length >
-      CODEX_ORPHAN_REMOVAL_JOURNAL_CAPACITY
-    ) {
-      state.codexOrphanRemovalEvents.shift();
-    }
-  }
-
-  /** Commit watch activity only after every message-admission check succeeds. */
-  private applyProgressWatchMessageActivity(
-    state: GatewayPersistedState,
-    now: Date,
-    activity: EnqueueMessageInput["progressWatch"],
-    sides: ResolvedEnqueueSides,
-  ): void {
-    if (activity === undefined) return;
-    if (
-      !CONVERSATION_ID_PATTERN.test(activity.conversationId) ||
-      activity.actorAlias !== sides.sourceAlias ||
-      (activity.openIdleMs !== undefined &&
-        (!Number.isSafeInteger(activity.openIdleMs) ||
-          activity.openIdleMs < PROGRESS_WATCH_MIN_IDLE_MS ||
-          activity.openIdleMs > PROGRESS_WATCH_MAX_IDLE_MS)) ||
-      (activity.completionSignal === true &&
-        activity.openIdleMs !== undefined)
-    ) {
-      throw new BridgeError(
-        "INVALID_PROGRESS_WATCH",
-        "The message watch activity is malformed or contradictory.",
-      );
-    }
-
-    const pair =
-      sides.pair === true
-        ? state.consentEdges.find((candidate) => consentEdgeMatchesMessage(candidate, sides))
-        : undefined;
-    const index = state.progressWatches.findIndex(
-      (watch) => watch.conversationId === activity.conversationId,
-    );
-    const existing = state.progressWatches[index];
-    if (existing !== undefined) {
-      if (
-        pair === undefined ||
-        !progressWatchMatchesConsentEdge(existing, pair) ||
-        !(
-          (sides.sourceAlias === existing.ownerAlias &&
-            sides.targetAlias === existing.workerAlias) ||
-          (sides.sourceAlias === existing.workerAlias &&
-            sides.targetAlias === existing.ownerAlias)
-        )
-      ) {
-        throw new BridgeError(
-          "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
-          "The watched conversation belongs to different exact endpoints.",
-        );
-      }
-      if (
-        activity.openIdleMs !== undefined &&
-        activity.actorAlias !== existing.ownerAlias
-      ) {
-        throw new BridgeError(
-          "PROGRESS_WATCH_OWNER_REQUIRED",
-          "Tracking options persist from the original TRACK; a repeated TRACK from the exact owner refreshes activity without changing them.",
-        );
-      }
-      if (activity.completionSignal === true) {
-        this.appendProgressWatchEvents(state, [
-          progressWatchJournalEvent(existing, now.toISOString(), {
-            kind: "settled",
-            actor:
-              activity.actorAlias === existing.ownerAlias
-                ? "owner"
-                : "worker",
-            reason: "done",
-          }),
-        ]);
-        state.progressWatches.splice(index, 1);
-        return;
-      }
-      state.progressWatches[index] = recordProgressWatchActivity(
-        existing,
-        now.getTime(),
-      );
-      return;
-    }
-
-    if (activity.openIdleMs === undefined) return;
-    if (this.config.trackingEnabled === false) {
-      throw new BridgeError(
-        "PROGRESS_TRACKING_DISABLED",
-        "Progress tracking is disabled by the controller configuration.",
-      );
-    }
-    if (pair === undefined) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_EDGE_REQUIRED",
-        "Progress tracking requires one exact paired consent edge.",
-      );
-    }
-    const watch = createProgressWatch({
-      conversationId: activity.conversationId,
-      ownerAlias: sides.sourceAlias,
-      workerAlias: sides.targetAlias,
-      ownerLease: pair.endpoints.find(
-        ({ alias }) => alias === sides.sourceAlias,
-      )!.ownerLease,
-      workerLease: pair.endpoints.find(
-        ({ alias }) => alias === sides.targetAlias,
-      )!.ownerLease,
-      idleMs: activity.openIdleMs,
-      at: now.getTime(),
-    });
-    this.installProgressWatch(state, watch, pair, now);
-  }
-
-  private inspectProgressWatchDue(
-    state: GatewayPersistedState,
-    watch: ProgressWatch,
-    now: Date,
-  ): ReturnType<typeof inspectProgressWatchDue> {
-    const owner = state.routes.find(
-      (route) =>
-        route.alias === watch.ownerAlias &&
-        route.binding.ownerLease === watch.ownerLease,
-    );
-    const worker = state.routes.find(
-      (route) =>
-        route.alias === watch.workerAlias &&
-        route.binding.ownerLease === watch.workerLease,
-    );
-    return inspectProgressWatchDue(watch, {
-      at: now.getTime(),
-      bothIdle: owner?.state === "idle" && worker?.state === "idle",
-    });
-  }
-
-  private commitProgressWatchNudge(
-    state: GatewayPersistedState,
-    now: Date,
-    nudge: EnqueueMessageInput["progressWatchNudge"],
-    sides: ResolvedEnqueueSides,
-  ): void {
-    if (nudge === undefined) return;
-    const index = state.progressWatches.findIndex(
-      (watch) => watch.conversationId === nudge.conversationId,
-    );
-    const watch = state.progressWatches[index];
-    if (
-      watch === undefined ||
-      sides.sourceAlias !== watch.ownerAlias ||
-      sides.targetAlias !== watch.workerAlias
-    ) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_OWNERSHIP_MISMATCH",
-        "The controller nudge no longer matches its exact watch edge.",
-      );
-    }
-    const due = this.inspectProgressWatchDue(state, watch, now);
-    if (due.kind !== "nudge" || due.nudgeNumber !== nudge.nudgeNumber) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_NUDGE_NOT_DUE",
-        "The requested progress-watch nudge is not currently due.",
-        true,
-      );
-    }
-    state.progressWatches[index] = commitProgressWatchNudge(watch, {
-      at: now.getTime(),
-      nudgeNumber: nudge.nudgeNumber,
-    });
-  }
-
-  private installProgressWatch(
-    state: GatewayPersistedState,
-    watch: ProgressWatch,
-    pair: GatewayConsentEdgeRecord,
-    now: Date,
-  ): void {
-    const replacedIndex = state.progressWatches.findIndex((candidate) =>
-      progressWatchMatchesConsentEdge(candidate, pair),
-    );
-    if (
-      replacedIndex < 0 &&
-      state.progressWatches.length >=
-        (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY)
-    ) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_CAPACITY_REACHED",
-        "The bounded progress-watch inventory is full.",
-        true,
-      );
-    }
-    if (
-      replacedIndex >= 0 &&
-      state.progressWatches[replacedIndex]!.ownerAlias !== watch.ownerAlias
-    ) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_REPLACEMENT_OWNER_REQUIRED",
-        "Only the incumbent watch owner may replace this pair watch; ask that owner to untrack it first.",
-      );
-    }
-    if (replacedIndex >= 0) {
-      const replaced = state.progressWatches[replacedIndex]!;
-      this.appendProgressWatchEvents(state, [
-        progressWatchJournalEvent(replaced, now.toISOString(), {
-          kind: "replaced",
-          actor: "owner",
-        }),
-      ]);
-      state.progressWatches[replacedIndex] = watch;
-      return;
-    }
-    this.appendProgressWatchEvents(state, [
-      progressWatchJournalEvent(watch, now.toISOString(), {
-        kind: "opened",
-        actor: "owner",
-      }),
-    ]);
-    state.progressWatches.push(watch);
-  }
-
-  private appendProgressWatchEvents(
-    state: GatewayPersistedState,
-    events: readonly PendingProgressWatchJournalEvent[],
-  ): void {
-    if (
-      state.watchSequence > Number.MAX_SAFE_INTEGER - events.length
-    ) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_SEQUENCE_EXHAUSTED",
-        "The bounded progress-watch journal sequence is exhausted.",
-      );
-    }
-    for (const event of events) {
-      state.watchSequence += 1;
-      state.progressWatchEvents.push({
-        sequence: state.watchSequence,
-        ...event,
-      });
-    }
-    while (
-      state.progressWatchEvents.length > this.config.limits.eventCapacity
-    ) {
-      state.progressWatchEvents.shift();
-    }
-  }
-
-  private settleProgressWatchesForAliases(
-    state: GatewayPersistedState,
-    aliases: ReadonlySet<string>,
-    now: Date,
-    actor: "gateway" | "operator" = "gateway",
-  ): void {
-    const retained: ProgressWatch[] = [];
-    const events: PendingProgressWatchJournalEvent[] = [];
-    for (const watch of state.progressWatches) {
-      if (
-        !aliases.has(watch.ownerAlias) &&
-        !aliases.has(watch.workerAlias)
-      ) {
-        retained.push(watch);
-        continue;
-      }
-      events.push(
-        progressWatchJournalEvent(watch, now.toISOString(), {
-          kind: "settled",
-          actor,
-          reason: "endpoint_retired",
-        }),
-      );
-    }
-    this.appendProgressWatchEvents(state, events);
-    state.progressWatches = retained;
-  }
-
-  private settleProgressWatchesForConsentEdge(
-    state: GatewayPersistedState,
-    pair: GatewayConsentEdgeRecord,
-    now: Date,
-  ): void {
-    const retained: ProgressWatch[] = [];
-    const events: PendingProgressWatchJournalEvent[] = [];
-    for (const watch of state.progressWatches) {
-      if (!progressWatchMatchesConsentEdge(watch, pair)) {
-        retained.push(watch);
-        continue;
-      }
-      events.push(
-        progressWatchJournalEvent(watch, now.toISOString(), {
-          kind: "settled",
-          actor: "operator",
-          reason: "pair_removed",
-        }),
-      );
-    }
-    this.appendProgressWatchEvents(state, events);
-    state.progressWatches = retained;
-  }
-
-  private finishMetadata(
-    state: GatewayPersistedState,
-    metadata: QueuedMessageMetadata | InFlightMessageMetadata,
-    deliveryState: Extract<
+    message: GatewayMessageRecord,
+    outcome: Extract<
       DeliveryState,
       | "delivered"
       | "unconfirmed"
@@ -5713,421 +2933,446 @@ export class GatewayStore {
     now: Date,
     safeErrorCode?: string,
   ): TerminalMessageSettlement {
-    const counterKey = deliveryState;
-    state.accounting[counterKey] += 1;
-    const pair = findConsentEdgeForMessage(state, metadata);
-    if (pair !== undefined) {
-      pair.counters[counterKey] += 1;
-      pair.updatedAt = now.toISOString();
+    if (message.state.phase === "terminal") {
+      return {
+        messageId: message.messageId,
+        state: message.state.outcome,
+        ...(message.state.safeErrorCode === undefined
+          ? {}
+          : { safeErrorCode: message.state.safeErrorCode }),
+      };
     }
-    const target = state.routes.find(
-      (route) => route.alias === metadata.targetAlias,
+    if (message.state.phase === "queued") {
+      state.accounting.queuedBytes -= message.bytes;
+    }
+    message.state = terminalState(
+      outcome,
+      now,
+      message.enqueuedAt,
+      safeErrorCode,
     );
-    if (target) target.counters[counterKey] += 1;
-    this.appendEvent(state, {
-      timestamp: now.toISOString(),
-      messageIdSuffix: metadata.messageIdSuffix,
-      ...(metadata.conversationIdSuffix === undefined
-        ? {}
-        : { conversationIdSuffix: metadata.conversationIdSuffix }),
-      direction: metadata.direction,
-      sourceAlias: metadata.sourceAlias,
-      targetAlias: metadata.targetAlias,
-      state: deliveryState,
-      bytes: metadata.bytes,
-      ...(metadata.body === undefined ? {} : { body: metadata.body }),
-      ...(metadata.steer === true ? { steer: true as const } : {}),
-      latencyMs: Math.max(0, now.getTime() - Date.parse(metadata.enqueuedAt)),
-      ...(safeErrorCode ? { safeErrorCode } : {}),
-    });
+    this.touchMessage(state, message);
+    state.accounting[outcome] += 1;
+    const target = state.routes.find(
+      (route) => route.binding.registrationId === message.targetRegistrationId,
+    );
+    if (target !== undefined) target.counters[outcome] += 1;
+    const edge = state.consentEdges.find((candidate) =>
+      sameConsent(candidate.endpoints, message.consentEdge),
+    );
+    if (edge !== undefined) {
+      edge.counters[outcome] += 1;
+      edge.updatedAt = now.toISOString();
+    }
     return {
-      messageId: metadata.messageId,
-      state: deliveryState,
-      ...(safeErrorCode ? { safeErrorCode } : {}),
+      messageId: message.messageId,
+      state: outcome,
+      ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
     };
   }
 
-  private validateAffectedInFlightSettlements(
+  private touchMessage(
     state: GatewayPersistedState,
-    aliases: Set<string>,
-    requested: readonly RouteInFlightSettlementInput[],
-  ): ReadonlyMap<string, RouteInFlightSettlementInput> {
-    if (requested.length > this.config.limits.maxInFlightMessages) {
-      throw new BridgeError(
-        "INVALID_ROUTE_TERMINATION_PLAN",
-        "Route termination requires one normalized terminal settlement per affected in-flight message.",
-      );
-    }
-    const affectedIds = new Set(
-      state.inFlight
-        .filter((item) => routeTerminationMatches(state, aliases, item))
-        .map((item) => item.messageId),
-    );
-    const byMessageId = new Map<string, RouteInFlightSettlementInput>();
-    for (const settlement of requested) {
-      if (
-        !MESSAGE_ID_PATTERN.test(settlement.messageId) ||
-        (settlement.state !== "delivered" &&
-          settlement.state !== "unconfirmed" &&
-          settlement.state !== "failed" &&
-          settlement.state !== "ambiguous" &&
-          settlement.state !== "expired" &&
-          settlement.state !== "cancelled") ||
-        (settlement.safeErrorCode !== undefined &&
-          !SAFE_CODE_PATTERN.test(settlement.safeErrorCode)) ||
-        byMessageId.has(settlement.messageId)
-      ) {
-        throw new BridgeError(
-          "INVALID_ROUTE_TERMINATION_PLAN",
-          "Route termination requires one normalized terminal settlement per affected in-flight message.",
-        );
-      }
-      byMessageId.set(settlement.messageId, settlement);
-    }
-    if (
-      byMessageId.size !== affectedIds.size ||
-      [...affectedIds].some((messageId) => !byMessageId.has(messageId)) ||
-      [...byMessageId].some(([messageId]) => !affectedIds.has(messageId))
-    ) {
-      throw new BridgeError(
-        "ROUTE_TERMINATION_PLAN_MISMATCH",
-        "The exact in-flight route termination plan no longer matches the affected message set.",
-        true,
-      );
-    }
-    return byMessageId;
+    message: GatewayMessageRecord,
+  ): void {
+    state.eventSequence += 1;
+    message.sequence = state.eventSequence;
   }
 
-  private validateAffectedConsentEdgeInFlightSettlements(
+  private appendRuntimeActivity(
     state: GatewayPersistedState,
-    pair: GatewayConsentEdgeInput | GatewayConsentEdgeRecord,
-    requested: readonly RouteInFlightSettlementInput[],
-  ): ReadonlyMap<string, RouteInFlightSettlementInput> {
-    if (requested.length > this.config.limits.maxInFlightMessages) {
-      throw new BridgeError(
-        "INVALID_PAIR_TERMINATION_PLAN",
-        "Unpairing requires one normalized terminal settlement per affected in-flight message.",
-      );
-    }
-    const affectedIds = new Set(
-      state.inFlight
-        .filter((item) => consentEdgeMatchesMessage(pair, item))
-        .map((item) => item.messageId),
-    );
-    const byMessageId = new Map<string, RouteInFlightSettlementInput>();
-    for (const settlement of requested) {
-      if (
-        !MESSAGE_ID_PATTERN.test(settlement.messageId) ||
-        (settlement.state !== "delivered" &&
-          settlement.state !== "unconfirmed" &&
-          settlement.state !== "failed" &&
-          settlement.state !== "ambiguous" &&
-          settlement.state !== "expired" &&
-          settlement.state !== "cancelled") ||
-        (settlement.safeErrorCode !== undefined &&
-          !SAFE_CODE_PATTERN.test(settlement.safeErrorCode)) ||
-        byMessageId.has(settlement.messageId)
-      ) {
-        throw new BridgeError(
-          "INVALID_PAIR_TERMINATION_PLAN",
-          "Unpairing requires one normalized terminal settlement per affected in-flight message.",
-        );
-      }
-      byMessageId.set(settlement.messageId, settlement);
-    }
-    if (
-      byMessageId.size !== affectedIds.size ||
-      [...affectedIds].some((messageId) => !byMessageId.has(messageId)) ||
-      [...byMessageId].some(([messageId]) => !affectedIds.has(messageId))
-    ) {
-      throw new BridgeError(
-        "PAIR_TERMINATION_PLAN_MISMATCH",
-        "The exact pair termination plan no longer matches its in-flight messages.",
-        true,
-      );
-    }
-    return byMessageId;
-  }
-
-  private terminateAffectedMessages(
-    state: GatewayPersistedState,
-    aliases: Set<string>,
     now: Date,
-    safeErrorCode: string,
-    inFlightSettlements: ReadonlyMap<
-      string,
-      RouteInFlightSettlementInput
-    >,
-    preserveQueued = false,
+    event: Omit<PublicGatewayActivityEvent, "sequence" | "timestamp">,
+  ): PublicGatewayActivityEvent {
+    state.eventSequence += 1;
+    const recorded: PublicGatewayActivityEvent = {
+      ...structuredClone(event),
+      sequence: state.eventSequence,
+      timestamp: now.toISOString(),
+    };
+    const wrapped: GatewayRuntimeActivity = {
+      type: "activity",
+      event: recorded,
+    };
+    if (!isRuntimeActivity(wrapped)) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_ACTIVITY",
+        "The bounded gateway activity event is malformed.",
+      );
+    }
+    state.activity.push(wrapped);
+    while (state.activity.length > gatewayPublicSnapshotLimits.activityEvents) {
+      state.activity.shift();
+    }
+    return structuredClone(recorded);
+  }
+
+  private terminalizeRegistration(
+    state: GatewayPersistedState,
+    registrationId: string,
+    now: Date,
   ): TerminalMessageSettlement[] {
     const settlements: TerminalMessageSettlement[] = [];
-    const queued = preserveQueued
-      ? []
-      : state.queue.filter((item) =>
-          routeTerminationMatches(state, aliases, item),
-        );
-    if (!preserveQueued) {
-      state.queue = state.queue.filter(
-        (item) => !routeTerminationMatches(state, aliases, item),
-      );
-    }
-    for (const item of queued) {
-      this.transientBodies.delete(item.messageId);
-      state.accounting.queuedBytes -= item.bytes;
-      const target = state.routes.find((route) => route.alias === item.targetAlias);
-      if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      const deadlineReached = Date.parse(item.deadlineAt) <= now.getTime();
-      settlements.push(
-        this.finishMetadata(
-          state,
-          item,
-          deadlineReached ? "expired" : "abandoned",
-          now,
-          deadlineReached ? "MESSAGE_EXPIRED" : safeErrorCode,
-        ),
-      );
-    }
-    const inFlight = state.inFlight.filter((item) =>
-      routeTerminationMatches(state, aliases, item),
-    );
-    state.inFlight = state.inFlight.filter(
-      (item) => !routeTerminationMatches(state, aliases, item),
-    );
-    for (const item of inFlight) {
-      const requested = inFlightSettlements.get(item.messageId);
-      if (requested === undefined) {
-        throw new BridgeError(
-          "ROUTE_TERMINATION_PLAN_MISMATCH",
-          "The exact in-flight route termination plan no longer matches the affected message set.",
-          true,
-        );
+    for (const message of state.messages) {
+      if (
+        message.state.phase === "terminal" ||
+        (message.sourceRegistrationId !== registrationId &&
+          message.targetRegistrationId !== registrationId)
+      ) {
+        continue;
       }
+      const outcome =
+        message.state.phase === "armed"
+          ? "ambiguous"
+          : message.state.phase === "accepted"
+            ? message.state.lossOutcome
+            : "cancelled";
       settlements.push(
-        this.finishMetadata(
+        this.finishMessage(
           state,
-          item,
-          requested.state,
+          message,
+          outcome,
           now,
-          requested.safeErrorCode,
+          outcome === "cancelled"
+            ? "ROUTE_UNREGISTERED"
+            : outcome === "ambiguous"
+              ? "DISPATCH_OUTCOME_AMBIGUOUS"
+              : "DELIVERY_UNCONFIRMED",
         ),
       );
     }
     return settlements;
   }
 
-  private terminateAffectedConsentEdgeMessages(
+  private removeRegistrationMetadata(
     state: GatewayPersistedState,
-    pair: GatewayConsentEdgeInput | GatewayConsentEdgeRecord,
-    now: Date,
-    safeErrorCode: string,
-    inFlightSettlements: ReadonlyMap<
-      string,
-      RouteInFlightSettlementInput
-    >,
-  ): TerminalMessageSettlement[] {
-    const settlements: TerminalMessageSettlement[] = [];
-    const queued = state.queue.filter((item) => consentEdgeMatchesMessage(pair, item));
-    state.queue = state.queue.filter(
-      (item) => !consentEdgeMatchesMessage(pair, item),
-    );
-    for (const item of queued) {
-      this.transientBodies.delete(item.messageId);
-      state.accounting.queuedBytes -= item.bytes;
-      const target = state.routes.find(
-        (route) => route.alias === item.targetAlias,
-      );
-      if (target) target.queueDepth = Math.max(0, target.queueDepth - 1);
-      const deadlineReached = Date.parse(item.deadlineAt) <= now.getTime();
-      settlements.push(
-        this.finishMetadata(
-          state,
-          item,
-          deadlineReached ? "expired" : "abandoned",
-          now,
-          deadlineReached ? "MESSAGE_EXPIRED" : safeErrorCode,
+    route: GatewayRouteRecord,
+  ): void {
+    state.routes = state.routes.filter((candidate) => candidate !== route);
+    state.consentEdges = state.consentEdges.filter(
+      (edge) =>
+        !edge.endpoints.some(
+          (endpoint) =>
+            endpoint.registrationId === route.binding.registrationId,
         ),
-      );
-    }
-    const inFlight = state.inFlight.filter((item) =>
-      consentEdgeMatchesMessage(pair, item),
     );
-    state.inFlight = state.inFlight.filter(
-      (item) => !consentEdgeMatchesMessage(pair, item),
+    state.dedupe = state.dedupe.filter(
+      (entry) =>
+        entry.sourceAlias !== route.alias && entry.targetAlias !== route.alias,
     );
-    for (const item of inFlight) {
-      const requested = inFlightSettlements.get(item.messageId);
-      if (requested === undefined) {
-        throw new BridgeError(
-          "PAIR_TERMINATION_PLAN_MISMATCH",
-          "The exact pair termination plan no longer matches its in-flight messages.",
-          true,
-        );
-      }
-      settlements.push(
-        this.finishMetadata(
-          state,
-          item,
-          requested.state,
-          now,
-          requested.safeErrorCode,
-        ),
-      );
-    }
-    return settlements;
+    state.rateBuckets = state.rateBuckets.filter(
+      (entry) => entry.sourceAlias !== route.alias,
+    );
   }
 
-  private prune(now: Date): void {
+  private renameRegistrationCoordinates(
+    state: GatewayPersistedState,
+    oldAlias: string,
+    newAlias: string,
+    registrationId: string,
+  ): void {
+    if (oldAlias === newAlias) return;
+    if (
+      !ALIAS_PATTERN.test(newAlias) ||
+      state.routes.some((route) => route.alias === newAlias)
+    ) {
+      throw new BridgeError(
+        "ROUTE_ALIAS_ALREADY_REGISTERED",
+        "The replacement alias is invalid or already registered.",
+      );
+    }
+    for (const edge of state.consentEdges) {
+      const updated = edge.endpoints.map((endpoint) =>
+        endpoint.registrationId === registrationId
+          ? { ...endpoint, alias: newAlias }
+          : endpoint,
+      ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
+      updated.sort(compareConsentEndpoints);
+      edge.endpoints = updated;
+    }
+    for (const message of state.messages) {
+      if (message.sourceRegistrationId === registrationId) {
+        message.sourceAlias = newAlias;
+      }
+      if (message.targetRegistrationId === registrationId) {
+        message.targetAlias = newAlias;
+      }
+      if (message.consentEdge !== null) {
+        const updated = message.consentEdge.map((endpoint) =>
+          endpoint.registrationId === registrationId
+            ? { ...endpoint, alias: newAlias }
+            : endpoint,
+        ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
+        updated.sort(compareConsentEndpoints);
+        message.consentEdge = updated;
+      }
+      if (
+        message.state.phase === "reserved" ||
+        message.state.phase === "armed" ||
+        message.state.phase === "accepted"
+      ) {
+        if (message.state.consentEdge !== null) {
+          const updated = message.state.consentEdge.map((endpoint) =>
+            endpoint.registrationId === registrationId
+              ? { ...endpoint, alias: newAlias }
+              : endpoint,
+          ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
+          updated.sort(compareConsentEndpoints);
+          message.state.consentEdge = updated;
+        }
+      }
+    }
+    for (const entry of state.dedupe) {
+      if (entry.sourceAlias === oldAlias) entry.sourceAlias = newAlias;
+      if (entry.targetAlias === oldAlias) entry.targetAlias = newAlias;
+    }
+    const oldBucket = state.rateBuckets.find(
+      (bucket) => bucket.sourceAlias === oldAlias,
+    );
+    const newBucket = state.rateBuckets.find(
+      (bucket) => bucket.sourceAlias === newAlias,
+    );
+    if (oldBucket !== undefined && newBucket === undefined) {
+      oldBucket.sourceAlias = newAlias;
+    } else if (oldBucket !== undefined && newBucket !== undefined) {
+      newBucket.windowStartedAt =
+        newBucket.windowStartedAt < oldBucket.windowStartedAt
+          ? newBucket.windowStartedAt
+          : oldBucket.windowStartedAt;
+      newBucket.count = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        newBucket.count + oldBucket.count,
+      );
+      state.rateBuckets = state.rateBuckets.filter(
+        (bucket) => bucket !== oldBucket,
+      );
+    }
+  }
+
+  private recoverAfterRestart(now: Date): void {
     const state = this.requireState();
-    const eventCutoff = now.getTime() - this.config.limits.eventTtlMs;
-    state.events = state.events
-      .filter((event) => Date.parse(event.timestamp) > eventCutoff);
-    state.progressWatchEvents = state.progressWatchEvents
-      .filter((event) => Date.parse(event.timestamp) > eventCutoff);
+    for (const message of state.messages) {
+      if (message.state.phase === "terminal") continue;
+      if (message.state.phase === "armed") {
+        this.finishMessage(
+          state,
+          message,
+          "ambiguous",
+          now,
+          "CONTROLLER_RESTARTED",
+        );
+        continue;
+      }
+      if (message.state.phase === "accepted") {
+        this.finishMessage(
+          state,
+          message,
+          message.state.lossOutcome,
+          now,
+          "CONTROLLER_RESTARTED",
+        );
+        continue;
+      }
+      if (
+        Date.parse(message.deadlineAt) <= now.getTime() ||
+        (message.state.phase === "queued" && message.body === undefined)
+      ) {
+        this.finishMessage(
+          state,
+          message,
+          Date.parse(message.deadlineAt) <= now.getTime()
+            ? "expired"
+            : "abandoned",
+          now,
+          Date.parse(message.deadlineAt) <= now.getTime()
+            ? "MESSAGE_EXPIRED"
+            : "CONTROLLER_RESTARTED",
+        );
+        continue;
+      }
+      if (message.transientTarget === true) {
+        this.finishMessage(
+          state,
+          message,
+          "abandoned",
+          now,
+          "CONTROLLER_RESTARTED",
+        );
+        continue;
+      }
+      if (message.state.phase === "reserved") {
+        const attemptCount = message.state.attemptCount;
+        message.state = { phase: "queued", attemptCount };
+        state.accounting.queuedBytes += message.bytes;
+        this.touchMessage(state, message);
+        continue;
+      }
+    }
+  }
+
+  private prune(state: GatewayPersistedState, now: Date): void {
+    const cutoff = now.getTime() - this.config.limits.eventTtlMs;
+    const active = state.messages.filter(
+      (message) => message.state.phase !== "terminal",
+    );
+    const terminal = state.messages
+      .filter(
+        (message) =>
+          message.state.phase === "terminal" &&
+          Date.parse(message.state.terminalAt) > cutoff,
+      )
+      .sort((left, right) => left.sequence - right.sequence)
+      .slice(-this.config.limits.eventCapacity);
+    state.messages = [...active, ...terminal];
+    state.activity = state.activity
+      .filter((entry) => Date.parse(entry.event.timestamp) > cutoff)
+      .slice(-gatewayPublicSnapshotLimits.activityEvents);
     state.dedupe = state.dedupe
-      .filter((record) => Date.parse(record.expiresAt) > now.getTime())
+      .filter((entry) => Date.parse(entry.expiresAt) > now.getTime())
       .slice(-this.config.limits.dedupeCapacity);
     state.rateBuckets = state.rateBuckets.filter(
       (bucket) =>
         now.getTime() - Date.parse(bucket.windowStartedAt) <
         this.config.limits.rateWindowMs,
     );
-    this.pruneRetainedEventBodies(state);
+    this.pruneRetainedBodies(state);
   }
 
-  private recoverAfterRestart(now: Date): void {
-    const state = this.requireState();
-    this.recoverCodexSuccessionAfterRestart(state, now);
-    if (this.config.trackingEnabled === false) {
-      this.appendProgressWatchEvents(
-        state,
-        state.progressWatches.map((watch) =>
-          progressWatchJournalEvent(watch, now.toISOString(), {
-            kind: "settled",
-            actor: "gateway",
-            reason: "tracking_disabled",
-          }),
-        ),
-      );
-      state.progressWatches = [];
-    }
-    for (const connector of state.connectors) {
-      connector.health = "offline";
-      connector.updatedAt = now.toISOString();
-      connector.safeErrorCode = "REOBSERVATION_REQUIRED";
-    }
-    for (const route of state.routes) {
-      route.state = route.enabled ? "stale" : "disabled";
-      route.updatedAt = now.toISOString();
-      route.safeErrorCode = "REOBSERVATION_REQUIRED";
-      route.queueDepth = 0;
-    }
-    const retainedQueue: QueuedMessageMetadata[] = [];
-    let retainedQueuedBytes = 0;
-    this.transientBodies.clear();
-    for (const item of state.queue) {
-      if (Date.parse(item.deadlineAt) <= now.getTime()) {
-        this.finishMetadata(
-          state,
-          item,
-          "expired",
-          now,
-          "MESSAGE_EXPIRED",
-        );
-        continue;
-      }
-      if (item.body === undefined) {
-        this.finishMetadata(
-          state,
-          item,
-          "abandoned",
-          now,
-          "CONTROLLER_RESTARTED",
-        );
-        continue;
-      }
-      // A correlated native reply admitted through a transient Claude
-      // capability cannot regain its exact UUID/generation after restart,
-      // even when another session later claims the same public alias.
-      if (
-        item.transientTarget === true ||
-        !state.routes.some((route) => route.alias === item.targetAlias)
-      ) {
-        this.finishMetadata(
-          state,
-          item,
-          "abandoned",
-          now,
-          "CONTROLLER_RESTARTED",
-        );
-        continue;
-      }
-      retainedQueue.push(item);
-      retainedQueuedBytes += item.bytes;
-      this.transientBodies.set(item.messageId, item.body);
-      const target = state.routes.find(
-        (route) => route.alias === item.targetAlias,
-      );
-      if (target !== undefined) target.queueDepth += 1;
-    }
-    for (const item of state.inFlight) {
-      this.finishMetadata(
-        state,
-        item,
-        "ambiguous",
-        now,
-        "CONTROLLER_RESTARTED",
+  private pruneRetainedBodies(state: GatewayPersistedState): void {
+    const cap =
+      this.config.limits.maxRetainedBodyBytes ?? DEFAULT_RETAINED_BODY_BYTES;
+    if (
+      !Number.isSafeInteger(cap) ||
+      cap < 1 ||
+      cap > GATEWAY_MAX_STATE_FILE_BYTES
+    ) {
+      throw new BridgeError(
+        "INVALID_GATEWAY_CONFIGURATION",
+        "The retained message-body limit is invalid.",
       );
     }
-    state.queue = retainedQueue;
-    state.inFlight = [];
-    state.accounting.queuedBytes = retainedQueuedBytes;
-  }
-
-  private recoverCodexSuccessionAfterRestart(
-    state: GatewayPersistedState,
-    now: Date,
-  ): void {
-    const journal = this.journal(state);
-    if (journal === null || journal.stage === "prepared") return;
-    const route = this.requireAnyJournalRoute(state, journal);
-    this.assertSuccessionLedgerEmpty(state, route.alias);
-    this.assertNewSuccessionIdentityAvailable(state, route, journal.new);
-    this.replaceCodexRouteForSuccession(
-      state,
-      route,
-      journal.new,
-      now,
-      "stale",
+    let bytes = state.messages.reduce(
+      (total, message) =>
+        total +
+        (message.state.phase === "terminal" && message.body !== undefined
+          ? Buffer.byteLength(message.body, "utf8")
+          : 0),
+      0,
     );
-    state.codexSuccession = {
-      ...journal,
-      stage: "recovery_forbidden",
-      safeErrorCode: "CODEX_SUCCESSION_RESTART_RECOVERY_REQUIRED",
-    };
+    for (const message of state.messages) {
+      if (bytes <= cap) break;
+      if (message.state.phase !== "terminal" || message.body === undefined) {
+        continue;
+      }
+      bytes -= Buffer.byteLength(message.body, "utf8");
+      delete message.body;
+    }
   }
 
-  private aggregateHealth(
-    connectors: readonly PublicConnectorSnapshot[],
-  ): "offline" | "connecting" | "healthy" | "degraded" {
-    if (connectors.length === 0) return "offline";
-    if (connectors.some((connector) => connector.health === "degraded")) {
-      return "degraded";
+  private assertConfiguredBounds(state: GatewayPersistedState): void {
+    const active = state.messages.filter(
+      (message) => message.state.phase !== "terminal",
+    );
+    if (
+      state.routes.some(
+        (route) => !this.config.allowedHosts.includes(route.binding.hostId),
+      ) ||
+      state.routes.length > this.config.limits.maxRoutes ||
+      state.consentEdges.length > this.config.limits.maxConsentEdges ||
+      active.length > this.config.limits.maxQueueMessages ||
+      active.filter(
+        (message) =>
+          message.state.phase === "reserved" ||
+          message.state.phase === "armed" ||
+          message.state.phase === "accepted",
+      ).length > this.config.limits.maxInFlightMessages ||
+      state.dedupe.length > this.config.limits.dedupeCapacity ||
+      state.rateBuckets.length > this.config.limits.maxRoutes ||
+      state.accounting.queuedBytes > this.config.limits.maxQueueBytes ||
+      active.some(
+        (message) =>
+          message.bytes > this.config.limits.maxMessageBytes ||
+          Date.parse(message.deadlineAt) - Date.parse(message.enqueuedAt) >
+            this.config.limits.messageDeadlineMs,
+      )
+    ) {
+      throw new BridgeError(
+        "CORRUPT_GATEWAY_STATE",
+        "The gateway state exceeds its configured bounds or host allowlist.",
+      );
     }
-    if (connectors.some((connector) => connector.health === "connecting")) {
-      return "connecting";
+  }
+
+  private async read<T>(operation: (state: GatewayPersistedState) => T): Promise<T> {
+    return this.mutex.run("gateway", async () => operation(this.requireState()));
+  }
+
+  private async mutate<T>(
+    operation: (state: GatewayPersistedState, now: Date) => T,
+  ): Promise<T> {
+    return this.mutex.run("gateway", async () => {
+      const state = this.requireState();
+      const before = structuredClone(state);
+      const now = this.now();
+      this.prune(state, now);
+      let value: T;
+      try {
+        value = operation(state, now);
+      } catch (error) {
+        if (error instanceof CommitAndThrow) {
+          state.updatedAt = now.toISOString();
+          state.commit = {
+            sequence: state.commit.sequence + 1,
+            id: this.randomId(),
+          };
+          try {
+            await this.persist();
+          } catch (persistError) {
+            if (!(persistError instanceof PostRenamePersistenceError)) {
+              this.state = before;
+            }
+            throw persistError;
+          }
+          throw error.error;
+        }
+        this.state = before;
+        throw error;
+      }
+      state.updatedAt = now.toISOString();
+      state.commit = {
+        sequence: state.commit.sequence + 1,
+        id: this.randomId(),
+      };
+      try {
+        await this.persist();
+      } catch (error) {
+        if (!(error instanceof PostRenamePersistenceError)) this.state = before;
+        throw error;
+      }
+      return value;
+    });
+  }
+
+  private requireState(): GatewayPersistedState {
+    if (this.state === undefined || this.lockHandle === undefined) {
+      throw new BridgeError(
+        "GATEWAY_NOT_INITIALIZED",
+        "The gateway store must hold its controller lock before use.",
+      );
     }
-    if (connectors.every((connector) => connector.health === "healthy")) {
-      return "healthy";
-    }
-    return "offline";
+    return this.state;
   }
 
   private async prepareOwnedDirectory(): Promise<string> {
     const requested = path.resolve(this.rootDir);
     await assertNoSymlinkComponents(requested);
     const canonical = await canonicalFuturePath(requested);
-    const home = await realpath(os.homedir()).catch(() => path.resolve(os.homedir()));
-    const temporaryRoot = await realpath(os.tmpdir()).catch(() => path.resolve(os.tmpdir()));
+    const home = await realpath(os.homedir()).catch(() =>
+      path.resolve(os.homedir()),
+    );
+    const temporaryRoot = await realpath(os.tmpdir()).catch(() =>
+      path.resolve(os.tmpdir()),
+    );
     if (
       canonical === path.parse(canonical).root ||
       canonical === home ||
@@ -6149,11 +3394,7 @@ export class GatewayStore {
       }
       this.assertOwnedPrivate(info.uid, info.mode, "directory");
     } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         existed = false;
       } else {
         throw error;
@@ -6167,7 +3408,7 @@ export class GatewayStore {
     if (root !== canonical) {
       throw new BridgeError(
         "UNSAFE_GATEWAY_STATE_DIRECTORY",
-        "The gateway state path changed while it was being prepared.",
+        "The gateway state path changed while it was prepared.",
       );
     }
     const markerPath = path.join(root, STATE_MARKER);
@@ -6179,11 +3420,7 @@ export class GatewayStore {
         STATE_MARKER_CONTENT,
       );
     } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         markerExists = false;
       } else {
         throw error;
@@ -6194,7 +3431,7 @@ export class GatewayStore {
       if (existed && entries.length > 0) {
         throw new BridgeError(
           "GATEWAY_STATE_DIRECTORY_NOT_OWNED",
-          "The existing gateway state directory is non-empty and has no gateway ownership marker.",
+          "The existing state directory is non-empty and lacks the ownership marker.",
         );
       }
       const marker = await open(
@@ -6211,7 +3448,6 @@ export class GatewayStore {
       } finally {
         await marker.close();
       }
-      await chmod(markerPath, 0o600);
     }
     return root;
   }
@@ -6223,10 +3459,11 @@ export class GatewayStore {
         `The gateway ${kind} is not owned by the current process user.`,
       );
     }
-    if ((mode & 0o077) !== 0) {
+    const expectedMode = kind === "directory" ? 0o700 : 0o600;
+    if ((mode & 0o777) !== expectedMode) {
       throw new BridgeError(
         "UNSAFE_GATEWAY_STATE_DIRECTORY",
-        `The gateway ${kind} must not grant group or other permissions.`,
+        `The gateway ${kind} must use exact mode ${expectedMode.toString(8)}.`,
       );
     }
   }
@@ -6244,11 +3481,7 @@ export class GatewayStore {
       );
     }
     this.assertOwnedPrivate(info.uid, info.mode, "state file");
-    if (
-      !Number.isSafeInteger(maximumBytes) ||
-      maximumBytes < 1 ||
-      info.size > maximumBytes
-    ) {
+    if (info.size > maximumBytes) {
       throw new BridgeError(
         "GATEWAY_STATE_FILE_TOO_LARGE",
         "A gateway controller file exceeds its strict byte limit.",
@@ -6275,14 +3508,14 @@ export class GatewayStore {
       const buffer = Buffer.alloc(maximumBytes + 1);
       let offset = 0;
       while (offset < buffer.length) {
-        const { bytesRead } = await handle.read(
+        const read = await handle.read(
           buffer,
           offset,
           buffer.length - offset,
           offset,
         );
-        if (bytesRead === 0) break;
-        offset += bytesRead;
+        if (read.bytesRead === 0) break;
+        offset += read.bytesRead;
       }
       if (offset > maximumBytes) {
         throw new BridgeError(
@@ -6348,23 +3581,17 @@ export class GatewayStore {
       try {
         owner = JSON.parse(
           await this.readPrivateFile(lockPath, MAX_LOCK_FILE_BYTES),
-        ) as {
-          pid?: unknown;
-          hostname?: unknown;
-        };
+        ) as { pid?: unknown; hostname?: unknown };
       } catch {
         throw new BridgeError(
           "GATEWAY_STATE_LOCK_UNVERIFIED",
           "The gateway state lock exists but cannot be safely verified.",
         );
       }
-      if (
-        owner.hostname !== os.hostname() ||
-        !isPositiveInteger(owner.pid)
-      ) {
+      if (owner.hostname !== os.hostname() || !isPositiveInteger(owner.pid)) {
         throw new BridgeError(
           "GATEWAY_STATE_IN_USE",
-          "The gateway state directory is locked by another or unverifiable host process.",
+          "The gateway state directory is locked by another host or unverifiable process.",
           true,
         );
       }
@@ -6385,9 +3612,16 @@ export class GatewayStore {
       }
       await rename(
         lockPath,
-        path.join(this.rootDir, `.gateway-controller.lock.stale-${randomUUID()}`),
+        path.join(
+          this.rootDir,
+          `.gateway-controller.lock.stale-${randomUUID()}`,
+        ),
       ).catch((error: unknown) => {
-        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
           throw error;
         }
       });
@@ -6404,24 +3638,20 @@ export class GatewayStore {
     const token = this.lockToken;
     this.lockHandle = undefined;
     this.lockToken = undefined;
-    if (!handle || !token) return;
+    if (handle === undefined || token === undefined) return;
     await handle.close().catch(() => undefined);
     const lockPath = path.join(this.rootDir, CONTROLLER_LOCK);
     try {
       const parsed = JSON.parse(
         await this.readPrivateFile(lockPath, MAX_LOCK_FILE_BYTES),
-      ) as {
-        token?: unknown;
-      };
+      ) as { token?: unknown };
       if (parsed.token === token) await unlink(lockPath);
     } catch {
       // Never remove a lock that cannot be proven to belong to this instance.
     }
   }
 
-  private async loadStateFile(
-    _now: Date,
-  ): Promise<GatewayPersistedState | undefined> {
+  private async loadStateFile(): Promise<GatewayPersistedState | undefined> {
     let body: string;
     try {
       body = await this.readPrivateFile(
@@ -6443,45 +3673,29 @@ export class GatewayStore {
         "The gateway controller state is not valid JSON.",
       );
     }
-    if (!isPersistedState(parsed)) {
+    if (isObject(parsed) && parsed.schemaVersion === 2) {
       throw new BridgeError(
-        "CORRUPT_GATEWAY_STATE",
-        "The gateway controller state failed strict schema validation.",
+        "GATEWAY_STATE_CONVERSION_REQUIRED",
+        "The gateway state must be converted offline before this release can start.",
       );
     }
-    if (
-      parsed.routes.some((route) => !this.config.allowedHosts.includes(route.binding.hostId)) ||
-      parsed.connectors.some((connector) => !this.config.allowedHosts.includes(connector.hostId)) ||
-      parsed.routes.length > this.config.limits.maxRoutes ||
-      parsed.connectors.length >
-        this.config.allowedHosts.length * gatewayProviders.length ||
-      parsed.consentEdges.length > this.config.limits.maxConsentEdges ||
-      parsed.rateBuckets.length > this.config.limits.maxRoutes ||
-      parsed.progressWatches.length >
-        (this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY) ||
-      parsed.dedupe.length > this.config.limits.dedupeCapacity ||
-      parsed.queue.length > this.config.limits.maxQueueMessages ||
-      parsed.inFlight.length > this.config.limits.maxInFlightMessages ||
-      parsed.queue.length + parsed.inFlight.length >
-        this.config.limits.maxQueueMessages ||
-      parsed.queue.some((item) => item.bytes > this.config.limits.maxMessageBytes) ||
-      parsed.accounting.queuedBytes > this.config.limits.maxQueueBytes
-    ) {
+    if (!isGatewayPersistedStateV3(parsed)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",
-        "The gateway state exceeds its current allowlist or configured bounds.",
+        "The gateway controller state failed strict v3 schema validation.",
       );
     }
+    this.assertConfiguredBounds(parsed);
     return parsed;
   }
 
   private async persist(force = false): Promise<void> {
     if (this.persistenceDeferred && !force) return;
     const state = this.requireState();
-    if (!isPersistedState(state)) {
+    if (!isGatewayPersistedStateV3(state)) {
       throw new BridgeError(
         "CORRUPT_GATEWAY_STATE",
-        "The gateway refused to persist internally inconsistent state.",
+        "The gateway refused to persist internally inconsistent v3 state.",
       );
     }
     const temporary = path.join(
@@ -6492,11 +3706,12 @@ export class GatewayStore {
     if (Buffer.byteLength(body, "utf8") > GATEWAY_MAX_STATE_FILE_BYTES) {
       throw new BridgeError(
         "GATEWAY_STATE_FILE_TOO_LARGE",
-        "The bounded gateway controller state exceeds its durable byte limit.",
+        "The bounded gateway state exceeds its durable byte limit.",
       );
     }
+    const prior = await this.loadStateFile();
     let handle: FileHandle | undefined;
-    let renamed = false;
+    let renameAttempted = false;
     try {
       try {
         handle = await open(
@@ -6530,8 +3745,8 @@ export class GatewayStore {
             throw error;
           }
         }
-        await rename(temporary, this.stateFilePath);
-        renamed = true;
+        renameAttempted = true;
+        await this.renameStateFile(temporary, this.stateFilePath);
         await this.afterStateFileRename?.();
         const directory = await open(this.rootDir, constants.O_RDONLY);
         try {
@@ -6540,24 +3755,31 @@ export class GatewayStore {
           await directory.close();
         }
       } catch (error) {
-        if (!renamed) throw error;
+        if (!renameAttempted) throw error;
         let installed: GatewayPersistedState | undefined;
+        let readbackFailed = false;
         try {
-          installed = await this.loadStateFile(this.now());
+          installed = await this.loadStateFile();
         } catch {
-          // Rename crossed the commit point. Keep the intended in-memory
-          // authority even if verification itself is unavailable; never
-          // manufacture an old-state rollback after an installed rename.
+          readbackFailed = true;
+          // Rename crossed the commit point; unverifiable authority poisons this instance.
         }
-        const verified =
-          installed !== undefined &&
-          JSON.stringify(installed) === JSON.stringify(state);
-        if (verified && installed !== undefined) {
+        const installedCurrent =
+          installed?.commit.id === state.commit.id &&
+          installed.commit.sequence === state.commit.sequence;
+        if (installedCurrent && installed !== undefined) {
           this.state = installed;
-        } else {
-          this.state = undefined;
+          return;
         }
-        throw new PostRenamePersistenceError(verified);
+        const installedPrior =
+          !readbackFailed &&
+          (prior === undefined
+            ? installed === undefined
+            : installed?.commit.id === prior.commit.id &&
+              installed.commit.sequence === prior.commit.sequence);
+        if (installedPrior) throw error;
+        this.state = undefined;
+        throw new PostRenamePersistenceError();
       }
     } finally {
       await handle?.close().catch(() => undefined);

@@ -110,12 +110,6 @@ export type RouteView = Readonly<{
   oldestAgeMs: number | undefined;
 }>;
 
-export type SuccessionView = Readonly<{
-  item: ModelAttentionItem;
-  guidanceKey: "codexSuccessionBusy" | "codexSuccessionRecovery";
-  command: string;
-}>;
-
 export type RoutesData = Readonly<{
   inboundMode: "paired" | "open";
   peers: readonly ModelPeerRow[];
@@ -125,7 +119,6 @@ export type RoutesData = Readonly<{
   consentEdges: readonly ModelConsentEdgeRow[];
   consentEdgesOmitted: number;
   graph: ModelGraphFacts;
-  successions: readonly SuccessionView[];
 }>;
 
 export type ActivityRow =
@@ -175,7 +168,6 @@ export type EmbassyAdapter = Readonly<{
     model: ModelViewModel,
     provider: ModelGatewayProvider,
   ): GatewayConnectorHealth | undefined;
-  extractSuccessions(model: ModelViewModel): readonly SuccessionView[];
   hasLifecycleTruncation(group: ModelMessageGroup): boolean;
   deliveriesTruncated(model: ModelViewModel): boolean;
   deliveryGroupKey(group: ModelMessageGroup): string;
@@ -229,7 +221,7 @@ export type EmbassyNamespace = Readonly<{
     direction?: GatewayMessageDirection,
   ): string;
   camelCaseToken(token: string): string;
-  canRequestStaleCodexRegistrationRemoval(route: ModelRouteRow): boolean;
+  canRequestCodexRegistrationRemoval(route: ModelRouteRow): boolean;
   canOfferConsentEdgeCandidate(route: ModelRouteRow): boolean;
   activityAuthority(event: ModelActivityEventRow): "operator" | "automatic";
   attentionQueueDepthLine(
@@ -310,7 +302,6 @@ declare global {
     }>;
     type DeliveryGroupView = import("./app-types.js").DeliveryGroupView;
     type RouteView = import("./app-types.js").RouteView;
-    type SuccessionView = import("./app-types.js").SuccessionView;
     type RoutesData = import("./app-types.js").RoutesData;
     type ActivityRow = import("./app-types.js").ActivityRow;
     type DiagnosticsData = import("./app-types.js").DiagnosticsData;

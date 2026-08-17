@@ -6,7 +6,8 @@
  * Provider identities and message bodies are accepted only from inherited
  * process state and stdin respectively. They are never reflected in output or
  * error text. Only `serve` owns the long-lived provider capabilities and
- * private control server; every other command is a bounded client operation.
+ * private control server. The state converter is an offline one-shot; every
+ * other command is a bounded client operation.
  */
 import { realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
@@ -54,6 +55,10 @@ import {
   type GatewayServerOptions,
 } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
+import {
+  convertGatewayStateV2ToV3,
+  type GatewayStateV2ToV3Result,
+} from "./state-v2-to-v3.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -72,6 +77,7 @@ export const gatewayCliCommands = [
   "health",
   "status",
   "doctor",
+  "convert-state-v2-to-v3",
   "delivery-status",
   "wait-delivery",
   "untrack",
@@ -111,6 +117,9 @@ type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
 type LiveDashboardRunner = (
   options: LiveDashboardCommandOptions,
 ) => Promise<LiveDashboardCommandOutcome | void>;
+type GatewayStateConverter = (
+  options: Readonly<{ stateDir: string }>,
+) => Promise<GatewayStateV2ToV3Result>;
 
 export type GatewayCliDependencies = {
   env?: NodeJS.ProcessEnv;
@@ -121,6 +130,7 @@ export type GatewayCliDependencies = {
   sendRequest?: GatewayControlSender;
   runServer?: GatewayServerRunner;
   runLiveDashboard?: LiveDashboardRunner;
+  convertState?: GatewayStateConverter;
   serverSignal?: AbortSignal;
   liveDashboardSignal?: AbortSignal;
   validateControlSocket?: (
@@ -513,6 +523,7 @@ async function buildRequest(
   switch (command) {
     case "serve":
     case "dashboard":
+    case "convert-state-v2-to-v3":
       throw new CliFault("INVALID_ARGUMENTS");
     case "health":
       return {
@@ -1022,6 +1033,7 @@ export async function runGatewayCli(
   const runServer = dependencies.runServer ?? runGatewayServer;
   const runLiveDashboard =
     dependencies.runLiveDashboard ?? runLiveDashboardCommand;
+  const convertState = dependencies.convertState ?? convertGatewayStateV2ToV3;
   const now = dependencies.now ?? Date.now;
   const delay = dependencies.delay ?? defaultDelay;
   if (
@@ -1076,6 +1088,22 @@ export async function runGatewayCli(
       if (!serverReadyEmitted) {
         throw new CliFault("SERVER_NOT_READY");
       }
+      return gatewayCliExitCodes.ok;
+    }
+    if (command === "convert-state-v2-to-v3") {
+      emptyParams(common.args);
+      const config = loadConfig(env);
+      const converted = await convertState({ stateDir: config.stateDir });
+      stdout.write(
+        serializedOutput({
+          ok: true,
+          command,
+          result: {
+            converted: true,
+            backupFile: path.basename(converted.backupFile),
+          },
+        }),
+      );
       return gatewayCliExitCodes.ok;
     }
     if (command === "dashboard") {
@@ -1181,27 +1209,6 @@ export async function runGatewayCli(
           `[embassy] ${getCliCopy(locale)["hint.progressWatchOwnerConflict"]}\n`,
         );
       }
-      if (command === "register-codex") {
-        const diagnosis = await sendRequest({
-          socketPath: config.controlSocketPath,
-          request: {
-            protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-            method: "list_snapshot",
-            params: {},
-          },
-        }).catch(() => undefined);
-        if (diagnosis?.ok === true) {
-          const conditions = codexDoctorConditions(diagnosis.result);
-          const hint = conditions.includes("split_brain")
-            ? "hint.codexSplitBrain"
-            : conditions.includes("orphaned")
-              ? "hint.codexOrphaned"
-              : undefined;
-          if (hint !== undefined) {
-            stderr.write(`[embassy] ${getCliCopy(locale)[hint]}\n`);
-          }
-        }
-      }
     } else if (
       command === "wait-delivery" &&
       exitCode === gatewayCliExitCodes.failure
@@ -1252,6 +1259,14 @@ export async function runGatewayCli(
         : gatewayCliExitCodes.invalidInput;
     }
     if (error instanceof BridgeError) {
+      if (error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN") {
+        writeFailure(stdout, stderr, locale, command, error.code, {
+          ambiguous: true,
+          retryable: false,
+          kind: "ambiguous",
+        });
+        return gatewayCliExitCodes.ambiguous;
+      }
       writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.recoverable,
         kind: error.recoverable ? "unavailable" : "input",

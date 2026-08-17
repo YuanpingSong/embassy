@@ -12,6 +12,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { BridgeError } from "../src/errors.js";
 import { CLAUDE_PEER_COMPATIBILITY } from "../src/gateway/claude-peer.js";
 import { ClaudeNativeHelperClient } from "../src/gateway/claude-helper-client.js";
 import type {
@@ -27,10 +28,7 @@ import {
   assertClaudeNativeHelperIpcSize,
   isClaudeNativeHelperParentMessage,
 } from "../src/gateway/claude-helper-protocol.js";
-import type {
-  GatewayAdapterCallbacks,
-  GatewayAdapterDelivery,
-} from "../src/gateway/service.js";
+import type { GatewayAdapterCallbacks } from "../src/gateway/service.js";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -106,15 +104,6 @@ test("real-PID helpers own independent native records and exact cleanup", async 
     assert.equal(secondRecord.name, "dsh-second");
     assert.equal(secondRecord.messagingSocketPath, secondSocketPath);
 
-    await first.request({
-      method: "resume_generation",
-      generation: first.generation,
-    });
-    await second.request({
-      method: "resume_generation",
-      generation: second.generation,
-    });
-
     await first.close();
     assert.equal(await missing(firstRecordPath), true);
     assert.equal(await missing(firstSocketPath), true);
@@ -154,37 +143,18 @@ class FakeHelperClient implements ClaudeNativeHelperClientLike {
     command: ClaudeNativeHelperCommand,
   ): Promise<ClaudeNativeHelperResult> {
     this.commands.push(command);
-    if (command.method === "dispatch") {
-      this.options.callbacks.onEvent({
-        event: "delivery",
-        value: {
-          messageId: command.messageId,
-          state: "transport_written",
-        },
-      });
-      return { state: "pending" };
+    if (command.method === "prepare_dispatch") {
+      return {
+        preparationId: "prep_0123456789abcdefghijklmn",
+        frameBytes: 123,
+        sha256: "a".repeat(64),
+      };
+    }
+    if (command.method === "perform_dispatch") {
+      return { state: "delivered" };
     }
     if (command.method === "release_inbound_receipt") {
       return { released: true };
-    }
-    if (command.method === "observe_barrier") {
-      return {
-        generation: command.generation,
-        activeGenerationMatched: true,
-        ingressQuiesced: true,
-        monitorFrozen: true,
-        discoveryInFlight: false,
-        pendingOutboundReceipts: 0,
-        pendingInboundReceipts: 0,
-        rejectedInboundSettlements: 0,
-        clean: true,
-      };
-    }
-    if (command.method === "publish_prepared") {
-      return { publication: "published" };
-    }
-    if (command.method === "purge_generation_replies") {
-      return { purged: 0 };
     }
     return { ok: true };
   }
@@ -206,14 +176,22 @@ class FakeHelperClient implements ClaudeNativeHelperClientLike {
   }
 }
 
+function lastPrepareCommand(
+  client: FakeHelperClient,
+): Extract<ClaudeNativeHelperCommand, { method: "prepare_dispatch" }> {
+  const command = [...client.commands]
+    .reverse()
+    .find((candidate) => candidate.method === "prepare_dispatch");
+  assert.ok(command !== undefined && command.method === "prepare_dispatch");
+  return command;
+}
+
 test("supervisor namespaces receipts and isolates one helper crash", async () => {
-  const deliveries: GatewayAdapterDelivery[] = [];
   const messages: Parameters<
     NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>
   >[0][] = [];
   const notices: string[] = [];
   const callbacks: GatewayAdapterCallbacks = {
-    onDelivery: (event) => deliveries.push({ ...event }),
     onRouteState: () => undefined,
     onClaudeReply: () => undefined,
     onClaudeMessage: (event) => messages.push(event),
@@ -224,7 +202,6 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
     identity: {
       provider: "claude",
       hostId: "this-mac",
-      endpointGeneration: "claude_generation",
     },
     runtime: {
       claudeExecutable: "/usr/bin/false",
@@ -293,7 +270,7 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
     });
 
     const deadlineAt = new Date(Date.now() + 30_000).toISOString();
-    const dispatched = await supervisor.dispatch({
+    const prepared = await supervisor.prepareDispatch({
       sourceAlias: "codex-first@this-mac",
       sourceProvider: "codex",
       targetAlias: "claude-first@this-mac",
@@ -304,8 +281,7 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
         provider: "claude",
         hostId: "this-mac",
         routeHandle: "00000000-0000-7000-8000-000000000111",
-        ownerLease: "lease-first",
-        endpointGeneration: "claude_generation",
+        registrationId: "registration-first",
       },
       authorization: "selected_route",
       messageId: "gateway-message-first",
@@ -314,16 +290,15 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       deadlineAt,
       progressWatchActive: true,
     });
-    assert.deepEqual(dispatched, { state: "pending" });
-    assert.equal(deliveries.at(-1)?.state, "transport_written");
+    assert.equal(prepared.frameBytes, 123);
+    assert.equal(prepared.sha256, "a".repeat(64));
     assert.deepEqual(clients[0]!.commands.at(-1), {
-      method: "dispatch",
+      method: "prepare_dispatch",
       binding: {
         provider: "claude",
         hostId: "this-mac",
         routeHandle: "00000000-0000-7000-8000-000000000111",
-        ownerLease: "lease-first",
-        endpointGeneration: "claude_generation",
+        registrationId: "registration-first",
       },
       authorization: "selected_route",
       messageId: "gateway-message-first",
@@ -336,14 +311,46 @@ test("supervisor namespaces receipts and isolates one helper crash", async () =>
       deadlineAt,
       progressWatchActive: true,
     });
+    assert.deepEqual(await prepared.perform(), { state: "delivered" });
+    assert.deepEqual(clients[0]!.commands.at(-1), {
+      method: "perform_dispatch",
+      preparationId: "prep_0123456789abcdefghijklmn",
+    });
+    assert.deepEqual(await prepared.perform(), {
+      state: "failed",
+      safeErrorCode: "CLAUDE_NATIVE_PREPARATION_CONSUMED",
+    });
+    const denied = await supervisor.prepareDispatch({
+      sourceAlias: "codex-first@this-mac",
+      sourceProvider: "codex",
+      targetAlias: "claude-first@this-mac",
+      conversationId: "conv_0123456789abcdef",
+      selectedAlias: "claude-first@this-mac",
+      stateRoot: "/state",
+      binding: {
+        provider: "claude",
+        hostId: "this-mac",
+        routeHandle: "00000000-0000-7000-8000-000000000111",
+        registrationId: "registration-first",
+      },
+      authorization: "selected_route",
+      messageId: "gateway-message-denied",
+      text: "denied body",
+      expectsReply: false,
+      deadlineAt,
+    });
+    await denied.cancel();
+    assert.deepEqual(clients[0]!.commands.at(-1), {
+      method: "cancel_dispatch",
+      preparationId: "prep_0123456789abcdefghijklmn",
+    });
+    assert.deepEqual(await denied.perform(), {
+      state: "failed",
+      safeErrorCode: "CLAUDE_NATIVE_PREPARATION_CONSUMED",
+    });
 
     clients[0]!.crash();
     assert.equal(supervisor.size, 1);
-    assert.deepEqual(deliveries.at(-1), {
-      messageId: "gateway-message-first",
-      state: "unconfirmed",
-      safeErrorCode: "CLAUDE_NATIVE_HELPER_EXITED",
-    });
     assert.equal(notices.at(-1), "CLAUDE_NATIVE_HELPER_EXITED");
     await supervisor.updateStatus("codex-second@this-mac", "busy");
     assert.deepEqual(clients[1]!.commands.at(-1), {
@@ -402,13 +409,12 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
   );
 
   const command = {
-    method: "dispatch",
+    method: "prepare_dispatch",
     binding: {
       provider: "claude",
       hostId: "this-mac",
       routeHandle: "00000000-0000-7000-8000-000000000111",
-      ownerLease: "lease-first",
-      endpointGeneration: "claude_generation",
+      registrationId: "registration-first",
     },
     authorization: "selected_route",
     messageId: "gateway-message-first",
@@ -428,6 +434,25 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
     command,
   } as const;
   assert.equal(isClaudeNativeHelperParentMessage(parent), true);
+  for (const method of ["perform_dispatch", "cancel_dispatch"] as const) {
+    assert.equal(
+      isClaudeNativeHelperParentMessage({
+        ...parent,
+        command: {
+          method,
+          preparationId: "prep_0123456789abcdefghijklmn",
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      isClaudeNativeHelperParentMessage({
+        ...parent,
+        command: { method, preparationId: "prep_foreign" },
+      }),
+      false,
+    );
+  }
   const escapedMaximum = {
     ...parent,
     command: { ...command, text: "\u0001".repeat(16 * 1024) },
@@ -465,6 +490,18 @@ test("helper dispatch IPC is exact, bounded, and provenance-closed", () => {
     }),
     false,
   );
+  const {
+    registrationId: _omittedRegistrationId,
+    ...bindingWithoutRegistration
+  } = command.binding;
+  assert.equal(_omittedRegistrationId, "registration-first");
+  assert.equal(
+    isClaudeNativeHelperParentMessage({
+      ...parent,
+      command: { ...command, binding: bindingWithoutRegistration },
+    }),
+    false,
+  );
 });
 
 test("supervisor binds every helper write to its exact alias and provider", async () => {
@@ -473,7 +510,6 @@ test("supervisor binds every helper write to its exact alias and provider", asyn
     identity: {
       provider: "claude",
       hostId: "this-mac",
-      endpointGeneration: "claude_generation",
     },
     runtime: {
       claudeExecutable: "/usr/bin/false",
@@ -496,8 +532,7 @@ test("supervisor binds every helper write to its exact alias and provider", asyn
     provider: "claude",
     hostId: "this-mac",
     routeHandle: "00000000-0000-7000-8000-000000000111",
-    ownerLease: "lease-first",
-    endpointGeneration: "claude_generation",
+    registrationId: "registration-first",
   } as const;
   const sources = [
     { alias: "dsh-builder@this-mac", provider: "deepseek" },
@@ -516,8 +551,7 @@ test("supervisor binds every helper write to its exact alias and provider", asyn
 
     const deadlineAt = new Date(Date.now() + 30_000).toISOString();
     for (const [index, source] of sources.entries()) {
-      assert.deepEqual(
-        await supervisor.dispatch({
+      const prepared = await supervisor.prepareDispatch({
           sourceAlias: source.alias,
           sourceProvider: source.provider,
           targetAlias: "claude-first@this-mac",
@@ -530,19 +564,16 @@ test("supervisor binds every helper write to its exact alias and provider", asyn
           text: "outbound body",
           expectsReply: false,
           deadlineAt,
-        }),
-        { state: "pending" },
-      );
-      const sent = clients[index]!.commands.at(-1);
-      assert.equal(sent?.method, "dispatch");
-      if (sent?.method !== "dispatch") assert.fail("expected dispatch command");
+        });
+      assert.deepEqual(await prepared.perform(), { state: "delivered" });
+      const sent = lastPrepareCommand(clients[index]!);
       assert.equal(sent.sourceAlias, source.alias);
       assert.equal(sent.sourceProvider, source.provider);
     }
 
     const deepseekCommands = clients[0]!.commands.length;
-    assert.deepEqual(
-      await supervisor.dispatch({
+    await assert.rejects(
+      supervisor.prepareDispatch({
         sourceAlias: "dsh-builder@this-mac",
         sourceProvider: "grok",
         targetAlias: "claude-first@this-mac",
@@ -556,7 +587,9 @@ test("supervisor binds every helper write to its exact alias and provider", asyn
         expectsReply: false,
         deadlineAt,
       }),
-      { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" },
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "PROVENANCE_ENVELOPE_INVALID",
     );
     assert.equal(clients[0]!.commands.length, deepseekCommands);
   } finally {
@@ -564,13 +597,12 @@ test("supervisor binds every helper write to its exact alias and provider", asyn
   }
 });
 
-test("supervisor carries only the activated source alias and exact selected target", async () => {
+test("supervisor carries only the directly advertised source alias and exact selected target", async () => {
   const clients: FakeHelperClient[] = [];
   const supervisor = new ClaudeNativeHelperSupervisor({
     identity: {
       provider: "claude",
       hostId: "this-mac",
-      endpointGeneration: "claude_generation",
     },
     runtime: {
       claudeExecutable: "/usr/bin/false",
@@ -584,7 +616,7 @@ test("supervisor carries only the activated source alias and exact selected targ
     maxHelpers: 1,
     callbacks: () => undefined,
     factory: async (options) => {
-      const client = new FakeHelperClient(options, 1);
+      const client = new FakeHelperClient(options, clients.length + 1);
       clients.push(client);
       return client;
     },
@@ -593,8 +625,7 @@ test("supervisor carries only the activated source alias and exact selected targ
     provider: "claude",
     hostId: "this-mac",
     routeHandle: "00000000-0000-7000-8000-000000000111",
-    ownerLease: "lease-first",
-    endpointGeneration: "claude_generation",
+    registrationId: "registration-first",
   } as const;
   try {
     await supervisor.advertise({
@@ -602,20 +633,17 @@ test("supervisor carries only the activated source alias and exact selected targ
       sourceProvider: "codex",
       cwd: "/workspace/old",
     });
-    await supervisor.prepareGeneration({
+    await supervisor.unadvertise("codex-old@this-mac");
+    assert.equal(clients[0]!.closed, true);
+    assert.deepEqual(clients[0]!.commands, [
+      { method: "unadvertise", alias: "codex-old@this-mac" },
+    ]);
+    await supervisor.advertise({
       alias: "codex-new@this-mac",
+      sourceProvider: "codex",
       cwd: "/workspace/new",
-      generation: "helper_generation_next",
-      currentGeneration: "helper_generation_1",
     });
-    assert.equal(
-      await supervisor.publishPrepared({
-        currentGeneration: "helper_generation_1",
-        preparedGeneration: "helper_generation_next",
-      }),
-      "published",
-    );
-    await supervisor.activatePrepared("helper_generation_next");
+    assert.equal(clients.length, 2);
 
     const dispatch = {
       sourceAlias: "codex-new@this-mac",
@@ -632,66 +660,61 @@ test("supervisor carries only the activated source alias and exact selected targ
       deadlineAt: new Date(Date.now() + 30_000).toISOString(),
       progressWatchActive: true,
     } as const;
-    assert.deepEqual(
-      await supervisor.dispatch({
+    await assert.rejects(
+      supervisor.prepareDispatch({
         ...dispatch,
         sourceAlias: "codex-old@this-mac",
       }),
-      {
-        state: "failed",
-        safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE",
-      },
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "CLAUDE_NATIVE_HELPER_UNAVAILABLE",
     );
     const { stateRoot: omittedStateRoot, ...withoutStateRoot } = dispatch;
     assert.equal(omittedStateRoot, "/state");
-    assert.deepEqual(
-      await supervisor.dispatch(withoutStateRoot),
-      { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" },
+    await assert.rejects(
+      supervisor.prepareDispatch(withoutStateRoot),
+      (error: unknown) =>
+        error instanceof BridgeError && error.code === "CLAUDE_ROUTE_UNAVAILABLE",
     );
-    const commandsBeforeInvalid = clients[0]!.commands.length;
-    assert.deepEqual(
-      await supervisor.dispatch({
+    const commandsBeforeInvalid = clients[1]!.commands.length;
+    await assert.rejects(
+      supervisor.prepareDispatch({
         ...dispatch,
         conversationId: "conv_short",
       }),
-      { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" },
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "PROVENANCE_ENVELOPE_INVALID",
     );
-    assert.deepEqual(
-      await supervisor.dispatch({
+    await assert.rejects(
+      supervisor.prepareDispatch({
         ...dispatch,
         text: "x".repeat(16 * 1024 + 1),
       }),
-      {
-        state: "failed",
-        safeErrorCode: "PROVENANCE_ENVELOPE_TOO_LARGE",
-      },
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "PROVENANCE_ENVELOPE_TOO_LARGE",
     );
-    assert.equal(clients[0]!.commands.length, commandsBeforeInvalid);
-    assert.deepEqual(await supervisor.dispatch(dispatch), { state: "pending" });
-    const sent = clients[0]!.commands.at(-1);
-    assert.equal(sent?.method, "dispatch");
-    if (sent?.method !== "dispatch") assert.fail("expected dispatch command");
+    assert.equal(clients[1]!.commands.length, commandsBeforeInvalid);
+    const firstPrepared = await supervisor.prepareDispatch(dispatch);
+    assert.deepEqual(await firstPrepared.perform(), { state: "delivered" });
+    const sent = lastPrepareCommand(clients[1]!);
     assert.equal(sent.sourceAlias, "codex-new@this-mac");
     assert.equal(sent.targetAlias, "claude-first@this-mac");
     assert.equal(sent.conversationId, "conv_0123456789abcdef");
     assert.equal(sent.text, "outbound body");
     assert.equal(sent.progressWatchActive, true);
 
-    assert.deepEqual(
-      await supervisor.dispatch({
+    const renamedPrepared = await supervisor.prepareDispatch({
         ...dispatch,
         selectedAlias: "claude-renamed@this-mac",
         messageId: "gateway-message-renamed-observation",
-      }),
-      { state: "pending" },
-    );
-    const renamed = clients[0]!.commands.at(-1);
-    assert.equal(renamed?.method, "dispatch");
-    if (renamed?.method !== "dispatch") assert.fail("expected dispatch command");
+      });
+    assert.deepEqual(await renamedPrepared.perform(), { state: "delivered" });
+    const renamed = lastPrepareCommand(clients[1]!);
     assert.equal(renamed.targetAlias, "claude-first@this-mac");
 
-    assert.deepEqual(
-      await supervisor.dispatch({
+    const nativeReplyPrepared = await supervisor.prepareDispatch({
         sourceAlias: dispatch.sourceAlias,
         sourceProvider: dispatch.sourceProvider,
         targetAlias: dispatch.targetAlias,
@@ -702,14 +725,9 @@ test("supervisor carries only the activated source alias and exact selected targ
         text: "native reply body",
         expectsReply: false,
         deadlineAt: dispatch.deadlineAt,
-      }),
-      { state: "pending" },
-    );
-    const nativeReply = clients[0]!.commands.at(-1);
-    assert.equal(nativeReply?.method, "dispatch");
-    if (nativeReply?.method !== "dispatch") {
-      assert.fail("expected native reply dispatch command");
-    }
+      });
+    assert.deepEqual(await nativeReplyPrepared.perform(), { state: "delivered" });
+    const nativeReply = lastPrepareCommand(clients[1]!);
     assert.equal(nativeReply.authorization, "native_reply");
     assert.equal(nativeReply.sourceAlias, "codex-new@this-mac");
     assert.equal(nativeReply.targetAlias, "claude-first@this-mac");

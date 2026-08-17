@@ -68,22 +68,22 @@ Origin, but every POST requires the exact Origin plus
 These checks constrain browser cross-origin requests; they do not authenticate
 local software. There are no generic control or provider routes, telemetry, or
 external assets. The only mutation route accepts exact pair, unpair,
-refresh-discovery, and stale-Codex-registration-removal actions, requires an
-explicit in-page confirmation, rejects bodies over 1 KiB, and is limited to
-six actions per minute. Removal names only a public `codex-*` alias; the broker
-accepts it only when the registration is stale and its endpoint generation is
-dead. No task ID or endpoint generation enters the browser contract. The
+refresh-discovery, and named Codex-registration-removal actions, requires an
+explicit in-page consequence confirmation, rejects bodies over 1 KiB, and is
+limited to six actions per minute. Removal names only a public `codex-*` alias;
+the broker removes that registration's consent edges and settles active work by
+its durable write phase. No task ID enters the browser contract. The
 browser client keeps only a display-preference key
 (active tab and language) in `localStorage`.
-The browser cannot create or live-unregister tasks, send, reply, approve,
+The browser cannot create tasks, send, reply, approve,
 interrupt, change settings, or invoke arbitrary broker/provider methods. It receives a sanitized
 snapshot via same-origin `fetch`; after each bounded action it reads
-a fresh snapshot. A snapshot observation may settle already-due
-lifecycle deliveries before projecting state.
+a fresh snapshot. A snapshot observation may settle already-due delivery
+deadlines before projecting state.
 
-An exact App Server generation transition appears in Activity as an automatic event, distinct from operator actions. The dashboard does not certify builds or grant authority: it reports only best-effort runtime facts from the bounded public snapshot. Overview and Routes keep Claude, Codex, DeepSeek, and Grok Build visible even when a route or connector is absent; Deliveries filters by all four source and target providers; Diagnostics shows observed protocol/version metadata, current connector health, and the last safe code. Version metadata never changes route authority.
+App Server generations, re-anchors, and refreshes do not appear in Activity or grant route authority. The dashboard reports only best-effort runtime facts from the bounded public snapshot. That public snapshot remains schema version 2 even though the private native store is schema 3. Overview and Routes keep Claude, Codex, DeepSeek, and Grok Build visible even when a route or connector is absent; Deliveries filters by all four source and target providers; Diagnostics shows observed protocol/version metadata, current connector health, and the last safe code. Version metadata never changes route authority.
 
-The Diagnostics registry block mirrors optional bounded `registry` observations on the Claude connector row: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. It derives “Parseable required fields observed”, “Empty since broker start”, or “No parseable record since broker start”. The last warning says that no Claude registry record with parseable required fields has been observed since broker start and that, if Claude is running, its registry layout may have changed; that possible layout change therefore cannot look like a healthy empty peer list. The dashboard never exposes retained native IDs, endpoint generations, raw registry records, or the release-owned offline support matrix, and endpoint recovery never replays a message body.
+The Diagnostics registry block mirrors optional bounded `registry` observations on the Claude connector row: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. It derives “Parseable required fields observed”, “Empty since broker start”, or “No parseable record since broker start”. The last warning says that no Claude registry record with parseable required fields has been observed since broker start and that, if Claude is running, its registry layout may have changed; that possible layout change therefore cannot look like a healthy empty peer list. The dashboard never exposes retained native IDs, operation-local endpoint evidence, raw registry records, or the release-owned offline support matrix, and a later attempt never replays an uncertain message body.
 
 An optional `--lang en|zh-CN` flag selects the display language. It belongs to
 the live companion only; the static pair is always written in both languages

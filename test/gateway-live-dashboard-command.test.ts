@@ -484,7 +484,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
   );
   assert.deepEqual(
     await actions.execute({
-      action: "remove_stale_codex_registration",
+      action: "remove_codex_registration",
       alias: "codex-orphan@this-mac",
     }),
     { ok: true, code: "ok" },
@@ -518,7 +518,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
       socketPath: CONTROL_SOCKET_PATH,
       request: {
         protocolVersion: 1,
-        method: "remove_stale_codex_registration",
+        method: "remove_codex_registration",
         params: { alias: "codex-orphan@this-mac" },
       },
     },

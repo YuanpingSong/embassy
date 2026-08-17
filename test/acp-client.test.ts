@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { setImmediate as delayImmediate } from "node:timers/promises";
 import test from "node:test";
 import {
   ACP_MAX_REPLY_BYTES,
@@ -217,6 +219,78 @@ test("creates sessions and preserves all five stop reasons with text chunks", as
     prompt: [{ type: "text", text: "hello" }],
   });
   client.close();
+});
+
+test("prepared prompts reserve and write one exact prehashed frame", async () => {
+  const agent = initializedAgent((message, peer) => {
+    if (message.method === "session/prompt") {
+      peer.result(message, { stopReason: "end_turn" });
+    }
+  });
+  const client = await spawnAcpClient(
+    { kind: "local-checkout", command: "agent" },
+    { spawn: spawnFrom(agent) },
+  );
+
+  const prepared = client.preparePrompt("session-prepared", "exact body");
+  assert.equal(
+    agent.received.some((message) => message.method === "session/prompt"),
+    false,
+  );
+  const receipt = await prepared.perform();
+  assert.equal(receipt.terminalState, "delivered");
+  const request = agent.received.find(
+    (message) => message.method === "session/prompt",
+  );
+  assert.ok(request);
+  const serialized = `${JSON.stringify(request)}\n`;
+  assert.equal(prepared.bodyBytes, Buffer.byteLength("exact body", "utf8"));
+  assert.equal(prepared.frameBytes, Buffer.byteLength(serialized, "utf8"));
+  assert.equal(
+    prepared.sha256,
+    createHash("sha256").update(serialized).digest("hex"),
+  );
+  await assert.rejects(prepared.perform(), /already consumed/u);
+  assert.throws(() => prepared.cancel(), /already consumed/u);
+
+  const cancelled = client.preparePrompt("session-cancelled", "never send");
+  cancelled.cancel();
+  await assert.rejects(cancelled.perform(), /already consumed/u);
+  assert.equal(
+    agent.received.some(
+      (message) =>
+        message.method === "session/prompt" &&
+        (message.params as RpcMessage).sessionId === "session-cancelled",
+    ),
+    false,
+  );
+  client.close();
+});
+
+test("close fences a prepared prompt queued behind an earlier write", async () => {
+  const agent = initializedAgent((message, peer) => {
+    if (message.method === "session/new") {
+      peer.result(message, { sessionId: "never-observed-after-close" });
+    }
+  });
+  const client = await spawnAcpClient(
+    { kind: "local-checkout", command: "agent" },
+    { spawn: spawnFrom(agent) },
+  );
+
+  agent.child.stdin.cork();
+  const earlier = client.newSession("/workspace").catch(() => undefined);
+  const prepared = client.preparePrompt("session-fenced", "must not write");
+  const prompt = prepared.perform();
+  client.close();
+  agent.child.stdin.uncork();
+  await earlier;
+  assert.equal((await prompt).terminalState, "unknown");
+  await delayImmediate();
+  assert.equal(
+    agent.received.some((message) => message.method === "session/prompt"),
+    false,
+  );
 });
 
 test("always cancels permission requests and rejects undeclared inbound requests", async () => {

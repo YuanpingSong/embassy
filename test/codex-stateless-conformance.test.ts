@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
-  CodexAppServerConnector,
   type CodexAppServerTransport,
 } from "../src/gateway/codex-app-server.js";
 import {
   createStatelessCodexOperationTransport,
+  type StatelessCodexAcceptedOperation,
+  type StatelessCodexActiveSteerResult,
   type StatelessCodexOperationResult,
   type StatelessCodexWriteEvidence,
 } from "../src/gateway/codex-stateless-transport.js";
@@ -65,13 +67,17 @@ class ScriptTransport implements CodexAppServerTransport {
   result(request: Frame, result: unknown): void {
     this.emit({ id: request.id, result });
   }
+  reject(request: Frame): void {
+    this.emit({ error: { code: -32602 }, id: request.id });
+  }
 }
 
 type Mode =
   | "success" | "busy" | "approval" | "fast" | "sync-loss" | "async-loss"
-  | "close" | "timeout" | "malformed" | "wrong" | "large-reply" | "steer"
+  | "close" | "timeout" | "malformed" | "wrong" | "large-reply"
   | "failed" | "interrupted" | "duplicate" | "init-loss" | "resume-loss"
-  | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply";
+  | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply"
+  | "accepted-timeout" | "accepted-close" | "steer-reject";
 
 function statelessFixture(
   modes: Mode[],
@@ -98,7 +104,7 @@ function statelessFixture(
         }
         else if (frame.method === "thread/resume") {
           if (mode === "resume-loss") return Promise.reject(new Error("resume loss"));
-          const status = mode === "busy" || mode === "steer" || mode === "steer-loss"
+          const status = mode === "busy"
             ? { type: "active" }
             : mode === "approval"
               ? { activeFlags: ["waitingOnApproval"], type: "active" }
@@ -120,7 +126,10 @@ function statelessFixture(
           if (mode === "close") return peer.close();
           if (mode === "timeout") return;
           if (mode === "malformed") return peer.result(frame, { turn: null });
-          if (frame.method === "turn/steer") return peer.result(frame, { turnId: TURN });
+          if (frame.method === "turn/steer") {
+            if (mode === "steer-reject") return peer.reject(frame);
+            return peer.result(frame, { turnId: TURN });
+          }
           const start = { turn: { id: TURN, status: "inProgress" } };
           if (mode === "wrong") return peer.emit({ id: 999_999, result: start });
           const complete = () => {
@@ -144,6 +153,8 @@ function statelessFixture(
             peer.result(frame, start);
           } else {
             peer.result(frame, start);
+            if (mode === "accepted-timeout" || mode === "steer-reject") return;
+            if (mode === "accepted-close") return void setImmediate(() => { void peer.close(); });
             setImmediate(() => {
               peer.emit({ method: "turn/started", params: { threadId: THREAD, turn: start.turn } });
               complete();
@@ -194,18 +205,31 @@ function statelessFixture(
 
 const input = (
   authorizeWrite: (evidence: StatelessCodexWriteEvidence) => Promise<boolean>,
-  kind: "start" | "steer" = "start",
   text = "synthetic body",
+  onAccepted: (accepted: StatelessCodexAcceptedOperation) => Promise<void> = async () => undefined,
 ) => ({
-  attemptId: "attempt-fixture-1", authorizeWrite, deadlineAt: DEADLINE,
-  ...(kind === "steer" ? { expectedTurnId: TURN, kind } as const : { kind } as const),
-  route: { alias: "codex-fixture@this-mac", hostId: "this-mac", threadId: THREAD },
+  attemptId: "attempt-fixture-1", authorizeWrite, deadlineAt: DEADLINE, kind: "start" as const,
+  onAccepted,
+  route: {
+    alias: "codex-fixture@this-mac", hostId: "this-mac",
+    registrationId: "registration-fixture-1", threadId: THREAD,
+  },
   text,
 });
 
-function assertState(result: StatelessCodexOperationResult, phase: string, state: string): void {
+function assertState(result: { phase: string; state: string }, phase: string, state: string): void {
   assert.equal(result.phase, phase);
   assert.equal(result.state, state);
+}
+
+function assertCode(result: object, code: string): void {
+  assert.equal("safeErrorCode" in result ? result.safeErrorCode : undefined, code);
+}
+
+function emitTerminal(wire: ScriptTransport): void {
+  wire.emit({ method: "turn/completed", params: {
+    threadId: THREAD, turn: { id: TURN, status: "completed" },
+  }});
 }
 
 function normalizeFrames(frames: Frame[]): Frame[] {
@@ -284,54 +308,12 @@ test("v1.8 Codex contract has one complete preclassified normalization ledger", 
   assert.match(manifest.normalization.writes ?? "", /clean=0.*armed uncertainty=1/);
 });
 
-test("legacy connector freezes applicable HOLD initialize resume start and steer frames", async () => {
+test("stateless transport is inert until execute and opens one exact connection per operation", async () => {
   for (const id of ["initialize", "resume-empty-history", "start", "steer"])
     assert.equal(row(id), "HOLD");
-  const transport = new ScriptTransport((frame, peer) => {
-    if (frame.method === "initialize") peer.result(frame, {});
-    else if (frame.method === "thread/loaded/list") peer.result(frame, { data: [THREAD] });
-    else if (frame.method === "thread/resume")
-      peer.result(frame, { thread: { id: THREAD, status: { type: "idle" }, turns: [] } });
-    else if (frame.method === "turn/start")
-      peer.result(frame, { turn: { id: TURN, status: "inProgress" } });
-    else if (frame.method === "turn/steer") peer.result(frame, { turnId: TURN });
-  });
-  const connector = await CodexAppServerConnector.connect({
-    compatibility: { endpointGeneration: "endpoint-fixture-1" },
-    now: () => new Date("2040-01-01T00:00:00.000Z"),
-    route: { endpointGeneration: "endpoint-fixture-1", threadId: THREAD },
-    transport,
-  });
-  assert.deepEqual(normalizeFrames(transport.sent.slice(0, 2)), manifest.wireGolden.initialize);
-  await connector.observeLoadedThread(connector.guard());
-  await connector.resumeThread(connector.guard());
-  await connector.submitMessage(connector.guard(), {
-    deadlineAt: DEADLINE,
-    messageId: "message-fixture-1",
-    text: "synthetic body",
-  });
-  const resumes = transport.sent.filter(({ method }) => method === "thread/resume");
-  assert.ok(resumes.length > 0);
-  for (const resume of resumes)
-    assert.deepEqual(normalizeFrames([resume])[0]?.params, manifest.wireGolden.resume.params);
-  assert.deepEqual(normalizeFrames([transport.sent.find(({ method }) => method === "turn/start")!])[0]?.params,
-    manifest.wireGolden.start.params);
-  const steered = await connector.submitMessage(connector.guard(), {
-    deadlineAt: DEADLINE,
-    messageId: "message-fixture-2",
-    steer: true,
-    text: "synthetic steer",
-  });
-  assert.equal(steered.disposition, "steered");
-  assert.deepEqual(normalizeFrames([transport.sent.find(({ method }) => method === "turn/steer")!])[0]?.params,
-    manifest.wireGolden.steer.params);
-  await connector.close();
-});
-
-test("stateless transport is inert until execute and opens one exact connection per operation", async () => {
   const current = statelessFixture(["success", "fast"]);
   assert.deepEqual(current.counts(), { closeCount: 0, connectCount: 0, factoryCount: 0, semanticWrites: 0 });
-  const evidence: unknown[] = [];
+  const evidence: StatelessCodexWriteEvidence[] = [];
   for (let index = 0; index < 2; index += 1) {
     const result = await current.operation.execute(input(async (value) => {
       evidence.push(value);
@@ -345,6 +327,16 @@ test("stateless transport is inert until execute and opens one exact connection 
   assert.equal(evidence.length, 2);
   assert.equal(JSON.stringify(evidence).includes(THREAD), false);
   assert.equal(JSON.stringify(evidence).includes("synthetic body"), false);
+  const sentStart = current.frames[0]?.find(({ method }) => method === "turn/start");
+  assert.notEqual(sentStart, undefined);
+  const startFrame = JSON.stringify(sentStart);
+  assert.deepEqual(evidence[0], {
+    attemptId: "attempt-fixture-1",
+    bodyBytes: Buffer.byteLength("synthetic body"),
+    frameBytes: Buffer.byteLength(startFrame),
+    kind: "codex_turn_start",
+    sha256: createHash("sha256").update(startFrame).digest("hex"),
+  });
   for (const frames of current.frames) {
     assert.deepEqual(frames[0], {
       id: 1, method: "initialize", params: {
@@ -362,6 +354,348 @@ test("stateless transport is inert until execute and opens one exact connection 
     assert.deepEqual(normalized.find(({ method }) => method === "thread/resume"), manifest.wireGolden.resume);
     assert.deepEqual(normalized.find(({ method }) => method === "turn/start"), manifest.wireGolden.start);
     assert.equal(frames.some(({ method }) => ["thread/loaded/list", "thread/unsubscribe", "turn/interrupt"].includes(String(method))), false);
+  }
+});
+
+test("correlated acceptance is reported before terminal and callback loss is unconfirmed", async () => {
+  const order: string[] = [];
+  const current = statelessFixture(["fast"]);
+  let closedHandle: StatelessCodexActiveSteerResult | undefined;
+  const result = await current.operation.execute(input(
+    async () => true,
+    "synthetic body",
+    async (accepted) => {
+      assert.deepEqual({ attemptId: accepted.attemptId, turnId: accepted.turnId },
+        { attemptId: "attempt-fixture-1", turnId: TURN });
+      order.push("accepted");
+      closedHandle = await accepted.steer({
+        attemptId: "fast-terminal-steer", authorizeWrite: async () => true,
+        deadlineAt: DEADLINE, text: "synthetic steer",
+      });
+    },
+  ));
+  order.push("terminal");
+  assert.deepEqual(order, ["accepted", "terminal"]);
+  assertState(result, "terminal", "terminal");
+  assertState(closedHandle!, "clean", "deferred");
+  assert.equal(current.counts().semanticWrites, 1);
+
+  const rejected = statelessFixture(["fast"]);
+  const unconfirmed = await rejected.operation.execute(input(
+    async () => true,
+    "synthetic body",
+    async () => { throw new Error("durable acceptance callback failed"); },
+  ));
+  assertState(unconfirmed, "accepted", "unconfirmed");
+  assert.equal("safeErrorCode" in unconfirmed ? unconfirmed.safeErrorCode : undefined,
+    "ACCEPTANCE_UNCONFIRMED");
+  assert.equal(rejected.counts().semanticWrites, 1);
+
+  const unresolved = statelessFixture(["accepted-timeout"], false, { turnTimeoutMs: 100 });
+  let premature: StatelessCodexActiveSteerResult | undefined;
+  let prematureAuthorizations = 0;
+  let handle: StatelessCodexAcceptedOperation | undefined;
+  let callbackDone!: () => void;
+  const committed = new Promise<void>((resolve) => { callbackDone = resolve; });
+  const pending = unresolved.operation.execute(input(async () => true, "synthetic body", async (accepted) => {
+    handle = accepted;
+    premature = await accepted.steer({
+      attemptId: "premature-steer",
+      authorizeWrite: async () => { prematureAuthorizations += 1; return true; },
+      deadlineAt: DEADLINE, text: "synthetic steer",
+    });
+    callbackDone();
+  }));
+  await committed;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assertState(premature!, "clean", "deferred");
+  assert.equal(prematureAuthorizations, 0);
+  const afterCommit = await handle!.steer({
+    attemptId: "committed-steer", authorizeWrite: async () => true,
+    deadlineAt: DEADLINE, text: "synthetic steer",
+  });
+  assertState(afterCommit, "terminal", "terminal");
+  emitTerminal(unresolved.transports[0]!);
+  assertState(await pending, "terminal", "terminal");
+  assert.equal(unresolved.frames[0]?.filter(({ method }) => method === "turn/steer").length, 1);
+  assert.equal(unresolved.counts().semanticWrites, 2);
+});
+
+test("accepted timeout or close is unconfirmed and never replays the start", async () => {
+  for (const mode of ["accepted-timeout", "accepted-close"] as const) {
+    const current = statelessFixture([mode]);
+    let accepted = 0;
+    const result = await current.operation.execute(input(
+      async () => true,
+      "synthetic body",
+      async () => { accepted += 1; },
+    ));
+    assertState(result, "accepted", "unconfirmed");
+    assert.equal(accepted, 1);
+    assert.equal(current.counts().semanticWrites, 1);
+    assert.equal(current.frames[0]?.filter(({ method }) => method === "turn/start").length, 1);
+  }
+});
+
+test("operation abort maps by phase and never leaks across executions", async () => {
+  const isolated = statelessFixture(["success"]);
+  const pre = new AbortController();
+  pre.abort();
+  const preResult = await isolated.operation.execute({
+    ...input(async () => { throw new Error("must not authorize"); }), signal: pre.signal,
+  });
+  assertState(preResult, "clean", "failed");
+  assertCode(preResult, "TRANSPORT_CLOSED");
+  assert.deepEqual(isolated.counts(), { closeCount: 0, connectCount: 0, factoryCount: 0, semanticWrites: 0 });
+  const independent = await isolated.operation.execute(input(async () => true));
+  assertState(independent, "terminal", "terminal");
+  assert.deepEqual(isolated.counts(), { closeCount: 1, connectCount: 1, factoryCount: 1, semanticWrites: 1 });
+
+  for (const disposition of ["false", "true", "throw"] as const) {
+    const controller = new AbortController();
+    const current = statelessFixture(["success"]);
+    let observed!: () => void;
+    let settle!: (value: boolean) => void;
+    let reject!: (error: Error) => void;
+    const started = new Promise<void>((resolve) => { observed = resolve; });
+    const permit = new Promise<boolean>((resolve, fail) => { settle = resolve; reject = fail; });
+    const execution = current.operation.execute({
+      ...input(() => { observed(); return permit; }), signal: controller.signal,
+    });
+    await started;
+    controller.abort();
+    if (disposition === "throw") reject(new Error("authorization uncertain"));
+    else settle(disposition === "true");
+    const result = await execution;
+    assertState(result, disposition === "false" ? "clean" : "armed",
+      disposition === "false" ? "failed" : "ambiguous");
+    assertCode(result, disposition === "throw" ? "WRITE_AUTHORIZATION_UNCERTAIN" : "TRANSPORT_CLOSED");
+    assert.equal(current.counts().semanticWrites, 0);
+  }
+
+  const afterSendAbort = new AbortController();
+  const afterSend = statelessFixture(["timeout"], false, {}, () => afterSendAbort.abort());
+  const armed = await afterSend.operation.execute({
+    ...input(async () => true), signal: afterSendAbort.signal,
+  });
+  assertState(armed, "armed", "ambiguous");
+  assertCode(armed, "TRANSPORT_CLOSED");
+  assert.equal(afterSend.counts().semanticWrites, 1);
+
+  const afterAcceptanceAbort = new AbortController();
+  const afterAcceptance = statelessFixture(["accepted-timeout"], false, { turnTimeoutMs: 100 });
+  let committed!: () => void;
+  const accepted = new Promise<void>((resolve) => { committed = resolve; });
+  const acceptedExecution = afterAcceptance.operation.execute({
+    ...input(async () => true, "synthetic body", async () => { committed(); }),
+    signal: afterAcceptanceAbort.signal,
+  });
+  await accepted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  afterAcceptanceAbort.abort();
+  const unconfirmed = await acceptedExecution;
+  assertState(unconfirmed, "accepted", "unconfirmed");
+  assertCode(unconfirmed, "TRANSPORT_CLOSED");
+
+  const afterTerminalAbort = new AbortController();
+  const afterTerminal = statelessFixture(["fast"]);
+  const terminal = await afterTerminal.operation.execute({
+    ...input(async () => true, "synthetic body", async () => { afterTerminalAbort.abort(); }),
+    signal: afterTerminalAbort.signal,
+  });
+  assertState(terminal, "terminal", "terminal");
+  assert.equal(afterTerminal.counts().semanticWrites, 1);
+});
+
+test("abort closes setup that resolves late without connecting or initializing", async () => {
+  const promptly = async <T>(pending: Promise<T>, label: string): Promise<T> =>
+    await Promise.race([pending, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`setup race stalled: ${label}`)), 100))]);
+  for (const boundary of ["factory", "connect"] as const) {
+    const controller = new AbortController();
+    const frames: Frame[] = [];
+    let authorizations = 0;
+    let connectCount = 0;
+    let factoryCloseCount = 0;
+    let ownedCloseCount = 0;
+    let cleanupConfirmed = false;
+    let reportFactoryClosed!: () => void;
+    let reportOwnedClosed!: () => void;
+    const factoryClosed = new Promise<void>((resolve) => { reportFactoryClosed = resolve; });
+    const ownedClosed = new Promise<void>((resolve) => { reportOwnedClosed = resolve; });
+    let resolveOwned!: (owned: ScriptTransport & { cleanupConfirmed: boolean }) => void;
+    const pendingOwned = new Promise<ScriptTransport & { cleanupConfirmed: boolean }>(
+      (resolve) => { resolveOwned = resolve; },
+    );
+    const wire = Object.assign(new ScriptTransport((frame) => { frames.push(frame); }),
+      { cleanupConfirmed: false });
+    const rawClose = wire.close.bind(wire);
+    wire.close = async () => {
+      if (!wire.closed) ownedCloseCount += 1;
+      await rawClose();
+      cleanupConfirmed = true;
+      wire.cleanupConfirmed = true;
+      reportOwnedClosed();
+    };
+    const factory = {
+      appServerVersion: "0.1.0", endpointGeneration: "endpoint-delayed",
+      hostId: "this-mac", protocol: "codex-app-server" as const, protocolVersion: "0.1.0",
+      close: async () => { factoryCloseCount += 1; reportFactoryClosed(); },
+      connectTransport: async () => { connectCount += 1; return pendingOwned; },
+    };
+    let resolveFactory!: (value: typeof factory) => void;
+    let setupStarted!: () => void;
+    const started = new Promise<void>((resolve) => { setupStarted = resolve; });
+    const pendingFactory = new Promise<typeof factory>((resolve) => { resolveFactory = resolve; });
+    const operation = createStatelessCodexOperationTransport({ now: () => new Date(NOW) }, {
+      createFactory: async () => {
+        setupStarted();
+        return boundary === "factory" ? pendingFactory : factory;
+      },
+    });
+    const execution = operation.execute({
+      ...input(async () => { authorizations += 1; return true; }), signal: controller.signal,
+    });
+    await started;
+    if (boundary === "connect") {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(connectCount, 1);
+    }
+    controller.abort();
+    const result = await promptly(execution, `${boundary} abort`);
+    assertState(result, "clean", "failed");
+    assertCode(result, "TRANSPORT_CLOSED");
+    assert.equal(result.cleanupConfirmed, false);
+    if (boundary === "factory") {
+      resolveFactory(factory);
+      await promptly(factoryClosed, "late factory close");
+    } else {
+      resolveOwned(wire);
+      await promptly(Promise.all([factoryClosed, ownedClosed]), "late owned close");
+    }
+    assert.equal(factoryCloseCount, 1);
+    assert.equal(connectCount, boundary === "factory" ? 0 : 1);
+    assert.equal(ownedCloseCount, boundary === "factory" ? 0 : 1);
+    assert.equal(cleanupConfirmed, boundary === "connect");
+    assert.equal(authorizations, 0);
+    assert.deepEqual(frames, []);
+  }
+});
+
+test("accepted handle keeps steering on one connector with exact cap and key", async () => {
+  const current = statelessFixture(["accepted-timeout"], false, { turnTimeoutMs: 100 });
+  const results: StatelessCodexActiveSteerResult[] = [];
+  const evidence: StatelessCodexWriteEvidence[] = [];
+  let publish!: (accepted: StatelessCodexAcceptedOperation) => void;
+  const published = new Promise<StatelessCodexAcceptedOperation>((resolve) => { publish = resolve; });
+  const execution = current.operation.execute(input(
+    async (value) => { evidence.push(value); return true; },
+    "synthetic body",
+    async (accepted) => { publish(accepted); },
+  ));
+  const handle = await published;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  for (const index of [1, 1, 2, 3, 4]) {
+    results.push(await handle.steer({
+      attemptId: `steer-attempt-${index}`,
+      authorizeWrite: async (value) => { evidence.push(value); return true; },
+      deadlineAt: DEADLINE, text: "synthetic steer",
+    }));
+  }
+  emitTerminal(current.transports[0]!);
+  const terminal = await execution;
+  assertState(terminal, "terminal", "terminal");
+  assert.deepEqual(results.map(({ phase, state }) => ({ phase, state })), [
+    { phase: "terminal", state: "terminal" },
+    { phase: "clean", state: "failed" },
+    { phase: "terminal", state: "terminal" },
+    { phase: "terminal", state: "terminal" },
+    { phase: "clean", state: "deferred" },
+  ]);
+  assert.deepEqual(current.counts(), { closeCount: 1, connectCount: 1, factoryCount: 1, semanticWrites: 4 });
+  assert.deepEqual(evidence.map(({ attemptId, kind }) => ({ attemptId, kind })), [
+    { attemptId: "attempt-fixture-1", kind: "codex_turn_start" },
+    { attemptId: "steer-attempt-1", kind: "codex_turn_steer" },
+    { attemptId: "steer-attempt-2", kind: "codex_turn_steer" },
+    { attemptId: "steer-attempt-3", kind: "codex_turn_steer" },
+  ]);
+  const steerFrames = current.frames[0]?.filter(({ method }) => method === "turn/steer") ?? [];
+  assert.equal(steerFrames.length, 3);
+  for (const [index, frame] of steerFrames.entries()) {
+    assert.deepEqual(normalizeFrames([frame])[0]?.params, manifest.wireGolden.steer.params);
+    const frameText = JSON.stringify(frame);
+    assert.deepEqual(evidence[index + 1], {
+      attemptId: `steer-attempt-${index + 1}`,
+      bodyBytes: Buffer.byteLength("synthetic steer"),
+      frameBytes: Buffer.byteLength(frameText),
+      kind: "codex_turn_steer",
+      sha256: createHash("sha256").update(frameText).digest("hex"),
+    });
+  }
+  const late = await handle.steer({
+    attemptId: "steer-after-close", authorizeWrite: async () => true,
+    deadlineAt: DEADLINE, text: "synthetic steer",
+  });
+  assertState(late, "clean", "deferred");
+  assert.equal(current.counts().semanticWrites, 4);
+});
+
+test("same-connector steer RPC rejection is ambiguous and never replayed", async () => {
+  const current = statelessFixture(["steer-reject"], false, { turnTimeoutMs: 100 });
+  let publish!: (accepted: StatelessCodexAcceptedOperation) => void;
+  const published = new Promise<StatelessCodexAcceptedOperation>((resolve) => { publish = resolve; });
+  const execution = current.operation.execute(input(async () => true, "synthetic body",
+    async (accepted) => { publish(accepted); }));
+  const accepted = await published;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const steerResult = await accepted.steer({
+    attemptId: "steer-rejected", authorizeWrite: async () => true,
+    deadlineAt: DEADLINE, text: "synthetic steer",
+  });
+  emitTerminal(current.transports[0]!);
+  const main = await execution;
+  assertState(main, "terminal", "terminal");
+  assertState(steerResult!, "armed", "ambiguous");
+  assert.equal(current.counts().semanticWrites, 2);
+  assert.equal(current.frames[0]?.filter(({ method }) => method === "turn/steer").length, 1);
+});
+
+test("paused steer authorization is fenced by terminal, approval, status, close, or protocol drift", async () => {
+  const disruptions: Array<(wire: ScriptTransport) => void> = [
+    (wire) => wire.emit({ method: "turn/completed", params: {
+      threadId: THREAD, turn: { id: TURN, status: "completed" },
+    }}),
+    (wire) => wire.emit({ id: "approval-steer", method: "item/commandExecution/requestApproval",
+      params: { threadId: THREAD, turnId: TURN } }),
+    (wire) => wire.emit({ method: "thread/status/changed", params: {
+      threadId: THREAD, status: { activeFlags: ["waitingOnApproval"], type: "active" },
+    }}),
+    (wire) => { void wire.close(); },
+    (wire) => wire.emit({ method: "turn/completed", params: { threadId: THREAD, turn: null } }),
+  ];
+  for (const disrupt of disruptions) {
+    const current = statelessFixture(["accepted-timeout"], false, { turnTimeoutMs: 100 });
+    let publish!: (accepted: StatelessCodexAcceptedOperation) => void;
+    const published = new Promise<StatelessCodexAcceptedOperation>((resolve) => { publish = resolve; });
+    const main = current.operation.execute(input(async () => true, "synthetic body",
+      async (accepted) => { publish(accepted); }));
+    const accepted = await published;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    let release!: (value: boolean) => void;
+    const permit = new Promise<boolean>((resolve) => { release = resolve; });
+    const pending = accepted.steer({
+      attemptId: "paused-steer", authorizeWrite: () => permit,
+      deadlineAt: DEADLINE, text: "synthetic steer",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    disrupt(current.transports[0]!);
+    release(true);
+    const side = await pending;
+    const result = await main;
+    assertState(side, "armed", "ambiguous");
+    assert.equal(current.frames[0]?.filter(({ method }) => method === "turn/steer").length, 0);
+    assert.equal(current.counts().semanticWrites, 1);
+    assert.ok(result.phase === "terminal" || result.phase === "accepted");
   }
 });
 
@@ -465,20 +799,18 @@ test("a reserved authorization is fenced by later busy approval or protocol evid
   }
 });
 
-test("every post-arm loss is ambiguous exactly once for start and steer", async () => {
-  for (const [mode, kind] of [
-    ["sync-loss", "start"], ["async-loss", "start"], ["close", "start"],
-    ["timeout", "start"], ["malformed", "start"], ["wrong", "start"],
-    ["steer-loss", "steer"],
+test("every post-arm start loss is ambiguous exactly once", async () => {
+  for (const mode of [
+    "sync-loss", "async-loss", "close", "timeout", "malformed", "wrong",
   ] as const) {
     const current = statelessFixture([mode]);
-    const result = await current.operation.execute(input(async () => true, kind));
+    const result = await current.operation.execute(input(async () => true));
     assertState(result, "armed", "ambiguous");
-    assert.equal(current.counts().semanticWrites, 1, `${mode}/${kind}`);
+    assert.equal(current.counts().semanticWrites, 1, mode);
     assert.equal(current.frames[0]?.filter(({ method }) =>
-      method === (kind === "start" ? "turn/start" : "turn/steer")).length, 1);
+      method === "turn/start").length, 1);
     assertGolden(
-      mode === "wrong" ? "wrong-correlation" : kind === "steer" ? "armed-steer-loss" : "armed-start-loss",
+      mode === "wrong" ? "wrong-correlation" : "armed-start-loss",
       result,
       1,
     );
@@ -497,19 +829,6 @@ test("exact start terminals, steer, reply bound, and cleanup preserve first trut
       assert.equal("replyCode" in result ? result.replyCode : undefined, null);
     }
   }
-  const steer = statelessFixture(["steer"]);
-  const steered = await steer.operation.execute(input(async () => true, "steer"));
-  assertState(steered, "terminal", "terminal");
-  assert.deepEqual(steer.frames[0]?.find(({ method }) => method === "turn/steer")?.params, {
-    expectedTurnId: TURN,
-    input: [{ text: "synthetic body", type: "text" }],
-    threadId: THREAD,
-  });
-  assert.deepEqual(
-    normalizeFrames(steer.frames[0] ?? []).find(({ method }) => method === "turn/steer"),
-    manifest.wireGolden.steer,
-  );
-
   const bounded = statelessFixture(["large-reply"]);
   const oversized = await bounded.operation.execute(input(async () => true));
   assertState(oversized, "terminal", "terminal");
@@ -541,7 +860,7 @@ test("input and serialized frame bounds fail before authorization", async () => 
     const result = await current.operation.execute(input(async () => {
       authorizations += 1;
       return true;
-    }, "start", text));
+    }, text));
     assert.equal(result.phase, "clean");
     assert.equal(authorizations, 0);
     assert.equal(current.counts().semanticWrites, 0);

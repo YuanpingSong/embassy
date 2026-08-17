@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   constants as fsConstants,
@@ -18,10 +18,6 @@ import { TextDecoder } from "node:util";
 
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
-import {
-  createCodexRegistrationGeneration,
-  isCodexRegistrationGeneration,
-} from "./codex-registration-generation.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import { isCompatibilityVersionEvidence } from "./compatibility.js";
@@ -42,6 +38,7 @@ const EMBASSY_SOURCE_NAME_PATTERN = /^(?:codex-|dsh-|grok-)/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const PRIVATE_ARTIFACT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 const CLAUDE_PEER_NOTICE_COPY = {
   en: {
@@ -121,22 +118,6 @@ export type ClaudePeerDiscovery = {
   parseableRecords: number;
 };
 
-export type ClaudePeerTransportStatus =
-  | "connecting"
-  | "write_started"
-  | "transport_written"
-  | "ambiguous"
-  | "not_written";
-
-export type ClaudePeerReceiptStatus =
-  | "held"
-  /** Native `delivered`: approval released the frame to Claude's queue. */
-  | "released"
-  | "denied"
-  | "expired"
-  | "unconfirmed"
-  | "ambiguous";
-
 export type ClaudePeerDeliveryDiagnostic = {
   /** Stable, non-sensitive gateway code rendered into Claude's context. */
   code: string;
@@ -145,7 +126,6 @@ export type ClaudePeerDeliveryDiagnostic = {
 export const claudePeerInboundStallReasons = [
   "ROUTE_BUSY",
   "ROUTE_UNAVAILABLE",
-  "CODEX_ROUTE_STALE",
   "AWAITING_EXTERNAL_APPROVAL",
 ] as const;
 export type ClaudePeerInboundStallReason =
@@ -159,17 +139,6 @@ export type ClaudePeerInboundProgress = {
 
 export type ClaudePeerAcknowledgmentResult = {
   transportStatus: "transport_written" | "suppressed";
-};
-
-export type ClaudePeerTransportEvent = {
-  messageId: string;
-  status: ClaudePeerTransportStatus;
-};
-
-export type ClaudePeerReceiptEvent = {
-  messageId: string;
-  status: ClaudePeerReceiptStatus;
-  trust: "untrusted_same_uid_peer";
 };
 
 export type ClaudePeerInboundMessage = {
@@ -192,8 +161,6 @@ export type ClaudePeerProtocolNotice = {
     | "INVALID_FRAME"
     | "UNSUPPORTED_FRAME"
     | "UNREGISTERED_REPLY_ADDRESS"
-    | "UNKNOWN_RECEIPT"
-    | "INVALID_RECEIPT_TRANSITION"
     | "RECEIPT_LIMIT"
     | "CONNECTION_LIMIT"
     | "CONNECTION_TIMEOUT"
@@ -226,7 +193,6 @@ export type ClaudePeerAdapterOptions = {
   maxFrameBytes?: number;
   targetLeaseMs?: number;
   connectTimeoutMs?: number;
-  receiptDeadlineMs?: number;
   maxPendingReceipts?: number;
   maxConnections?: number;
   connectionIdleMs?: number;
@@ -241,49 +207,40 @@ export type ClaudePeerAdapterTestOverrides = {
   connect?: ClaudePeerConnect;
   now?: () => number;
   createId?: () => string;
-  /** Separate from protocol/message UUID generation so lifecycle tests cannot alias it. */
-  createGeneration?: () => string;
+  /** Separate from protocol/message UUID generation so artifact tests cannot alias it. */
+  createArtifactToken?: () => string;
   registryRename?: (source: string, destination: string) => Promise<void>;
   registryOperationHook?: (event: {
-    operation: "advertise" | "publish" | "status" | "unadvertise";
+    operation: "advertise" | "status" | "unadvertise";
     phase: "entered" | "exited";
     generation: string;
   }) => void | Promise<void>;
   userHome?: string;
   tempRoots?: readonly string[];
-  registryPublicationHook?: (
-    stage: "before_rename" | "after_rename",
-  ) => void | Promise<void>;
   postBindHook?: (socketPath: string) => void | Promise<void>;
 };
 
-export type ClaudePeerRegistryPublicationOutcome =
-  | "published"
-  | "not_published"
-  | "unknown";
-
 export type ClaudePeerListenerOptions = {
   onMessage: (message: ClaudePeerInboundMessage) => void | Promise<void>;
-  onReceipt?: (event: ClaudePeerReceiptEvent) => void | Promise<void>;
   onProtocolNotice?: (
     notice: ClaudePeerProtocolNotice,
   ) => void | Promise<void>;
 };
 
-export type ClaudePeerSendOptions = {
-  listener?: ClaudePeerListener;
-  /** Exact gateway message deadline as an epoch-millisecond timestamp. */
-  receiptDeadlineAt?: number;
-  onTransportStatus?: (
-    event: ClaudePeerTransportEvent,
-  ) => void | Promise<void>;
-};
-
-export type ClaudePeerSendResult = {
+export type ClaudePeerPreparedSendResult = {
   messageId: string;
   transportStatus: "transport_written";
-  receiptStatus: "pending" | "unavailable";
 };
+
+export type ClaudePeerPreparedSend = Readonly<{
+  messageId: string;
+  frameBytes: number;
+  sha256: string;
+  /** Starts the exact prepared socket operation once, without reserialization. */
+  perform: () => Promise<ClaudePeerPreparedSendResult>;
+  /** Permanently consumes this preparation without opening a socket. */
+  cancel: () => void;
+}>;
 
 type FileGeneration = {
   dev: number;
@@ -361,28 +318,6 @@ type ParsedControlFrame = {
 
 type ParsedFrame = ParsedUserFrame | ParsedControlFrame;
 
-type PendingReceipt = {
-  binding: TargetBinding;
-  state: "pending" | "held";
-  writeEvidence: "none" | "transport_written" | "transport_uncertain";
-  deadlineAt: number;
-  timer: NodeJS.Timeout;
-};
-
-function pendingReceiptDeadlineStatus(
-  pending: PendingReceipt,
-): "unconfirmed" | "ambiguous" | "expired" {
-  if (
-    pending.writeEvidence === "transport_written" ||
-    pending.state === "held"
-  ) {
-    return "unconfirmed";
-  }
-  return pending.writeEvidence === "transport_uncertain"
-    ? "ambiguous"
-    : "expired";
-}
-
 type InboundReceipt = {
   sourceSessionId: string;
   originalMessageId: string;
@@ -401,7 +336,6 @@ type AdapterLimits = {
   maxFrameBytes: number;
   targetLeaseMs: number;
   connectTimeoutMs: number;
-  receiptDeadlineMs: number;
   maxPendingReceipts: number;
   maxConnections: number;
   connectionIdleMs: number;
@@ -929,7 +863,7 @@ export class ClaudePeerAdapter {
   readonly #connect: ClaudePeerConnect;
   readonly #now: () => number;
   readonly #createId: () => string;
-  readonly #createGeneration: () => string;
+  readonly #createArtifactToken: () => string;
   readonly #locale: DashboardLocale;
   readonly #attestedClaudeCodeVersion: string;
   readonly #deliveryNotices: GatewayDeliveryNoticeMode;
@@ -942,15 +876,12 @@ export class ClaudePeerAdapter {
     | undefined;
   readonly #userHome: string;
   readonly #tempRoots: readonly string[];
-  readonly #listenerOwner = Object.freeze({});
   readonly #registryMutex = new KeyedMutex();
-  readonly #registryPublicationHook:
-    | ((stage: "before_rename" | "after_rename") => void | Promise<void>)
-    | undefined;
   readonly #postBindHook: ClaudePeerAdapterTestOverrides["postBindHook"];
   readonly #targets = new Map<string, TargetBinding>();
   readonly #workspacePolicies = new Map<string, WorkspacePolicy>();
   readonly #listeners = new Set<ClaudePeerListener>();
+  readonly #preparedSends = new Set<() => void>();
 
   constructor(
     options: ClaudePeerAdapterOptions,
@@ -1037,13 +968,6 @@ export class ClaudePeerAdapter {
         30_000,
         "connectTimeoutMs",
       ),
-      receiptDeadlineMs: configuredLimit(
-        options.receiptDeadlineMs,
-        5 * 60_000,
-        10,
-        10 * 60_000,
-        "receiptDeadlineMs",
-      ),
       maxPendingReceipts: configuredLimit(
         options.maxPendingReceipts,
         256,
@@ -1079,8 +1003,7 @@ export class ClaudePeerAdapter {
       ((socketPath) => net.createConnection({ path: socketPath }));
     this.#now = testing.now ?? Date.now;
     this.#createId = testing.createId ?? randomUUID;
-    this.#createGeneration =
-      testing.createGeneration ?? createCodexRegistrationGeneration;
+    this.#createArtifactToken = testing.createArtifactToken ?? randomUUID;
     this.#registryRename = testing.registryRename ?? rename;
     this.#registryOperationHook = testing.registryOperationHook;
     this.#userHome = assertAbsoluteConfiguredPath(
@@ -1092,7 +1015,6 @@ export class ClaudePeerAdapter {
         ...(testing.tempRoots ?? ["/tmp", "/private/tmp", os.tmpdir()]),
       ].map((root) => assertAbsoluteConfiguredPath(root, "tempRoot")),
     );
-    this.#registryPublicationHook = testing.registryPublicationHook;
     this.#postBindHook = testing.postBindHook;
   }
 
@@ -1676,19 +1598,18 @@ export class ClaudePeerAdapter {
     };
   }
 
-  async #listen(
+  async listen(
     options: ClaudePeerListenerOptions,
-    preparedGeneration?: string,
   ): Promise<ClaudePeerListener> {
     await Promise.all([
       this.#validateSessionsDirectory(),
       this.#validateRealDirectory(this.#socketDir),
     ]);
-    const generation = preparedGeneration ?? this.#createGeneration();
-    if (!isCodexRegistrationGeneration(generation)) {
+    const generation = this.#createArtifactToken();
+    if (!PRIVATE_ARTIFACT_TOKEN_PATTERN.test(generation)) {
       throw new BridgeError(
         "INVALID_CODEX_PEER_GENERATION",
-        "A native Codex listener requires one bounded opaque generation.",
+        "A native source listener requires one bounded private artifact token.",
       );
     }
     if (
@@ -1740,7 +1661,6 @@ export class ClaudePeerAdapter {
       revalidateBinding: async (binding) =>
         await this.#revalidateBinding(binding),
       options,
-      owner: this.#listenerOwner,
       generation,
       registryRename: this.#registryRename,
       ...(this.#registryOperationHook === undefined
@@ -1748,10 +1668,6 @@ export class ClaudePeerAdapter {
         : { registryOperationHook: this.#registryOperationHook }),
       runRegistryMutation: async (operation) =>
         await this.#registryMutex.run("codex-registry", operation),
-      ...(preparedGeneration === undefined ? {} : { preparedGeneration }),
-      ...(this.#registryPublicationHook === undefined
-        ? {}
-        : { registryPublicationHook: this.#registryPublicationHook }),
       postBindHook: this.#postBindHook,
       onClosed: () => this.#listeners.delete(listener),
     });
@@ -1759,30 +1675,36 @@ export class ClaudePeerAdapter {
     return listener;
   }
 
-  async listen(options: ClaudePeerListenerOptions): Promise<ClaudePeerListener> {
-    return await this.#listen(options);
-  }
-
-  async listenPrepared(
-    generation: string,
-    options: ClaudePeerListenerOptions,
-  ): Promise<ClaudePeerListener> {
-    if (!isCodexRegistrationGeneration(generation)) {
-      throw new BridgeError(
-        "INVALID_CODEX_PEER_GENERATION",
-        "A prepared native Codex listener requires one bounded opaque generation.",
-      );
-    }
-    return await this.#listen(options, generation);
-  }
-
-  async send(
+  async prepareSend(
     targetId: string,
     content: string,
-    options: ClaudePeerSendOptions = {},
-  ): Promise<ClaudePeerSendResult> {
-    // Session UUIDs survive registry rewrites, renames, and endpoint rotation.
-    // Refresh the replaceable transport coordinates before any write begins.
+    options: Readonly<{
+      deadlineAt: number;
+      /** Owned reply address only; no outbound receipt is tracked. */
+      replyListener?: ClaudePeerListener;
+    }>,
+  ): Promise<ClaudePeerPreparedSend> {
+    if (
+      !Number.isSafeInteger(options.deadlineAt) ||
+      options.deadlineAt < 0
+    ) {
+      throw new BridgeError(
+        "INVALID_PEER_MESSAGE_DEADLINE",
+        "The Claude peer message deadline must be an epoch-millisecond timestamp.",
+      );
+    }
+    if (options.deadlineAt <= this.#now()) {
+      throw new BridgeError(
+        "CLAUDE_PEER_MESSAGE_EXPIRED",
+        "The Claude peer message deadline elapsed before preparation.",
+        true,
+      );
+    }
+
+    // Preparation positively resolves every replaceable coordinate and exact
+    // workspace generation. The resulting operation owns only immutable wire
+    // bytes and the already-validated socket path; it performs no connection
+    // or write until its one-shot perform function is invoked.
     await this.discover();
     const target = this.#targets.get(targetId);
     if (target === undefined) {
@@ -1835,6 +1757,7 @@ export class ClaudePeerAdapter {
       this.#workspacePolicies.delete(targetId);
       throw error;
     }
+
     const messageId = this.#createId();
     if (!UUID_PATTERN.test(messageId)) {
       throw new BridgeError(
@@ -1842,8 +1765,10 @@ export class ClaudePeerAdapter {
         "The configured ID source did not produce a UUID.",
       );
     }
-    const listener = options.listener;
-    if (listener !== undefined && !this.#listeners.has(listener)) {
+    if (
+      options.replyListener !== undefined &&
+      !this.#listeners.has(options.replyListener)
+    ) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_FOREIGN",
         "The reply listener is not owned by this adapter.",
@@ -1852,71 +1777,54 @@ export class ClaudePeerAdapter {
     const frame = encodeClaudePeerUserFrame({
       messageId,
       content,
-      ...(listener === undefined ? {} : { from: listener.address }),
+      ...(options.replyListener === undefined
+        ? {}
+        : { from: options.replyListener.address }),
       maxFrameBytes: this.#limits.maxFrameBytes,
     });
-    if (
-      options.receiptDeadlineAt !== undefined &&
-      (!Number.isSafeInteger(options.receiptDeadlineAt) ||
-        options.receiptDeadlineAt < 0)
-    ) {
-      throw new BridgeError(
-        "INVALID_PEER_RECEIPT_DEADLINE",
-        "The Claude peer receipt deadline must be an epoch-millisecond timestamp.",
-      );
-    }
-    if (
-      options.receiptDeadlineAt !== undefined &&
-      options.receiptDeadlineAt <= this.#now()
-    ) {
-      throw new BridgeError(
-        "CLAUDE_PEER_MESSAGE_EXPIRED",
-        "The Claude peer message deadline elapsed before any socket write.",
-        true,
-      );
-    }
-    if (listener !== undefined) {
-      listener.track(messageId, binding, options.receiptDeadlineAt);
-    }
+    const socketPath = binding.record.messagingSocketPath;
+    let state: "prepared" | "performed" | "cancelled" = "prepared";
+    const cancel = (): void => {
+      if (state !== "prepared") return;
+      state = "cancelled";
+      this.#preparedSends.delete(cancel);
+    };
+    this.#preparedSends.add(cancel);
 
-    await invokeObservationalHook(options.onTransportStatus, {
-      messageId,
-      status: "connecting",
-    });
-    if (
-      options.receiptDeadlineAt !== undefined &&
-      options.receiptDeadlineAt <= this.#now()
-    ) {
-      listener?.untrack(messageId);
-      await invokeObservationalHook(options.onTransportStatus, {
-        messageId,
-        status: "not_written",
-      });
-      throw new BridgeError(
-        "CLAUDE_PEER_MESSAGE_EXPIRED",
-        "The Claude peer message deadline elapsed before any socket write.",
-        true,
-      );
-    }
-    let written = false;
-    let writeStarted = false;
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const socket = this.#connect(binding.record.messagingSocketPath);
+    const perform = (): Promise<ClaudePeerPreparedSendResult> => {
+      if (state !== "prepared") {
+        return Promise.reject(
+          new BridgeError(
+            "CLAUDE_PEER_PREPARATION_CONSUMED",
+            "The prepared Claude peer write was already performed or cancelled.",
+          ),
+        );
+      }
+      state = "performed";
+      this.#preparedSends.delete(cancel);
+      if (options.deadlineAt <= this.#now()) {
+        return Promise.reject(
+          new BridgeError(
+            "CLAUDE_PEER_MESSAGE_EXPIRED",
+            "The Claude peer message deadline elapsed before any socket write.",
+            true,
+          ),
+        );
+      }
+
+      let writeStarted = false;
+      const write = new Promise<void>((resolve, reject) => {
+        const socket = this.#connect(socketPath);
         const timeoutMs = Math.max(
           1,
           Math.min(
             this.#limits.connectTimeoutMs,
-            options.receiptDeadlineAt === undefined
-              ? this.#limits.connectTimeoutMs
-              : options.receiptDeadlineAt - this.#now(),
+            options.deadlineAt - this.#now(),
           ),
         );
         const timer = setTimeout(() => {
           socket.destroy();
-          const deadlineElapsed =
-            options.receiptDeadlineAt !== undefined &&
-            this.#now() >= options.receiptDeadlineAt;
+          const deadlineElapsed = this.#now() >= options.deadlineAt;
           reject(
             new BridgeError(
               writeStarted
@@ -1939,10 +1847,7 @@ export class ClaudePeerAdapter {
           reject(error);
         });
         socket.once("connect", () => {
-          if (
-            options.receiptDeadlineAt !== undefined &&
-            options.receiptDeadlineAt <= this.#now()
-          ) {
+          if (options.deadlineAt <= this.#now()) {
             clearTimeout(timer);
             socket.destroy();
             reject(
@@ -1955,17 +1860,8 @@ export class ClaudePeerAdapter {
             return;
           }
           writeStarted = true;
-          listener?.recordTransportOutcome(
-            messageId,
-            "transport_uncertain",
-          );
-          void invokeObservationalHook(options.onTransportStatus, {
-            messageId,
-            status: "write_started",
-          });
           try {
             socket.end(frame, () => {
-              written = true;
               clearTimeout(timer);
               socket.destroy();
               resolve();
@@ -1977,54 +1873,34 @@ export class ClaudePeerAdapter {
           }
         });
       });
-    } catch (error) {
-      if (listener !== undefined) {
-        if (writeStarted) {
-          listener.recordTransportOutcome(messageId, "transport_uncertain");
-        } else {
-          listener.untrack(messageId);
-        }
-      }
-      await invokeObservationalHook(
-        options.onTransportStatus,
-        {
-          messageId,
-          status: writeStarted ? "ambiguous" : "not_written",
+      return write.then(
+        () => ({ messageId, transportStatus: "transport_written" as const }),
+        (error: unknown) => {
+          if (error instanceof BridgeError) throw error;
+          throw new BridgeError(
+            writeStarted
+              ? "CLAUDE_PEER_WRITE_AMBIGUOUS"
+              : "CLAUDE_PEER_WRITE_FAILED",
+            writeStarted
+              ? "The Claude peer write began but its outcome is ambiguous; do not retry automatically."
+              : "The Claude peer message was not confirmed written.",
+            !writeStarted,
+          );
         },
       );
-      if (error instanceof BridgeError) throw error;
-      if (writeStarted) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WRITE_AMBIGUOUS",
-          "The Claude peer write began but its outcome is ambiguous; do not retry automatically.",
-        );
-      }
-      throw new BridgeError(
-        "CLAUDE_PEER_WRITE_FAILED",
-        "The Claude peer message was not confirmed written.",
-        true,
-      );
-    }
-    if (!written) {
-      listener?.recordTransportOutcome(messageId, "transport_uncertain");
-      throw new BridgeError(
-        "CLAUDE_PEER_WRITE_AMBIGUOUS",
-        "The Claude peer write outcome is ambiguous; do not retry automatically.",
-      );
-    }
-    listener?.recordTransportOutcome(messageId, "transport_written");
-    await invokeObservationalHook(options.onTransportStatus, {
-      messageId,
-      status: "transport_written",
-    });
-    return {
-      messageId,
-      transportStatus: "transport_written",
-      receiptStatus: listener === undefined ? "unavailable" : "pending",
     };
+
+    return Object.freeze({
+      messageId,
+      frameBytes: frame.length,
+      sha256: createHash("sha256").update(frame).digest("hex"),
+      perform,
+      cancel,
+    });
   }
 
   async close(): Promise<void> {
+    for (const cancel of [...this.#preparedSends]) cancel();
     const results = await Promise.allSettled(
       [...this.#listeners].map(async (listener) => listener.close()),
     );
@@ -2052,15 +1928,10 @@ type ListenerCreateOptions = {
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
   revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   options: ClaudePeerListenerOptions;
-  owner: object;
   generation: string;
   registryRename: (source: string, destination: string) => Promise<void>;
   registryOperationHook?: ClaudePeerAdapterTestOverrides["registryOperationHook"];
   runRegistryMutation: <T>(operation: () => Promise<T>) => Promise<T>;
-  preparedGeneration?: string;
-  registryPublicationHook?: (
-    stage: "before_rename" | "after_rename",
-  ) => void | Promise<void>;
   postBindHook: ClaudePeerAdapterTestOverrides["postBindHook"];
   onClosed: () => void;
 };
@@ -2105,7 +1976,6 @@ export class ClaudePeerListener {
   ) => Promise<TargetBinding>;
   readonly #revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   readonly #options: ClaudePeerListenerOptions;
-  readonly #owner: object;
   readonly #registryRename: (
     source: string,
     destination: string,
@@ -2116,13 +1986,8 @@ export class ClaudePeerListener {
   readonly #runRegistryMutation: <T>(
     operation: () => Promise<T>,
   ) => Promise<T>;
-  readonly #preparedGeneration: string | undefined;
-  readonly #registryPublicationHook:
-    | ((stage: "before_rename" | "after_rename") => void | Promise<void>)
-    | undefined;
   readonly #onClosed: () => void;
   readonly #connections = new Set<Socket>();
-  readonly #pending = new Map<string, PendingReceipt>();
   readonly #inboundReceipts = new Map<string, InboundReceipt>();
   // One bounded exception slot owns an overflow message only long enough to
   // return its terminal capacity rejection. It never forwards content to the
@@ -2134,11 +1999,6 @@ export class ClaudePeerListener {
   readonly #inboundQuiesceWaiters = new Set<() => void>();
   #advertisedRecord: AdvertisedCodexRegistryRecord | undefined;
   #advertisedGeneration: FileGeneration | undefined;
-  #preparedRecord: AdvertisedCodexRegistryRecord | undefined;
-  #publicationAttempted = false;
-  #publicationSourceGeneration: FileGeneration | undefined;
-  #publicationConfirmed = false;
-  #activationGranted = false;
   #closing = false;
   #closed = false;
   #closeOperation: Promise<void> | undefined;
@@ -2169,15 +2029,10 @@ export class ClaudePeerListener {
     this.#resolveSessionBinding = options.resolveSessionBinding;
     this.#revalidateBinding = options.revalidateBinding;
     this.#options = options.options;
-    this.#owner = options.owner;
     this.#registryRename = options.registryRename;
     this.#registryOperationHook = options.registryOperationHook;
     this.#runRegistryMutation = options.runRegistryMutation;
-    this.#preparedGeneration = options.preparedGeneration;
-    this.#registryPublicationHook = options.registryPublicationHook;
     this.#onClosed = options.onClosed;
-    this.#inboundQuiesced = options.preparedGeneration !== undefined;
-    this.#activationGranted = options.preparedGeneration === undefined;
   }
 
   static async create(
@@ -2185,12 +2040,7 @@ export class ClaudePeerListener {
   ): Promise<ClaudePeerListener> {
     // One gateway process owns one native peer socket. It may advertise one
     // registered Codex task through Claude's native session registry.
-    const socketPath = path.join(
-      options.socketDir,
-      options.preparedGeneration === undefined
-        ? `${process.pid}.sock`
-        : `${process.pid}.${options.preparedGeneration}.sock`,
-    );
+    const socketPath = path.join(options.socketDir, `${process.pid}.sock`);
     try {
       await lstat(socketPath);
       throw new BridgeError(
@@ -2348,23 +2198,6 @@ export class ClaudePeerListener {
 
   #serializeRecord(record: AdvertisedCodexRegistryRecord): string {
     return `${JSON.stringify(record)}\n`;
-  }
-
-  #recordBelongsToThisListener(
-    record: AdvertisedCodexRegistryRecord,
-  ): boolean {
-    return (
-      record.embassyAdvertisementVersion === EMBASSY_ADVERTISEMENT_VERSION &&
-      record.pid === process.pid &&
-      UUID_PATTERN.test(record.sessionId) &&
-      record.messagingSocketPath === this.#socketPath &&
-      record.version === this.#attestedClaudeCodeVersion &&
-      record.peerProtocol === CLAUDE_PEER_COMPATIBILITY.peerProtocol &&
-      record.kind === "interactive" &&
-      record.entrypoint === "cli" &&
-      EMBASSY_SOURCE_NAME_PATTERN.test(record.name) &&
-      ALIAS_PATTERN.test(record.name)
-    );
   }
 
   async #assertRegistryDirectory(): Promise<void> {
@@ -2626,7 +2459,7 @@ export class ClaudePeerListener {
   }
 
   async #mutateRegistry<T>(
-    operation: "advertise" | "publish" | "status" | "unadvertise",
+    operation: "advertise" | "status" | "unadvertise",
     mutation: () => Promise<T>,
   ): Promise<T> {
     return await this.#runRegistryMutation(async () => {
@@ -2653,12 +2486,6 @@ export class ClaudePeerListener {
         throw new BridgeError(
           "CLAUDE_PEER_LISTENER_CLOSED",
           "The Claude peer callback listener is closed.",
-        );
-      }
-      if (this.#preparedGeneration !== undefined) {
-        throw new BridgeError(
-          "CODEX_PEER_PREPARED_NOT_ACTIVE",
-          "A prepared native Codex listener must use atomic succession publication.",
         );
       }
       if (
@@ -2688,157 +2515,6 @@ export class ClaudePeerListener {
       this.#advertisedRecord = record;
       this.#advertisedGeneration = exact.generation;
     });
-  }
-
-  async #classifyPublication(
-    current: ClaudePeerListener,
-    record: AdvertisedCodexRegistryRecord,
-  ): Promise<ClaudePeerRegistryPublicationOutcome> {
-    const sourceGeneration = this.#publicationSourceGeneration;
-    if (sourceGeneration !== undefined) {
-      const published = await this.#recordMatches(record, sourceGeneration);
-      if (published.matches) {
-        this.#advertisedRecord = record;
-        this.#advertisedGeneration = published.generation;
-        this.#publicationConfirmed = true;
-        return "published";
-      }
-    }
-    return (await this.#oldPublicationStillPresent(current))
-      ? "not_published"
-      : "unknown";
-  }
-
-  async #oldPublicationStillPresent(
-    current: ClaudePeerListener,
-  ): Promise<boolean> {
-    const oldRecord = current.#advertisedRecord;
-    const oldGeneration = current.#advertisedGeneration;
-    if (oldRecord === undefined || oldGeneration === undefined) return false;
-    return (
-      await current.#recordMatches(oldRecord, oldGeneration)
-    ).matches;
-  }
-
-  async publishReplacing(
-    current: ClaudePeerListener,
-    name: string,
-    cwd: string,
-  ): Promise<ClaudePeerRegistryPublicationOutcome> {
-    return await this.#mutateRegistry(
-      "publish",
-      async () => await this.#publishReplacingLocked(current, name, cwd),
-    );
-  }
-
-  async #publishReplacingLocked(
-    current: ClaudePeerListener,
-    name: string,
-    cwd: string,
-  ): Promise<ClaudePeerRegistryPublicationOutcome> {
-    if (
-      this.#isClosingOrClosed() ||
-      current.#isClosingOrClosed() ||
-      this === current ||
-      this.#preparedGeneration === undefined ||
-      this.generation === current.generation ||
-      !current.#activationGranted ||
-      this.#owner !== current.#owner ||
-      this.#sessionsDir !== current.#sessionsDir ||
-      this.#expectedUid !== current.#expectedUid ||
-      !sameDirectoryGeneration(
-        this.#sessionsGeneration,
-        current.#sessionsGeneration,
-      )
-    ) {
-      throw new BridgeError(
-        "CODEX_PEER_SUCCESSION_INVALID",
-        "Native Codex listener succession requires two live generations from one adapter owner.",
-      );
-    }
-    if (!this.#inboundQuiesced || !current.#inboundQuiesced) {
-      throw new BridgeError(
-        "CODEX_PEER_SUCCESSION_NOT_QUIESCED",
-        "Both native Codex listener generations must be inbound-quiesced before publication.",
-      );
-    }
-    if (
-      current.#advertisedRecord === undefined ||
-      current.#advertisedGeneration === undefined ||
-      !current.#recordBelongsToThisListener(current.#advertisedRecord)
-    ) {
-      throw new BridgeError(
-        "CODEX_PEER_SUCCESSION_CURRENT_UNOWNED",
-        "The current native Codex listener does not own an exact advertised record.",
-      );
-    }
-    if (name === current.#advertisedRecord.name) {
-      throw new BridgeError(
-        "CODEX_PEER_SUCCESSION_ALIAS_UNCHANGED",
-        "Native Codex succession requires a distinct alias.",
-      );
-    }
-    if (this.#preparedRecord === undefined) {
-      this.#preparedRecord = this.#newAdvertisedRecord(name, cwd);
-    } else if (
-      this.#preparedRecord.name !== name ||
-      this.#preparedRecord.cwd !== cwd
-    ) {
-      throw new BridgeError(
-        "CODEX_PEER_SUCCESSION_CHANGED",
-        "A prepared native Codex publication cannot change identity after preparation.",
-      );
-    }
-    const record = this.#preparedRecord;
-    if (this.#publicationAttempted) {
-      return await this.#classifyPublication(current, record);
-    }
-
-    let temporary:
-      | Readonly<{ path: string; generation: FileGeneration }>
-      | undefined;
-    let renameInvoked = false;
-    try {
-      temporary = await this.#createRegistryTemporary(record);
-      this.#publicationSourceGeneration = temporary.generation;
-      await this.#registryPublicationHook?.("before_rename");
-      if (
-        this.#isClosingOrClosed() ||
-        current.#isClosingOrClosed() ||
-        !this.#inboundQuiesced ||
-        !current.#inboundQuiesced
-      ) {
-        return (await this.#oldPublicationStillPresent(current))
-          ? "not_published"
-          : "unknown";
-      }
-      const currentExact = await current.#recordMatches(
-        current.#advertisedRecord,
-        current.#advertisedGeneration,
-      );
-      if (!currentExact.matches) return "unknown";
-      renameInvoked = true;
-      this.#publicationAttempted = true;
-      await this.#registryRename(temporary.path, this.#registryPath());
-      temporary = undefined;
-      await this.#registryPublicationHook?.("after_rename");
-      await this.#syncRegistryDirectory();
-      return await this.#classifyPublication(current, record);
-    } catch {
-      if (!renameInvoked) {
-        return (await this.#oldPublicationStillPresent(current))
-          ? "not_published"
-          : "unknown";
-      }
-      return await this.#classifyPublication(current, record);
-    } finally {
-      if (temporary !== undefined) {
-        await this.#cleanupOwnedFile(
-          temporary.path,
-          temporary.generation,
-        ).catch(() => undefined);
-      }
-    }
   }
 
   async updateAdvertisedStatus(status: ClaudePeerStatus): Promise<void> {
@@ -2924,49 +2600,6 @@ export class ClaudePeerListener {
     await unlink(this.#registryPath()).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
     });
-  }
-
-  grantSuccessionActivation(): void {
-    if (this.#isClosingOrClosed()) {
-      throw new BridgeError(
-        "CLAUDE_PEER_LISTENER_CLOSED",
-        "The Claude peer callback listener is closed.",
-      );
-    }
-    if (
-      this.#preparedGeneration === undefined ||
-      !this.#publicationAttempted ||
-      !this.#publicationConfirmed ||
-      this.#publicationSourceGeneration === undefined ||
-      this.#advertisedRecord === undefined ||
-      this.#advertisedGeneration === undefined ||
-      !sameFileGeneration(
-        this.#publicationSourceGeneration,
-        this.#advertisedGeneration,
-      )
-    ) {
-      throw new BridgeError(
-        "CODEX_PEER_PREPARED_NOT_ACTIVE",
-        "A prepared native Codex listener requires exact confirmed publication before activation can be granted.",
-      );
-    }
-    this.#activationGranted = true;
-  }
-
-  resumeInbound(): void {
-    if (this.#isClosingOrClosed()) {
-      throw new BridgeError(
-        "CLAUDE_PEER_LISTENER_CLOSED",
-        "The Claude peer callback listener is closed.",
-      );
-    }
-    if (!this.#activationGranted) {
-      throw new BridgeError(
-        "CODEX_PEER_PREPARED_NOT_ACTIVE",
-        "A prepared native Codex listener cannot resume before durable succession activation.",
-      );
-    }
-    this.#inboundQuiesced = false;
   }
 
   async acknowledge(
@@ -3224,74 +2857,6 @@ export class ClaudePeerListener {
     return { transportStatus: "transport_written" };
   }
 
-  track(
-    messageId: string,
-    binding: TargetBinding,
-    receiptDeadlineAt?: number,
-  ): void {
-    if (this.#isClosingOrClosed()) {
-      throw new BridgeError(
-        "CLAUDE_PEER_LISTENER_CLOSED",
-        "The Claude peer callback listener is closed.",
-      );
-    }
-    if (this.#pending.size >= this.#limits.maxPendingReceipts) {
-      throw new BridgeError(
-        "CLAUDE_PEER_RECEIPT_LIMIT",
-        "The bounded Claude peer receipt table is full.",
-        true,
-      );
-    }
-    if (this.#pending.has(messageId)) {
-      throw new BridgeError(
-        "CLAUDE_PEER_MESSAGE_ID_COLLISION",
-        "The peer message ID collided with an outstanding receipt.",
-      );
-    }
-    const now = this.#now();
-    const deadlineAt =
-      receiptDeadlineAt ?? now + this.#limits.receiptDeadlineMs;
-    const timer = setTimeout(() => {
-      const pending = this.#pending.get(messageId);
-      if (pending === undefined) return;
-      this.#pending.delete(messageId);
-      void this.#emitReceipt({
-        messageId,
-        status: pendingReceiptDeadlineStatus(pending),
-        trust: "untrusted_same_uid_peer",
-      });
-    }, Math.max(1, deadlineAt - now));
-    timer.unref();
-    this.#pending.set(messageId, {
-      binding,
-      state: "pending",
-      writeEvidence: "none",
-      deadlineAt,
-      timer,
-    });
-  }
-
-  recordTransportOutcome(
-    messageId: string,
-    outcome: "transport_written" | "transport_uncertain",
-  ): void {
-    const pending = this.#pending.get(messageId);
-    if (pending === undefined) return;
-    if (
-      pending.writeEvidence !== "transport_written" ||
-      outcome === "transport_written"
-    ) {
-      pending.writeEvidence = outcome;
-    }
-  }
-
-  untrack(messageId: string): void {
-    const pending = this.#pending.get(messageId);
-    if (pending === undefined) return;
-    clearTimeout(pending.timer);
-    this.#pending.delete(messageId);
-  }
-
   #accept(socket: Socket): void {
     if (
       this.#isClosingOrClosed() ||
@@ -3401,7 +2966,8 @@ export class ClaudePeerListener {
   ): Promise<void> {
     if (this.#isClosingOrClosed()) return;
     if (frame.type === "control") {
-      await this.#handleControl(frame);
+      // Native outbound status is accepted for wire compatibility but is not
+      // settlement authority. A confirmed mailbox write is terminal.
       return;
     }
     if (this.#inboundQuiesced) {
@@ -3509,74 +3075,6 @@ export class ClaudePeerListener {
     }
   }
 
-  async #handleControl(frame: ParsedControlFrame): Promise<void> {
-    const pending = this.#pending.get(frame.originalMessageId);
-    if (pending === undefined) {
-      await this.#notice("UNKNOWN_RECEIPT");
-      return;
-    }
-    let currentBinding: TargetBinding;
-    try {
-      // Receipt authority is the stable Claude session UUID, not the
-      // short-lived send-time registry/socket lease. Re-discover the exact
-      // session on every receipt so legitimate held/terminal frames remain
-      // valid for the full message deadline and across socket rotation.
-      currentBinding = await this.#resolveSessionBinding(
-        pending.binding.targetId,
-      );
-    } catch {
-      await this.#notice("UNKNOWN_RECEIPT");
-      return;
-    }
-    if (frame.from !== `uds:${currentBinding.record.messagingSocketPath}`) {
-      await this.#notice("UNKNOWN_RECEIPT");
-      return;
-    }
-    pending.binding = currentBinding;
-    if (this.#now() >= pending.deadlineAt) {
-      clearTimeout(pending.timer);
-      this.#pending.delete(frame.originalMessageId);
-      await this.#emitReceipt({
-        messageId: frame.originalMessageId,
-        status: pendingReceiptDeadlineStatus(pending),
-        trust: "untrusted_same_uid_peer",
-      });
-      return;
-    }
-    if (frame.status === "held") {
-      if (pending.state !== "pending") {
-        await this.#notice("INVALID_RECEIPT_TRANSITION");
-        return;
-      }
-      pending.state = "held";
-      pending.writeEvidence = "transport_written";
-      await this.#emitReceipt({
-        messageId: frame.originalMessageId,
-        status: "held",
-        trust: "untrusted_same_uid_peer",
-      });
-      return;
-    }
-    clearTimeout(pending.timer);
-    this.#pending.delete(frame.originalMessageId);
-    await this.#emitReceipt({
-      messageId: frame.originalMessageId,
-      status:
-        frame.status === "delivered"
-          ? "released"
-          : frame.status,
-      trust: "untrusted_same_uid_peer",
-    });
-  }
-
-  async #emitReceipt(event: ClaudePeerReceiptEvent): Promise<void> {
-    try {
-      await invokeHook(this.#options.onReceipt, event);
-    } catch {
-      await this.#notice("CALLBACK_ERROR");
-    }
-  }
-
   async #notice(code: ClaudePeerProtocolNotice["code"]): Promise<void> {
     try {
       await invokeHook(this.#options.onProtocolNotice, { code });
@@ -3603,29 +3101,11 @@ export class ClaudePeerListener {
     } catch (error) {
       errors.push(error);
     }
-    const unsettledReceipts = [...this.#pending.entries()];
-    for (const pending of this.#pending.values()) clearTimeout(pending.timer);
-    this.#pending.clear();
     this.#inboundReceipts.clear();
     if (this.#capacitySettlement?.retryTimer !== undefined) {
       clearTimeout(this.#capacitySettlement.retryTimer);
     }
     this.#capacitySettlement = undefined;
-    const receiptResults = await Promise.allSettled(
-      unsettledReceipts.map(async ([messageId, pending]) =>
-        this.#emitReceipt({
-          messageId,
-          status:
-            pendingReceiptDeadlineStatus(pending) === "unconfirmed"
-              ? "unconfirmed"
-              : "ambiguous",
-          trust: "untrusted_same_uid_peer",
-        }),
-      ),
-    );
-    for (const result of receiptResults) {
-      if (result.status === "rejected") errors.push(result.reason);
-    }
     for (const socket of this.#connections) socket.destroy();
     this.#connections.clear();
     let callbackPathOwned = false;

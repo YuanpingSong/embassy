@@ -34,7 +34,8 @@ Embassy provides same-UID containment and route attribution, not authentication
 against other processes running as the same OS user.
 
 - A Codex route is attributed to the exact inherited `CODEX_THREAD_ID` of the
-  task that self-registers it.
+  task that self-registers it. App Server attachment and endpoint generations
+  are current transport facts, never durable route authority.
 - A Claude route is attributed to a validated live peer generation and native
   session UUID. An inherited `CLAUDE_CODE_MESSAGING_SOCKET` is a transient
   reply capability, not a credential.
@@ -62,8 +63,10 @@ review, and audit work.
   symlink policy, modes, approved version-directory containment, its own state
   and sockets, and the generation of artifacts it owns. Before acting on an
   identity-bearing input—such as an inherited task identity, provider record,
-  endpoint binding, route, or reply request—it validates the input's bounded
-  shape and its current ownership, correlation, and generation. Unsafe
+  route, provider record, or reply request—it validates the input's bounded
+  shape and its current ownership and correlation. Immediately before an
+  effect, the owning transport re-attests every changing path, socket,
+  process, interface, target, and generation fact it actually uses. Unsafe
   controller-wide evidence is fatal; this class comprises Embassy-owned or
   executed artifacts and Embassy callback, control, and state paths. The
   Claude-owned external sessions registry root is instead a read-side identity
@@ -99,8 +102,10 @@ review, and audit work.
   single-user machine.
 - **Predictions based on version strings.** A version string is diagnostic
   metadata, never routing authority, security evidence, or attack detection.
-  Current path, ownership, protocol, interface, generation, and correlated
-  operation facts decide what Embassy can safely do. Boot refusal is reserved
+  Current path, ownership, protocol, interface, used-artifact generation, and
+  correlated operation facts decide what Embassy can safely do. Codex
+  registration performs no provider I/O; every delivery proves the current
+  boundary independently. Boot refusal is reserved
   for an unsafe or lost singleton lease, corrupt controller state, or an unsafe
   OS boundary. Interface drift or one unavailable optional provider degrades
   that surface; it does not take down the broker or the other providers.
@@ -127,9 +132,10 @@ silently expand Embassy's claimed boundary.
 - Pairs are additive, bounded, and per-edge: adding an edge never retires
   another, and removing one invalidates its active conversation capabilities
   before the change is published. Explicitly requested endpoint replacement
-  (registration succession) atomically settles the outgoing endpoint's
-  accepted work before the replacement is exposed; a half-replaced
-  intermediate state is never published.
+  (`register-codex --succeeds`) is one atomic logical-route transaction: it
+  settles the outgoing route's work by recorded write phase, removes its edges
+  and capabilities, and publishes only the replacement. There is no prepared,
+  activated, re-anchored, or recovery generation and no half-replaced state.
 - Embassy never mutates a Codex task's approval or sandbox policy and never
   answers an approval request. An inbound turn uses the task's existing native
   policy. With `approvalPolicy: never`, no human confirmation occurs on that
@@ -177,12 +183,13 @@ broker.
   startup; unsafe UID or mode evidence for Claude's external sessions registry
   root quarantines only Claude. A provider version is best-effort diagnostic
   metadata and carries no routing authority. Runtime authority comes from an
-  explicit pair, exact owned route and session identity, current connector and
-  generation facts, strict protocol handling, and correlated operation results.
+  explicit pair, exact owned route and session identity, current
+  per-operation transport facts, strict protocol handling, and correlated
+  operation results.
   A Claude record whose peer protocol is not 1 is rejected in isolation and
-  included in bounded rejection evidence. Every replacement Codex endpoint
-  generation must negotiate its current interface and re-observe the exact task
-  before the controller re-anchors it.
+  included in bounded rejection evidence. Every Codex endpoint used by a
+  delivery must negotiate its current interface and resume the exact task
+  before that operation receives final write authorization.
 - Embassy publishes at most one process-owned `codex-*` record in Claude's
   registry with the supported explicit versioned Embassy-advertisement marker.
   The prefix is a visible alias convention, not the discriminator: an unmarked
@@ -198,8 +205,8 @@ broker.
   admits it at the next tool-call boundary; Embassy never interrupts or injects
   mid-generation. Clean boundary refusal falls back to the normal queue, which
   retains at most three steers per route. The environment kill switch defaults
-  on and can disable this classification globally. Interrupt remains limited to
-  an exact turn started and positively observed by the same connector.
+  on and can disable this classification globally. Embassy never issues
+  `turn/interrupt`.
 - The tested App Server 0.147.0 initialization enables `experimentalApi: true`
   solely for `thread/resume.excludeTurns: true`. It adds no general
   experimental method or authority. Missing, malformed, or nonempty returned
@@ -239,8 +246,8 @@ Embassy's provider-facing access is intentionally enumerable:
   path, version-banner, and compatibility observation;
 - read the live Claude session registry and connect validated peer sockets;
 - create and later remove its one callback socket and one registry record;
-- resolve the managed Codex installation and attach to the already-running
-  local App Server; and
+- resolve the managed Codex installation and open one attested local App Server
+  connection per operation; and
 - inspect canonical filesystem metadata needed to validate provider-advertised
   endpoints and generations.
 
@@ -261,9 +268,10 @@ configuration contents. Report a bug if any normal code path attempts to do so.
 Raw provider frames, tool data, stderr, callback addresses, and socket paths
 remain memory-only and are discarded on restart. Message bodies are the
 exception: queued and recently delivered bodies are retained under bounded caps
-in the mode-0600 state file, so queued mail survives a broker restart and
-re-sends exactly once when its route is re-observed. A message in flight at the
-moment of a crash settles `ambiguous` and is never replayed.
+in the mode-0600 state file. A queued or reserved message may resume once after
+a broker restart against its still-exact logical route and consent edge. An
+armed or accepted message at crash settles ambiguous or unconfirmed and is
+never replayed.
 
 The full `conv_` token exposed to a CLI initiator or routed recipient travels
 only inside the accepted CLI result or transient provider payload. It is never
@@ -275,7 +283,7 @@ generations, or private route handles. The untrusted body remains opaque text
 and may itself contain sender-provided strings.
 
 The closed private binding store may retain the exact Codex thread ID and Claude
-session UUID required for ownership and endpoint re-observation. Native IDs are
+session UUID required for logical ownership. Native IDs are
 forbidden from public snapshots, normalized events, the dashboard, aliases,
 logs, errors, and CLI output. A Claude UUID may enter only as a user-supplied
 explicit CLI selector; Embassy never discovers or prints it publicly.
@@ -311,9 +319,11 @@ Origin; every POST requires the exact Origin plus
 Those checks block ambient cross-origin browser requests but do not authenticate
 local software. There are no generic control or provider routes, telemetry, or
 external assets. The sole mutation route accepts only exact pair, unpair,
-refresh-discovery, and broker-guarded stale-Codex-registration-removal JSON
-bodies, capped at 1 KiB and six confirmed actions per minute. The browser
-cannot create a registration, live-unregister a task, send, reply, approve,
+refresh-discovery, and named Codex-registration-removal JSON bodies, capped at
+1 KiB and six confirmed actions per minute. Registration removal requires an
+in-page consequence confirmation; it removes incident consent edges and
+settles active work by its durable write phase. The browser cannot create a
+registration, send, reply, approve,
 interrupt, change settings, or invoke arbitrary broker/provider methods.
 
 Reports involving the live companion are in scope if they demonstrate a
@@ -334,15 +344,15 @@ exact OS boundaries. Unsafe Embassy-owned or executed artifacts, callback,
 control, or state paths remain startup-fatal; unsafe UID or mode evidence on
 Claude's external sessions registry root quarantines only that provider.
 Runtime does not import the release-owned support matrix or derive authority
-from version metadata. It reports best-effort connector health, route
-staleness, observed metadata, and last safe codes while strict record, frame,
-response, identity, generation, correlation, and deadline checks decide each
+from version metadata. It reports best-effort connector health, observation
+freshness, and last safe codes while strict record, frame, response, identity,
+current used-artifact generation, correlation, and deadline checks decide each
 operation. Claude registry parsing remains strict for every required and
 consumed field while ignoring unknown top-level fields; bounded rejected-record
-counts and an observed-empty registry are surfaced instead of hidden. A
-replacement Codex endpoint negotiates its current interface and re-observes the
-exact registered task before re-anchoring. No validation traffic routes a user
-message or starts a model turn.
+counts and an observed-empty registry are surfaced instead of hidden. Each
+Codex delivery independently attests, connects, initializes, and resumes the
+exact registered task before its final write authorization. No observation
+traffic routes a user message or starts a model turn.
 
 Passive live discovery, a live provider connection, a native message, and an
 App Server turn are distinct authorization gates. Each requires an explicit

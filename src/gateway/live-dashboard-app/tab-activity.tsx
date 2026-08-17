@@ -1,8 +1,7 @@
 // Activity tab (§4.5) — the merged, honestly bounded event stream.
 //
-// The live contract carries a bounded process-local activity ledger in
-// addition to delivery settlements and alerts. Automatic endpoint refreshes
-// stay visibly distinct from operator actions. It never includes bodies,
+// The live contract carries bounded broker activity in addition to delivery
+// settlements and alerts. Operator actions remain visibly attributed. It never includes bodies,
 // private route handles, task IDs, or complete conversation capabilities.
 //
 // Row order is the adapter's explicit timestamp-desc sort (adapter.activityRows);
@@ -39,8 +38,6 @@ namespace Embassy {
     routes_paired: "app.activity.operation.routesPaired",
     routes_unpaired: "app.activity.operation.routesUnpaired",
     watch_ended: "app.activity.operation.watchEnded",
-    endpoint_refreshed: "app.activity.operation.endpointRefreshed",
-    codex_orphan_removed: "app.activity.operation.codexOrphanRemoved",
   };
 
   /** Teaching command for the empty stream (verified real CLI verb). */

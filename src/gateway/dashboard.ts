@@ -545,8 +545,6 @@ function renderActivity(context: RenderContext): string {
     routes_paired: "app.activity.operation.routesPaired",
     routes_unpaired: "app.activity.operation.routesUnpaired",
     watch_ended: "app.activity.operation.watchEnded",
-    endpoint_refreshed: "app.activity.operation.endpointRefreshed",
-    codex_orphan_removed: "app.activity.operation.codexOrphanRemoved",
   };
   const operations = context.model.brokerActivity.length === 0
     ? ""

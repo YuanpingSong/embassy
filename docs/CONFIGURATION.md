@@ -21,6 +21,22 @@ or CLI flags.
 | `EMBASSY_LOCALE` | `en` | CLI output language, exactly `en` or `zh-CN`. The `--lang` flag overrides it for the invocation that carries it; an unset or empty value means `en`, and any other value is an argument error |
 | `EMBASSY_HOSTS` | `this-mac` | Comma-separated list of 1 through 32 unique lowercase host aliases. **The v1 launcher accepts only the single exact value `this-mac`**: any other list — including a longer one that contains `this-mac` — fails `embassy serve` closed with `GATEWAY_REMOTE_PROVIDER_DISABLED`. The variable exists for the deferred remote-consulate work and has no useful setting today |
 
+### Offline state upgrade
+
+Schema 3 is the broker's only native state format. Before starting this release
+against schema-2 state, stop the broker and run:
+
+```bash
+embassy convert-state-v2-to-v3
+```
+
+The command resolves the same configured state directory as `serve`; it accepts
+no alternate state-path argument and starts no providers, helpers, discovery,
+listener, or control socket. It verifies a byte-identical v2 backup before
+atomically installing and reading back v3 state. Normal output contains only
+success and the backup basename. If conversion fails, use the exact normalized
+safe code; do not retry a commit-unknown result or hand-edit the state file.
+
 The live dashboard is available directly at `http://127.0.0.1:41961/` while
 its foreground companion runs. Its port is a per-invocation CLI choice, not an
 environment setting: pass `--port <n>` with an integer from 1024 through 65535
@@ -59,7 +75,7 @@ The stall notice is not separately configurable. It fires at
 default four-hour deadline a pending delivery is reported at two minutes, not
 two hours.
 
-A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity succession.
+A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity replacement.
 
 The public launcher accepts only host `this-mac`; remote connectors remain a future capability. `register-codex` therefore takes an optional `--host <id>`, but `this-mac` is the only value the broker will admit, and the alias must end in `@<id>` to match. `--host` is also mutually exclusive with `--succeeds`, which always inherits the succeeded alias's host.
 
@@ -84,13 +100,11 @@ the destination session before suspecting the route.
 
 Embassy routes four providers: Claude over peer protocol 1, Codex over the managed App Server, and DeepSeek plus Grok Build over ACP v1. The release-owned [support matrix](../support/provider-support-matrix.json) records the exact artifacts, protocols, capabilities, stop fidelity, limitations, and test date exercised offline. Runtime never imports that file. A build or version fact can qualify the release's “tested with” claim, but it never grants or withholds routing authority.
 
-Runtime is best effort: an explicit consent edge plus the exact owned route/session identity authorizes an attempt. The current connector, route generation, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health, route staleness, and an exact safe code; it does not create a compatibility tier or block unrelated providers.
+Runtime is best effort: an explicit consent edge plus the exact owned route/session identity authorizes an attempt. The current per-operation transport, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health and an exact safe code; it does not create a compatibility tier or block unrelated providers.
 
 Only unsafe OS evidence for Embassy-owned or executed artifacts and Embassy callback, control, or state paths—such as an unsafe lease or state, swapped binary, ownership/path/symlink mismatch, or invalid generation—refuses broker startup. The Claude-owned external sessions registry root is read-side identity evidence: an unsafe UID or mode degrades only Claude with a loud observation while the broker and other providers remain available. Claude still requires native `peerProtocol: 1` per session record: a record that declares any other value is rejected in isolation and included in bounded rejection evidence without stopping the broker or hiding other usable sessions.
 
 Runtime parsing remains strict on every known registry field, frame, and response; unknown top-level Claude registry fields are ignored because Embassy never consumes them. The Claude connector row in public status carries optional bounded `registry` observations: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. Both dashboards render the same evidence loudly: if Claude is running but no record with parseable required fields has been observed since broker start, its registry layout may have changed.
-
-For every replacement Codex App Server generation, Embassy negotiates a fresh connection and re-anchors a retained route only when `thread/loaded/list` finds its exact private task identity once. A failed negotiation, missing or duplicate task, or unclean transition leaves the route stale rather than retargeting it.
 
 The managed Codex installation is resolved by exact verified path; a `codex` elsewhere on `PATH` is neither used nor modified. Claude is resolved from `EMBASSY_CLAUDE_BIN` or the official per-user launcher, never by searching `PATH`. DeepSeek uses only the attested checkout root above. Grok Build uses the release-pinned ACP launch. Version strings, when present, are bounded diagnostic metadata only.
 
@@ -100,4 +114,4 @@ Claude sessions are addressed by their current `name@host` or by a user-supplied
 
 Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name.
 
-Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Compatible managed App Server generation changes and broker restarts can both re-anchor the exact loaded task automatically; a normal restart needs no manual registration. If boot reactivation cannot find that task exactly once, the route remains stale with `REOBSERVATION_REQUIRED`. Once the task is observable, recover it by rerunning `embassy register-codex --alias <same-alias>` from that exact Codex task without unregistering first. Never supply or reconstruct its thread ID. If the task no longer exists, the live dashboard can remove the retained registration only after the broker proves it stale on a dead endpoint generation.
+Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server, Desktop, and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration and consent edge remain.

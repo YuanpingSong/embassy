@@ -18,7 +18,6 @@ import { test } from "node:test";
 import type { CodexAppServerTransport } from "../src/gateway/codex-app-server.js";
 import {
   buildLocalCodexProxyEnvironment,
-  createLocalCodexRefreshCandidateTransportFactory,
   createLocalCodexTransportFactory,
   LocalCodexTransportError,
   resolveManagedLocalCodexInstallation,
@@ -298,11 +297,11 @@ test("startup attests version-drifted Codex installations without opening App Se
   }
 });
 
-test("refresh candidate resolution attests the exact current managed release", async () => {
+test("per-operation factory resolution attests the exact current managed release", async () => {
   const drifted = await installationFixture("0.148.0");
   try {
     let spawnCalls = 0;
-    const candidate = await createLocalCodexRefreshCandidateTransportFactory(
+    const candidate = await createLocalCodexTransportFactory(
       {
         environment: { HOME: drifted.home },
       },
@@ -310,7 +309,7 @@ test("refresh candidate resolution attests the exact current managed release", a
         loginHome: () => drifted.home,
         spawn: () => {
           spawnCalls += 1;
-          throw new Error("candidate resolution must not connect by itself");
+          throw new Error("factory resolution must not connect by itself");
         },
       },
     );
@@ -326,28 +325,23 @@ test("refresh candidate resolution attests the exact current managed release", a
 test("bounded prerelease builds remain OS-attested without connecting", async () => {
   const drifted = await installationFixture("0.148.0-alpha.1");
   try {
-    for (const createFactory of [
-      createLocalCodexTransportFactory,
-      createLocalCodexRefreshCandidateTransportFactory,
-    ] as const) {
-      let spawnCalls = 0;
-      const candidate = await createFactory(
-        {
-          environment: { HOME: drifted.home },
+    let spawnCalls = 0;
+    const candidate = await createLocalCodexTransportFactory(
+      {
+        environment: { HOME: drifted.home },
+      },
+      {
+        loginHome: () => drifted.home,
+        spawn: () => {
+          spawnCalls += 1;
+          throw new Error("prerelease resolution must not connect");
         },
-        {
-          loginHome: () => drifted.home,
-          spawn: () => {
-            spawnCalls += 1;
-            throw new Error("prerelease resolution must not connect");
-          },
-        },
-      );
-      assert.equal(candidate.appServerVersion, "0.148.0-alpha.1");
-      assert.equal(candidate.protocolVersion, "0.148.0-alpha.1");
-      assert.equal(spawnCalls, 0);
-      await candidate.close();
-    }
+      },
+    );
+    assert.equal(candidate.appServerVersion, "0.148.0-alpha.1");
+    assert.equal(candidate.protocolVersion, "0.148.0-alpha.1");
+    assert.equal(spawnCalls, 0);
+    await candidate.close();
   } finally {
     await drifted.close();
   }
@@ -356,22 +350,17 @@ test("bounded prerelease builds remain OS-attested without connecting", async ()
 test("unsafe release leaves remain rejected before provider construction", async () => {
   const drifted = await installationFixture("nightly build");
   try {
-    for (const createFactory of [
-      createLocalCodexTransportFactory,
-      createLocalCodexRefreshCandidateTransportFactory,
-    ] as const) {
-      await assert.rejects(
-        createFactory(
-          {
-            environment: { HOME: drifted.home },
-          },
-          { loginHome: () => drifted.home },
-        ),
-        (error: unknown) =>
-          error instanceof LocalCodexTransportError &&
-          error.code === "MANAGED_CODEX_INVALID",
-      );
-    }
+    await assert.rejects(
+      createLocalCodexTransportFactory(
+        {
+          environment: { HOME: drifted.home },
+        },
+        { loginHome: () => drifted.home },
+      ),
+      (error: unknown) =>
+        error instanceof LocalCodexTransportError &&
+        error.code === "MANAGED_CODEX_INVALID",
+    );
   } finally {
     await drifted.close();
   }

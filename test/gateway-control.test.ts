@@ -325,7 +325,7 @@ function handlers(
     health: () => ({ status: "ok", revision: 7 }),
     registerCodex: () => ({ accepted: true, code: "ok" }),
     unregisterCodex: () => ({ accepted: true, code: "ok" }),
-    removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
+    removeCodexRegistration: () => ({ accepted: true, code: "ok" }),
     selectClaude: () => ({ accepted: true, code: "ok" }),
     unselectClaude: () => ({ accepted: true, code: "ok" }),
     pair: () => ({ accepted: true, code: "ok" }),
@@ -443,7 +443,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   let toCodex: ValidatedSendToCodexParams | undefined;
   let paired: unknown;
   let unpaired: unknown;
-  let removedStaleCodexAlias: string | undefined;
+  let removedCodexAlias: string | undefined;
   let reply: unknown;
   const server = await startGatewayControlServer({
     stateDir,
@@ -461,8 +461,8 @@ test("serves the two directional routes and emits metadata-only responses", asyn
         unpaired = { ...params };
         return { accepted: true, code: "ok" };
       },
-      removeStaleCodexRegistration: ({ alias }) => {
-        removedStaleCodexAlias = alias;
+      removeCodexRegistration: ({ alias }) => {
+        removedCodexAlias = alias;
         return { accepted: true, code: "ok" };
       },
       sendToClaude: (params) => {
@@ -572,11 +572,11 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     socketPath,
     request: {
       protocolVersion: 1,
-      method: "remove_stale_codex_registration",
+      method: "remove_codex_registration",
       params: { alias: "codex-orphan@this-mac" },
     },
   });
-  assert.equal(removedStaleCodexAlias, "codex-orphan@this-mac");
+  assert.equal(removedCodexAlias, "codex-orphan@this-mac");
   await sendGatewayControlRequest({
     socketPath,
     request: {
@@ -843,7 +843,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "health",
     "register_codex",
     "unregister_codex",
-    "remove_stale_codex_registration",
+    "remove_codex_registration",
     "select_claude",
     "unselect_claude",
     "pair",
@@ -894,7 +894,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     handlers: handlers({
       registerCodex: count,
       unregisterCodex: count,
-      removeStaleCodexRegistration: count,
+      removeCodexRegistration: count,
       pair: count,
       unpair: count,
       deliveryStatus: () => {
@@ -1037,8 +1037,8 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["delivery_status", { token: "dlv_too-short" }],
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     ["observe_snapshot", { extra: true }],
-    ["remove_stale_codex_registration", { alias: "claude@this-mac" }],
-    ["remove_stale_codex_registration", { alias: "codex-main" }],
+    ["remove_codex_registration", { alias: "claude@this-mac" }],
+    ["remove_codex_registration", { alias: "codex-main" }],
     ["pair", { aliases: ["one@this-mac", "one@this-mac"] }],
     ["pair", { aliases: ["one@this-mac", "two@other-mac"] }],
     ["pair", { aliases: ["one@this-mac"] }],
@@ -1070,11 +1070,11 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       },
     ],
     [
-      "remove_stale_codex_registration",
+      "remove_codex_registration",
       { alias: "codex-main@this-mac", threadId: THREAD_ID },
     ],
     [
-      "remove_stale_codex_registration",
+      "remove_codex_registration",
       { alias: "codex-main@this-mac", endpointGeneration: "old" },
     ],
     [
@@ -1114,7 +1114,11 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     await rawRequest(socketPath, wireRequest("steer", {})),
     "UNKNOWN_METHOD",
   );
-  for (const removedMethod of ["compat_check", "compat_certify"]) {
+  for (const removedMethod of [
+    "compat_check",
+    "compat_certify",
+    "remove_stale_codex_registration",
+  ]) {
     assertWireError(
       await rawRequest(socketPath, wireRequest(removedMethod, {})),
       "UNKNOWN_METHOD",
@@ -1431,21 +1435,15 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   const invalidActivityKindAction = snapshot();
   const kindAction = invalidActivityKindAction.activityEvents?.[0];
   assert.ok(kindAction);
-  kindAction.kind = "endpoint";
+  kindAction.kind = "registration";
   kindAction.action = "routes_paired";
-  kindAction.operatorAction = false;
+  kindAction.operatorAction = true;
   const invalidAutomaticAuthority = snapshot();
   const automaticAuthority = invalidAutomaticAuthority.activityEvents?.[0];
   assert.ok(automaticAuthority);
-  automaticAuthority.kind = "endpoint";
-  automaticAuthority.action = "endpoint_refreshed";
-  automaticAuthority.operatorAction = true;
-  const invalidRecoveryAuthority = snapshot();
-  const recoveryAuthority = invalidRecoveryAuthority.activityEvents?.[0];
-  assert.ok(recoveryAuthority);
-  recoveryAuthority.kind = "recovery";
-  recoveryAuthority.action = "codex_orphan_removed";
-  recoveryAuthority.operatorAction = false;
+  automaticAuthority.kind = "registration";
+  automaticAuthority.action = "codex_unregistered";
+  automaticAuthority.operatorAction = false;
   const invalidDeadline = snapshot();
   assert.ok(invalidDeadline.deadlinePressure);
   invalidDeadline.deadlinePressure.expiredEvents = 2;
@@ -1510,7 +1508,6 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidActivity,
     invalidActivityKindAction,
     invalidAutomaticAuthority,
-    invalidRecoveryAuthority,
     invalidDeadline,
     invalidRegistry,
     invalidObservationAge,
@@ -1623,31 +1620,31 @@ test("list_snapshot validates canonical consent endpoints against route bindings
 
 test("activity validation binds each kind to its exact action and authority", async () => {
   const { stateDir, socketPath } = await privateState();
-  const endpoint = snapshot();
-  endpoint.activityEvents = [
+  const registration = snapshot();
+  registration.activityEvents = [
     {
       sequence: 1,
       timestamp: NOW,
-      kind: "endpoint",
-      action: "endpoint_refreshed",
-      outcome: "accepted",
-      aliases: ["codex-main@this-mac"],
-      operatorAction: false,
-    },
-  ];
-  const recovery = snapshot();
-  recovery.activityEvents = [
-    {
-      sequence: 2,
-      timestamp: NOW,
-      kind: "recovery",
-      action: "codex_orphan_removed",
+      kind: "registration",
+      action: "codex_unregistered",
       outcome: "accepted",
       aliases: ["codex-main@this-mac"],
       operatorAction: true,
     },
   ];
-  const candidates = [endpoint, recovery];
+  const selection = snapshot();
+  selection.activityEvents = [
+    {
+      sequence: 2,
+      timestamp: NOW,
+      kind: "selection",
+      action: "claude_selected",
+      outcome: "accepted",
+      aliases: ["claude-main@this-mac"],
+      operatorAction: true,
+    },
+  ];
+  const candidates = [registration, selection];
   const server = await startGatewayControlServer({
     stateDir,
     socketPath,
@@ -1993,7 +1990,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
       socketPath,
       request: {
         protocolVersion: 1,
-        method: "remove_stale_codex_registration",
+        method: "remove_codex_registration",
         params: { alias: "codex-orphan@this-mac" },
       },
     }),

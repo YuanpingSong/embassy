@@ -456,7 +456,7 @@ test("action route forwards only the four exact verbs", async () => {
       aliases: ["grok-builder@this-mac", "advisor@this-mac"],
     },
     {
-      action: "remove_stale_codex_registration",
+      action: "remove_codex_registration",
       alias: "codex-orphan@this-mac",
     },
     { action: "refresh_dashboard" },
@@ -599,17 +599,25 @@ test("action route rejects malformed or cross-origin requests before broker cont
     {
       method: "POST",
       headers: actionHeaders(
-        '{"action":"remove_stale_codex_registration","alias":"claude-advisor@this-mac"}',
+        '{"action":"remove_stale_codex_registration","alias":"codex-old@this-mac"}',
       ),
-      body: '{"action":"remove_stale_codex_registration","alias":"claude-advisor@this-mac"}',
+      body: '{"action":"remove_stale_codex_registration","alias":"codex-old@this-mac"}',
       status: 400,
     },
     {
       method: "POST",
       headers: actionHeaders(
-        '{"action":"remove_stale_codex_registration","alias":"codex-orphan@this-mac","threadId":"private"}',
+        '{"action":"remove_codex_registration","alias":"claude-advisor@this-mac"}',
       ),
-      body: '{"action":"remove_stale_codex_registration","alias":"codex-orphan@this-mac","threadId":"private"}',
+      body: '{"action":"remove_codex_registration","alias":"claude-advisor@this-mac"}',
+      status: 400,
+    },
+    {
+      method: "POST",
+      headers: actionHeaders(
+        '{"action":"remove_codex_registration","alias":"codex-orphan@this-mac","threadId":"private"}',
+      ),
+      body: '{"action":"remove_codex_registration","alias":"codex-orphan@this-mac","threadId":"private"}',
       status: 400,
     },
     {

@@ -53,7 +53,7 @@ The first command starts the managed daemon if it is not already running (`resta
 
 Desktop attaches to the managed standalone App Server when it launches. If the daemon restarts while Desktop is already open, waiting alone does not reconnect that app process: fully quit Desktop, rerun `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`, and reopen the exact task.
 
-Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. Consent plus exact owned route/session identity authorizes an attempt; the current connector, route state, and correlated operation determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned executable and state paths, endpoint generations, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
+Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. Consent plus exact logical route/session identity authorizes an attempt; the current per-operation transport and correlated evidence determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned executable and state paths, generations of artifacts it actually uses, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
 
 > **Known limitation:** Embassy can reach Codex tasks only while Desktop uses the managed standalone App Server. In that mode, tasks currently cannot connect to Desktop's built-in in-app browser (`@Browser` loads but does not attach). Switching Desktop back to its default private App Server restores the built-in browser immediately — but makes those tasks unreachable by Embassy. No other capability regressions have been identified, though this was not an exhaustive parity test.
 
@@ -74,7 +74,7 @@ embassy status
 
 `status` lists `availablePeers` — the live Claude sessions you can select. If
 that list is empty, start a Claude Code session and run
-`embassy refresh-dashboard`, which re-runs Claude discovery; the next `status`
+`embassy refresh-dashboard`, which refreshes discovery; the next `status`
 should show it.
 
 ### 2. Register the Codex task
@@ -87,7 +87,7 @@ embassy register-codex --alias codex-reviewer@this-mac
 
 You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `embassy unregister-codex --alias codex-reviewer@this-mac` from inside that same task.
 
-Managed App Server generation changes and `embassy serve` restarts both use exact-task reactivation. A fresh initialize negotiates the connection; `thread/loaded/list` must find the byte-identical task exactly once before Embassy re-anchors the alias on that exact generation. A normal broker restart therefore needs no manual registration. A missing or duplicate exact task, changed generation, or failed negotiation leaves the route stale with a safe code; once that task is observable, rerun `embassy register-codex --alias codex-reviewer@this-mac` from the exact task without unregistering first. Embassy never retargets by alias or replays an ambiguously written body.
+Registration records the exact inherited task identity and performs no App Server I/O. Every delivery opens a fresh attested local transport, initializes it, resumes that exact task with history excluded, and authorizes the body write once. App Server and Desktop restarts therefore do not require re-registration or re-anchoring; a current unavailable or unobservable task keeps the logical route and consent edge while the attempt reports an exact safe code. Embassy never retargets by alias or replays an ambiguously written body.
 
 ### 3. Select a Claude destination
 
@@ -169,7 +169,7 @@ is refused until one closes. If the port is occupied, startup fails explicitly,
 points to `--port`, and never falls back to another port. See
 [Dashboard](docs/DASHBOARD.md) for details.
 
-The live dashboard can also remove an orphaned Codex registration after an explicit confirmation, but only when the broker proves that the registration is stale and its owning endpoint generation is dead. A current, merely offline, or ambiguous generation is never removable through this recovery action.
+The live dashboard can remove any named Codex registration after an explicit confirmation. The confirmation names the consequence: the broker deletes that registration's consent edges, cancels queued or reserved work, settles armed work ambiguous and accepted work unconfirmed, and never replays either uncertain class.
 
 The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`. The live dashboard has no login, token, cookie, or per-browser session: it assumes a trusted single-user machine, and local software that can reach or spoof loopback can read it and invoke its bounded actions. The server still requires the exact Host header on every request and the exact Origin plus `X-Embassy-Request` on every POST; it sends no CORS headers and does not accept `OPTIONS`.
 
@@ -228,7 +228,8 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | --- | --- | --- |
 | `serve` | operator | Start the foreground broker and dashboard |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
-| `refresh-dashboard` | operator | Re-run Claude session discovery and regenerate both static dashboard files |
+| `refresh-dashboard` | operator | Refresh provider discovery and regenerate both static dashboard files |
+| `convert-state-v2-to-v3` | operator, broker stopped | Back up and convert the configured private state to native v3 without starting providers or the broker |
 | `dashboard --live [--lang en\|zh-CN] [--port <n>]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
@@ -249,11 +250,11 @@ or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 ## Safety in one minute
 
 - **Local broker, stable loopback dashboard.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. The opt-in `embassy dashboard --live` companion is a separate process and the only listener Embassy can create, bound to exact `127.0.0.1` on stable port `41961` by default (or the per-invocation `--port <n>`). It is deliberately unauthenticated local HTTP for a trusted single-user machine; Host, Origin, and sentinel checks constrain browser-origin requests but do not authenticate local processes or OS users.
-- **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and generation checks reduce mistakes, but are not a defense against code already running as your OS user.
-- **Compatibility is tested offline; runtime is best effort.** The release-owned support matrix records exact tested artifacts, protocols, capabilities, stop fidelity, limitations, and test dates. Runtime never imports that matrix and never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health, route staleness, and safe codes without replaying uncertainty.
+- **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and per-operation artifact checks reduce mistakes, but are not a defense against code already running as your OS user.
+- **Compatibility is tested offline; runtime is best effort.** The release-owned support matrix records exact tested artifacts, protocols, capabilities, stop fidelity, limitations, and test dates. Runtime never imports that matrix and never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
-- **Bodies stored, bounded, and yours.** Message bodies persist in the broker's private mode-0600 state under bounded retention so the ledger can show you the mail itself; queued mail survives a broker restart and re-sends exactly once. Raw provider frames stay memory-only. The static dashboard files remain metadata-only; the live dashboard shows retained bodies.
+- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v3 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, provider receipt, or dashboard. Raw provider frames stay memory-only. The static dashboard files remain metadata-only; the live dashboard shows retained bodies.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.
 

@@ -81,14 +81,14 @@ test("snapshot evidence exposes suffix-only correlation, peer validation, operat
   assert.equal(en.includes("conv_IjKl_789"), false);
 });
 
-test("activity projection distinguishes automatic endpoint refresh from operator recovery", () => {
+test("activity projection distinguishes automatic discovery from operator registration", () => {
   const snapshot = dashboardFixture();
   snapshot.activityEvents = [
     {
       sequence: 1,
       timestamp: "2026-08-08T11:59:53.000Z",
-      kind: "endpoint",
-      action: "endpoint_refreshed",
+      kind: "discovery",
+      action: "discovery_refreshed",
       outcome: "accepted",
       aliases: ["codex-reviewer@this-mac"],
       operatorAction: false,
@@ -96,8 +96,8 @@ test("activity projection distinguishes automatic endpoint refresh from operator
     {
       sequence: 2,
       timestamp: "2026-08-08T11:59:54.000Z",
-      kind: "recovery",
-      action: "codex_orphan_removed",
+      kind: "registration",
+      action: "codex_registered",
       outcome: "accepted",
       aliases: ["codex-orphan@this-mac"],
       operatorAction: true,
@@ -111,8 +111,8 @@ test("activity projection distinguishes automatic endpoint refresh from operator
       operatorAction,
     })),
     [
-      { action: "endpoint_refreshed", operatorAction: false },
-      { action: "codex_orphan_removed", operatorAction: true },
+      { action: "discovery_refreshed", operatorAction: false },
+      { action: "codex_registered", operatorAction: true },
     ],
   );
 
@@ -126,10 +126,10 @@ test("activity projection distinguishes automatic endpoint refresh from operator
     (en.match(/data-dashboard-row="operator-action"/gu) ?? []).length,
     1,
   );
-  assert.match(en, /automatic[\s\S]*Codex endpoint refreshed/u);
-  assert.match(en, /operator[\s\S]*Stale Codex registration removed/u);
-  assert.match(zh, /自动[\s\S]*已刷新 Codex 端点/u);
-  assert.match(zh, /操作者[\s\S]*已移除陈旧的 Codex 注册/u);
+  assert.match(en, /automatic[\s\S]*Discovery refreshed/u);
+  assert.match(en, /operator[\s\S]*Codex task registered/u);
+  assert.match(zh, /自动[\s\S]*已刷新发现结果/u);
+  assert.match(zh, /操作者[\s\S]*已注册 Codex 任务/u);
 });
 
 test("registry evidence stays connector-scoped and raises one honest warning", () => {
@@ -473,12 +473,12 @@ test("QUEUE_STALLED is rendered only from a provided normalized alert", () => {
   );
 });
 
-test("a durable pair stays visible and degraded when its Codex route needs re-observation", () => {
+test("a durable pair stays visible and degraded when its Codex provider is unavailable", () => {
   const snapshot = dashboardFixture();
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
-    state: "stale",
-    safeErrorCode: "REOBSERVATION_REQUIRED",
+    state: "offline",
+    safeErrorCode: "CODEX_PROVIDER_UNAVAILABLE",
   };
   const model = buildDashboardViewModel(snapshot);
   assert.equal(model.overall, "attention");
@@ -488,19 +488,16 @@ test("a durable pair stays visible and degraded when its Codex route needs re-ob
   assert.equal(model.graph.unpairedReadyByProvider.codex, 0);
   assert.equal(model.consentEdges[0]?.state, "degraded");
   assert.equal(model.exchange.parties[0]?.nextAction, "none");
-  assert.equal(model.exchange.parties[1]?.nextAction, "restore_codex");
+  assert.equal(model.exchange.parties[1]?.nextAction, "none");
   assert.equal(model.attention.length, 1);
   assert.equal(model.attention[0]?.kind, "route");
-  assert.equal(model.attention[0]?.guidance, "codex_reactivation_required");
+  assert.equal(model.attention[0]?.guidance, "route_stale");
   const html = renderDashboardHtml(snapshot);
   assert.match(html, /Claude · claude-advisor@this-mac ↔ Codex · codex-reviewer@this-mac/);
   assert.match(html, /Consent edge retained; one or both routes need attention/);
-  assert.match(html, /Saved Codex route is not live/);
-  assert.match(html, /saved Codex route has no current live endpoint proof/);
-  assert.match(
-    html,
-    /embassy register-codex --alias codex-reviewer@this-mac/,
-  );
+  assert.match(html, /A route is unavailable/);
+  assert.match(html, /current operation/);
+  assert.match(html, /embassy refresh-dashboard/);
   assert.match(html, />Degraded</);
   assert.equal(html.includes("No consent edge exists"), false);
   assert.equal(html.includes("QUEUE_STALLED"), false);
@@ -540,186 +537,6 @@ test("a durable pair stays visible with an unavailable reason when one saved rou
   assert.match(zh, /同意边端点不可用/);
   assert.match(zh, /请先运行 embassy refresh-dashboard/);
   assert.equal(zh.includes("当前没有同意边"), false);
-});
-
-test("Codex restart alerts for one route coalesce into one human condition", () => {
-  const snapshot = dashboardFixture();
-  snapshot.routes[1] = {
-    ...snapshot.routes[1]!,
-    state: "stale",
-    safeErrorCode: "REOBSERVATION_REQUIRED",
-  };
-  snapshot.alerts = [
-    {
-      code: "REOBSERVATION_REQUIRED",
-      severity: "warning",
-      timestamp: "2026-08-08T11:59:58.000Z",
-      provider: "codex",
-      host: "this-mac",
-      alias: "codex-reviewer@this-mac",
-    },
-    {
-      code: "CODEX_BOOT_REACTIVATION_SKIPPED",
-      severity: "warning",
-      timestamp: "2026-08-08T11:59:59.000Z",
-      provider: "codex",
-      host: "this-mac",
-      alias: "codex-reviewer@this-mac",
-    },
-  ];
-
-  const model = buildDashboardViewModel(snapshot);
-  assert.equal(model.attention.length, 1);
-  assert.equal(model.attention[0]?.code, "CODEX_BOOT_REACTIVATION_SKIPPED");
-  assert.equal(model.attention[0]?.timestamp, "2026-08-08T11:59:59.000Z");
-  assert.equal(model.attention[0]?.guidance, "codex_reactivation_required");
-
-  const en = renderDashboardHtml(snapshot);
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /CODEX_BOOT_REACTIVATION_SKIPPED/);
-  assert.match(en, /Saved Codex route is not live/);
-  assert.match(en, /saved Codex route has no current live endpoint proof/);
-  assert.match(en, /embassy register-codex --alias codex-reviewer@this-mac/);
-  assert.match(zh, /已保存的 Codex 路由不在线/);
-  assert.match(zh, /当前没有在线端点证明/);
-  assert.match(zh, /embassy register-codex --alias codex-reviewer@this-mac/);
-});
-
-test("Codex reactivation evidence disappears once its exact route is live", () => {
-  const snapshot = dashboardFixture();
-  snapshot.alerts = [
-    {
-      code: "CODEX_BOOT_REACTIVATION_SKIPPED",
-      severity: "warning",
-      timestamp: "2026-08-08T11:59:59.000Z",
-      provider: "codex",
-      host: "this-mac",
-      alias: "codex-reviewer@this-mac",
-    },
-  ];
-
-  const model = buildDashboardViewModel(snapshot);
-  assert.equal(
-    model.attention.some(
-      (item) => item.code === "CODEX_BOOT_REACTIVATION_SKIPPED",
-    ),
-    false,
-  );
-  assert.equal(
-    renderDashboardHtml(snapshot).includes("Saved Codex route is not live"),
-    false,
-  );
-});
-
-test("route-derived reactivation guidance requires an actually stale Codex route", () => {
-  const snapshot = dashboardFixture();
-  snapshot.routes[1] = {
-    ...snapshot.routes[1]!,
-    state: "offline",
-    safeErrorCode: "REOBSERVATION_REQUIRED",
-  };
-
-  const model = buildDashboardViewModel(snapshot);
-  const routeAttention = model.attention.find(
-    (item) => item.alias === "codex-reviewer@this-mac",
-  );
-  assert.equal(routeAttention?.code, "REOBSERVATION_REQUIRED");
-  assert.equal(routeAttention?.guidance, "route_stale");
-  assert.equal(
-    model.attention.some(
-      (item) => item.guidance === "codex_reactivation_required",
-    ),
-    false,
-  );
-  assert.equal(
-    renderDashboardHtml(snapshot).includes("Saved Codex route is not live"),
-    false,
-  );
-});
-
-test("aged Codex staleness points at Desktop while the recovery burst remains transient", () => {
-  const snapshot = dashboardFixture();
-  const route = snapshot.routes.find((candidate) => candidate.provider === "codex");
-  assert.ok(route);
-  route.state = "stale";
-  route.safeErrorCode = "CODEX_ROUTE_STALE";
-  route.lastSeenAt = "2026-08-08T11:59:59.000Z";
-  snapshot.alerts = [{
-    code: "CODEX_ROUTE_STALE",
-    severity: "error",
-    timestamp: route.lastSeenAt,
-    provider: "codex",
-    host: route.host,
-    alias: route.alias,
-  }];
-
-  assert.equal(
-    buildDashboardViewModel(snapshot).attention[0]?.guidance,
-    "codex_stale",
-  );
-
-  route.lastSeenAt = "2026-08-08T11:59:57.000Z";
-  snapshot.alerts[0]!.timestamp = route.lastSeenAt;
-  const connector = snapshot.connectors.find(
-    (candidate) => candidate.provider === "codex",
-  );
-  assert.ok(connector);
-  connector.health = "degraded";
-  assert.equal(
-    buildDashboardViewModel(snapshot).attention[0]?.guidance,
-    "codex_stale",
-  );
-  connector.health = "healthy";
-  const model = buildDashboardViewModel(snapshot);
-  assert.equal(
-    model.attention[0]?.guidance,
-    "codex_app_reconnect_required",
-  );
-
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /Waiting for the Codex app/);
-  assert.match(en, /managed App Server is reachable/);
-  assert.match(en, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
-  assert.match(zh, /正在等待 Codex 应用重新连接/);
-  assert.match(zh, /托管 App Server 可以访问/);
-  assert.match(zh, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
-  assert.equal(en.includes("Re-run register-codex"), false);
-});
-
-test("generation-changed Codex route renders Desktop reconnect guidance", () => {
-  const snapshot = dashboardFixture();
-  const route = snapshot.routes.find((candidate) => candidate.provider === "codex");
-  assert.ok(route);
-  route.state = "stale";
-  route.safeErrorCode = "ENDPOINT_GENERATION_CHANGED";
-  route.lastSeenAt = "2026-08-08T11:59:57.000Z";
-  snapshot.alerts = [{
-    code: "ENDPOINT_GENERATION_CHANGED",
-    severity: "error",
-    timestamp: route.lastSeenAt,
-    provider: "codex",
-    host: route.host,
-    alias: route.alias,
-  }];
-  const connector = snapshot.connectors.find(
-    (candidate) => candidate.provider === "codex",
-  );
-  assert.ok(connector);
-  connector.health = "healthy";
-
-  const attention = buildDashboardViewModel(snapshot).attention.find(
-    (item) => item.alias === route.alias && item.host === route.host,
-  );
-  assert.equal(attention?.guidance, "codex_app_reconnect_required");
-
-  const relaunch = /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/;
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(en, /Waiting for the Codex app/);
-  assert.match(en, relaunch);
-  assert.match(zh, /正在等待 Codex 应用重新连接/);
-  assert.match(zh, relaunch);
 });
 
 test("any provider-to-Claude mailbox write surfaces one notice while its recipient is unobserved", () => {
@@ -812,54 +629,9 @@ test("restart guidance preserves queued mail and isolates in-flight ambiguity", 
     },
   ];
   const html = renderDashboardHtml(snapshot);
-  assert.match(html, /queued mail survives and resumes exactly once/);
-  assert.match(html, /only a write in flight at the crash settles ambiguous/);
+  assert.match(html, /queued or reserved mail may resume once/);
+  assert.match(html, /armed or accepted work settles ambiguous or unconfirmed without replay/);
   assert.doesNotMatch(html, /restarting abandons memory-only message bodies/);
-});
-
-test("Codex succession alerts distinguish a busy boundary from manual recovery", () => {
-  const snapshot = dashboardFixture();
-  snapshot.alerts = [
-    {
-      code: "CODEX_SUCCESSION_BARRIER_BUSY",
-      severity: "warning",
-      timestamp: snapshot.generatedAt,
-      provider: "codex",
-      host: "this-mac",
-    },
-    {
-      code: "CODEX_SUCCESSION_PUBLICATION_UNKNOWN",
-      severity: "error",
-      timestamp: snapshot.generatedAt,
-      provider: "codex",
-      host: "this-mac",
-    },
-  ];
-  const model = buildDashboardViewModel(snapshot);
-  assert.equal(
-    model.attention.find(
-      (item) => item.code === "CODEX_SUCCESSION_BARRIER_BUSY",
-    )?.guidance,
-    "codex_succession_busy",
-  );
-  assert.equal(
-    model.attention.find(
-      (item) => item.code === "CODEX_SUCCESSION_PUBLICATION_UNKNOWN",
-    )?.guidance,
-    "codex_succession_recovery",
-  );
-
-  const en = renderDashboardHtml(snapshot, { locale: "en" });
-  assert.match(en, /Codex task change needs a quiet boundary/);
-  assert.match(en, /kept the current Codex registration/);
-  assert.match(en, /Codex task change requires manual recovery/);
-  assert.match(en, /keeps Codex registration offline instead of guessing/);
-  assert.match(en, /Do not send, retry the task change, or assume either task is active/);
-
-  const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
-  assert.match(zh, /更换 Codex 任务需要等待静默边界/);
-  assert.match(zh, /更换 Codex 任务需要手动恢复/);
-  assert.match(zh, /不会猜测哪个任务拥有路由/);
 });
 
 test("first-run exchange board gives truthful paired setup actions", () => {
@@ -983,8 +755,8 @@ test("a fresh Codex task remains pairable beside an existing degraded edge", () 
   const snapshot = dashboardFixture();
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
-    state: "stale",
-    safeErrorCode: "REOBSERVATION_REQUIRED",
+    state: "offline",
+    safeErrorCode: "CODEX_PROVIDER_UNAVAILABLE",
   };
   const { oldestQueuedAt: _oldestQueuedAt, ...freshCodex } =
     dashboardFixture().routes[1]!;
@@ -1181,7 +953,7 @@ test("51 active groups are counted before the 50-group display slice", () => {
   assert.match(html, /7 delivery events before dashboard projection/);
 });
 
-test("Chinese copy distinguishes static snapshots, stale routes, and expired deliveries", () => {
+test("Chinese copy distinguishes static snapshots, unavailable routes, and expired deliveries", () => {
   const snapshot = dashboardFixture();
   snapshot.routes[1] = {
     ...snapshot.routes[1]!,
@@ -1196,7 +968,7 @@ test("Chinese copy distinguishes static snapshots, stale routes, and expired del
   const html = renderDashboardHtml(snapshot, { locale: "zh-CN" });
   assert.equal(html.includes("即时"), false);
   assert.match(html, /一个时间点/);
-  assert.match(html, /需要重新观察/);
+  assert.match(html, /路由不可用/);
   assert.match(html, /已超出投递期限/);
 });
 

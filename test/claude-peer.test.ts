@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import {
   chmod,
@@ -28,7 +29,6 @@ import {
   type ClaudePeerInboundMessage,
   type ClaudePeerListener,
   type ClaudePeerProtocolNotice,
-  type ClaudePeerReceiptEvent,
   type ClaudeProcessIdentity,
 } from "../src/gateway/claude-peer.js";
 
@@ -68,8 +68,7 @@ async function fixture(
   overrides: FixtureOverrides = {},
 ): Promise<Fixture> {
   // Keep the test-owned root short enough for Darwin's Unix socket pathname
-  // limit. os.tmpdir() can be a long per-user path there, and prepared socket
-  // names include both the PID and generation. This still never uses the real
+  // limit. os.tmpdir() can be a long per-user path there. This still never uses the real
   // /tmp/cc-socks root or ~/.claude.
   const createdRoot = await mkdtemp(
     path.join("/tmp", "synthetic-cc-peer-"),
@@ -95,11 +94,10 @@ async function fixture(
     connect,
     now,
     createId,
-    createGeneration,
+    createArtifactToken,
     expectedUid,
     registryRename,
     registryOperationHook,
-    registryPublicationHook,
     postBindHook,
     ...productionOverrides
   } = overrides;
@@ -109,7 +107,6 @@ async function fixture(
       socketDir,
       attestedClaudeCodeVersion:
         CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-      receiptDeadlineMs: 50,
       connectTimeoutMs: 500,
       connectionIdleMs: 500,
       ...productionOverrides,
@@ -120,14 +117,11 @@ async function fixture(
       ...(connect === undefined ? {} : { connect }),
       ...(now === undefined ? {} : { now }),
       ...(createId === undefined ? {} : { createId }),
-      ...(createGeneration === undefined ? {} : { createGeneration }),
+      ...(createArtifactToken === undefined ? {} : { createArtifactToken }),
       ...(registryRename === undefined ? {} : { registryRename }),
       ...(registryOperationHook === undefined
         ? {}
         : { registryOperationHook }),
-      ...(registryPublicationHook === undefined
-        ? {}
-        : { registryPublicationHook }),
       ...(postBindHook === undefined ? {} : { postBindHook }),
       userHome: home,
       tempRoots: [systemTemp],
@@ -231,6 +225,17 @@ async function selectFirstPeer(current: Fixture) {
     current.stateDir,
   );
   return target;
+}
+
+async function prepareAndPerform(
+  current: Fixture,
+  targetId: string,
+  content: string,
+) {
+  const prepared = await current.adapter.prepareSend(targetId, content, {
+    deadlineAt: Date.now() + 30_000,
+  });
+  return await prepared.perform();
 }
 
 async function sendLines(
@@ -449,7 +454,7 @@ test("discovery preserves capabilities only for the same exact session generatio
   assert.ok(replaced !== undefined);
   assert.notEqual(replaced.targetId, first.targetId);
   await assert.rejects(
-    current.adapter.send(first.targetId, "must not silently rebind"),
+    prepareAndPerform(current, first.targetId, "must not silently rebind"),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_TARGET_UNKNOWN",
@@ -470,7 +475,7 @@ test("selection attestation is required before any peer socket write", async (t)
   assert.ok(target !== undefined);
 
   await assert.rejects(
-    current.adapter.send(target.targetId, "must remain local"),
+    prepareAndPerform(current, target.targetId, "must remain local"),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WORKSPACE_UNATTESTED",
@@ -642,7 +647,7 @@ test("name, cwd, and kind changes preserve the logical session UUID", async (t) 
   assert.ok(changedKind !== undefined);
   assert.equal(changedKind.targetId, moved.targetId);
   await assert.rejects(
-    current.adapter.send(first.targetId, "workspace changed"),
+    prepareAndPerform(current, first.targetId, "workspace changed"),
     (error: unknown) =>
       error instanceof BridgeError &&
       (error.code === "CLAUDE_PEER_TARGET_CHANGED" ||
@@ -650,7 +655,7 @@ test("name, cwd, and kind changes preserve the logical session UUID", async (t) 
   );
 });
 
-test("send rejects replaced state and workspace generations before connecting", { skip: process.platform !== "darwin" }, async (t) => {
+test("preparation rejects replaced state and workspace generations before connecting", { skip: process.platform !== "darwin" }, async (t) => {
   let connections = 0;
   const current = await fixture(t);
   await addPeer(current, {
@@ -665,7 +670,7 @@ test("send rejects replaced state and workspace generations before connecting", 
   await rm(current.stateDir, { recursive: true });
   await mkdir(current.stateDir, { mode: 0o700 });
   await assert.rejects(
-    current.adapter.send(target.targetId, "state changed"),
+    prepareAndPerform(current, target.targetId, "state changed"),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_STATE_ROOT_CHANGED",
@@ -679,7 +684,7 @@ test("send rejects replaced state and workspace generations before connecting", 
   await rm(current.workspace, { recursive: true });
   await mkdir(current.workspace, { mode: 0o700 });
   await assert.rejects(
-    current.adapter.send(target.targetId, "workspace changed"),
+    prepareAndPerform(current, target.targetId, "workspace changed"),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WORKSPACE_CHANGED",
@@ -779,7 +784,8 @@ test("discovery tolerates unknown registry fields without exposing them", async 
     target.targetId,
     current.stateDir,
   );
-  const sent = await current.adapter.send(
+  const sent = await prepareAndPerform(
+    current,
     target.targetId,
     "unknown fields do not hide this peer",
   );
@@ -830,7 +836,8 @@ test("absent and bounded Claude versions remain metadata through delivery", asyn
       target.targetId,
       current.stateDir,
     );
-    const sent = await current.adapter.send(
+    const sent = await prepareAndPerform(
+      current,
       target.targetId,
       "version metadata does not fence the route",
     );
@@ -964,7 +971,7 @@ test("frame codec emits canonical v1 NDJSON and rejects smuggling", () => {
   );
 });
 
-test("send revalidates the exact target generation and never retries a changed peer", async (t) => {
+test("preparation revalidates the exact target generation and never retries a changed peer", async (t) => {
   const current = await fixture(t);
   const target = await addPeer(current, { pid: 43_101 });
   const discovered = await current.adapter.discover();
@@ -982,14 +989,14 @@ test("send revalidates the exact target generation and never retries a changed p
   await writeFile(target.registryPath, JSON.stringify(record), { mode: 0o600 });
 
   await assert.rejects(
-    current.adapter.send(targetId, "do not deliver"),
+    prepareAndPerform(current, targetId, "do not deliver"),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_TARGET_UNKNOWN",
   );
 });
 
-test("send follows a session UUID across process and socket rotation", async (t) => {
+test("preparation follows a session UUID across process and socket rotation", async (t) => {
   let replacementConnections = 0;
   const current = await fixture(t);
   const original = await addPeer(current, {
@@ -1015,7 +1022,8 @@ test("send follows a session UUID across process and socket rotation", async (t)
     },
   });
 
-  const sent = await current.adapter.send(
+  const sent = await prepareAndPerform(
+    current,
     target.targetId,
     "follow the logical session",
   );
@@ -1028,14 +1036,12 @@ test("send follows a session UUID across process and socket rotation", async (t)
   );
 });
 
-test("send writes exactly one canonical frame and reports transport, not delivery", async (t) => {
+test("prepared send exposes exact immutable evidence and opens no socket before perform", async (t) => {
   let wire = Buffer.alloc(0);
   let connections = 0;
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-  });
+  const current = await fixture(t, { createId: () => MESSAGE_ONE });
   await addPeer(current, {
-    pid: 44_101,
+    pid: 44_151,
     handler: (socket) => {
       connections += 1;
       socket.on("data", (chunk) => {
@@ -1044,31 +1050,43 @@ test("send writes exactly one canonical frame and reports transport, not deliver
     },
   });
   const target = await selectFirstPeer(current);
-  const statuses: string[] = [];
-  const result = await current.adapter.send(target.targetId, "transport only", {
-    onTransportStatus: (event) => {
-      statuses.push(event.status);
-    },
+  const replyListener = await current.adapter.listen({
+    onMessage: () => undefined,
+  });
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "authorized exact frame",
+    { deadlineAt: Date.now() + 30_000, replyListener },
+  );
+  assert.equal(connections, 0);
+  const exactFrame = encodeClaudePeerUserFrame({
+    messageId: MESSAGE_ONE,
+    content: "authorized exact frame",
+    from: replyListener.address,
+  });
+  assert.equal(prepared.frameBytes, exactFrame.length);
+  assert.equal(
+    prepared.sha256,
+    createHash("sha256").update(exactFrame).digest("hex"),
+  );
+
+  assert.deepEqual(await prepared.perform(), {
+    messageId: MESSAGE_ONE,
+    transportStatus: "transport_written",
   });
   await eventually(() => wire.includes(0x0a));
   assert.equal(connections, 1);
-  assert.deepEqual(statuses, [
-    "connecting",
-    "write_started",
-    "transport_written",
-  ]);
-  assert.deepEqual(result, {
-    messageId: MESSAGE_ONE,
-    transportStatus: "transport_written",
-    receiptStatus: "unavailable",
-  });
-  const parsed = JSON.parse(wire.toString("utf8")) as Record<string, unknown>;
-  assert.equal(parsed.type, "user");
-  assert.equal(parsed.msgV, 1);
-  assert.equal(parsed.from, undefined);
+  assert.deepEqual(wire, exactFrame);
+  await assert.rejects(
+    prepared.perform(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_PREPARATION_CONSUMED",
+  );
+  assert.equal(connections, 1);
 });
 
-test("send never opens a peer socket after its canonical deadline", async (t) => {
+test("cancel and deadline consume prepared sends without opening a socket", async (t) => {
   let connections = 0;
   let now = 1_786_150_000_000;
   const current = await fixture(t, {
@@ -1076,54 +1094,43 @@ test("send never opens a peer socket after its canonical deadline", async (t) =>
     now: () => now,
   });
   await addPeer(current, {
-    pid: 44_102,
+    pid: 44_152,
     handler: (socket) => {
       connections += 1;
       socket.resume();
     },
   });
   const target = await selectFirstPeer(current);
-  const deadlineAt = now + 1;
-  const statuses: string[] = [];
+  const cancelled = await current.adapter.prepareSend(
+    target.targetId,
+    "denied",
+    { deadlineAt: now + 30_000 },
+  );
+  cancelled.cancel();
   await assert.rejects(
-    current.adapter.send(target.targetId, "already expired", {
-      receiptDeadlineAt: deadlineAt,
-      onTransportStatus: (event) => {
-        statuses.push(event.status);
-        if (event.status === "connecting") now = deadlineAt;
-      },
-    }),
+    cancelled.perform(),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_PREPARATION_CONSUMED",
+  );
+
+  const expired = await current.adapter.prepareSend(
+    target.targetId,
+    "expired",
+    { deadlineAt: now + 1 },
+  );
+  now += 1;
+  await assert.rejects(
+    expired.perform(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_MESSAGE_EXPIRED" &&
       error.recoverable,
   );
   assert.equal(connections, 0);
-  assert.deepEqual(statuses, ["connecting", "not_written"]);
 });
 
-test("transport observer failures cannot turn a written message into a retry signal", async (t) => {
-  let writes = 0;
-  const current = await fixture(t, { createId: () => MESSAGE_ONE });
-  await addPeer(current, {
-    pid: 44_201,
-    handler: (socket) => {
-      writes += 1;
-      socket.resume();
-    },
-  });
-  const target = await selectFirstPeer(current);
-  const result = await current.adapter.send(target.targetId, "exactly once", {
-    onTransportStatus: () => {
-      throw new Error("observer failure");
-    },
-  });
-  await eventually(() => writes === 1);
-  assert.equal(result.transportStatus, "transport_written");
-  assert.equal(writes, 1);
-});
-
-test("a post-connect error is ambiguous, non-retryable, and retains late receipt tracking", async (t) => {
+test("a prepared post-connect error is ambiguous and non-retryable", async (t) => {
   const fakeSocket = new EventEmitter() as net.Socket;
   fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
   fakeSocket.end = ((
@@ -1133,99 +1140,26 @@ test("a post-connect error is ambiguous, non-retryable, and retains late receipt
     queueMicrotask(() => fakeSocket.emit("error", new Error("reset")));
     return fakeSocket;
   }) as net.Socket["end"];
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  const transport: string[] = [];
   const current = await fixture(t, {
     createId: () => MESSAGE_ONE,
-    receiptDeadlineMs: 20,
     connect: () => {
       queueMicrotask(() => fakeSocket.emit("connect"));
       return fakeSocket;
     },
   });
   await addPeer(current, { pid: 44_301 });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
   const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "ambiguous edge",
+    { deadlineAt: Date.now() + 30_000 },
+  );
   await assert.rejects(
-    current.adapter.send(target.targetId, "ambiguous edge", {
-      listener,
-      onTransportStatus: (event) => {
-        transport.push(event.status);
-      },
-    }),
+    prepared.perform(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       error.recoverable === false,
-  );
-  assert.deepEqual(transport, ["connecting", "write_started", "ambiguous"]);
-  await eventually(() => receipts.length === 1);
-  assert.equal(receipts[0]?.status, "ambiguous");
-});
-
-test("a held receipt cannot be downgraded by a later transport error", async (t) => {
-  const fakeSocket = new EventEmitter() as net.Socket;
-  fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
-  let listener: ClaudePeerListener | undefined;
-  let peerSocketPath = "";
-  let heldThenError: Promise<void> | undefined;
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  fakeSocket.end = ((_frame: Buffer, _callback: () => void) => {
-    heldThenError = (async () => {
-      assert.ok(listener !== undefined);
-      await sendLines(listener.address.slice(4), [
-        `${JSON.stringify({
-          type: "control",
-          action: "peer_message_status",
-          status: "held",
-          reason: "not surfaced",
-          from: `uds:${peerSocketPath}`,
-          orig_msg_id: MESSAGE_ONE,
-          msgV: 1,
-          msg_id: MESSAGE_TWO,
-        })}\n`,
-      ]);
-      await eventually(() => receipts.some((event) => event.status === "held"));
-      fakeSocket.emit("error", new Error("reset after native hold"));
-    })();
-    return fakeSocket;
-  }) as net.Socket["end"];
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-    receiptDeadlineMs: 200,
-    connect: () => {
-      queueMicrotask(() => fakeSocket.emit("connect"));
-      return fakeSocket;
-    },
-  });
-  const peer = await addPeer(current, { pid: 44_303 });
-  peerSocketPath = peer.socketPath;
-  listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
-  const target = await selectFirstPeer(current);
-  await assert.rejects(
-    current.adapter.send(target.targetId, "held before reset", {
-      listener,
-      receiptDeadlineAt: Date.now() + 200,
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS",
-  );
-  await heldThenError;
-  await eventually(() => receipts.length === 2, 500);
-  assert.deepEqual(
-    receipts.map((event) => event.status),
-    ["held", "unconfirmed"],
   );
 });
 
@@ -1233,7 +1167,6 @@ test("a post-connect timeout is ambiguous rather than not-written", async (t) =>
   const fakeSocket = new EventEmitter() as net.Socket;
   fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
   fakeSocket.end = (() => fakeSocket) as net.Socket["end"];
-  const transport: string[] = [];
   const current = await fixture(t, {
     createId: () => MESSAGE_ONE,
     connectTimeoutMs: 10,
@@ -1244,65 +1177,46 @@ test("a post-connect timeout is ambiguous rather than not-written", async (t) =>
   });
   await addPeer(current, { pid: 44_302 });
   const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "timeout edge",
+    { deadlineAt: Date.now() + 30_000 },
+  );
   await assert.rejects(
-    current.adapter.send(target.targetId, "timeout edge", {
-      onTransportStatus: (event) => {
-        transport.push(event.status);
-      },
-    }),
+    prepared.perform(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       error.recoverable === false,
   );
-  assert.deepEqual(transport, ["connecting", "write_started", "ambiguous"]);
 });
 
 test("a write that hangs across the canonical deadline is ambiguous, not expired", async (t) => {
   const fakeSocket = new EventEmitter() as net.Socket;
   fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
   fakeSocket.end = (() => fakeSocket) as net.Socket["end"];
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  const transport: string[] = [];
   const current = await fixture(t, {
     createId: () => MESSAGE_ONE,
     connectTimeoutMs: 500,
-    receiptDeadlineMs: 1_000,
     connect: () => {
       queueMicrotask(() => fakeSocket.emit("connect"));
       return fakeSocket;
     },
   });
   await addPeer(current, { pid: 44_304 });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
   const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "deadline-crossing write",
+    { deadlineAt: Date.now() + 200 },
+  );
   await assert.rejects(
-    current.adapter.send(target.targetId, "deadline-crossing write", {
-      listener,
-      receiptDeadlineAt: Date.now() + 200,
-      onTransportStatus: (event) => {
-        transport.push(event.status);
-      },
-    }),
+    prepared.perform(),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       !error.recoverable,
   );
-  await eventually(() => receipts.length === 1);
-  assert.deepEqual(transport, ["connecting", "write_started", "ambiguous"]);
-  assert.deepEqual(receipts, [
-    {
-      messageId: MESSAGE_ONE,
-      status: "ambiguous",
-      trust: "untrusted_same_uid_peer",
-    },
-  ]);
 });
 
 test("anonymous callback listener bounds NDJSON and marks registered peers untrusted", async (t) => {
@@ -1390,244 +1304,6 @@ test("transient reply addresses resolve only to the exact logical session UUID",
   );
 });
 
-test("known held receipt flow is normalized without claiming task completion", async (t) => {
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  let outbound: Record<string, unknown> | undefined;
-  const current = await fixture(t, { createId: () => MESSAGE_ONE });
-  const peer = await addPeer(current, {
-    pid: 46_101,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        outbound = JSON.parse(data) as Record<string, unknown>;
-      });
-    },
-  });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
-  const target = await selectFirstPeer(current);
-  const result = await current.adapter.send(target.targetId, "needs approval", {
-    listener,
-  });
-  assert.equal(result.receiptStatus, "pending");
-  await eventually(() => outbound !== undefined);
-  assert.equal(outbound?.from, listener.address);
-
-  const statusFrame = (status: "held" | "delivered", messageId: string) =>
-    `${JSON.stringify({
-      type: "control",
-      action: "peer_message_status",
-      status,
-      reason: "not surfaced",
-      from: `uds:${peer.socketPath}`,
-      orig_msg_id: MESSAGE_ONE,
-      msgV: 1,
-      msg_id: messageId,
-    })}\n`;
-  await sendLines(listener.address.slice(4), [
-    statusFrame("held", MESSAGE_TWO),
-  ]);
-  await eventually(() => receipts.length === 1);
-  assert.deepEqual(receipts[0], {
-    messageId: MESSAGE_ONE,
-    status: "held",
-    trust: "untrusted_same_uid_peer",
-  });
-  await sendLines(listener.address.slice(4), [
-    statusFrame("delivered", "00000000-0000-4000-8000-000000000103"),
-  ]);
-  await eventually(() => receipts.length === 2);
-  assert.deepEqual(receipts[1], {
-    messageId: MESSAGE_ONE,
-    status: "released",
-    trust: "untrusted_same_uid_peer",
-  });
-});
-
-test("outbound receipt control re-resolves the stable session after each expired lease", async (t) => {
-  let clock = 50_000;
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-    now: () => clock,
-    receiptDeadlineMs: 2_000,
-    targetLeaseMs: 100,
-  });
-  const peer = await addPeer(current, {
-    pid: 46_102,
-    sessionId: SESSION_ONE,
-    handler: (socket) => socket.resume(),
-  });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
-  const target = await selectFirstPeer(current);
-  await current.adapter.send(target.targetId, "receipt outlives discovery lease", {
-    listener,
-    receiptDeadlineAt: clock + 2_000,
-  });
-
-  const statusFrame = (status: "held" | "delivered", messageId: string) =>
-    `${JSON.stringify({
-      type: "control",
-      action: "peer_message_status",
-      status,
-      reason: "not surfaced",
-      from: `uds:${peer.socketPath}`,
-      orig_msg_id: MESSAGE_ONE,
-      msgV: 1,
-      msg_id: messageId,
-    })}\n`;
-
-  clock += 101;
-  await sendLines(listener.address.slice(4), [
-    statusFrame("held", MESSAGE_TWO),
-  ]);
-  await eventually(() => receipts.length === 1);
-  assert.equal(receipts[0]?.status, "held");
-
-  clock += 101;
-  await sendLines(listener.address.slice(4), [
-    statusFrame("delivered", "00000000-0000-4000-8000-000000000104"),
-  ]);
-  await eventually(() => receipts.length === 2);
-  assert.deepEqual(
-    receipts.map((event) => event.status),
-    ["held", "released"],
-  );
-});
-
-test("a confirmed write without a native terminal becomes unconfirmed", async (t) => {
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-    receiptDeadlineMs: 20,
-  });
-  await addPeer(current, { pid: 47_101, handler: (socket) => socket.resume() });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
-  const callbackPath = listener.address.slice(4);
-  const target = await selectFirstPeer(current);
-  await current.adapter.send(target.targetId, "no acknowledgement", { listener });
-  await eventually(() => receipts.length === 1);
-  assert.deepEqual(receipts[0], {
-    messageId: MESSAGE_ONE,
-    status: "unconfirmed",
-    trust: "untrusted_same_uid_peer",
-  });
-  const registryNames = await readdir(current.sessionsDir);
-  assert.ok(!registryNames.includes(`${process.pid}.json`));
-  await listener.close();
-  await assert.rejects(lstat(callbackPath), { code: "ENOENT" });
-});
-
-test("a held receipt uses the exact per-message deadline before becoming unconfirmed", async (t) => {
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-    receiptDeadlineMs: 1_000,
-  });
-  const peer = await addPeer(current, {
-    pid: 47_102,
-    handler: (socket) => socket.resume(),
-  });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
-  const target = await selectFirstPeer(current);
-  const deadlineAt = Date.now() + 250;
-  await current.adapter.send(target.targetId, "held without release", {
-    listener,
-    receiptDeadlineAt: deadlineAt,
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "control",
-      action: "peer_message_status",
-      status: "held",
-      reason: "not surfaced",
-      from: `uds:${peer.socketPath}`,
-      orig_msg_id: MESSAGE_ONE,
-      msgV: 1,
-      msg_id: MESSAGE_TWO,
-    })}\n`,
-  ]);
-  await eventually(() => receipts.length === 1);
-  assert.equal(receipts[0]?.status, "held");
-  await eventually(() => receipts.length === 2, 500);
-  assert.deepEqual(receipts[1], {
-    messageId: MESSAGE_ONE,
-    status: "unconfirmed",
-    trust: "untrusted_same_uid_peer",
-  });
-  assert.ok(Date.now() < deadlineAt + 400);
-});
-
-test("a native terminal at the exact canonical cutoff cannot override write evidence", async (t) => {
-  let clock = 1_786_150_000_000;
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-    receiptDeadlineMs: 1_000,
-    now: () => clock,
-  });
-  const peer = await addPeer(current, {
-    pid: 47_103,
-    handler: (socket) => socket.resume(),
-  });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: (event) => {
-      receipts.push(event);
-    },
-  });
-  const target = await selectFirstPeer(current);
-  const deadlineAt = clock + 1_000;
-  await current.adapter.send(target.targetId, "cutoff race", {
-    listener,
-    receiptDeadlineAt: deadlineAt,
-  });
-  clock = deadlineAt;
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "control",
-      action: "peer_message_status",
-      status: "delivered",
-      reason: "not surfaced",
-      from: `uds:${peer.socketPath}`,
-      orig_msg_id: MESSAGE_ONE,
-      msgV: 1,
-      msg_id: MESSAGE_TWO,
-    })}\n`,
-  ]);
-  await eventually(() => receipts.length === 1);
-  assert.deepEqual(receipts, [
-    {
-      messageId: MESSAGE_ONE,
-      status: "unconfirmed",
-      trust: "untrusted_same_uid_peer",
-    },
-  ]);
-});
-
 test("listener advertises one native codex peer and removes it on close", async (t) => {
   const current = await fixture(t, { createId: () => SESSION_ONE });
   const listener = await current.adapter.listen({ onMessage: () => undefined });
@@ -1679,329 +1355,6 @@ test("listener advertises bounded unknown Claude version evidence", async (t) =>
   await listener.close();
 });
 
-test("prepared listener generations coexist, publish atomically, and activate explicitly", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO, MESSAGE_ONE];
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_TWO,
-    createGeneration: () => "active_01",
-  });
-  let preparedMessages = 0;
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("successor_01", {
-    onMessage: () => {
-      preparedMessages += 1;
-    },
-  });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-
-  assert.equal(active.generation, "active_01");
-  assert.equal(prepared.generation, "successor_01");
-  assert.notEqual(active.address, prepared.address);
-  assert.match(prepared.address, new RegExp(`${process.pid}\\.successor_01\\.sock$`, "u"));
-  assert.equal((await lstat(active.address.slice(4))).isSocket(), true);
-  assert.equal((await lstat(prepared.address.slice(4))).isSocket(), true);
-
-  await active.advertise("codex-before", current.workspace);
-  const before = JSON.parse(await readFile(registryPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  assert.equal(before.name, "codex-before");
-  assert.equal(before.messagingSocketPath, active.address.slice(4));
-  await assert.rejects(
-    prepared.advertise("codex-bypass", current.workspace),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  assert.throws(
-    () => prepared.resumeInbound(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  await assert.rejects(
-    prepared.publishReplacing(active, "codex-after", current.workspace),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_SUCCESSION_NOT_QUIESCED",
-  );
-
-  const inboundFrame = `${JSON.stringify({
-    type: "user",
-    message: { role: "user", content: "generation fence" },
-    msgV: 1,
-    msg_id: MESSAGE_ONE,
-    priority: "next",
-  })}\n`;
-  await sendLines(prepared.address.slice(4), [inboundFrame]).catch(
-    () => undefined,
-  );
-  await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  assert.equal(preparedMessages, 0);
-
-  await active.quiesceInbound();
-  const outcome = await prepared.publishReplacing(
-    active,
-    "codex-after",
-    current.workspace,
-  );
-  assert.equal(outcome, "published");
-  const after = JSON.parse(await readFile(registryPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  assert.equal(after.name, "codex-after");
-  assert.equal(after.sessionId, SESSION_TWO);
-  assert.equal(after.messagingSocketPath, prepared.address.slice(4));
-  assert.equal((await lstat(registryPath)).mode & 0o777, 0o600);
-  assert.deepEqual(
-    (await readdir(current.sessionsDir)).filter((name) => name.includes("tmp")),
-    [],
-  );
-
-  await sendLines(prepared.address.slice(4), [inboundFrame]).catch(
-    () => undefined,
-  );
-  await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  assert.equal(preparedMessages, 0);
-  assert.throws(
-    () => prepared.resumeInbound(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  prepared.grantSuccessionActivation();
-  prepared.grantSuccessionActivation();
-  prepared.resumeInbound();
-  prepared.resumeInbound();
-  await sendLines(prepared.address.slice(4), [inboundFrame]);
-  await eventually(() => preparedMessages === 1);
-
-  await active.close();
-  const preserved = JSON.parse(await readFile(registryPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  assert.equal(preserved.name, "codex-after");
-  assert.equal(preserved.messagingSocketPath, prepared.address.slice(4));
-  await prepared.updateAdvertisedStatus("waiting");
-  const waiting = JSON.parse(await readFile(registryPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  assert.equal(waiting.status, "waiting");
-  await prepared.close();
-  await assert.rejects(lstat(registryPath), { code: "ENOENT" });
-});
-
-test("sibling status mutation cannot interleave across succession publication", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  const events: string[] = [];
-  let publicationPausedResolve: (() => void) | undefined;
-  const publicationPaused = new Promise<void>((resolve) => {
-    publicationPausedResolve = resolve;
-  });
-  let releasePublication: (() => void) | undefined;
-  const publicationRelease = new Promise<void>((resolve) => {
-    releasePublication = resolve;
-  });
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-    registryOperationHook: (event) => {
-      events.push(
-        `${event.operation}:${event.phase}:${event.generation}`,
-      );
-    },
-    registryPublicationHook: async (stage) => {
-      if (stage !== "before_rename") return;
-      publicationPausedResolve?.();
-      await publicationRelease;
-    },
-  });
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("status_race_01", {
-    onMessage: () => undefined,
-  });
-  await active.advertise("codex-before", current.workspace);
-  events.length = 0;
-  await active.quiesceInbound();
-
-  const publication = prepared.publishReplacing(
-    active,
-    "codex-after",
-    current.workspace,
-  );
-  await publicationPaused;
-  const staleStatus = active.updateAdvertisedStatus("waiting");
-  await Promise.resolve();
-  releasePublication?.();
-
-  assert.equal(await publication, "published");
-  await staleStatus;
-  assert.deepEqual(events, [
-    `publish:entered:${prepared.generation}`,
-    `publish:exited:${prepared.generation}`,
-    `status:entered:${active.generation}`,
-    `status:exited:${active.generation}`,
-  ]);
-  const registry = JSON.parse(
-    await readFile(
-      path.join(current.sessionsDir, `${process.pid}.json`),
-      "utf8",
-    ),
-  ) as Record<string, unknown>;
-  assert.equal(registry.name, "codex-after");
-  assert.equal(registry.status, "idle");
-});
-
-test("old close waits behind post-rename proof and preserves the new registry", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  const events: string[] = [];
-  let publicationPausedResolve: (() => void) | undefined;
-  const publicationPaused = new Promise<void>((resolve) => {
-    publicationPausedResolve = resolve;
-  });
-  let releasePublication: (() => void) | undefined;
-  const publicationRelease = new Promise<void>((resolve) => {
-    releasePublication = resolve;
-  });
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-    registryOperationHook: (event) => {
-      events.push(
-        `${event.operation}:${event.phase}:${event.generation}`,
-      );
-    },
-    registryPublicationHook: async (stage) => {
-      if (stage !== "after_rename") return;
-      publicationPausedResolve?.();
-      await publicationRelease;
-    },
-  });
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("close_race_01", {
-    onMessage: () => undefined,
-  });
-  await active.advertise("codex-before", current.workspace);
-  events.length = 0;
-  await active.quiesceInbound();
-
-  const publication = prepared.publishReplacing(
-    active,
-    "codex-after",
-    current.workspace,
-  );
-  await publicationPaused;
-  const staleClose = active.close();
-  await Promise.resolve();
-  releasePublication?.();
-
-  assert.equal(await publication, "published");
-  await staleClose;
-  assert.deepEqual(events, [
-    `publish:entered:${prepared.generation}`,
-    `publish:exited:${prepared.generation}`,
-    `unadvertise:entered:${active.generation}`,
-    `unadvertise:exited:${active.generation}`,
-  ]);
-  const registry = JSON.parse(
-    await readFile(
-      path.join(current.sessionsDir, `${process.pid}.json`),
-      "utf8",
-    ),
-  ) as Record<string, unknown>;
-  assert.equal(registry.name, "codex-after");
-  assert.equal(registry.messagingSocketPath, prepared.address.slice(4));
-});
-
-test("succession refuses a byte-identical registry with a foreign inode generation", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-  });
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("successor_02", {
-    onMessage: () => undefined,
-  });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-  await active.advertise("codex-before", current.workspace);
-  await active.quiesceInbound();
-  const serialized = await readFile(registryPath, "utf8");
-  const replacement = path.join(current.sessionsDir, "foreign-identical.tmp");
-  await writeFile(replacement, serialized, { mode: 0o600 });
-  await rename(replacement, registryPath);
-
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "unknown",
-  );
-  assert.equal(await readFile(registryPath, "utf8"), serialized);
-  assert.throws(
-    () => prepared.resumeInbound(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-});
-
-test("prepared generations validate syntax and reject foreign adapter ownership", async (t) => {
-  const current = await fixture(t, { createId: () => SESSION_ONE });
-  for (const generation of ["", "../escape", "with.dot", "x".repeat(33)]) {
-    await assert.rejects(
-      current.adapter.listenPrepared(generation, {
-        onMessage: () => undefined,
-      }),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "INVALID_CODEX_PEER_GENERATION",
-    );
-  }
-
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  await active.advertise("codex-before", current.workspace);
-  await active.quiesceInbound();
-  await assert.rejects(
-    current.adapter.listenPrepared(
-      active.generation,
-      { onMessage: () => undefined },
-    ),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_GENERATION_EXISTS",
-  );
-  const foreignAdapter = new ClaudePeerAdapter(
-    {
-      sessionsDir: current.sessionsDir,
-      socketDir: current.socketDir,
-      attestedClaudeCodeVersion:
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
-    },
-    {
-      createId: () => SESSION_TWO,
-      userHome: current.home,
-      tempRoots: [current.systemTemp],
-    },
-  );
-  try {
-    const foreignPrepared = await foreignAdapter.listenPrepared("foreign_01", {
-      onMessage: () => undefined,
-    });
-    await assert.rejects(
-      foreignPrepared.publishReplacing(
-        active,
-        "codex-after",
-        current.workspace,
-      ),
-      (error: unknown) =>
-        error instanceof BridgeError &&
-        error.code === "CODEX_PEER_SUCCESSION_INVALID",
-    );
-  } finally {
-    await foreignAdapter.close();
-  }
-});
-
 test("post-bind registry quarantine confirms exact callback closure", async (t) => {
   let socketPath: string | undefined;
   const current = await fixture(t, {
@@ -2043,15 +1396,15 @@ test("post-bind registry quarantine stays fatal after callback replacement", asy
   await chmod(current.sessionsDir, 0o700);
 });
 
-test("ordinary listener generations are fresh across process-lifecycle replacements", async (t) => {
+test("listener artifact tokens are fresh across process replacements", async (t) => {
   const current = await fixture(t, {
-    createGeneration: () => "ordinary_old_01",
+    createArtifactToken: () => "ordinary_old_01",
   });
   const oldListener = await current.adapter.listen({
     onMessage: () => undefined,
   });
-  const persistedOldGeneration = oldListener.generation;
-  assert.equal(persistedOldGeneration, "ordinary_old_01");
+  const oldArtifactToken = oldListener.generation;
+  assert.equal(oldArtifactToken, "ordinary_old_01");
   await oldListener.close();
   await current.adapter.close();
 
@@ -2063,7 +1416,7 @@ test("ordinary listener generations are fresh across process-lifecycle replaceme
         CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
     },
     {
-      createGeneration: () => "ordinary_new_02",
+      createArtifactToken: () => "ordinary_new_02",
       userHome: current.home,
       tempRoots: [current.systemTemp],
     },
@@ -2073,16 +1426,16 @@ test("ordinary listener generations are fresh across process-lifecycle replaceme
       onMessage: () => undefined,
     });
     assert.equal(replacement.generation, "ordinary_new_02");
-    assert.notEqual(replacement.generation, persistedOldGeneration);
+    assert.notEqual(replacement.generation, oldArtifactToken);
     await replacement.close();
   } finally {
     await replacementAdapter.close();
   }
 });
 
-test("ordinary listener generation factories fail closed on invalid output", async (t) => {
+test("listener artifact token factories fail closed on invalid output", async (t) => {
   const current = await fixture(t, {
-    createGeneration: () => "invalid.generation",
+    createArtifactToken: () => "invalid.generation",
   });
   await assert.rejects(
     current.adapter.listen({ onMessage: () => undefined }),
@@ -2090,166 +1443,6 @@ test("ordinary listener generation factories fail closed on invalid output", asy
       error instanceof BridgeError &&
       error.code === "INVALID_CODEX_PEER_GENERATION",
   );
-});
-
-test("publication classifies pre-rename failure as not published", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-    registryPublicationHook: (stage) => {
-      if (stage === "before_rename") throw new Error("synthetic pre-rename");
-    },
-  });
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("successor_03", {
-    onMessage: () => undefined,
-  });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-  await active.advertise("codex-before", current.workspace);
-  await active.quiesceInbound();
-
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "not_published",
-  );
-  assert.equal(
-    (JSON.parse(await readFile(registryPath, "utf8")) as Record<string, unknown>)
-      .name,
-    "codex-before",
-  );
-  active.resumeInbound();
-});
-
-test("publication proves syscall rename failure left the exact old inode unpublished", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-    registryRename: async (source, destination) => {
-      if (source.includes(".successor_syscall.registry.tmp")) {
-        throw Object.assign(new Error("synthetic rename failure"), {
-          code: "EIO",
-        });
-      }
-      await rename(source, destination);
-    },
-  });
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("successor_syscall", {
-    onMessage: () => undefined,
-  });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-  await active.advertise("codex-before", current.workspace);
-  const before = await lstat(registryPath);
-  await active.quiesceInbound();
-
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "not_published",
-  );
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "not_published",
-  );
-  const after = await lstat(registryPath);
-  assert.equal(after.dev, before.dev);
-  assert.equal(after.ino, before.ino);
-  assert.throws(
-    () => prepared.grantSuccessionActivation(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  active.resumeInbound();
-});
-
-test("publication proves a post-rename failure as published by exact reread", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-    registryPublicationHook: (stage) => {
-      if (stage === "after_rename") throw new Error("synthetic post-rename");
-    },
-  });
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("successor_04", {
-    onMessage: () => undefined,
-  });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-  await active.advertise("codex-before", current.workspace);
-  await active.quiesceInbound();
-
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "published",
-  );
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "published",
-  );
-  assert.throws(
-    () => prepared.resumeInbound(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  prepared.grantSuccessionActivation();
-  prepared.resumeInbound();
-  assert.equal(
-    (JSON.parse(await readFile(registryPath, "utf8")) as Record<string, unknown>)
-      .name,
-    "codex-after",
-  );
-});
-
-test("publication never adopts a byte-identical foreign post-rename inode", async (t) => {
-  const identifiers = [SESSION_ONE, SESSION_TWO];
-  let registryPath = "";
-  let foreignSerialized = "";
-  const current = await fixture(t, {
-    createId: () => identifiers.shift() ?? MESSAGE_ONE,
-    registryPublicationHook: async (stage) => {
-      if (stage !== "after_rename") return;
-      foreignSerialized = await readFile(registryPath, "utf8");
-      const replacement = path.join(
-        path.dirname(registryPath),
-        "foreign-byte-identical.tmp",
-      );
-      await writeFile(replacement, foreignSerialized, { mode: 0o600 });
-      await rename(replacement, registryPath);
-      throw new Error("synthetic indeterminate publication");
-    },
-  });
-  registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-  const active = await current.adapter.listen({ onMessage: () => undefined });
-  const prepared = await current.adapter.listenPrepared("successor_05", {
-    onMessage: () => undefined,
-  });
-  await active.advertise("codex-before", current.workspace);
-  await active.quiesceInbound();
-
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "unknown",
-  );
-  assert.equal(
-    await prepared.publishReplacing(active, "codex-after", current.workspace),
-    "unknown",
-  );
-  assert.equal(await readFile(registryPath, "utf8"), foreignSerialized);
-  assert.throws(
-    () => prepared.grantSuccessionActivation(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  assert.throws(
-    () => prepared.resumeInbound(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CODEX_PEER_PREPARED_NOT_ACTIVE",
-  );
-  await active.close();
-  assert.equal(await readFile(registryPath, "utf8"), foreignSerialized);
 });
 
 test("listener returns native held and delivered statuses to the sending peer", async (t) => {
@@ -2702,7 +1895,7 @@ test("a pre-write acknowledgement failure is recoverable and retains its handle"
 
   await assert.rejects(
     listener.acknowledge(receiptHandle as string, "expired", {
-      code: "CODEX_ROUTE_STALE",
+      code: "ROUTE_UNAVAILABLE",
     }),
     (error: unknown) =>
       error instanceof BridgeError &&
@@ -3116,18 +2309,18 @@ test("verbose notices preserve the localized expired diagnostic frame", async (t
   ]);
   await eventually(() => receiptHandle !== undefined);
   await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "CODEX_ROUTE_STALE",
+    code: "ROUTE_UNAVAILABLE",
   });
   await eventually(() => frames.length === 2);
   assert.equal(frames[0]?.status, "expired");
-  assert.equal(frames[0]?.reason, "CODEX_ROUTE_STALE");
+  assert.equal(frames[0]?.reason, "ROUTE_UNAVAILABLE");
   assert.equal(frames[1]?.type, "user");
   const diagnosticContent = String(
     (frames[1]?.message as Record<string, unknown>)?.content,
   );
   assert.match(
     diagnosticContent,
-    /gateway-delivery-diagnostic status="expired" code="CODEX_ROUTE_STALE"/,
+    /gateway-delivery-diagnostic status="expired" code="ROUTE_UNAVAILABLE"/,
   );
   assert.match(diagnosticContent, /本地网关无法投递前一条消息/);
   assert.match(diagnosticContent, /embassy status/);
@@ -3191,12 +2384,12 @@ test("merged notices keep stalls but fold expiry diagnostics into native status"
   );
 
   await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "CODEX_ROUTE_STALE",
+    code: "ROUTE_UNAVAILABLE",
   });
   await eventually(() => frames.length === 2);
   assert.equal(frames[1]?.action, "peer_message_status");
   assert.equal(frames[1]?.status, "expired");
-  assert.equal(frames[1]?.reason, "CODEX_ROUTE_STALE");
+  assert.equal(frames[1]?.reason, "ROUTE_UNAVAILABLE");
   assert.equal(
     frames.some((frame) =>
       String((frame.message as Record<string, unknown> | undefined)?.content)
@@ -3253,42 +2446,13 @@ test("quiet notices suppress gateway user frames while preserving native expiry 
   assert.equal(frames.length, 0);
 
   await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "CODEX_ROUTE_STALE",
+    code: "ROUTE_UNAVAILABLE",
   });
   await eventually(() => frames.length === 1);
   assert.equal(frames[0]?.action, "peer_message_status");
   assert.equal(frames[0]?.status, "expired");
-  assert.equal(frames[0]?.reason, "CODEX_ROUTE_STALE");
+  assert.equal(frames[0]?.reason, "ROUTE_UNAVAILABLE");
   assert.equal(frames[0]?.type, "control");
-});
-
-test("listener shutdown preserves confirmed-write evidence as unconfirmed", async (t) => {
-  const receipts: ClaudePeerReceiptEvent[] = [];
-  let asyncSettlementFinished = false;
-  const current = await fixture(t, {
-    createId: () => MESSAGE_ONE,
-    receiptDeadlineMs: 1_000,
-  });
-  await addPeer(current, { pid: 47_201, handler: (socket) => socket.resume() });
-  const listener = await current.adapter.listen({
-    onMessage: () => undefined,
-    onReceipt: async (event) => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      receipts.push(event);
-      asyncSettlementFinished = true;
-    },
-  });
-  const target = await selectFirstPeer(current);
-  await current.adapter.send(target.targetId, "pending at shutdown", {
-    listener,
-  });
-  await listener.close();
-  assert.equal(asyncSettlementFinished, true);
-  assert.deepEqual(receipts[0], {
-    messageId: MESSAGE_ONE,
-    status: "unconfirmed",
-    trust: "untrusted_same_uid_peer",
-  });
 });
 
 test("close is single-flight and shuts the socket after registry cleanup failure", async (t) => {
@@ -3355,24 +2519,4 @@ test("callback cleanup preserves an observed foreign path replacement", async (t
       error.code === "CLAUDE_PEER_CALLBACK_CHANGED",
   );
   assert.equal(await readFile(callbackPath, "utf8"), "foreign replacement");
-});
-
-test("prepared callback cleanup preserves an observed foreign path replacement", async (t) => {
-  const current = await fixture(t);
-  const listener = await current.adapter.listenPrepared("cleanup_01", {
-    onMessage: () => undefined,
-  });
-  const callbackPath = listener.address.slice(4);
-  await unlink(callbackPath);
-  await writeFile(callbackPath, "foreign prepared replacement", { mode: 0o600 });
-  await assert.rejects(
-    listener.close(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_CALLBACK_CHANGED",
-  );
-  assert.equal(
-    await readFile(callbackPath, "utf8"),
-    "foreign prepared replacement",
-  );
 });

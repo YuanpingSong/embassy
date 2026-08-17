@@ -54,7 +54,7 @@ test("skill exposes only the stable gateway operating surface", async () => {
   assert.match(skill, /availablePeers/);
   assert.match(skill, /exact prefix `STEER:`/);
   assert.match(skill, /next tool-call boundary/);
-  assert.match(skill, /At most three steering messages/);
+  assert.match(skill, /cap is three steers per exact active operation/);
   assert.match(skill, /standard input/);
   assert.match(skill, /native bidirectional messaging/);
   assert.match(skill, /codex-\*/);
@@ -77,11 +77,13 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /crossSessionInbound/);
   assert.match(skill, /Claude, Codex, DeepSeek, and Grok as first-class providers/);
   assert.match(skill, /Runtime status is best-effort/);
-  assert.match(skill, /route staleness, connector health, observed metadata, and the last safe code/);
+  assert.match(skill, /observation freshness, connector health, observed metadata, and the last safe code/);
   assert.match(skill, /versions are diagnostic metadata, not routing authority/);
   assert.match(skill, /release-owned offline support matrix/);
   assert.match(skill, /pair --from .* --to/);
-  assert.match(skill, /replacement generation negotiates its current interface/);
+  assert.match(skill, /Registration commits only the logical route record and performs no provider or App Server I\/O/);
+  assert.match(skill, /Every Codex operation independently attests the current interface and resumes the exact registered task/);
+  assert.match(skill, /bounded observation is display-only and never routing authority or a dispatch gate/);
   assert.doesNotMatch(skill, /schema_attested|monitor-only|write-attestation/i);
   assert.match(skill, /default paired mode/);
   assert.match(skill, /SENDER_NOT_PAIRED/);

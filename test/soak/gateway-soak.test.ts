@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,13 +13,16 @@ import type { GatewayControlHandlers } from "../../src/gateway/control.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
-  type GatewayAdapterDelivery,
   type GatewayAdapterDispatchInput,
   type GatewayAdapterDispatchResult,
   type GatewayAdapterRouteState,
   type GatewayProviderAdapter,
 } from "../../src/gateway/service.js";
-import type { PrivateEndpointIdentity } from "../../src/gateway/types.js";
+import type {
+  GatewayPreparedWriteEvidence,
+  GatewayProvider,
+  LogicalRouteBinding,
+} from "../../src/gateway/types.js";
 
 /**
  * Deliverability soak: the v1.2 gate instrument.
@@ -26,12 +30,12 @@ import type { PrivateEndpointIdentity } from "../../src/gateway/types.js";
  * Property under test — every accepted message reaches EXACTLY ONE of the six
  * explicit terminal outcomes with an allowlisted reason, under randomized
  * busy/idle churn, scripted dispatch faults, clock jumps, and full service
- * restarts. Bodies are memory-only by design, so "survives a restart" is not
- * the invariant; "never silently lost or double-settled" is.
+ * restarts. Bodies survive only in the bounded private v3 ledger; every
+ * accepted message must remain neither silently lost nor double-settled.
  */
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000901";
-const SOAK_BODY = "SOAK_BODY_MEMORY_ONLY_5f21";
+const SOAK_BODY = "SOAK_BOUNDED_V3_BODY_5f21";
 const ITERATIONS = Number(process.env.SOAK_ITERATIONS ?? "1200");
 const RESTART_AT = new Set(
   (process.env.SOAK_RESTARTS ?? "400,800")
@@ -58,11 +62,13 @@ const SAFE_CODE_ALLOWLIST = new Set([
   "DISPATCH_OUTCOME_AMBIGUOUS",
   "PROVIDER_DISPATCH_DEFERRED",
   "CLAUDE_RECEIPT_UNCONFIRMED",
-  "CODEX_ROUTE_STALE",
   "SOAK_FAILED",
   "SOAK_CANCELLED",
   "SOAK_AMBIGUOUS",
-  "SOAK_DEFER",
+  "ROUTE_BUSY",
+  "PROVIDER_DISPATCH_FAILED",
+  "WRITE_AUTHORIZATION_UNCERTAIN",
+  "DELIVERY_UNCONFIRMED",
   "PROVIDER_DELIVERY_CANCELLED",
 ]);
 
@@ -118,30 +124,34 @@ class ManualClock {
   }
 }
 
-type SoakDispatchPlan = GatewayAdapterDispatchResult | { state: "throw" };
+type SoakDispatchPlan =
+  | GatewayAdapterDispatchResult
+  | { state: "throw" }
+  | { state: "throw_armed" };
 
 class SoakProvider implements GatewayProviderAdapter {
-  readonly identity: PrivateEndpointIdentity;
+  readonly identity: Readonly<{ provider: GatewayProvider; hostId: string }>;
   readonly protocol: string;
   readonly protocolVersion = "synthetic-1";
   callbacks: GatewayAdapterCallbacks | undefined;
   state: GatewayAdapterRouteState = "idle";
-  dispatchPlans: SoakDispatchPlan[] = [];
+  dispatchPlans = new Map<string, SoakDispatchPlan[]>();
   dispatches: GatewayAdapterDispatchInput[] = [];
-  postDispatchDelivery: GatewayAdapterDelivery | undefined;
+  readonly evidence = new Map<string, {
+    attemptIds: Set<string>;
+    authorizations: number;
+    semanticWrites: number;
+    acceptances: number;
+  }>();
+  observed = new Map<string, LogicalRouteBinding>();
   closed = false;
 
   constructor(provider: "codex" | "claude") {
     this.identity = {
       provider,
       hostId: "this-mac",
-      endpointGeneration: `soak_generation_${provider}`,
     };
     this.protocol = provider === "codex" ? "codex-app-server" : "claude-peer";
-  }
-
-  activateEndpointGeneration(endpointGeneration: string): void {
-    assert.equal(endpointGeneration, this.identity.endpointGeneration);
   }
 
   #trace(name: string): void {
@@ -189,7 +199,25 @@ class SoakProvider implements GatewayProviderAdapter {
 
   #advertisedGenerations = new Map<string, string>();
 
-  async advertiseNativeSourcePeer(input: { alias: string; sourceProvider: PrivateEndpointIdentity["provider"] }): Promise<void> {
+  observeLogicalRoute(input: {
+    alias: string;
+    routeHandle: string;
+    registrationId: string;
+  }): void {
+    this.observed.set(input.alias, {
+      ...this.identity,
+      routeHandle: input.routeHandle,
+      registrationId: input.registrationId,
+    });
+  }
+
+  forgetLogicalRoute(registrationId: string): void {
+    for (const [alias, binding] of this.observed) {
+      if (binding.registrationId === registrationId) this.observed.delete(alias);
+    }
+  }
+
+  async advertiseNativeSourcePeer(input: { alias: string; sourceProvider: GatewayProvider }): Promise<void> {
     assert.equal(input.sourceProvider, "codex");
     this.#trace("advertiseNativeSourcePeer");
     this.#advertisedGenerations.set(input.alias, "soak_listener_1");
@@ -203,15 +231,6 @@ class SoakProvider implements GatewayProviderAdapter {
   async updateNativeSourcePeerStatus(): Promise<void> {
     this.#trace("updateNativeSourcePeerStatus");
     // Soak never asserts peer status writes.
-  }
-
-  currentNativeCodexPeerGeneration(alias: string): string {
-    this.#trace("currentNativeCodexPeerGeneration");
-    const generation = this.#advertisedGenerations.get(alias);
-    if (generation === undefined) {
-      throw new Error("SOAK_UNADVERTISED_ALIAS");
-    }
-    return generation;
   }
 
   assertWorkspaceDisjoint = async (): Promise<void> => {
@@ -233,34 +252,77 @@ class SoakProvider implements GatewayProviderAdapter {
   ): Promise<GatewayAdapterDispatchResult> {
     this.#trace("dispatch");
     this.dispatches.push({ ...input, binding: { ...input.binding } });
-    const delivery = this.postDispatchDelivery;
-    if (delivery !== undefined) {
-      this.postDispatchDelivery = undefined;
-      this.callbacks?.onDelivery({ ...delivery, messageId: input.messageId });
-    }
-    const plan = this.dispatchPlans.shift();
-    if (plan === undefined) {
-      return this.identity.provider === "codex"
-        ? { state: "accepted" }
-        : { state: "pending" };
-    }
-    if (plan.state === "throw") {
+    const counter = this.evidence.get(input.text) ?? {
+      attemptIds: new Set<string>(),
+      authorizations: 0,
+      semanticWrites: 0,
+      acceptances: 0,
+    };
+    assert.equal(counter.attemptIds.has(input.attemptId), false, "attempt IDs never replay");
+    counter.attemptIds.add(input.attemptId);
+    this.evidence.set(input.text, counter);
+    const script = this.dispatchPlans.get(input.text) ?? [];
+    const plan = script.shift();
+    if (script.length === 0) this.dispatchPlans.delete(input.text);
+    else this.dispatchPlans.set(input.text, script);
+    if (plan?.state === "throw") {
       throw new Error("SOAK_SYNTHETIC_DISPATCH_CRASH");
     }
-    return plan;
+    if (plan?.state === "deferred") return plan;
+    const evidence = prepared(input);
+    const authorized = await input.authorizeWrite({ attemptId: input.attemptId, ...evidence });
+    assert.equal(authorized, true);
+    counter.authorizations += 1;
+    counter.semanticWrites += 1;
+    if (this.identity.provider === "codex") {
+      await input.onAccepted({ attemptId: input.attemptId });
+      counter.acceptances += 1;
+    }
+    if (plan?.state === "throw_armed") {
+      throw new Error("SOAK_SYNTHETIC_POST_WRITE_CRASH");
+    }
+    return plan ?? { state: "delivered" };
   }
 
   emitRouteState(state: GatewayAdapterRouteState): void {
     this.state = state;
-    this.callbacks?.onRouteState({
-      endpoint: { ...this.identity, routeHandle: THREAD_ID },
-      state,
-    });
+    for (const route of this.observed.values()) {
+      this.callbacks?.onRouteState({
+        route,
+        state,
+        observedAt: new Date().toISOString(),
+      });
+    }
   }
 
   async close(): Promise<void> {
     this.closed = true;
   }
+
+  plan(body: string, plan: SoakDispatchPlan): void {
+    this.dispatchPlans.set(
+      body,
+      plan.state === "deferred" ? [plan, { state: "delivered" }] : [plan],
+    );
+  }
+}
+
+function prepared(input: GatewayAdapterDispatchInput): GatewayPreparedWriteEvidence {
+  const kind = input.binding.provider === "claude"
+    ? "claude_mailbox"
+    : input.binding.provider === "codex"
+      ? input.steer === true
+        ? "codex_turn_steer"
+        : "codex_turn_start"
+      : "acp_prompt";
+  const frame = `soak:${input.attemptId}:${input.messageId}:${input.text}`;
+  return {
+    kind,
+    bodyBytes: Buffer.byteLength(input.text),
+    bodySha256: createHash("sha256").update(input.text).digest("hex"),
+    frameBytes: Buffer.byteLength(frame),
+    sha256: createHash("sha256").update(frame).digest("hex"),
+  };
 }
 
 function soakConfig(stateDir: string): GatewayConfig {
@@ -295,6 +357,10 @@ async function registerAndSelect(
     codexThreadId: THREAD_ID,
   });
   assert.deepEqual(selected, { accepted: true, code: "ok" }, "selectClaude");
+  const paired = await handlers.pair({
+    aliases: ["claude-one@this-mac", "codex-main@this-mac"],
+  });
+  assert.deepEqual(paired, { accepted: true, code: "ok" }, "pair");
 }
 
 test("soak: randomized churn settles every accepted message exactly once", async (t) => {
@@ -314,6 +380,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
 
   let claude = new SoakProvider("claude");
   let codex = new SoakProvider("codex");
+  const providers = [claude, codex];
   service = new GatewayService({
     config,
     adapters: [claude, codex],
@@ -326,6 +393,8 @@ test("soak: randomized churn settles every accepted message exactly once", async
 
   type LedgerEntry = {
     token: string;
+    body: string;
+    provider: "claude" | "codex";
     epoch: number;
     settled?: { state: string; safeErrorCode?: string };
   };
@@ -338,24 +407,32 @@ test("soak: randomized churn settles every accepted message exactly once", async
   };
 
   const planPool: SoakDispatchPlan[] = [
-    { state: "accepted" },
-    { state: "accepted" },
-    { state: "accepted" },
-    { state: "accepted" },
-    { state: "accepted" },
-    { state: "accepted" },
-    { state: "deferred", safeErrorCode: "SOAK_DEFER" },
+    { state: "delivered" },
+    { state: "delivered" },
+    { state: "delivered" },
+    { state: "delivered" },
+    { state: "delivered" },
+    { state: "delivered" },
+    { state: "deferred", safeErrorCode: "ROUTE_BUSY" },
     { state: "delivered" },
     { state: "failed", safeErrorCode: "SOAK_FAILED" },
     { state: "cancelled", safeErrorCode: "SOAK_CANCELLED" },
     { state: "throw" },
+    { state: "throw_armed" },
   ];
 
   const settleLedger = async (onlyEpoch?: number): Promise<void> => {
     for (const entry of ledger) {
-      if (entry.settled !== undefined) continue;
       if (onlyEpoch !== undefined && entry.epoch !== onlyEpoch) continue;
       const status = await handlers.deliveryStatus({ token: entry.token });
+      if (entry.settled !== undefined) {
+        if (status.found) {
+          assert.equal(status.terminal, true, "terminal delivery truth never reopens");
+          assert.equal(status.state, entry.settled.state);
+          assert.equal(status.safeErrorCode, entry.settled.safeErrorCode);
+        }
+        continue;
+      }
       if (status.found && status.terminal) {
         entry.settled = {
           state: status.state,
@@ -370,16 +447,12 @@ test("soak: randomized churn settles every accepted message exactly once", async
   for (let i = 1; i <= ITERATIONS; i += 1) {
     if (TRACE) console.error(`soak iter ${i}`);
     if (RESTART_AT.has(i)) {
-      // Snapshot unsettled current-epoch trackers, then restart everything.
+      // Snapshot current terminals, then prove queued/phase truth survives restart.
       await settleLedger(epoch);
-      for (const entry of ledger) {
-        if (entry.settled === undefined && entry.epoch === epoch) {
-          entry.settled = { state: "restart-swept" };
-        }
-      }
       await service.close();
       claude = new SoakProvider("claude");
       codex = new SoakProvider("codex");
+      providers.push(claude, codex);
       service = new GatewayService({
         config,
         adapters: [claude, codex],
@@ -389,6 +462,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
       await service.start();
       handlers = service.handlers();
       await registerAndSelect(handlers);
+      await settleLedger();
       epoch += 1;
       tallies.restarts += 1;
       continue;
@@ -397,38 +471,34 @@ test("soak: randomized churn settles every accepted message exactly once", async
     const roll = random();
     if (roll < 0.4) {
       // Claude -> Codex send.
-      codex.dispatchPlans.push(
-        planPool[Math.floor(random() * planPool.length)]!,
-      );
+      const body = `${SOAK_BODY}_${i}`;
+      codex.plan(body, planPool[Math.floor(random() * planPool.length)]!);
       const accepted = await handlers.sendToCodex({
         fromAlias: "claude-one@this-mac",
         toAlias: "codex-main@this-mac",
-        text: `${SOAK_BODY}_${i}`,
+        text: body,
         replyAddress: "uds:/synthetic/claude.sock",
         expectsReply: false,
       });
       if (accepted.accepted) {
-        ledger.push({ token: accepted.deliveryToken, epoch });
+        ledger.push({ token: accepted.deliveryToken, body, provider: "codex", epoch });
         tallies.sent += 1;
       } else {
         tallies.acceptedRejections += 1;
       }
     } else if (roll < 0.65) {
-      // Codex -> Claude send; sometimes attach transport evidence.
-      if (random() < 0.5) {
-        claude.postDispatchDelivery = {
-          state: random() < 0.5 ? "transport_written" : "delivered",
-        } as GatewayAdapterDelivery;
-      }
+      // Codex -> Claude send.
+      const body = `${SOAK_BODY}_${i}`;
+      claude.plan(body, planPool[Math.floor(random() * planPool.length)]!);
       const accepted = await handlers.sendToClaude({
         fromAlias: "codex-main@this-mac",
         threadId: THREAD_ID,
         toAlias: "claude-one@this-mac",
-        text: `${SOAK_BODY}_${i}`,
+        text: body,
         expectsReply: false,
       });
       if (accepted.accepted) {
-        ledger.push({ token: accepted.deliveryToken, epoch });
+        ledger.push({ token: accepted.deliveryToken, body, provider: "claude", epoch });
         tallies.sent += 1;
       } else {
         tallies.acceptedRejections += 1;
@@ -440,6 +510,9 @@ test("soak: randomized churn settles every accepted message exactly once", async
       await clock.advanceBy(250 + Math.floor(random() * 4750));
     }
     if (i % 50 === 0) {
+      for (let pass = 0; pass < 5; pass += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       await settleLedger();
     }
   }
@@ -458,6 +531,10 @@ test("soak: randomized churn settles every accepted message exactly once", async
   await settleLedger();
   await clock.advanceBy(config.limits.messageDeadlineMs + 10_000);
   await settleLedger();
+  for (let pass = 0; pass < 10; pass += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await settleLedger();
+  }
 
   const unsettled = ledger.filter((entry) => entry.settled === undefined);
   for (const entry of unsettled) {
@@ -477,7 +554,6 @@ test("soak: randomized churn settles every accepted message exactly once", async
   for (const entry of ledger) {
     const state = entry.settled!.state;
     outcomes.set(state, (outcomes.get(state) ?? 0) + 1);
-    if (state === "restart-swept") continue;
     assert.equal(
       TERMINAL_OUTCOMES.has(state),
       true,
@@ -490,6 +566,30 @@ test("soak: randomized churn settles every accepted message exactly once", async
     );
   }
 
+  for (const entry of ledger) {
+    const generations = providers
+      .filter((provider) => provider.identity.provider === entry.provider)
+      .map((provider) => provider.evidence.get(entry.body))
+      .filter((candidate) => candidate !== undefined);
+    if (generations.length === 0) continue;
+    const attemptIds = new Set<string>();
+    let attemptCount = 0;
+    let authorizations = 0;
+    let semanticWrites = 0;
+    let acceptances = 0;
+    for (const evidence of generations) {
+      attemptCount += evidence.attemptIds.size;
+      for (const attemptId of evidence.attemptIds) attemptIds.add(attemptId);
+      authorizations += evidence.authorizations;
+      semanticWrites += evidence.semanticWrites;
+      acceptances += evidence.acceptances;
+    }
+    assert.equal(attemptIds.size, attemptCount, `attempt ID reused across restart for ${entry.body}`);
+    assert.ok(authorizations <= 1, `authorization replayed for ${entry.body}`);
+    assert.ok(semanticWrites <= 1, `semantic write replayed for ${entry.body}`);
+    assert.ok(acceptances <= 1, `acceptance replayed for ${entry.body}`);
+  }
+
   // No silent loss: tallies reconcile.
   assert.equal(
     ledger.length,
@@ -497,11 +597,9 @@ test("soak: randomized churn settles every accepted message exactly once", async
     "ledger tracks every accepted send",
   );
 
-  // CO #36 (in flight) makes bodies first-class observable data: they may
-  // appear in snapshot events and persisted state, under bounded retention.
-  // Until that slice lands with its retention contract, report presence
-  // instead of asserting either era's rule; tighten this to the #36 contract
-  // (bounded count/bytes, oldest evicted) when the store slice ships.
+  // v3 retains bodies only in the bounded private ledger and its bounded
+  // public projection. Report their retained presence without assuming that
+  // an old terminal row must survive capacity eviction.
   const snapshot = await handlers.listSnapshot();
   const snapshotCarriesBodies = JSON.stringify(snapshot).includes(SOAK_BODY);
   const stateFile = await readFile(

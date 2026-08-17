@@ -65,8 +65,6 @@ export const dashboardCopyEn = {
     "No live, collision-free session is selectable. Resolve the issue shown in Sessions & routes, then refresh discovery.",
   "next.registerCodex":
     "Inside the Codex task, run embassy register-codex --alias codex-<name>@<host>.",
-  "next.restoreCodex":
-    "Re-run embassy register-codex --alias <alias> inside that exact Codex task.",
   "attention.eyebrow": "Needs attention",
   "attention.title": "Resolve before sending",
   "attention.count": "{count} active",
@@ -82,16 +80,6 @@ export const dashboardCopyEn = {
     "The saved route does not currently have a matching live endpoint proof.",
   "guidance.reobserveClaude.action":
     "Refresh discovery and explicitly select the current Claude alias.",
-  "guidance.reobserveCodex.title": "Codex registration needs observation",
-  "guidance.reobserveCodex.body":
-    "The saved route does not currently have a matching live endpoint proof.",
-  "guidance.reobserveCodex.action":
-    "Re-run register-codex inside that exact Codex task.",
-  "guidance.codexReactivationRequired.title": "Saved Codex route is not live",
-  "guidance.codexReactivationRequired.body":
-    "The consent edge remains, but the saved Codex route has no current live endpoint proof.",
-  "guidance.codexReactivationRequired.action":
-    "Inside that exact Codex task, run embassy register-codex --alias {alias}.",
   "guidance.consentEdgeUnavailable.title": "Consent edge endpoint unavailable",
   "guidance.consentEdgeUnavailable.body":
     "The consent edge remains, but this saved endpoint is unavailable in the current bounded snapshot.",
@@ -102,25 +90,16 @@ export const dashboardCopyEn = {
     "The selected session is absent from current local discovery.",
   "guidance.claudeNotObserved.action":
     "Keep Claude running with crossSessionInbound enabled, refresh, then select its current alias.",
-  "guidance.codexStale.title": "Codex route is stale",
-  "guidance.codexStale.body":
-    "The registered Codex task no longer has a ready App Server connection.",
-  "guidance.codexStale.action":
-    "Re-run register-codex with the same alias inside that exact Codex task. Do not unregister first.",
-  "guidance.codexAppReconnectRequired.title": "Waiting for the Codex app",
-  "guidance.codexAppReconnectRequired.body":
-    "The managed App Server is reachable, but this saved task is still not observable; the app or task may not have reconnected.",
-  "guidance.codexAppReconnectRequired.action":
-    "Open the Codex app and this exact task. If the app was already open when the daemon restarted, relaunch it with /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT. Do not resend queued mail.",
   "guidance.connectorOffline.title": "A provider connector is offline",
   "guidance.connectorOffline.body":
     "Embassy cannot currently reach the local provider connector.",
   "guidance.connectorOffline.action":
-    "Run embassy status. If a broker restart is necessary, queued mail survives and resumes exactly once; only a write in flight at the crash settles ambiguous.",
-  "guidance.routeStale.title": "A route is stale",
-  "guidance.routeStale.body": "The route no longer has current endpoint proof.",
+    "Run embassy status. After a broker restart, queued or reserved mail may resume once; armed or accepted work settles ambiguous or unconfirmed without replay.",
+  "guidance.routeStale.title": "A route is unavailable",
+  "guidance.routeStale.body":
+    "The provider could not be used for the current operation.",
   "guidance.routeStale.action":
-    "Refresh and restore the matching selection or registration.",
+    "Run embassy refresh-dashboard, then embassy status. The next operation checks its provider connection again.",
   "guidance.queueStalled.title": "Queued delivery is stalled",
   "guidance.queueStalled.body":
     "The oldest accepted message remains queued past half of its delivery deadline.",
@@ -142,23 +121,12 @@ export const dashboardCopyEn = {
   "guidance.degraded.body":
     "Embassy retained a normalized connector warning.",
   "guidance.degraded.action":
-    "Run embassy status. If a broker restart is necessary, queued mail survives and resumes exactly once; only a write in flight at the crash settles ambiguous.",
+    "Run embassy status. After a broker restart, queued or reserved mail may resume once; armed or accepted work settles ambiguous or unconfirmed without replay.",
   "guidance.generic.title": "Embassy reported a normalized alert",
   "guidance.generic.body":
     "This safe code has no automatic repair mapped in the dashboard.",
   "guidance.generic.action":
     "Review embassy status. Never automatically retry an ambiguous delivery.",
-  "guidance.codexSuccessionBusy.title": "Codex task change needs a quiet boundary",
-  "guidance.codexSuccessionBusy.body":
-    "Embassy kept the current Codex registration because accepted or active work had not fully drained.",
-  "guidance.codexSuccessionBusy.action":
-    "Let current work reach a terminal state, run embassy status, then retry the same register-codex --alias <new> --succeeds <old> command.",
-  "guidance.codexSuccessionRecovery.title":
-    "Codex task change requires manual recovery",
-  "guidance.codexSuccessionRecovery.body":
-    "The task change did not reach a safe active generation. Embassy keeps Codex registration offline instead of guessing which task owns the route.",
-  "guidance.codexSuccessionRecovery.action":
-    "Do not send, retry the task change, or assume either task is active. Run embassy status and preserve the current state for manual recovery.",
   "guidance.progressWatch.title": "A tracked conversation is quiet",
   "guidance.progressWatch.body":
     "Embassy is supervising this completion-ended conversation and has sent at least one idle nudge.",
@@ -413,16 +381,16 @@ export const dashboardCopyEn = {
   "live.mastheadSubtitle":
     "Live metadata stream with bounded route-consent controls. serve remains socket-only.",
   "live.readonlyFooter":
-    "This view can pair, unpair, refresh Claude discovery, and request removal of a stale Codex registration — nothing else.",
+    "This view can pair, unpair, refresh discovery, and request removal of a named Codex registration — nothing else.",
   "live.action.authorityLabel": "Bounded operator authority",
   "live.action.authorityBody":
-    "This view can pair or unpair named endpoints, refresh Claude discovery, and request removal of a named Codex registration only when the broker proves it stale on a dead endpoint generation. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
+    "This view can pair or unpair named endpoints, refresh discovery, and request removal of a named Codex registration. Removal settles its active work by durable write phase and deletes its consent edges. It cannot register tasks, send, reply, approve, interrupt, or change settings.",
   "live.action.sectionTitle": "Bounded route actions",
   "live.action.scope":
-    "Pair or unpair named Claude and Codex endpoints, refresh discovery, or recover an orphaned Codex alias. Every action requires confirmation and broker-side revalidation.",
+    "Pair or unpair named endpoints, refresh discovery, or remove a named Codex registration. Every action requires confirmation and broker-side revalidation.",
   "live.action.pair": "Pair endpoints",
   "live.action.unpair": "Unpair endpoints",
-  "live.action.removeStaleCodexRegistration": "Remove stale registration",
+  "live.action.removeCodexRegistration": "Remove registration",
   "live.action.refresh": "Refresh discovery",
   "live.action.confirm": "Confirm",
   "live.action.cancel": "Cancel",
@@ -575,14 +543,10 @@ export const dashboardCopyEn = {
     "Remove only this outbound edge. Open inbound remains enabled for every live Claude session under this OS user.",
   "app.routes.refreshCmd":
     "Re-read local discovery and rewrite the static dashboard file.",
-  "app.routes.removeStaleCodex.consequence":
-    "Remove only {alias} if the broker confirms that the registration is stale and its endpoint generation is dead. Its consent edges are removed; a live registration is never touched.",
+  "app.routes.removeCodex.consequence":
+    "Remove {alias}, delete all of its consent edges, and settle its active work by durable write phase. Queued or reserved work is cancelled; armed work becomes ambiguous; accepted work becomes unconfirmed.",
   "app.routes.noPeers": "No Claude session was discovered in this snapshot.",
   "app.routes.noCodex": "No Codex task is registered.",
-  "app.routes.successions": "Succession history",
-  "app.routes.successions.empty": "No task change is in progress.",
-  "app.routes.successions.note":
-    "A task change moves the alias to a new Codex task. Nothing transfers: queued work, history, and approvals stay with the old task.",
   "app.routes.detail.absent": "Not carried by the live contract.",
   "app.routes.expandDetails": "Expand details for {alias}",
   "app.routes.collapseDetails": "Collapse details for {alias}",
@@ -608,8 +572,6 @@ export const dashboardCopyEn = {
   "app.activity.operation.routesPaired": "Consent edge paired",
   "app.activity.operation.routesUnpaired": "Consent edge unpaired",
   "app.activity.operation.watchEnded": "Progress watch ended",
-  "app.activity.operation.endpointRefreshed": "Codex endpoint refreshed",
-  "app.activity.operation.codexOrphanRemoved": "Stale Codex registration removed",
   "app.activity.operation.operator": "operator",
   "app.activity.operation.automatic": "automatic",
   "app.activity.operation.accepted": "accepted",
