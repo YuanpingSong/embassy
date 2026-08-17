@@ -38,3 +38,18 @@ adjacent, one operator instruction).
 mostly valid explicit fixtures — no mechanical rename; 80–150 focused
 test changes expected. Base = public main 4a69c27. Freeze with SHA;
 taste + adversarial at gate (identity is a trust seam).
+
+## Contest ruling (2026-08-17)
+
+Engineer contested the ~45-src-touched estimate (which was their own
+emb-87 pre-estimate, ticketed verbatim by PM) with a measured remainder
+map from the first coherent cut: the named service/store fallbacks alone
+are ~20 sites / ~40 touched lines. GRANTED: src changed ≤175, tests/docs
+≤220, overall E3 under 500 changed. Net [-30,+10] becomes an EXPECTATION,
+not a hard consequence — do-not-golf logic extends to identity
+explicitness. APPROVED: one bounded safe code
+GATEWAY_NODE_INVENTORY_REQUIRED for the missing-inventory refusal — the
+emb-88 screen pattern; overloading catch-all
+INVALID_GATEWAY_CONFIGURATION would either fire the hint on unrelated
+config failures or require message-based discrimination. Concept count
+for the slice: one.
