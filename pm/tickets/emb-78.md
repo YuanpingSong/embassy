@@ -50,3 +50,19 @@ path live over SSH. Five findings:
 
 README prerequisites patched same-day (see commit). Items 1-3 ride v1.8
 (1 partially lands with emb-77); item 5 extends the doctor.
+
+## Proven fresh-machine recipe (m5dev, live, 2026-08-16 night)
+
+1. Claude Code: curl -fsSL https://claude.ai/install.sh | bash (in-home
+   layout; Homebrew cask will NOT attest).
+2. Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh, then
+   codex app-server daemon start (daemon start alone does NOT provision the
+   standalone layout; unmanaged ghost servers must be killed first — the
+   doctor should detect "running but not managed").
+3. Embassy: npm i -g agent-embassy (pnpm users pin the version; PNPM_HOME
+   PATH note applies).
+4. Skills: cp -R <pkg>/skills/embassy-peer into ~/.claude/skills/ and
+   ~/.codex/skills/.
+Result on m5dev: broker healthy, four connectors (deepseek honestly
+degraded), ACP routes registered. Second network node live — v1.9 ground
+truth acquired en route.
