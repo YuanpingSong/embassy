@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.9.2] - 2026-08-17
+
+Identical to the unpublished v1.9.1 (its pipeline was failed by a stochastic test flaw — a forged-token fixture that matched the real token 1 time in 64 — not by any product defect; the fixture now guarantees difference).
+
 ## [1.9.1] - 2026-08-17
 
 ### Fixed
