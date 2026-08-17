@@ -4,7 +4,7 @@ title: v2→v3 converter emits state the same-version loader rejects (host ident
 kind: bug
 size: 2
 status: landed
-release: v1.9.3
+release: v1.9.4
 updated: 2026-08-17
 ---
 
@@ -105,8 +105,9 @@ unchanged; no-v2-backup case recovers in place; original repro correctly
 inverted; 10 seam attacks clean (stale-backup mismatch refusal, resume,
 idempotence, complete-backup-on-refusal). Catalog cache kept with
 cached-then-cleared test. Zero new public concepts confirmed
-(GATEWAY_STATE_BACKUP_MISMATCH pre-existing at base). Released as v1.9.3
-(commit e0d8f3b). Deferred nits recorded in gate rulings thread: v3
+(GATEWAY_STATE_BACKUP_MISMATCH pre-existing at base). Released as v1.9.4 (a7902e8);
+the v1.9.3 tag is dead — PM release-checklist miss (EMBASSY_VERSION and
+its pinned test not bumped), no product defect, checklist amended. Deferred nits recorded in gate rulings thread: v3
 backup filename is single-use (safe-direction block, ergonomics ruling
 later); ENOENT guard coupling; converter lock lacks stale-pid reaping
 (pre-existing).
