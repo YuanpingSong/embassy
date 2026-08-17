@@ -49,3 +49,14 @@ valid v2 broker response (focused tests prove it). GRANTED: src ≤96
 This is completion-to-coherence, not scope growth — a frozen slice must
 be internally consistent. HOLD REMAINS: freeze, then stand down; gate and
 landing wait for the founder's resume.
+
+## Pause state (2026-08-17, founder hold)
+
+Lane frozen at SHA 6520e3a2, src 89 changed net -37, tests 215, protocol
+split stated per rider (control v2 / peer wire v1). The pause message and
+the third-contest grant CROSSED: the freeze intentionally excludes the
+granted +6 decoder fix, so the focused behavioral run is knowingly red
+(decodeResponse still v1 at three sites; valid v2 responses rejected).
+Documented, safe, nothing running. ON RESUME: apply the granted +6,
+re-freeze with new SHA, then gate. Message-crossing recurrence noted for
+the retro (second occurrence class; first was the v1.9 triple-grant).
