@@ -2,7 +2,7 @@ namespace Embassy {
   export function canRequestCodexRegistrationRemoval(
     route: DashboardRouteRow,
   ): boolean {
-    return route.provider === "codex";
+    return route.provider === "codex" && route.mutable !== false;
   }
 
   export const canOfferConsentEdgeCandidate = (route: DashboardRouteRow): boolean => route.enabled && (route.state === "idle" || route.state === "busy" || route.state === "awaiting_approval");
@@ -58,7 +58,8 @@ namespace Embassy {
     for (let left = 0; left < data.routes.length; left += 1) {
       for (let right = left + 1; right < data.routes.length; right += 1) {
         const a = data.routes[left]?.route; const b = data.routes[right]?.route;
-        if (a === undefined || b === undefined || !canOfferConsentEdgeCandidate(a) || !canOfferConsentEdgeCandidate(b) || a.provider === b.provider || a.host !== b.host) continue;
+        if (a === undefined || b === undefined || !canOfferConsentEdgeCandidate(a) || !canOfferConsentEdgeCandidate(b) ||
+          (a.provider === b.provider && a.host === b.host) || [a, b].find((route) => route.host === [a.host, b.host].sort()[0])?.mutable === false) continue;
         if (!data.consentEdges.some((edge) => sameEdge(edge, [a.alias, b.alias]))) candidates.push([a, b]);
       }
     }
@@ -70,7 +71,7 @@ namespace Embassy {
           {data.consentEdges.map((edge) => {
             const aliases = edge.endpoints.map(({ alias }) => alias) as [string, string];
             return <li key={aliases.join("\0")}><code>{edgeLabel(edge, t)}</code> <StateChip domain="route" state={edge.state === "ready" ? "idle" : "stale"} small />
-              <ActionButton action={{ action: "unpair", aliases }} label={t("live.action.unpair")} enabled={props.actionsEnabled} onAction={props.onAction} />
+              <ActionButton action={{ action: "unpair", aliases }} label={t("live.action.unpair")} enabled={props.actionsEnabled && edge.mutable !== false} onAction={props.onAction} />
             </li>;
           })}
         </ul>

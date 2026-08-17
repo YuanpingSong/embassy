@@ -17,11 +17,13 @@ import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   type GatewayControlRequest, type GatewayControlResponse,
   type SendGatewayControlRequestOptions } from "./control.js";
 import { loadGatewayConfig, type GatewayConfig } from "./config.js";
+import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import { DEFAULT_LIVE_DASHBOARD_PORT, runLiveDashboardCommand,
   type LiveDashboardCommandOutcome, type LiveDashboardCommandOptions } from "./live-dashboard-command.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
+import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
 import { convertGatewayStateV2ToV3, type GatewayStateV2ToV3Result } from "./state-v2-to-v3.js";
 
 const THREAD_ID_PATTERN =
@@ -41,6 +43,7 @@ export const gatewayCliCommands = [
   "wait-delivery", "untrack", "refresh-dashboard", "dashboard", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send-to-claude", "send-to-codex", "reply",
+  "peer-stdio",
 ] as const;
 
 export type GatewayCliCommand = (typeof gatewayCliCommands)[number];
@@ -59,6 +62,7 @@ type GatewayControlSender = <M extends GatewayControlMethod>(options: SendGatewa
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
 type LiveDashboardRunner = (options: LiveDashboardCommandOptions) => Promise<LiveDashboardCommandOutcome | void>;
 type GatewayStateConverter = (options: Readonly<{ stateDir: string }>) => Promise<GatewayStateV2ToV3Result>;
+type PeerStdioRunner = (options: Parameters<typeof runPeerStdio>[0]) => PeerStdioSession;
 
 export type GatewayCliDependencies = {
   env?: NodeJS.ProcessEnv;
@@ -66,6 +70,7 @@ export type GatewayCliDependencies = {
   stdout?: Writable;
   stderr?: Writable;
   loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig;
+  loadNodeInventory?: (stateDir: string) => Promise<GatewayNodeInventory>;
   sendRequest?: GatewayControlSender;
   runServer?: GatewayServerRunner;
   runLiveDashboard?: LiveDashboardRunner;
@@ -73,6 +78,7 @@ export type GatewayCliDependencies = {
   serverSignal?: AbortSignal;
   liveDashboardSignal?: AbortSignal;
   validateControlSocket?: (stateDir: string, socketPath: string) => Promise<void>;
+  runPeerStdio?: PeerStdioRunner;
   now?: () => number;
   delay?: (milliseconds: number) => Promise<void>;
 };
@@ -165,7 +171,7 @@ const gatewayAliasHost = (alias: string): string => alias.slice(alias.lastIndexO
 function requirePairAliases(options: ParsedOptions): readonly [string, string] {
   const from = requireAlias(options, "from");
   const to = requireAlias(options, "to");
-  if (from === to || gatewayAliasHost(from) !== gatewayAliasHost(to)) fault();
+  if (from === to) fault();
   return [from, to];
 }
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
@@ -282,6 +288,7 @@ async function buildRequest(
     case "serve":
     case "dashboard":
     case "convert-state-v2-to-v3":
+    case "peer-stdio":
       return fault();
     case "health": case "status": case "doctor": case "refresh-dashboard": return fault();
     case "delivery-status":
@@ -537,6 +544,40 @@ export async function runGatewayCli(
       return gatewayCliExitCodes.ok;
     }
     if (command === undefined) fault("UNKNOWN_COMMAND");
+    if (command === "peer-stdio") {
+      emptyParams(common.args);
+      try {
+        const config = loadConfig(env);
+        const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(config.stateDir);
+        await validateSocket(config.stateDir, config.controlSocketPath);
+        let peerHost: string | undefined;
+        const request = async <M extends "peer_catalog" | "peer_handoff">(
+          method: M,
+          params: M extends "peer_catalog" ? { peerHost: string } : { peerHost: string; handoff: import("./peer-protocol.js").PeerHandoffParams },
+        ) => {
+          const response = await sendRequest({ socketPath: config.controlSocketPath,
+            request: { protocolVersion: 1, method, params } as Extract<GatewayControlRequest, { method: M }> });
+          if (!response.ok) throw new PeerHandlerError({ code: -32000, message: "Local broker unavailable" });
+          return response.result;
+        };
+        const session = (dependencies.runPeerStdio ?? runPeerStdio)({
+          localHost: inventory.host, input: stdin as never, output: stdout as never,
+          handlers: {
+            initialize: ({ host }) => {
+              if (!inventory.nodes.includes(host)) throw new PeerHandlerError({ code: -32001, message: "Peer host not configured" });
+              peerHost = host;
+            },
+            catalog: async () => await request("peer_catalog", { peerHost: peerHost! }),
+            handoff: async (handoff) => await request("peer_handoff", { peerHost: peerHost!, handoff }),
+          },
+        });
+        await session.done;
+        return gatewayCliExitCodes.ok;
+      } catch {
+        stderr.write("Embassy peer transport failed.\n");
+        return gatewayCliExitCodes.unavailable;
+      }
+    }
     if (command === "serve") {
       await (dependencies.runServer ?? runGatewayServer)({
         env, locale, inboundMode: parseServeInboundMode(common.args),

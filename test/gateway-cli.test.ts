@@ -1790,11 +1790,6 @@ test("identity, stdin, and argument failures happen before any control request",
       code: "INVALID_ARGUMENTS",
     },
     {
-      argv: ["pair", "--from", "grok@this-mac", "--to", "grok@other-mac"],
-      env: {},
-      code: "INVALID_ARGUMENTS",
-    },
-    {
       argv: [
         "send-to-codex",
         "--from",
@@ -1960,6 +1955,41 @@ test("identity, stdin, and argument failures happen before any control request",
     assert.equal(rendered.includes(SECRET_BODY), false);
     assert.equal(rendered.includes(THREAD_ID), false);
     assert.equal(rendered.includes(CLAUDE_SOCKET_PATH), false);
+  }
+});
+
+test("peer-stdio attests the private control socket before opening the protocol", async () => {
+  let requested = false, opened = false;
+  const code = await runGatewayCli(["peer-stdio"], {
+    env: {}, stdout: capture(), stderr: capture(),
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
+      inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
+    loadNodeInventory: async () => ({ host: "studio", nodes: ["m5dev"], configured: true }),
+    validateControlSocket: async () => { throw new Error("unsafe socket"); },
+    sendRequest: async () => { requested = true; throw new Error("must not send"); },
+    runPeerStdio: () => { opened = true; return { done: Promise.resolve(), close: () => undefined }; },
+  });
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(requested, false);
+  assert.equal(opened, false);
+});
+
+test("pair and unpair preserve cross-host aliases and owner authority", async () => {
+  for (const command of ["pair", "unpair"] as const) {
+    const stdout = capture(), stderr = capture(); let request: unknown;
+    const code = await runGatewayCli([command, "--from", "advisor@studio", "--to", "codex-main@m5dev"], {
+      env: {}, stdout, stderr, loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+        allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
+        inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }), validateControlSocket: async () => undefined,
+      sendRequest: ((input: { request: unknown }) => { request = input.request; return Promise.resolve({ protocolVersion: 1, ok: true,
+        result: { accepted: false, code: "conflict", ownerHost: "m5dev" } }); }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    });
+    assert.equal(code, gatewayCliExitCodes.rejected);
+    assert.deepEqual(request, { protocolVersion: 1, method: command,
+      params: { aliases: ["advisor@studio", "codex-main@m5dev"] } });
+    assert.equal((JSON.parse(stdout.chunks.join("")) as { result: { ownerHost: string } }).result.ownerHost, "m5dev");
+    assert.match(stderr.chunks.join(""), /gateway rejected/);
   }
 });
 

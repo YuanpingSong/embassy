@@ -7,6 +7,8 @@ import path from "node:path";
 
 import type { GatewayConfig } from "../src/gateway/config.js";
 import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
+import type { PeerClient } from "../src/gateway/peer-client.js";
+import type { PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
@@ -343,6 +345,8 @@ async function fixture(
   options: Readonly<{
     deadlineMs?: number;
     inboundMode?: GatewayConfig["inboundMode"];
+    hostId?: string;
+    peerNodes?: readonly string[];
     seed?: (store: GatewayStore) => Promise<void>;
     codexDoctor?: () => Promise<CodexDoctorResult>;
   }> = {},
@@ -354,7 +358,9 @@ async function fixture(
   const config: GatewayConfig = {
     stateDir,
     controlSocketPath: path.join(stateDir, "control.sock"),
-    allowedHosts: ["this-mac"],
+    allowedHosts: [options.hostId ?? "this-mac", ...(options.peerNodes ?? [])],
+    hostId: options.hostId ?? "this-mac",
+    peerNodes: options.peerNodes ?? [],
     steeringEnabled: true,
     inboundMode: options.inboundMode ?? "paired",
     stallNoticeMs: 2_500,
@@ -471,6 +477,122 @@ test("record-only register and atomic succeeds never connect during construction
   } finally {
     await subject.close();
   }
+});
+
+test("federated named routes are read-only at the service boundary", async () => {
+  const subject = await fixture([new FakeProvider({ provider: "claude", hostId: "studio" })],
+    { hostId: "studio", peerNodes: ["m5dev"] });
+  try {
+    const remoteCodex: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
+      binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote_codex", registrationId: "reg_mirror_codex" } };
+    const remoteClaude: RegisterRouteInput = { alias: "advisor@m5dev", registrationMode: "federated_peer",
+      binding: { provider: "claude", hostId: "m5dev", routeHandle: "reg_remote_claude", registrationId: "reg_mirror_claude" } };
+    const local: RegisterRouteInput = { alias: "advisor@studio", registrationMode: "selected_live_peer",
+      binding: { provider: "claude", hostId: "studio", routeHandle: "claude-session-a", registrationId: "reg_local" } };
+    await subject.store.registerRoute(local); await subject.store.registerRoute(remoteCodex); await subject.store.registerRoute(remoteClaude);
+    const before = await readFile(subject.store.stateFilePath, "utf8");
+    assert.deepEqual(await subject.handlers.removeCodexRegistration({ alias: remoteCodex.alias }), { accepted: false, code: "not_found" });
+    assert.deepEqual(await subject.handlers.unselectClaude({ alias: remoteClaude.alias }), { accepted: false, code: "not_found" });
+    assert.equal(await readFile(subject.store.stateFilePath, "utf8"), before);
+  } finally { await subject.close(); }
+});
+
+test("peer handoff preserves every write boundary and never replays uncertainty", async () => {
+  const run = async (mode: "confirmed" | "pipe" | "authorization" | "acceptance") => {
+    const subject = await fixture([new FakeProvider({ provider: "claude", hostId: "studio" })],
+      { hostId: "studio", peerNodes: ["m5dev"] });
+    let writes = 0;
+    try {
+      const local: RegisterRouteInput = { alias: "advisor@studio", registrationMode: "selected_live_peer",
+        binding: { provider: "claude", hostId: "studio", routeHandle: "claude-session-a", registrationId: "reg_local" } };
+      const remote: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
+        binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
+      await subject.store.registerRoute(local); await subject.store.registerRoute(remote);
+      await subject.store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
+      const peer = { close: () => undefined, prepareHandoff: (params: PeerHandoffParams) => {
+        const bodySha256 = createHash("sha256").update(params.body).digest("hex");
+        return { bodyBytes: Buffer.byteLength(params.body), bodySha256, frameBytes: 32, sha256: createHash("sha256").update("peer-frame").digest("hex"),
+          cancel: () => undefined, perform: async () => { writes += 1; if (mode === "pipe") throw new Error("pipe lost"); return { accepted: true as const }; } };
+      } } as unknown as PeerClient;
+      (subject.service as unknown as { peerClients: Map<string, PeerClient> }).peerClients.set("m5dev", peer);
+      if (mode === "authorization") {
+        const original = subject.store.authorizeMessage.bind(subject.store);
+        subject.store.authorizeMessage = async (input) => { await original(input); throw new Error("authorization commit uncertain"); };
+      } else if (mode === "acceptance") {
+        const original = subject.store.acceptMessage.bind(subject.store);
+        subject.store.acceptMessage = async (input) => { await original(input); throw new Error("accept commit uncertain"); };
+      }
+      const sent = await subject.handlers.sendToCodex({ fromAlias: local.alias, toAlias: remote.alias,
+        text: `peer ${mode}`, replyAddress: "uds:/test/reply.sock", expectsReply: false });
+      assert.equal(sent.accepted, true, JSON.stringify(sent));
+      await eventually(async () => { const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken }); return status.found && status.terminal; });
+      const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+      assert.equal(status.found, true);
+      if (!status.found) throw new Error("missing delivery");
+      assert.equal(status.state, mode === "confirmed" ? "delivered" : mode === "acceptance" ? "unconfirmed" : "ambiguous");
+      assert.equal(status.safeErrorCode, mode === "confirmed" ? "PEER_HANDOFF_CONFIRMED" : mode === "acceptance"
+        ? "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" : mode === "authorization" ? "WRITE_AUTHORIZATION_UNCERTAIN" : "PEER_HANDOFF_OUTCOME_UNKNOWN");
+      assert.equal(writes, mode === "authorization" ? 0 : 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(writes, mode === "authorization" ? 0 : 1);
+      if (mode === "confirmed") {
+        const state = JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as { messages: Record<string, unknown>[] };
+        assert.equal(Object.hasOwn(state.messages.at(-1)!, "body"), false);
+      }
+    } finally { await subject.close(); }
+  };
+  for (const mode of ["confirmed", "pipe", "authorization", "acceptance"] as const) await run(mode);
+});
+
+test("an unavailable peer requeues once without a hot dispatch loop", async () => {
+  const provider = new FakeProvider({ provider: "claude", hostId: "studio" });
+  const subject = await fixture([provider], { hostId: "studio", peerNodes: ["m5dev"] });
+  let reserves = 0;
+  try {
+    const local: RegisterRouteInput = { alias: "advisor@studio", registrationMode: "selected_live_peer",
+      binding: { provider: "claude", hostId: "studio", routeHandle: provider.replyRouteHandle, registrationId: "reg_local" } };
+    const remote: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
+      binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
+    await subject.store.registerRoute(local); await subject.store.registerRoute(remote);
+    await subject.store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
+    const reserve = subject.store.reserveMessage.bind(subject.store);
+    subject.store.reserveMessage = async (...args) => { reserves += 1; return await reserve(...args); };
+    const sent = await subject.handlers.sendToCodex({ fromAlias: local.alias, toAlias: remote.alias,
+      text: "wait for tunnel", replyAddress: "uds:/test/reply.sock", expectsReply: false });
+    assert.equal(sent.accepted, true); await eventually(() => reserves === 1);
+    for (let index = 0; index < 5; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reserves, 1);
+    const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+    assert.equal(status.found && status.state, "stalled");
+  } finally { await subject.close(); }
+});
+
+test("local Claude ingress advertises and hands off a federated Codex route", async () => {
+  const provider = new FakeProvider({ provider: "claude", hostId: "studio" });
+  const local: RegisterRouteInput = { alias: "advisor@studio", registrationMode: "selected_live_peer",
+    binding: { provider: "claude", hostId: "studio", routeHandle: provider.replyRouteHandle, registrationId: "reg_local" } };
+  const remote: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
+    binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
+  const subject = await fixture([provider], { hostId: "studio", peerNodes: ["m5dev"], seed: async (store) => {
+    await store.registerRoute(local); await store.registerRoute(remote);
+    await store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
+  } });
+  let writes = 0;
+  try {
+    const peer = { close: () => undefined, prepareHandoff: (params: PeerHandoffParams) => {
+      const bodySha256 = createHash("sha256").update(params.body).digest("hex");
+      return { bodyBytes: Buffer.byteLength(params.body), bodySha256, frameBytes: 32,
+        sha256: createHash("sha256").update("native-peer-frame").digest("hex"), cancel: () => undefined,
+        perform: async () => { writes += 1; return { accepted: true as const }; } };
+    } } as unknown as PeerClient;
+    (subject.service as unknown as { peerClients: Map<string, PeerClient> }).peerClients.set("m5dev", peer);
+    assert.ok(provider.advertised.includes(remote.alias));
+    provider.callbacks?.onClaudeMessage?.({ endpoint: { provider: "claude", hostId: "studio", routeHandle: provider.replyRouteHandle },
+      sourceAlias: local.alias, targetAlias: remote.alias, text: "native federation", receiptHandle: "receipt-native-federation" });
+    await eventually(() => writes === 1);
+    await eventually(async () => (await subject.store.publicSnapshot()).messages.at(-1)?.state === "delivered");
+    assert.equal((await subject.store.publicSnapshot()).messages.at(-1)?.safeErrorCode, "PEER_HANDOFF_CONFIRMED");
+  } finally { await subject.close(); }
 });
 
 test("stale removal and succession controls preserve a same-alias replacement", async () => {

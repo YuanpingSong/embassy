@@ -10,6 +10,7 @@ export type GatewayDeliveryNoticeMode = (typeof gatewayDeliveryNoticeModes)[numb
 export type GatewayAcpProviderConfig = Readonly<{ provider: "deepseek" | "grok"; alias: string;
   /** Test/operator injection; omitted entries use the reviewed provider default. */ launch?: AcpLaunchSpec }>;
 export type GatewayConfig = { stateDir: string; controlSocketPath: string; allowedHosts: readonly string[];
+  hostId?: string; peerNodes?: readonly string[];
   steeringEnabled: boolean; trackingEnabled?: boolean; inboundMode: GatewayInboundMode; stallNoticeMs: number;
   deliveryNotices?: GatewayDeliveryNoticeMode; acpProviders?: readonly GatewayAcpProviderConfig[]; limits: GatewayStoreLimits };
 
@@ -78,7 +79,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     (limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY) * 768 + limits.maxQueueMessages * 512;
   if (stateBudget > MAX_STATE_BUDGET) invalid("The combined gateway route, event, dedupe, and queue capacities exceed the durable state byte budget.");
   return {
-    stateDir, controlSocketPath, allowedHosts: hosts(env.EMBASSY_HOSTS),
+    stateDir, controlSocketPath, allowedHosts: hosts(env.EMBASSY_HOSTS), hostId: "this-mac", peerNodes: [],
     steeringEnabled: toggle(env, "EMBASSY_STEERING_ENABLED"), trackingEnabled: toggle(env, "EMBASSY_TRACKING_ENABLED"), inboundMode: "paired",
     stallNoticeMs: Math.min(Math.floor(messageDeadlineMs / 2), 120_000),
     deliveryNotices: notices(env.EMBASSY_DELIVERY_NOTICES), limits,

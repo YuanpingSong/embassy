@@ -220,6 +220,7 @@ export type DashboardRouteRow = Readonly<{
   counters: RouteCounters;
   lastSeenAt?: string | undefined;
   safeErrorCode?: string | undefined;
+  mutable?: boolean | undefined;
 }>;
 
 export type DashboardConsentEndpoint = Readonly<{
@@ -232,6 +233,7 @@ export type DashboardConsentEdgeRow = Readonly<{
   host: string;
   state: "ready" | "degraded" | "unavailable";
   counters: RouteCounters;
+  mutable?: boolean | undefined;
 }>;
 
 export type DashboardGraphFacts = Readonly<{
@@ -967,6 +969,7 @@ function buildProjectedDashboardViewModel(
       ...(safeCode(route.safeErrorCode) === undefined
         ? {}
         : { safeErrorCode: safeCode(route.safeErrorCode) }),
+      mutable: route.mutable !== false,
     };
   });
   const routes = [...allRoutes]
@@ -1000,6 +1003,7 @@ function buildProjectedDashboardViewModel(
               ? "degraded"
               : "unavailable",
         counters: normalizedCounters(edge.counters),
+        mutable: edge.mutable !== false,
       };
     })
     .sort(

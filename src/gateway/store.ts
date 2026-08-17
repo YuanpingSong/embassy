@@ -185,12 +185,26 @@ function consentKey(
     )
     .join("\0");
 }
+function edgeOwnerHost(endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint]): string {
+  return endpoints.map((endpoint) => aliasHost(endpoint.alias)).sort()[0]!;
+}
 function sameConsent(
   left: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
   right: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
 ): boolean {
   if (left === null || right === null) return left === right;
   return consentKey(left) === consentKey(right);
+}
+function routeModeMatchesHost(
+  route: Pick<GatewayRouteRecord, "binding" | "registrationMode">,
+  localHost: string | undefined,
+): boolean {
+  if (route.registrationMode === "federated_peer") {
+    return localHost !== undefined && route.binding.hostId !== localHost;
+  }
+  return route.binding.hostId === localHost && (route.binding.provider === "claude"
+    ? route.registrationMode === "selected_live_peer"
+    : route.registrationMode === "explicit_opt_in");
 }
 function isConsentEdge(value: unknown): value is GatewayConsentEdgeRecord {
   if (
@@ -208,7 +222,7 @@ function isConsentEdge(value: unknown): value is GatewayConsentEdgeRecord {
   ];
   return (
     compareConsentEndpoints(endpoints[0], endpoints[1]) < 0 &&
-    endpoints[0].provider !== endpoints[1].provider &&
+    endpoints[0].alias !== endpoints[1].alias &&
     isIsoTimestamp(value.createdAt) &&
     isIsoTimestamp(value.updatedAt) &&
     isCounters(value.counters)
@@ -221,7 +235,8 @@ function isPrepared(value: unknown): value is GatewayPreparedWriteEvidence {
     (value.kind === "claude_mailbox" ||
       value.kind === "codex_turn_start" ||
       value.kind === "codex_turn_steer" ||
-      value.kind === "acp_prompt") &&
+      value.kind === "acp_prompt" ||
+      value.kind === "peer_handoff") &&
     isPositiveInteger(value.bodyBytes) &&
     typeof value.bodySha256 === "string" &&
     SHA256_PATTERN.test(value.bodySha256) &&
@@ -233,7 +248,9 @@ function isPrepared(value: unknown): value is GatewayPreparedWriteEvidence {
 }
 function expectedPreparedKind(
   message: Pick<GatewayMessageRecord, "direction" | "steer">,
+  targetMode?: GatewayRouteRecord["registrationMode"],
 ): GatewayPreparedWriteEvidence["kind"] {
+  if (targetMode === "federated_peer") return "peer_handoff";
   const target = parseDirection(message.direction)!.targetProvider;
   if (target === "claude") return "claude_mailbox";
   if (target === "codex") {
@@ -593,12 +610,15 @@ export function isGatewayPersistedStateV3(value: unknown): value is GatewayPersi
       }
     }
   }
+  const localHosts = new Set(state.routes
+    .filter((route) => route.registrationMode !== "federated_peer")
+    .map((route) => route.binding.hostId));
+  if (localHosts.size > 1) return false;
+  const localHost = [...localHosts][0];
   for (const route of state.routes) {
     if (
       !route.alias.endsWith(`@${route.binding.hostId}`) ||
-      (route.binding.provider === "claude"
-        ? route.registrationMode !== "selected_live_peer"
-        : route.registrationMode !== "explicit_opt_in")
+      !routeModeMatchesHost(route, localHost)
     ) {
       return false;
     }
@@ -614,7 +634,8 @@ export function isGatewayPersistedStateV3(value: unknown): value is GatewayPersi
       right?.binding.registrationId !== rightEndpoint.registrationId ||
       left.binding.provider !== leftEndpoint.provider ||
       right.binding.provider !== rightEndpoint.provider ||
-      left.binding.hostId !== right.binding.hostId
+      (left.binding.hostId === right.binding.hostId &&
+        left.binding.provider === right.binding.provider)
     ) {
       return false;
     }
@@ -636,7 +657,8 @@ export function isGatewayPersistedStateV3(value: unknown): value is GatewayPersi
       if (
         source?.binding.registrationId !== message.sourceRegistrationId ||
         source.binding.provider !== direction.sourceProvider ||
-        (target !== undefined && source.binding.hostId !== target.binding.hostId)
+        (target !== undefined && source.binding.hostId === target.binding.hostId &&
+          source.binding.provider === target.binding.provider)
       ) {
         return false;
       }
@@ -684,7 +706,7 @@ export function isGatewayPersistedStateV3(value: unknown): value is GatewayPersi
     if (
       (message.state.phase === "armed" ||
         message.state.phase === "accepted") &&
-      (message.state.prepared.kind !== expectedPreparedKind(message) ||
+      (message.state.prepared.kind !== expectedPreparedKind(message, target?.registrationMode) ||
         message.state.prepared.bodyBytes !== message.bytes ||
         message.state.prepared.bodySha256 !==
           createHash("sha256").update(message.body!, "utf8").digest("hex"))
@@ -869,6 +891,9 @@ export class GatewayStore {
   }
   async listLogicalRoutes(): Promise<GatewayPrivateRouteInspection[]> {
     return this.inspectPrivateRoutes();
+  }
+  async inspectPrivateConsentEdges(): Promise<GatewayConsentEdgeRecord[]> {
+    return this.read((state) => structuredClone(state.consentEdges));
   }
   async inspectPrivateRoute(
     alias: string,
@@ -1253,10 +1278,12 @@ export class GatewayStore {
       ) {
         throw new BridgeError("ROUTE_UNREGISTERED", "The native ingress target registration is no longer current.");
       }
+      const nativeSourceHost = target.registrationMode === "federated_peer"
+        ? (this.config.hostId ?? this.config.allowedHosts[0]) : target.binding.hostId;
       if (
         input.source.binding.provider !== "claude" ||
-        input.source.binding.hostId !== target.binding.hostId ||
-        input.source.alias.endsWith(`@${target.binding.hostId}`) === false
+        input.source.binding.hostId !== nativeSourceHost ||
+        input.source.alias.endsWith(`@${nativeSourceHost}`) === false
       ) {
         throw new BridgeError("INVALID_NATIVE_PEER", "The native Claude sender does not match the target host.");
       }
@@ -1276,7 +1303,7 @@ export class GatewayStore {
                 canonicalConsentEndpoints(selected, target),
               ),
             );
-      if (this.config.inboundMode === "paired" && edge === undefined) {
+      if ((this.config.inboundMode === "paired" || target.registrationMode === "federated_peer") && edge === undefined) {
         this.recordRejection(
           state,
           {
@@ -1468,20 +1495,20 @@ export class GatewayStore {
       const bodySha256 = createHash("sha256")
         .update(message.body ?? "", "utf8")
         .digest("hex");
-      if (
-        !isPrepared(input.prepared) ||
-        input.prepared.kind !== expectedPreparedKind(message) ||
-        input.prepared.bodyBytes !== message.bytes ||
-        input.prepared.bodySha256 !== bodySha256
-      ) {
-        throw new BridgeError("INVALID_PREPARED_WRITE_EVIDENCE", "The prepared payload evidence does not match the admitted message.");
-      }
       const target = state.routes.find(
         (route) =>
           route.alias === message.targetAlias &&
           route.binding.registrationId === message.targetRegistrationId &&
           route.enabled,
       );
+      if (
+        !isPrepared(input.prepared) ||
+        input.prepared.kind !== expectedPreparedKind(message, target?.registrationMode) ||
+        input.prepared.bodyBytes !== message.bytes ||
+        input.prepared.bodySha256 !== bodySha256
+      ) {
+        throw new BridgeError("INVALID_PREPARED_WRITE_EVIDENCE", "The prepared payload evidence does not match the admitted message.");
+      }
       if (
         input.sourceRegistrationId !== message.sourceRegistrationId ||
         input.targetRegistrationId !== message.targetRegistrationId ||
@@ -1581,8 +1608,8 @@ export class GatewayStore {
         (message.state.phase === "armed" &&
           (input.state === "expired" ||
             (input.state === "unconfirmed" &&
-              (input.safeErrorCode !== "ACP_OUTCOME_COARSE" ||
-                message.state.prepared.kind !== "acp_prompt")))) ||
+              !((input.safeErrorCode === "ACP_OUTCOME_COARSE" && message.state.prepared.kind === "acp_prompt") ||
+                (input.safeErrorCode === "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" && message.state.prepared.kind === "peer_handoff"))))) ||
         (message.state.phase === "accepted" &&
           (input.state === "expired" ||
             (input.state === "unconfirmed" &&
@@ -1686,6 +1713,7 @@ export class GatewayStore {
             ? {}
             : { oldestQueuedAt: queued[0].enqueuedAt }),
           counters: { ...route.counters },
+          mutable: route.registrationMode !== "federated_peer",
         };
       });
       const consentEdges: PublicConsentEdgeSnapshot[] = state.consentEdges.map(
@@ -1698,7 +1726,8 @@ export class GatewayStore {
               alias: edge.endpoints[1].alias, provider: edge.endpoints[1].provider,
             },
           ],
-          host: aliasHost(edge.endpoints[0].alias), counters: { ...edge.counters },
+          host: edgeOwnerHost(edge.endpoints), counters: { ...edge.counters },
+          mutable: edgeOwnerHost(edge.endpoints) === (this.config.hostId ?? this.config.allowedHosts[0]),
         }),
       );
       const currentEvents = state.messages.map((message) =>
@@ -1810,6 +1839,7 @@ export class GatewayStore {
     };
   }
   private validateRouteInput(input: RegisterRouteInput): void {
+    const localHost = this.config.hostId ?? this.config.allowedHosts[0];
     if (
       !isObject(input) ||
       !ALIAS_PATTERN.test(input.alias) ||
@@ -1817,9 +1847,7 @@ export class GatewayStore {
       !REGISTRATION_MODES.has(input.registrationMode) ||
       !input.alias.endsWith(`@${input.binding.hostId}`) ||
       !this.config.allowedHosts.includes(input.binding.hostId) ||
-      (input.binding.provider === "claude"
-        ? input.registrationMode !== "selected_live_peer"
-        : input.registrationMode !== "explicit_opt_in")
+      !routeModeMatchesHost(input, localHost)
     ) {
       throw new BridgeError("INVALID_ROUTE_BINDING", "The logical route binding is invalid for this gateway.");
     }
@@ -1881,11 +1909,11 @@ export class GatewayStore {
     if (
       left === undefined ||
       right === undefined ||
-      left.binding.provider === right.binding.provider ||
-      left.binding.hostId !== right.binding.hostId
+      (left.binding.provider === right.binding.provider &&
+        left.binding.hostId === right.binding.hostId)
     ) {
       if (required) {
-        throw new BridgeError("INVALID_CONSENT_EDGE", "Consent requires exact same-host routes from distinct providers.");
+        throw new BridgeError("INVALID_CONSENT_EDGE", "Consent requires distinct providers or distinct configured hosts.");
       }
       return undefined;
     }
@@ -2229,6 +2257,9 @@ export class GatewayStore {
           : { safeErrorCode: message.state.safeErrorCode }),
       };
     }
+    const handedOff = outcome === "delivered" &&
+      (message.state.phase === "armed" || message.state.phase === "accepted") &&
+      message.state.prepared.kind === "peer_handoff";
     if (message.state.phase === "queued") {
       state.accounting.queuedBytes -= message.bytes;
     }
@@ -2239,6 +2270,7 @@ export class GatewayStore {
       safeErrorCode,
     );
     this.touchMessage(state, message);
+    if (handedOff) delete message.body;
     state.accounting[outcome] += 1;
     const target = state.routes.find(
       (route) => route.binding.registrationId === message.targetRegistrationId,
@@ -2532,7 +2564,8 @@ export class GatewayStore {
     );
     if (
       state.routes.some(
-        (route) => !this.config.allowedHosts.includes(route.binding.hostId),
+        (route) => !this.config.allowedHosts.includes(route.binding.hostId) ||
+          !routeModeMatchesHost(route, this.config.hostId ?? this.config.allowedHosts[0]),
       ) ||
       state.routes.length > this.config.limits.maxRoutes ||
       state.consentEdges.length > this.config.limits.maxConsentEdges ||

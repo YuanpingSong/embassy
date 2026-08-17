@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
+import { isAttestedGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import {
   CLAUDE_PEER_COMPATIBILITY,
   ClaudePeerAdapter,
@@ -154,7 +155,8 @@ export type LocalClaudeGatewayProviderOptions = {
   runtime: AttestedClaudePeerRuntime;
   /** Fixed controller-owned root re-attested by each selected-route dispatch. */
   stateRoot: string;
-  hostId?: "this-mac";
+  hostId?: string;
+  nodeInventory?: GatewayNodeInventory;
   /** Locale for bounded notices written into native Claude sessions. */
   locale?: DashboardLocale;
   /** Gateway-authored user-frame policy; native receipt status is unchanged. */
@@ -187,14 +189,15 @@ type ClaudeSelectedRoute = {
   observationDirty: boolean;
 };
 
-function exactLocalHost(hostId: string | undefined): "this-mac" {
-  if ((hostId ?? LOCAL_HOST) !== LOCAL_HOST) {
+function exactLocalHost(hostId: string | undefined, inventory?: GatewayNodeInventory): string {
+  const resolved = hostId ?? LOCAL_HOST;
+  if (resolved !== LOCAL_HOST && !isAttestedGatewayNodeInventory(inventory, resolved)) {
     throw new BridgeError(
       "GATEWAY_REMOTE_PROVIDER_DISABLED",
-      "This provider is restricted to the exact local host boundary.",
+      "A custom local host coordinate requires the attested nodes.json inventory.",
     );
   }
-  return LOCAL_HOST;
+  return resolved;
 }
 
 function positiveBounded(
@@ -296,7 +299,7 @@ function unavailableClaudeRegistryObservation(): GatewayAdapterRegistryObservati
 export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
   readonly identity: Readonly<{
     provider: "claude";
-    hostId: "this-mac";
+    hostId: string;
   }>;
   readonly protocol = "claude-peer";
   readonly protocolVersion = `${CLAUDE_PEER_COMPATIBILITY.peerProtocol}`;
@@ -333,7 +336,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         "The Claude provider notice locale is unsupported.",
       );
     }
-    const hostId = exactLocalHost(options.hostId);
+    const hostId = exactLocalHost(options.hostId, options.nodeInventory);
     this.identity = {
       provider: "claude",
       hostId,
@@ -851,6 +854,7 @@ export function createLocalClaudeGatewayProvider(
 
 export type LocalCodexGatewayProviderOptions = {
   hostId: string;
+  nodeInventory?: GatewayNodeInventory;
   operation: StatelessCodexOperationTransport;
   createObservationFactory?: () => Promise<LocalCodexTransportFactory>;
   observationPollMs?: number;
@@ -992,13 +996,14 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   constructor(options: LocalCodexGatewayProviderOptions) {
     if (
-      options.hostId !== LOCAL_HOST ||
+      (options.hostId !== LOCAL_HOST &&
+        !isAttestedGatewayNodeInventory(options.nodeInventory, options.hostId)) ||
       options.operation === undefined ||
       typeof options.operation.execute !== "function"
     ) {
       throw new BridgeError(
         "INVALID_GATEWAY_PROVIDER_CONFIGURATION",
-        "The stateless Codex provider requires the exact local host.",
+        "The stateless Codex provider requires the exact attested local host.",
       );
     }
     this.hostId = options.hostId;

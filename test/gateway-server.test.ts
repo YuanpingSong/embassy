@@ -312,6 +312,7 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   );
   assert.deepEqual(Object.keys(codexProviderOptions ?? {}), [
     "hostId",
+    "nodeInventory",
     "operation",
     "createObservationFactory",
   ]);
