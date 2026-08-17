@@ -13,11 +13,17 @@ import {
   type ClaudePeerRuntimeOptions,
 } from "./claude-runtime.js";
 import {
-  createLocalCodexRefreshCandidateTransportFactory,
   createLocalCodexTransportFactory,
+  resolveManagedLocalCodexInstallation,
+  type ManagedLocalCodexInstallation,
   type LocalCodexTransportFactory,
   type LocalCodexTransportFactoryOptions,
 } from "./codex-local-transport.js";
+import {
+  createStatelessCodexOperationTransport,
+  type StatelessCodexOperationTransport,
+  type StatelessCodexOperationTransportOptions,
+} from "./codex-stateless-transport.js";
 import {
   createSystemCodexDoctorInspector,
   diagnoseCodexAttachment,
@@ -98,14 +104,16 @@ export type GatewayServerDependencies = {
   ) => GatewayProviderAdapter;
   acquireInstanceLease?: (loginHome: string) => Promise<GatewayInstanceLease>;
   createStore?: (config: GatewayConfig) => GatewayStore;
-  /** Resolve and attest the exact current managed Codex installation. */
-  createCodexFactory?: (
+  createCodexOperation?: (
+    options: StatelessCodexOperationTransportOptions,
+  ) => StatelessCodexOperationTransport;
+  /** Observation is independent and never supplies routing authority. */
+  createCodexObservationFactory?: (
     options: LocalCodexTransportFactoryOptions,
   ) => Promise<LocalCodexTransportFactory>;
-  /** Resolve and attest an exact current managed replacement. */
-  createCodexRefreshCandidateFactory?: (
-    options: LocalCodexTransportFactoryOptions,
-  ) => Promise<LocalCodexTransportFactory>;
+  resolveCodexInstallation?: (
+    home: string,
+  ) => Promise<ManagedLocalCodexInstallation>;
   createCodexProvider?: (
     options: LocalCodexGatewayProviderOptions,
   ) => GatewayProviderAdapter;
@@ -137,6 +145,29 @@ function instanceLeaseLostError(): BridgeError {
     "Embassy lost its host-wide gateway lease and shut down.",
     true,
   );
+}
+
+function gatewayStartCancelledError(): BridgeError {
+  return new BridgeError(
+    "GATEWAY_START_CANCELLED",
+    "Gateway startup was cancelled before it became ready.",
+    true,
+  );
+}
+
+function cleanupFailure(
+  primary: unknown,
+  failures: readonly unknown[],
+): BridgeError {
+  const error = new BridgeError(
+    "GATEWAY_CLEANUP_FAILED",
+    "The local gateway could not confirm exact resource cleanup.",
+  ) as BridgeError & { cause?: unknown };
+  error.cause = new AggregateError(
+    primary === undefined ? [...failures] : [primary, ...failures],
+    "Gateway execution and cleanup failures are preserved independently.",
+  );
+  return error;
 }
 
 /**
@@ -232,7 +263,6 @@ function createShutdownLatch(
 
 async function closeUnownedAssembly(input: {
   claudeProvider?: GatewayProviderAdapter;
-  codexFactory?: LocalCodexTransportFactory;
   codexProvider?: GatewayProviderAdapter;
   acpProviders?: readonly GatewayProviderAdapter[];
   store?: GatewayStore;
@@ -245,10 +275,6 @@ async function closeUnownedAssembly(input: {
     await input.codexProvider.close().catch((error: unknown) => {
       failures.push(error);
     });
-  } else if (input.codexFactory !== undefined) {
-    await input.codexFactory.close().catch((error: unknown) => {
-      failures.push(error);
-    });
   }
   await input.claudeProvider?.close().catch((error: unknown) => {
     failures.push(error);
@@ -257,9 +283,9 @@ async function closeUnownedAssembly(input: {
     failures.push(error);
   });
   if (failures.length > 0) {
-    throw new BridgeError(
-      "GATEWAY_CLEANUP_FAILED",
-      "The local gateway could not confirm exact resource cleanup.",
+    throw new AggregateError(
+      failures,
+      "One or more unowned gateway resources did not confirm cleanup.",
     );
   }
 }
@@ -283,11 +309,14 @@ export async function runGatewayServer(
     dependencies.acquireInstanceLease ?? acquireGatewayInstanceLease;
   const createStore =
     dependencies.createStore ?? ((config) => new GatewayStore(config));
-  const createCodexFactory =
-    dependencies.createCodexFactory ?? createLocalCodexTransportFactory;
-  const createCodexRefreshCandidateFactory =
-    dependencies.createCodexRefreshCandidateFactory ??
-    createLocalCodexRefreshCandidateTransportFactory;
+  const createCodexOperation =
+    dependencies.createCodexOperation ?? createStatelessCodexOperationTransport;
+  const createCodexObservationFactory =
+    dependencies.createCodexObservationFactory ??
+    createLocalCodexTransportFactory;
+  const resolveCodexInstallation =
+    dependencies.resolveCodexInstallation ??
+    resolveManagedLocalCodexInstallation;
   const createCodexProvider =
     dependencies.createCodexProvider ?? createLocalCodexGatewayProvider;
   const resolveDeepSeek =
@@ -310,13 +339,19 @@ export async function runGatewayServer(
     removeSignalListener,
   );
   let claudeProvider: GatewayProviderAdapter | undefined;
-  let codexFactory: LocalCodexTransportFactory | undefined;
   let codexProvider: GatewayProviderAdapter | undefined;
   const acpProviders: GatewayProviderAdapter[] = [];
   let store: GatewayStore | undefined;
   let service: GatewayServerService | undefined;
   let instanceLease: GatewayInstanceLease | undefined;
   let startupAbort: AbortController | undefined;
+  let primaryFailure: unknown;
+  let shutdownSeen = false;
+  const shutdownRequested = shutdown.wait.then(() => {
+    shutdownSeen = true;
+    startupAbort?.abort();
+    return { kind: "shutdown" } as const;
+  });
 
   try {
     const loadedConfig = loadConfig(env);
@@ -345,7 +380,19 @@ export async function runGatewayServer(
       env,
       resolvedLoginHome,
     );
-    const acquiredLease = await acquireInstanceLease(resolvedLoginHome);
+    const leaseAcquisition = acquireInstanceLease(resolvedLoginHome).then(
+      (lease) => ({ kind: "lease" as const, lease }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    const acquired = await Promise.race([leaseAcquisition, shutdownRequested]);
+    if (acquired.kind === "shutdown") {
+      void leaseAcquisition.then(async (late) => {
+        if (late.kind === "lease") await late.lease.close().catch(() => undefined);
+      });
+      throw gatewayStartCancelledError();
+    }
+    if (acquired.kind === "error") throw acquired.error;
+    const acquiredLease = acquired.lease;
     instanceLease = acquiredLease;
     startupAbort = new AbortController();
     const leaseLoss = acquiredLease.lost.then(() => {
@@ -353,6 +400,7 @@ export async function runGatewayServer(
       return { kind: "lease_lost" } as const;
     });
     const assertLeaseHeld = (): void => {
+      if (shutdownSeen) throw gatewayStartCancelledError();
       if (acquiredLease.isLost()) throw instanceLeaseLostError();
     };
     const awaitWhileLeaseHeld = async <T>(
@@ -364,7 +412,21 @@ export async function runGatewayServer(
         (result) => ({ kind: "result", result }) as const,
         (error: unknown) => ({ kind: "error", error }) as const,
       );
-      const outcome = await Promise.race([observed, leaseLoss]);
+      const outcome = await Promise.race([
+        observed,
+        leaseLoss,
+        shutdownRequested,
+      ]);
+      if (outcome.kind === "shutdown") {
+        if (cleanLateResult !== undefined) {
+          void observed.then(async (late) => {
+            if (late.kind === "result") {
+              await cleanLateResult(late.result).catch(() => undefined);
+            }
+          });
+        }
+        throw gatewayStartCancelledError();
+      }
       if (outcome.kind === "lease_lost") {
         if (cleanLateResult !== undefined) {
           void observed.then(async (late) => {
@@ -386,6 +448,12 @@ export async function runGatewayServer(
       return outcome.result;
     };
     assertLeaseHeld();
+    const createdStore = createStore(config);
+    store = createdStore;
+    await awaitWhileLeaseHeld(
+      createdStore.initialize({ deferPersistence: true }),
+    );
+    assertLeaseHeld();
     const runtime = await awaitWhileLeaseHeld(
       Promise.resolve().then(() =>
         attestClaudeRuntime({
@@ -393,7 +461,7 @@ export async function runGatewayServer(
         }),
       ),
     );
-    claudeProvider = createClaudeProvider({
+    const createdClaudeProvider = createClaudeProvider({
       runtime,
       locale: options.locale ?? "en",
       nativeHelpers: { maxHelpers: config.limits.maxRoutes },
@@ -401,39 +469,24 @@ export async function runGatewayServer(
         ? {}
         : { deliveryNotices: config.deliveryNotices }),
     });
-    store = createStore(config);
+    claudeProvider = createdClaudeProvider;
+    const codexEnvironment = localCodexProviderEnvironment(env);
     const codexFactoryOptions: LocalCodexTransportFactoryOptions = {
-      environment: localCodexProviderEnvironment(env),
+      environment: codexEnvironment,
       hostId: GATEWAY_LOCAL_HOST_ID,
     };
-    const createOwnedCodexFactory = async (
-      creator: (
-        options: LocalCodexTransportFactoryOptions,
-      ) => Promise<LocalCodexTransportFactory>,
-    ): Promise<LocalCodexTransportFactory> =>
-      await awaitWhileLeaseHeld(
-        Promise.resolve().then(() => creator(codexFactoryOptions)),
-        async (lateFactory) => lateFactory.close(),
-      );
-    const createdCodexFactory = await createOwnedCodexFactory(
-      createCodexFactory,
-    );
-    codexFactory = createdCodexFactory;
-    if (
-      createdCodexFactory.availabilityFailure !== undefined &&
-      createdCodexFactory.availabilityFailure !==
-        "CODEX_CONTROL_SOCKET_UNAVAILABLE"
-    ) {
-      throw new BridgeError(
-        "CODEX_RUNTIME_ATTESTATION_INVALID",
-        "Codex App Server availability evidence must use a reviewed bounded code.",
-      );
-    }
-    codexProvider = createCodexProvider({
-      factory: createdCodexFactory,
-      refreshFactory: async () =>
-        await createOwnedCodexFactory(createCodexRefreshCandidateFactory),
+    const codexOperation = createCodexOperation({
+      local: {
+        environment: codexEnvironment,
+      },
     });
+    const createdCodexProvider = createCodexProvider({
+      hostId: GATEWAY_LOCAL_HOST_ID,
+      operation: codexOperation,
+      createObservationFactory: async () =>
+        await createCodexObservationFactory(codexFactoryOptions),
+    });
+    codexProvider = createdCodexProvider;
     for (const definition of config.acpProviders ?? []) {
       let resolved: DeepSeekAcpLaunch = {};
       if (definition.launch !== undefined) {
@@ -459,22 +512,23 @@ export async function runGatewayServer(
     }
     const createdService = createService({
       config,
-      adapters: [claudeProvider, codexProvider, ...acpProviders],
-      store,
-      ...(createdCodexFactory.diagnosticInstallation === undefined
-        ? {}
-        : {
-            codexDoctor: async () =>
-              await diagnoseCodexAttachment({
-                socketPath:
-                  createdCodexFactory.diagnosticInstallation!
-                    .controlSocketPath,
-                daemonExecutablePath:
-                  createdCodexFactory.diagnosticInstallation!.binaryPath,
-                embassyPid: process.pid,
-                inspector: createSystemCodexDoctorInspector(),
-              }),
-          }),
+      adapters: [createdClaudeProvider, createdCodexProvider, ...acpProviders],
+      store: createdStore,
+      codexDoctor: async () => {
+        try {
+          const installation = await resolveCodexInstallation(
+            resolvedLoginHome,
+          );
+          return await diagnoseCodexAttachment({
+            socketPath: installation.controlSocketPath,
+            daemonExecutablePath: installation.binaryPath,
+            embassyPid: process.pid,
+            inspector: createSystemCodexDoctorInspector(),
+          });
+        } catch {
+          return { conditions: ["unknown"] as const };
+        }
+      },
     });
     service = createdService;
     await awaitWhileLeaseHeld(
@@ -482,21 +536,32 @@ export async function runGatewayServer(
         createdService.start(startupAbort?.signal),
       ),
     );
-    await awaitWhileLeaseHeld(
-      Promise.resolve().then(() =>
-        options.onReady({
-          status: "ready",
-          hostId: GATEWAY_LOCAL_HOST_ID,
-          codexMode: "native_messaging",
-          dashboardFile: DASHBOARD_FILE_NAME,
-        }),
-      ),
+    assertLeaseHeld();
+    const readyPublication = Promise.resolve().then(() =>
+      options.onReady({
+        status: "ready",
+        hostId: GATEWAY_LOCAL_HOST_ID,
+        codexMode: "native_messaging",
+        dashboardFile: DASHBOARD_FILE_NAME,
+      }),
     );
-    const lifetime = await Promise.race([
-      shutdown.wait.then(() => ({ kind: "shutdown" }) as const),
+    const readyOutcome = await Promise.race([
+      readyPublication.then(
+        () => ({ kind: "ready" }) as const,
+        (error: unknown) => ({ kind: "error", error }) as const,
+      ),
       leaseLoss,
+      shutdownRequested,
     ]);
+    if (readyOutcome.kind === "error") throw readyOutcome.error;
+    if (readyOutcome.kind === "lease_lost") throw instanceLeaseLostError();
+    if (readyOutcome.kind === "shutdown") return;
+    assertLeaseHeld();
+    const lifetime = await Promise.race([shutdownRequested, leaseLoss]);
     if (lifetime.kind === "lease_lost") throw instanceLeaseLostError();
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
     startupAbort?.abort();
     shutdown.dispose();
@@ -508,7 +573,6 @@ export async function runGatewayServer(
     } else {
       await closeUnownedAssembly({
         ...(claudeProvider === undefined ? {} : { claudeProvider }),
-        ...(codexFactory === undefined ? {} : { codexFactory }),
         ...(codexProvider === undefined ? {} : { codexProvider }),
         acpProviders,
         ...(store === undefined ? {} : { store }),
@@ -516,14 +580,16 @@ export async function runGatewayServer(
         cleanupFailures.push(error);
       });
     }
-    await instanceLease?.close().catch((error: unknown) => {
-      cleanupFailures.push(error);
-    });
+    // Keep the host-wide lease held until process exit when provider/store
+    // cleanup is unconfirmed. A replacement controller must not overlap
+    // possibly-live exact-owned resources.
+    if (cleanupFailures.length === 0) {
+      await instanceLease?.close().catch((error: unknown) => {
+        cleanupFailures.push(error);
+      });
+    }
     if (cleanupFailures.length > 0) {
-      throw new BridgeError(
-        "GATEWAY_CLEANUP_FAILED",
-        "The local gateway could not confirm exact resource cleanup.",
-      );
+      throw cleanupFailure(primaryFailure, cleanupFailures);
     }
   }
 }

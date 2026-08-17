@@ -115,6 +115,7 @@ test("bare invocation and help flags print localized usage without side effects"
     const help = stdout.chunks.join("");
     assert.match(help, current.expected);
     assert.match(help, /refresh-dashboard/);
+    assert.match(help, /convert-state-v2-to-v3/);
     assert.match(help, /wait-delivery/);
     assert.match(help, /untrack/);
     assert.match(help, /dashboard --live \[--port <n>\]/);
@@ -123,6 +124,130 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.equal(stderr.chunks.join(""), "");
   }
+});
+
+test("offline state conversion uses only configured state and prints no private evidence", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  const stateDir = "/private/fake-state";
+  let convertedStateDir: string | undefined;
+  let unrelatedWork = false;
+  const code = await runGatewayCli(["convert-state-v2-to-v3"], {
+    env: { EMBASSY_STATE_DIR: stateDir },
+    stdout,
+    stderr,
+    loadConfig: () => ({
+      stateDir,
+      controlSocketPath: `${stateDir}/control.sock`,
+      allowedHosts: ["this-mac"],
+      steeringEnabled: true,
+      inboundMode: "paired",
+      stallNoticeMs: 30_000,
+      limits: {} as never,
+    }),
+    convertState: async ({ stateDir: actual }) => {
+      convertedStateDir = actual;
+      return {
+        backupFile: "gateway-state.v2.backup.json",
+        commitId: "PRIVATE_COMMIT_ID",
+        commitSequence: 41,
+      };
+    },
+    validateControlSocket: async () => {
+      unrelatedWork = true;
+    },
+    sendRequest: async () => {
+      unrelatedWork = true;
+      throw new Error("converter must not contact control");
+    },
+    runServer: async () => {
+      unrelatedWork = true;
+    },
+    runLiveDashboard: async () => {
+      unrelatedWork = true;
+    },
+  });
+
+  assert.equal(code, gatewayCliExitCodes.ok);
+  assert.equal(convertedStateDir, stateDir);
+  assert.equal(unrelatedWork, false);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: true,
+    command: "convert-state-v2-to-v3",
+    result: {
+      converted: true,
+      backupFile: "gateway-state.v2.backup.json",
+    },
+  });
+  assert.equal(stdout.chunks.join("").includes("PRIVATE_COMMIT_ID"), false);
+  assert.equal(stdout.chunks.join("").includes(stateDir), false);
+  assert.equal(stderr.chunks.join(""), "");
+});
+
+test("offline state conversion rejects options before configuration", async () => {
+  let worked = false;
+  const stdout = capture();
+  const code = await runGatewayCli(
+    ["convert-state-v2-to-v3", "--state-dir", "/tmp/other"],
+    {
+      env: {},
+      stdout,
+      stderr: capture(),
+      loadConfig: () => {
+        worked = true;
+        throw new Error("must not load configuration");
+      },
+      convertState: async () => {
+        worked = true;
+        throw new Error("must not convert");
+      },
+    },
+  );
+  assert.equal(code, gatewayCliExitCodes.invalidInput);
+  assert.equal(worked, false);
+  assert.equal(
+    (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error
+      .code,
+    "INVALID_ARGUMENTS",
+  );
+});
+
+test("offline state conversion exposes commit uncertainty as non-retryable ambiguity", async () => {
+  const stdout = capture();
+  const code = await runGatewayCli(["convert-state-v2-to-v3"], {
+    env: {},
+    stdout,
+    stderr: capture(),
+    loadConfig: () => ({
+      stateDir: "/private/fake-state",
+      controlSocketPath: "/private/fake-state/control.sock",
+      allowedHosts: ["this-mac"],
+      steeringEnabled: true,
+      inboundMode: "paired",
+      stallNoticeMs: 30_000,
+      limits: {} as never,
+    }),
+    convertState: async () => {
+      throw new BridgeError(
+        "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
+        "PRIVATE_CONVERTER_DIAGNOSTIC",
+        true,
+      );
+    },
+  });
+
+  assert.equal(code, gatewayCliExitCodes.ambiguous);
+  const output = stdout.chunks.join("");
+  assert.deepEqual(JSON.parse(output), {
+    ok: false,
+    command: "convert-state-v2-to-v3",
+    error: {
+      code: "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
+      ambiguous: true,
+      retryable: false,
+    },
+  });
+  assert.equal(output.includes("PRIVATE_CONVERTER_DIAGNOSTIC"), false);
 });
 
 test("removed compatibility commands fail before configuration or control work", async () => {
@@ -293,7 +418,7 @@ test("all client commands use one private control socket and expose only normali
       unregisters.push({ ...params });
       return { accepted: true, code: "ok" };
     },
-    removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
+    removeCodexRegistration: () => ({ accepted: true, code: "ok" }),
     selectClaude: ({ alias }) => {
       selected.push(alias);
       return { accepted: true, code: "ok" };
@@ -1246,7 +1371,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
   });
   assert.equal(
     unknownErr.chunks.join(""),
-    "[embassy] delivery token not recognized; it may have expired or belong to a previous gateway session.\n",
+    "[embassy] delivery token not recognized; it may have expired or left bounded retention.\n",
   );
 
   const timeoutOut = capture();
@@ -1401,7 +1526,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
   );
 });
 
-test("doctor returns normalized conditions and registration names attachment remedies", async () => {
+test("doctor returns normalized conditions while registration stays record-only", async () => {
   const config = {
     stateDir: "/private/fake-state",
     controlSocketPath: "/private/fake-state/control.sock",
@@ -1444,8 +1569,8 @@ test("doctor returns normalized conditions and registration names attachment rem
   });
 
   const expected = {
-    en: /Desktop is on a private App Server.*\/usr\/bin\/open/,
-    "zh-CN": /桌面应用正在使用私有 App Server.*\/usr\/bin\/open/,
+    en: "[embassy] gateway rejected the request.\n",
+    "zh-CN": "[embassy] 网关拒绝了该请求。\n",
   } as const;
   for (const locale of ["en", "zh-CN"] as const) {
     let calls = 0;
@@ -1465,18 +1590,17 @@ test("doctor returns normalized conditions and registration names attachment rem
       validateControlSocket: async () => undefined,
       sendRequest: (async () => {
         calls += 1;
-        return calls === 1
-          ? {
-              protocolVersion: 1,
-              ok: true,
-              result: { accepted: false, code: "rejected" },
-            }
-          : { protocolVersion: 1, ok: true, result: snapshot("split_brain") };
+        return {
+          protocolVersion: 1,
+          ok: true,
+          result: { accepted: false, code: "rejected" },
+        };
       }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
     });
     assert.equal(code, gatewayCliExitCodes.rejected);
-    assert.equal(calls, 2);
-    assert.match(stderr.chunks.join(""), expected[locale]);
+    assert.equal(calls, 1);
+    assert.equal(stderr.chunks.join(""), expected[locale]);
+    assert.doesNotMatch(stderr.chunks.join(""), /App Server|\/usr\/bin\/open/u);
   }
 });
 
@@ -2009,7 +2133,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       health: () => ({ status: "ok", revision: 1 }),
       registerCodex: () => ({ accepted: true, code: "ok" }),
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
-      removeStaleCodexRegistration: () => ({ accepted: true, code: "ok" }),
+      removeCodexRegistration: () => ({ accepted: true, code: "ok" }),
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
       pair: () => ({ accepted: true, code: "ok" }),

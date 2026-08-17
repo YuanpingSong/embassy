@@ -1,8 +1,8 @@
 namespace Embassy {
-  export function canRequestStaleCodexRegistrationRemoval(
+  export function canRequestCodexRegistrationRemoval(
     route: DashboardRouteRow,
   ): boolean {
-    return route.provider === "codex" && route.state === "stale";
+    return route.provider === "codex";
   }
 
   export const canOfferConsentEdgeCandidate = (route: DashboardRouteRow): boolean => route.enabled && (route.state === "idle" || route.state === "busy" || route.state === "awaiting_approval");
@@ -18,6 +18,7 @@ namespace Embassy {
   function ActionButton(props: Readonly<{
     action: LiveDashboardAction;
     label: string;
+    consequence?: string;
     enabled: boolean;
     onAction: RoutesTabProps["onAction"];
   }>): React.ReactElement {
@@ -31,9 +32,12 @@ namespace Embassy {
         setResult(next); setPending(false); setConfirming(false);
       });
     };
-    if (confirming) return <span className="row-baseline">
+    if (confirming) return <span className="stack-sm">
+      {props.consequence === undefined ? null : <span className="footnote">{props.consequence}</span>}
+      <span className="row-baseline">
       <button type="button" disabled={pending} onClick={run}>{pending ? t("live.action.pending") : t("live.action.confirm")}</button>
       <button type="button" disabled={pending} onClick={() => { setConfirming(false); }}>{t("live.action.cancel")}</button>
+      </span>
     </span>;
     return <span className="stack-sm">
       <button type="button" disabled={!props.enabled} onClick={() => { setResult(undefined); setConfirming(true); }}>{props.label}</button>
@@ -78,7 +82,7 @@ namespace Embassy {
           <h2 className="mono-label section-label">{t(`provider.${provider}`)}</h2>
           <ul>{routes.map(({ route, oldestAgeMs }) => <li key={`${route.alias}\0${route.host}`}>
             <code>{route.alias}</code> · <StateChip domain="route" state={route.state} small /> · {t("app.routes.queueDepth")}: {route.queueDepth}{oldestAgeMs === undefined ? "" : ` · ${fmtAge(oldestAgeMs)}`}
-            {canRequestStaleCodexRegistrationRemoval(route) ? <ActionButton action={{ action: "remove_stale_codex_registration", alias: route.alias }} label={t("live.action.removeStaleCodexRegistration")} enabled={props.actionsEnabled} onAction={props.onAction} /> : null}
+            {canRequestCodexRegistrationRemoval(route) ? <ActionButton action={{ action: "remove_codex_registration", alias: route.alias }} label={t("live.action.removeCodexRegistration")} consequence={t("app.routes.removeCodex.consequence", { alias: route.alias })} enabled={props.actionsEnabled} onAction={props.onAction} /> : null}
           </li>)}</ul>
           <p className="footnote">{t("app.routes.unpairedProvider", { provider: t(`provider.${provider}`), count: data.graph.unpairedReadyByProvider[provider] })}</p>
         </section>;

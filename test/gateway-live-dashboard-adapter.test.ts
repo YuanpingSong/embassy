@@ -270,7 +270,6 @@ function fixture(name: string): DashboardViewModel {
 const HEALTHY = fixture("healthy-exchange");
 const DEGRADED = fixture("degraded-queue");
 const EMPTY = fixture("empty-first-run");
-const SUCCESSION = fixture("succession-generation");
 
 /** Re-materializes a vm-realm value in this realm so deepEqual can run. */
 function plain<Value>(value: Value): Value {
@@ -340,7 +339,6 @@ test("bundle evaluates in node:vm and exposes the adapter surface", () => {
     "pulse",
     "worstConnectorHealth",
     "matchesProviderFilters",
-    "extractSuccessions",
     "hasLifecycleTruncation",
     "deliveriesTruncated",
     "deliveryGroupKey",
@@ -406,7 +404,7 @@ test("root browser protocol ignores fragments and uses cookie-free API posts", a
     assert.deepEqual(
       plain(
         await protocol.executeAction({
-          action: "remove_stale_codex_registration",
+          action: "remove_codex_registration",
           alias: "codex-orphan@this-mac",
         }),
       ),
@@ -428,7 +426,7 @@ test("root browser protocol ignores fragments and uses cookie-free API posts", a
   assert.equal(
     calls[0]?.init.body,
     JSON.stringify({
-      action: "remove_stale_codex_registration",
+      action: "remove_codex_registration",
       alias: "codex-orphan@this-mac",
     }),
   );
@@ -478,7 +476,6 @@ test("fixtures carry the full DashboardViewModel shape", () => {
     ["healthy-exchange", HEALTHY],
     ["degraded-queue", DEGRADED],
     ["empty-first-run", EMPTY],
-    ["succession-generation", SUCCESSION],
   ];
   const topLevelKeys = [
     "schemaVersion",
@@ -527,7 +524,7 @@ test("fixtures carry the full DashboardViewModel shape", () => {
 });
 
 test("fixtures only use real protocol tokens (no chip falls back to unknown)", () => {
-  for (const model of [HEALTHY, DEGRADED, EMPTY, SUCCESSION]) {
+  for (const model of [HEALTHY, DEGRADED, EMPTY]) {
     for (const group of model.activity) {
       assert.notEqual(
         bundle.Embassy.chipKindFor(group.state, group.direction),
@@ -761,7 +758,6 @@ test("worstConnectorHealth picks the worst per provider", () => {
   assert.equal(adapter.worstConnectorHealth(DEGRADED, "codex"), "offline");
   assert.equal(adapter.worstConnectorHealth(HEALTHY, "claude"), "healthy");
   assert.equal(adapter.worstConnectorHealth(HEALTHY, "codex"), "healthy");
-  assert.equal(adapter.worstConnectorHealth(SUCCESSION, "codex"), "degraded");
 });
 
 test("worstConnectorHealth is undefined when no connector of the provider is observed", () => {
@@ -799,13 +795,14 @@ test("worstConnectorHealth honors the offline < degraded < connecting < healthy 
 });
 
 // ---------------------------------------------------------------------------
-// §7.3 — successions and routes props
+// §7.3 — routes props
 // ---------------------------------------------------------------------------
 
-test("stale-registration recovery is offered only on stale Codex rows", () => {
-  const staleCodex = DEGRADED.routes.find(
-    (route) => route.provider === "codex" && route.state === "stale",
+test("confirmed registration removal is offered on every Codex row", () => {
+  const offlineCodex = DEGRADED.routes.find(
+    (route) => route.provider === "codex" && route.state === "offline",
   ) as DashboardRouteRow;
+  const staleCodex = { ...offlineCodex, state: "stale" as const };
   const disabledCodex = DEGRADED.routes.find(
     (route) => route.provider === "codex" && route.state === "disabled",
   ) as DashboardRouteRow;
@@ -813,22 +810,17 @@ test("stale-registration recovery is offered only on stale Codex rows", () => {
     (route) => route.provider === "claude",
   ) as DashboardRouteRow;
 
+  assert.equal(bundle.Embassy.canRequestCodexRegistrationRemoval(staleCodex), true);
+  assert.equal(bundle.Embassy.canRequestCodexRegistrationRemoval(disabledCodex), true);
   assert.equal(
-    bundle.Embassy.canRequestStaleCodexRegistrationRemoval(staleCodex),
-    true,
-  );
-  assert.equal(
-    bundle.Embassy.canRequestStaleCodexRegistrationRemoval(disabledCodex),
-    false,
-  );
-  assert.equal(
-    bundle.Embassy.canRequestStaleCodexRegistrationRemoval({
+    bundle.Embassy.canRequestCodexRegistrationRemoval({
       ...claude,
       state: "stale",
     }),
     false,
   );
-  assert.match(bundle.source, /remove_stale_codex_registration/u);
+  assert.match(bundle.source, /remove_codex_registration/u);
+  assert.match(bundle.source, /app\.routes\.removeCodex\.consequence/u);
 });
 
 test("consent-edge candidates require enabled observed routes", () => {
@@ -876,23 +868,6 @@ test("overview and routes preserve the explicit open-inbound policy", () => {
   assert.equal(adapter.routesProps(open, GENERATED_MS).inboundMode, "open");
 });
 
-test("extractSuccessions keeps only succession guidance, in server order", () => {
-  const successions = adapter.extractSuccessions(SUCCESSION);
-  assert.deepEqual(
-    plain(successions).map((view) => [view.guidanceKey, view.item.alias]),
-    [
-      ["codexSuccessionRecovery", "codex-legacy@this-mac"],
-      ["codexSuccessionBusy", "codex-builder@this-mac"],
-    ],
-  );
-  assert.equal(
-    at(successions, 1).command,
-    "embassy register-codex --alias <new> --succeeds codex-builder@this-mac",
-  );
-  assert.equal(adapter.extractSuccessions(DEGRADED).length, 0);
-  assert.equal(adapter.extractSuccessions(EMPTY).length, 0);
-});
-
 // ---------------------------------------------------------------------------
 // §7.3 — attention guidance keys and teaching commands
 // ---------------------------------------------------------------------------
@@ -900,19 +875,14 @@ test("extractSuccessions keeps only succession guidance, in server order", () =>
 test("guidanceCopyKey camelCases every guidance value", () => {
   const expected: readonly [DashboardAttentionItem["guidance"], string][] = [
     ["reobserve_claude", "reobserveClaude"],
-    ["reobserve_codex", "reobserveCodex"],
-    ["codex_reactivation_required", "codexReactivationRequired"],
     ["consent_edge_unavailable", "consentEdgeUnavailable"],
     ["claude_not_observed", "claudeNotObserved"],
-    ["codex_stale", "codexStale"],
     ["connector_offline", "connectorOffline"],
     ["route_stale", "routeStale"],
     ["queue_stalled", "queueStalled"],
     ["recipient_waiting_input", "recipientWaitingInput"],
     ["unconfirmed", "unconfirmed"],
     ["degraded", "degraded"],
-    ["codex_succession_busy", "codexSuccessionBusy"],
-    ["codex_succession_recovery", "codexSuccessionRecovery"],
     ["progress_watch", "progressWatch"],
     ["generic", "generic"],
   ];
@@ -926,25 +896,15 @@ test("attention teaching commands are real CLI verbs", () => {
   assert.deepEqual(
     plain(views).map((view) => [view.guidanceKey, view.command]),
     [
-      ["codexStale", "embassy register-codex --alias codex-builder@this-mac"],
+      ["routeStale", "embassy status"],
       ["queueStalled", "embassy status"],
       ["degraded", "embassy status"],
       ["unconfirmed", "embassy status"],
     ],
   );
-  const successionViews = adapter.attentionViews(SUCCESSION);
-  assert.deepEqual(
-    plain(successionViews).map((view) => view.command),
-    [
-      "embassy register-codex --alias <new> --succeeds codex-legacy@this-mac",
-      "embassy register-codex --alias <new> --succeeds codex-builder@this-mac",
-      "embassy select-claude --alias claude-advisor@this-mac",
-      "embassy status",
-    ],
-  );
   const verbs =
     /^(EMBASSY_[A-Z_]+=\S+ )?embassy (serve|health|status|delivery-status|wait-delivery|refresh-dashboard|dashboard|register-codex|unregister-codex|select-claude|unselect-claude|send-to-claude|send-to-codex|reply)\b/;
-  for (const view of [...views, ...successionViews]) {
+  for (const view of views) {
     assert.match(view.command, verbs);
   }
 });
@@ -987,30 +947,11 @@ test("attention commands fall back to angle-bracket placeholders without an alia
     "embassy select-claude --alias <alias>",
   );
   assert.equal(
-    adapter.attentionCommand({ ...anonymous, guidance: "reobserve_codex" }),
-    "embassy register-codex --alias <alias>",
-  );
-  assert.equal(
-    adapter.attentionCommand({
-      ...anonymous,
-      alias: "codex-reviewer@this-mac",
-      guidance: "codex_reactivation_required",
-    }),
-    "embassy register-codex --alias codex-reviewer@this-mac",
-  );
-  assert.equal(
     adapter.attentionCommand({
       ...anonymous,
       guidance: "consent_edge_unavailable",
     }),
     "embassy refresh-dashboard",
-  );
-  assert.equal(
-    adapter.attentionCommand({
-      ...anonymous,
-      guidance: "codex_succession_recovery",
-    }),
-    "embassy register-codex --alias <new> --succeeds <old>",
   );
   assert.equal(
     adapter.attentionCommand({ ...anonymous, guidance: "generic" }),
@@ -1188,28 +1129,18 @@ test("activityRows includes body-free broker operations in timeline order", () =
   ]);
 });
 
-test("live activity authority labels automatic refreshes and operator recovery distinctly", () => {
-  const endpoint: DashboardActivityEventRow = {
+test("live activity authority labels operator registration activity", () => {
+  const registration: DashboardActivityEventRow = {
     sequence: 1,
     timestamp: "2026-08-08T12:00:00.000Z",
-    kind: "endpoint",
-    action: "endpoint_refreshed",
+    kind: "registration",
+    action: "codex_unregistered",
     outcome: "accepted",
     aliases: ["codex-main@this-mac"],
-    operatorAction: false,
-  };
-  const recovery: DashboardActivityEventRow = {
-    sequence: 2,
-    timestamp: "2026-08-08T12:00:01.000Z",
-    kind: "recovery",
-    action: "codex_orphan_removed",
-    outcome: "accepted",
-    aliases: ["codex-orphan@this-mac"],
     operatorAction: true,
   };
 
-  assert.equal(bundle.Embassy.activityAuthority(endpoint), "automatic");
-  assert.equal(bundle.Embassy.activityAuthority(recovery), "operator");
+  assert.equal(bundle.Embassy.activityAuthority(registration), "operator");
   assert.match(bundle.source, /data-activity-authority/u);
 });
 
@@ -1219,7 +1150,7 @@ test("activityRows drops in-flight groups and alerts without a timestamp", () =>
     .filter((row) => row.kind === "alert")
     .map((row) => (row.kind === "alert" ? row.guidanceKey : ""));
   // ADAPTER_DEGRADED carries no timestamp and must not be placed on the timeline.
-  assert.deepEqual(alertGuidance, ["codexStale", "queueStalled", "unconfirmed"]);
+  assert.deepEqual(alertGuidance, ["routeStale", "queueStalled", "unconfirmed"]);
   assert.equal(
     DEGRADED.attention.filter((item) => item.timestamp === undefined).length,
     1,
@@ -1273,8 +1204,9 @@ test("delivered is qualified only for codex_to_claude (H2)", () => {
   // The rule is driven by (state, direction) — the direction alone changes nothing.
   assert.equal(bundle.Embassy.chipKindFor("failed", "codex_to_claude"), "failure");
 
-  const settled = SUCCESSION.activity.find(
-    (group) => group.state === "delivered",
+  const settled = HEALTHY.activity.find(
+    (group) =>
+      group.state === "delivered" && group.direction === "codex_to_claude",
   ) as DashboardMessageGroup;
   assert.equal(settled.direction, "codex_to_claude");
   assert.equal(
@@ -1574,7 +1506,6 @@ test("empty peers, routes, connectors and activity produce empty props, never a 
   assert.equal(routes.peers.length, 0);
   assert.equal(routes.routes.length, 0);
   assert.equal(routes.consentEdges.length, 0);
-  assert.equal(routes.successions.length, 0);
   assert.equal(routes.peersOmitted, 0);
   assert.equal(routes.routesOmitted, 0);
 

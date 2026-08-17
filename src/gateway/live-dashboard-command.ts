@@ -262,7 +262,7 @@ export function createGatewayLiveDashboardActions(
         let response:
           | GatewayControlResponse<"pair">
           | GatewayControlResponse<"unpair">
-          | GatewayControlResponse<"remove_stale_codex_registration">
+          | GatewayControlResponse<"remove_codex_registration">
           | GatewayControlResponse<"refresh_dashboard">;
         switch (action.action) {
           case "pair":
@@ -289,12 +289,12 @@ export function createGatewayLiveDashboardActions(
               },
             });
             break;
-          case "remove_stale_codex_registration":
+          case "remove_codex_registration":
             response = await sendRequest({
               socketPath,
               request: {
                 protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-                method: "remove_stale_codex_registration",
+                method: "remove_codex_registration",
                 params: { alias: action.alias },
               },
             });

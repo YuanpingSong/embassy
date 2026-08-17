@@ -17,17 +17,18 @@ means addressing its reason, not ignoring it.
   candidate, not declined forever.
 - **Codex write activation from read probes** — Declined permanently because
   initialize/thread-list evidence never grants `turn/start` authority.
-- **Automatic re-anchor promises in alerts** — The dashboard states what the
-  broker can prove, never what it hopes.
+- **Automatic re-anchor promises in alerts** — Superseded in v1.8 when Codex
+  endpoint re-anchoring was removed. The dashboard still states only current
+  operation facts, never hoped-for recovery.
 - **Cosmetic backlog held out of v1.4/v1.5** (stale `live-*` state-directory
   sweep; dashboard `GET /?query` → `404`; leading-zero port parse) — Correctness
   and honesty shipped first; these wait without shame.
 - **Cross-layer launcher-banner provenance policy** — Deferred from CO #39
   because a parser-only patch would have been false; the honest fix spans
   server/provider classification.
-- **Claude endpoint-generation deleted-as-churn via constant sentinel** — Kept
-  the constant sentinel rather than adding schema surgery because the added
-  complexity failed the complexity test.
+- **Claude endpoint-generation deleted-as-churn via constant sentinel** —
+  Superseded by native state schema 3, which removed persisted endpoint
+  generations instead of adding another compatibility sentinel.
 - **Native stall-notice prose kept one hop from the remedy** — The native
   notice states when queued mail arrives and points onward; the dashboard owns
   the full remedy prose.

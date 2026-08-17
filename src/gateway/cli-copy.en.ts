@@ -14,7 +14,8 @@ Commands:
   health                 Check broker health
   status                 Read the public status snapshot
   doctor                 Diagnose Codex Desktop attachment
-  refresh-dashboard      Publish both static dashboard files
+  convert-state-v2-to-v3 Convert stopped-broker state after making a backup
+  refresh-dashboard      Refresh discovery and publish both static dashboards
   dashboard --live [--port <n>]
                          Open live status and bounded route consent
   register-codex         Register or succeed a Codex task
@@ -46,10 +47,6 @@ Options:
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
   "hint.progressWatchOwnerConflict":
     "this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.",
-  "hint.codexSplitBrain":
-    "Desktop is on a private App Server; its tasks are unreachable by Embassy. Relaunch: /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT",
-  "hint.codexOrphaned":
-    "the daemon is running but no Desktop client is attached; threads cannot load. Run: /usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT, then open your Codex task.",
   "error.input": "request rejected.",
   "error.decision": "gateway rejected the request.",
   "error.unavailable": "gateway unavailable.",
@@ -58,7 +55,7 @@ Options:
   "error.unsafe":
     "gateway state directory or socket has unexpected permissions or ownership. Verify nothing else controls that path before running embassy serve.",
   "error.tokenUnknown":
-    "delivery token not recognized; it may have expired or belong to a previous gateway session.",
+    "delivery token not recognized; it may have expired or left bounded retention.",
   "error.deliveryTimeout":
     "the delivery has not settled yet; the gateway is still running. Check again later with embassy delivery-status.",
 } as const satisfies CliCopy;

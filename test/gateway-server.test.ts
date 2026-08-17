@@ -7,6 +7,7 @@ import { BridgeError } from "../src/errors.js";
 import { CLAUDE_PEER_COMPATIBILITY } from "../src/gateway/claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
 import type { LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
+import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
 import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
@@ -61,6 +62,28 @@ function factory(
     protocolVersion: appServerVersion,
     close: async () => onClose(),
   } as unknown as LocalCodexTransportFactory;
+}
+
+function statelessOperation(): StatelessCodexOperationTransport {
+  return {
+    execute: async (input) => ({
+      attemptId: input.attemptId,
+      cleanupConfirmed: true,
+      phase: "clean",
+      safeErrorCode: "THREAD_NOT_OBSERVED",
+      state: "deferred",
+    }),
+  };
+}
+
+function inertStore(
+  config: ConstructorParameters<typeof GatewayStore>[0],
+): GatewayStore {
+  const store = new GatewayStore(config);
+  Object.defineProperty(store, "initialize", {
+    value: async () => undefined,
+  });
+  return store;
 }
 
 function instanceLease(
@@ -148,14 +171,15 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   };
   const config = loadGatewayConfig(env);
   const effectiveConfig = { ...config, inboundMode: "open" as const };
-  const store = new GatewayStore(effectiveConfig);
+  const store = inertStore(effectiveConfig);
   const abort = new AbortController();
   const signals = signalHarness();
   const events: string[] = [];
   const ready: GatewayServerReadyResult[] = [];
   let claudeOptions: unknown;
-  let codexFactoryOptions: Record<string, unknown> | undefined;
+  let codexOperationOptions: Record<string, unknown> | undefined;
   let codexProviderOptions: Record<string, unknown> | undefined;
+  let codexObservationAttempts = 0;
   const acpProviderOptions: Record<string, unknown>[] = [];
   let serviceOptions: Record<string, unknown> | undefined;
 
@@ -202,10 +226,14 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
         assert.deepEqual(received, effectiveConfig);
         return store;
       },
-      createCodexFactory: async (options) => {
-        events.push("create-codex-factory");
-        codexFactoryOptions = options as unknown as Record<string, unknown>;
-        return factory(() => events.push("close-codex-factory"));
+      createCodexOperation: (options) => {
+        events.push("create-codex-operation");
+        codexOperationOptions = options as unknown as Record<string, unknown>;
+        return statelessOperation();
+      },
+      createCodexObservationFactory: async () => {
+        codexObservationAttempts += 1;
+        return factory(() => undefined);
       },
       createCodexProvider: (options) => {
         events.push("create-codex");
@@ -240,21 +268,26 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   assert.deepEqual(claudeOptions, {
     claudeExecutable: SYNTHETIC_LAUNCHER,
   });
-  assert.equal(codexFactoryOptions?.hostId, "this-mac");
-  assert.deepEqual(codexFactoryOptions?.environment, {
+  const localOperation = codexOperationOptions?.local as
+    | Record<string, unknown>
+    | undefined;
+  assert.deepEqual(localOperation?.environment, {
     HOME: SYNTHETIC_HOME,
     USER: "synthetic-user",
     LOGNAME: "synthetic-user",
   });
   assert.equal(
-    JSON.stringify(codexFactoryOptions).includes(SYNTHETIC_SECRET),
+    JSON.stringify(codexOperationOptions).includes(SYNTHETIC_SECRET),
     false,
   );
   assert.deepEqual(Object.keys(codexProviderOptions ?? {}), [
-    "factory",
-    "refreshFactory",
+    "hostId",
+    "operation",
+    "createObservationFactory",
   ]);
-  assert.equal(typeof codexProviderOptions?.refreshFactory, "function");
+  assert.equal(codexProviderOptions?.hostId, "this-mac");
+  assert.equal(typeof codexProviderOptions?.createObservationFactory, "function");
+  assert.equal(codexObservationAttempts, 0);
   assert.equal(serviceOptions?.store, store);
   assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
@@ -299,10 +332,10 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   assert.deepEqual(events, [
     "config",
     "acquire-instance",
+    "create-store",
     "attest-claude",
     "create-claude",
-    "create-store",
-    "create-codex-factory",
+    "create-codex-operation",
     "create-codex",
     "resolve-deepseek",
     "create-deepseek",
@@ -315,7 +348,7 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   assert.equal(signals.listenerCount(), 0);
 });
 
-test("assembly uses attested resolvers at startup and after replacement", async () => {
+test("assembly constructs inert operations and keeps observation attestation lazy", async () => {
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
     EMBASSY_STATE_DIR: "/synthetic/controller-state",
@@ -323,13 +356,12 @@ test("assembly uses attested resolvers at startup and after replacement", async 
   const config = loadGatewayConfig(env);
   const abort = new AbortController();
   const signals = signalHarness();
-  const initial = factory(() => undefined);
-  const candidate = factory(() => undefined);
-  let startupCalls = 0;
-  let candidateCalls = 0;
+  const observer = factory(() => undefined);
+  let operationCalls = 0;
+  let observationCalls = 0;
   let providerOptions:
     | {
-        refreshFactory?: () => Promise<LocalCodexTransportFactory>;
+        createObservationFactory?: () => Promise<LocalCodexTransportFactory>;
       }
     | undefined;
 
@@ -346,15 +378,15 @@ test("assembly uses attested resolvers at startup and after replacement", async 
       acquireInstanceLease: async () => instanceLease(() => undefined),
       attestClaudeRuntime: async () => runtime(),
       createClaudeProvider: () => provider(() => undefined),
-      createStore: () => new GatewayStore(config),
-      createCodexFactory: async (options) => {
-        startupCalls += 1;
-        return initial;
+      createStore: () => inertStore(config),
+      createCodexOperation: () => {
+        operationCalls += 1;
+        return statelessOperation();
       },
-      createCodexRefreshCandidateFactory: async (options) => {
-        candidateCalls += 1;
+      createCodexObservationFactory: async (options) => {
+        observationCalls += 1;
         assert.equal(options.hostId, "this-mac");
-        return candidate;
+        return observer;
       },
       createCodexProvider: (options) => {
         providerOptions = options;
@@ -362,19 +394,19 @@ test("assembly uses attested resolvers at startup and after replacement", async 
       },
       createService: () => ({
         start: async () => {
-          assert.equal(startupCalls, 1);
-          assert.equal(candidateCalls, 0);
-          const refreshFactory = providerOptions?.refreshFactory;
-          assert.notEqual(refreshFactory, undefined);
-          assert.strictEqual(await refreshFactory!(), candidate);
+          assert.equal(operationCalls, 1);
+          assert.equal(observationCalls, 0);
+          const observe = providerOptions?.createObservationFactory;
+          assert.notEqual(observe, undefined);
+          assert.strictEqual(await observe!(), observer);
         },
         close: async () => undefined,
       }),
     },
   );
 
-  assert.equal(startupCalls, 1);
-  assert.equal(candidateCalls, 1);
+  assert.equal(operationCalls, 1);
+  assert.equal(observationCalls, 1);
   assert.equal(signals.listenerCount(), 0);
 });
 
@@ -413,8 +445,8 @@ test("Claude version evidence never prevents normal adapter construction", async
           assert.deepEqual(options.runtime, current.runtime);
           return provider(() => undefined);
         },
-        createStore: () => new GatewayStore(config),
-        createCodexFactory: async () => factory(() => undefined),
+        createStore: () => inertStore(config),
+        createCodexOperation: () => statelessOperation(),
         createCodexProvider: () => provider(() => undefined),
         createService: () => ({
           start: async () => undefined,
@@ -428,63 +460,51 @@ test("Claude version evidence never prevents normal adapter construction", async
   }
 });
 
-test("Codex version drift and a missing socket still construct the normal adapter", async () => {
-  for (const evidence of [
-    { version: "1.0.0" },
-    { version: "unknown" },
+test("Codex startup performs no installation resolution or App Server I/O", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+  };
+  const config = loadGatewayConfig(env);
+  const abort = new AbortController();
+  const signals = signalHarness();
+  let installationResolutions = 0;
+  let observationFactories = 0;
+
+  await runGatewayServer(
     {
-      version: SYNTHETIC_CODEX_VERSION,
-      availabilityFailure: "CODEX_CONTROL_SOCKET_UNAVAILABLE" as const,
+      env,
+      signal: abort.signal,
+      onReady: () => abort.abort(),
     },
-  ]) {
-    const env: NodeJS.ProcessEnv = {
-      HOME: SYNTHETIC_HOME,
-      EMBASSY_STATE_DIR: "/synthetic/controller-state",
-    };
-    const config = loadGatewayConfig(env);
-    const abort = new AbortController();
-    const signals = signalHarness();
-    let nativeCodexConstructions = 0;
-
-    await runGatewayServer(
-      {
-        env,
-        signal: abort.signal,
-        onReady: () => abort.abort(),
+    {
+      ...signals.dependencies,
+      loadConfig: () => config,
+      loginHome: () => SYNTHETIC_HOME,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => provider(() => undefined),
+      createStore: () => inertStore(config),
+      createCodexOperation: () => statelessOperation(),
+      createCodexObservationFactory: async () => {
+        observationFactories += 1;
+        return factory(() => undefined);
       },
-      {
-        ...signals.dependencies,
-        loadConfig: () => config,
-        loginHome: () => SYNTHETIC_HOME,
-        acquireInstanceLease: async () => instanceLease(() => undefined),
-        attestClaudeRuntime: async () => runtime(),
-        createClaudeProvider: () => provider(() => undefined),
-        createStore: () => new GatewayStore(config),
-        createCodexFactory: async () =>
-          factory(
-            () => undefined,
-            evidence.version,
-            evidence.availabilityFailure,
-          ),
-        createCodexProvider: (options) => {
-          nativeCodexConstructions += 1;
-          assert.equal(options.factory.appServerVersion, evidence.version);
-          assert.equal(
-            options.factory.availabilityFailure,
-            evidence.availabilityFailure,
-          );
-          return provider(() => undefined);
-        },
-        createService: () => ({
-          start: async () => undefined,
-          close: async () => undefined,
-        }),
+      resolveCodexInstallation: async () => {
+        installationResolutions += 1;
+        throw new Error("diagnostic resolver must remain lazy");
       },
-    );
+      createCodexProvider: () => provider(() => undefined),
+      createService: () => ({
+        start: async () => undefined,
+        close: async () => undefined,
+      }),
+    },
+  );
 
-    assert.equal(nativeCodexConstructions, 1);
-    assert.equal(signals.listenerCount(), 0);
-  }
+  assert.equal(installationResolutions, 0);
+  assert.equal(observationFactories, 0);
+  assert.equal(signals.listenerCount(), 0);
 });
 
 test("assembly failure closes every resource not yet owned by a service", async () => {
@@ -493,7 +513,7 @@ test("assembly failure closes every resource not yet owned by a service", async 
     EMBASSY_STATE_DIR: "/synthetic/controller-state",
   };
   const config = loadGatewayConfig(env);
-  const store = new GatewayStore(config);
+  const store = inertStore(config);
   const closed: string[] = [];
   Object.defineProperty(store, "close", {
     value: async () => {
@@ -514,8 +534,7 @@ test("assembly failure closes every resource not yet owned by a service", async 
         attestClaudeRuntime: async () => runtime(),
         createClaudeProvider: () => provider(() => closed.push("claude")),
         createStore: () => store,
-        createCodexFactory: async () =>
-          factory(() => closed.push("codex-factory")),
+        createCodexOperation: () => statelessOperation(),
         createCodexProvider: () => {
           throw new BridgeError("SYNTHETIC_ASSEMBLY_FAILURE", "synthetic");
         },
@@ -525,7 +544,85 @@ test("assembly failure closes every resource not yet owned by a service", async 
       error instanceof BridgeError &&
       error.code === "SYNTHETIC_ASSEMBLY_FAILURE",
   );
-  assert.deepEqual(closed, ["codex-factory", "claude", "store", "instance"]);
+  assert.deepEqual(closed, ["claude", "store", "instance"]);
+  assert.equal(signals.listenerCount(), 0);
+});
+
+test("state preflight preserves both conversion and cleanup failures", async () => {
+  const env: NodeJS.ProcessEnv = {
+    HOME: SYNTHETIC_HOME,
+    EMBASSY_STATE_DIR: "/synthetic/controller-state",
+  };
+  const config = loadGatewayConfig(env);
+  const signals = signalHarness();
+  const events: string[] = [];
+  const store = {
+    initialize: async (options: { deferPersistence?: boolean }) => {
+      events.push("initialize-store");
+      assert.deepEqual(options, { deferPersistence: true });
+      throw new BridgeError(
+        "GATEWAY_STATE_CONVERSION_REQUIRED",
+        "synthetic v2 state requires offline conversion",
+      );
+    },
+    close: async () => {
+      events.push("close-store");
+      throw new Error("synthetic cleanup failure");
+    },
+  } as unknown as GatewayStore;
+
+  await assert.rejects(
+    runGatewayServer(
+      { env, onReady: () => assert.fail("server must not become ready") },
+      {
+        ...signals.dependencies,
+        loadConfig: () => config,
+        loginHome: () => SYNTHETIC_HOME,
+        acquireInstanceLease: async () =>
+          instanceLease(() => events.push("close-instance")),
+        createStore: () => {
+          events.push("create-store");
+          return store;
+        },
+        attestClaudeRuntime: async () => {
+          events.push("attest-claude");
+          return runtime();
+        },
+        createClaudeProvider: () => {
+          events.push("create-claude");
+          return provider(() => undefined);
+        },
+      },
+    ),
+    (error: unknown) => {
+      if (
+        !(error instanceof BridgeError) ||
+        error.code !== "GATEWAY_CLEANUP_FAILED"
+      ) {
+        return false;
+      }
+      const cause = (error as BridgeError & { cause?: unknown }).cause;
+      assert.ok(cause instanceof AggregateError);
+      assert.equal(cause.errors.length, 2);
+      assert.ok(cause.errors[0] instanceof BridgeError);
+      assert.equal(
+        (cause.errors[0] as BridgeError).code,
+        "GATEWAY_STATE_CONVERSION_REQUIRED",
+      );
+      assert.ok(cause.errors[1] instanceof AggregateError);
+      assert.equal((cause.errors[1] as AggregateError).errors.length, 1);
+      assert.match(
+        String((cause.errors[1] as AggregateError).errors[0]),
+        /synthetic cleanup failure/u,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(events, [
+    "create-store",
+    "initialize-store",
+    "close-store",
+  ]);
   assert.equal(signals.listenerCount(), 0);
 });
 
@@ -545,6 +642,7 @@ test("instance ownership is acquired before provider setup and released after se
         ...signals.dependencies,
         loadConfig: () => config,
         loginHome: () => SYNTHETIC_HOME,
+        createStore: inertStore,
         acquireInstanceLease: async () => {
           events.push("acquire-instance");
           return instanceLease(() => events.push("close-instance"));
@@ -570,7 +668,7 @@ test("instance ownership is acquired before provider setup and released after se
   assert.equal(signals.listenerCount(), 0);
 });
 
-test("a service cleanup failure still releases the host-wide instance lease", async () => {
+test("a service cleanup failure keeps the host-wide instance lease held", async () => {
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
     EMBASSY_STATE_DIR: "/synthetic/controller-state",
@@ -595,8 +693,8 @@ test("a service cleanup failure still releases the host-wide instance lease", as
           instanceLease(() => events.push("close-instance")),
         attestClaudeRuntime: async () => runtime(),
         createClaudeProvider: () => provider(() => undefined),
-        createStore: () => new GatewayStore(config),
-        createCodexFactory: async () => factory(() => undefined),
+        createStore: () => inertStore(config),
+        createCodexOperation: () => statelessOperation(),
         createCodexProvider: () => provider(() => undefined),
         createService: () => ({
           start: async () => undefined,
@@ -610,7 +708,7 @@ test("a service cleanup failure still releases the host-wide instance lease", as
     (error: unknown) =>
       error instanceof BridgeError && error.code === "GATEWAY_CLEANUP_FAILED",
   );
-  assert.deepEqual(events, ["close-service", "close-instance"]);
+  assert.deepEqual(events, ["close-service"]);
   assert.equal(signals.listenerCount(), 0);
 });
 
@@ -642,8 +740,8 @@ test("an instance-lease cleanup failure is normalized", async () => {
           }),
         attestClaudeRuntime: async () => runtime(),
         createClaudeProvider: () => provider(() => undefined),
-        createStore: () => new GatewayStore(config),
-        createCodexFactory: async () => factory(() => undefined),
+        createStore: () => inertStore(config),
+        createCodexOperation: () => statelessOperation(),
         createCodexProvider: () => provider(() => undefined),
         createService: () => ({
           start: async () => undefined,
@@ -693,8 +791,8 @@ test("unexpected host lease loss stops the service before releasing instance own
       acquireInstanceLease: async () => lease.lease,
       attestClaudeRuntime: async () => runtime(),
       createClaudeProvider: () => provider(() => undefined),
-      createStore: () => new GatewayStore(config),
-      createCodexFactory: async () => factory(() => undefined),
+      createStore: () => inertStore(config),
+      createCodexOperation: () => statelessOperation(),
       createCodexProvider: () => provider(() => undefined),
       createService: () => ({
         start: async () => {
@@ -754,8 +852,8 @@ test("lease loss during service start prevents readiness and cleans up", async (
       acquireInstanceLease: async () => lease.lease,
       attestClaudeRuntime: async () => runtime(),
       createClaudeProvider: () => provider(() => undefined),
-      createStore: () => new GatewayStore(config),
-      createCodexFactory: async () => factory(() => undefined),
+      createStore: () => inertStore(config),
+      createCodexOperation: () => statelessOperation(),
       createCodexProvider: () => provider(() => undefined),
       createService: () => ({
         start: async () => {
@@ -787,6 +885,75 @@ test("lease loss during service start prevents readiness and cleans up", async (
 });
 
 test(
+  "SIGTERM cancels a never-resolving service start without publishing ready",
+  { timeout: 1_000 },
+  async () => {
+    const env: NodeJS.ProcessEnv = {
+      HOME: SYNTHETIC_HOME,
+      EMBASSY_STATE_DIR: "/synthetic/controller-state",
+    };
+    const config = loadGatewayConfig(env);
+    const signals = signalHarness();
+    const events: string[] = [];
+    let startSignal: AbortSignal | undefined;
+    let markStartEntered: (() => void) | undefined;
+    const startEntered = new Promise<void>((resolve) => {
+      markStartEntered = resolve;
+    });
+    const startNeverFinishes = new Promise<void>(() => undefined);
+
+    const running = runGatewayServer(
+      {
+        env,
+        onReady: () => assert.fail("a cancelled startup must not become ready"),
+      },
+      {
+        ...signals.dependencies,
+        loadConfig: () => config,
+        loginHome: () => SYNTHETIC_HOME,
+        acquireInstanceLease: async () =>
+          instanceLease(() => events.push("close-instance")),
+        attestClaudeRuntime: async () => runtime(),
+        createClaudeProvider: () => provider(() => undefined),
+        createStore: () => inertStore(config),
+        createCodexOperation: () => statelessOperation(),
+        createCodexProvider: () => provider(() => undefined),
+        createService: () => ({
+          start: async (signal) => {
+            events.push("start-service");
+            startSignal = signal;
+            markStartEntered?.();
+            await startNeverFinishes;
+          },
+          close: async () => {
+            events.push("close-service");
+          },
+        }),
+      },
+    );
+    await startEntered;
+    assert.notEqual(startSignal, undefined);
+    assert.equal(startSignal?.aborted, false);
+    signals.emit("SIGTERM");
+
+    await assert.rejects(
+      running,
+      (error: unknown) =>
+        error instanceof BridgeError &&
+        error.code === "GATEWAY_START_CANCELLED" &&
+        error.recoverable === true,
+    );
+    assert.equal(startSignal?.aborted, true);
+    assert.deepEqual(events, [
+      "start-service",
+      "close-service",
+      "close-instance",
+    ]);
+    assert.equal(signals.listenerCount(), 0);
+  },
+);
+
+test(
   "different EMBASSY_STATE_DIR values cannot start two controllers for one login home",
   { skip: process.platform !== "darwin" },
   async (t) => {
@@ -808,8 +975,8 @@ test(
         return runtime();
       },
       createClaudeProvider: () => provider(() => undefined),
-      createStore: (config) => new GatewayStore(config),
-      createCodexFactory: async () => factory(() => undefined),
+      createStore: (config) => inertStore(config),
+      createCodexOperation: () => statelessOperation(),
       createCodexProvider: () => provider(() => undefined),
       createService: () => ({
         start: async () => undefined,

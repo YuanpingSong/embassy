@@ -39,7 +39,7 @@ export type LiveDashboardAction =
       aliases: readonly [string, string];
     }>
   | Readonly<{
-      action: "remove_stale_codex_registration";
+      action: "remove_codex_registration";
       alias: string;
     }>
   | Readonly<{ action: "refresh_dashboard" }>;
@@ -273,7 +273,7 @@ function parseAction(body: string): LiveDashboardAction | undefined {
     return { action: "refresh_dashboard" };
   }
   if (
-    record.action === "remove_stale_codex_registration" &&
+    record.action === "remove_codex_registration" &&
     keys.length === 2 &&
     keys.includes("action") &&
     keys.includes("alias") &&
@@ -283,7 +283,7 @@ function parseAction(body: string): LiveDashboardAction | undefined {
     record.alias.startsWith("codex-")
   ) {
     return {
-      action: "remove_stale_codex_registration",
+      action: "remove_codex_registration",
       alias: record.alias,
     };
   }

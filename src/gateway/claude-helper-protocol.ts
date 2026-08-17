@@ -2,14 +2,11 @@ import type { ClaudePeerInboundProgress } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import type { DashboardLocale } from "./locale.js";
-import type {
-  GatewayAdapterDelivery,
-  GatewayAdapterDispatchResult,
-} from "./service.js";
+import type { GatewayAdapterDispatchResult } from "./service.js";
 import {
   isGatewayProvider,
   type GatewayProvider,
-  type PrivateRouteBinding,
+  type LogicalRouteBinding,
 } from "./types.js";
 
 export const CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION = 1 as const;
@@ -18,6 +15,7 @@ export const CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION = 1 as const;
 // exact reviewed raw-body maximum without changing the provider wire limit.
 export const CLAUDE_NATIVE_HELPER_MAX_IPC_BYTES = 128 * 1024;
 export const CLAUDE_NATIVE_HELPER_MAX_REQUESTS = 64;
+export const CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS = 5_000;
 
 export type ClaudeNativeHelperRegistration = Readonly<{
   alias: string;
@@ -39,10 +37,6 @@ export type ClaudeNativeHelperInitialization = Readonly<{
 
 export type ClaudeNativeHelperCommand =
   | Readonly<{
-      method: "resume_generation";
-      generation: string;
-    }>
-  | Readonly<{
       method: "authorize_route";
       alias: string;
       routeHandle: string;
@@ -53,8 +47,8 @@ export type ClaudeNativeHelperCommand =
       routeHandle: string;
     }>
   | Readonly<{
-      method: "dispatch";
-      binding: PrivateRouteBinding;
+      method: "prepare_dispatch";
+      binding: LogicalRouteBinding;
       authorization: "selected_route" | "native_reply";
       messageId: string;
       sourceAlias: string;
@@ -65,6 +59,14 @@ export type ClaudeNativeHelperCommand =
       expectsReply: boolean;
       deadlineAt: string;
       progressWatchActive?: true;
+    }>
+  | Readonly<{
+      method: "perform_dispatch";
+      preparationId: string;
+    }>
+  | Readonly<{
+      method: "cancel_dispatch";
+      preparationId: string;
     }>
   | Readonly<{
       method: "update_inbound_status";
@@ -90,47 +92,6 @@ export type ClaudeNativeHelperCommand =
       method: "unadvertise";
       alias: string;
     }>
-  | Readonly<{
-      method: "quiesce_generation";
-      generation: string;
-    }>
-  | Readonly<{
-      method: "observe_barrier";
-      generation: string;
-    }>
-  | Readonly<{
-      method: "prepare_generation";
-      alias: string;
-      cwd: string;
-      generation: string;
-    }>
-  | Readonly<{
-      method: "publish_prepared";
-      currentGeneration: string;
-      preparedGeneration: string;
-    }>
-  | Readonly<{
-      method: "activate_prepared";
-      generation: string;
-    }>
-  | Readonly<{
-      method: "cleanup_prepared";
-      generation: string;
-    }>
-  | Readonly<{
-      method: "rollback_prepared";
-      preparedGeneration: string;
-      resumeGeneration: string;
-    }>
-  | Readonly<{
-      method: "retire_generation";
-      retiredGeneration: string;
-      protectedActiveGeneration: string;
-    }>
-  | Readonly<{
-      method: "purge_generation_replies";
-      generation: string;
-    }>
   | Readonly<{ method: "close" }>;
 
 export type ClaudeNativeHelperRequest = Readonly<{
@@ -145,10 +106,6 @@ export type ClaudeNativeHelperParentMessage =
   | ClaudeNativeHelperRequest;
 
 export type ClaudeNativeHelperEvent =
-  | Readonly<{
-      event: "delivery";
-      value: GatewayAdapterDelivery;
-    }>
   | Readonly<{
       event: "claude_reply";
       value: Readonly<{
@@ -173,21 +130,13 @@ export type ClaudeNativeHelperEvent =
 
 export type ClaudeNativeHelperResult =
   | Readonly<{ generation: string }>
-  | GatewayAdapterDispatchResult
   | Readonly<{
-      generation: string;
-      activeGenerationMatched: boolean;
-      ingressQuiesced: boolean;
-      monitorFrozen: boolean;
-      discoveryInFlight: boolean;
-      pendingOutboundReceipts: number;
-      pendingInboundReceipts: number;
-      rejectedInboundSettlements: number;
-      clean: boolean;
+      preparationId: string;
+      frameBytes: number;
+      sha256: string;
     }>
-  | Readonly<{ publication: "published" | "not_published" | "unknown" }>
+  | GatewayAdapterDispatchResult
   | Readonly<{ released: boolean }>
-  | Readonly<{ purged: number }>
   | Readonly<{ ok: true }>;
 
 export type ClaudeNativeHelperChildMessage =
@@ -213,11 +162,13 @@ export type ClaudeNativeHelperChildMessage =
 
 const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,95}$/;
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/;
-const GENERATION = /^[A-Za-z0-9_-]{1,32}$/;
+const GENERATION = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALIAS = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const CONVERSATION_ID = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const ROUTE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const PREPARATION_ID = /^prep_[A-Za-z0-9_-]{24}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -252,22 +203,15 @@ function provider(value: unknown): value is GatewayProvider {
   return isGatewayProvider(value);
 }
 
-function binding(value: unknown): value is PrivateRouteBinding {
+function binding(value: unknown): value is LogicalRouteBinding {
   return (
     record(value) &&
-    exact(value, [
-      "provider",
-      "hostId",
-      "routeHandle",
-      "ownerLease",
-      "endpointGeneration",
-    ]) &&
+    exact(value, ["provider", "hostId", "routeHandle", "registrationId"]) &&
     provider(value.provider) &&
     value.hostId === "this-mac" &&
     typeof value.routeHandle === "string" &&
     ROUTE.test(value.routeHandle) &&
-    boundedString(value.ownerLease, 256) &&
-    boundedString(value.endpointGeneration, 256)
+    boundedString(value.registrationId, 256)
   );
 }
 
@@ -309,17 +253,6 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
   switch (value.method) {
     case "close":
       return exact(value, ["method"]);
-    case "resume_generation":
-    case "quiesce_generation":
-    case "observe_barrier":
-    case "activate_prepared":
-    case "cleanup_prepared":
-    case "purge_generation_replies":
-      return (
-        exact(value, ["method", "generation"]) &&
-        typeof value.generation === "string" &&
-        GENERATION.test(value.generation)
-      );
     case "authorize_route":
       return (
         exact(value, ["method", "alias", "routeHandle", "stateRoot"]) &&
@@ -336,7 +269,7 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         typeof value.routeHandle === "string" &&
         UUID.test(value.routeHandle)
       );
-    case "dispatch":
+    case "prepare_dispatch":
       return (
         exact(
           value,
@@ -373,6 +306,13 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         (value.progressWatchActive === undefined ||
           value.progressWatchActive === true)
       );
+    case "perform_dispatch":
+    case "cancel_dispatch":
+      return (
+        exact(value, ["method", "preparationId"]) &&
+        typeof value.preparationId === "string" &&
+        PREPARATION_ID.test(value.preparationId)
+      );
     case "update_inbound_status":
       return (
         exact(
@@ -398,7 +338,6 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         [
           "ROUTE_BUSY",
           "ROUTE_UNAVAILABLE",
-          "CODEX_ROUTE_STALE",
           "AWAITING_EXTERNAL_APPROVAL",
         ].includes(String(value.progress.reason)) &&
         Number.isSafeInteger(value.progress.queuedForMs) &&
@@ -421,54 +360,6 @@ function command(value: unknown): value is ClaudeNativeHelperCommand {
         exact(value, ["method", "alias"]) &&
         typeof value.alias === "string" &&
         ALIAS.test(value.alias)
-      );
-    case "prepare_generation":
-      return (
-        exact(value, ["method", "alias", "cwd", "generation"]) &&
-        typeof value.alias === "string" &&
-        ALIAS.test(value.alias) &&
-        typeof value.cwd === "string" &&
-        value.cwd.startsWith("/") &&
-        value.cwd.length <= 4_096 &&
-        !value.cwd.includes("\0") &&
-        typeof value.generation === "string" &&
-        GENERATION.test(value.generation)
-      );
-    case "publish_prepared":
-      return (
-        exact(value, [
-          "method",
-          "currentGeneration",
-          "preparedGeneration",
-        ]) &&
-        typeof value.currentGeneration === "string" &&
-        GENERATION.test(value.currentGeneration) &&
-        typeof value.preparedGeneration === "string" &&
-        GENERATION.test(value.preparedGeneration)
-      );
-    case "rollback_prepared":
-      return (
-        exact(value, [
-          "method",
-          "preparedGeneration",
-          "resumeGeneration",
-        ]) &&
-        typeof value.preparedGeneration === "string" &&
-        GENERATION.test(value.preparedGeneration) &&
-        typeof value.resumeGeneration === "string" &&
-        GENERATION.test(value.resumeGeneration)
-      );
-    case "retire_generation":
-      return (
-        exact(value, [
-          "method",
-          "retiredGeneration",
-          "protectedActiveGeneration",
-        ]) &&
-        typeof value.retiredGeneration === "string" &&
-        GENERATION.test(value.retiredGeneration) &&
-        typeof value.protectedActiveGeneration === "string" &&
-        GENERATION.test(value.protectedActiveGeneration)
       );
     default:
       return false;
@@ -523,31 +414,6 @@ export function isClaudeNativeHelperChildMessage(
     }
     const event = value.value;
     if (!exact(event, ["event", "value"]) || !record(event.value)) return false;
-    if (event.event === "delivery") {
-      return (
-        exact(event.value, ["messageId", "state"], ["safeErrorCode", "replyText"]) &&
-        boundedString(event.value.messageId, 256) &&
-        [
-          "transport_uncertain",
-          "transport_written",
-          "held",
-          "released",
-          "unconfirmed",
-          "denied",
-          "expired",
-          "ambiguous",
-          "completed",
-          "failed",
-          "cancelled",
-        ].includes(String(event.value.state)) &&
-        (event.value.safeErrorCode === undefined ||
-          (typeof event.value.safeErrorCode === "string" &&
-            SAFE_CODE.test(event.value.safeErrorCode))) &&
-        (event.value.replyText === undefined ||
-          (typeof event.value.replyText === "string" &&
-            Buffer.byteLength(event.value.replyText, "utf8") <= 64 * 1024))
-      );
-    }
     if (event.event === "claude_reply") {
       return (
         exact(event.value, ["routeHandle", "text"]) &&
@@ -618,52 +484,19 @@ function helperResult(value: unknown): value is ClaudeNativeHelperResult {
   }
   if (exact(value, ["ok"]) && value.ok === true) return true;
   if (
-    exact(value, ["publication"]) &&
-    ["published", "not_published", "unknown"].includes(
-      String(value.publication),
-    )
+    exact(value, ["preparationId", "frameBytes", "sha256"]) &&
+    typeof value.preparationId === "string" &&
+    PREPARATION_ID.test(value.preparationId) &&
+    Number.isSafeInteger(value.frameBytes) &&
+    Number(value.frameBytes) > 0 &&
+    Number(value.frameBytes) <= 1024 * 1024 + 1 &&
+    typeof value.sha256 === "string" &&
+    SHA256.test(value.sha256)
   ) {
     return true;
   }
   if (exact(value, ["released"]) && typeof value.released === "boolean") {
     return true;
-  }
-  if (
-    exact(value, ["purged"]) &&
-    Number.isSafeInteger(value.purged) &&
-    Number(value.purged) >= 0
-  ) {
-    return true;
-  }
-  if (
-    exact(value, [
-      "generation",
-      "activeGenerationMatched",
-      "ingressQuiesced",
-      "monitorFrozen",
-      "discoveryInFlight",
-      "pendingOutboundReceipts",
-      "pendingInboundReceipts",
-      "rejectedInboundSettlements",
-      "clean",
-    ])
-  ) {
-    return (
-      typeof value.generation === "string" &&
-      GENERATION.test(value.generation) &&
-      [
-        value.activeGenerationMatched,
-        value.ingressQuiesced,
-        value.monitorFrozen,
-        value.discoveryInFlight,
-        value.clean,
-      ].every((entry) => typeof entry === "boolean") &&
-      [
-        value.pendingOutboundReceipts,
-        value.pendingInboundReceipts,
-        value.rejectedInboundSettlements,
-      ].every((entry) => Number.isSafeInteger(entry) && Number(entry) >= 0)
-    );
   }
   if (
     !exact(
@@ -672,12 +505,11 @@ function helperResult(value: unknown): value is ClaudeNativeHelperResult {
       ["safeErrorCode", "replyText"],
     ) ||
     ![
-      "pending",
-      "accepted",
-      "deferred",
       "delivered",
+      "unconfirmed",
       "failed",
       "ambiguous",
+      "expired",
       "cancelled",
     ].includes(String(value.state)) ||
     (value.safeErrorCode !== undefined &&
@@ -688,13 +520,6 @@ function helperResult(value: unknown): value is ClaudeNativeHelperResult {
         Buffer.byteLength(value.replyText, "utf8") > 64 * 1024))
   ) {
     return false;
-  }
-  if (
-    value.state === "pending" ||
-    value.state === "accepted" ||
-    value.state === "deferred"
-  ) {
-    return value.replyText === undefined;
   }
   return true;
 }

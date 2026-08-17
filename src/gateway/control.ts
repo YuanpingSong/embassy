@@ -77,7 +77,7 @@ export const gatewayControlMethods = [
   "health",
   "register_codex",
   "unregister_codex",
-  "remove_stale_codex_registration",
+  "remove_codex_registration",
   "select_claude",
   "unselect_claude",
   "pair",
@@ -116,8 +116,8 @@ export type UnregisterCodexParams = {
   threadId: string;
 };
 
-/** Bounded operator recovery input; native task and endpoint IDs stay private. */
-export type RemoveStaleCodexRegistrationParams = {
+/** Bounded operator removal input; native task IDs stay private. */
+export type RemoveCodexRegistrationParams = {
   alias: string;
 };
 
@@ -245,8 +245,8 @@ export type GatewayControlRequest =
     }
   | {
       protocolVersion: 1;
-      method: "remove_stale_codex_registration";
-      params: RemoveStaleCodexRegistrationParams;
+      method: "remove_codex_registration";
+      params: RemoveCodexRegistrationParams;
     }
   | {
       protocolVersion: 1;
@@ -317,10 +317,7 @@ type ValidatedGatewayControlRequest =
       params: ValidatedRegisterCodexParams;
     }
   | Extract<GatewayControlRequest, { method: "unregister_codex" }>
-  | Extract<
-      GatewayControlRequest,
-      { method: "remove_stale_codex_registration" }
-    >
+  | Extract<GatewayControlRequest, { method: "remove_codex_registration" }>
   | Extract<GatewayControlRequest, { method: "select_claude" }>
   | Extract<GatewayControlRequest, { method: "unselect_claude" }>
   | Extract<GatewayControlRequest, { method: "pair" }>
@@ -423,7 +420,7 @@ type ResultByMethod = {
   health: GatewayHealthResult;
   register_codex: GatewayDecision;
   unregister_codex: GatewayDecision;
-  remove_stale_codex_registration: GatewayDecision;
+  remove_codex_registration: GatewayDecision;
   select_claude: GatewayDecision;
   unselect_claude: GatewayDecision;
   pair: GatewayDecision;
@@ -448,8 +445,8 @@ export type GatewayControlHandlers = {
   unregisterCodex: (
     params: Readonly<UnregisterCodexParams>,
   ) => MaybePromise<GatewayDecision>;
-  removeStaleCodexRegistration: (
-    params: Readonly<RemoveStaleCodexRegistrationParams>,
+  removeCodexRegistration: (
+    params: Readonly<RemoveCodexRegistrationParams>,
   ) => MaybePromise<GatewayDecision>;
   selectClaude: (
     params: Readonly<SelectClaudeParams>,
@@ -803,7 +800,7 @@ function normalizeParams(
         threadId: value.threadId.toLowerCase(),
       };
     }
-    case "remove_stale_codex_registration": {
+    case "remove_codex_registration": {
       if (
         !hasExactKeys(value, ["alias"]) ||
         !isAlias(value.alias) ||
@@ -1562,10 +1559,6 @@ function isGatewayActivityIdentity(
       );
     case "watch":
       return action === "watch_ended" && operatorAction;
-    case "endpoint":
-      return action === "endpoint_refreshed" && !operatorAction;
-    case "recovery":
-      return action === "codex_orphan_removed" && operatorAction;
     default:
       return false;
   }
@@ -1783,7 +1776,7 @@ function isResultForMethod<M extends GatewayControlMethod>(
       return isHealthResult(value);
     case "register_codex":
     case "unregister_codex":
-    case "remove_stale_codex_registration":
+    case "remove_codex_registration":
     case "select_claude":
     case "unselect_claude":
     case "pair":
@@ -1832,8 +1825,8 @@ async function dispatch(
       case "unregister_codex":
         result = await handlers.unregisterCodex(request.params);
         break;
-      case "remove_stale_codex_registration":
-        result = await handlers.removeStaleCodexRegistration(request.params);
+      case "remove_codex_registration":
+        result = await handlers.removeCodexRegistration(request.params);
         break;
       case "select_claude":
         result = await handlers.selectClaude(request.params);
@@ -2004,7 +1997,7 @@ function isNonIdempotentControlMethod(method: GatewayControlMethod): boolean {
   return (
     method === "register_codex" ||
     method === "unregister_codex" ||
-    method === "remove_stale_codex_registration" ||
+    method === "remove_codex_registration" ||
     method === "select_claude" ||
     method === "unselect_claude" ||
     method === "pair" ||

@@ -31,8 +31,8 @@ either agent runtime.
 
 Provider versions are best-effort diagnostic metadata, never routing authority.
 An explicit pair plus the exact owned route and session identity authorizes an
-attempt; current connector, generation, strict wire, capability, and correlated
-operation facts decide its result. The release-owned offline support matrix is
+attempt; the current per-operation transport, strict wire, capability, and
+correlated operation facts decide its result. The release-owned offline support matrix is
 the tested-artifact record and is never imported by runtime. Unsafe OS evidence
 for Embassy-owned or executed artifacts and Embassy callback, control, or state
 paths refuses broker startup; unsafe UID or mode evidence on Claude's external
@@ -66,7 +66,7 @@ Claude–Codex address book the user wants.
 
 The repo-shipped skill is the lightweight user/agent interface. A persistent
 local broker is still required to own the private control socket, retain
-transient reply correlation, watch endpoint generations, queue while a Codex
+transient reply correlation, publish native advertisements, queue while a Codex
 task is busy, and regenerate the dashboard between agent turns. The skill does
 not wrap, replace, or recreate either provider.
 
@@ -169,17 +169,17 @@ The status below is intentionally narrower than the target architecture.
 
 | Component | Current evidence |
 | --- | --- |
-| Neutral gateway types, metadata store, route fencing, bounded queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention |
+| Neutral gateway types, native-v3 metadata store, bounded attempt state machine, queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the stable loopback listener, direct multi-browser access, projection, request guards, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
 | Claude registry/peer adapter with strict peer protocol 1 and per-operation validation | **Implemented** and live-tested through Claude Code 2.1.227, including discovery, native status frames, cancellation, and accessible-workspace validation |
 | Claude binary/runtime metadata | **Implemented**; validates the exact owned path and records launcher-leaf metadata without granting it routing authority |
-| Allowlisted Codex App Server connector with bounded busy behavior | **Implemented** and live-tested against App Server 0.147.0 for external busy observation, registered-route reachability across settings changes, and an automatically started queued turn; exact `STEER:` boundary behavior is covered deterministically |
+| Stateless allowlisted Codex App Server transport with bounded busy behavior | **Implemented**; every operation opens and attests its own transport, and the conformance suite covers idle gating, exact `STEER:` behavior, clean retry, and ambiguous no-replay settlement |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, and lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup; remote adapters remain disabled |
-| Gateway service composition | **Implemented**, including private control-server startup, adapter lifecycle, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and clean-restart abandonment tests |
-| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque memory-only correlation handles, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
+| Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and restart attempt-phase tests |
+| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v3 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
@@ -213,41 +213,27 @@ are replaceable delivery coordinates, not identity, and are refreshed from the
 live registry before a write. The gateway rejects duplicate current names and
 duplicate live UUIDs rather than choosing between them.
 
-The controller binds a Codex route to an exact host, App Server endpoint
-generation, thread ID, and owner lease. Other provider-native IDs, PIDs,
+The controller binds a Codex route to an exact host, thread ID, and owner
+lease. Other provider-native IDs, PIDs,
 working directories, endpoint paths, and socket paths are never public
 selectors or output fields. A Claude UUID may be supplied explicitly as a
 destination, but the gateway never prints or invents one for the caller.
 
 Codex registration is explicit. A task registers its own alias and
 authoritative `CODEX_THREAD_ID`; the gateway does not enumerate global Codex
-history to invent routes. A route becomes usable only after the matching host
-connector positively observes that exact task on the current endpoint
-generation.
+history to invent routes. Registration performs no provider I/O. Each delivery
+opens a fresh attested App Server transport, initializes it, resumes the exact
+private task with history excluded, and authorizes one body write. Endpoint or
+Desktop restart is therefore a transport fact, not a logical route transition;
+an unavailable or duplicate exact task fails that operation with a safe code
+without retargeting the alias or replaying an ambiguous write.
 
-An App Server endpoint-generation change is a fenced route transition, not a
-new registration. Embassy stops dispatch through the old connector and creates
-a replacement connector. That exact generation must negotiate its current
-interface and pass `thread/loaded/list` validation, where every retained
-private thread ID must occur exactly once. The connector resumes that exact
-task with history excluded; only then may the controller activate writes and
-atomically re-anchor the same alias, owner lease, and pair edges to the new
-endpoint generation. Each successful re-anchor is recorded in a bounded
-private journal; neither thread IDs nor endpoint generations enter public
-activity, diagnostics, logs, or CLI output. An incompatible endpoint, a
-missing or duplicate exact task, or an unclean transition leaves the route
-stale and write-disabled. No body, callback, receipt handle, reply capability,
-conversation capability, delivery token, or ambiguous write crosses this
-boundary by replay.
-
-The live dashboard exposes one bounded recovery operation for an orphaned
-Codex registration. It carries only the public canonical `codex-*` alias and
-requires explicit operator confirmation. The broker revalidates that the
-route is stale and its owning endpoint generation is dead, then quiesces that
-exact route before removing it and its incident pair edges and appending the
-private recovery journal. Ready, merely offline, current-generation, and
-ambiguous cases fail closed; the browser cannot name a thread ID or endpoint
-generation.
+The live dashboard exposes the bounded `remove_codex_registration` operation.
+It carries only one public canonical `codex-*` alias and requires explicit
+operator confirmation of the consequences. In one fencing commit the broker
+cancels queued or reserved work, settles armed work ambiguous and accepted work
+unconfirmed, removes that registration and its incident consent edges, and
+never replays uncertain work. The browser cannot name a thread ID.
 
 Claude discovery is passive and limited to currently advertised genuine
 Claude session records. Only a validated native record bearing the supported
@@ -275,22 +261,13 @@ invented additional owner or mode rule. A current name resolves to a UUID but
 never substitutes for it.
 
 A selected Claude UUID remains the durable route identity until explicit
-unselection. Startup performs a bounded read-only Claude registry scan solely
-for connector-level schema, rejection, and empty-since-boot evidence. It
-publishes no candidates and does not select, connect to, or adopt the identity
-of any peer; every restored route begins stale. The stateful probe may replace
-memory-only validated target bindings, including native IDs and socket-derived
-binding evidence, until a later scan or close. Those bindings are neither
-public nor persisted and confer no candidate publication, selection, or route
-authority. A later, separately authorized discovery operation may reactivate
-the selection only when the full bounded scan contains exactly one compatible
-interactive peer with the byte-identical UUID on the same provider, host, and
-ownership lease. The adapter revalidates the current workspace and provider
-selection before the store atomically adopts the current endpoint generation
-and latest name. An incomplete scan, duplicate name or UUID, changed UUID,
-workspace failure, or store collision leaves the route stale and releases any
-provider selection acquired by the failed attempt. A name alone never restores
-or retargets a durable selection.
+unselection. Discovery publishes only bounded sanitized candidates and current
+lookup aliases; it never changes the selected UUID. Immediately before a
+Claude-bound write, Embassy performs a fresh bounded registry scan, resolves
+that byte-identical UUID exactly once, and revalidates its current workspace,
+process, socket, and used-artifact generation. An incomplete scan, duplicate
+name or UUID, changed UUID, or unsafe current coordinate fails that operation
+closed. A name alone never restores or retargets a durable selection.
 
 The dashboard is the single pane for the human. It shows both sanitized
 available/selected Claude aliases and explicitly registered Codex aliases,
@@ -340,9 +317,9 @@ Claude's native `SendMessage`, starts an App Server turn, and returns the
 final reply.
 
 1. The gateway advertises one process-owned `codex-*` record per registered
-   task in Claude's native registry. A supervised helper process owns each
-   advertisement's registry record and callback socket; the broker remains
-   the sole owner of state, queues, and dispatch.
+   task in Claude's native registry. The broker owns the advertisement,
+   callback socket, state, queue, and dispatch; provider process lifecycle is
+   not persisted as route authority.
 2. A real Claude session uses native `ListAgents` and `SendMessage`; the
    gateway validates that exact live registry/socket generation and treats the
    text as untrusted user-role input. This inbound observation grants only a
@@ -364,13 +341,13 @@ final reply.
 4. The gateway resolves the Codex alias to its private exact-thread binding.
 5. The resumed task retains its existing native permissions. The gateway does
    not supply policy overrides.
-6. App Server status notifications atomically refresh the advertised native
-   peer record to `idle`, `busy`, or `waiting`.
-7. Immediately before `turn/start` or `turn/steer`, the owning connector wraps
+6. Immediately before `turn/start` or `turn/steer`, the delivery attempt wraps
    the raw body once in Embassy's authoritative Codex-bound
-   `cross-session-message` frame. If the task is idle, the connector starts one dedicated turn.
-   Ordinary messages received while it is active or awaiting approval queue
-   internally. An exact leading `STEER:` body in this direction is marked as a
+   `cross-session-message` frame. It opens and attests a fresh App Server
+   transport, resumes the exact task with history excluded, and starts one
+   dedicated turn only if the task is idle. Ordinary messages received while
+   it is active or awaiting approval remain queued. An exact leading `STEER:`
+   body in this direction is marked as a
    steering message. If the connector has a positively observed active turn
    and no RPC already in flight, it sends the closed `turn/steer` request with
    that exact ID as `expectedTurnId`; App Server admits the input at the next
@@ -379,7 +356,7 @@ final reply.
    boundary silently returns the same body to the normal queue. It does not
    emit Claude's approval-specific native `held` control frame for ordinary
    queueing.
-8. In `merged` and `verbose` notice modes, if the delivery remains pending for
+7. In `merged` and `verbose` notice modes, if the delivery remains pending for
    exactly `min(floor(messageDeadlineMs / 2), 120_000)` milliseconds, the
    gateway may send the originating Claude session at most one nonterminal
    `<gateway-delivery-stall>` user frame for that receipt. It contains only an
@@ -389,13 +366,13 @@ final reply.
    default four-hour deadline the notice fires at two minutes, not two hours.
    `quiet` suppresses this gateway-authored frame without changing native status
    or dashboard state.
-9. When the task becomes idle, the connector refreshes the exact task state and
-   starts the held message. A route retains at most three queued steering
+8. A later bounded attempt opens a new transport and starts the held message
+   after it observes the exact task idle. A route retains at most three queued steering
    messages; accepting a fourth atomically cancels the oldest with safe code
    `STEER_QUEUE_SUPERSEDED`, a normal terminal receipt, and a `STEER`-marked
    journal event. Explicit registration is sufficient authorization; Embassy
    does not run an additional workspace or policy classifier.
-10. Successful App Server acceptance returns Claude's native `delivered`
+9. Successful App Server acceptance returns Claude's native `delivered`
    receipt. A route or delivery error returns native `expired` with one safe
    error code retained in its `reason` field. The default `merged` mode omits
    the duplicate terminal user frame; `verbose` additionally sends a static
@@ -406,7 +383,7 @@ final reply.
    reserved for an actual user or policy refusal.
    A transient clean pre-dispatch failure returns the same message to the queue
    instead of terminally failing it.
-11. Completion is summarized into bounded normalized state and the correlated
+10. Completion is summarized into bounded normalized state and the correlated
     reply is returned only to the same originating Claude session UUID after
     its current coordinates are uniquely re-resolved and revalidated.
 
@@ -448,8 +425,8 @@ limits, deduplicates, and queues before presentation framing.
 The store therefore retains only the raw unframed body, never the composed
 envelope. A pure composer runs at the final semantic provider-write boundary so
 a clean retry produces the same bytes with exactly one authoritative outer
-wrapper. Automatic provider
-startup and endpoint-generation validation, receipt frames, and diagnostics do
+wrapper. Provider connection setup and per-operation artifact validation,
+receipt frames, and diagnostics do
 not use this path.
 
 Both provider directions use Claude-compatible textual framing with a
@@ -500,19 +477,20 @@ on by default and exact `0` disables classification. The tested 0.147.0 schema
 requires `expectedTurnId`, rejects a nonmatching active turn, reports a clean
 `activeTurnNotSteerable` condition, and returns the accepted turn ID. Embassy
 validates all of those temporal correlations before settlement. `turn/interrupt`
-is permitted only for a turn that the same connector started and positively
-observed; steering never authorizes it, and there is no generic App Server RPC
-escape hatch.
+is never called or exposed, and there is no generic App Server RPC escape
+hatch.
 
 ### Delivery status and bounded waits
 
 Every accepted control-plane `send_to_claude`, `send_to_codex`, or `reply`
-result contains both its conversation ID and a fresh opaque, memory-only
-delivery correlation handle called a delivery token.
+result contains both its conversation ID and a fresh opaque delivery
+correlation handle called a delivery token.
 The token has the closed form `dlv_` followed by exactly 24 base64url
 characters (`A-Z`, `a-z`, `0-9`, `_`, or `-`). It addresses one bounded
-in-memory delivery tracker and is not a provider receipt handle or a provider
-native identifier.
+private-v3 message/status row and is not a provider receipt handle or a
+provider native identifier. It is stored only in the mode-0600 broker state
+and never appears in a public snapshot, normal log, provider receipt, or
+dashboard.
 
 The read-only `delivery_status` method accepts only that token and returns one
 of these closed results:
@@ -557,21 +535,20 @@ never displaced to admit a new send. A pressure-evicted handle returns
 ### Replies and process restarts
 
 Conversation IDs correlate replies, and callback addresses exist only in
-memory, but queued message bodies are durable. After a gateway restart, each
-queued message is triaged: one already past its deadline settles `expired`; one
-whose target authority was transient, or whose target route is gone, settles
-`abandoned` with `CONTROLLER_RESTARTED`; every other queued body is restored and
-re-armed for dispatch, then sent exactly once after its exact route is
-re-observed. A message in flight at the moment of the restart or crash settles
-`ambiguous` with `CONTROLLER_RESTARTED` and is never replayed.
+memory, but message bodies and their bounded attempt phase are durable. After a
+gateway restart, queued or reserved work may resume once against the same
+logical route and consent edge. Work that crossed the armed boundary settles
+`ambiguous`; provider-accepted work without terminal evidence settles
+`unconfirmed`. Neither is replayed. Work already past its deadline settles
+`expired`.
 
-The prior Claude binding remains stored but stale. After authorized live
-discovery, one exact UUID-bound selection may be reactivated under its latest
-name. No pending reply, callback, native receipt handle, delivery token/status
-tracker, or conversation capability survives the restart; a prior token
-therefore returns `found: false`. A stale or offline selection can be explicitly
-removed by its stored alias or a user-supplied UUID without requiring discovery
-first.
+The delivery token and status of each retained message survive the restart: a
+queued or reserved attempt remains inspectable while it resumes, and armed or
+accepted work remains inspectable after it settles ambiguous or unconfirmed.
+Pending replies, callbacks, native receipt handles, and conversation
+capabilities do not survive. Logical registrations, Claude selections, and
+consent edges remain, while each subsequent provider operation must attest its
+own current transport facts.
 
 ## Gateway control plane
 
@@ -584,37 +561,49 @@ The closed version 1 method family is exactly these sixteen methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
-  lifecycle deliveries before projecting;
+  delivery deadlines before projecting;
 - `register_codex`, `unregister_codex`, and
-  `remove_stale_codex_registration` — explicit Codex registration and
-  succession, unregister, and broker-guarded removal of a stale orphan whose
-  owning endpoint generation is dead;
+  `remove_codex_registration` — explicit Codex registration and atomic
+  `--succeeds` replacement, owner unregister, and confirmed operator removal;
 - `select_claude` and `unselect_claude`, from the current sanitized
   available-peer inventory;
 - `pair` and `unpair`, the two-endpoint permission edge;
-- `delivery_status`, a lookup by opaque, memory-only correlation handle;
+- `delivery_status`, a lookup by an opaque correlation handle retained only in
+  bounded private v3 state;
 - `untrack`, which closes one active progress watch by conversation token;
 - `send_to_claude` and `send_to_codex`, the provider-specific sends;
 - `reply`, the correlated reply operation; and
-- `refresh_dashboard`, which refreshes Claude discovery and republishes.
+- `refresh_dashboard`, which refreshes provider discovery and republishes.
 
 The live dashboard companion calls `observe_snapshot` for every read; its
 mutation route additionally calls `pair`, `unpair`,
-`remove_stale_codex_registration`, and `refresh_dashboard`, and nothing else.
+`remove_codex_registration`, and `refresh_dashboard`, and nothing else.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-seventeen implemented commands are
+eighteen implemented commands are
 `serve`, `health`, `status`, `delivery-status`, `wait-delivery`, `untrack`,
 `refresh-dashboard`, `dashboard`, `register-codex`, `unregister-codex`,
 `select-claude`, `unselect-claude`, `pair`, `unpair`, `send-to-claude`,
-`send-to-codex`, and `reply`. `dashboard` requires `--live` and accepts an
+`send-to-codex`, `reply`, and `convert-state-v2-to-v3`. `dashboard` requires `--live` and accepts an
 optional `--lang en|zh-CN` and `--port <n>`; it starts the companion process
 rather than issuing a single control request. Message bodies are non-empty
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line and
 never returns a thread ID, provider-native ID, path, address, or message body.
 These commands require the foreground broker, except that `serve` starts it in
-the current terminal. It never daemonizes itself.
+the current terminal and `convert-state-v2-to-v3` is an offline one-shot
+upgrade. The converter uses only the normally resolved state directory,
+requires the controller lock, installs strict native schema 3 through an
+fsynced atomic replacement, and reports only success plus the verified v2
+backup basename. It starts no provider, helper, listener, discovery, or control
+socket. The launcher never daemonizes itself.
+
+`register-codex --alias <new> --succeeds <current>` is one atomic logical-route
+transaction. It verifies the inherited identity of the replacement task,
+settles the outgoing route's work according to recorded write phase, removes
+its incident consent edges and transient capabilities, and publishes only the
+new registration. There is no prepared, activated, endpoint-generation, or
+manual-recovery state.
 
 `select-claude --alias <current-name@host>` and
 `select-claude --session <uuid>` select the same logical session.
@@ -733,35 +722,31 @@ any NVM-managed `codex` on the user's `PATH` (for example
 it, and does not edit a shell profile. The two installations therefore do not
 conflict.
 
-The connector has a fixed App Server method allowlist. A connector
-may initialize, observe loaded tasks, resume/unsubscribe the exact registered
-task, start a dedicated turn, and interrupt only its own confirmed turn. Archive,
+The stateless transport has a fixed App Server method allowlist. One attempt
+may initialize, resume the exact registered task, start a dedicated turn, or
+steer the exact positively observed active turn. Loaded-task enumeration,
+unsubscribe, interrupt, archive,
 delete, history, shell, configuration, authentication, plugin,
 approval-response, and generic RPC methods remain excluded everywhere.
 
 The App Server capability first tested with 0.147.0 gates the privacy-preserving
 `thread/resume.excludeTurns` field behind initialization capability
-`experimentalApi: true`. The connector therefore hard-codes that one
-non-configurable capability solely to suppress history retrieval. Both initial
-resume and the immediate pre-start refresh send exactly `threadId` plus
-`excludeTurns: true`, then require an exact empty `thread.turns` array.
+`experimentalApi: true`. The transport therefore hard-codes that one
+non-configurable capability solely to suppress history retrieval. The attempt's
+resume sends exactly `threadId` plus `excludeTurns: true`, then requires an
+exact empty `thread.turns` array.
 Missing, malformed, or nonempty turns fail closed and are never emitted or
 persisted. The capability does not add an experimental client method or change
 the closed RPC allowlist.
 
-Generation validation and controller activation are distinct gates. A
-replacement connector may initialize, list, resume, and expose normalized
-status before the controller activates it. No Claude-initiated turn can start
-until that exact endpoint generation has negotiated its current interface,
-re-observed the registered task, and established explicit route ownership.
-Version metadata does not participate in that decision.
-
-Registration resumes the exact task and establishes reachability. Embassy does
-not read or retain reported working-directory or policy fields. Before
-`turn/start`, including a queued drain, the connector refreshes that exact task
-on the same live connection, requires it to be idle, and starts the turn with
-no policy overrides. Settings notifications cannot make an explicitly
-registered live route unreachable or discard its accepted queue.
+Registration records the exact inherited task identity and establishes logical
+reachability without provider I/O. For each `turn/start`, including a queued
+drain, Embassy opens and attests a fresh transport, initializes the closed
+interface, resumes that exact task with history excluded, requires it to be
+idle, and authorizes one body write with no policy overrides. Version metadata
+does not participate. Embassy does not read or retain reported
+working-directory or policy fields, and a transport failure cannot discard the
+registration or its accepted queue.
 
 Version 1 never changes or independently classifies a Codex task's approval or
 sandbox policy. Offline `TurnStartParams` schema evidence from tested App
@@ -770,7 +755,7 @@ policy overrides persist for the current and subsequent turns, so using them
 as per-message restrictions would silently mutate the native task. Embassy
 therefore starts the turn without overrides and leaves approval, sandbox, and
 tool enforcement to the registered task's native Codex configuration. Explicit
-`codex-*` registration plus exact live thread/generation validation is the
+`codex-*` registration plus exact per-operation task and transport validation is the
 gateway reachability boundary; native task policy remains Codex's concern.
 
 A remote connector never starts, stops, replaces, signals, or unlinks a
@@ -860,7 +845,7 @@ Each page assembles seven sections:
 
 - **Exchange** — aggregate gateway health plus every explicit cross-provider
   pair and its per-edge counters.
-- **Attention** — allowlisted alerts such as stale route, protocol mismatch,
+- **Attention** — allowlisted alerts such as an unavailable route, protocol mismatch,
   queue full, or ambiguous delivery.
 - **Transit** — queued-message depth and bytes in flight.
 - **Progress supervision** — active progress watches and their state.
@@ -910,15 +895,16 @@ gateway as unavailable when nothing is serving.
   and cross-origin reads are unavailable.
 - **Projection and actions.** The companion observes through
   `observe_snapshot`. Its only mutations are exact two-endpoint `pair`,
-  `unpair`, `refresh_dashboard`, and `remove_stale_codex_registration`
-  control calls behind one closed `/action` route. The recovery
-  action carries only a canonical public `codex-*` alias and is accepted only
-  after the broker revalidates that the route is stale and its endpoint
-  generation is dead; native task and generation IDs never enter the browser
-  contract. The browser shows the consequence and requires
+  `unpair`, `refresh_dashboard`, and `remove_codex_registration`
+  control calls behind one closed `/action` route. The removal action carries
+  only a canonical public `codex-*` alias; native task IDs never enter the
+  browser contract. In one fencing commit it cancels queued or reserved work,
+  settles armed work ambiguous and accepted work unconfirmed, removes the
+  route's consent edges, and never replays uncertain work. The browser shows
+  the consequence and requires
   explicit confirmation; the server rejects bodies over 1 KiB and limits the
   companion to six actions per minute. It cannot create a registration,
-  unregister a live route, succeed,
+  succeed,
   send, reply, approve, interrupt, change settings, or invoke a generic/provider
   method. Each mutation touches only the edge it names: adding an edge never
   retires another, and removing one settles its accepted work before the
@@ -939,11 +925,13 @@ the static pair, which is always written in both languages.
 
 The private store may retain:
 
-- aliases, enabled state, ownership leases, and exact provider-native route
-  handles inside the closed controller-private binding schema;
-- endpoint-generation and compatibility markers;
-- bounded durable queue-ledger and normalized delivery metadata used for
-  accounting and dashboard projection;
+- schema-3 logical registrations with aliases, registration IDs, and exact
+  provider-native route handles inside the closed private binding schema;
+- consent edges tied to exact registration IDs, so alias reuse cannot inherit
+  permission;
+- bounded messages with explicit `queued`, `reserved`, `armed`, `accepted`, or
+  `terminal` attempt phase and normalized activity used for accounting and
+  dashboard projection;
 - timestamps, counters, dedupe/rate-limit records, and safe error codes.
 
 It also retains message bodies under bounded caps — the queued body of every
@@ -952,23 +940,22 @@ oldest-first against a 1 MiB budget by default. It must never retain provider
 output, tool input/output, raw App Server or Claude frames, stderr, histories,
 credentials, Claude registry payloads, or callback/socket paths. The public
 snapshot is a
-strict projection that also removes private route handles and endpoint
-generations. The state directory is mode 0700 and binding state is mode 0600;
+strict projection that removes private route handles, registration IDs, and
+operation-local endpoint evidence. The state directory is mode 0700 and state is mode 0600;
 provider-native identifiers never enter normalized events, public snapshots,
 the dashboard, CLI arguments/output, aliases, logs, or error text. On restart,
-every restored route begins stale and unusable. An authorized discovery may
-reactivate only the byte-identical durable Claude UUID after the current
-provider endpoint, workspace, complete unique discovery, and ownership lease
-all revalidate. The public `selected` bit flips only after that atomic private
-rebind succeeds. Queued bodies are restored and re-armed for dispatch; no
-callback, receipt handle, conversation, or reply capability is restored, and no
-delivery token or status tracker is reconstructed.
+logical routes and consent edges remain unchanged. Queued and reserved bodies
+may resume once only after their exact registration and consent authority is
+rechecked; armed and accepted work settles without replay. Callback, native
+receipt, conversation, and reply capabilities are not reconstructed.
 
-The delivery-token mapping, queryable status tracker, native receipt handle,
-and one-stall-notice state are always memory-only. Durable delivery metadata
-does not contain enough information to reconstruct any of those capabilities.
-A restored body is re-sent exactly once and only into its own exact
-re-observed route; it is never replayed into a reconstructed capability.
+Private schema 3 is the binary's only native store format; the bounded public
+snapshot deliberately remains schema version 2. Upgrading an existing schema-2
+state requires the offline `embassy convert-state-v2-to-v3` command before
+starting the broker. It verifies and retains a byte-identical v2 backup, then
+atomically installs and reads back strict v3 state. The runtime performs no
+in-binary migration or best-effort rewrite; any non-v3 state produces the
+ordinary strict corrupt-state error.
 
 ## Minimum filesystem and process access
 
@@ -1033,48 +1020,33 @@ the preferred least-context setup, but it is not mandatory.
   Embassy-owned or executed artifacts and Embassy callback, control, or state
   paths refuses broker startup. Unsafe UID or mode evidence on Claude's
   external sessions registry root quarantines only Claude. A malformed message version, required App Server response
-  shape, or endpoint generation fails closed on its affected route.
+  shape, or used-artifact generation fails closed on its current operation.
 - Alias collisions, stale ownership leases, PID/socket races, unsafe
   gateway-owned state, unexpected paths, queue overflow, deadline expiry, and ambiguous writes are
   normalized failures, never raw diagnostics.
-- Provider disconnect invalidates every route on that endpoint generation.
-- Explicit `register-codex` replaces a closed or faulted App Server connector;
-  if the recovered route is idle, held undispatched work is woken. Ambiguous
-  writes are not retried.
+- A provider disconnect fails or defers only the current operation. The next
+  eligible attempt opens and attests a new transport; logical registration and
+  consent do not depend on a connector lifecycle.
 - The first successful Codex registration locks its exact alias, task, and host
-  until that registration is explicitly succeeded. Exact re-registration and
-  connector recovery remain valid; unregister removes reachability but does not
-  by itself release the identity.
+  until that registration is explicitly replaced or unregistered. Exact
+  re-registration remains idempotent.
 - `register-codex --alias <new> --succeeds <current>`, issued from inside the
   successor task on the same host with its own inherited `CODEX_THREAD_ID`, is
-  the one path that changes the registered Codex identity without a restart. A
-  successor must name the exact active registration, on the same host, with a
-  different alias and a different thread; anything else is
-  `CODEX_SUCCESSION_OWNER_MISMATCH`. The journaled machine freezes the outgoing
-  generation's ingress and dispatch, drains callbacks and receipt writes, and
-  requires a clean quiescence barrier before it prepares anything durable.
-  Nothing transfers: conversations, pending reply capabilities, queued bodies,
-  and delivery tokens belong to the retired identity and are purged rather than
-  inherited, and the successor is published on a fresh listener generation.
-  Publication arming is the irreversible boundary — before it, a failure rolls
-  back to the old registration; at or after an armed, published, or unknown
-  observation, the old registration is never restored, and an incomplete
-  succession leaves registration offline and pinned until manual recovery
-  rather than leaving two live registrations.
-- A failed reactivation of a retained route, or any fresh-registration rollback
-  whose cleanup cannot be fully confirmed, pins that exact identity
-  fail-closed. Only exact retry is permitted until the old route is confirmed
-  unregistered and the controller is restarted.
+  the one atomic transaction that changes the registered Codex identity. A
+  replacement must name the exact current registration on the same host, with
+  a different alias and thread. Embassy settles the outgoing registration's
+  work from its durable attempt phase, removes its consent edges and transient
+  capabilities, and publishes only the replacement. No conversation, reply
+  capability, queued body, or permission transfers to the new identity, and no
+  intermediate generation or manual-recovery state exists.
 - No ambiguous mutation is retried automatically.
-- A queued body survives process loss under bounded retention and is re-sent
-  exactly once after its exact route is re-observed. A message in flight when
-  the process was lost settles `ambiguous` with `CONTROLLER_RESTARTED`; a
-  message whose target authority was transient, or whose target route no longer
-  exists, settles `abandoned` with the same code.
+- A queued or reserved body survives process loss under bounded retention and
+  may resume once after exact logical authority is rechecked. Armed or accepted
+  work settles `ambiguous` or `unconfirmed` and is never replayed.
 - A provider or Desktop update that changes an internal interface degrades its
   responsible route while the broker and other providers remain available. A
-  Claude record outside peer protocol 1 is rejected per record, and retained
-  state never activates an unvalidated replacement endpoint generation.
+  Claude record outside peer protocol 1 is rejected per record, and every
+  current provider artifact used for an operation is re-attested before effect.
 
 ## Validation boundary
 

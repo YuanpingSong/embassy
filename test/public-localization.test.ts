@@ -174,6 +174,30 @@ test("public locales document provenance framing and recipient continuation", as
   }
 });
 
+test("delivery-token documentation preserves private v3 restart continuity", async () => {
+  const [english, chinese, architecture, englishReadme, chineseReadme] =
+    await Promise.all([
+      readPublicFile("docs/DELIVERY.md"),
+      readPublicFile("docs/DELIVERY.zh-CN.md"),
+      readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
+      readPublicFile("README.md"),
+      readPublicFile("README.zh-CN.md"),
+    ]);
+
+  assert.match(english, /retained pre-restart token continues to resolve/i);
+  assert.match(english, /never enters a public snapshot, normal log, provider receipt, or dashboard/i);
+  assert.match(chinese, /重启前仍受保留的令牌在重启后会继续解析/u);
+  assert.match(chinese, /绝不会进入公开快照、普通日志、提供方回执或任何仪表盘/u);
+  assert.match(architecture, /delivery token and status of each retained message survive the restart/i);
+  assert.match(englishReadme, /opaque delivery token\/status persist/i);
+  assert.match(chineseReadme, /不透明投递令牌／状态.*持久化/u);
+
+  for (const document of [english, architecture]) {
+    assert.doesNotMatch(document, /delivery tokens? remain memory-only|prior token therefore returns `found: false`/i);
+  }
+  assert.doesNotMatch(chinese, /投递令牌仍仅存于内存|重启后，先前的令牌会报告/u);
+});
+
 test("current dashboard docs use the stable direct-loopback contract", async () => {
   const paths = [
     "README.md",

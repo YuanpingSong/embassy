@@ -241,29 +241,6 @@ namespace Embassy {
     );
   }
 
-  /** Succession extraction (§2.2): succession-guidance attention items only. */
-  export function extractSuccessions(
-    model: DashboardViewModel,
-  ): readonly SuccessionView[] {
-    const successions: SuccessionView[] = [];
-    for (const item of model.attention) {
-      if (item.guidance === "codex_succession_busy") {
-        successions.push({
-          item,
-          guidanceKey: "codexSuccessionBusy",
-          command: attentionCommand(item),
-        });
-      } else if (item.guidance === "codex_succession_recovery") {
-        successions.push({
-          item,
-          guidanceKey: "codexSuccessionRecovery",
-          command: attentionCommand(item),
-        });
-      }
-    }
-    return successions;
-  }
-
   export function overviewProps(
     model: DashboardViewModel,
     nowMs: number,
@@ -346,7 +323,6 @@ namespace Embassy {
       consentEdges: model.consentEdges,
       consentEdgesOmitted: model.omissions.consentEdges,
       graph: model.graph,
-      successions: extractSuccessions(model),
     };
   }
 
@@ -417,7 +393,6 @@ namespace Embassy {
     routeOldestAgeMs,
     pulse,
     worstConnectorHealth,
-    extractSuccessions,
     hasLifecycleTruncation,
     deliveriesTruncated,
     deliveryGroupKey,

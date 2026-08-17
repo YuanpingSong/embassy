@@ -1,11 +1,13 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Serializable } from "node:child_process";
+import { randomBytes } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
 import {
   assertClaudeNativeHelperIpcSize,
   CLAUDE_NATIVE_HELPER_MAX_REQUESTS,
+  CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS,
   CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION,
   isClaudeNativeHelperParentMessage,
   type ClaudeNativeHelperChildMessage,
@@ -19,6 +21,27 @@ import {
   type LocalClaudeGatewayProvider,
 } from "./providers.js";
 import type { GatewayAdapterCallbacks } from "./service.js";
+import type { GatewayAdapterDispatchResult } from "./service.js";
+
+type PreparedNativeDispatch = Readonly<{
+  messageId: string;
+  frameBytes: number;
+  sha256: string;
+  perform: () => Promise<GatewayAdapterDispatchResult>;
+  cancel: () => void;
+}>;
+
+type HelperDispatchProvider = LocalClaudeGatewayProvider & {
+  prepareNativeHelperDispatch: (
+    command: Extract<ClaudeNativeHelperCommand, { method: "prepare_dispatch" }>,
+  ) => Promise<PreparedNativeDispatch>;
+};
+
+type HeldPreparation = {
+  preparationId: string;
+  prepared: PreparedNativeDispatch;
+  timer: NodeJS.Timeout;
+};
 
 function sendChildMessage(value: ClaudeNativeHelperChildMessage): Promise<void> {
   assertClaudeNativeHelperIpcSize(value);
@@ -53,6 +76,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
   let initialized = false;
   let closing = false;
   let admitted = 0;
+  let heldPreparation: HeldPreparation | undefined;
   let operation = Promise.resolve();
   let sendOperation = Promise.resolve();
 
@@ -71,7 +95,6 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
   };
 
   const callbacks: GatewayAdapterCallbacks = {
-    onDelivery: (value) => event({ event: "delivery", value: { ...value } }),
     onRouteState: () => undefined,
     onClaudeReply: (value) =>
       event({
@@ -142,7 +165,6 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     try {
       await created.initialize(callbacks);
       const generation = created.currentUnadvertisedNativeCodexPeerGeneration();
-      await created.quiesceNativeCodexPeerGeneration(generation);
       await created.advertiseNativeSourcePeer(message.registration);
       initialized = true;
       return { generation };
@@ -151,6 +173,34 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
       provider = undefined;
       throw error;
     }
+  };
+
+  const discardPreparation = (): void => {
+    const current = heldPreparation;
+    heldPreparation = undefined;
+    if (current === undefined) return;
+    clearTimeout(current.timer);
+    current.prepared.cancel();
+  };
+
+  const takePreparation = (preparationId: string): HeldPreparation => {
+    const current = heldPreparation;
+    heldPreparation = undefined;
+    if (current === undefined) {
+      throw new BridgeError(
+        "CLAUDE_NATIVE_PREPARATION_UNKNOWN",
+        "The native helper preparation is unknown or already consumed.",
+      );
+    }
+    clearTimeout(current.timer);
+    if (current.preparationId !== preparationId) {
+      current.prepared.cancel();
+      throw new BridgeError(
+        "CLAUDE_NATIVE_PREPARATION_MISMATCH",
+        "The native helper preparation capability did not match.",
+      );
+    }
+    return current;
   };
 
   const execute = async (
@@ -164,9 +214,6 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
       );
     }
     switch (command.method) {
-      case "resume_generation":
-        await active.resumeNativeCodexPeerGeneration(command.generation);
-        return okResult();
       case "authorize_route": {
         const snapshot = await active.discoverClaudePeers();
         const peer = snapshot.peers.find(
@@ -194,8 +241,46 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
       case "release_route":
         await active.releaseRoute(command.routeHandle);
         return okResult();
-      case "dispatch":
-        return await active.dispatch(command);
+      case "prepare_dispatch": {
+        if (heldPreparation !== undefined) {
+          throw new BridgeError(
+            "CLAUDE_NATIVE_PREPARATION_CAPACITY",
+            "The native helper already owns its single bounded preparation.",
+            true,
+          );
+        }
+        const prepared = await (
+          active as HelperDispatchProvider
+        ).prepareNativeHelperDispatch(command);
+        const preparationId = `prep_${randomBytes(18).toString("base64url")}`;
+        const timer = setTimeout(
+          discardPreparation,
+          Math.max(
+            1,
+            Math.min(
+              CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS,
+              Date.parse(command.deadlineAt) - Date.now(),
+            ),
+          ),
+        );
+        timer.unref();
+        heldPreparation = { preparationId, prepared, timer };
+        return {
+          preparationId,
+          frameBytes: prepared.frameBytes,
+          sha256: prepared.sha256,
+        };
+      }
+      case "perform_dispatch": {
+        const current = takePreparation(command.preparationId);
+        // Calling perform begins the exact stored operation synchronously;
+        // only its already-started completion is awaited here.
+        const operation = current.prepared.perform();
+        return await operation;
+      }
+      case "cancel_dispatch":
+        takePreparation(command.preparationId).prepared.cancel();
+        return okResult();
       case "update_inbound_status":
         await active.updateNativeInboundStatus(
           command.receiptHandle,
@@ -221,54 +306,8 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
       case "unadvertise":
         await active.unadvertiseNativeSourcePeer(command.alias);
         return okResult();
-      case "quiesce_generation":
-        await active.quiesceNativeCodexPeerGeneration(command.generation);
-        return okResult();
-      case "observe_barrier":
-        return await active.observeNativeCodexSuccessionBarrier(
-          command.generation,
-        );
-      case "prepare_generation":
-        await active.prepareNativeCodexPeerGeneration({
-          alias: command.alias,
-          cwd: command.cwd,
-          generation: command.generation,
-        });
-        return okResult();
-      case "publish_prepared":
-        return {
-          publication: await active.publishPreparedNativeCodexPeer({
-            currentGeneration: command.currentGeneration,
-            preparedGeneration: command.preparedGeneration,
-          }),
-        };
-      case "activate_prepared":
-        await active.activatePreparedNativeCodexPeerGeneration(
-          command.generation,
-        );
-        return okResult();
-      case "cleanup_prepared":
-        await active.cleanupPreparedNativeCodexPeerGeneration(command.generation);
-        return okResult();
-      case "rollback_prepared":
-        await active.rollbackPreparedNativeCodexPeerGeneration({
-          preparedGeneration: command.preparedGeneration,
-          resumeGeneration: command.resumeGeneration,
-        });
-        return okResult();
-      case "retire_generation":
-        await active.retireNativeCodexPeerGeneration({
-          retiredGeneration: command.retiredGeneration,
-          protectedActiveGeneration: command.protectedActiveGeneration,
-        });
-        return okResult();
-      case "purge_generation_replies":
-        return {
-          purged: await active.purgeNativeCodexPeerGenerationReplyCapabilities(
-            command.generation,
-          ),
-        };
       case "close":
+        discardPreparation();
         await active.close();
         return okResult();
     }
@@ -277,6 +316,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     if (closing) return;
     closing = true;
+    discardPreparation();
     const current = provider;
     provider = undefined;
     if (current !== undefined) await current.close().catch(() => undefined);

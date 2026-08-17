@@ -19,6 +19,7 @@ const DEFAULT_MAX_REPLY_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TURN_TIMEOUT_MS = 2 * 60_000;
 const MAX_FAST_TERMINAL_CANDIDATES = 4;
+const SETUP_ABORTED = Symbol("setup-aborted");
 const OUTPUT_NOTIFICATION_OPT_OUTS = [
   "item/started", "item/agentMessage/delta", "item/reasoning/textDelta",
   "item/reasoning/summaryTextDelta", "item/commandExecution/outputDelta",
@@ -36,7 +37,7 @@ type OperationPhase = "clean" | "armed" | "accepted" | "terminal";
 type TurnOutcome = "completed" | "failed" | "interrupted";
 type ReplyCode = "REPLY_TOO_LARGE" | "REPLY_UNAVAILABLE" | null;
 export type StatelessCodexRoute = Readonly<{
-  alias: string; hostId: string; threadId: string;
+  alias: string; hostId: string; registrationId: string; threadId: string;
 }>;
 
 export type StatelessCodexWriteEvidence = Readonly<{
@@ -51,13 +52,45 @@ type StatelessCodexOperationCommon = Readonly<{
   text: string;
 }>;
 
-export type StatelessCodexOperationInput =
-  | (StatelessCodexOperationCommon & Readonly<{ kind: "start" }>)
-  | (StatelessCodexOperationCommon &
-      Readonly<{ expectedTurnId: string; kind: "steer" }>);
+export type StatelessCodexActiveSteerInput = Readonly<{
+  attemptId: string; deadlineAt: string; text: string;
+  authorizeWrite: (evidence: StatelessCodexWriteEvidence) => Promise<boolean>;
+}>;
+
+type ActiveSteerResultCommon = Readonly<{ attemptId: string }>;
+
+export type StatelessCodexActiveSteerResult =
+  | (ActiveSteerResultCommon & Readonly<{
+      phase: "clean"; state: "deferred" | "failed";
+      safeErrorCode: StatelessCodexSafeErrorCode;
+    }>)
+  | (ActiveSteerResultCommon & Readonly<{
+      phase: "armed"; state: "ambiguous";
+      safeErrorCode: StatelessCodexSafeErrorCode;
+    }>)
+  | (ActiveSteerResultCommon & Readonly<{
+      phase: "terminal"; state: "terminal"; outcome: "delivered";
+      replyCode: "REPLY_UNAVAILABLE"; replyText: null;
+    }>);
+
+export type StatelessCodexAcceptedOperation = Readonly<{
+  attemptId: string;
+  /** Ephemeral exact App Server evidence. Never persist or log this ID. */
+  turnId: string;
+  steer: (input: StatelessCodexActiveSteerInput) => Promise<StatelessCodexActiveSteerResult>;
+}>;
+
+export type StatelessCodexOperationInput = StatelessCodexOperationCommon &
+  Readonly<{
+    kind: "start";
+    onAccepted: (accepted: StatelessCodexAcceptedOperation) => Promise<void>;
+    /** Exact-operation lifecycle only; never sends an App Server interrupt. */
+    signal?: AbortSignal;
+  }>;
 
 export type StatelessCodexSafeErrorCode =
   | LocalCodexTransportErrorCode
+  | "ACCEPTANCE_UNCONFIRMED"
   | "APPROVAL_REQUIRED"
   | "INPUT_INVALID"
   | "MESSAGE_EXPIRED"
@@ -66,7 +99,6 @@ export type StatelessCodexSafeErrorCode =
   | "RESULT_SCHEMA_MISMATCH"
   | "ROUTE_BUSY"
   | "RPC_REJECTED"
-  | "RPC_REJECTED_NO_EFFECT"
   | "THREAD_NOT_OBSERVED"
   | "TRANSPORT_CLOSED"
   | "TRANSPORT_WRITE_FAILED"
@@ -85,11 +117,6 @@ export type StatelessCodexOperationResult =
       Readonly<{
         phase: "armed"; state: "ambiguous";
         safeErrorCode: StatelessCodexSafeErrorCode;
-      }>)
-  | (ResultCommon &
-      Readonly<{
-        phase: "armed"; state: "deferred";
-        safeErrorCode: "RPC_REJECTED_NO_EFFECT";
       }>)
   | (ResultCommon &
       Readonly<{
@@ -160,8 +187,17 @@ type TerminalResult = Readonly<{
   replyText: string | null;
 }>;
 
+type AcceptedOperationKey = Readonly<{
+  attemptId: string; registrationId: string; threadId: string; turnId: string;
+}>;
+
+type SetupResource = Readonly<{ close: () => Promise<void> }>;
+
 type WithoutResultCommon<T> = T extends unknown ? Omit<T, keyof ResultCommon> : never;
 type InnerResult = WithoutResultCommon<StatelessCodexOperationResult>;
+type ActiveSteerInner = StatelessCodexActiveSteerResult extends infer Result
+  ? Result extends unknown ? Omit<Result, "attemptId"> : never
+  : never;
 
 class OperationError extends Error {
   constructor(readonly code: StatelessCodexSafeErrorCode) {
@@ -174,6 +210,31 @@ class RpcRejectedError extends OperationError {
   constructor() {
     super("RPC_REJECTED");
     this.name = "StatelessCodexRpcRejectedError";
+  }
+}
+
+async function awaitSetupResource<T extends SetupResource>(
+  pending: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof SETUP_ABORTED> {
+  if (signal === undefined) return await pending;
+  if (signal.aborted) {
+    void pending.then((resource) => resource.close()).catch(() => undefined);
+    return SETUP_ABORTED;
+  }
+  let observeAbort!: () => void;
+  const aborted = new Promise<typeof SETUP_ABORTED>((resolve) => {
+    observeAbort = () => resolve(SETUP_ABORTED);
+    signal.addEventListener("abort", observeAbort, { once: true });
+  });
+  try {
+    const settled = await Promise.race([pending, aborted]);
+    if (settled === SETUP_ABORTED) {
+      void pending.then((resource) => resource.close()).catch(() => undefined);
+    }
+    return settled;
+  } finally {
+    signal.removeEventListener("abort", observeAbort);
   }
 }
 
@@ -285,11 +346,23 @@ function validateInput(
   options: NormalizedOptions,
 ): { bodyBytes: number; deadlineAtMs: number } {
   if (
-    !validOpaqueId(input.attemptId, 128) ||
     !validHost(input.route.hostId) ||
     !validAlias(input.route.alias, input.route.hostId) ||
     !validOpaqueId(input.route.threadId) ||
-    (input.kind === "steer" && !validOpaqueId(input.expectedTurnId)) ||
+    !validOpaqueId(input.route.registrationId, 128) ||
+    typeof input.onAccepted !== "function"
+  ) {
+    throw new OperationError("INPUT_INVALID");
+  }
+  return validateMessageInput(input, options);
+}
+
+function validateMessageInput(
+  input: StatelessCodexActiveSteerInput | StatelessCodexOperationInput,
+  options: NormalizedOptions,
+): { bodyBytes: number; deadlineAtMs: number } {
+  if (
+    !validOpaqueId(input.attemptId, 128) ||
     typeof input.text !== "string" ||
     input.text.trim().length === 0 ||
     input.text.includes("\0")
@@ -319,6 +392,12 @@ class OperationSession {
   private phase: OperationPhase = "clean";
   private protocolFailure: OperationError | undefined;
   private selectedTurnId: string | undefined;
+  private acceptedKey: AcceptedOperationKey | undefined;
+  private sideChannelEvidenceValid = false;
+  private acceptanceDurable = false;
+  private activeSteerInFlight = false;
+  private activeSteerCalls = 0;
+  private readonly activeSteerAttemptIds = new Set<string>();
   private awaitingAuthorization = false;
   private prewriteProofValid = false;
   private readonly candidates = new Map<string, FastCandidate>();
@@ -326,6 +405,7 @@ class OperationSession {
   private terminalResolve: ((result: TerminalResult) => void) | undefined;
   private terminalTimer: NodeJS.Timeout | undefined;
   private transportLost = false;
+  private aborted = false;
   private readonly unlisten: Array<() => void> = [];
 
   constructor(
@@ -343,13 +423,27 @@ class OperationSession {
   }
 
   dispose(): void {
+    this.sideChannelEvidenceValid = false;
     for (const remove of this.unlisten.splice(0)) remove();
-    this.clearPending();
+    this.rejectPending(new OperationError("TRANSPORT_CLOSED"));
     this.clearTerminalWait();
+  }
+
+  abort(): void {
+    if (this.aborted) return;
+    this.aborted = true;
+    this.sideChannelEvidenceValid = false;
+    if (this.awaitingAuthorization) this.prewriteProofValid = false;
+    const error = new OperationError("TRANSPORT_CLOSED");
+    this.rejectPending(error);
+    const reject = this.terminalReject;
+    this.clearTerminalWait();
+    reject?.(error);
   }
 
   async execute(): Promise<InnerResult> {
     try {
+      if (this.aborted) return this.cleanFailure("TRANSPORT_CLOSED");
       await this.initialize();
       this.awaitingAuthorization = true;
       this.prewriteProofValid = true;
@@ -366,29 +460,17 @@ class OperationSession {
         );
       }
 
-      const method = this.input.kind === "start" ? "turn/start" : "turn/steer";
-      const params =
-        this.input.kind === "start"
-          ? {
-              input: [{ text: this.input.text, type: "text" }],
-              threadId: this.input.route.threadId,
-            }
-          : {
-              expectedTurnId: this.input.expectedTurnId,
-              input: [{ text: this.input.text, type: "text" }],
-              threadId: this.input.route.threadId,
-            };
-      const prepared = this.prepareRequest(method, params);
+      const prepared = this.prepareRequest("turn/start", {
+        input: [{ text: this.input.text, type: "text" }],
+        threadId: this.input.route.threadId,
+      });
       const responsePromise = this.reservePreparedRequest(prepared);
       void responsePromise.catch(() => undefined);
       const evidence: StatelessCodexWriteEvidence = {
         attemptId: this.input.attemptId,
         bodyBytes: this.bodyBytes,
         frameBytes: prepared.frameBytes,
-        kind:
-          this.input.kind === "start"
-            ? "codex_turn_start"
-            : "codex_turn_steer",
+        kind: "codex_turn_start",
         sha256: createHash("sha256").update(prepared.frame).digest("hex"),
       };
 
@@ -404,6 +486,7 @@ class OperationSession {
       this.awaitingAuthorization = false;
       if (!authorized) {
         this.clearPending();
+        if (this.aborted) return this.cleanFailure("TRANSPORT_CLOSED");
         return this.cleanDeferred("WRITE_AUTHORIZATION_DENIED");
       }
 
@@ -411,8 +494,14 @@ class OperationSession {
       // exact body-bearing send call there is deliberately no await or yield.
       this.phase = "armed";
       if (!this.prewriteProofValid || !this.markPendingSent(prepared.id)) {
-        return this.armedAmbiguous("PROTOCOL_ERROR");
+        return this.armedAmbiguous(
+          this.aborted ? "TRANSPORT_CLOSED" : "PROTOCOL_ERROR",
+        );
       }
+      // This monotonic latch begins before the semantic write and is never
+      // restored from a later response. Synchronous post-response drift is
+      // therefore preserved across the Promise continuation.
+      this.sideChannelEvidenceValid = true;
       let writePromise: Promise<void>;
       try {
         writePromise = this.transport.send(prepared.frame);
@@ -429,32 +518,7 @@ class OperationSession {
       try {
         result = await responsePromise;
       } catch (error) {
-        if (this.input.kind === "steer" && error instanceof RpcRejectedError) {
-          return {
-            phase: "armed",
-            safeErrorCode: "RPC_REJECTED_NO_EFFECT",
-            state: "deferred",
-          };
-        }
         return this.armedAmbiguous(this.errorCode(error));
-      }
-
-      if (this.input.kind === "steer") {
-        if (
-          !isRecord(result) ||
-          Object.keys(result).length !== 1 ||
-          result.turnId !== this.input.expectedTurnId
-        ) {
-          return this.armedAmbiguous("RESULT_SCHEMA_MISMATCH");
-        }
-        this.phase = "terminal";
-        return {
-          outcome: "delivered",
-          phase: "terminal",
-          replyCode: "REPLY_UNAVAILABLE",
-          replyText: null,
-          state: "terminal",
-        };
       }
 
       if (!isRecord(result)) {
@@ -466,9 +530,27 @@ class OperationSession {
       }
       this.phase = "accepted";
       this.selectedTurnId = turn.id;
+      const acceptedKey: AcceptedOperationKey = Object.freeze({
+        attemptId: this.input.attemptId,
+        registrationId: this.input.route.registrationId,
+        threadId: this.input.route.threadId,
+        turnId: turn.id,
+      });
+      this.acceptedKey = acceptedKey;
       for (const candidateId of [...this.candidates.keys()]) {
         if (candidateId !== turn.id) this.candidates.delete(candidateId);
       }
+      try {
+        await this.input.onAccepted({
+          attemptId: this.input.attemptId,
+          turnId: turn.id,
+          steer: (input) => this.steerAcceptedOperation(acceptedKey, input),
+        });
+      } catch {
+        this.sideChannelEvidenceValid = false;
+        return this.acceptedUnconfirmed("ACCEPTANCE_UNCONFIRMED");
+      }
+      this.acceptanceDurable = true;
       const fast = this.terminalFor(turn.id);
       if (fast !== undefined) return this.terminal(fast);
       try {
@@ -482,6 +564,147 @@ class OperationSession {
       if (this.phase === "armed") return this.armedAmbiguous(code);
       return this.cleanFailure(code);
     }
+  }
+
+  private async steerAcceptedOperation(
+    key: AcceptedOperationKey,
+    input: StatelessCodexActiveSteerInput,
+  ): Promise<StatelessCodexActiveSteerResult> {
+    let phase: "armed" | "clean" = "clean";
+    let ownsSteerSlot = false;
+    let result: ActiveSteerInner | undefined;
+    try {
+      const validated = validateMessageInput(input, this.options);
+      if (!this.acceptedOperationMatches(key)) {
+        result = { phase: "clean", safeErrorCode: "ROUTE_BUSY", state: "deferred" };
+      } else if (
+        input.attemptId === key.attemptId ||
+        this.activeSteerAttemptIds.has(input.attemptId)
+      ) {
+        result = { phase: "clean", safeErrorCode: "INPUT_INVALID", state: "failed" };
+      } else if (this.activeSteerInFlight || this.activeSteerCalls >= 3) {
+        result = { phase: "clean", safeErrorCode: "ROUTE_BUSY", state: "deferred" };
+      } else {
+        this.activeSteerCalls += 1;
+        this.activeSteerAttemptIds.add(input.attemptId);
+        this.activeSteerInFlight = true;
+        ownsSteerSlot = true;
+        const prepared = this.prepareRequest("turn/steer", {
+          expectedTurnId: key.turnId,
+          input: [{ text: input.text, type: "text" }],
+          threadId: key.threadId,
+        });
+        const responsePromise = this.reservePreparedRequest(prepared);
+        void responsePromise.catch(() => undefined);
+        const evidence: StatelessCodexWriteEvidence = {
+          attemptId: input.attemptId,
+          bodyBytes: validated.bodyBytes,
+          frameBytes: prepared.frameBytes,
+          kind: "codex_turn_steer",
+          sha256: createHash("sha256").update(prepared.frame).digest("hex"),
+        };
+        let authorized: boolean;
+        try {
+          authorized = await input.authorizeWrite(evidence);
+        } catch {
+          this.clearPending();
+          phase = "armed";
+          authorized = false;
+          result = {
+            phase: "armed",
+            safeErrorCode: "WRITE_AUTHORIZATION_UNCERTAIN",
+            state: "ambiguous",
+          };
+        }
+        if (result === undefined) {
+          if (!authorized) {
+            this.clearPending();
+            result = {
+              phase: "clean",
+              safeErrorCode: this.aborted
+                ? "TRANSPORT_CLOSED"
+                : "WRITE_AUTHORIZATION_DENIED",
+              state: this.aborted ? "failed" : "deferred",
+            };
+          } else {
+            phase = "armed";
+            if (
+              !this.acceptedOperationMatches(key) ||
+              this.messageExpired(validated.deadlineAtMs) ||
+              !this.markPendingSent(prepared.id)
+            ) {
+              this.clearPending();
+              result = {
+                phase: "armed",
+                safeErrorCode: this.aborted
+                  ? "TRANSPORT_CLOSED"
+                  : "PROTOCOL_ERROR",
+                state: "ambiguous",
+              };
+            } else {
+              let writePromise: Promise<void>;
+              try {
+                writePromise = this.transport.send(prepared.frame);
+              } catch {
+                writePromise = Promise.reject(
+                  new OperationError("TRANSPORT_WRITE_FAILED"),
+                );
+              }
+              void writePromise.catch(() => {
+                this.rejectPending(new OperationError("TRANSPORT_WRITE_FAILED"));
+              });
+              try {
+                const response = await responsePromise;
+                if (
+                  !isRecord(response) ||
+                  Object.keys(response).length !== 1 ||
+                  response.turnId !== key.turnId
+                ) {
+                  throw new OperationError("RESULT_SCHEMA_MISMATCH");
+                }
+                result = {
+                  outcome: "delivered",
+                  phase: "terminal",
+                  replyCode: "REPLY_UNAVAILABLE",
+                  replyText: null,
+                  state: "terminal",
+                };
+              } catch (error) {
+                result = {
+                  phase: "armed",
+                  safeErrorCode: this.errorCode(error),
+                  state: "ambiguous",
+                };
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      result = phase === "armed"
+        ? { phase, safeErrorCode: this.errorCode(error), state: "ambiguous" }
+        : { phase, safeErrorCode: this.errorCode(error), state: "failed" };
+    } finally {
+      if (ownsSteerSlot) this.activeSteerInFlight = false;
+    }
+    return { ...result!, attemptId: input.attemptId };
+  }
+
+  private acceptedOperationMatches(key: AcceptedOperationKey): boolean {
+    return (
+      this.sideChannelEvidenceValid &&
+      this.acceptanceDurable &&
+      this.acceptedKey === key &&
+      this.phase === "accepted" &&
+      this.selectedTurnId === key.turnId &&
+      this.input.route.registrationId === key.registrationId &&
+      this.input.attemptId === key.attemptId
+    );
+  }
+
+  private messageExpired(deadlineAtMs: number): boolean {
+    const nowMs = this.options.now().getTime();
+    return !Number.isFinite(nowMs) || nowMs >= deadlineAtMs;
   }
 
   private async initialize(): Promise<void> {
@@ -541,10 +764,7 @@ class OperationSession {
     if (status === "not_loaded") return this.cleanDeferred("THREAD_NOT_OBSERVED");
     if (status === "system_error") return this.cleanFailure("THREAD_NOT_OBSERVED");
     if (status === "waiting_approval") return this.cleanDeferred("APPROVAL_REQUIRED");
-    if (this.input.kind === "start") {
-      return status === "idle" ? undefined : this.cleanDeferred("ROUTE_BUSY");
-    }
-    return status === "active" ? undefined : this.cleanDeferred("ROUTE_BUSY");
+    return status === "idle" ? undefined : this.cleanDeferred("ROUTE_BUSY");
   }
 
   private request(method: string, params: JsonObject): Promise<unknown> {
@@ -587,7 +807,7 @@ class OperationSession {
 
   private reservePreparedRequest(prepared: PreparedRequest): Promise<unknown> {
     if (this.protocolFailure !== undefined) throw this.protocolFailure;
-    if (this.pending !== undefined || this.transportLost) {
+    if (this.pending !== undefined || this.transportLost || this.aborted) {
       throw new OperationError("TRANSPORT_CLOSED");
     }
     return new Promise<unknown>((resolve, reject) => {
@@ -700,8 +920,19 @@ class OperationSession {
       const candidate = this.candidate(turn.id, false);
       if (candidate === undefined || candidate.terminal !== null) return;
       candidate.terminal = turn.status;
+      this.sideChannelEvidenceValid = false;
       if (turn.id === this.selectedTurnId) {
         this.resolveTerminal(turn.id, candidate);
+      }
+      return;
+    }
+    if (method === "thread/closed") {
+      if (this.targetParams(params)) this.protocolFault();
+      return;
+    }
+    if (method === "thread/status/changed" && this.targetParams(params)) {
+      if (parseRouteStatus(params.status) !== "active") {
+        this.sideChannelEvidenceValid = false;
       }
       return;
     }
@@ -722,6 +953,7 @@ class OperationSession {
     }
     if (params.threadId !== this.input.route.threadId) return;
     if (this.awaitingAuthorization) this.prewriteProofValid = false;
+    this.sideChannelEvidenceValid = false;
     // Deliberately no JSON-RPC response. Embassy is not an approval authority.
   }
 
@@ -826,6 +1058,9 @@ class OperationSession {
     if (this.transportLost) {
       return Promise.reject(new OperationError("TRANSPORT_CLOSED"));
     }
+    if (this.aborted) {
+      return Promise.reject(new OperationError("TRANSPORT_CLOSED"));
+    }
     const remaining = Math.min(
       this.options.turnTimeoutMs,
       this.deadlineAtMs - this.options.now().getTime(),
@@ -860,6 +1095,7 @@ class OperationSession {
   private protocolFault(): void {
     if (this.protocolFailure !== undefined) return;
     this.protocolFailure = new OperationError("PROTOCOL_ERROR");
+    this.sideChannelEvidenceValid = false;
     this.rejectPending(this.protocolFailure);
     const reject = this.terminalReject;
     this.clearTerminalWait();
@@ -869,6 +1105,7 @@ class OperationSession {
   private handleTransportLoss(): void {
     if (this.transportLost) return;
     this.transportLost = true;
+    this.sideChannelEvidenceValid = false;
     const error = new OperationError("TRANSPORT_CLOSED");
     this.rejectPending(error);
     const reject = this.terminalReject;
@@ -926,6 +1163,7 @@ class OperationSession {
 
   private terminal(result: TerminalResult): InnerResult {
     this.phase = "terminal";
+    this.sideChannelEvidenceValid = false;
     return { ...result, phase: "terminal", state: "terminal" };
   }
 }
@@ -953,18 +1191,41 @@ export function createStatelessCodexOperationTransport(
       let session: OperationSession | undefined;
       let result: InnerResult;
       let setupCleanupFailed = false;
+      let lateCleanupUnconfirmed = false;
+      let abortClose: Promise<void> | undefined;
+      let removeAbortListener: (() => void) | undefined;
       try {
         const validated = validateInput(input, normalized);
+        const signal = input.signal;
+        if (signal?.aborted) {
+          throw new OperationError("TRANSPORT_CLOSED");
+        }
         const factoryOptions = {
           ...normalized.local,
           hostId: input.route.hostId,
         };
-        factory = await (dependencies.createFactory?.(factoryOptions) ??
+        const factoryPending = dependencies.createFactory?.(factoryOptions) ??
           createLocalCodexTransportFactory(
             factoryOptions,
             dependencies.localDependencies ?? {},
-          ));
-        owned = await factory.connectTransport();
+          );
+        const created = await awaitSetupResource(factoryPending, signal);
+        if (created === SETUP_ABORTED) {
+          lateCleanupUnconfirmed = true;
+          throw new OperationError("TRANSPORT_CLOSED");
+        }
+        factory = created;
+        if (signal?.aborted) throw new OperationError("TRANSPORT_CLOSED");
+        const connected = await awaitSetupResource(
+          factory.connectTransport(),
+          signal,
+        );
+        if (connected === SETUP_ABORTED) {
+          lateCleanupUnconfirmed = true;
+          throw new OperationError("TRANSPORT_CLOSED");
+        }
+        owned = connected;
+        if (signal?.aborted) throw new OperationError("TRANSPORT_CLOSED");
         session = new OperationSession(
           owned,
           input,
@@ -972,6 +1233,24 @@ export function createStatelessCodexOperationTransport(
           validated.deadlineAtMs,
           validated.bodyBytes,
         );
+        if (signal !== undefined) {
+          const abort = () => {
+            session?.abort();
+            if (abortClose === undefined && owned !== undefined) {
+              try {
+                abortClose = owned.close();
+              } catch (error) {
+                abortClose = Promise.reject(error);
+              }
+              void abortClose.catch(() => undefined);
+            }
+          };
+          if (signal.aborted) abort();
+          else {
+            signal.addEventListener("abort", abort, { once: true });
+            removeAbortListener = () => signal.removeEventListener("abort", abort);
+          }
+        }
         result = await session.execute();
       } catch (error) {
         setupCleanupFailed =
@@ -984,11 +1263,13 @@ export function createStatelessCodexOperationTransport(
         };
       }
 
+      removeAbortListener?.();
       session?.dispose();
-      let cleanupConfirmed = owned === undefined && !setupCleanupFailed;
+      let cleanupConfirmed =
+        owned === undefined && !setupCleanupFailed && !lateCleanupUnconfirmed;
       if (owned !== undefined) {
         try {
-          await owned.close();
+          await (abortClose ?? owned.close());
         } catch {
           // Cleanup truth is returned separately and never overwrites delivery.
         }

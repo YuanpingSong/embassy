@@ -130,7 +130,18 @@ silently expanding the boundary through a test or hardening patch.
 - Keep the control plane on one private Unix-domain socket inside the
   controller-owned mode-0700 state directory. Controller files are mode 0600.
 - A Codex task self-registers using its inherited `CODEX_THREAD_ID` and a
-  `codex-*` alias. Never accept, print, or guess its thread ID.
+  `codex-*` alias. Never accept, print, or guess its thread ID. Registration
+  changes only the durable logical route record; it performs no provider or
+  App Server I/O. Best-effort observation is bounded and display-only, never
+  routing authority or a dispatch gate. Each Codex operation independently
+  attests the current interface and resumes the exact registered task before
+  final write authorization.
+- `register-codex --succeeds` is one atomic logical replacement. It settles
+  queued/reserved work `cancelled`, armed work `ambiguous`, and accepted work
+  `unconfirmed`; removes every incident consent edge and conversation, reply,
+  or native capability; and installs only the successor. Never add a
+  succession journal, prepared generation, activation, re-anchoring, or
+  recovery choreography.
 - Codex-to-Claude delivery requires an already-selected compatible Claude
   session. A send must never select a merely discovered candidate.
 - Any exact compatible live same-UID Claude session may reach the one
@@ -143,27 +154,28 @@ silently expanding the boundary through a test or hardening patch.
 - Publish at most one process-owned `codex-*` registry record per supervised
   advertisement process. Remove only the exact-owned record and callback socket
   during graceful shutdown; never modify another process's artifacts.
-- Persist message bodies only in the bounded mode-0600 broker state needed for
-  the private ledger, live dashboard, and queued-delivery recovery. A queued,
-  undispatched body may resume exactly once after restart; never retry an
-  ambiguous write. Keep raw provider frames, callback addresses, socket paths,
-  credentials, provider histories, and tool data memory-only.
+- Persist message bodies, opaque delivery tokens, and delivery status only in
+  the bounded mode-0600 broker state needed for the private ledger, live
+  dashboard, and queued-delivery recovery. A queued or reserved body may
+  resume once within its deadline and attempt budget after restart. An armed
+  or accepted message settles `ambiguous` or `unconfirmed` and is never
+  replayed. Keep conversations, reply and native capabilities, raw provider
+  frames, callback addresses, socket paths, credentials, provider histories,
+  and tool data memory-only.
 - Closed private route state may retain the Codex thread ID and Claude session
-  UUID needed for ownership and re-observation. Native IDs are forbidden from
-  public snapshots, normalized events, the dashboard, aliases, logs, errors,
-  and CLI output.
-- Restored routes are stale until their exact current endpoint generation and
-  provider target are positively re-observed.
+  UUID needed for logical ownership and per-operation attestation. Native IDs
+  are forbidden from public snapshots, normalized events, the dashboard,
+  aliases, logs, errors, and CLI output.
 - Treat inherited `CLAUDE_CODE_MESSAGING_SOCKET` as a raw absolute path. It may
   become an in-memory `uds:` capability only; never accept it from an argument,
   print it, persist it, or instruct the user to prefix it.
 - Classify only an exact leading `STEER:` body in the Claude-to-Codex direction.
-  Deliver it through the validated closed `turn/steer` schema at the next
-  tool-call boundary; never interrupt or inject mid-generation. A cleanly unavailable
-  boundary falls back to the normal bounded queue. Keep the global kill switch,
-  three-steer per-route cap, normal receipts, and journal marker. Expose no
-  generic provider RPC escape hatch or approval-response method. Interrupt only
-  an exact turn started and positively observed by the same connector.
+  Deliver it through the exact accepted operation's same-session
+  `turn/steer` capability at the next tool-call boundary; never interrupt or
+  inject mid-generation. A cleanly unavailable boundary falls back to the
+  normal bounded queue. Keep the global kill switch, three-steer cap, and
+  normal receipts. Expose no generic provider RPC escape hatch or
+  approval-response method. Embassy never calls `turn/interrupt`.
 - Embassy never mutates a Codex task's persistent approval or sandbox policy
   and never answers approvals. Registration—not a read-only-policy classifier—
   is the gateway reachability boundary.
@@ -172,13 +184,14 @@ silently expanding the boundary through a test or hardening patch.
   and never retain returned history.
 - Keep runtime routing authority independent of provider version and build
   metadata. An explicit pair plus the exact owned route and session identity
-  authorizes an attempt; current connector, generation, strict wire, and
+  authorizes an attempt; current per-operation transport, strict wire, and
   correlated-operation facts decide its result. The release-owned offline
-  support matrix records tested artifacts, capabilities, limitations, and date,
-  but runtime never imports it.
-- Validate exact OS ownership, path, symlink, lease, state, and generation
-  boundaries for Embassy-owned or executed artifacts. Unsafe evidence there,
-  or for Embassy callback, control, or state paths, may refuse broker startup.
+  support matrix records tested artifacts, capabilities, limitations, and
+  date, but runtime never imports it.
+- Validate exact OS ownership, path, symlink, lease, state, and used-artifact
+  generation boundaries for Embassy-owned or executed artifacts. Unsafe
+  evidence there, or for Embassy callback, control, or state paths, may refuse
+  broker startup.
   Unsafe UID or mode evidence for the Claude-owned external sessions registry root
   quarantines only Claude while the broker and other providers stay available.
   Require Claude peer protocol 1 per session record; reject another value in
@@ -186,22 +199,24 @@ silently expanding the boundary through a test or hardening patch.
   keeping every required and consumed field strict, and expose bounded
   rejection and observed-empty facts.
 - Treat interface drift and missing optional providers as provider-local
-  degradation. Surface route staleness, connector health, and the last safe
-  code; do not turn version metadata into routing authority. A replacement
-  Codex generation must negotiate its current interface and re-observe the
-  exact registered task before re-anchoring. Fail an unvalidated endpoint
-  generation closed on its responsible route, and never replay an ambiguous
-  write.
+  degradation. Surface bounded observation freshness, connector health, and
+  the last safe code; do not turn observation or version metadata into routing
+  authority. Fail an unattested operation closed on its responsible route, and
+  never replay an ambiguous write.
 - Preserve bounded queues, messages, callbacks, deadlines, deduplication, rate
   limits, and conversation tables. Never retry an ambiguous write.
 - The dashboard remains an atomically replaced, metadata-only static HTML file
   with no JavaScript, external assets, storage, telemetry, mutation endpoint,
   or network listener.
 - The opt-in live companion may render that same bounded public model with
-  local JavaScript and the reviewed pair, unpair, stale-registration removal,
-  and refresh-discovery actions. It must have no provider or generic control
-  method, additional mutation, external asset, storage, service worker,
-  telemetry, or non-loopback listener.
+  local JavaScript and the reviewed pair, unpair, named Codex-registration
+  removal, and refresh-discovery actions. Confirmed registration removal may
+  target any named Codex route; its one state commit removes incident consent
+  edges and conversation, reply, or native capabilities, and settles
+  queued/reserved work `cancelled`, armed work `ambiguous`, and accepted work
+  `unconfirmed`. It must have no provider or generic control method, additional
+  mutation, external asset, storage, service worker, telemetry, or non-loopback
+  listener.
 - Never read, print, copy, accept, persist, or forward credentials, OAuth
   material, Keychain data, transcripts, provider histories, tool data, or raw
   diagnostics. Never write protocol diagnostics to stdout.

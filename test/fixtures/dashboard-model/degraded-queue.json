@@ -21,7 +21,7 @@
       "ready": 0,
       "countIsLowerBound": true,
       "primaryAlias": "codex-builder@this-mac",
-      "nextAction": "restore_codex"
+      "nextAction": "none"
     }],
     "queuedMessages": 7,
     "queueCountIsLowerBound": true,
@@ -31,13 +31,13 @@
   "attention": [
     {
       "kind": "route",
-      "code": "CODEX_ROUTE_STALE",
+      "code": "CODEX_PROVIDER_UNAVAILABLE",
       "severity": "error",
       "timestamp": "2026-08-08T11:58:00.000Z",
       "provider": "codex",
       "alias": "codex-builder@this-mac",
       "host": "this-mac",
-      "guidance": "codex_stale"
+      "guidance": "route_stale"
     },
     {
       "kind": "alert",
@@ -242,7 +242,7 @@
       "provider": "codex",
       "host": "this-mac",
       "enabled": true,
-      "state": "stale",
+      "state": "offline",
       "queueDepth": 5,
       "oldestQueuedAt": "2026-08-08T11:52:30.000Z",
       "queueAgeMs": 450000,
@@ -259,7 +259,7 @@
         "bytesAccepted": 131072
       },
       "lastSeenAt": "2026-08-08T11:41:12.000Z",
-      "safeErrorCode": "CODEX_ROUTE_STALE"
+      "safeErrorCode": "CODEX_PROVIDER_UNAVAILABLE"
     },
     {
       "alias": "codex-reviewer@this-mac",

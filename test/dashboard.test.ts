@@ -66,9 +66,15 @@ test("dashboard remedies describe durable queues and bounded body visibility", (
     "guidance.connectorOffline.action",
     "guidance.degraded.action",
   ] as const) {
-    assert.match(dashboardCopyEn[key], /queued mail survives.*exactly once/i);
+    assert.match(
+      dashboardCopyEn[key],
+      /queued or reserved mail may resume once.*armed or accepted work settles ambiguous or unconfirmed without replay/i,
+    );
     assert.doesNotMatch(dashboardCopyEn[key], /abandons.*bod/i);
-    assert.match(dashboardCopyZhCn[key], /排队邮件会保留并精确恢复一次/u);
+    assert.match(
+      dashboardCopyZhCn[key],
+      /排队或已保留的邮件可恢复一次.*已武装或已接受的工作会以结果不确定或未确认结算.*绝不重放/u,
+    );
   }
   assert.match(
     dashboardCopyEn["app.activity.limited"],

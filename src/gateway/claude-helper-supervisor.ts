@@ -15,26 +15,23 @@ import type {
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import type { DashboardLocale } from "./locale.js";
 import type {
-  ClaudeNativeCodexSuccessionBarrier,
-} from "./providers.js";
-import type {
   GatewayAdapterCallbacks,
   GatewayAdapterDispatchResult,
 } from "./service.js";
 import {
   isGatewayProvider,
   type GatewayProvider,
-  type PrivateEndpointIdentity,
-  type PrivateRouteBinding,
+  type LogicalRouteBinding,
 } from "./types.js";
+
+type LogicalProviderIdentity = Readonly<
+  Pick<LogicalRouteBinding, "provider" | "hostId">
+>;
 
 type HelperRecord = {
   client: ClaudeNativeHelperClientLike;
-  activeAlias: string;
+  alias: string;
   sourceProvider: GatewayProvider;
-  activeGeneration: string;
-  prepared?: Readonly<{ alias: string; generation: string }>;
-  retiredGeneration?: string;
   authorizedRoutes: Map<string, string>;
   closing: boolean;
 };
@@ -44,13 +41,20 @@ type ReceiptOwner = Readonly<{
   childHandle: string;
 }>;
 
-type PendingDispatch = {
+type SupervisorPreparation = {
   helper: HelperRecord;
-  evidence: "none" | "transport_uncertain" | "transport_written";
+  cancel: () => Promise<void>;
 };
 
+export type ClaudeNativeHelperPreparedDispatch = Readonly<{
+  frameBytes: number;
+  sha256: string;
+  perform: () => Promise<GatewayAdapterDispatchResult>;
+  cancel: () => Promise<void>;
+}>;
+
 export type ClaudeNativeHelperSupervisorOptions = Readonly<{
-  identity: PrivateEndpointIdentity;
+  identity: LogicalProviderIdentity;
   runtime: AttestedClaudePeerRuntime;
   locale: DashboardLocale;
   deliveryNotices: GatewayDeliveryNoticeMode;
@@ -60,16 +64,6 @@ export type ClaudeNativeHelperSupervisorOptions = Readonly<{
   factory?: ClaudeNativeHelperFactory;
 }>;
 
-const TERMINAL_DELIVERY_STATES = new Set([
-  "released",
-  "unconfirmed",
-  "denied",
-  "expired",
-  "ambiguous",
-  "completed",
-  "failed",
-  "cancelled",
-]);
 const PUBLIC_ALIAS =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const CONVERSATION_ID = /^conv_[A-Za-z0-9_-]{16,64}$/;
@@ -90,7 +84,7 @@ function ok(result: ClaudeNativeHelperResult): void {
 }
 
 export class ClaudeNativeHelperSupervisor {
-  readonly #identity: PrivateEndpointIdentity;
+  readonly #identity: LogicalProviderIdentity;
   readonly #runtime: AttestedClaudePeerRuntime;
   readonly #locale: DashboardLocale;
   readonly #deliveryNotices: GatewayDeliveryNoticeMode;
@@ -99,9 +93,8 @@ export class ClaudeNativeHelperSupervisor {
   readonly #callbacks: () => GatewayAdapterCallbacks | undefined;
   readonly #factory: ClaudeNativeHelperFactory;
   readonly #helpersByAlias = new Map<string, HelperRecord>();
-  readonly #helpersByGeneration = new Map<string, HelperRecord>();
   readonly #receiptOwners = new Map<string, ReceiptOwner>();
-  readonly #pendingDispatches = new Map<string, PendingDispatch>();
+  readonly #preparations = new Set<SupervisorPreparation>();
   #closed = false;
 
   constructor(options: ClaudeNativeHelperSupervisorOptions) {
@@ -165,35 +158,13 @@ export class ClaudeNativeHelperSupervisor {
     }
     record = {
       client,
-      activeAlias: input.alias,
+      alias: input.alias,
       sourceProvider: input.sourceProvider,
-      activeGeneration: client.generation,
       authorizedRoutes: new Map(),
       closing: false,
     };
     this.#helpersByAlias.set(input.alias, record);
-    this.#helpersByGeneration.set(client.generation, record);
     for (const event of buffered) this.#onEvent(record, event);
-    try {
-      ok(
-        await client.request({
-          method: "resume_generation",
-          generation: client.generation,
-        }),
-      );
-    } catch (error) {
-      // The child may have activated before the response was lost. Preserve
-      // exact ownership in the supervisor so ordinary rollback can close it.
-      throw error;
-    }
-  }
-
-  currentGeneration(alias: string): string {
-    const helper = this.#helpersByAlias.get(alias);
-    if (helper === undefined || helper.closing) {
-      throw fault("CODEX_PEER_GENERATION_MISMATCH");
-    }
-    return helper.activeGeneration;
   }
 
   async updateStatus(
@@ -222,21 +193,21 @@ export class ClaudeNativeHelperSupervisor {
     if (failure !== undefined) throw failure;
   }
 
-  async dispatch(input: Readonly<{
+  async prepareDispatch(input: Readonly<{
     sourceAlias: string;
     sourceProvider: GatewayProvider;
     targetAlias: string;
     conversationId: string;
     selectedAlias?: string;
     stateRoot?: string;
-    binding: PrivateRouteBinding;
+    binding: LogicalRouteBinding;
     authorization: "selected_route" | "native_reply";
     messageId: string;
     text: string;
     expectsReply: boolean;
     deadlineAt: string;
     progressWatchActive?: true;
-  }>): Promise<GatewayAdapterDispatchResult> {
+  }>): Promise<ClaudeNativeHelperPreparedDispatch> {
     if (
       typeof input.sourceAlias !== "string" ||
       !PUBLIC_ALIAS.test(input.sourceAlias) ||
@@ -247,27 +218,24 @@ export class ClaudeNativeHelperSupervisor {
       !CONVERSATION_ID.test(input.conversationId) ||
       typeof input.text !== "string"
     ) {
-      return { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" };
+      throw fault("PROVENANCE_ENVELOPE_INVALID");
     }
     if (Buffer.byteLength(input.text, "utf8") > MAX_RAW_BODY_BYTES) {
-      return {
-        state: "failed",
-        safeErrorCode: "PROVENANCE_ENVELOPE_TOO_LARGE",
-      };
+      throw fault("PROVENANCE_ENVELOPE_TOO_LARGE");
     }
     const helper = this.#helpersByAlias.get(input.sourceAlias);
     if (helper === undefined || helper.closing) {
-      return { state: "failed", safeErrorCode: "CLAUDE_NATIVE_HELPER_UNAVAILABLE" };
+      throw fault("CLAUDE_NATIVE_HELPER_UNAVAILABLE", true);
     }
     if (helper.sourceProvider !== input.sourceProvider) {
-      return { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" };
+      throw fault("PROVENANCE_ENVELOPE_INVALID");
     }
     if (input.authorization === "selected_route") {
       if (
         input.selectedAlias === undefined ||
         input.stateRoot === undefined
       ) {
-        return { state: "failed", safeErrorCode: "CLAUDE_ROUTE_UNAVAILABLE" };
+        throw fault("CLAUDE_ROUTE_UNAVAILABLE", true);
       }
       const authority = `${input.selectedAlias}\0${input.stateRoot}`;
       if (helper.authorizedRoutes.get(input.binding.routeHandle) !== authority) {
@@ -282,18 +250,13 @@ export class ClaudeNativeHelperSupervisor {
         helper.authorizedRoutes.set(input.binding.routeHandle, authority);
       }
     }
-    this.#pendingDispatches.set(input.messageId, {
-      helper,
-      evidence: "none",
-    });
-    try {
-      const result = await helper.client.request(
-        {
-          method: "dispatch",
+    const result = await helper.client.request(
+      {
+          method: "prepare_dispatch",
           binding: input.binding,
           authorization: input.authorization,
           messageId: input.messageId,
-          sourceAlias: helper.activeAlias,
+          sourceAlias: helper.alias,
           sourceProvider: helper.sourceProvider,
           targetAlias: input.targetAlias,
           conversationId: input.conversationId,
@@ -303,33 +266,110 @@ export class ClaudeNativeHelperSupervisor {
           ...(input.progressWatchActive === true
             ? { progressWatchActive: true as const }
             : {}),
+      },
+      Math.max(
+        1,
+        Math.min(60_000, Date.parse(input.deadlineAt) - Date.now()),
+      ),
+    );
+    if (
+      !("preparationId" in result) ||
+      typeof result.preparationId !== "string" ||
+      !("frameBytes" in result) ||
+      !("sha256" in result)
+    ) {
+      throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
+    }
+    let state: "prepared" | "performed" | "cancelled" = "prepared";
+    let tracked!: SupervisorPreparation;
+    const cancel = async (): Promise<void> => {
+      if (state !== "prepared") return;
+      state = "cancelled";
+      this.#preparations.delete(tracked);
+      try {
+        ok(
+          await helper.client.request({
+            method: "cancel_dispatch",
+            preparationId: result.preparationId,
+          }),
+        );
+      } catch (error) {
+        if (
+          error instanceof BridgeError &&
+          error.code === "CLAUDE_NATIVE_PREPARATION_UNKNOWN"
+        ) {
+          return;
+        }
+        throw error;
+      }
+    };
+    const perform = (): Promise<GatewayAdapterDispatchResult> => {
+      if (state !== "prepared") {
+        return Promise.resolve({
+          state: "failed",
+          safeErrorCode: "CLAUDE_NATIVE_PREPARATION_CONSUMED",
+        });
+      }
+      state = "performed";
+      this.#preparations.delete(tracked);
+      const operation = helper.client.request(
+        {
+          method: "perform_dispatch",
+          preparationId: result.preparationId,
         },
         Math.max(
           1,
           Math.min(60_000, Date.parse(input.deadlineAt) - Date.now()),
         ),
       );
-      if (
-        !("state" in result) ||
-        ![
-          "pending",
-          "accepted",
-          "deferred",
-          "delivered",
-          "failed",
-          "ambiguous",
-          "cancelled",
-        ].includes(String(result.state))
-      ) {
-        throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
-      }
-      if (result.state !== "pending") this.#pendingDispatches.delete(input.messageId);
-      return result as GatewayAdapterDispatchResult;
-    } catch (error) {
-      const pending = this.#pendingDispatches.get(input.messageId);
-      if (pending?.evidence === "none") this.#pendingDispatches.delete(input.messageId);
-      throw error;
-    }
+      return operation.then(
+        (performed): GatewayAdapterDispatchResult => {
+          if (
+            !("state" in performed) ||
+            ![
+              "delivered",
+              "unconfirmed",
+              "failed",
+              "ambiguous",
+              "expired",
+              "cancelled",
+            ].includes(String(performed.state))
+          ) {
+            return {
+              state: "ambiguous",
+              safeErrorCode: "CLAUDE_NATIVE_HELPER_INVALID_RESPONSE",
+            };
+          }
+          return performed as GatewayAdapterDispatchResult;
+        },
+        (error: unknown): GatewayAdapterDispatchResult => {
+          if (error instanceof BridgeError) {
+            if (error.code === "CLAUDE_PEER_MESSAGE_EXPIRED") {
+              return { state: "expired", safeErrorCode: error.code };
+            }
+            if (
+              error.code === "CLAUDE_NATIVE_PREPARATION_UNKNOWN" ||
+              error.code === "CLAUDE_NATIVE_PREPARATION_MISMATCH" ||
+              error.code === "CLAUDE_PEER_PREPARATION_CONSUMED"
+            ) {
+              return { state: "failed", safeErrorCode: error.code };
+            }
+          }
+          return {
+            state: "ambiguous",
+            safeErrorCode: "CLAUDE_NATIVE_HELPER_PERFORM_UNCERTAIN",
+          };
+        },
+      );
+    };
+    tracked = { helper, cancel };
+    this.#preparations.add(tracked);
+    return Object.freeze({
+      frameBytes: result.frameBytes,
+      sha256: result.sha256,
+      perform,
+      cancel,
+    });
   }
 
   async releaseRoute(routeHandle: string): Promise<void> {
@@ -379,7 +419,6 @@ export class ClaudeNativeHelperSupervisor {
       reason:
         | "ROUTE_BUSY"
         | "ROUTE_UNAVAILABLE"
-        | "CODEX_ROUTE_STALE"
         | "AWAITING_EXTERNAL_APPROVAL";
       queuedForMs: number;
     }>,
@@ -405,158 +444,12 @@ export class ClaudeNativeHelperSupervisor {
     return "released" in result && result.released === true;
   }
 
-  async quiesceAll(): Promise<void> {
-    const results = await Promise.allSettled(
-      [...new Set(this.#helpersByAlias.values())].map(async (helper) => {
-        ok(
-          await helper.client.request({
-            method: "quiesce_generation",
-            generation: helper.activeGeneration,
-          }),
-        );
-      }),
-    );
-    const failed = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (failed !== undefined) throw failed.reason;
-  }
-
-  async quiesceGeneration(generation: string): Promise<void> {
-    const helper = this.#requireGeneration(generation);
-    ok(await helper.client.request({ method: "quiesce_generation", generation }));
-  }
-
-  async observeBarrier(
-    generation: string,
-  ): Promise<ClaudeNativeCodexSuccessionBarrier> {
-    const helper = this.#requireGeneration(generation);
-    const result = await helper.client.request({ method: "observe_barrier", generation });
-    if (!("clean" in result) || !("generation" in result)) {
-      throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
-    }
-    return result as ClaudeNativeCodexSuccessionBarrier;
-  }
-
-  async prepareGeneration(input: Readonly<{
-    alias: string;
-    cwd: string;
-    generation: string;
-    currentGeneration: string;
-  }>): Promise<void> {
-    const helper = this.#helpersByGeneration.get(input.currentGeneration);
-    if (
-      helper === undefined ||
-      helper.activeGeneration !== input.currentGeneration ||
-      helper.prepared !== undefined
-    ) {
-      throw fault("CODEX_PEER_SUCCESSION_CAPACITY");
-    }
-    ok(
-      await helper.client.request({
-        method: "prepare_generation",
-        alias: input.alias,
-        cwd: input.cwd,
-        generation: input.generation,
-      }),
-    );
-    helper.prepared = { alias: input.alias, generation: input.generation };
-    this.#helpersByGeneration.set(input.generation, helper);
-  }
-
-  async publishPrepared(input: Readonly<{
-    currentGeneration: string;
-    preparedGeneration: string;
-  }>): Promise<"published" | "not_published" | "unknown"> {
-    const helper = this.#requireGeneration(input.currentGeneration);
-    if (this.#requireGeneration(input.preparedGeneration) !== helper) {
-      throw fault("CODEX_PEER_SUCCESSION_GENERATION_MISMATCH");
-    }
-    const result = await helper.client.request({
-      method: "publish_prepared",
-      ...input,
-    });
-    if (!("publication" in result)) {
-      throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
-    }
-    return result.publication;
-  }
-
-  async activatePrepared(generation: string): Promise<void> {
-    const helper = this.#requireGeneration(generation);
-    const prepared = helper.prepared;
-    if (prepared?.generation !== generation) {
-      throw fault("CODEX_PEER_SUCCESSION_GENERATION_MISMATCH");
-    }
-    const oldAlias = helper.activeAlias;
-    const oldGeneration = helper.activeGeneration;
-    ok(await helper.client.request({ method: "activate_prepared", generation }));
-    this.#helpersByAlias.delete(oldAlias);
-    helper.retiredGeneration = oldGeneration;
-    helper.activeAlias = prepared.alias;
-    helper.activeGeneration = prepared.generation;
-    delete helper.prepared;
-    helper.authorizedRoutes.clear();
-    this.#helpersByAlias.set(helper.activeAlias, helper);
-  }
-
-  async cleanupPrepared(generation: string): Promise<void> {
-    const helper = this.#requireGeneration(generation);
-    ok(await helper.client.request({ method: "cleanup_prepared", generation }));
-    if (helper.prepared?.generation === generation) delete helper.prepared;
-    this.#helpersByGeneration.delete(generation);
-  }
-
-  async resumeGeneration(generation: string): Promise<void> {
-    const helper = this.#requireGeneration(generation);
-    ok(await helper.client.request({ method: "resume_generation", generation }));
-  }
-
-  async rollbackPrepared(input: Readonly<{
-    preparedGeneration: string;
-    resumeGeneration: string;
-  }>): Promise<void> {
-    const helper = this.#requireGeneration(input.resumeGeneration);
-    if (this.#requireGeneration(input.preparedGeneration) !== helper) {
-      throw fault("CODEX_PEER_SUCCESSION_GENERATION_MISMATCH");
-    }
-    ok(await helper.client.request({ method: "rollback_prepared", ...input }));
-    if (helper.prepared?.generation === input.preparedGeneration) {
-      delete helper.prepared;
-    }
-    this.#helpersByGeneration.delete(input.preparedGeneration);
-  }
-
-  async retireGeneration(input: Readonly<{
-    retiredGeneration: string;
-    protectedActiveGeneration: string;
-  }>): Promise<void> {
-    const helper = this.#requireGeneration(input.protectedActiveGeneration);
-    if (this.#requireGeneration(input.retiredGeneration) !== helper) {
-      throw fault("CODEX_PEER_SUCCESSION_GENERATION_MISMATCH");
-    }
-    ok(await helper.client.request({ method: "retire_generation", ...input }));
-    if (helper.retiredGeneration === input.retiredGeneration) {
-      delete helper.retiredGeneration;
-    }
-    this.#helpersByGeneration.delete(input.retiredGeneration);
-  }
-
-  async purgeGenerationReplies(generation: string): Promise<number> {
-    const helper = this.#requireGeneration(generation);
-    const result = await helper.client.request({
-      method: "purge_generation_replies",
-      generation,
-    });
-    if (!("purged" in result) || !Number.isSafeInteger(result.purged)) {
-      throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
-    }
-    return result.purged;
-  }
-
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    await Promise.allSettled(
+      [...this.#preparations].map(async (prepared) => await prepared.cancel()),
+    );
     const helpers = [...new Set(this.#helpersByAlias.values())];
     for (const helper of helpers) helper.closing = true;
     const results = await Promise.allSettled(
@@ -572,23 +465,6 @@ export class ClaudeNativeHelperSupervisor {
   #onEvent(helper: HelperRecord, event: ClaudeNativeHelperEvent): void {
     if (helper.closing || this.#closed) return;
     const callbacks = this.#callbacks();
-    if (event.event === "delivery") {
-      const pending = this.#pendingDispatches.get(event.value.messageId);
-      if (pending?.helper !== helper) return;
-      if (event.value.state === "transport_uncertain") {
-        pending.evidence = "transport_uncertain";
-      } else if (
-        event.value.state === "transport_written" ||
-        event.value.state === "held"
-      ) {
-        pending.evidence = "transport_written";
-      }
-      if (TERMINAL_DELIVERY_STATES.has(event.value.state)) {
-        this.#pendingDispatches.delete(event.value.messageId);
-      }
-      callbacks?.onDelivery({ ...event.value });
-      return;
-    }
     if (event.event === "claude_reply") {
       callbacks?.onClaudeReply({
         endpoint: { ...this.#identity, routeHandle: event.value.routeHandle },
@@ -600,7 +476,7 @@ export class ClaudeNativeHelperSupervisor {
       callbacks?.onProtocolNotice?.({ code: event.value.code });
       return;
     }
-    if (event.value.targetAlias !== helper.activeAlias) {
+    if (event.value.targetAlias !== helper.alias) {
       callbacks?.onProtocolNotice?.({ code: "CLAUDE_NATIVE_HELPER_TARGET_MISMATCH" });
       return;
     }
@@ -639,20 +515,6 @@ export class ClaudeNativeHelperSupervisor {
       return;
     }
     const callbacks = this.#callbacks();
-    for (const [messageId, pending] of this.#pendingDispatches) {
-      if (pending.helper !== helper) continue;
-      this.#pendingDispatches.delete(messageId);
-      callbacks?.onDelivery({
-        messageId,
-        state:
-          pending.evidence === "transport_written"
-            ? "unconfirmed"
-            : pending.evidence === "transport_uncertain"
-              ? "ambiguous"
-              : "failed",
-        safeErrorCode: "CLAUDE_NATIVE_HELPER_EXITED",
-      });
-    }
     callbacks?.onProtocolNotice?.({ code: "CLAUDE_NATIVE_HELPER_EXITED" });
     this.#removeHelper(helper);
   }
@@ -661,23 +523,12 @@ export class ClaudeNativeHelperSupervisor {
     for (const [alias, candidate] of this.#helpersByAlias) {
       if (candidate === helper) this.#helpersByAlias.delete(alias);
     }
-    for (const [generation, candidate] of this.#helpersByGeneration) {
-      if (candidate === helper) this.#helpersByGeneration.delete(generation);
-    }
     for (const [handle, owner] of this.#receiptOwners) {
       if (owner.helper === helper) this.#receiptOwners.delete(handle);
     }
-    for (const [messageId, pending] of this.#pendingDispatches) {
-      if (pending.helper === helper) this.#pendingDispatches.delete(messageId);
+    for (const prepared of [...this.#preparations]) {
+      if (prepared.helper === helper) this.#preparations.delete(prepared);
     }
-  }
-
-  #requireGeneration(generation: string): HelperRecord {
-    const helper = this.#helpersByGeneration.get(generation);
-    if (helper === undefined || helper.closing) {
-      throw fault("CODEX_PEER_SUCCESSION_GENERATION_MISMATCH");
-    }
-    return helper;
   }
 
   #requireReceipt(receiptHandle: string): ReceiptOwner {

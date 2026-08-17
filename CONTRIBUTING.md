@@ -59,41 +59,34 @@ recovery.
   Neither path makes the inbound session outbound-selected.
 - Claude's session UUID is its stable logical identity. Current names are a
   live index; do not add historical-name routing or PID/socket identity.
-- Preserve current-name collision refusal and endpoint-generation fencing.
+- Preserve current-name collision refusal and exact registration fencing.
+- Codex registration is record-only: it changes the durable logical route and
+  performs no provider or App Server I/O. `register-codex --succeeds` is one
+  atomic logical replacement that settles queued/reserved work `cancelled`,
+  armed work `ambiguous`, and accepted work `unconfirmed`; removes every
+  incident consent edge and conversation, reply, or native capability; and
+  installs only the successor. Do not add prepared generations, re-anchoring,
+  or recovery journals.
 
 ### Provider adapters
 
 Claude Code's cross-session feature is official. Embassy's use of its external
-registry and peer socket shape remains an internal adapter: require the
-native peer protocol 1 and bounded live-schema probes while
-validating every consumed field and frame. Unknown top-level registry fields
-may be ignored; required and consumed fields remain strict, and rejection or
-observed-empty counts must stay loud. A certified same-major build is writable;
-a same-major build whose probes all pass is `schema_attested`, but it is
-writable only when those probes cover the write path. Claude's probes do.
-Ordinary Codex compatibility and registration reads remain read-only: they may
-include `initialize`, `thread/loaded/list`, and registration-time
-`thread/resume`, but do not invoke `turn/start`. The optional Codex
-write-attestation probe is the sole exception. It may create at most one
-disposable broker-owned thread per attempt, under a bounded write fence with
-zero user-thread contact; every created probe thread is archived and confirmed
-absent from the loaded set. The probe resolves the pinned model's lowest
-advertised effort. Whenever that model/effort pin cannot resolve, it declines
-in a zero-spend fail-safe before creating any thread or model turn. Untested
-Codex 0.x therefore remains monitor-only pending a certified write schema.
-Failed
-probes, a different major, or version evidence that cannot establish a safe
-major leave only that
-provider degraded, monitor-only, and write-fenced while the broker,
-control/dashboard surfaces, and other provider remain available; probes can
-never promote across a major or unknown version. Unsafe ownership, path,
-symlink, lease, state, or generation evidence for Embassy-owned or executed
-artifacts and Embassy callback, control, or state paths still aborts startup;
-an unsafe Claude-owned external sessions registry root quarantines only Claude.
-Do not widen a supported major or declared protocol without a
-documented review and deterministic fixtures. Different-major guidance must
-safely name the observed/tested versions and supported major, say that a
-supporting Embassy release is required, and never prescribe `embassy health`.
+registry and peer socket shape remains an internal adapter: require native
+peer protocol 1 and validate every consumed field and frame. Unknown top-level
+registry fields may be ignored; required and consumed fields remain strict,
+and rejected-record or observed-empty counts must stay loud. Codex registration
+performs no provider I/O. Its bounded observer is display-only: it may report
+freshness and safe codes but never authorizes, rejects, or delays a delivery.
+Every Codex delivery instead creates an operation-local transport,
+negotiates the current interface, and resumes the exact registered task with
+history excluded before final write authorization. Unsafe ownership, path,
+symlink, lease, state, or used-artifact generation evidence for Embassy-owned
+or executed artifacts and Embassy callback, control, or state paths still
+aborts startup; an unsafe Claude-owned external sessions registry root
+quarantines only Claude. Provider versions remain diagnostic metadata, and
+interface drift or an unavailable optional provider degrades only that
+surface. Do not widen a declared protocol without documented review and
+deterministic fixtures.
 
 The gateway may publish one process-owned `codex-*` peer so Claude's native
 `ListAgents` and `SendMessage` tools can reach Codex. It must never overwrite a
@@ -101,17 +94,21 @@ foreign registry record, claim to be a Claude model session, or unlink a socket
 whose exact generation it no longer owns.
 
 App Server calls use a closed allowlist. Do not add a generic RPC method,
-`turn/steer`, approval responses, history retrieval, shell execution, settings
-mutation, or provider authentication. Keep `experimentalApi: true`
-non-configurable and limited to `thread/resume.excludeTurns: true`; every resume
-must require an empty `thread.turns` response.
+approval responses, history retrieval, shell execution, settings mutation, or
+provider authentication. The only active-turn method is exact same-session
+`turn/steer` for a leading `STEER:` body on the accepted operation, capped at
+three and admitted only at the next tool-call boundary. Embassy never calls
+`turn/interrupt`. Keep `experimentalApi: true` non-configurable and limited to
+`thread/resume.excludeTurns: true`; every resume must require an empty
+`thread.turns` response.
 
 ### Permissions
 
 Embassy does not set or override a Codex task's persistent approval or sandbox
-policy. Registration is the gateway reachability boundary. The connector may
-observe native route and approval-waiting status, but must not classify policy
-or turn workspace/settings metadata into a second authorization gate.
+policy. Registration is the gateway reachability boundary. Bounded observation
+may describe route and approval-waiting status, but it is never authority or a
+dispatch gate and must not classify policy or turn workspace/settings metadata
+into a second authorization gate.
 
 For Codex-to-Claude delivery, Claude's `crossSessionInbound` behavior remains
 native. Do not route around a hold or refusal or fabricate a successful receipt.
@@ -125,11 +122,12 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
   terminal failure, ambiguity, expiry, and restart abandonment.
 - Never retry an ambiguous provider write. Requeue only a confirmed clean
   deferral that has not crossed an ambiguous mutation boundary.
-- Restarts keep queued bodies under bounded retention and re-send each exactly
-  once when its exact route is re-observed. A message in flight at the moment of
-  a crash settles `ambiguous`; a message whose target authority was transient is
-  abandoned rather than reconstructed. Restored routes stay stale until exact
-  re-observation.
+- The private mode-0600 v3 ledger retains bounded queued and recent bodies,
+  opaque delivery tokens, and status. Queued or reserved work may resume once
+  within its deadline and attempt budget against the same exact route and edge.
+  Armed work settles `ambiguous`; accepted work settles `unconfirmed`; neither
+  is replayed. Conversations, reply/native capabilities, raw frames, callback
+  addresses, and socket paths remain memory-only.
 - Persist native route identifiers only in the closed private binding schema.
   Keep them out of events, snapshots, dashboard rows, logs, errors, and CLI
   output. The only CLI exception is a UUID explicitly supplied by the user as a
@@ -147,10 +145,14 @@ single-user machine; exact Host on every request and exact Origin plus
 `X-Embassy-Request` on every POST constrain browser origins, not local
 software. Preserve the direct root URL, multi-window/browser access, collision
 failure with no fallback port, no CORS/`OPTIONS`, and only the reviewed pair,
-unpair, refresh-discovery, and stale-registration-removal mutations—never a
-provider or generic control method. Do not add a wildcard/remote listener,
-external assets, service workers, telemetry, or additional mutation endpoints.
-Keep the public v1 launcher foreground, macOS-only, and local-host-only.
+unpair, refresh-discovery, and named Codex-registration-removal mutations—never
+a provider or generic control method. Confirmed removal may target any named
+Codex registration; its atomic commit removes incident consent edges and
+conversation, reply, or native capabilities, and settles queued/reserved work
+`cancelled`, armed work `ambiguous`, and accepted work `unconfirmed`. Do not
+add a wildcard/remote listener, external assets, service workers, telemetry,
+or additional mutation endpoints. Keep the public v1 launcher foreground,
+macOS-only, and local-host-only.
 
 ## Live validation
 

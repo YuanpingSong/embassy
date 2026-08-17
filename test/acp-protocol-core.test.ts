@@ -352,7 +352,10 @@ test("process death: an uncertain prompt is UNKNOWN and cannot replay on the dea
     textTruncated: false,
   });
   peer.result(request, { stopReason: "end_turn" });
-  assert.equal((await client.prompt("s", "two")).terminalState, "unknown");
+  await assert.rejects(
+    client.prompt("s", "two"),
+    /ACP prompt preparation is unavailable/,
+  );
   await assert.rejects(client.cancel("s"), /ACP subprocess exited/);
   assert.equal(
     peer.received.filter((message) => message.method === "session/prompt").length,

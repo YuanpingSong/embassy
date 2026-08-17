@@ -46,11 +46,16 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "docs/DELIVERY.md",
     "docs/DELIVERY.zh-CN.md",
     "README.zh-CN.md",
-    "dist/src/gateway/codex-registration-succession.js",
-    "dist/src/gateway/delivery-machine.js",
     "dist/src/gateway/live-dashboard.js",
+    "dist/src/gateway/state-v2-to-v3.js",
   ]) {
     assert.ok(expected.includes(packagePath), packagePath);
+  }
+  for (const removedPath of [
+    "dist/src/gateway/codex-registration-generation.js",
+    "dist/src/gateway/codex-registration-succession.js",
+  ]) {
+    assert.ok(!expected.includes(removedPath), removedPath);
   }
   assert.ok(!expected.includes("assets/social-preview-arcs-fable.png"));
 
@@ -134,7 +139,7 @@ test("package checker rejects missing and regex-shaped extra files", async (t) =
         files: report.files.filter(
           ({ path: packagePath }) =>
             packagePath !==
-            "dist/src/gateway/codex-registration-succession.js",
+            "dist/src/gateway/state-v2-to-v3.js",
         ),
       },
     ]),
@@ -142,5 +147,5 @@ test("package checker rejects missing and regex-shaped extra files", async (t) =
   );
   const missing = runChecker(["--report", reportPath]);
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /missing: .*codex-registration-succession\.js/);
+  assert.match(missing.stderr, /missing: .*state-v2-to-v3\.js/);
 });

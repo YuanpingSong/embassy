@@ -38,7 +38,6 @@ export type DashboardNextAction =
   | "restore_claude"
   | "repair_claude_inventory"
   | "register_codex"
-  | "restore_codex"
   | "none";
 
 export type DashboardExchangeParty = Readonly<{
@@ -64,20 +63,14 @@ export type DashboardAttentionItem = Readonly<{
   queueDepth?: number | undefined;
   guidance:
     | "reobserve_claude"
-    | "reobserve_codex"
-    | "codex_reactivation_required"
     | "consent_edge_unavailable"
     | "claude_not_observed"
-    | "codex_stale"
-    | "codex_app_reconnect_required"
     | "connector_offline"
     | "route_stale"
     | "queue_stalled"
     | "recipient_waiting_input"
     | "unconfirmed"
     | "degraded"
-    | "codex_succession_busy"
-    | "codex_succession_recovery"
     | "progress_watch"
     | "registry_empty"
     | "registry_rejected"
@@ -149,9 +142,7 @@ export type DashboardActivityEventRow = Readonly<{
     | "selection"
     | "registration"
     | "pairing"
-    | "watch"
-    | "endpoint"
-    | "recovery";
+    | "watch";
   action:
     | "discovery_refreshed"
     | "claude_selected"
@@ -161,14 +152,44 @@ export type DashboardActivityEventRow = Readonly<{
     | "codex_unregistered"
     | "routes_paired"
     | "routes_unpaired"
-    | "watch_ended"
-    | "endpoint_refreshed"
-    | "codex_orphan_removed";
+    | "watch_ended";
   outcome: "accepted" | "rejected";
   aliases: readonly string[];
   operatorAction: boolean;
   safeErrorCode?: string | undefined;
 }>;
+
+const dashboardActivityKinds: readonly DashboardActivityEventRow["kind"][] = [
+  "discovery",
+  "selection",
+  "registration",
+  "pairing",
+  "watch",
+];
+
+const dashboardActivityActions: readonly DashboardActivityEventRow["action"][] = [
+  "discovery_refreshed",
+  "claude_selected",
+  "claude_unselected",
+  "codex_registered",
+  "codex_succeeded",
+  "codex_unregistered",
+  "routes_paired",
+  "routes_unpaired",
+  "watch_ended",
+];
+
+function isDashboardActivityKind(
+  value: string,
+): value is DashboardActivityEventRow["kind"] {
+  return dashboardActivityKinds.some((candidate) => candidate === value);
+}
+
+function isDashboardActivityAction(
+  value: string,
+): value is DashboardActivityEventRow["action"] {
+  return dashboardActivityActions.some((candidate) => candidate === value);
+}
 
 export type DashboardPeerRow = Readonly<{
   alias: string;
@@ -403,20 +424,14 @@ const statePresentation = {
 
 const guidanceCopyKeys = {
   reobserve_claude: "reobserveClaude",
-  reobserve_codex: "reobserveCodex",
-  codex_reactivation_required: "codexReactivationRequired",
   consent_edge_unavailable: "consentEdgeUnavailable",
   claude_not_observed: "claudeNotObserved",
-  codex_stale: "codexStale",
-  codex_app_reconnect_required: "codexAppReconnectRequired",
   connector_offline: "connectorOffline",
   route_stale: "routeStale",
   queue_stalled: "queueStalled",
   recipient_waiting_input: "recipientWaitingInput",
   unconfirmed: "unconfirmed",
   degraded: "degraded",
-  codex_succession_busy: "codexSuccessionBusy",
-  codex_succession_recovery: "codexSuccessionRecovery",
   progress_watch: "progressWatch",
   registry_empty: "registryEmpty",
   registry_rejected: "registryRejected",
@@ -430,29 +445,19 @@ const nextActionCopyKeys = {
   restore_claude: "next.restoreClaude",
   repair_claude_inventory: "next.repairClaude",
   register_codex: "next.registerCodex",
-  restore_codex: "next.restoreCodex",
   none: "next.none",
 } as const satisfies Record<DashboardNextAction, string>;
 
 const attentionCommands = {
   reobserve_claude: "embassy select-claude --alias {alias}",
-  reobserve_codex: "embassy register-codex --alias {alias}",
-  codex_reactivation_required: "embassy register-codex --alias {alias}",
   consent_edge_unavailable: "embassy refresh-dashboard",
   claude_not_observed: "embassy select-claude --alias {alias}",
-  codex_stale: "embassy register-codex --alias {alias}",
-  codex_app_reconnect_required:
-    "/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT",
   connector_offline: "embassy status",
   route_stale: "embassy status",
   queue_stalled: "embassy status",
   recipient_waiting_input: "embassy status",
   unconfirmed: "embassy status",
   degraded: "embassy status",
-  codex_succession_busy:
-    "embassy register-codex --alias <new> --succeeds {alias}",
-  codex_succession_recovery:
-    "embassy register-codex --alias <new> --succeeds {alias}",
   progress_watch: "embassy status",
   registry_empty: "embassy refresh-dashboard",
   registry_rejected: "embassy status",
@@ -490,10 +495,7 @@ export const DASHBOARD_SEMANTICS = Object.freeze({
   guidanceCopyKeys,
   nextActionCopyKeys,
   attentionCommands,
-  attentionCommandFallbacks: {
-    codex_succession_busy: "<old>",
-    codex_succession_recovery: "<old>",
-  },
+  attentionCommandFallbacks: {},
   deliveryMeaningKeys,
   deliveryMeaningByTargetProvider: {
     claude: "activity.meaning.delivered.toClaude",
@@ -735,62 +737,15 @@ function routePriority(route: DashboardRouteRow): number {
   return 4;
 }
 
-const CODEX_APP_RECONNECT_GUIDANCE_AFTER_MS = 2_000;
-
-function needsCodexAppReconnect(
-  route: DashboardRouteRow,
-  connectors: readonly DashboardConnectorRow[],
-  generatedAt: string | undefined,
-): boolean {
-  if (
-    route.provider !== "codex" ||
-    route.state !== "stale" ||
-    (route.safeErrorCode !== "CODEX_ROUTE_STALE" &&
-      route.safeErrorCode !== "ENDPOINT_GENERATION_CHANGED") ||
-    route.lastSeenAt === undefined ||
-    generatedAt === undefined ||
-    Date.parse(generatedAt) - Date.parse(route.lastSeenAt) <
-      CODEX_APP_RECONNECT_GUIDANCE_AFTER_MS
-  ) {
-    return false;
-  }
-  return connectors.some(
-    (connector) =>
-      connector.provider === "codex" &&
-      connector.host === route.host &&
-      connector.health === "healthy",
-  );
-}
-
 function alertPriority(severity: AlertSeverity): number {
   return severity === "error" ? 0 : severity === "warning" ? 1 : 2;
 }
 
-function guidanceFor(
-  code: string | undefined,
-  provider: GatewayProvider | undefined,
-): DashboardAttentionItem["guidance"] {
-  if (code === "CODEX_SUCCESSION_BARRIER_BUSY") {
-    return "codex_succession_busy";
-  }
-  if (code?.startsWith("CODEX_SUCCESSION_") === true) {
-    return "codex_succession_recovery";
-  }
-  if (
-    provider === "codex" &&
-    (code === "REOBSERVATION_REQUIRED" ||
-      code === "CODEX_BOOT_REACTIVATION_SKIPPED")
-  ) {
-    return "codex_reactivation_required";
-  }
+function guidanceFor(code: string | undefined): DashboardAttentionItem["guidance"] {
   switch (code) {
-    case "REOBSERVATION_REQUIRED":
-      return provider === "claude" ? "reobserve_claude" : "reobserve_codex";
     case "PEER_NOT_OBSERVED":
     case "CLAUDE_PEER_NOT_OBSERVED":
       return "claude_not_observed";
-    case "CODEX_ROUTE_STALE":
-      return "codex_stale";
     case "CONNECTOR_OFFLINE":
       return "connector_offline";
     case "ROUTE_STALE":
@@ -806,64 +761,6 @@ function guidanceFor(
     default:
       return "generic";
   }
-}
-
-function isCodexReactivationCondition(item: DashboardAttentionItem): boolean {
-  return (
-    item.provider === "codex" &&
-    (item.code === "REOBSERVATION_REQUIRED" ||
-      item.code === "CODEX_BOOT_REACTIVATION_SKIPPED")
-  );
-}
-
-function coalesceCodexReactivationAlerts(
-  alerts: readonly DashboardAttentionItem[],
-  routes: readonly DashboardRouteRow[],
-): DashboardAttentionItem[] {
-  const staleCodexScopes = new Set(
-    routes
-      .filter((route) => route.provider === "codex" && route.state === "stale")
-      .map((route) => `${route.alias}\0${route.host}`),
-  );
-  const coalesced: DashboardAttentionItem[] = [];
-  for (const alert of alerts) {
-    if (!isCodexReactivationCondition(alert)) {
-      coalesced.push(alert);
-      continue;
-    }
-    if (alert.alias === undefined || alert.host === undefined) continue;
-    const scope = `${alert.alias}\0${alert.host}`;
-    if (!staleCodexScopes.has(scope)) continue;
-    const existingIndex = coalesced.findIndex(
-      (candidate) =>
-        isCodexReactivationCondition(candidate) &&
-        candidate.alias === alert.alias &&
-        candidate.host === alert.host,
-    );
-    if (existingIndex === -1) {
-      coalesced.push(alert);
-      continue;
-    }
-    const existing = coalesced[existingIndex]!;
-    const bootSkipped = alert.code === "CODEX_BOOT_REACTIVATION_SKIPPED"
-      ? alert
-      : existing.code === "CODEX_BOOT_REACTIVATION_SKIPPED"
-        ? existing
-        : alert;
-    const timestamp = compareText(
-      alert.timestamp ?? "",
-      existing.timestamp ?? "",
-    ) >= 0 ? alert.timestamp : existing.timestamp;
-    coalesced[existingIndex] = {
-      ...bootSkipped,
-      severity:
-        alertPriority(alert.severity) < alertPriority(existing.severity)
-          ? alert.severity
-          : existing.severity,
-      ...(timestamp === undefined ? {} : { timestamp }),
-    };
-  }
-  return coalesced;
 }
 
 function recipientIsUnobserved(route: DashboardRouteRow): boolean {
@@ -1047,7 +944,13 @@ function buildProjectedDashboardViewModel(
   ).flatMap((event) => {
     const timestamp = normalizedTimestamp(event.timestamp);
     const sequence = normalizedInteger(event.sequence);
-    if (timestamp === undefined || sequence === undefined || sequence < 1) {
+    if (
+      timestamp === undefined ||
+      sequence === undefined ||
+      sequence < 1 ||
+      !isDashboardActivityKind(event.kind) ||
+      !isDashboardActivityAction(event.action)
+    ) {
       return [];
     }
     return [
@@ -1348,7 +1251,7 @@ function buildProjectedDashboardViewModel(
         ? "pair_routes"
         : routesByProvider.codex.length === 0
           ? "register_codex"
-          : "restore_codex";
+          : "none";
   const parties = gatewayProviders.map((provider): DashboardExchangeParty => {
       const providerPeers = validPeers.filter((peer) => peer.provider === provider);
       const providerRoutes = routesByProvider[provider];
@@ -1388,17 +1291,12 @@ function buildProjectedDashboardViewModel(
       };
   });
 
-  const explicitAlerts = coalesceCodexReactivationAlerts(
-    snapshot.alerts
-      .map((alert): DashboardAttentionItem => {
+  const explicitAlerts = snapshot.alerts
+    .map((alert): DashboardAttentionItem => {
         const code = safeCode(alert.code);
         const route =
           code === "QUEUE_STALLED" && typeof alert.alias === "string" &&
             alert.provider !== undefined
-            ? routeByEndpoint.get(`${alert.provider}\0${alert.alias}`)
-            : undefined;
-        const alertRoute =
-          typeof alert.alias === "string" && alert.provider !== undefined
             ? routeByEndpoint.get(`${alert.provider}\0${alert.alias}`)
             : undefined;
         return {
@@ -1429,15 +1327,10 @@ function buildProjectedDashboardViewModel(
             route.queueDepth > 0
               ? { queueDepth: route.queueDepth }
               : {}),
-          guidance:
-            alertRoute !== undefined &&
-            needsCodexAppReconnect(alertRoute, connectors, generatedAt)
-              ? "codex_app_reconnect_required"
-              : guidanceFor(code, alert.provider),
+          guidance: guidanceFor(code),
         };
-      }),
-    allRoutes,
-  ).sort((left, right) =>
+      })
+    .sort((left, right) =>
     alertPriority(left.severity) - alertPriority(right.severity) ||
     compareText(right.timestamp ?? "", left.timestamp ?? ""),
   );
@@ -1528,16 +1421,7 @@ function buildProjectedDashboardViewModel(
       provider: route.provider,
       alias: route.alias,
       host: route.host,
-      guidance:
-        route.provider === "codex" &&
-        route.state === "stale" &&
-        route.safeErrorCode === "REOBSERVATION_REQUIRED"
-          ? "codex_reactivation_required"
-          : needsCodexAppReconnect(route, connectors, generatedAt)
-            ? "codex_app_reconnect_required"
-            : route.provider === "codex" && route.state === "stale"
-              ? "codex_stale"
-              : "route_stale",
+      guidance: "route_stale",
     });
     representedScopes.add(scope);
   }
