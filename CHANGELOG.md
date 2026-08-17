@@ -4,7 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.9.4] - 2026-08-17
+
+Identical to the unpublished v1.9.3 (its pipeline was failed by a release-checklist miss — the embedded version constant and its pinned test were not bumped with the package version; no product defect).
+
 ## [1.9.3] - 2026-08-17
+
+Unpublished; see 1.9.4.
 
 ### Fixed
 

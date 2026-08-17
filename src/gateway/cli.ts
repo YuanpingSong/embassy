@@ -33,7 +33,7 @@ const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
 const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
 const PEER_AWAIT_REQUEST_TIMEOUT_MS = 35_000;
-export const EMBASSY_VERSION = "1.9.2";
+export const EMBASSY_VERSION = "1.9.4";
 // RELEASE VERSION SWEEP — every place the version lives: package.json,
 // npm-shrinkwrap.json (x2), this constant,
 // test/gateway-cli.test.ts package-metadata assertion.
