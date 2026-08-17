@@ -38,6 +38,10 @@ const PROVENANCE_RECIPIENT_PROFILE_VALUES = {
     emitConversationAttribute: true,
     allowQueuedAhead: false,
   }),
+  peer: Object.freeze({
+    emitConversationAttribute: true,
+    allowQueuedAhead: false,
+  }),
 } satisfies Record<GatewayProvider, ProvenanceRecipientProfile>;
 
 const PROVENANCE_RECIPIENT_PROFILES: Readonly<
@@ -83,7 +87,8 @@ function validateInput(input: ComposeProvenanceEnvelopeInput): void {
     input === null ||
     !isGatewayProvider(input.sourceProvider) ||
     !isGatewayProvider(input.recipientProvider) ||
-    input.sourceProvider === input.recipientProvider ||
+    (input.sourceProvider === input.recipientProvider &&
+      input.sourceProvider !== "peer") ||
     typeof input.sourceAlias !== "string" ||
     !ALIAS_PATTERN.test(input.sourceAlias) ||
     typeof input.targetAlias !== "string" ||

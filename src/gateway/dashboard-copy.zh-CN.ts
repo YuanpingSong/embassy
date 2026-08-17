@@ -183,6 +183,8 @@ export const dashboardCopyZhCn = {
     "DeepSeek 已接受该投递。这不表示模型已经完成或处理该输入。",
   "activity.meaning.delivered.toGrok":
     "Grok Build 已接受该投递。这不表示模型已经完成或处理该输入。",
+  "activity.meaning.delivered.toPeer":
+    "Shell 对等方已将帧刷新到 stdout 并确认其回执。",
   "activity.meaning.unconfirmed":
     "传输写入已完成，但终结原生证据不可用。重试前请检查接收方。",
   "activity.meaning.ambiguous": "不确定写入后的结果未知。请勿自动重试。",
@@ -306,6 +308,7 @@ export const dashboardCopyZhCn = {
   "provider.codex": "Codex",
   "provider.deepseek": "DeepSeek",
   "provider.grok": "Grok Build",
+  "provider.peer": "Shell 对等方",
   "health.offline": "离线",
   "health.connecting": "连接中",
   "health.healthy": "健康",

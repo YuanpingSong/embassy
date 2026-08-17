@@ -20,6 +20,12 @@ export const cliCopyZhCn = {
                          打开实时状态与有限路由同意操作
   register-codex         注册或继任 Codex 任务
   unregister-codex       注销当前 Codex 任务
+  register-peer --alias <对等别名> [--token-stdin|--emit-env]
+                         注册通用 shell 对等方
+  unregister-peer --alias <对等别名> [--token-stdin]
+                         注销通用 shell 对等方
+  await --alias <对等别名> [--token-stdin]
+                         等待一条对等消息并在标准输出后确认
   select-claude          选择已发现的 Claude 会话
   unselect-claude        清除 Claude 选择
   pair [--from <别名> --to <别名>] 添加一条跨提供商同意边
@@ -33,6 +39,8 @@ export const cliCopyZhCn = {
 
 选项：
   --lang en|zh-CN        本地化面向用户的文本
+  --token-stdin          从标准输入首个 LF 结尾行读取对等令牌
+  --emit-env             将首次注册令牌输出为 export 命令
   --port <n>             实时仪表盘端口，1024–65535（默认 41961）
   --version, -v          输出版本
   --help, -h             显示此帮助

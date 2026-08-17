@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
 import type { GatewayConfig } from "./config.js";
@@ -10,9 +10,13 @@ import {
   type GatewayDecision,
   type GatewayDeliveryStatusResult,
   type GatewayReplyCaller,
+  type GatewayRegisterPeerResult,
   type GatewaySendResult,
   type GatewaySnapshotObservation,
   type PairParams,
+  type PeerPrincipalParams,
+  type PeerReceiptParams,
+  type RegisterPeerParams,
   pairParamAliases,
   pairParamThreadAttestation,
   type ReplyParams,
@@ -25,6 +29,7 @@ import {
 import { publishGatewayDashboard } from "./dashboard.js";
 import type { CodexDoctorResult } from "./codex-doctor.js";
 import { spawnPeerClient, type PeerClient } from "./peer-client.js";
+import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
 import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
@@ -67,6 +72,7 @@ const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PRIVATE_HANDLE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PUBLIC_ALIAS =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
+const PEER_TOKEN = /^peer_[A-Za-z0-9_-]{32}$/;
 const DISCOVERY_INTERVAL_MS = 30_000;
 const CODEX_DOCTOR_INTERVAL_MS = 30_000;
 const PEER_REFRESH_INTERVAL_MS = 30_000;
@@ -84,6 +90,7 @@ const CLEAN_RETRY_CODES = new Set([
   "SPAWN_TIMEOUT",
   "TRANSPORT_CONNECT_FAILED",
   "REQUEST_TIMEOUT",
+  "PEER_NOT_AWAITING",
 ]);
 
 export type GatewayAdapterRouteState = "idle" | "busy" | "awaiting_approval";
@@ -261,7 +268,7 @@ class ConsentOwnerError extends BridgeError {
   }
 }
 
-function decisionFor(error: unknown): Extract<GatewayDecision, { accepted: false }> {
+function decisionFor(error: unknown, peerPrincipal = false): Extract<GatewayDecision, { accepted: false }> {
   if (error instanceof ConsentOwnerError) return { accepted: false, code: "conflict", ownerHost: error.ownerHost };
   if (!(error instanceof BridgeError)) return { accepted: false, code: "rejected" };
   if (error.code.includes("NOT_FOUND") || error.code.includes("NOT_AVAILABLE")) {
@@ -276,7 +283,7 @@ function decisionFor(error: unknown): Extract<GatewayDecision, { accepted: false
   if (error.code.includes("UNAVAILABLE") || error.code.includes("OFFLINE") || error.code.includes("UNOBSERVED")) {
     return { accepted: false, code: "unavailable" };
   }
-  if (error.code.includes("MISMATCH") || error.code.includes("ADDRESS")) {
+  if ((peerPrincipal && error.code === "ROUTE_UNREGISTERED") || error.code.includes("MISMATCH") || error.code.includes("ADDRESS")) {
     return { accepted: false, code: "route_mismatch" };
   }
   return { accepted: false, code: "rejected" };
@@ -340,6 +347,10 @@ function peerCatalogViewChanged(prior: PeerCatalogResult | undefined, current: P
   return prior === undefined || view(prior) !== view(current);
 }
 
+function peerHandle(uid: number, alias: string, token: string): string {
+  return `peer:${createHash("sha256").update(`${uid}\0${alias}\0${token}`).digest("hex")}`;
+}
+
 export class GatewayService {
   readonly config: GatewayConfig;
   readonly store: GatewayStore;
@@ -352,6 +363,7 @@ export class GatewayService {
   private readonly spawnPeer: typeof spawnPeerClient;
   private readonly peerClients = new Map<string, PeerClient>();
   private readonly peerCatalogs = new Map<string, PeerCatalogResult>();
+  private readonly peerCleanupAliases = new Set<string>();
   /** View-only freshness; never consulted by routing or write authorization. */
   private readonly peerRouteViews = new Map<string, GatewayAdapterRouteObservation>();
   private readonly connectors = new Map<string, ConnectorRuntime>();
@@ -528,7 +540,7 @@ export class GatewayService {
   }
 
   handlers(): GatewayControlHandlers {
-    const decide = async (operation: () => Promise<void>): Promise<GatewayDecision> => {
+    const decide = async (operation: () => Promise<void>, peerPrincipal = false): Promise<GatewayDecision> => {
       try {
         this.assertWritable();
         await operation();
@@ -536,12 +548,23 @@ export class GatewayService {
         await this.publish();
         return { accepted: true, code: "ok" };
       } catch (error) {
-        return decisionFor(error);
+        return decisionFor(error, peerPrincipal);
       }
     };
     return {
       health: () => ({ status: this.health(), revision: this.revision }),
       registerCodex: (params) => decide(async () => this.registerCodex(params)),
+      registerPeer: async (params): Promise<GatewayRegisterPeerResult> => {
+        try {
+          this.assertWritable();
+          const token = await this.registerPeer(params);
+          this.revision += 1; await this.publish();
+          return token === undefined ? { accepted: true, code: "ok" } : { accepted: true, code: "ok", token };
+        } catch (error) { return decisionFor(error, true); }
+      },
+      unregisterPeer: (params) => decide(async () => this.unregisterPeer(params), true),
+      awaitPeer: (params) => this.awaitPeer(params),
+      peerReceipt: (params) => decide(async () => this.peerReceipt(params), true),
       unregisterCodex: (params) => decide(async () => this.unregisterCodex(params)),
       removeCodexRegistration: (params) =>
         decide(async () => this.removeCodexRegistration(params.alias)),
@@ -846,8 +869,8 @@ export class GatewayService {
     );
   }
 
-  private reconcileUnadvertisement(route: GatewayPrivateRouteInspection): void {
-    void this.unadvertise(route).catch((error) =>
+  private async reconcileUnadvertisement(route: GatewayPrivateRouteInspection): Promise<void> {
+    await this.unadvertise(route).catch((error) =>
       this.alert("NATIVE_UNADVERTISEMENT_FAILED", route, error),
     );
   }
@@ -870,7 +893,7 @@ export class GatewayService {
     if (releaseProviderRoute) {
       await this.adapterFor(route.binding)?.releaseRoute?.(route.binding.routeHandle);
     } else {
-      this.reconcileUnadvertisement(route);
+      await this.reconcileUnadvertisement(route);
     }
   }
 
@@ -955,6 +978,73 @@ export class GatewayService {
     this.observeRoute(installed);
     this.reconcileAdvertisement(installed);
     this.kick(params.alias);
+  }
+
+  private async registerPeer(params: RegisterPeerParams): Promise<string | undefined> {
+    if (this.peerCleanupAliases.has(params.alias)) {
+      throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
+    }
+    const existing = await this.store.inspectPrivateRoute(params.alias);
+    if (existing !== undefined) {
+      if (params.token === undefined) throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+      await this.assertPeer({ alias: params.alias, token: params.token });
+      this.observeRoute(existing); this.reconcileAdvertisement(existing);
+      this.kick(existing.alias, existing.binding.registrationId);
+      return undefined;
+    }
+    if (params.token !== undefined || !params.alias.endsWith(`@${this.config.hostId ?? this.config.allowedHosts[0]}`)) {
+      throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+    }
+    const token = `peer_${randomBytes(24).toString("base64url")}`;
+    await this.store.registerRoute({ alias: params.alias, binding: {
+      provider: "peer", hostId: this.config.hostId ?? this.config.allowedHosts[0]!,
+      routeHandle: peerHandle(process.getuid!(), params.alias, token), registrationId: registrationId(),
+    }, registrationMode: "explicit_opt_in" });
+    const installed = (await this.store.inspectPrivateRoute(params.alias))!;
+    this.observeRoute(installed); this.reconcileAdvertisement(installed);
+    return token;
+  }
+
+  private async assertPeer(params: PeerPrincipalParams): Promise<GatewayPrivateRouteInspection> {
+    const route = await this.store.inspectPrivateRoute(params.alias);
+    const expected = Buffer.from(peerHandle(process.getuid!(), params.alias, params.token));
+    const actualHandle = route?.binding.provider === "peer" && /^peer:[0-9a-f]{64}$/.test(route.binding.routeHandle)
+      ? route.binding.routeHandle : `peer:${"0".repeat(64)}`;
+    const matches = timingSafeEqual(Buffer.from(actualHandle), expected);
+    if (!PEER_TOKEN.test(params.token) || route?.binding.provider !== "peer" || !matches) {
+      throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+    }
+    return route;
+  }
+
+  private async unregisterPeer(params: PeerPrincipalParams): Promise<void> {
+    const route = await this.assertPeer(params);
+    if (this.peerCleanupAliases.has(route.alias)) throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
+    this.peerCleanupAliases.add(route.alias);
+    try {
+      const result = await this.store.removeOwnedRouteAtomic({ alias: route.alias, binding: route.binding });
+      if (!result.removed) throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+      await this.finishSettlements(result.settlements); this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
+      this.forgetRoute(route); await this.reconcileUnadvertisement(route);
+    } finally { this.peerCleanupAliases.delete(route.alias); }
+  }
+
+  private async awaitPeer(params: PeerPrincipalParams): Promise<PeerMailboxAwaitResult> {
+    this.assertWritable();
+    const route = await this.assertPeer(params);
+    const adapter = this.adapterFor(route.binding) as LocalPeerMailboxProvider | undefined;
+    if (adapter?.awaitMessage === undefined) throw new BridgeError("PROVIDER_UNAVAILABLE", "The provider is unavailable.", true);
+    const pending = adapter.awaitMessage({ alias: route.alias, ...route.binding });
+    this.kick(route.alias, route.binding.registrationId);
+    return await pending;
+  }
+
+  private async peerReceipt(params: PeerReceiptParams): Promise<void> {
+    const route = await this.assertPeer(params);
+    const adapter = this.adapterFor(route.binding) as LocalPeerMailboxProvider | undefined;
+    if (adapter?.acknowledgeReceipt({ alias: route.alias, ...route.binding, receipt: params.receipt }) === "rejected") {
+      throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+    }
   }
 
   private async unregisterCodex(params: UnregisterCodexParams): Promise<void> {
@@ -1108,8 +1198,11 @@ export class GatewayService {
   private async sendToClaude(params: ValidatedSendToClaudeParams): Promise<GatewaySendResult> {
     try {
       this.assertWritable();
-      const source = await this.assertThread(params.fromAlias, params.threadId);
-      const target = await this.resolveSelectedClaudeRoute(params.toAlias);
+      const source = "peerToken" in params && params.peerToken !== undefined
+        ? await this.assertPeer({ alias: params.fromAlias, token: params.peerToken })
+        : await this.assertThread(params.fromAlias, params.threadId);
+      const direct = await this.store.inspectPrivateRoute(params.toAlias);
+      const target = direct?.binding.provider === "peer" ? direct : await this.resolveSelectedClaudeRoute(params.toAlias);
       if (target === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
       return await this.enqueueConversation({
         sourceAlias: params.fromAlias,
@@ -1123,7 +1216,7 @@ export class GatewayService {
           : { trackIdleMinutes: params.trackIdleMinutes }),
       });
     } catch (error) {
-      return decisionFor(error);
+      return decisionFor(error, "peerToken" in params);
     }
   }
 
@@ -1131,21 +1224,22 @@ export class GatewayService {
     try {
       this.assertWritable();
       let source: GatewayPrivateRouteInspection | undefined;
-      if (params.replyAddress === undefined) {
+      if ("peerToken" in params && params.peerToken !== undefined) {
+        source = await this.assertPeer({ alias: params.fromAlias, token: params.peerToken });
+      } else if (params.replyAddress === undefined) {
         throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The inherited reply capability is required.");
+      } else {
+        const resolved = await this.claudeAdapter(aliasHost(params.fromAlias))?.resolveReplyAddress?.(params.replyAddress);
+        if (resolved === undefined) throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The reply capability is stale.");
+        source = (await this.store.listLogicalRoutes()).find((route) => route.binding.provider === "claude" &&
+          route.alias === params.fromAlias && route.binding.routeHandle === resolved.routeHandle);
+        if (source === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The reply route is not selected.");
       }
-      const adapter = this.claudeAdapter(aliasHost(params.fromAlias));
-      const resolved = await adapter?.resolveReplyAddress?.(params.replyAddress);
-      if (resolved === undefined) throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The reply capability is stale.");
-      source = (await this.store.listLogicalRoutes()).find(
-        (route) =>
-          route.binding.provider === "claude" &&
-          route.alias === params.fromAlias &&
-          route.binding.routeHandle === resolved.routeHandle,
-      );
-      if (source === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The reply route is not selected.");
       const target = await this.store.inspectPrivateRoute(params.toAlias);
       if (source === undefined || target === undefined) {
+        throw new BridgeError("ROUTE_NOT_AVAILABLE", "The selected route is absent.");
+      }
+      if (target.binding.provider !== "codex" && target.binding.provider !== "peer") {
         throw new BridgeError("ROUTE_NOT_AVAILABLE", "The selected route is absent.");
       }
       return await this.enqueueConversation({
@@ -1160,7 +1254,7 @@ export class GatewayService {
           : { trackIdleMinutes: params.trackIdleMinutes }),
       });
     } catch (error) {
-      return decisionFor(error);
+      return decisionFor(error, "peerToken" in params);
     }
   }
 
@@ -1216,7 +1310,7 @@ export class GatewayService {
         existingConversation: conversation,
       });
     } catch (error) {
-      return decisionFor(error);
+      return decisionFor(error, params.caller.kind === "peer");
     }
   }
 
@@ -1248,6 +1342,7 @@ export class GatewayService {
         throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The reply capability is stale.");
       }
     }
+    if (caller.kind === "peer") await this.assertPeer({ alias: caller.alias, token: caller.token });
     return route.binding;
   }
 
@@ -1280,6 +1375,8 @@ export class GatewayService {
           : undefined;
     const sourceBinding = input.expectedSourceBinding ?? conversationSourceBinding ?? source?.binding;
     const targetBinding = input.expectedTargetBinding ?? conversationTargetBinding ?? target?.binding;
+    const steer = input.text.startsWith("STEER:") && this.config.steeringEnabled &&
+      sourceBinding?.provider === "claude" && targetBinding?.provider === "codex";
     if (
       input.existingConversation === undefined &&
       this.conversations.size >= MAX_CONVERSATIONS &&
@@ -1323,9 +1420,7 @@ export class GatewayService {
               expectedSourceRegistrationId: sourceBinding.registrationId,
               expectedTargetRegistrationId: targetBinding.registrationId,
             }),
-        ...(input.text.startsWith("STEER:") && this.config.steeringEnabled
-          ? { steer: true as const }
-          : {}),
+        ...(steer ? { steer: true as const } : {}),
       });
     } catch (error) {
       this.restoreProgressWatch(
@@ -1353,9 +1448,7 @@ export class GatewayService {
     if (enqueued.supersededSettlement !== undefined) {
       await this.finishSettlement(enqueued.supersededSettlement);
     }
-    if (input.text.startsWith("STEER:") && this.config.steeringEnabled) {
-      this.kickSteer(input.targetAlias);
-    }
+    if (steer) this.kickSteer(input.targetAlias);
     this.kick(input.targetAlias);
     this.scheduleWake();
     return {
@@ -1706,7 +1799,7 @@ export class GatewayService {
           },
           onAccepted: async (evidence) => {
             if (
-              target.binding.provider !== "codex" ||
+              (target.binding.provider !== "codex" && target.binding.provider !== "peer") ||
               evidence.attemptId !== attempt.attemptId
             ) {
               throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The provider accepted another attempt.");
@@ -1929,7 +2022,7 @@ export class GatewayService {
       registrationId: `native_${bodyHash(`${event.endpoint.routeHandle}\0${event.sourceAlias}`).slice(0, 32)}`,
     };
     const conversationId = createGatewayConversationId();
-    const steer = event.text.startsWith("STEER:") && this.config.steeringEnabled;
+    const steer = target.binding.provider === "codex" && event.text.startsWith("STEER:") && this.config.steeringEnabled;
     this.assertWritable();
     const enqueued = await this.store.enqueueNativeIngress({
       source: { alias: event.sourceAlias, binding: sourceBinding },
@@ -2522,7 +2615,7 @@ export class GatewayService {
           routes = [...reconciled.routes]; await this.finishSettlements(reconciled.settlements);
           for (const old of before) if (!routes.some((route) => route.alias === old.alias &&
             route.binding.registrationId === old.binding.registrationId)) {
-            this.peerRouteViews.delete(old.alias); this.reconcileUnadvertisement(old);
+            this.peerRouteViews.delete(old.alias); await this.reconcileUnadvertisement(old);
           }
           for (const route of routes) if (!before.some((old) => old.alias === route.alias &&
             old.binding.registrationId === route.binding.registrationId)) this.reconcileAdvertisement(route);

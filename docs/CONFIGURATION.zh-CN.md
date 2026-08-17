@@ -1,6 +1,6 @@
 # 配置与提供方契约
 
-Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇集所有变量、提供方传输契约、提供方运行时规则与寻址模型。没有配置文件；所有值均为环境变量或 CLI 标志。
+Embassy 主要通过各命令启动时读取的环境变量进行配置。本文档汇集所有变量、提供方传输契约、提供方运行时规则与寻址模型。除下文所述的私有 `nodes.json` 联合清单外，所有值均为环境变量或 CLI 标志。
 
 ---
 
@@ -14,7 +14,9 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
 | `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes` 与 `TRACK:` 开启请求会被拒绝。活跃监视只存在于内存中，并随代理进程结束；重启后绝不恢复。没有活跃监视时，`DONE:` 不产生作用；`untrack` 不会因开关而被特别拒绝，而是返回 `NOT_FOUND`。取值只能是 `1` 或 `0`，其他值均为配置错误 |
 | `EMBASSY_LOCALE` | `en` | CLI 输出语言，精确取值 `en` 或 `zh-CN`。`--lang` 标志会覆盖当次调用；未设置或为空表示 `en`，其他任何取值都是参数错误 |
-| `EMBASSY_HOSTS` | `this-mac` | 以逗号分隔的 1 到 32 个唯一小写主机别名。**v1 启动器只接受单个精确值 `this-mac`**：任何其他列表——包括包含 `this-mac` 的更长列表——都会让 `embassy serve` 以 `GATEWAY_REMOTE_PROVIDER_DISABLED` 关闭失败。该变量是为推迟的远程领事馆功能预留的，目前没有可用的设置 |
+| `EMBASSY_HOSTS` | `this-mac` | 保留的旧版主机列表解析器：取值仍必须是 1 到 32 个唯一小写别名，但不构成联合权限。没有 `nodes.json` 时，无论此值为何，`serve` 都保持仅本地的 `this-mac`。已配置 `nodes.json` 时，显式设置此变量会以 `INVALID_GATEWAY_CONFIGURATION` 关闭失败 |
+
+联合权限仅来自 `EMBASSY_STATE_DIR` 中的 `nodes.json`。它必须是当前用户所有的 mode-0600 普通文件，且对象形状必须精确为 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`。`host` 指定当前代理；`nodes` 包含 1 到 31 个唯一的 OpenSSH 别名，不得包含 `host`，使联合总主机数不超过 32。每个列出的节点都是 `embassy peer-stdio` 的固定 SSH 目的地。文件缺失时，代理保持仅本地的 `this-mac`。
 
 ### 离线状态升级
 
@@ -56,7 +58,7 @@ embassy convert-state-v2-to-v3
 
 初始发送方从 CLI 结果获得完整 `conv_` 令牌，接收方则从入站消息的来源封装和回复提示中获得同一个令牌。令牌是内存中的参与方范围定位符，不是权限凭据：每次 `reply` 都会重新检查调用方身份、参与关系和实时路由。代理重启后令牌不再存在；路由失效或身份替换后，也不得重试或重构旧令牌。
 
-公开发布的启动器仅接受主机 `this-mac`；远程连接器仍是未来功能。因此 `register-codex` 提供可选的 `--host <id>`，但代理只会接纳 `this-mac`，而且别名必须以 `@<id>` 结尾才能匹配。`--host` 与 `--succeeds` 互斥，后者始终继承被接替别名的主机。
+公开发布的启动器仍绑定本地主机。在已实现的 SSH 许可清单联合模式下，每个代理只服务一个本地主机身份，并仅与已配置的 Embassy 节点交换有界路由目录和由目的地负责的交接。`register-codex` 仍是本地任务注册；其可选的 `--host <id>` 与别名后缀必须指向该代理的本地主机。`--host` 仍与 `--succeeds` 互斥，后者始终继承被接替别名的主机。
 
 ## Claude Code 自身的设置：`crossSessionInbound`
 
@@ -66,7 +68,7 @@ embassy convert-state-v2-to-v3
 
 ## 提供方与运行时契约
 
-Embassy 路由四种提供方：Claude 使用对等协议 1，Codex 使用托管 App Server，DeepSeek 与 Grok Build 使用 ACP v1。发布版自有的[支持矩阵](../support/provider-support-matrix.json)记录离线测试的精确构件、协议、能力、停止保真度、限制与测试日期；运行时从不导入它。构建或版本事实可以限定发布版“已测试”的说法，但绝不授予或撤销路由权限。
+Embassy 路由五种提供方：Claude 使用对等协议 1，Codex 使用托管 App Server，DeepSeek 与 Grok Build 使用 ACP v1，通用 shell 对等方使用私有控制套接字。发布版自有的[支持矩阵](../support/provider-support-matrix.json)记录离线测试的精确构件、协议、能力、停止保真度、限制与测试日期；运行时从不导入它。构建或版本事实可以限定发布版“已测试”的说法，但绝不授予或撤销路由权限。
 
 运行时采用尽力而为模式：显式同意边加上精确自有路由/会话身份会授权一次尝试。当前逐操作传输、被消费协议字段的严格结构与相关操作决定结果。接口变化或可选提供方缺失会显示为提供方局部的降级/离线健康度与精确安全代码；它不会产生兼容性等级，也不会阻止其他提供方。
 
@@ -83,3 +85,9 @@ Claude 会话通过其当前的 `name@host` 或用户提供的原生会话 UUID 
 名称、旧名称、PID、注册表路径、进程生成号和套接字生成号绝不会成为替代身份键。当两个在线会话共享同一当前名称时，Embassy 拒绝猜测。
 
 Codex 路由使用显式的 `codex-*` 别名和任务继承的线程标识。私有线程 ID 从不作为命令行参数接受，也从不打印。注册时不执行 App Server 操作。每次投递都会打开并验证新的托管传输，初始化后在不读取历史的前提下恢复精确任务，并仅授权一次正文写入。App Server、桌面应用或代理重启不会改变逻辑路由权限，也无需重新注册。当前任务不可用或不可观察时，尝试会报告操作级安全代码，而注册和同意边仍会保留。
+
+Shell 路由使用 `peer-*` 别名与注册时铸造的 `peer_` 令牌。Broker 只持久化
+其 UID/别名/令牌哈希路由句柄，绝不持久化原始令牌。认证调用使用
+`--token-stdin` 在标准输入第一行提供令牌；携带正文的调用将其余字节作为
+正文。`--emit-env` 仍可供稳定 shell harness 选择使用。这里没有 PID 绑定、
+令牌文件、Keychain 条目、守护进程或其他持久化路径。

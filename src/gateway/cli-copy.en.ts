@@ -20,6 +20,12 @@ Commands:
                          Open live status and bounded route consent
   register-codex         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task
+  register-peer --alias <peer-alias> [--token-stdin|--emit-env]
+                         Register a universal shell peer
+  unregister-peer --alias <peer-alias> [--token-stdin]
+                         Unregister a universal shell peer
+  await --alias <peer-alias> [--token-stdin]
+                         Wait for one peer message and acknowledge stdout
   select-claude          Select a discovered Claude session
   unselect-claude        Clear the Claude selection
   pair [--from <alias> --to <alias>] Add one cross-provider consent edge
@@ -33,6 +39,8 @@ Commands:
 
 Options:
   --lang en|zh-CN        Localize user-facing text
+  --token-stdin          Read the peer token as the first LF-terminated stdin line
+  --emit-env             Print the first registration token as an export command
   --port <n>             Live dashboard port, 1024–65535 (default 41961)
   --version, -v          Print the version
   --help, -h             Show this help

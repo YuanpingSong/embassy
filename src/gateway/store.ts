@@ -37,6 +37,7 @@ const ALIAS_PATTERN =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const PRIVATE_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const PEER_ROUTE_HANDLE_PATTERN = /^peer:[0-9a-f]{64}$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const MESSAGE_ID_PATTERN =
   /^msg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -136,6 +137,8 @@ function isRoute(value: unknown): value is GatewayRouteRecord {
     isLogicalBinding(value.binding) &&
     typeof value.registrationMode === "string" &&
     REGISTRATION_MODES.has(value.registrationMode) &&
+    (value.binding.provider !== "peer" || value.registrationMode === "federated_peer" ||
+      PEER_ROUTE_HANDLE_PATTERN.test(value.binding.routeHandle)) &&
     typeof value.enabled === "boolean" &&
     (value.busyPolicy === "queue" || value.busyPolicy === "refuse") &&
     isIsoTimestamp(value.registeredAt) &&
@@ -240,6 +243,7 @@ function isPrepared(value: unknown): value is GatewayPreparedWriteEvidence {
       value.kind === "codex_turn_start" ||
       value.kind === "codex_turn_steer" ||
       value.kind === "acp_prompt" ||
+      value.kind === "peer_mailbox" ||
       value.kind === "peer_handoff") &&
     isPositiveInteger(value.bodyBytes) &&
     typeof value.bodySha256 === "string" &&
@@ -260,6 +264,7 @@ function expectedPreparedKind(
   if (target === "codex") {
     return message.steer === true ? "codex_turn_steer" : "codex_turn_start";
   }
+  if (target === "peer") return "peer_mailbox";
   return "acp_prompt";
 }
 function isAttemptAuthority(value: Record<string, unknown>): boolean {
@@ -1918,6 +1923,8 @@ export class GatewayStore {
       !ALIAS_PATTERN.test(input.alias) ||
       !isLogicalBinding(input.binding) ||
       !REGISTRATION_MODES.has(input.registrationMode) ||
+      (input.binding.provider === "peer" && input.registrationMode !== "federated_peer" &&
+        !PEER_ROUTE_HANDLE_PATTERN.test(input.binding.routeHandle)) ||
       !input.alias.endsWith(`@${input.binding.hostId}`) ||
       !this.config.allowedHosts.includes(input.binding.hostId) ||
       !routeModeMatchesHost(input, localHost)

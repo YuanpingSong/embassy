@@ -98,7 +98,7 @@ PONG
 });
 
 test("covers every distinct provider pair through its recipient profile", () => {
-  const providers = ["codex", "claude", "deepseek", "grok"] as const satisfies
+  const providers = ["codex", "claude", "deepseek", "grok", "peer"] as const satisfies
     readonly GatewayProvider[];
 
   for (const sourceProvider of providers) {
@@ -124,7 +124,7 @@ test("covers every distinct provider pair through its recipient profile", () => 
         ),
       );
       assert.equal(
-        envelope.match(/ from-provider="(?:codex|claude|deepseek|grok)"/gu)
+        envelope.match(/ from-provider="(?:codex|claude|deepseek|grok|peer)"/gu)
           ?.length,
         1,
       );
@@ -141,6 +141,12 @@ test("provider attribution is independent of alias spelling", () => {
   assert.ok(envelope.includes(' from-name="codex-looking@this-mac"'));
   assert.ok(envelope.includes(' from-provider="deepseek"'));
   assert.doesNotMatch(envelope, / from-provider="codex"/u);
+});
+
+test("peer provenance permits its store-vetted same-provider route", () => {
+  assert.match(compose({ sourceProvider: "peer", recipientProvider: "peer",
+    sourceAlias: "peer-a@one-mac", targetAlias: "peer-b@two-mac" }),
+  /from-provider="peer"/u);
 });
 
 test("adds one broker-owned track marker for an active progress watch", () => {
@@ -322,7 +328,7 @@ test("rejects a raw body over 16 KiB by UTF-8 bytes", () => {
 test("rejects invalid providers, aliases, conversation tokens, and body types", () => {
   const invalidInputs: ComposeProvenanceEnvelopeInput[] = [
     {
-      sourceProvider: "peer" as GatewayProvider,
+      sourceProvider: "unknown" as GatewayProvider,
       recipientProvider: "codex",
       sourceAlias: "embassy-pm@this-mac",
       targetAlias: "codex-main@this-mac",
@@ -385,7 +391,7 @@ test("rejects invalid providers, aliases, conversation tokens, and body types", 
       "PROVENANCE_ENVELOPE_INVALID",
     );
   }
-  for (const recipientProvider of ["claude", "deepseek", "grok"] as const) {
+  for (const recipientProvider of ["claude", "deepseek", "grok", "peer"] as const) {
     assertBridgeError(
       () =>
         compose({

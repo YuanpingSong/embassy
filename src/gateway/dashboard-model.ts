@@ -505,6 +505,7 @@ export const DASHBOARD_SEMANTICS = Object.freeze({
     codex: "activity.meaning.delivered.toCodex",
     deepseek: "activity.meaning.delivered.toDeepSeek",
     grok: "activity.meaning.delivered.toGrok",
+    peer: "activity.meaning.delivered.toPeer",
   },
   deliveryMeaningBySafeErrorCode: {
     SENDER_NOT_PAIRED: "activity.meaning.senderNotPaired",

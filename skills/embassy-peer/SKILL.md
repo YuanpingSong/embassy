@@ -1,19 +1,19 @@
 ---
 name: embassy-peer
-description: Operate Embassy through current name@host or Claude session-UUID selectors. Use when a Codex task needs to register for native inbound messaging, list available peers, refresh the operator's static dashboard, pair with and message a Claude session, or unregister without exposing provider credentials, socket paths, or message bodies.
+description: Operate Embassy through current name@host or Claude session-UUID selectors and universal peer-* shell routes. Use when an agent needs to register for inbound messaging, await shell-peer mail, list available peers, refresh the operator's static dashboard, manage a Codex-attested pair, send or reply under its own principal, or unregister without exposing provider credentials, socket paths, or message bodies.
 ---
 
 # Embassy Peer Gateway
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Provider-authorized mutations require exactly one inherited principal. Stop on missing or dual Codex/Claude identity; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. `pair` and `unpair` carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the operator-facing live dashboard creates or removes an edge without that task attestation.
+Provider-authorized operations require exactly one principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting principal; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. A shell-peer token authorizes only that peer's send, reply, await, receipt, and unregister operations; it never authorizes `pair` or `unpair`. Those commands carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the operator-facing live dashboard creates or removes an edge without that task attestation.
 
 If `CALLER_IDENTITY_CONFLICT` reports that both agent identities were inherited, explain that the Codex App Server daemon may have been started inside an agent session. Tell the operator to run `codex app-server daemon restart` from a normal terminal. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
 
 ## Select a peer
 
-Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. The shipped launcher accepts only `this-mac`; remote connectors are deferred. Ask the user to choose a selector when it is ambiguous.
+Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. A broker without a federation inventory defaults to `this-mac`; configured allowlisted Embassy nodes exchange bounded public route catalogs and destination-owned handoffs over fixed attach-only SSH. Ask the user to choose a selector when it is ambiguous.
 
 Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
 
@@ -31,7 +31,7 @@ embassy health
 
 If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
-Embassy presents Claude, Codex, DeepSeek, and Grok as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
+Embassy presents Claude, Codex, DeepSeek, Grok, and shell peers as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
 
 List the public snapshot:
 
@@ -46,6 +46,34 @@ embassy refresh-dashboard
 ```
 
 Run that refresh only at the passive-discovery authorization stage. Treat the response as a normalized refresh result; it does not reveal the path. The operator-facing page is `gateway-dashboard.html` in the configured state directory, by default `~/.local/state/agent-embassy/`. Use the operator's configured location when it differs. Do not search for the file or scan controller-owned paths.
+
+## Register and await as a shell peer
+
+Register a shell-fresh harness under a `peer-*` alias:
+
+```sh
+embassy register-peer --alias peer-reviewer@this-mac
+```
+
+The result prints the raw `peer_` token exactly once. Retain it only in the
+agent's context. Do not put it in argv, a file, Keychain, logs, or prose. The
+broker persists only the UID/alias/token hash route handle, never the token.
+There is no PID binding or helper daemon.
+
+For every later peer-authenticated command, use `--token-stdin`: the first
+stdin line is the exact token, and any remaining bytes are the message body.
+Do not combine it with an inherited Codex identity, Claude identity, or
+`EMBASSY_PEER_TOKEN`. `register-peer --emit-env` is available only when a
+harness genuinely retains one stable shell; stdin is the universal floor.
+
+To receive one framed message, run `embassy await --alias
+peer-reviewer@this-mac --token-stdin` with the token and trailing newline on
+stdin. The CLI performs bounded 30-second long polls, writes the complete frame
+to stdout, flushes it, then acknowledges its private receipt. Run at most one
+waiter for that registration; the broker allows 16 globally. A missing receipt
+is terminal `unconfirmed`, post-arm uncertainty is terminal `ambiguous`, and
+neither may be retried automatically. Unregister with `unregister-peer` under
+the same alias/token principal.
 
 ## Pair providers
 

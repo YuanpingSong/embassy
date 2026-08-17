@@ -1,8 +1,9 @@
 # Embassy Gateway Architecture
 
 Status: local bidirectional routing is implemented for Claude, Codex, DeepSeek,
-and Grok. Remote connectors remain deferred. The published package supports
-macOS, the only platform exercised end to end so far.
+Grok, and universal shell peers. Configured Embassy nodes federate allowlisted
+named routes over a fixed attach-only SSH transport. The published package
+supports macOS, the only platform exercised end to end so far.
 
 This document uses four evidence labels:
 
@@ -177,7 +178,8 @@ The status below is intentionally narrower than the target architecture.
 | Claude current-user runtime roots | **Implemented**; derives the registry and callback roots from the verified OS user without inspecting a launcher or configuration file |
 | Stateless allowlisted Codex App Server transport with bounded busy behavior | **Implemented**; every operation opens and attests its own transport, and the conformance suite covers idle gating, exact `STEER:` behavior, clean retry, and ambiguous no-replay settlement |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
-| Local provider adapters | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, and lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup; remote adapters remain disabled |
+| Local provider adapters and Embassy-node federation | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup, plus bounded catalog reconciliation and destination-owned handoff over the fixed attach-only SSH transport |
+| Universal shell peer mailbox | **Implemented**, alias-plus-token same-UID attribution, hash-only durable ownership, bounded long polling, stdout-flush receipts, and restart uncertainty tests; no PID binding, token file, Keychain entry, or daemon |
 | Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and restart attempt-phase tests |
 | Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v3 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
@@ -851,7 +853,7 @@ Each page assembles seven sections:
 - **Progress supervision** — active progress watches and their state.
 - **Operator activity** — the broker's bounded public journal of accepted
   operator actions.
-- **Sessions** — first-class Claude, Codex, DeepSeek, and Grok provider rows,
+- **Sessions** — first-class Claude, Codex, DeepSeek, Grok, and shell-peer provider rows,
   aliases, host, route state, and queue depth.
 - **Diagnostics** — best-effort observed metadata, per-host connector health,
   last safe code, deadline-pressure buckets, accounting totals, and the

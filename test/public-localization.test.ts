@@ -76,6 +76,32 @@ test("Simplified Chinese README preserves the complete executable contract", asy
   assert.equal(chinese.includes("```markdown"), false);
 });
 
+test("public locales describe universal shell peer identity and receipt semantics", async () => {
+  const [english, chinese, delivery, chineseDelivery] = await Promise.all([
+    readPublicFile("README.md"),
+    readPublicFile("README.zh-CN.md"),
+    readPublicFile("docs/DELIVERY.md"),
+    readPublicFile("docs/DELIVERY.zh-CN.md"),
+  ]);
+  for (const document of [english, chinese]) {
+    for (const token of [
+      "peer-*",
+      "register-peer",
+      "--token-stdin",
+      "--emit-env",
+      "embassy await",
+      "unconfirmed",
+      "ambiguous",
+    ]) assert.ok(document.includes(token), token);
+    assert.match(document, /30[- 秒]second|30 秒/u);
+    assert.match(document, /stdout/);
+  }
+  assert.match(delivery, /PEER_NOT_AWAITING/);
+  assert.match(delivery, /One waiter.*16 globally/);
+  assert.match(chineseDelivery, /PEER_NOT_AWAITING/);
+  assert.match(chineseDelivery, /每条注册路由允许一个等待者，全局最多 16 个/);
+});
+
 test("progress-watch docs state disabled and idle-timeout behavior exactly", async () => {
   const [englishConfig, chineseConfig, architecture, englishReadme, chineseReadme] =
     await Promise.all([

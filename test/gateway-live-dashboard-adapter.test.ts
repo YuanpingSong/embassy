@@ -1345,6 +1345,10 @@ test("delivered hover meaning localizes by direction, other states do not", () =
     "activity.meaning.delivered.toGrok",
   );
   assert.equal(
+    bundle.Embassy.deliveryMeaningKey("delivered", "codex_to_peer"),
+    "activity.meaning.delivered.toPeer",
+  );
+  assert.equal(
     bundle.Embassy.deliveryMeaningKey("delivered"),
     "activity.meaning.delivered",
   );
@@ -1367,7 +1371,7 @@ test("overviewProps composes the status strip, queues and attention", () => {
   assert.equal(data.statusStrip.broker, "degraded");
   assert.deepEqual(
     plain(data.statusStrip.providers).map((row) => [row.provider, row.health]),
-    [["claude", "degraded"], ["codex", "offline"], ["deepseek", undefined], ["grok", undefined]],
+    [["claude", "degraded"], ["codex", "offline"], ["deepseek", undefined], ["grok", undefined], ["peer", undefined]],
   );
   const queues = new Map(data.providerQueues.map((row) => [row.provider, row.queue]));
   assert.equal(queues.get("codex")?.depth, 5);
@@ -1390,7 +1394,7 @@ test("overviewProps on a healthy exchange reports no attention and a live pair",
   assert.equal(data.statusStrip.broker, "healthy");
   assert.deepEqual(
     plain(data.statusStrip.providers).map((row) => row.provider),
-    ["claude", "codex", "deepseek", "grok"],
+    ["claude", "codex", "deepseek", "grok", "peer"],
   );
   assert.equal(data.graph.readyConsentEdgeCount, 1);
   assert.equal(data.degradedConsentEdgeCopyKey, undefined);
@@ -1494,7 +1498,7 @@ test("empty peers, routes, connectors and activity produce empty props, never a 
   assert.equal(overview.statusStrip.broker, "connecting");
   assert.deepEqual(
     plain(overview.statusStrip.providers).map((row) => [row.provider, row.health]),
-    [["claude", undefined], ["codex", undefined], ["deepseek", undefined], ["grok", undefined]],
+    [["claude", undefined], ["codex", undefined], ["deepseek", undefined], ["grok", undefined], ["peer", undefined]],
   );
   assert.equal(overview.attention.length, 0);
   assert.equal(overview.attentionOmitted, 0);
@@ -1502,7 +1506,7 @@ test("empty peers, routes, connectors and activity produce empty props, never a 
   assert.equal(overview.pulse.total, 0);
   assert.equal(overview.pulse.bars.length, 8);
   assert.equal(overview.pulse.isLowerBound, false);
-  assert.equal(overview.providerQueues.length, 4);
+  assert.equal(overview.providerQueues.length, 5);
   assert.equal(overview.providerQueues.every((row) => row.queue.depth === 0), true);
 
   const routes = adapter.routesProps(EMPTY, nowMs);

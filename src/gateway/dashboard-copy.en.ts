@@ -199,6 +199,8 @@ export const dashboardCopyEn = {
     "DeepSeek accepted the delivery. This does not mean the model completed or acted on it.",
   "activity.meaning.delivered.toGrok":
     "Grok Build accepted the delivery. This does not mean the model completed or acted on it.",
+  "activity.meaning.delivered.toPeer":
+    "The shell peer flushed the frame to stdout and acknowledged its receipt.",
   "activity.meaning.unconfirmed":
     "The transport write completed, but terminal native evidence was unavailable. Inspect the recipient before retrying.",
   "activity.meaning.ambiguous":
@@ -334,6 +336,7 @@ export const dashboardCopyEn = {
   "provider.codex": "Codex",
   "provider.deepseek": "DeepSeek",
   "provider.grok": "Grok Build",
+  "provider.peer": "Shell peer",
   "health.offline": "Offline",
   "health.connecting": "Connecting",
   "health.healthy": "Healthy",

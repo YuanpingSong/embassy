@@ -26,6 +26,8 @@ test("repo-scoped peer skill has complete discoverable metadata", async () => {
   assert.match(interfaceYaml, /display_name: "Embassy Peer Gateway"/);
   assert.match(interfaceYaml, /short_description: ".{25,64}"/);
   assert.match(interfaceYaml, /default_prompt: ".*\$embassy-peer.*"/);
+  assert.match(interfaceYaml, /shell peers safely/);
+  assert.match(interfaceYaml, /register this task or shell peer, await inbound mail/);
 });
 
 test("skill exposes only the stable gateway operating surface", async () => {
@@ -75,7 +77,13 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /old name stops resolving immediately/);
   assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
-  assert.match(skill, /Claude, Codex, DeepSeek, and Grok as first-class providers/);
+  assert.match(skill, /Claude, Codex, DeepSeek, Grok, and shell peers as first-class providers/);
+  assert.match(skill, /register-peer --alias peer-reviewer@this-mac/);
+  assert.match(skill, /first\s+stdin line is the exact token/);
+  assert.match(skill, /never the token/);
+  assert.match(skill, /There is no PID binding or helper daemon/);
+  assert.match(skill, /bounded 30-second long polls/);
+  assert.match(skill, /broker allows 16 globally/);
   assert.match(skill, /Runtime status is best-effort/);
   assert.match(skill, /observation freshness, connector health, observed metadata, and the last safe code/);
   assert.match(skill, /versions are diagnostic metadata, not routing authority/);

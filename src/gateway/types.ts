@@ -1,6 +1,6 @@
-export const gatewayProviders = ["claude", "codex", "deepseek", "grok"] as const;
+export const gatewayProviders = ["claude", "codex", "deepseek", "grok", "peer"] as const;
 export type GatewayProvider = (typeof gatewayProviders)[number];
-export const gatewayRegistrationIngressPrefixes = Object.freeze({ claude: undefined, codex: "codex-", deepseek: "dsh-", grok: "grok-" } satisfies Readonly<Record<GatewayProvider, string | undefined>>);
+export const gatewayRegistrationIngressPrefixes = Object.freeze({ claude: undefined, codex: "codex-", deepseek: "dsh-", grok: "grok-", peer: "peer-" } satisfies Readonly<Record<GatewayProvider, string | undefined>>);
 export const gatewayInboundModes = ["paired", "open"] as const;
 export type GatewayInboundMode = (typeof gatewayInboundModes)[number];
 export const connectorHealthStates = ["offline", "connecting", "healthy", "degraded"] as const;
@@ -111,6 +111,7 @@ export type GatewayPreparedWriteEvidence = {
     | "codex_turn_start"
     | "codex_turn_steer"
     | "acp_prompt"
+    | "peer_mailbox"
     | "peer_handoff";
   bodyBytes: number; bodySha256: string; frameBytes: number; sha256: string;
 };

@@ -9,7 +9,7 @@ tabs, request controls, bounded actions, and security caveat.
 
 ## Static dashboard
 
-Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of all four provider rows (Claude, Codex, DeepSeek, and Grok Build), connector health, exact named routes and consent edges, recent delivery states, queue depth, latency, and last safe codes.
+Open `gateway-dashboard.html` inside the configured state directory. It gives a metadata-only view of all five provider rows (Claude, Codex, DeepSeek, Grok Build, and shell peer), connector health, exact named routes and consent edges, recent delivery states, queue depth, latency, and last safe codes.
 
 Interpret queue and delivery by direction. Codex-bound ordinary work can wait
 for the task to become idle. Claude-bound work does not wait for Claude idle:
@@ -81,7 +81,7 @@ snapshot via same-origin `fetch`; after each bounded action it reads
 a fresh snapshot. A snapshot observation may settle already-due delivery
 deadlines before projecting state.
 
-App Server generations, re-anchors, and refreshes do not appear in Activity or grant route authority. The dashboard reports only best-effort runtime facts from the bounded public snapshot. That public snapshot remains schema version 2 even though the private native store is schema 3. Overview and Routes keep Claude, Codex, DeepSeek, and Grok Build visible even when a route or connector is absent; Deliveries filters by all four source and target providers; Diagnostics shows observed protocol/version metadata, current connector health, and the last safe code. Version metadata never changes route authority.
+App Server generations, re-anchors, and refreshes do not appear in Activity or grant route authority. The dashboard reports only best-effort runtime facts from the bounded public snapshot. That public snapshot remains schema version 2 even though the private native store is schema 3. Overview and Routes dynamically enumerate Claude, Codex, DeepSeek, Grok Build, and shell peer even when a route or connector is absent; Deliveries filters by all five source and target providers; Diagnostics shows observed protocol/version metadata, current connector health, and the last safe code. Raw peer tokens and private mailbox receipts never enter the public model. Version metadata never changes route authority.
 
 The Diagnostics registry block mirrors optional bounded `registry` observations on the Claude connector row: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. It derives “Parseable required fields observed”, “Empty since broker start”, or “No parseable record since broker start”. The last warning says that no Claude registry record with parseable required fields has been observed since broker start and that, if Claude is running, its registry layout may have changed; that possible layout change therefore cannot look like a healthy empty peer list. The dashboard never exposes retained native IDs, operation-local endpoint evidence, raw registry records, or the release-owned offline support matrix, and a later attempt never replays an uncertain message body.
 
