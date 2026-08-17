@@ -45,3 +45,22 @@ nodes.json changes).
 `eng/emb-84-v2` (+39 test lines, base e854d00). One live catalog
 verification round from this-mac authorized at freeze. Ships with emb-85
 as v1.9.3.
+
+## Gate rulings (v1 freeze, 2026-08-17)
+
+Independent gate: patch SHA verified, 573/573, accounting reproduced to
+the line. Taste: land-with-corrections (record-only). Rulings:
+
+1. **"See the broker's actual failure stage" is narrowed, accepted.**
+   control.ts:755 collapses every handler exception to HANDLER_FAILURE —
+   the peer channel cannot carry stage without touching the control
+   protocol. Ruled: for v1.9.3 the peer channel must distinguish exactly
+   three states (unreachable −32603 / not-configured −32001 / broker
+   refused −32000); the failure STAGE stays on the operator channel
+   (broker alerts), which is where the emb-83 diagnostic already proved
+   its worth. Stage propagation through the control protocol is declined
+   for now; revisit only if a live operator is actually confused.
+2. **The one-shot catalog cache** (initialize obtains catalog, first
+   catalog/get serves it, cleared thereafter) was unasked-for. Authorized
+   retroactively CONTINGENT on a test asserting the cached-then-cleared
+   sequence; otherwise remove it. Engineer's choice.
