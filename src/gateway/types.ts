@@ -7,21 +7,17 @@ export const connectorHealthStates = ["offline", "connecting", "healthy", "degra
 export type ConnectorHealth = (typeof connectorHealthStates)[number];
 export const routeStates = ["stale", "idle", "busy", "awaiting_approval", "offline", "disabled"] as const;
 export type RouteState = (typeof routeStates)[number];
-export const routeRegistrationModes = ["explicit_opt_in", "selected_live_peer"] as const;
+export const routeRegistrationModes = ["explicit_opt_in", "selected_live_peer", "federated_peer"] as const;
 export type RouteRegistrationMode = (typeof routeRegistrationModes)[number];
-export type MessageDirection = { [Source in GatewayProvider]: `${Source}_to_${Exclude<GatewayProvider, Source>}` }[GatewayProvider];
+export type MessageDirection = `${GatewayProvider}_to_${GatewayProvider}`;
 export type ParsedMessageDirection = Readonly<{ sourceProvider: GatewayProvider; targetProvider: GatewayProvider }>;
 export const isGatewayProvider = (value: unknown): value is GatewayProvider =>
   typeof value === "string" && (gatewayProviders as readonly string[]).includes(value);
 export function directionId(sourceProvider: GatewayProvider, targetProvider: GatewayProvider): MessageDirection {
-  if (sourceProvider === targetProvider) {
-    throw new RangeError("SAME_PROVIDER_DIRECTION");
-  }
   return `${sourceProvider}_to_${targetProvider}` as MessageDirection;
 }
 export const messageDirections = Object.freeze(gatewayProviders.flatMap(
-  (sourceProvider) => gatewayProviders.filter((targetProvider) => targetProvider !== sourceProvider)
-    .map((targetProvider) => directionId(sourceProvider, targetProvider)),
+  (sourceProvider) => gatewayProviders.map((targetProvider) => directionId(sourceProvider, targetProvider)),
 )) as readonly MessageDirection[];
 export function parseDirection(value: unknown): ParsedMessageDirection | undefined {
   if (typeof value !== "string") return undefined;
@@ -33,8 +29,7 @@ export function parseDirection(value: unknown): ParsedMessageDirection | undefin
   const targetProvider = value.slice(separator + 4);
   if (
     !isGatewayProvider(sourceProvider) ||
-    !isGatewayProvider(targetProvider) ||
-    sourceProvider === targetProvider
+    !isGatewayProvider(targetProvider)
   ) {
     return undefined;
   }
@@ -115,7 +110,8 @@ export type GatewayPreparedWriteEvidence = {
     | "claude_mailbox"
     | "codex_turn_start"
     | "codex_turn_steer"
-    | "acp_prompt";
+    | "acp_prompt"
+    | "peer_handoff";
   bodyBytes: number; bodySha256: string; frameBytes: number; sha256: string;
 };
 export type GatewayMessageAttemptAuthority = {
@@ -164,11 +160,11 @@ export type GatewayPersistedState = {
 };
 export type PublicRouteSnapshot = {
   alias: string; provider: GatewayProvider; host: string; enabled: boolean; state: RouteState; busyPolicy: BusyPolicy; lastSeenAt?: string; queueDepth: number;
-  oldestQueuedAt?: string; counters: RouteCounters; safeErrorCode?: string;
+  oldestQueuedAt?: string; counters: RouteCounters; safeErrorCode?: string; mutable?: boolean;
 };
 export type PublicConsentEndpointSnapshot = Readonly<{ alias: string; provider: GatewayProvider }>;
 export type PublicConsentEdgeSnapshot = {
-  endpoints: readonly [PublicConsentEndpointSnapshot, PublicConsentEndpointSnapshot]; host: string; counters: RouteCounters;
+  endpoints: readonly [PublicConsentEndpointSnapshot, PublicConsentEndpointSnapshot]; host: string; counters: RouteCounters; mutable?: boolean;
 };
 export type PublicConnectorSnapshot = {
   provider: GatewayProvider; host: string; health: ConnectorHealth; protocol: string; protocolVersion: string; lastSeenAt?: string; observationAgeMs?: number; codexDoctor?: PublicCodexDoctorSnapshot; safeErrorCode?: string; registry?: PublicRegistryObservationSnapshot;

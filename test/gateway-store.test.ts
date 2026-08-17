@@ -1569,3 +1569,97 @@ test("runtime requires exact private modes for state directories and files", asy
   await assert.rejects(new GatewayStore(setup.config).initialize(), /exact mode 600/u);
   await chmod(setup.store.stateFilePath, 0o600);
 });
+
+test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {
+  const setup = await fixture();
+  const config = { ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] };
+  const store = new GatewayStore(config, { now: setup.clock.now, randomId: setup.clock.randomId });
+  await store.initialize();
+  const local: RegisterRouteInput = { alias: "codex-local@studio", registrationMode: "explicit_opt_in",
+    binding: { provider: "codex", hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } };
+  const remote: RegisterRouteInput = { alias: "codex-remote@m5dev", registrationMode: "federated_peer",
+    binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
+  await store.registerRoute(local); await store.registerRoute(remote);
+  await store.addConsentEdge(consentInput(local, remote));
+  const admitted = await store.enqueueMessage({ sourceAlias: local.alias, targetAlias: remote.alias,
+    expectedSourceRegistrationId: local.binding.registrationId, expectedTargetRegistrationId: remote.binding.registrationId,
+    body: "cross-host", dedupeKey: "federated-cross-host" });
+  const reserved = await store.reserveMessage(remote.alias);
+  assert.equal(reserved.status, "reserved");
+  if (reserved.status !== "reserved") return;
+  const bodySha256 = createHash("sha256").update("cross-host").digest("hex");
+  assert.deepEqual(await store.authorizeMessage({ messageId: reserved.attempt.messageId,
+    attemptId: reserved.attempt.attemptId, sourceRegistrationId: local.binding.registrationId,
+    targetRegistrationId: remote.binding.registrationId,
+    prepared: { kind: "peer_handoff", bodyBytes: 10, bodySha256, frameBytes: 20, sha256: bodySha256 } }), { status: "authorized" });
+  assert.deepEqual(await store.acceptMessage({ messageId: reserved.attempt.messageId,
+    attemptId: reserved.attempt.attemptId, lossOutcome: "unconfirmed" }), { status: "accepted" });
+  assert.equal((await store.settleAttempt({ messageId: reserved.attempt.messageId,
+    attemptId: reserved.attempt.attemptId, state: "delivered", safeErrorCode: "PEER_HANDOFF_CONFIRMED" })).status, "settled");
+  const state = JSON.parse(await readFile(store.stateFilePath, "utf8"));
+  assert.equal(Object.hasOwn(state.messages[0], "body"), false);
+  await store.enqueueMessage({ sourceAlias: local.alias, targetAlias: remote.alias,
+    expectedSourceRegistrationId: local.binding.registrationId, expectedTargetRegistrationId: remote.binding.registrationId,
+    body: "acceptance observed", dedupeKey: "federated-acceptance-loss" });
+  const uncertain = await store.reserveMessage(remote.alias);
+  assert.equal(uncertain.status, "reserved");
+  if (uncertain.status === "reserved") {
+    const uncertainSha = createHash("sha256").update("acceptance observed").digest("hex");
+    await store.authorizeMessage({ messageId: uncertain.attempt.messageId, attemptId: uncertain.attempt.attemptId,
+      sourceRegistrationId: local.binding.registrationId, targetRegistrationId: remote.binding.registrationId,
+      prepared: { kind: "peer_handoff", bodyBytes: 19, bodySha256: uncertainSha, frameBytes: 30, sha256: uncertainSha } });
+    assert.equal((await store.settleAttempt({ messageId: uncertain.attempt.messageId,
+      attemptId: uncertain.attempt.attemptId, state: "unconfirmed",
+      safeErrorCode: "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" })).status, "settled");
+  }
+  assert.equal(admitted.accepted, true);
+
+  const remoteSource: RegisterRouteInput = { alias: "claude-remote@m5dev", registrationMode: "federated_peer",
+    binding: { provider: "claude", hostId: "m5dev", routeHandle: "reg_remote_source", registrationId: "reg_mirror_source" } };
+  const localTarget: RegisterRouteInput = { alias: "codex-target@studio", registrationMode: "explicit_opt_in",
+    binding: { provider: "codex", hostId: "studio", routeHandle: "thread-target", registrationId: "reg_local_target" } };
+  await store.registerRoute(remoteSource); await store.registerRoute(localTarget);
+  await store.addConsentEdge(consentInput(remoteSource, localTarget));
+  await store.enqueueMessage({ sourceAlias: remoteSource.alias, targetAlias: localTarget.alias,
+    expectedSourceRegistrationId: remoteSource.binding.registrationId, expectedTargetRegistrationId: localTarget.binding.registrationId,
+    body: "destination-owned", dedupeKey: "destination-owned-local-write" });
+  const localAttempt = await store.reserveMessage(localTarget.alias);
+  assert.equal(localAttempt.status, "reserved");
+  if (localAttempt.status === "reserved") {
+    const localSha = createHash("sha256").update("destination-owned").digest("hex");
+    assert.equal((await store.authorizeMessage({ messageId: localAttempt.attempt.messageId, attemptId: localAttempt.attempt.attemptId,
+      sourceRegistrationId: remoteSource.binding.registrationId, targetRegistrationId: localTarget.binding.registrationId,
+      prepared: { kind: "codex_turn_start", bodyBytes: 17, bodySha256: localSha, frameBytes: 22, sha256: localSha } })).status, "authorized");
+  }
+  await store.close();
+});
+
+test("configured canonical host rejects retained local routes from the legacy host", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.registerRoute(route("codex", "codex-main@this-mac", "reg_legacy"));
+  await setup.store.close();
+  const renamed = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio", "this-mac"] },
+    { now: setup.clock.now, randomId: setup.clock.randomId });
+  await assert.rejects(renamed.initialize(), /configured bounds or host allowlist/iu);
+});
+
+test("federated native ingress always requires a durable selected-source edge", async () => {
+  const setup = await fixture({ inboundMode: "open" });
+  const store = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] },
+    { now: setup.clock.now, randomId: setup.clock.randomId });
+  await store.initialize();
+  const local: RegisterRouteInput = { alias: "codex-local@studio", registrationMode: "explicit_opt_in",
+    binding: { provider: "codex", hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } };
+  const remote: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
+    binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
+  await store.registerRoute(local); await store.registerRoute(remote);
+  await assert.rejects(store.enqueueNativeIngress({ source: { alias: "visitor@studio",
+    binding: { provider: "claude", hostId: "studio", routeHandle: "native-session", registrationId: "native_visitor" } },
+    targetAlias: remote.alias, expectedTargetRegistrationId: remote.binding.registrationId, body: "unpaired",
+    dedupeKey: "federated-open-unpaired", conversationIdSuffix: "a1b2c3d4" }), /durable consent/iu);
+  const rejected = (await store.publicSnapshot()).messages;
+  assert.equal(rejected.length, 1); assert.equal(rejected[0]?.state, "rejected");
+  assert.equal(rejected[0]?.safeErrorCode, "SENDER_NOT_PAIRED");
+  await store.close();
+});

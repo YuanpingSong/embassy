@@ -17,11 +17,13 @@ session or thread identifiers, or unredacted personal paths.
 
 ## Deployment boundary
 
-Embassy is personal, same-machine software for one macOS user. Run it only
-under an OS account that is yours alone and where you trust every process
-already running as that user. Do not expose its sockets or state directory on a
-network, host it as a service, or use it to share a Claude or Codex subscription
-between users.
+Embassy is personal software for one macOS user. Each broker remains local to
+one machine; an explicit private `nodes.json` may connect the user's own
+SSH-reachable machines through the user's existing OpenSSH configuration. Run
+every node only under an OS account that is yours alone and where you trust
+every process already running as that user. Do not expose Embassy sockets or
+state on a network, host it as a service, or use it to share a provider
+subscription between users.
 
 The broker is local; the agents are not. Embassy does not call a provider API,
 but a delivered body becomes model input in the receiving product and may be
@@ -167,7 +169,11 @@ broker.
 
 ## Process and protocol boundary
 
-- The v1 launcher is foreground, macOS-only, same-machine, and local-host-only.
+- The launcher is foreground and macOS-only. Provider attestation and the
+  control plane remain machine-local. Configured federation owns only a fixed
+  outbound `ssh ... embassy peer-stdio` subprocess; SSH supplies transport
+  authentication, encryption, and liveness, and Embassy opens no federation
+  listener.
 - Before provider setup, the launcher acquires one host-wide macOS advisory
   lease. If its lease helper exits or the lease is otherwise lost
   unexpectedly, Embassy shuts down rather than continuing without singleton
@@ -214,6 +220,11 @@ broker.
 - Queues, frames, bodies, callbacks, deadlines, deduplication,
   rate limits, and transient conversations are bounded. Ambiguous writes are
   never retried automatically.
+- A peer catalog contains only bounded, body-free local metadata. It never
+  exports imported rows, message or conversation tokens, native identifiers,
+  provider frames, sockets, paths, credentials, or raw diagnostics. Each
+  destination broker owns its durable queue; loss after a federated write is
+  UNKNOWN and is never replayed.
 - Raw-body classification and accounting happen before framing. In the
   untrusted body only, Embassy case-insensitively neutralizes boundary-shaped
   opening or closing copies of its reserved framing tags before composing the

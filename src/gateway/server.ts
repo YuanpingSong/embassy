@@ -13,6 +13,7 @@ import { createSystemCodexDoctorInspector, diagnoseCodexAttachment,
   diagnoseMissingManagedCodexLayout, type CodexDoctorInspector } from "./codex-doctor.js";
 import { loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { DASHBOARD_FILE_NAME } from "./dashboard.js";
+import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { resolveDeepSeekAcpLaunch, type DeepSeekAcpLaunch, type DeepSeekDetectOptions } from "./deepseek-detect.js";
 import { acquireGatewayInstanceLease, type GatewayInstanceLease } from "./instance-lease.js";
 import type { DashboardLocale } from "./locale.js";
@@ -26,13 +27,14 @@ export const GATEWAY_LOCAL_HOST_ID = "this-mac";
 const GROK_ACP_LAUNCH = Object.freeze({
   kind: "npx", package: "@xai-official/grok@1.0.5", args: ["agent", "stdio"],
 } satisfies AcpLaunchSpec);
-export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: typeof GATEWAY_LOCAL_HOST_ID; codexMode: "native_messaging"; dashboardFile: typeof DASHBOARD_FILE_NAME }>;
+export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: string; codexMode: "native_messaging"; dashboardFile: typeof DASHBOARD_FILE_NAME }>;
 export type GatewayServerOptions = { env?: NodeJS.ProcessEnv; inboundMode?: GatewayInboundMode;
   locale?: DashboardLocale; signal?: AbortSignal; onReady: (result: GatewayServerReadyResult) => void | Promise<void> };
 type ServerService = Readonly<{ start: (signal?: AbortSignal) => Promise<void>; close: () => Promise<void> }>;
 type Signal = "SIGINT" | "SIGTERM";
 export type GatewayServerDependencies = {
   loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig; loginHome?: () => string;
+  loadNodeInventory?: (stateDir: string) => Promise<GatewayNodeInventory>;
   attestClaudeRuntime?: () => Promise<AttestedClaudePeerRuntime>; createClaudeProvider?: (options: LocalClaudeGatewayProviderOptions) => GatewayProviderAdapter;
   acquireInstanceLease?: (home: string) => Promise<GatewayInstanceLease>; createStore?: (config: GatewayConfig) => GatewayStore;
   createCodexOperation?: (options: StatelessCodexOperationTransportOptions) => StatelessCodexOperationTransport; createCodexObservationFactory?: (options: LocalCodexTransportFactoryOptions) => Promise<LocalCodexTransportFactory>;
@@ -95,6 +97,7 @@ export async function runGatewayServer(
   const env = options.env ?? process.env;
   const d = {
     loadConfig: dependencies.loadConfig ?? loadGatewayConfig,
+    loadNodeInventory: dependencies.loadNodeInventory ?? loadGatewayNodeInventory,
     loginHome: dependencies.loginHome ?? (() => userInfo().homedir),
     attestClaudeRuntime: dependencies.attestClaudeRuntime ?? attestClaudePeerRuntime,
     createClaudeProvider: dependencies.createClaudeProvider ?? createLocalClaudeGatewayProvider,
@@ -124,14 +127,20 @@ export async function runGatewayServer(
   });
   try {
     const loaded = d.loadConfig(env);
+    const inventory = await d.loadNodeInventory(loaded.stateDir);
+    if (inventory.configured && env.EMBASSY_HOSTS !== undefined) {
+      throw serverError("INVALID_GATEWAY_CONFIGURATION", "nodes.json and EMBASSY_HOSTS cannot both define gateway hosts.");
+    }
     const inboundMode = options.inboundMode ?? loaded.inboundMode;
     if (!(gatewayInboundModes as readonly string[]).includes(inboundMode)) {
       throw serverError("INVALID_GATEWAY_CONFIGURATION", "The gateway inbound mode must be paired or open.");
     }
-    const config = { ...loaded, inboundMode };
-    if (config.allowedHosts.length !== 1 || config.allowedHosts[0] !== GATEWAY_LOCAL_HOST_ID) {
-      throw serverError("GATEWAY_REMOTE_PROVIDER_DISABLED", "This launcher supports only the exact local gateway host.");
-    }
+    const localHost = inventory.host;
+    const config = { ...loaded, inboundMode, hostId: localHost, peerNodes: inventory.nodes,
+      allowedHosts: Object.freeze([localHost, ...inventory.nodes]),
+      ...(loaded.acpProviders === undefined ? {} : { acpProviders: loaded.acpProviders.map((definition) => ({ ...definition,
+        alias: definition.alias.endsWith(`@${GATEWAY_LOCAL_HOST_ID}`)
+          ? `${definition.alias.slice(0, -GATEWAY_LOCAL_HOST_ID.length)}${localHost}` : definition.alias })) }) };
     const home = d.loginHome();
     const acquiring = d.acquireInstanceLease(home).then(
       (value) => ({ kind: "lease", value }) as const,
@@ -169,14 +178,16 @@ export async function runGatewayServer(
     providers.push(d.createClaudeProvider({
       runtime,
       stateRoot: config.stateDir,
+      hostId: localHost,
+      nodeInventory: inventory,
       locale: options.locale ?? "en",
       nativeHelpers: { maxHelpers: config.limits.maxRoutes },
       ...(config.deliveryNotices === undefined ? {} : { deliveryNotices: config.deliveryNotices }),
     }));
     const localEnvironment = codexEnvironment(env);
-    const factoryOptions = { environment: localEnvironment, hostId: GATEWAY_LOCAL_HOST_ID };
+    const factoryOptions = { environment: localEnvironment, hostId: localHost };
     providers.push(d.createCodexProvider({
-      hostId: GATEWAY_LOCAL_HOST_ID,
+      hostId: localHost, nodeInventory: inventory,
       operation: d.createCodexOperation({ local: { environment: localEnvironment } }),
       createObservationFactory: () => d.createCodexObservationFactory(factoryOptions),
     }));
@@ -189,7 +200,7 @@ export async function runGatewayServer(
       } else if (definition.provider === "grok") resolved = { launch: GROK_ACP_LAUNCH };
       providers.push(d.createAcpProvider({
         ...definition,
-        hostId: GATEWAY_LOCAL_HOST_ID,
+        hostId: localHost,
         ...(resolved.launch === undefined ? {} : { launch: resolved.launch }),
         ...(resolved.safeErrorCode === undefined ? {} : { unavailableCode: resolved.safeErrorCode }),
       }));
@@ -215,7 +226,7 @@ export async function runGatewayServer(
     });
     await guarded(Promise.resolve().then(() => service!.start(startupAbort?.signal)));
     assertLease();
-    const ready = Promise.resolve().then(() => options.onReady({ status: "ready", hostId: GATEWAY_LOCAL_HOST_ID,
+    const ready = Promise.resolve().then(() => options.onReady({ status: "ready", hostId: localHost,
       codexMode: "native_messaging", dashboardFile: DASHBOARD_FILE_NAME })).then(
       () => ({ kind: "ready" }) as const, (error: unknown) => ({ kind: "error", error }) as const);
     const published = await Promise.race([ready, loss, stop]);

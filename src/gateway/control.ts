@@ -28,6 +28,8 @@ import type {
   RouteCounters,
   SafeGatewayAlert,
 } from "./types.js";
+import { decodePeerParams, decodePeerResult, type PeerCatalogResult,
+  type PeerHandoffParams, type PeerHandoffResult } from "./peer-protocol.js";
 
 export const GATEWAY_CONTROL_PROTOCOL_VERSION = 1 as const;
 export const GATEWAY_CONTROL_MAX_FRAME_BYTES = 32 * 1024;
@@ -56,7 +58,7 @@ export const gatewayControlMethods = [
   "health", "register_codex", "unregister_codex", "remove_codex_registration",
   "select_claude", "unselect_claude", "pair", "unpair", "list_snapshot",
   "observe_snapshot", "delivery_status", "untrack", "send_to_claude",
-  "send_to_codex", "reply", "refresh_dashboard",
+  "send_to_codex", "reply", "refresh_dashboard", "peer_catalog", "peer_handoff",
 ] as const;
 export type GatewayControlMethod = (typeof gatewayControlMethods)[number];
 export type GatewayBusyPolicy = "queue";
@@ -115,6 +117,8 @@ export type ReplyParams = {
 };
 export type UntrackParams = { conversationId: string };
 export type DeliveryStatusParams = { token: string };
+export type PeerCatalogParams = { peerHost: string };
+export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
 
 type RequestParams = {
   health: Record<string, never>; register_codex: RegisterCodexParams;
@@ -124,7 +128,8 @@ type RequestParams = {
   observe_snapshot: Record<string, never>; delivery_status: DeliveryStatusParams;
   untrack: UntrackParams; send_to_claude: SendToClaudeParams;
   send_to_codex: SendToCodexParams; reply: ReplyParams;
-  refresh_dashboard: Record<string, never>;
+  refresh_dashboard: Record<string, never>; peer_catalog: PeerCatalogParams;
+  peer_handoff: PeerHandoffControlParams;
 };
 type ValidatedParams = Omit<RequestParams, "register_codex" | "send_to_claude" | "send_to_codex"> & {
   register_codex: ValidatedRegisterCodexParams;
@@ -143,7 +148,7 @@ export type GatewayDecisionCode =
   | "busy" | "unavailable" | "rejected";
 export type GatewayDecision =
   | { accepted: true; code: "ok" }
-  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
+  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok">; ownerHost?: string };
 export type GatewaySendResult =
   | { accepted: true; code: "ok"; conversationId: string; deliveryToken: string }
   | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
@@ -170,7 +175,8 @@ type ResultByMethod = {
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
   untrack: GatewayDecision; send_to_claude: GatewaySendResult;
   send_to_codex: GatewaySendResult; reply: GatewaySendResult;
-  refresh_dashboard: GatewayRefreshResult;
+  refresh_dashboard: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
+  peer_handoff: PeerHandoffResult;
 };
 type MaybePromise<T> = T | Promise<T>;
 export type GatewayControlHandlers = {
@@ -190,6 +196,8 @@ export type GatewayControlHandlers = {
   sendToCodex: (params: Readonly<ValidatedSendToCodexParams>) => MaybePromise<GatewaySendResult>;
   reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewaySendResult>;
   refreshDashboard: () => MaybePromise<GatewayRefreshResult>;
+  peerCatalog?: (params: Readonly<PeerCatalogParams>) => MaybePromise<PeerCatalogResult>;
+  peerHandoff?: (params: Readonly<PeerHandoffControlParams>) => MaybePromise<PeerHandoffResult>;
 };
 
 export type GatewayWireErrorCode =
@@ -378,6 +386,21 @@ const messageText = isMessageText;
 function emptyParams(value: unknown): Record<string, never> {
   if (!isRecord(value) || !exact(value, [])) invalid(); return {};
 }
+function decodePeerCatalog(value: unknown): PeerCatalogParams {
+  if (!shape(value, { peerHost: host })) invalid();
+  return { peerHost: value.peerHost as string };
+}
+function decodePeerHandoff(value: unknown): PeerHandoffControlParams {
+  if (!isRecord(value) || !exact(value, ["peerHost", "handoff"]) || !host(value.peerHost)) invalid();
+  try { return { peerHost: value.peerHost, handoff: decodePeerParams("handoff", value.handoff) }; }
+  catch { return invalid(); }
+}
+const isPeerCatalog = (value: unknown): boolean => {
+  try { decodePeerResult("catalog/get", value); return true; } catch { return false; }
+};
+const isPeerHandoffResult = (value: unknown): boolean => {
+  try { decodePeerResult("handoff", value); return true; } catch { return false; }
+};
 function decodeRegister(value: unknown): ValidatedRegisterCodexParams {
   if (!isRecord(value) || !exact(value, ["alias", "threadId"], ["hostId", "busyPolicy", "succeedsAlias"]) ||
       !alias(value.alias) || !value.alias.startsWith("codex-") || !uuid(value.threadId) ||
@@ -409,9 +432,7 @@ function decodePair(value: unknown): PairParams {
   if (Object.hasOwn(value, "aliases")) {
     if (!exact(value, ["aliases"], ["threadAttestation"]) || !Array.isArray(value.aliases) ||
         value.aliases.length !== 2 || !alias(value.aliases[0]) || !alias(value.aliases[1]) ||
-        value.aliases[0] === value.aliases[1] ||
-        value.aliases[0].slice(value.aliases[0].lastIndexOf("@") + 1) !==
-          value.aliases[1].slice(value.aliases[1].lastIndexOf("@") + 1)) invalid();
+        value.aliases[0] === value.aliases[1]) invalid();
     let threadAttestation: GenericPairParams["threadAttestation"];
     if (value.threadAttestation !== undefined) {
       if (!shape(value.threadAttestation, { alias, threadId: uuid }) ||
@@ -489,7 +510,9 @@ function decodeUntrack(value: unknown): UntrackParams {
 function isDecision(value: unknown): value is GatewayDecision {
   return shape(value, { accepted: (item) => typeof item === "boolean", code: oneOf(
     "ok", "not_found", "conflict", "watch_owner_conflict", "route_mismatch", "busy", "unavailable", "rejected",
-  ) }) && (value.accepted === true ? value.code === "ok" : value.code !== "ok");
+  ) }, { ownerHost: host }) && (value.accepted === true
+    ? value.code === "ok" && value.ownerHost === undefined
+    : value.code !== "ok" && (value.ownerHost === undefined || value.code === "conflict"));
 }
 function isHealthResult(value: unknown): value is GatewayHealthResult {
   return shape(value, { status: oneOf("ok", "degraded"), revision: nonNegative }); }
@@ -533,7 +556,7 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
   if (!shape(value, { alias, provider: isGatewayProvider, host, enabled: (item) => typeof item === "boolean",
     state: oneOf("stale", "idle", "busy", "awaiting_approval", "offline", "disabled"),
     busyPolicy: oneOf("queue"), queueDepth: nonNegative, counters: isRouteCounters },
-  { lastSeenAt: iso, oldestQueuedAt: iso, safeErrorCode: safeCode })) return false;
+  { lastSeenAt: iso, oldestQueuedAt: iso, safeErrorCode: safeCode, mutable: (item) => typeof item === "boolean" })) return false;
   const row = value as unknown as PublicRouteSnapshot;
   return row.alias.endsWith(`@${row.host}`) &&
     (row.oldestQueuedAt === undefined ? row.queueDepth === 0 : row.queueDepth > 0); }
@@ -544,10 +567,11 @@ function isConsentEdgeSnapshot(value: unknown): value is PublicConsentEdgeSnapsh
   const endpoint = (item: unknown): item is { alias: string; provider: (typeof gatewayProviders)[number] } =>
     shape(item, { alias, provider: isGatewayProvider });
   if (!shape(value, { endpoints: (rows) => Array.isArray(rows) && rows.length === 2 && rows.every(endpoint),
-    host, counters: isRouteCounters })) return false;
+    host, counters: isRouteCounters }, { mutable: (item) => typeof item === "boolean" })) return false;
   const [left, right] = value.endpoints as [{ alias: string; provider: string }, { alias: string; provider: string }];
-  return left.provider !== right.provider && left.alias !== right.alias && compareConsentEndpoints(left, right) < 0 &&
-    left.alias.endsWith(`@${value.host}`) && right.alias.endsWith(`@${value.host}`); }
+  const hosts = [left.alias.slice(left.alias.lastIndexOf("@") + 1), right.alias.slice(right.alias.lastIndexOf("@") + 1)];
+  return left.alias !== right.alias && compareConsentEndpoints(left, right) < 0 &&
+    (left.provider !== right.provider || hosts[0] !== hosts[1]) && value.host === [...hosts].sort()[0]; }
 function isAvailablePeerSnapshot(value: unknown): value is PublicAvailablePeerSnapshot {
   return shape(value, { alias, provider: oneOf("claude"), host,
     state: oneOf("idle", "busy", "awaiting_approval", "offline"),
@@ -668,6 +692,8 @@ const descriptors = {
   delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false }, untrack: { handler: "untrack", decode: decodeUntrack, result: isDecision, mutation: false },
   send_to_claude: { handler: "sendToClaude", decode: decodeSendClaude, result: isSendResult, mutation: true }, send_to_codex: { handler: "sendToCodex", decode: decodeSendCodex, result: isSendResult, mutation: true },
   reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_dashboard: { handler: "refreshDashboard", decode: emptyParams, result: isRefreshResult, mutation: false },
+  peer_catalog: { handler: "peerCatalog", decode: decodePeerCatalog, result: isPeerCatalog, mutation: false },
+  peer_handoff: { handler: "peerHandoff", decode: decodePeerHandoff, result: isPeerHandoffResult, mutation: true },
 } satisfies Record<GatewayControlMethod, Descriptor>;
 
 function parseRequestObject(value: unknown): ValidatedGatewayControlRequest {

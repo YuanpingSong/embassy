@@ -857,6 +857,8 @@ test("only exposes queue-mode lifecycle methods", () => {
     "send_to_codex",
     "reply",
     "refresh_dashboard",
+    "peer_catalog",
+    "peer_handoff",
   ]);
   assert.equal(isGatewayAlias("codex-main@this-mac"), true);
   assert.equal(isGatewayAlias("codex-main"), false);
@@ -1041,7 +1043,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["remove_codex_registration", { alias: "claude@this-mac" }],
     ["remove_codex_registration", { alias: "codex-main" }],
     ["pair", { aliases: ["one@this-mac", "one@this-mac"] }],
-    ["pair", { aliases: ["one@this-mac", "two@other-mac"] }],
     ["pair", { aliases: ["one@this-mac"] }],
     ["pair", { aliases: ["one@this-mac", "two@this-mac"], extra: true }],
     [
@@ -1401,7 +1402,7 @@ test("list_snapshot accepts all derived directions and rejects legacy authority 
   const compatibilityField = { ...snapshot(), compatibilityChecks: [] };
   const oldPairs = { ...snapshot(), pairs: [] };
   const invalidDirection = structuredClone(canonical);
-  invalidDirection.messages[0]!.direction = "codex_to_codex" as never;
+  invalidDirection.messages[0]!.direction = "codex_to_peer" as never;
   assert.equal(isGatewaySnapshot(canonical), true);
   assert.deepEqual(canonical.messages.map(({ direction }) => direction), messageDirections);
   assert.ok([oldSchema, compatibilityField, oldPairs, invalidDirection].every(

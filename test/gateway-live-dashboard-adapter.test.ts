@@ -811,6 +811,7 @@ test("confirmed registration removal is offered on every Codex row", () => {
   ) as DashboardRouteRow;
 
   assert.equal(bundle.Embassy.canRequestCodexRegistrationRemoval(staleCodex), true);
+  assert.equal(bundle.Embassy.canRequestCodexRegistrationRemoval({ ...staleCodex, mutable: false }), false);
   assert.equal(bundle.Embassy.canRequestCodexRegistrationRemoval(disabledCodex), true);
   assert.equal(
     bundle.Embassy.canRequestCodexRegistrationRemoval({
@@ -829,6 +830,8 @@ test("consent-edge candidates require enabled observed routes", () => {
   assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, state: "awaiting_approval" }), true);
   assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, enabled: false }), false);
   assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, state: "stale" }), false);
+  assert.equal(bundle.Embassy.canOfferConsentEdgeCandidate({ ...route, mutable: false }), true,
+    "read-only remote routes remain candidates when the owner-host endpoint is local");
 });
 
 test("routesProps keeps every provider route in server order", () => {

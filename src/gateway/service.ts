@@ -24,6 +24,8 @@ import {
 } from "./control.js";
 import { publishGatewayDashboard } from "./dashboard.js";
 import type { CodexDoctorResult } from "./codex-doctor.js";
+import { spawnPeerClient, type PeerClient } from "./peer-client.js";
+import { peerEdgeRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import {
   PROGRESS_WATCH_DEFAULT_CAPACITY,
   PROGRESS_WATCH_DEFAULT_IDLE_MS,
@@ -67,6 +69,7 @@ const PUBLIC_ALIAS =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const DISCOVERY_INTERVAL_MS = 30_000;
 const CODEX_DOCTOR_INTERVAL_MS = 30_000;
+const PEER_REFRESH_INTERVAL_MS = 30_000;
 const CLEAN_RETRY_DELAY_MS = 500;
 const MAX_CONVERSATIONS = 1_024;
 const MAX_PENDING_CLAUDE_REPLIES = MAX_CONVERSATIONS;
@@ -199,6 +202,7 @@ export type GatewayServiceOptions = Readonly<{
   publishDashboard?: typeof publishGatewayDashboard; now?: () => Date;
   nativePeerCwd?: string; timers?: GatewayServiceTimers;
   codexDoctor?: () => Promise<CodexDoctorResult>;
+  spawnPeer?: typeof spawnPeerClient;
 }>;
 
 type ConnectorRuntime = {
@@ -251,8 +255,14 @@ function aliasHost(alias: string): string {
 function safeCode(value: string | undefined, fallback: string): string {
   return value !== undefined && SAFE_CODE.test(value) ? value : fallback;
 }
+class ConsentOwnerError extends BridgeError {
+  constructor(readonly ownerHost: string) {
+    super("CONSENT_OWNER_HOST_REQUIRED", `Run pair or unpair on the edge owner host ${ownerHost}.`);
+  }
+}
 
 function decisionFor(error: unknown): Extract<GatewayDecision, { accepted: false }> {
+  if (error instanceof ConsentOwnerError) return { accepted: false, code: "conflict", ownerHost: error.ownerHost };
   if (!(error instanceof BridgeError)) return { accepted: false, code: "rejected" };
   if (error.code.includes("NOT_FOUND") || error.code.includes("NOT_AVAILABLE")) {
     return { accepted: false, code: "not_found" };
@@ -316,6 +326,9 @@ export class GatewayService {
   private readonly timers: GatewayServiceTimers;
   private readonly nativePeerCwd: string;
   private readonly codexDoctor: (() => Promise<CodexDoctorResult>) | undefined;
+  private readonly spawnPeer: typeof spawnPeerClient;
+  private readonly peerClients = new Map<string, PeerClient>();
+  private readonly peerCatalogs = new Map<string, PeerCatalogResult>();
   private readonly connectors = new Map<string, ConnectorRuntime>();
   private readonly routeObservations = new Map<string, GatewayAdapterRouteObservation>();
   private readonly candidates = new Map<string, Candidate>();
@@ -336,6 +349,7 @@ export class GatewayService {
   private wakeTimer: GatewayServiceTimer | undefined;
   private nextDiscoveryAt = 0;
   private nextDoctorAt = 0;
+  private nextPeerRefreshAt = 0;
   private codexDoctorResult: CodexDoctorResult | undefined;
   private revision = 0;
   private snapshotRevision = 0;
@@ -355,6 +369,7 @@ export class GatewayService {
     this.now = options.now ?? (() => new Date());
     this.nativePeerCwd = options.nativePeerCwd ?? process.cwd();
     this.codexDoctor = options.codexDoctor;
+    this.spawnPeer = options.spawnPeer ?? spawnPeerClient;
     this.timers = options.timers ?? {
       setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
       clearTimeout: (timer) => clearTimeout(timer),
@@ -419,6 +434,7 @@ export class GatewayService {
       const now = this.now().getTime();
       this.nextDiscoveryAt = now + DISCOVERY_INTERVAL_MS;
       this.nextDoctorAt = now + CODEX_DOCTOR_INTERVAL_MS;
+      this.nextPeerRefreshAt = now;
       for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
       await this.publish();
       this.scheduleWake();
@@ -465,6 +481,8 @@ export class GatewayService {
     this.control = undefined;
     const failures: unknown[] = [];
     if (control !== undefined) await control.close().catch((error) => failures.push(error));
+    for (const peer of this.peerClients.values()) peer.close();
+    this.peerClients.clear();
     // Provider close aborts exact owned operations. It must never join a turn.
     await Promise.all(
       this.adapters.map(async (adapter) => {
@@ -710,7 +728,9 @@ export class GatewayService {
   }
 
   private async advertise(route: GatewayPrivateRouteInspection): Promise<void> {
-    await this.claudeAdapter(route.binding.hostId)?.advertiseNativeSourcePeer?.({
+    const hostId = route.registrationMode === "federated_peer"
+      ? (this.config.hostId ?? this.config.allowedHosts[0]!) : route.binding.hostId;
+    await this.claudeAdapter(hostId)?.advertiseNativeSourcePeer?.({
       alias: route.alias,
       sourceProvider: route.binding.provider,
       cwd: this.nativePeerCwd,
@@ -718,7 +738,9 @@ export class GatewayService {
   }
 
   private async unadvertise(route: GatewayPrivateRouteInspection): Promise<void> {
-    await this.claudeAdapter(route.binding.hostId)?.unadvertiseNativeSourcePeer?.(route.alias);
+    const hostId = route.registrationMode === "federated_peer"
+      ? (this.config.hostId ?? this.config.allowedHosts[0]!) : route.binding.hostId;
+    await this.claudeAdapter(hostId)?.unadvertiseNativeSourcePeer?.(route.alias);
   }
 
   private reconcileAdvertisement(route: GatewayPrivateRouteInspection): void {
@@ -852,7 +874,7 @@ export class GatewayService {
 
   private async removeCodexRegistration(alias: string): Promise<void> {
     const route = await this.store.inspectPrivateRoute(alias);
-    if (route === undefined || route.binding.provider !== "codex") {
+    if (route === undefined || route.binding.provider !== "codex" || route.registrationMode === "federated_peer") {
       throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The Codex registration is absent.");
     }
     await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
@@ -915,13 +937,15 @@ export class GatewayService {
 
   private async unselectClaude(params: SelectClaudeParams): Promise<void> {
     const route = await this.resolveSelectedClaudeRoute(params.alias);
-    if (route === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
+    if (route === undefined || route.registrationMode === "federated_peer") throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
     await this.removeOwnedRoute(route, "CLAUDE_ROUTE_NOT_FOUND", true);
   }
 
   private async pair(params: PairParams): Promise<void> {
     const endpoints = await this.resolvePairEndpoints(params, true);
     const aliases = endpoints.aliases;
+    const ownerHost = aliases.map(aliasHost).sort()[0]!;
+    if ((this.config.hostId ?? this.config.allowedHosts[0]) !== ownerHost) throw new ConsentOwnerError(ownerHost);
     const attestation = pairParamThreadAttestation(params);
     if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
@@ -933,6 +957,8 @@ export class GatewayService {
   private async unpair(params: PairParams): Promise<void> {
     const endpoints = await this.resolvePairEndpoints(params, false);
     const aliases = endpoints.aliases;
+    const ownerHost = aliases.map(aliasHost).sort()[0]!;
+    if ((this.config.hostId ?? this.config.allowedHosts[0]) !== ownerHost) throw new ConsentOwnerError(ownerHost);
     const attestation = pairParamThreadAttestation(params);
     if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
@@ -1011,7 +1037,7 @@ export class GatewayService {
       if (params.replyAddress === undefined) {
         throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The inherited reply capability is required.");
       }
-      const adapter = this.claudeAdapter(aliasHost(params.toAlias));
+      const adapter = this.claudeAdapter(aliasHost(params.fromAlias));
       const resolved = await adapter?.resolveReplyAddress?.(params.replyAddress);
       if (resolved === undefined) throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The reply capability is stale.");
       source = (await this.store.listLogicalRoutes()).find(
@@ -1351,8 +1377,9 @@ export class GatewayService {
         runners.delete(key);
         if (retry) this.scheduleTargetRetry(targetAlias, registrationId, steer);
         else if (steer && this.running && !this.closing) this.kickSteer(targetAlias);
-        else if (this.running) void this.store.inspectDispatchableTargets().then((targets) => {
-          if (targets.includes(targetAlias)) this.kick(targetAlias);
+        else if (this.running) void Promise.all([this.store.inspectDispatchableTargets(), this.store.inspectPrivateRoute(targetAlias)]).then(([targets, route]) => {
+          if (targets.includes(targetAlias) &&
+            (route?.registrationMode !== "federated_peer" || this.peerClients.has(route.binding.hostId))) this.kick(targetAlias);
         }).catch(() => undefined);
       });
     runners.set(key, runner);
@@ -1430,6 +1457,65 @@ export class GatewayService {
       ) {
         await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "ROUTE_UNREGISTERED");
         return false;
+      }
+      if (target.registrationMode === "federated_peer") {
+        const peer = this.peerClients.get(target.binding.hostId);
+        if (peer === undefined || source === undefined || source.registrationMode === "federated_peer") {
+          await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
+          return false;
+        }
+        const sourceEndpoint = { alias: source.alias, provider: source.binding.provider,
+          host: source.binding.hostId, routeRef: source.binding.registrationId } as const;
+        const targetEndpoint = { alias: target.alias, provider: target.binding.provider,
+          host: target.binding.hostId, routeRef: target.binding.routeHandle } as const;
+        const params: PeerHandoffParams = {
+          originAttemptId: attempt.attemptId, originMessageId: attempt.messageId,
+          source: sourceEndpoint, target: targetEndpoint,
+          edgeRef: peerEdgeRef([sourceEndpoint, targetEndpoint]),
+          edgeOwnerHost: [sourceEndpoint.host, targetEndpoint.host].sort()[0]!,
+          deadlineAt: attempt.deadlineAt, expectsReply: conversation?.expectsReply ?? true,
+          body: attempt.body,
+          ...(attempt.steer === true ? { steer: true as const } : {}),
+          ...(attempt.conversationIdSuffix === undefined ? {} : { conversationCorrelation: attempt.conversationIdSuffix }),
+        };
+        let armed = false, authorizationUncertain = false, acceptanceObserved = false, result: GatewayAdapterDispatchResult;
+        try {
+          const prepared = peer.prepareHandoff(params);
+          let authorized: Awaited<ReturnType<GatewayStore["authorizeMessage"]>>;
+          try { authorized = await this.store.authorizeMessage({ messageId: attempt.messageId,
+              attemptId: attempt.attemptId, sourceRegistrationId: attempt.sourceRegistrationId,
+              targetRegistrationId: attempt.targetRegistrationId,
+              prepared: { kind: "peer_handoff", bodyBytes: prepared.bodyBytes,
+                bodySha256: prepared.bodySha256, frameBytes: prepared.frameBytes, sha256: prepared.sha256 } });
+          } catch (error) { authorizationUncertain = true; throw error; }
+          if (authorized.status !== "authorized") {
+            prepared.cancel();
+            if (authorized.status === "terminal") await this.finishSettlement(authorized.settlement);
+            this.activeAttempts.delete(attempt.messageId);
+            return false;
+          }
+          armed = true;
+          await prepared.perform();
+          acceptanceObserved = true;
+          const accepted = await this.store.acceptMessage({ messageId: attempt.messageId,
+            attemptId: attempt.attemptId, lossOutcome: "unconfirmed" });
+          if (accepted.status !== "accepted") throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The peer acceptance fence is stale.");
+          result = { state: "delivered", safeErrorCode: "PEER_HANDOFF_CONFIRMED" };
+        } catch {
+          if (!armed && !authorizationUncertain) {
+            peer.close();
+            this.peerClients.delete(target.binding.hostId);
+            await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
+            return false;
+          }
+          result = acceptanceObserved
+            ? { state: "unconfirmed", safeErrorCode: "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" }
+            : { state: "ambiguous", safeErrorCode: authorizationUncertain ? "WRITE_AUTHORIZATION_UNCERTAIN" : "PEER_HANDOFF_OUTCOME_UNKNOWN" };
+        }
+        const requeued = await this.applyDispatchResult(attempt.messageId, attempt.attemptId, result,
+          armed, conversation, attempt.sourceAlias, attempt.targetAlias);
+        this.activeAttempts.delete(attempt.messageId);
+        return requeued;
       }
       const adapter = this.adapterFor(target.binding);
       if (adapter === undefined) {
@@ -1727,7 +1813,9 @@ export class GatewayService {
     receiptHandle?: string;
   }>): Promise<void> {
     const target = await this.store.inspectPrivateRoute(event.targetAlias);
-    if (target === undefined || target.binding.hostId !== event.endpoint.hostId) {
+    const localHost = this.config.hostId ?? this.config.allowedHosts[0];
+    if (target === undefined || (target.binding.hostId !== event.endpoint.hostId &&
+      !(target.registrationMode === "federated_peer" && event.endpoint.hostId === localHost))) {
       throw new BridgeError("ROUTE_NOT_AVAILABLE", "The native target is absent.");
     }
     const selected = (await this.store.listLogicalRoutes()).find(
