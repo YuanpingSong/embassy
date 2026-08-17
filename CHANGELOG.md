@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.8.1] - 2026-08-17
+
+### Fixed
+
+- The live status/doctor snapshot no longer fails the strict client decoder: real-boot snapshots emitted deadline-pressure buckets in a shape the shared schema rejected (`CONTROL_INVALID_RESPONSE` from every client). Found live in the v1.8.0 release drill; a real-boot-shaped snapshot now renders through the strict decoder in the suite.
+- Recorded reproduction lead: a converted v2 Claude selection can fail per-operation delivery validation (`CLAUDE_ROUTE_UNAVAILABLE`) until reselected once; under investigation as converter-vs-expected behavior.
+
 ## [1.8.0] - 2026-08-17
 
 ### Changed
