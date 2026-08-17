@@ -39,3 +39,13 @@ tests/docs ≤230, target = final numstat. RIDER confirmed from the
 engineer's own note: the PEER wire protocol stays version 1 — only the
 private CONTROL protocol bumps to 2; the freeze must state both numbers
 explicitly so the two protocols are never conflated.
+
+## Third contest ruling (2026-08-17, during hold)
+
+decodeResponse still hard-coded control protocol 1 at three sites
+(control.ts:1101/1103/1110) — without the fix the v2 client rejects every
+valid v2 broker response (focused tests prove it). GRANTED: src ≤96
+(target 95), +3/-3, net unchanged -37, zero concepts; peer wire stays v1.
+This is completion-to-coherence, not scope growth — a frozen slice must
+be internally consistent. HOLD REMAINS: freeze, then stand down; gate and
+landing wait for the founder's resume.
