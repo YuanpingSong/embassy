@@ -91,3 +91,6 @@ rework rejected as over-engineering. Landing-gate check item: the specific
 underlying conditions must still surface honestly in some bounded surface
 (route/connector safeErrorCode, alert, or doctor); vanishing entirely =
 correction.
+FINAL: the crossing resolved as A-implemented (seven literal codes in the
+closed table, 537/537); the B-as-built amendment is superseded and its
+visibility gate-check is moot.
