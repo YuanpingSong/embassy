@@ -27,3 +27,15 @@ tests/docs ≤140; zero new concepts (a protocol version bump is not a
 concept). Base = public main 788a6f3 (emb-89 included). Freeze with SHA;
 adversarial-only gate unless the diff surprises (control decoding is a
 trust seam but the cut is pure deletion).
+
+## Contest ruling (2026-08-17)
+
+Measured cut: src +26/-63 = 89 changed, NET -37, every line inside the
+named deliverable; the ≤60 cap would force protocol-1 literals/types to
+survive inside the v2 implementation — do-not-golf bars it. Test
+remainder is compiler-derived (17 CLI + ~32 control + 3 dashboard + 1
+server typed fixtures plus version literals). GRANTED: src changed ≤90;
+tests/docs ≤230, target = final numstat. RIDER confirmed from the
+engineer's own note: the PEER wire protocol stays version 1 — only the
+private CONTROL protocol bumps to 2; the freeze must state both numbers
+explicitly so the two protocols are never conflated.
