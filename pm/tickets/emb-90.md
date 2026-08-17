@@ -60,3 +60,13 @@ granted +6 decoder fix, so the focused behavioral run is knowingly red
 Documented, safe, nothing running. ON RESUME: apply the granted +6,
 re-freeze with new SHA, then gate. Message-crossing recurrence noted for
 the retro (second occurrence class; first was the v1.9 triple-grant).
+
+## Coherent freeze (2026-08-17, hold in force)
+
+Engineer applied the granted +6 and re-froze coherently: SHA 946195fb,
+src 95 changed net -37 (grant ≤96, target hit exactly), tests 215 (≤230),
+zero concepts, protocol split stated (control v2 / peer wire v1 —
+peer-stdio fixtures correctly remain literal 1). Narrow evidence only:
+typecheck green, focused 82/0. No full check, no gate, no landing, no
+emb-91 — hold respected. Lane parked awaiting founder resume; gate runs
+then.
