@@ -18,17 +18,16 @@ Your [Claude Code](https://code.claude.com) sessions, [Codex](https://chatgpt.co
 npm install -g agent-embassy
 ```
 
-Prerequisites, stated honestly: v1.7.x requires **Claude Code installed via
-the official installer** (`curl -fsSL https://claude.ai/install.sh | bash` —
-Embassy attests the in-home launcher layout; Homebrew installs live outside
-your home directory and fail `CLAUDE_EXECUTABLE_OUTSIDE_HOME` by design) and
-**a managed Codex App Server standalone install** (created by the ChatGPT
-desktop app, or by the official installer `curl -fsSL
+Prerequisites, stated honestly: Claude routes require a live same-user Claude
+Code session with peer protocol 1. Embassy derives the external registry and
+peer-socket roots from the current OS user; it does not inspect Claude's
+launcher or configuration. Codex routes require **a managed Codex App Server
+standalone install** (created by the ChatGPT desktop app, or by the official
+installer `curl -fsSL
 https://chatgpt.com/codex/install.sh | sh` followed by `codex app-server
-daemon start` — the daemon alone does not provision the layout). Without
-either, `embassy
-serve` currently refuses to boot — v1.8 relaxes both to per-provider
-degradation. pnpm users: pin the version (`pnpm install -g
+daemon start` — the daemon alone does not provision the layout). A missing
+Claude registry degrades only Claude while the broker and other providers stay
+available. pnpm users: pin the version (`pnpm install -g
 agent-embassy@latest` can resolve stale metadata; prefer an explicit
 version) and ensure `PNPM_HOME/bin` is on PATH in non-interactive shells.
 
@@ -53,7 +52,7 @@ The first command starts the managed daemon if it is not already running (`resta
 
 Desktop attaches to the managed standalone App Server when it launches. If the daemon restarts while Desktop is already open, waiting alone does not reconnect that app process: fully quit Desktop, rerun `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`, and reopen the exact task.
 
-Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. Consent plus exact logical route/session identity authorizes an attempt; the current per-operation transport and correlated evidence determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned executable and state paths, generations of artifacts it actually uses, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
+Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. Consent plus exact logical route/session identity authorizes an attempt; the current per-operation transport and correlated evidence determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned or executed artifacts and state paths, generations of artifacts it actually uses, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
 
 > **Known limitation:** Embassy can reach Codex tasks only while Desktop uses the managed standalone App Server. In that mode, tasks currently cannot connect to Desktop's built-in in-app browser (`@Browser` loads but does not attach). Switching Desktop back to its default private App Server restores the built-in browser immediately — but makes those tasks unreachable by Embassy. No other capability regressions have been identified, though this was not an exhaustive parity test.
 
@@ -271,7 +270,7 @@ See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting
 | --- | --- |
 | [Architecture](docs/GATEWAY-ARCHITECTURE.md) | The full design: topology, adapters, control plane, threat model, and the paired-consent inbound model |
 | [Delivery](docs/DELIVERY.md) | Delivery semantics, tokens, settlement states, and retry rules |
-| [Configuration](docs/CONFIGURATION.md) | Environment variables, compatibility contract, and addressing rules |
+| [Configuration](docs/CONFIGURATION.md) | Environment variables, provider contracts, and addressing rules |
 | [Dashboard](docs/DASHBOARD.md) | Static and live dashboard setup, security model, and mutation actions |
 | [Security policy](SECURITY.md) | How to report a vulnerability, and the boundary in depth |
 | [Contributing](CONTRIBUTING.md) | Where changes go, and how to run the deterministic suite |

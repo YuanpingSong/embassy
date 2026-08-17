@@ -21,7 +21,6 @@ import { test, type TestContext } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
 import {
-  CLAUDE_PEER_COMPATIBILITY,
   ClaudePeerAdapter,
   encodeClaudePeerUserFrame,
   type ClaudePeerAdapterOptions,
@@ -33,6 +32,7 @@ import {
 } from "../src/gateway/claude-peer.js";
 
 const UID = process.getuid?.() ?? 501;
+const TEST_VERSION = "2.1.227";
 const SESSION_ONE = "00000000-0000-4000-8000-000000000001";
 const SESSION_TWO = "00000000-0000-4000-8000-000000000002";
 const SESSION_THREE = "00000000-0000-4000-8000-000000000003";
@@ -105,8 +105,6 @@ async function fixture(
     {
       sessionsDir,
       socketDir,
-      attestedClaudeCodeVersion:
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
       connectTimeoutMs: 500,
       connectionIdleMs: 500,
       ...productionOverrides,
@@ -198,7 +196,7 @@ async function addPeer(
         ? {}
         : {
             version:
-              input.version ?? CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+              input.version ?? TEST_VERSION,
           }),
       peerProtocol: input.peerProtocol ?? 1,
       kind: input.kind ?? "interactive",
@@ -265,36 +263,12 @@ async function eventually(
   }
 }
 
-test("adapter treats bounded Claude versions as metadata and normalizes private roots", async () => {
-  const unknownVersion = new ClaudePeerAdapter({
-    sessionsDir: "/synthetic/sessions",
-    socketDir: "/synthetic/sockets",
-    attestedClaudeCodeVersion: "unknown",
-  });
-  await unknownVersion.close();
-  const futureVersion = new ClaudePeerAdapter({
-    sessionsDir: "/synthetic/sessions",
-    socketDir: "/synthetic/sockets",
-    attestedClaudeCodeVersion: "3.0.0",
-  });
-  await futureVersion.close();
-  assert.throws(
-    () =>
-      new ClaudePeerAdapter({
-        sessionsDir: "/synthetic/sessions",
-        socketDir: "/synthetic/sockets",
-        attestedClaudeCodeVersion: "not-a-version",
-      }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_GATEWAY_CONFIGURATION",
-  );
+test("adapter normalizes its private roots without launcher metadata", () => {
   assert.throws(
     () =>
       new ClaudePeerAdapter({
         sessionsDir: "relative/sessions",
         socketDir: "/synthetic/sockets",
-        attestedClaudeCodeVersion: "2.1.226",
       }),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "INVALID_PEER_PATH",
@@ -384,13 +358,13 @@ test("discovery isolates mixed real-world records across a Claude Code patch upg
     pid: 41_114,
     sessionId: "00000000-0000-4000-8000-000000000004",
     name: "current-peer",
-    version: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+    version: TEST_VERSION,
   });
   await addPeer(current, {
     pid: 41_115,
     sessionId: "00000000-0000-4000-8000-000000000005",
     name: "project migration",
-    version: CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
+    version: TEST_VERSION,
   });
   await addPeer(current, {
     pid: 41_116,
@@ -616,6 +590,7 @@ test("name, cwd, and kind changes preserve the logical session UUID", async (t) 
     pid: 41_331,
     name: "original",
     kind: "interactive",
+    handler: (socket) => socket.resume(),
   });
   const first = (await current.adapter.discover()).peers[0];
   assert.ok(first !== undefined);
@@ -646,16 +621,10 @@ test("name, cwd, and kind changes preserve the logical session UUID", async (t) 
   const changedKind = (await current.adapter.discover()).peers[0];
   assert.ok(changedKind !== undefined);
   assert.equal(changedKind.targetId, moved.targetId);
-  await assert.rejects(
-    prepareAndPerform(current, first.targetId, "workspace changed"),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      (error.code === "CLAUDE_PEER_TARGET_CHANGED" ||
-        error.code === "CLAUDE_PEER_WORKSPACE_CHANGED"),
-  );
+  await prepareAndPerform(current, first.targetId, "current workspace proven");
 });
 
-test("preparation rejects replaced state and workspace generations before connecting", { skip: process.platform !== "darwin" }, async (t) => {
+test("preparation freshly attests safe replacement state and workspace roots", { skip: process.platform !== "darwin" }, async (t) => {
   let connections = 0;
   const current = await fixture(t);
   await addPeer(current, {
@@ -669,27 +638,13 @@ test("preparation rejects replaced state and workspace generations before connec
 
   await rm(current.stateDir, { recursive: true });
   await mkdir(current.stateDir, { mode: 0o700 });
-  await assert.rejects(
-    prepareAndPerform(current, target.targetId, "state changed"),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_STATE_ROOT_CHANGED",
-  );
-  assert.equal(connections, 0);
+  await prepareAndPerform(current, target.targetId, "state replaced safely");
+  assert.equal(connections, 1);
 
-  await current.adapter.assertTargetWorkspaceDisjoint(
-    target.targetId,
-    current.stateDir,
-  );
   await rm(current.workspace, { recursive: true });
   await mkdir(current.workspace, { mode: 0o700 });
-  await assert.rejects(
-    prepareAndPerform(current, target.targetId, "workspace changed"),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_WORKSPACE_CHANGED",
-  );
-  assert.equal(connections, 0);
+  await prepareAndPerform(current, target.targetId, "workspace replaced safely");
+  assert.equal(connections, 2);
 });
 
 test("discovery ignores provider modes but rejects invalid processes and paths", async (t) => {
@@ -824,13 +779,26 @@ test("absent and bounded Claude versions remain metadata through delivery", asyn
       socket.resume();
     },
   });
-  await addPeer(current, { pid: 42_114, version: "not-a-version" });
+  await addPeer(current, {
+    pid: 42_114,
+    sessionId: SESSION_THREE,
+    version: "diagnostic-build-label",
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
+  });
+  await addPeer(current, {
+    pid: 42_116,
+    sessionId: "00000000-0000-4000-8000-000000000004",
+    version: "x".repeat(65),
+  });
 
   const result = await current.adapter.discover();
-  assert.equal(result.peers.length, 2);
+  assert.equal(result.peers.length, 3);
   assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
-  assert.equal(result.entriesScanned, 3);
-  assert.equal(result.parseableRecords, 2);
+  assert.equal(result.entriesScanned, 4);
+  assert.equal(result.parseableRecords, 3);
   for (const target of result.peers) {
     await current.adapter.assertTargetWorkspaceDisjoint(
       target.targetId,
@@ -843,7 +811,7 @@ test("absent and bounded Claude versions remain metadata through delivery", asyn
     );
     assert.equal(sent.transportStatus, "transport_written");
   }
-  assert.equal(connections, 2);
+  assert.equal(connections, 3);
 });
 
 test("discovery excludes a marked Embassy helper advertisement before peer accounting", async (t) => {
@@ -1334,7 +1302,6 @@ test("listener advertises one native codex peer and removes it on close", async 
 test("listener advertises bounded unknown Claude version evidence", async (t) => {
   const current = await fixture(t, {
     createId: () => SESSION_ONE,
-    attestedClaudeCodeVersion: "unknown",
   });
   const listener = await current.adapter.listen({ onMessage: () => undefined });
   const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
@@ -1412,8 +1379,6 @@ test("listener artifact tokens are fresh across process replacements", async (t)
     {
       sessionsDir: current.sessionsDir,
       socketDir: current.socketDir,
-      attestedClaudeCodeVersion:
-        CLAUDE_PEER_COMPATIBILITY.claudeCodeVersion,
     },
     {
       createArtifactToken: () => "ordinary_new_02",
@@ -1500,7 +1465,6 @@ test("native acknowledgements follow a session UUID across socket rotation", asy
   const replacementStatuses: Array<Record<string, unknown>> = [];
   const current = await fixture(t, {
     now: () => now,
-    targetLeaseMs: 100,
   });
   const original = await addPeer(current, {
     pid: 47_153,
@@ -1730,7 +1694,6 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   const current = await fixture(t, {
     locale: "zh-CN",
     now: () => now,
-    targetLeaseMs: 100,
     maxFrameBytes: 512,
   });
   const original = await addPeer(current, {

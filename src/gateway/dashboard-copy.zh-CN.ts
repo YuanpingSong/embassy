@@ -55,7 +55,7 @@ export const dashboardCopyZhCn = {
     "运行 embassy select-claude --alias <alias>，明确选择一个可见会话。",
   "next.pairRoutes":
     "运行 embassy pair --from <alias> --to <alias>，建立显式同意边。",
-  "next.restoreClaude": "刷新发现；若未自动恢复，请明确选择 Claude 当前别名。",
+  "next.restoreClaude": "刷新发现以更新观测，然后明确选择 Claude 当前别名。",
   "next.repairClaude":
     "当前没有在线且无冲突的可选会话。请先解决“会话与路由”中显示的问题，再刷新发现。",
   "next.registerCodex":
@@ -255,6 +255,8 @@ export const dashboardCopyZhCn = {
   "diagnostics.codexDoctor.attached": "桌面应用已连接到受管理的 App Server。",
   "diagnostics.codexDoctor.observation_stale":
     "连接器观察已过期；当前健康状态尚未得到证明。",
+  "diagnostics.codexDoctor.managed_layout_missing":
+    "托管 App Server 布局缺失，但另一个进程占用了固定的 Codex 私有控制套接字。请运行 embassy doctor，然后重新安装托管 App Server，或停止该残留进程后重试。",
   "diagnostics.codexDoctor.unknown": "无法确定桌面应用的连接状态。",
   "diagnostics.registry.title": "注册表观察",
   "diagnostics.registry.entriesScanned": "已扫描条目",
@@ -321,7 +323,8 @@ export const dashboardCopyZhCn = {
   "route.meaning.idle": "已启用，可以承载消息。",
   "route.meaning.busy": "端点正忙；投递时机取决于目标提供方的传输方式。",
   "route.meaning.awaitingApproval": "正在等待提供方的原生审批。",
-  "route.meaning.stale": "当前没有端点证明；请刷新并恢复该路由。",
+  "route.meaning.stale":
+    "当前提供方观测不可用；刷新只更新证据，下一次操作会再次检查。",
   "route.meaning.offline": "该路由的连接器无法访问。",
   "route.meaning.disabled": "已被管理性停用，不属于故障。",
   "peer.idle": "空闲",
@@ -500,7 +503,8 @@ export const dashboardCopyZhCn = {
     "仅移除此同意边；相邻边上的工作保持活动。",
   "app.routes.unselectCmd.consequenceOpen":
     "仅移除此出站边。开放入站仍对同一操作系统用户下的所有在线 Claude 会话启用。",
-  "app.routes.refreshCmd": "重新读取本地发现结果，并重写静态面板文件。",
+  "app.routes.refreshCmd":
+    "仅用于观测：重新读取本地发现结果并重写静态面板文件；不会选择或恢复路由。",
   "app.routes.removeCodex.consequence":
     "移除 {alias}，删除其所有同意边，并按持久化写入阶段结算活动工作。已排队或已保留的工作会取消；已武装的工作变为结果不确定；已接受的工作变为未确认。",
   "app.routes.noPeers": "此快照中没有发现任何 Claude 会话。",

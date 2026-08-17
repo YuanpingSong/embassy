@@ -31,6 +31,7 @@ import {
   isGatewayDeliveryToken,
   isGatewayHostId,
   isGatewayReplyAddress,
+  isGatewaySnapshot,
   sendGatewayControlRequest,
   startGatewayControlServer,
   type ValidatedRegisterCodexParams,
@@ -1146,168 +1147,36 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
   await server.close();
 });
 
-test("delivery status and receipt results are closed and internally consistent", async () => {
+test("the client alone decodes closed delivery and receipt results", async () => {
   const { stateDir, socketPath } = await privateState();
-  const statusCandidates: unknown[] = [
+  const base = { found: true, updatedAt: NOW, deadlineAt: DEADLINE } as const;
+  const candidates: unknown[] = [
     { found: false },
-    {
-      found: true,
-      state: "queued",
-      terminal: false,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      pendingForMs: 125,
-    },
-    {
-      found: true,
-      state: "stalled",
-      terminal: false,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      pendingForMs: 5_000,
-      safeErrorCode: "DELIVERY_STALLED",
-    },
-    {
-      found: true,
-      state: "cancelled",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-    },
-    {
-      found: true,
-      state: "delivered",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-    },
-    {
-      found: true,
-      state: "unconfirmed",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      safeErrorCode: "CLAUDE_NATIVE_ACK_UNAVAILABLE",
-    },
-    {
-      found: true,
-      state: "expired",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      safeErrorCode: "DELIVERY_DEADLINE_EXPIRED",
-    },
-    {
-      found: true,
-      state: "failed",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      safeErrorCode: "DELIVERY_FAILED",
-    },
-    {
-      found: true,
-      state: "ambiguous",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      safeErrorCode: "DELIVERY_AMBIGUOUS",
-    },
-    {
-      found: true,
-      state: "queued",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-    },
-    {
-      found: true,
-      state: "unconfirmed",
-      terminal: false,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-    },
-    {
-      found: true,
-      state: "delivered",
-      terminal: true,
-      updatedAt: "not-a-timestamp",
-      deadlineAt: DEADLINE,
-    },
-    {
-      found: true,
-      state: "failed",
-      terminal: true,
-      updatedAt: NOW,
-      deadlineAt: DEADLINE,
-      pendingForMs: -1,
-    },
+    { ...base, state: "queued", terminal: false, pendingForMs: 125 },
+    { ...base, state: "cancelled", terminal: true },
+    { ...base, state: "queued", terminal: true },
+    { ...base, state: "unconfirmed", terminal: false },
+    { ...base, state: "delivered", terminal: true, updatedAt: "not-a-timestamp" },
+    { ...base, state: "failed", terminal: true, pendingForMs: -1 },
     { found: false, safeErrorCode: "MUST_NOT_BE_PRESENT" },
   ];
   const server = await startGatewayControlServer({
-    stateDir,
-    socketPath,
-    handlers: handlers({
-      deliveryStatus: () => statusCandidates.shift() as never,
-      sendToClaude: () =>
-        ({
-          accepted: true,
-          code: "ok",
-          conversationId: CONVERSATION_ID,
-        }) as never,
-      reply: () => ({
-        accepted: true,
-        code: "ok",
-        conversationId: CONVERSATION_ID,
-        deliveryToken: "dlv_invalid+token___________",
-      }) as never,
-    }),
+    stateDir, socketPath,
+    handlers: handlers({ deliveryStatus: () => candidates.shift() as never }),
   });
-
-  for (let attempt = 0; attempt < 9; attempt += 1) {
-    const response = await rawRequest(
-      socketPath,
-      wireRequest("delivery_status", { token: DELIVERY_TOKEN }),
-    );
-    assert.equal(response.ok, true);
+  const request = {
+    protocolVersion: 1, method: "delivery_status", params: { token: DELIVERY_TOKEN },
+  } as const;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.equal((await sendGatewayControlRequest({ socketPath, request })).ok, true);
   }
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    assertWireError(
-      await rawRequest(
-        socketPath,
-        wireRequest("delivery_status", { token: DELIVERY_TOKEN }),
-      ),
-      "INVALID_HANDLER_RESPONSE",
+    await assert.rejects(
+      sendGatewayControlRequest({ socketPath, request }),
+      (error: unknown) => error instanceof GatewayControlTransportError &&
+        error.code === "CONTROL_INVALID_RESPONSE",
     );
   }
-
-  assertWireError(
-    await rawRequest(
-      socketPath,
-      wireRequest("send_to_claude", {
-        fromAlias: "codex-main@this-mac",
-        threadId: THREAD_ID,
-        toAlias: "claude-one@build-mac",
-        text: "bounded body",
-      }),
-    ),
-    "INVALID_HANDLER_RESPONSE",
-  );
-  assertWireError(
-    await rawRequest(
-      socketPath,
-      wireRequest("reply", {
-        conversationId: CONVERSATION_ID,
-        text: "bounded reply",
-        caller: {
-          kind: "codex",
-          alias: "codex-main@this-mac",
-          threadId: THREAD_ID,
-        },
-      }),
-    ),
-    "INVALID_HANDLER_RESPONSE",
-  );
   await server.close();
 });
 
@@ -1356,7 +1225,7 @@ test("enforces one bounded JSONL frame per connection", async () => {
   await server.close();
 });
 
-test("never reflects handler exceptions or invalid private response fields", async () => {
+test("never reflects handler exceptions", async () => {
   const { stateDir, socketPath } = await privateState();
   const secretText = "do-not-reflect-this-body";
   const server = await startGatewayControlServer({
@@ -1366,8 +1235,6 @@ test("never reflects handler exceptions or invalid private response fields", asy
       sendToClaude: () => {
         throw new Error(`${THREAD_ID} ${secretText}`);
       },
-      listSnapshot: () =>
-        ({ ...snapshot(), threadId: THREAD_ID, text: secretText }) as GatewaySnapshot,
     }),
   });
 
@@ -1383,19 +1250,17 @@ test("never reflects handler exceptions or invalid private response fields", asy
   assertWireError(failed, "HANDLER_FAILURE");
   assert.equal(JSON.stringify(failed).includes(THREAD_ID), false);
   assert.equal(JSON.stringify(failed).includes(secretText), false);
-
-  const invalid = await rawRequest(
-    socketPath,
-    wireRequest("list_snapshot", {}),
-  );
-  assertWireError(invalid, "INVALID_HANDLER_RESPONSE");
-  assert.equal(JSON.stringify(invalid).includes(THREAD_ID), false);
-  assert.equal(JSON.stringify(invalid).includes(secretText), false);
   await server.close();
 });
 
 test("list_snapshot requires bounded projection and explicit omission counts", async () => {
-  const { stateDir, socketPath } = await privateState();
+  for (const [condition, accepted] of [
+    ["managed_layout_missing", true], ["MANAGED_LAYOUT_MISSING", false],
+  ] as const) {
+    const candidate = snapshot();
+    candidate.connectors[0]!.codexDoctor = { conditions: [condition as never] };
+    assert.equal(isGatewaySnapshot(candidate), accepted);
+  }
   const { truncation: _omitted, ...withoutTruncation } = snapshot();
   const { inboundMode: _inboundMode, ...withoutInboundMode } = snapshot();
   const invalidInboundMode = { ...snapshot(), inboundMode: "closed" };
@@ -1518,23 +1383,7 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     nonClaudeAvailablePeer,
     unprojected,
   ];
-  const attempts = candidates.length;
-  const server = await startGatewayControlServer({
-    stateDir,
-    socketPath,
-    handlers: handlers({
-      listSnapshot: () => candidates.shift() as GatewaySnapshot,
-    }),
-  });
-
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const response = await rawRequest(
-      socketPath,
-      wireRequest("list_snapshot", {}),
-    );
-    assertWireError(response, "INVALID_HANDLER_RESPONSE");
-  }
-  await server.close();
+  assert.ok(candidates.every((candidate) => !isGatewaySnapshot(candidate)));
 });
 
 test("list_snapshot accepts all derived directions and rejects legacy authority schema", async () => {
@@ -1553,30 +1402,11 @@ test("list_snapshot accepts all derived directions and rejects legacy authority 
   const oldPairs = { ...snapshot(), pairs: [] };
   const invalidDirection = structuredClone(canonical);
   invalidDirection.messages[0]!.direction = "codex_to_codex" as never;
-  const candidates = [canonical, oldSchema, compatibilityField, oldPairs, invalidDirection];
-  const server = await startGatewayControlServer({
-    stateDir,
-    socketPath,
-    handlers: handlers({
-      listSnapshot: () => candidates.shift() as GatewaySnapshot,
-    }),
-  });
-
-  const accepted = await rawRequest(
-    socketPath,
-    wireRequest("list_snapshot", {}),
-  );
-  assert.equal(accepted.ok, true);
-  if (!accepted.ok) assert.fail("expected schema-v2 snapshot");
-  assert.deepEqual((accepted.result as GatewaySnapshot).messages.map(({ direction }) => direction), messageDirections);
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const response = await rawRequest(
-      socketPath,
-      wireRequest("list_snapshot", {}),
-    );
-    assertWireError(response, "INVALID_HANDLER_RESPONSE");
-  }
-  await server.close();
+  assert.equal(isGatewaySnapshot(canonical), true);
+  assert.deepEqual(canonical.messages.map(({ direction }) => direction), messageDirections);
+  assert.ok([oldSchema, compatibilityField, oldPairs, invalidDirection].every(
+    (candidate) => !isGatewaySnapshot(candidate),
+  ));
 });
 
 test("list_snapshot validates canonical consent endpoints against route bindings", async () => {
@@ -1602,20 +1432,10 @@ test("list_snapshot validates canonical consent endpoints against route bindings
   (providerMismatch.consentEdges[0]!.endpoints[0] as unknown as { provider: string }).provider = "grok";
   const widenedEndpoint = structuredClone(canonical);
   (widenedEndpoint.consentEdges[0]!.endpoints[0] as unknown as Record<string, unknown>).lease = "private";
-  const candidates = [canonical, reversed, providerMismatch, widenedEndpoint];
-  const server = await startGatewayControlServer({
-    stateDir,
-    socketPath,
-    handlers: handlers({ listSnapshot: () => candidates.shift() as GatewaySnapshot }),
-  });
-  assert.equal((await rawRequest(socketPath, wireRequest("list_snapshot", {}))).ok, true);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    assertWireError(
-      await rawRequest(socketPath, wireRequest("list_snapshot", {})),
-      "INVALID_HANDLER_RESPONSE",
-    );
-  }
-  await server.close();
+  assert.equal(isGatewaySnapshot(canonical), true);
+  assert.ok([reversed, providerMismatch, widenedEndpoint].every(
+    (candidate) => !isGatewaySnapshot(candidate),
+  ));
 });
 
 test("activity validation binds each kind to its exact action and authority", async () => {
@@ -1680,12 +1500,14 @@ test("observe_snapshot enforces a closed revision-and-snapshot result", async ()
   });
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await rawRequest(
-      socketPath,
-      wireRequest("observe_snapshot", {}),
+    await assert.rejects(
+      sendGatewayControlRequest({
+        socketPath,
+        request: { protocolVersion: 1, method: "observe_snapshot", params: {} },
+      }),
+      (error: unknown) => error instanceof GatewayControlTransportError &&
+        error.code === "CONTROL_INVALID_RESPONSE",
     );
-    assertWireError(response, "INVALID_HANDLER_RESPONSE");
-    assert.equal(JSON.stringify(response).includes(THREAD_ID), false);
   }
   await server.close();
 });

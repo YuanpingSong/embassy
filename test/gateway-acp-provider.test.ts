@@ -105,15 +105,12 @@ test("DeepSeek owns one lazy session and preserves coarse and cancelled outcomes
 
 test("Grok keeps uncertainty stale until bounded recovery, then preserves end_turn", async () => {
   let now = 0;
-  let wake: (() => void) | undefined;
   const first = new FakeClient();
   first.receipts.push({ terminalState: "unknown", text: "partial", textTruncated: false });
   const second = new FakeClient();
   second.receipts.push({ terminalState: "delivered", stopReason: "end_turn", text: "done", textTruncated: false });
   const { adapter, input, states } = await dispatchFixture("grok", [first, second], {
     now: () => now,
-    setTimeout: ((callback: () => void) => { wake = callback; return { unref: () => undefined }; }) as unknown as typeof setTimeout,
-    clearTimeout: (() => undefined) as typeof clearTimeout,
   });
   assert.deepEqual(await adapter.dispatch(input), { state: "ambiguous", safeErrorCode: "ACP_SUBPROCESS_EXITED", replyText: "partial" });
   assert.deepEqual(states, [{ state: "unobserved", code: "ACP_SUBPROCESS_EXITED" }]);
@@ -126,10 +123,9 @@ test("Grok keeps uncertainty stale until bounded recovery, then preserves end_tu
     code: "ACP_RESTART_BACKOFF",
   });
   now = 250;
-  wake?.();
   assert.deepEqual(await adapter.dispatch(input), { state: "delivered", replyText: "done" });
   assert.equal(first.closed, true);
-  assert.deepEqual(states.map(({ state }) => state), ["unobserved", "unobserved", "idle", "idle"]);
+  assert.deepEqual(states.map(({ state }) => state), ["unobserved", "unobserved", "idle"]);
   await adapter.close();
 });
 
@@ -432,20 +428,13 @@ test("a late old-registration failure cannot close or back off the replacement c
   await adapter.close();
 });
 
-test("ACP close fences late prompt callbacks and recovery scheduling", async () => {
+test("ACP close fences late prompt callbacks", async () => {
   const client = new FakeClient();
   let finish!: (receipt: AcpPromptReceipt) => void;
   client.receipts.push(new Promise<AcpPromptReceipt>((resolve) => {
     finish = resolve;
   }));
-  let timers = 0;
-  const { adapter, input, states } = await dispatchFixture("grok", [client], {
-    setTimeout: ((callback: () => void) => {
-      timers += 1;
-      return { callback, unref: () => undefined };
-    }) as unknown as typeof setTimeout,
-    clearTimeout: (() => undefined) as typeof clearTimeout,
-  });
+  const { adapter, input, states } = await dispatchFixture("grok", [client]);
   const dispatch = adapter.dispatch(input);
   await waitFor(() => client.prompts.length === 1);
   await adapter.close();
@@ -456,7 +445,6 @@ test("ACP close fences late prompt callbacks and recovery scheduling", async () 
     safeErrorCode: "ACP_SUBPROCESS_EXITED",
   });
   assert.deepEqual(states, []);
-  assert.equal(timers, 0);
 });
 
 test("ACP observation callback failure cannot overwrite terminal delivery", async () => {

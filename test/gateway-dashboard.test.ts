@@ -33,15 +33,23 @@ test("Codex doctor conditions render exact actionable copy in both locales", () 
   );
   assert.ok(codex);
   codex.codexDoctor = {
-    conditions: ["split_brain", "observation_stale"],
+    conditions: ["split_brain", "observation_stale", "managed_layout_missing"],
   };
   const en = renderDashboardHtml(snapshot, { locale: "en" });
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
   assert.match(en, /Desktop is on a private App Server/);
   assert.match(en, /Connector observation is stale/);
+  assert.match(en, /managed App Server layout is missing/);
+  assert.match(en, /embassy doctor/);
+  assert.match(en, /reinstall the managed App Server or stop the ghost process/);
   assert.match(en, /\/usr\/bin\/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT/);
   assert.match(zh, /桌面应用正在使用私有 App Server/);
   assert.match(zh, /连接器观察已过期/);
+  assert.match(zh, /托管 App Server 布局缺失/);
+  assert.match(zh, /embassy doctor/);
+  assert.match(zh, /重新安装托管 App Server，或停止该残留进程/);
+  assert.doesNotMatch(en, /app-server-control\.sock|\/synthetic\/|PID \d+/);
+  assert.doesNotMatch(zh, /app-server-control\.sock|\/synthetic\/|PID \d+/);
 });
 
 test("snapshot evidence exposes suffix-only correlation, peer validation, operations, and deadline buckets", () => {

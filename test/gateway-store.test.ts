@@ -470,8 +470,9 @@ test("same-alias replacement fences native admission, succession, pair, and unpa
   const { store } = await fixture({ inboundMode: "open" });
   await store.initialize();
   await paired(store);
-  await store.removeRouteAtomic({
+  await store.removeOwnedRouteAtomic({
     alias: codex.alias,
+    binding: codex.binding,
     activity: { operatorAction: true },
   });
   const current = route(
@@ -1140,7 +1141,7 @@ test("Codex succession is one idempotent replacement with exact phase settlement
       aliases: [codex.alias, replacement.alias],
     }],
   );
-  assert.equal((await store.inspectConsentEdges()).length, 0);
+  assert.equal((await store.publicSnapshot()).consentEdges.length, 0);
   assert.equal((await store.inspectPrivateRoute(replacement.alias))?.binding.registrationId,
     replacement.binding.registrationId);
   await store.close();
@@ -1154,7 +1155,10 @@ test("in-flight capacity is enforced before queue reservation", async () => {
   await enqueue(store, "capacity-two", "two");
   await reserve(store);
   assert.deepEqual(await store.reserveMessage(codex.alias), { status: "empty" });
-  assert.equal((await store.inspectQueuedMessageIds()).length, 1);
+  assert.equal(
+    (await store.publicSnapshot()).messages.filter(({ state }) => state === "queued").length,
+    1,
+  );
   await store.close();
 });
 
@@ -1251,12 +1255,14 @@ test("late exact-owner cleanup cannot remove an alias replacement", async () => 
   await store.initialize();
   await store.registerRoute(codex);
   const oldBinding = { ...codex.binding };
-  assert.equal((await store.removeRouteAtomic({
+  assert.equal((await store.removeOwnedRouteAtomic({
     alias: codex.alias,
+    binding: oldBinding,
     activity: { operatorAction: true },
   })).removed, true);
-  assert.deepEqual(await store.removeRouteAtomic({
+  assert.deepEqual(await store.removeOwnedRouteAtomic({
     alias: codex.alias,
+    binding: oldBinding,
     activity: { operatorAction: true },
   }), { removed: false, settlements: [] });
   assert.deepEqual(

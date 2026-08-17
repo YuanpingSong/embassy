@@ -130,8 +130,15 @@ export type StatelessCodexOperationResult =
         replyText: string | null;
       }>);
 
+export type StatelessCodexObservation = Readonly<{
+  state: "idle" | "busy" | "awaiting_approval" | "unobserved";
+  safeErrorCode?: "CODEX_OBSERVER_PROTOCOL_ERROR" | "CODEX_OBSERVER_UNAVAILABLE" | "THREAD_NOT_OBSERVED";
+}>;
+
 export type StatelessCodexOperationTransport = Readonly<{
   execute: (input: StatelessCodexOperationInput) => Promise<StatelessCodexOperationResult>;
+  /** Independent display evidence. It never prepares or performs a semantic write. */
+  observe: (route: StatelessCodexRoute, signal?: AbortSignal) => Promise<StatelessCodexObservation>;
 }>;
 
 export type StatelessCodexOperationTransportOptions = Readonly<{
@@ -563,6 +570,30 @@ class OperationSession {
       if (this.phase === "accepted") return this.acceptedUnconfirmed(code);
       if (this.phase === "armed") return this.armedAmbiguous(code);
       return this.cleanFailure(code);
+    }
+  }
+
+  async observe(): Promise<StatelessCodexObservation> {
+    try {
+      await this.initialize();
+      const status = await this.resume();
+      if (status === "idle") return { state: "idle" };
+      if (status === "waiting_approval") return { state: "awaiting_approval" };
+      if (status === "active") return { state: "busy" };
+      return {
+        state: "unobserved",
+        safeErrorCode: status === "not_loaded"
+          ? "THREAD_NOT_OBSERVED"
+          : "CODEX_OBSERVER_PROTOCOL_ERROR",
+      };
+    } catch (error) {
+      return {
+        state: "unobserved",
+        safeErrorCode:
+          error instanceof OperationError && error.code === "THREAD_NOT_OBSERVED"
+            ? "THREAD_NOT_OBSERVED"
+            : "CODEX_OBSERVER_UNAVAILABLE",
+      };
     }
   }
 
@@ -1283,6 +1314,67 @@ export function createStatelessCodexOperationTransport(
         }
       }
       return { ...result, attemptId: input.attemptId, cleanupConfirmed };
+    },
+    async observe(route, signal): Promise<StatelessCodexObservation> {
+      let factory: LocalCodexTransportFactory | undefined;
+      let owned: LocalCodexOwnedTransport | undefined;
+      let session: OperationSession | undefined;
+      try {
+        if (
+          !validHost(route.hostId) ||
+          !validAlias(route.alias, route.hostId) ||
+          !validOpaqueId(route.threadId) ||
+          !validOpaqueId(route.registrationId, 128) ||
+          signal?.aborted
+        ) {
+          return { state: "unobserved", safeErrorCode: "CODEX_OBSERVER_UNAVAILABLE" };
+        }
+        const factoryOptions = { ...normalized.local, hostId: route.hostId };
+        const created = await awaitSetupResource(
+          dependencies.createFactory?.(factoryOptions) ??
+            createLocalCodexTransportFactory(
+              factoryOptions,
+              dependencies.localDependencies ?? {},
+            ),
+          signal,
+        );
+        if (created === SETUP_ABORTED) {
+          return { state: "unobserved", safeErrorCode: "CODEX_OBSERVER_UNAVAILABLE" };
+        }
+        factory = created;
+        const connected = await awaitSetupResource(factory.connectTransport(), signal);
+        if (connected === SETUP_ABORTED) {
+          return { state: "unobserved", safeErrorCode: "CODEX_OBSERVER_UNAVAILABLE" };
+        }
+        owned = connected;
+        const input: StatelessCodexOperationInput = {
+          attemptId: "observer",
+          authorizeWrite: async () => false,
+          deadlineAt: new Date(normalized.now().getTime() + normalized.requestTimeoutMs).toISOString(),
+          kind: "start",
+          onAccepted: async () => undefined,
+          route,
+          text: "observer",
+          ...(signal === undefined ? {} : { signal }),
+        };
+        session = new OperationSession(owned, input, normalized, Infinity, 0);
+        if (signal !== undefined) {
+          const abort = () => session?.abort();
+          signal.addEventListener("abort", abort, { once: true });
+          try {
+            return await session.observe();
+          } finally {
+            signal.removeEventListener("abort", abort);
+          }
+        }
+        return await session.observe();
+      } catch {
+        return { state: "unobserved", safeErrorCode: "CODEX_OBSERVER_UNAVAILABLE" };
+      } finally {
+        session?.dispose();
+        try { await owned?.close(); } catch { /* display evidence only */ }
+        try { await factory?.close(); } catch { /* display evidence only */ }
+      }
     },
   };
 }

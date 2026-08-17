@@ -178,7 +178,7 @@ test("dashboard locale grammar is one exact shared allowlist", () => {
 test("English and Chinese render one semantic model with reciprocal local links", () => {
   const snapshot = dashboardFixture();
   const model = buildDashboardViewModel(snapshot);
-  const en = renderDashboardHtml(snapshot, { locale: "en", refreshSeconds: 2 });
+  const en = renderDashboardHtml(snapshot, { locale: "en" });
   const zh = renderDashboardHtml(snapshot, { locale: "zh-CN" });
 
   assert.equal(renderDashboardHtml(snapshot, { locale: "en" }), en);

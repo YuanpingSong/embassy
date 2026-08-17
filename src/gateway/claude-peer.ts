@@ -20,18 +20,8 @@ import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
-import { isCompatibilityVersionEvidence } from "./compatibility.js";
 
-/**
- * This adapter intentionally pins the inspected, implementation-specific
- * local peer boundary. The feature is documented in Claude Code, but its
- * registry and NDJSON formats are not a stable public integration contract.
- */
-export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({
-  claudeCodeVersion: "2.1.227",
-  peerProtocol: 1,
-  messageVersion: 1,
-});
+export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({ peerProtocol: 1 });
 const EMBASSY_ADVERTISEMENT_VERSION = 1;
 const EMBASSY_SOURCE_NAME_PATTERN = /^(?:codex-|dsh-|grok-)/;
 
@@ -60,28 +50,16 @@ const REGISTRY_FILE_PATTERN = /^([1-9][0-9]{0,9})\.json$/;
 const SOCKET_FILE_PATTERN = /^([1-9][0-9]{0,9})\.sock$/;
 const MAX_PID = 2_147_483_647;
 
-export const claudePeerStatuses = [
-  "busy",
-  "shell",
-  "idle",
-  "waiting",
-] as const;
+export const claudePeerStatuses = ["busy", "shell", "idle", "waiting"] as const;
 export type ClaudePeerStatus = (typeof claudePeerStatuses)[number];
 
-export const claudePeerKinds = [
-  "interactive",
-  "bg",
-  "daemon",
-  "daemon-worker",
-] as const;
+export const claudePeerKinds = ["interactive", "bg", "daemon", "daemon-worker"] as const;
 export type ClaudePeerKind = (typeof claudePeerKinds)[number];
 
 export const claudePeerRejectionCodes = [
   "ENTRY_LIMIT_EXCEEDED",
   "INVALID_FILE_NAME",
   "REGISTRY_NOT_REGULAR",
-  "REGISTRY_OWNER_MISMATCH",
-  "REGISTRY_MODE_UNSAFE",
   "REGISTRY_TOO_LARGE",
   "REGISTRY_RACED",
   "REGISTRY_INVALID_JSON",
@@ -91,8 +69,6 @@ export const claudePeerRejectionCodes = [
   "PID_OWNER_MISMATCH",
   "SOCKET_OUTSIDE_ROOT",
   "SOCKET_NOT_SOCKET",
-  "SOCKET_OWNER_MISMATCH",
-  "SOCKET_MODE_UNSAFE",
   "SELF_TARGET",
   "SESSION_ID_COLLISION",
 ] as const;
@@ -100,29 +76,16 @@ export type ClaudePeerRejectionCode =
   (typeof claudePeerRejectionCodes)[number];
 
 export type ClaudePeerDescriptor = {
-  /** Claude's stable logical session UUID. Names and sockets are not identity. */
-  targetId: string;
-  alias: string;
-  kind: ClaudePeerKind;
-  status: ClaudePeerStatus;
+  targetId: string; // Stable session UUID; names and sockets are coordinates.
+  alias: string; kind: ClaudePeerKind; status: ClaudePeerStatus;
   compatibility: "compatible";
 };
-
 export type ClaudePeerDiscovery = {
   peers: ClaudePeerDescriptor[];
   rejected: Partial<Record<ClaudePeerRejectionCode, number>>;
-  truncated: boolean;
-  /** Bounded registry entries examined, including safely skipped records. */
-  entriesScanned: number;
-  /** Records whose required known fields parsed before later liveness checks. */
-  parseableRecords: number;
+  truncated: boolean; entriesScanned: number; parseableRecords: number;
 };
-
-export type ClaudePeerDeliveryDiagnostic = {
-  /** Stable, non-sensitive gateway code rendered into Claude's context. */
-  code: string;
-};
-
+export type ClaudePeerDeliveryDiagnostic = { code: string };
 export const claudePeerInboundStallReasons = [
   "ROUTE_BUSY",
   "ROUTE_UNAVAILABLE",
@@ -132,28 +95,16 @@ export type ClaudePeerInboundStallReason =
   (typeof claudePeerInboundStallReasons)[number];
 
 export type ClaudePeerInboundProgress = {
-  kind: "stall";
-  reason: ClaudePeerInboundStallReason;
-  queuedForMs: number;
+  kind: "stall"; reason: ClaudePeerInboundStallReason; queuedForMs: number;
 };
-
-export type ClaudePeerAcknowledgmentResult = {
-  transportStatus: "transport_written" | "suppressed";
-};
-
+export type ClaudePeerAcknowledgmentResult = { transportStatus: "transport_written" | "suppressed" };
 export type ClaudePeerInboundMessage = {
-  inboundId: string;
-  content: string;
-  /** Validated connect-back capability, not proof of the connecting PID. */
-  sourceTargetId?: string;
-  /** Display label from that capability; never an authority. */
-  sourceAlias?: string;
-  /** Opaque listener-owned handle for native held/delivered status updates. */
+  inboundId: string; content: string;
+  sourceTargetId?: string; sourceAlias?: string;
   receiptHandle?: string;
   replySupported: boolean;
   trust: "untrusted_same_uid_peer" | "untrusted_anonymous_local_peer";
 };
-
 export type ClaudePeerProtocolNotice = {
   code:
     | "FRAME_TOO_LARGE"
@@ -166,48 +117,24 @@ export type ClaudePeerProtocolNotice = {
     | "CONNECTION_TIMEOUT"
     | "CALLBACK_ERROR";
 };
-
 export type ClaudeProcessIdentity = {
-  uid: number;
-  /** Stable only for the lifetime of this process, such as ps(1) lstart. */
-  generation: string;
+  uid: number; generation: string;
 };
-
 export type ClaudeProcessInspector = (
   pid: number,
 ) => Promise<ClaudeProcessIdentity | undefined>;
-
 export type ClaudePeerConnect = (socketPath: string) => Socket;
-
 export type ClaudePeerAdapterOptions = {
-  sessionsDir: string;
-  socketDir: string;
-  /** Bounded metadata from the attested runtime, never user input. */
-  attestedClaudeCodeVersion: string;
-  /** Locale for bounded user-visible gateway notices written to Claude. */
-  locale?: DashboardLocale;
-  /** Gateway-authored user-frame policy; native status frames are unaffected. */
+  sessionsDir: string; socketDir: string; locale?: DashboardLocale;
   deliveryNotices?: GatewayDeliveryNoticeMode;
-  maxRegistryEntries?: number;
-  maxRegistryBytes?: number;
-  maxFrameBytes?: number;
-  targetLeaseMs?: number;
-  connectTimeoutMs?: number;
-  maxPendingReceipts?: number;
-  maxConnections?: number;
-  connectionIdleMs?: number;
+  maxRegistryEntries?: number; maxRegistryBytes?: number;
+  maxFrameBytes?: number; connectTimeoutMs?: number;
+  maxPendingReceipts?: number; maxConnections?: number; connectionIdleMs?: number;
   maxFramesPerConnection?: number;
 };
-
-/** Dependency seams for deterministic tests; never populate from config. */
 export type ClaudePeerAdapterTestOverrides = {
-  /** Deterministic owner-mismatch seam; production always uses process.getuid(). */
-  expectedUid?: number;
-  processInspector?: ClaudeProcessInspector;
-  connect?: ClaudePeerConnect;
-  now?: () => number;
-  createId?: () => string;
-  /** Separate from protocol/message UUID generation so artifact tests cannot alias it. */
+  expectedUid?: number; processInspector?: ClaudeProcessInspector;
+  connect?: ClaudePeerConnect; now?: () => number; createId?: () => string;
   createArtifactToken?: () => string;
   registryRename?: (source: string, destination: string) => Promise<void>;
   registryOperationHook?: (event: {
@@ -215,133 +142,61 @@ export type ClaudePeerAdapterTestOverrides = {
     phase: "entered" | "exited";
     generation: string;
   }) => void | Promise<void>;
-  userHome?: string;
-  tempRoots?: readonly string[];
+  userHome?: string; tempRoots?: readonly string[];
   postBindHook?: (socketPath: string) => void | Promise<void>;
 };
-
 export type ClaudePeerListenerOptions = {
   onMessage: (message: ClaudePeerInboundMessage) => void | Promise<void>;
-  onProtocolNotice?: (
-    notice: ClaudePeerProtocolNotice,
-  ) => void | Promise<void>;
+  onProtocolNotice?: (notice: ClaudePeerProtocolNotice) => void | Promise<void>;
 };
-
 export type ClaudePeerPreparedSendResult = {
-  messageId: string;
-  transportStatus: "transport_written";
+  messageId: string; transportStatus: "transport_written";
 };
-
 export type ClaudePeerPreparedSend = Readonly<{
-  messageId: string;
-  frameBytes: number;
-  sha256: string;
-  /** Starts the exact prepared socket operation once, without reserialization. */
+  messageId: string; frameBytes: number; sha256: string;
   perform: () => Promise<ClaudePeerPreparedSendResult>;
-  /** Permanently consumes this preparation without opening a socket. */
   cancel: () => void;
 }>;
-
-type FileGeneration = {
-  dev: number;
-  ino: number;
-  size: number;
-  mtimeMs: number;
-};
-
-type SocketGeneration = {
-  dev: number;
-  ino: number;
-};
-
-type DirectoryGeneration = {
-  dev: number;
-  ino: number;
-};
-
-type WorkspacePolicy = {
-  stateRoot: string;
-  stateGeneration: DirectoryGeneration;
-  workspace: string;
-  workspaceGeneration: DirectoryGeneration;
-};
+type FileGeneration = { dev: number; ino: number; size: number; mtimeMs: number };
+type SocketGeneration = { dev: number; ino: number };
+type DirectoryGeneration = { dev: number; ino: number };
 
 type ParsedRegistryRecord = {
-  pid: number;
-  sessionId: string;
-  cwd: string;
-  peerProtocol: 1;
-  kind: ClaudePeerKind;
-  messagingSocketPath: string;
-  name: string;
-  status: ClaudePeerStatus;
+  pid: number; sessionId: string; cwd: string; kind: ClaudePeerKind;
+  messagingSocketPath: string; name: string; status: ClaudePeerStatus;
   embassyAdvertisement: boolean;
 };
-
-type TargetBinding = {
-  targetId: string;
-  alias: string;
-  registryPath: string;
-  registryGeneration: FileGeneration;
-  socketGeneration: SocketGeneration;
-  record: ParsedRegistryRecord;
-  processGeneration: string;
-  expiresAt: number;
-};
-
+type TargetBinding = Readonly<{
+  targetId: string; alias: string; record: ParsedRegistryRecord;
+}>;
 type CanonicalUserFrame = {
-  msgV: 1;
-  msg_id: string;
-  type: "user";
-  message: {
-    role: "user";
-    content: string;
-  };
-  priority: "next";
-  from?: string;
+  msgV: 1; msg_id: string; type: "user";
+  message: { role: "user"; content: string };
+  priority: "next"; from?: string;
 };
-
 type ParsedUserFrame = {
-  type: "user";
-  content: string;
-  messageId?: string;
-  from?: string;
+  type: "user"; content: string; messageId?: string; from?: string;
 };
 
 type ParsedControlFrame = {
-  type: "control";
-  action: "peer_message_status";
+  type: "control"; action: "peer_message_status";
   status: "held" | "denied" | "expired" | "delivered";
-  from: string;
-  originalMessageId: string;
+  from: string; originalMessageId: string;
 };
 
 type ParsedFrame = ParsedUserFrame | ParsedControlFrame;
-
 type InboundReceipt = {
-  sourceSessionId: string;
-  originalMessageId: string;
+  sourceSessionId: string; originalMessageId: string;
   stallNotification: "available" | "writing" | "settled";
 };
 
-type CapacitySettlement = {
-  receipt: InboundReceipt;
-  attempts: number;
-  retryTimer?: NodeJS.Timeout;
-};
-
+type CapacitySettlement = { receipt: InboundReceipt; attempts: number; retryTimer?: NodeJS.Timeout };
 type AdapterLimits = {
-  maxRegistryEntries: number;
-  maxRegistryBytes: number;
-  maxFrameBytes: number;
-  targetLeaseMs: number;
-  connectTimeoutMs: number;
-  maxPendingReceipts: number;
-  maxConnections: number;
+  maxRegistryEntries: number; maxRegistryBytes: number; maxFrameBytes: number;
+  connectTimeoutMs: number; maxPendingReceipts: number; maxConnections: number;
   connectionIdleMs: number;
   maxFramesPerConnection: number;
 };
-
 const MAX_CLAUDE_STALL_QUEUED_MS = 3_600_000;
 const CAPACITY_SETTLEMENT_MAX_ATTEMPTS = 3;
 const CAPACITY_SETTLEMENT_RETRY_MS = 25;
@@ -373,6 +228,10 @@ function isBoundedString(
   return typeof value === "string" && byteLength(value) <= maxBytes;
 }
 
+function isDiagnosticVersion(value: unknown): value is string {
+  return isBoundedString(value, 64) && value.length > 0 && !value.includes("\0");
+}
+
 function validateContent(content: unknown, maxBytes: number): string {
   if (
     typeof content !== "string" ||
@@ -388,28 +247,15 @@ function validateContent(content: unknown, maxBytes: number): string {
   return content;
 }
 
-function exactMode(mode: number): number {
-  return mode & 0o777;
+function exactMode(mode: number): number { return mode & 0o777; }
+
+function generationOf(
+  stat: { dev: number; ino: number; size: number; mtimeMs: number },
+): FileGeneration {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
 }
 
-function generationOf(stat: {
-  dev: number;
-  ino: number;
-  size: number;
-  mtimeMs: number;
-}): FileGeneration {
-  return {
-    dev: stat.dev,
-    ino: stat.ino,
-    size: stat.size,
-    mtimeMs: stat.mtimeMs,
-  };
-}
-
-function sameFileGeneration(
-  left: FileGeneration,
-  right: FileGeneration,
-): boolean {
+function sameFileGeneration(left: FileGeneration, right: FileGeneration): boolean {
   return (
     left.dev === right.dev &&
     left.ino === right.ino &&
@@ -418,35 +264,12 @@ function sameFileGeneration(
   );
 }
 
-function sameSocketGeneration(
-  left: SocketGeneration,
-  right: SocketGeneration,
-): boolean {
+function sameSocketGeneration(left: SocketGeneration, right: SocketGeneration): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function sameDirectoryGeneration(
-  left: DirectoryGeneration,
-  right: DirectoryGeneration,
-): boolean {
+function sameDirectoryGeneration(left: DirectoryGeneration, right: DirectoryGeneration): boolean {
   return left.dev === right.dev && left.ino === right.ino;
-}
-
-function sameTargetGeneration(
-  left: TargetBinding,
-  right: TargetBinding,
-): boolean {
-  return (
-    left.registryPath === right.registryPath &&
-    left.record.pid === right.record.pid &&
-    left.record.sessionId === right.record.sessionId &&
-    left.record.name === right.record.name &&
-    left.record.cwd === right.record.cwd &&
-    left.record.kind === right.record.kind &&
-    left.record.messagingSocketPath === right.record.messagingSocketPath &&
-    left.processGeneration === right.processGeneration &&
-    sameSocketGeneration(left.socketGeneration, right.socketGeneration)
-  );
 }
 
 function pathContains(parent: string, child: string): boolean {
@@ -503,13 +326,8 @@ function configuredLimit(
 
 function boundedStallQueuedForMs(value: number): number {
   if (Number.isNaN(value) || value === Number.NEGATIVE_INFINITY) return 0;
-  if (value === Number.POSITIVE_INFINITY) {
-    return MAX_CLAUDE_STALL_QUEUED_MS;
-  }
-  return Math.min(
-    MAX_CLAUDE_STALL_QUEUED_MS,
-    Math.max(0, Math.trunc(value)),
-  );
+  if (value === Number.POSITIVE_INFINITY) return MAX_CLAUDE_STALL_QUEUED_MS;
+  return Math.min(MAX_CLAUDE_STALL_QUEUED_MS, Math.max(0, Math.trunc(value)));
 }
 
 function parseRegistryRecord(
@@ -517,23 +335,13 @@ function parseRegistryRecord(
   expectedPid: number,
 ): ParsedRegistryRecord | undefined {
   if (!isObject(value)) return undefined;
-  const required = [
-    "pid",
-    "sessionId",
-    "cwd",
-    "startedAt",
-    "procStart",
-    "peerProtocol",
-    "kind",
-    "entrypoint",
-    "messagingSocketPath",
-    "name",
-    "updatedAt",
-  ] as const;
+  const required = ["pid", "sessionId", "cwd", "startedAt", "procStart",
+    "peerProtocol", "kind", "entrypoint", "messagingSocketPath", "name",
+    "updatedAt"] as const;
   if (!required.every((key) => Object.hasOwn(value, key))) return undefined;
   const embassyAdvertisement =
     value.embassyAdvertisementVersion === EMBASSY_ADVERTISEMENT_VERSION &&
-    isCompatibilityVersionEvidence(value.version) &&
+    isDiagnosticVersion(value.version) &&
     typeof value.name === "string" &&
     EMBASSY_SOURCE_NAME_PATTERN.test(value.name) &&
     ALIAS_PATTERN.test(value.name) &&
@@ -542,23 +350,12 @@ function parseRegistryRecord(
     value.peerProtocol === CLAUDE_PEER_COMPATIBILITY.peerProtocol &&
     value.status !== undefined &&
     value.statusUpdatedAt !== undefined;
-  if (
-    value.embassyAdvertisementVersion !== undefined &&
-    !embassyAdvertisement
-  ) {
-    return undefined;
-  }
+  if (value.embassyAdvertisementVersion !== undefined && !embassyAdvertisement) return undefined;
   const versionObserved =
-    value.version === undefined ||
-    isCompatibilityVersionEvidence(value.version);
+    value.version === undefined || isDiagnosticVersion(value.version);
 
   if (value.pid !== expectedPid) return undefined;
-  if (
-    typeof value.sessionId !== "string" ||
-    !UUID_PATTERN.test(value.sessionId)
-  ) {
-    return undefined;
-  }
+  if (typeof value.sessionId !== "string" || !UUID_PATTERN.test(value.sessionId)) return undefined;
   if (
     !isBoundedString(value.cwd, 4096) ||
     !path.isAbsolute(value.cwd) ||
@@ -621,13 +418,9 @@ function parseRegistryRecord(
     pid: expectedPid,
     sessionId: value.sessionId.toLowerCase(),
     cwd: value.cwd,
-    peerProtocol: 1,
     kind: value.kind as ClaudePeerKind,
     messagingSocketPath: value.messagingSocketPath,
     name: value.name,
-    // Some reviewed Claude Code print/SDK session records omit status fields
-    // while the model turn is active. Treat that live process conservatively
-    // as busy.
     status: (value.status ?? "busy") as ClaudePeerStatus,
     embassyAdvertisement,
   };
@@ -842,16 +635,60 @@ async function invokeHook<T>(
   await hook(value);
 }
 
-async function invokeObservationalHook<T>(
-  hook: ((value: T) => void | Promise<void>) | undefined,
-  value: T,
+function writeSocketPayload(
+  connect: ClaudePeerConnect,
+  socketPath: string,
+  payload: Buffer,
+  timeoutMs: number,
+  onWriteStart: () => void,
 ): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(socketPath);
+    let settled = false;
+    const timer = setTimeout(
+      () => finish(new Error("peer write timeout")),
+      timeoutMs,
+    );
+    timer.unref();
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      error === undefined ? resolve() : reject(error);
+    };
+    socket.once("error", finish);
+    socket.once("connect", () => {
+      try {
+        onWriteStart();
+        socket.end(payload, () => finish());
+      } catch (error) {
+        finish(error as Error);
+      }
+    });
+  });
+}
+
+async function socketOwnership(
+  socketPath: string,
+  generation: SocketGeneration,
+): Promise<"owned" | "changed" | "missing"> {
   try {
-    await invokeHook(hook, value);
-  } catch {
-    // Status observation must never change a possibly-written transport
-    // outcome or invite an unsafe caller retry.
+    const stat = await lstat(socketPath);
+    return stat.isSocket() &&
+      sameSocketGeneration({ dev: stat.dev, ino: stat.ino }, generation)
+      ? "owned"
+      : "changed";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
   }
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) =>
+    server.close((error) => error === undefined ? resolve() : reject(error)),
+  );
 }
 
 export class ClaudePeerAdapter {
@@ -865,7 +702,6 @@ export class ClaudePeerAdapter {
   readonly #createId: () => string;
   readonly #createArtifactToken: () => string;
   readonly #locale: DashboardLocale;
-  readonly #attestedClaudeCodeVersion: string;
   readonly #deliveryNotices: GatewayDeliveryNoticeMode;
   readonly #registryRename: (
     source: string,
@@ -879,7 +715,7 @@ export class ClaudePeerAdapter {
   readonly #registryMutex = new KeyedMutex();
   readonly #postBindHook: ClaudePeerAdapterTestOverrides["postBindHook"];
   readonly #targets = new Map<string, TargetBinding>();
-  readonly #workspacePolicies = new Map<string, WorkspacePolicy>();
+  readonly #selectedStateRoots = new Map<string, string>();
   readonly #listeners = new Set<ClaudePeerListener>();
   readonly #preparedSends = new Set<() => void>();
 
@@ -893,12 +729,6 @@ export class ClaudePeerAdapter {
         "Claude peer sockets are supported only on macOS and Linux.",
       );
     }
-    if (!isCompatibilityVersionEvidence(options.attestedClaudeCodeVersion)) {
-      throw new BridgeError(
-        "INVALID_GATEWAY_CONFIGURATION",
-        "The Claude version metadata is malformed.",
-      );
-    }
     if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
       throw new BridgeError(
         "DASHBOARD_LOCALE_UNSUPPORTED",
@@ -906,7 +736,6 @@ export class ClaudePeerAdapter {
       );
     }
     this.#locale = options.locale ?? "en";
-    this.#attestedClaudeCodeVersion = options.attestedClaudeCodeVersion;
     if (
       options.deliveryNotices !== undefined &&
       !["merged", "verbose", "quiet"].includes(options.deliveryNotices)
@@ -932,70 +761,21 @@ export class ClaudePeerAdapter {
         "expectedUid must be a non-negative integer.",
       );
     }
+    const limit = (
+      name: keyof AdapterLimits,
+      fallback: number,
+      minimum: number,
+      maximum: number,
+    ): number => configuredLimit(options[name], fallback, minimum, maximum, name);
     this.#limits = {
-      maxRegistryEntries: configuredLimit(
-        options.maxRegistryEntries,
-        256,
-        1,
-        4_096,
-        "maxRegistryEntries",
-      ),
-      maxRegistryBytes: configuredLimit(
-        options.maxRegistryBytes,
-        16 * 1024,
-        512,
-        1024 * 1024,
-        "maxRegistryBytes",
-      ),
-      maxFrameBytes: configuredLimit(
-        options.maxFrameBytes,
-        64 * 1024,
-        256,
-        1024 * 1024,
-        "maxFrameBytes",
-      ),
-      targetLeaseMs: configuredLimit(
-        options.targetLeaseMs,
-        30_000,
-        100,
-        5 * 60_000,
-        "targetLeaseMs",
-      ),
-      connectTimeoutMs: configuredLimit(
-        options.connectTimeoutMs,
-        2_000,
-        10,
-        30_000,
-        "connectTimeoutMs",
-      ),
-      maxPendingReceipts: configuredLimit(
-        options.maxPendingReceipts,
-        256,
-        1,
-        4_096,
-        "maxPendingReceipts",
-      ),
-      maxConnections: configuredLimit(
-        options.maxConnections,
-        32,
-        1,
-        1_024,
-        "maxConnections",
-      ),
-      connectionIdleMs: configuredLimit(
-        options.connectionIdleMs,
-        5_000,
-        10,
-        60_000,
-        "connectionIdleMs",
-      ),
-      maxFramesPerConnection: configuredLimit(
-        options.maxFramesPerConnection,
-        8,
-        1,
-        128,
-        "maxFramesPerConnection",
-      ),
+      maxRegistryEntries: limit("maxRegistryEntries", 256, 1, 4_096),
+      maxRegistryBytes: limit("maxRegistryBytes", 16 * 1024, 512, 1024 * 1024),
+      maxFrameBytes: limit("maxFrameBytes", 64 * 1024, 256, 1024 * 1024),
+      connectTimeoutMs: limit("connectTimeoutMs", 2_000, 10, 30_000),
+      maxPendingReceipts: limit("maxPendingReceipts", 256, 1, 4_096),
+      maxConnections: limit("maxConnections", 32, 1, 1_024),
+      connectionIdleMs: limit("connectionIdleMs", 5_000, 10, 60_000),
+      maxFramesPerConnection: limit("maxFramesPerConnection", 8, 1, 128),
     };
     this.#inspectProcess = testing.processInspector ?? defaultProcessInspector;
     this.#connect =
@@ -1018,18 +798,11 @@ export class ClaudePeerAdapter {
     this.#postBindHook = testing.postBindHook;
   }
 
-  async #validateRealDirectory(directory: string): Promise<void> {
-    const stat = await lstat(directory);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new BridgeError(
-        "UNSAFE_PEER_DIRECTORY",
-        "The Claude peer directory is not an accessible real directory.",
-      );
-    }
-  }
-
-  async #validateSessionsDirectory(): Promise<void> {
-    const stat = await lstat(this.#sessionsDir);
+  async #validateRoots(): Promise<void> {
+    const [stat, sockets] = await Promise.all([
+      lstat(this.#sessionsDir),
+      lstat(this.#socketDir),
+    ]);
     if (
       stat.isSymbolicLink() ||
       !stat.isDirectory() ||
@@ -1039,6 +812,12 @@ export class ClaudePeerAdapter {
       throw new BridgeError(
         "UNSAFE_PEER_DIRECTORY",
         "The Claude sessions directory failed its exact owner and mode policy.",
+      );
+    }
+    if (sockets.isSymbolicLink() || !sockets.isDirectory()) {
+      throw new BridgeError(
+        "UNSAFE_PEER_DIRECTORY",
+        "The Claude peer socket directory is not an accessible real directory.",
       );
     }
   }
@@ -1137,8 +916,7 @@ export class ClaudePeerAdapter {
     _existingTargetId?: string,
     onParsed?: () => void,
   ): Promise<TargetBinding> {
-    const { value, generation: registryGeneration } =
-      await this.#readRegistryFile(registryPath);
+    const { value } = await this.#readRegistryFile(registryPath);
     if (isObject(value) && value.pid !== expectedPid) {
       throw new BridgeError(
         "PID_MISMATCH",
@@ -1168,7 +946,7 @@ export class ClaudePeerAdapter {
         "Registry process owner is unsafe.",
       );
     }
-    const socketGeneration = await this.#validateSocket(
+    await this.#validateSocket(
       record.messagingSocketPath,
       expectedPid,
     );
@@ -1178,21 +956,12 @@ export class ClaudePeerAdapter {
       // coordinates for that session and are revalidated before every write.
       targetId: record.sessionId,
       alias: record.name,
-      registryPath,
-      registryGeneration,
-      socketGeneration,
       record,
-      processGeneration: processIdentity.generation,
-      expiresAt: this.#now() + this.#limits.targetLeaseMs,
     };
   }
 
   async discover(): Promise<ClaudePeerDiscovery> {
-    await Promise.all([
-      this.#validateSessionsDirectory(),
-      this.#validateRealDirectory(this.#socketDir),
-    ]);
-    const previousTargets = [...this.#targets.values()];
+    await this.#validateRoots();
     const nextTargets = new Map<string, TargetBinding>();
     const collidedSessionIds = new Set<string>();
     const rejected: Partial<Record<ClaudePeerRejectionCode, number>> = {};
@@ -1229,7 +998,7 @@ export class ClaudePeerAdapter {
       }
       const registryPath = path.join(this.#sessionsDir, entry.name);
       try {
-        let binding = await this.#bindingFromRegistry(
+        const binding = await this.#bindingFromRegistry(
           registryPath,
           pid,
           undefined,
@@ -1237,16 +1006,6 @@ export class ClaudePeerAdapter {
             parseableRecords += 1;
           },
         );
-        const previous = previousTargets.find((candidate) =>
-          sameTargetGeneration(candidate, binding),
-        );
-        if (previous !== undefined) {
-          binding = {
-            ...binding,
-            targetId: previous.targetId,
-            expiresAt: this.#now() + this.#limits.targetLeaseMs,
-          };
-        }
         if (
           collidedSessionIds.has(binding.targetId) ||
           nextTargets.has(binding.targetId)
@@ -1287,9 +1046,6 @@ export class ClaudePeerAdapter {
     for (const [targetId, binding] of nextTargets) {
       this.#targets.set(targetId, binding);
     }
-    for (const targetId of this.#workspacePolicies.keys()) {
-      if (!nextTargets.has(targetId)) this.#workspacePolicies.delete(targetId);
-    }
     return {
       peers,
       rejected,
@@ -1299,171 +1055,62 @@ export class ClaudePeerAdapter {
     };
   }
 
-  async #revalidateBinding(binding: TargetBinding): Promise<TargetBinding> {
-    await Promise.all([
-      this.#validateSessionsDirectory(),
-      this.#validateRealDirectory(this.#socketDir),
-    ]);
-    if (binding.expiresAt < this.#now()) {
-      this.#targets.delete(binding.targetId);
-      this.#workspacePolicies.delete(binding.targetId);
-      throw new BridgeError(
-        "CLAUDE_PEER_TARGET_STALE",
-        "The Claude peer discovery lease expired; discover again.",
-        true,
-      );
-    }
-    const current = await this.#bindingFromRegistry(
-      binding.registryPath,
-      binding.record.pid,
-      binding.targetId,
-    );
-    if (
-      !sameTargetGeneration(binding, current)
-    ) {
-      this.#targets.delete(binding.targetId);
-      this.#workspacePolicies.delete(binding.targetId);
-      throw new BridgeError(
-        "CLAUDE_PEER_TARGET_CHANGED",
-        "The Claude peer generation changed; discover again.",
-        true,
-      );
-    }
-    current.expiresAt = binding.expiresAt;
-    this.#targets.set(current.targetId, current);
-    return current;
-  }
-
-  async #canonicalStateRoot(stateRoot: string): Promise<{
-    path: string;
-    generation: DirectoryGeneration;
-  }> {
+  async #attestOwnedDirectory(
+    candidate: string,
+    exactPrivate: boolean,
+    code: "CLAUDE_PEER_STATE_ROOT_UNSAFE" | "CLAUDE_PEER_WORKSPACE_UNSAFE",
+  ): Promise<string> {
     try {
-      const configured = assertAbsoluteConfiguredPath(
-        stateRoot,
-        "controllerStateRoot",
-      );
+      const configured = assertAbsoluteConfiguredPath(candidate, "peerDirectory");
       const before = await lstat(configured);
+      const canonical = await realpath(configured);
+      const after = await lstat(configured);
+      const safeMode = (mode: number): boolean =>
+        exactPrivate ? exactMode(mode) === 0o700 : (exactMode(mode) & 0o022) === 0;
       if (
         before.isSymbolicLink() ||
         !before.isDirectory() ||
         before.uid !== this.#expectedUid ||
-        exactMode(before.mode) !== 0o700
-      ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_STATE_ROOT_UNSAFE",
-          "The controller state root failed its canonical ownership policy.",
-        );
-      }
-      const canonical = await realpath(configured);
-      const after = await lstat(configured);
-      if (
+        !safeMode(before.mode) ||
         canonical !== configured ||
         after.isSymbolicLink() ||
         !after.isDirectory() ||
         after.uid !== this.#expectedUid ||
-        exactMode(after.mode) !== 0o700 ||
+        !safeMode(after.mode) ||
         before.dev !== after.dev ||
         before.ino !== after.ino
       ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_STATE_ROOT_UNSAFE",
-          "The controller state root changed or is not canonical.",
-        );
+        throw new BridgeError(code, "The peer directory failed its exact ownership policy.");
       }
-      return {
-        path: canonical,
-        generation: { dev: after.dev, ino: after.ino },
-      };
+      return canonical;
     } catch (error) {
       if (error instanceof BridgeError) throw error;
-      throw new BridgeError(
-        "CLAUDE_PEER_STATE_ROOT_UNSAFE",
-        "The controller state root could not be safely attested.",
-      );
+      throw new BridgeError(code, "The peer directory could not be safely attested.");
     }
   }
 
-  async #assertBindingWorkspaceDisjoint(
-    binding: TargetBinding,
-    _canonicalStateRoot: string,
-  ): Promise<{ path: string; generation: DirectoryGeneration }> {
-    try {
-      const cwd = binding.record.cwd;
-      const before = await lstat(cwd);
-      if (before.isSymbolicLink() || !before.isDirectory()) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_UNSAFE",
-          "The selected Claude workspace failed its directory policy.",
-        );
-      }
-      const canonicalWorkspace = await realpath(cwd);
-      const homeBefore = await lstat(this.#userHome);
-      const canonicalHome = await realpath(this.#userHome);
-      const homeAfter = await lstat(this.#userHome);
-      if (
-        canonicalWorkspace !== cwd ||
-        homeBefore.isSymbolicLink() ||
-        !homeBefore.isDirectory() ||
-        canonicalHome !== this.#userHome ||
-        homeBefore.uid !== this.#expectedUid ||
-        (exactMode(homeBefore.mode) & 0o022) !== 0 ||
-        homeAfter.isSymbolicLink() ||
-        !homeAfter.isDirectory() ||
-        homeAfter.uid !== this.#expectedUid ||
-        (exactMode(homeAfter.mode) & 0o022) !== 0 ||
-        homeBefore.dev !== homeAfter.dev ||
-        homeBefore.ino !== homeAfter.ino
-      ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_UNSAFE",
-          "The selected Claude workspace or local home is non-canonical.",
-        );
-      }
-      const filesystemRoot = path.parse(canonicalWorkspace).root;
-      if (canonicalWorkspace === filesystemRoot) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_BROAD",
-          "The selected Claude workspace is broader than the safe local boundary.",
-        );
-      }
-      if (
-        this.#tempRoots.some(
-          (tempRoot) =>
-            pathContains(tempRoot, canonicalWorkspace) ||
-            pathContains(canonicalWorkspace, tempRoot),
-        )
-      ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_BROAD",
-          "The selected Claude workspace is inside or contains a temporary root.",
-        );
-      }
-      const after = await lstat(cwd);
-      if (
-        after.isSymbolicLink() ||
-        !after.isDirectory() ||
-        before.uid !== this.#expectedUid ||
-        after.uid !== this.#expectedUid ||
-        (exactMode(before.mode) & 0o022) !== 0 ||
-        (exactMode(after.mode) & 0o022) !== 0 ||
-        before.dev !== after.dev ||
-        before.ino !== after.ino
-      ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_UNSAFE",
-          "The selected Claude workspace changed or failed its owner and mode policy.",
-        );
-      }
-      return {
-        path: canonicalWorkspace,
-        generation: { dev: after.dev, ino: after.ino },
-      };
-    } catch (error) {
-      if (error instanceof BridgeError) throw error;
+  async #assertBindingWorkspaceDisjoint(binding: TargetBinding): Promise<void> {
+    const code = "CLAUDE_PEER_WORKSPACE_UNSAFE" as const;
+    const configured = assertAbsoluteConfiguredPath(binding.record.cwd, "peerDirectory");
+    if (
+      configured === path.parse(configured).root ||
+      this.#tempRoots.some(
+        (root) => pathContains(root, configured) || pathContains(configured, root),
+      )
+    ) {
       throw new BridgeError(
-        "CLAUDE_PEER_WORKSPACE_UNSAFE",
-        "The selected Claude workspace could not be safely attested.",
+        "CLAUDE_PEER_WORKSPACE_BROAD",
+        "The selected Claude workspace is broader than the safe local boundary.",
+      );
+    }
+    const [workspace] = await Promise.all([
+      this.#attestOwnedDirectory(configured, false, code),
+      this.#attestOwnedDirectory(this.#userHome, false, code),
+    ]);
+    if (workspace !== configured) {
+      throw new BridgeError(
+        code,
+        "The peer workspace changed during attestation.",
       );
     }
   }
@@ -1484,54 +1131,17 @@ export class ClaudePeerAdapter {
         true,
       );
     }
-    const binding = await this.#revalidateBinding(target);
-    const state = await this.#canonicalStateRoot(
+    const stateRoot = await this.#attestOwnedDirectory(
       controllerStateRoot,
+      true,
+      "CLAUDE_PEER_STATE_ROOT_UNSAFE",
     );
-    const workspace = await this.#assertBindingWorkspaceDisjoint(
-      binding,
-      state.path,
-    );
-    const existing = this.#workspacePolicies.get(targetId);
-    if (existing !== undefined) {
-      if (
-        existing.stateRoot !== state.path ||
-        !sameDirectoryGeneration(existing.stateGeneration, state.generation)
-      ) {
-        this.#workspacePolicies.delete(targetId);
-        throw new BridgeError(
-          "CLAUDE_PEER_STATE_ROOT_CHANGED",
-          "The selected Claude target is already bound to another controller state generation.",
-        );
-      }
-      if (
-        existing.workspace !== workspace.path ||
-        !sameDirectoryGeneration(
-          existing.workspaceGeneration,
-          workspace.generation,
-        )
-      ) {
-        this.#workspacePolicies.delete(targetId);
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_CHANGED",
-          "The selected Claude workspace generation changed; select it again.",
-          true,
-        );
-      }
-    }
-    this.#workspacePolicies.set(targetId, {
-      stateRoot: state.path,
-      stateGeneration: state.generation,
-      workspace: workspace.path,
-      workspaceGeneration: workspace.generation,
-    });
+    await this.#assertBindingWorkspaceDisjoint(target);
+    this.#selectedStateRoots.set(targetId, stateRoot);
   }
 
   async #resolveReplyAddress(address: string): Promise<TargetBinding> {
-    await Promise.all([
-      this.#validateSessionsDirectory(),
-      this.#validateRealDirectory(this.#socketDir),
-    ]);
+    await this.#validateRoots();
     if (!address.startsWith("uds:")) {
       throw new BridgeError(
         "UNREGISTERED_REPLY_ADDRESS",
@@ -1557,22 +1167,12 @@ export class ClaudePeerAdapter {
       );
     }
     const registryPath = path.join(this.#sessionsDir, `${pid}.json`);
-    let binding = await this.#bindingFromRegistry(registryPath, pid);
+    const binding = await this.#bindingFromRegistry(registryPath, pid);
     if (binding.record.messagingSocketPath !== socketPath) {
       throw new BridgeError(
         "UNREGISTERED_REPLY_ADDRESS",
         "Reply address does not match its live registry generation.",
       );
-    }
-    const previous = [...this.#targets.values()].find((candidate) =>
-      sameTargetGeneration(candidate, binding),
-    );
-    if (previous !== undefined) {
-      binding = {
-        ...binding,
-        targetId: previous.targetId,
-        expiresAt: this.#now() + this.#limits.targetLeaseMs,
-      };
     }
     this.#targets.set(binding.targetId, binding);
     return binding;
@@ -1584,10 +1184,6 @@ export class ClaudePeerAdapter {
    * every later delivery resolves the UUID to fresh transport coordinates.
    */
   async resolveReplyAddress(address: string): Promise<ClaudePeerDescriptor> {
-    await Promise.all([
-      this.#validateSessionsDirectory(),
-      this.#validateRealDirectory(this.#socketDir),
-    ]);
     const binding = await this.#resolveReplyAddress(address);
     return {
       targetId: binding.targetId,
@@ -1601,10 +1197,7 @@ export class ClaudePeerAdapter {
   async listen(
     options: ClaudePeerListenerOptions,
   ): Promise<ClaudePeerListener> {
-    await Promise.all([
-      this.#validateSessionsDirectory(),
-      this.#validateRealDirectory(this.#socketDir),
-    ]);
+    await this.#validateRoots();
     const generation = this.#createArtifactToken();
     if (!PRIVATE_ARTIFACT_TOKEN_PATTERN.test(generation)) {
       throw new BridgeError(
@@ -1630,10 +1223,8 @@ export class ClaudePeerAdapter {
       limits: this.#limits,
       createId: this.#createId,
       connect: this.#connect,
-      now: this.#now,
       locale: this.#locale,
       deliveryNotices: this.#deliveryNotices,
-      attestedClaudeCodeVersion: this.#attestedClaudeCodeVersion,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
       resolveSessionBinding: async (sessionId) => {
@@ -1656,10 +1247,8 @@ export class ClaudePeerAdapter {
             true,
           );
         }
-        return await this.#revalidateBinding(target);
+        return target;
       },
-      revalidateBinding: async (binding) =>
-        await this.#revalidateBinding(binding),
       options,
       generation,
       registryRename: this.#registryRename,
@@ -1714,47 +1303,22 @@ export class ClaudePeerAdapter {
         true,
       );
     }
-    const binding = await this.#revalidateBinding(target);
-    const workspacePolicy = this.#workspacePolicies.get(targetId);
-    if (workspacePolicy === undefined) {
+    const stateRoot = this.#selectedStateRoots.get(targetId);
+    if (stateRoot === undefined) {
       throw new BridgeError(
         "CLAUDE_PEER_WORKSPACE_UNATTESTED",
         "The Claude peer workspace must pass selection validation before send.",
       );
     }
     try {
-      const state = await this.#canonicalStateRoot(workspacePolicy.stateRoot);
-      const workspace = await this.#assertBindingWorkspaceDisjoint(
-        binding,
-        state.path,
+      await this.#attestOwnedDirectory(
+        stateRoot,
+        true,
+        "CLAUDE_PEER_STATE_ROOT_UNSAFE",
       );
-      if (
-        !sameDirectoryGeneration(
-          workspacePolicy.stateGeneration,
-          state.generation,
-        )
-      ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_STATE_ROOT_CHANGED",
-          "The controller state root generation changed; select the target again.",
-          true,
-        );
-      }
-      if (
-        workspacePolicy.workspace !== workspace.path ||
-        !sameDirectoryGeneration(
-          workspacePolicy.workspaceGeneration,
-          workspace.generation,
-        )
-      ) {
-        throw new BridgeError(
-          "CLAUDE_PEER_WORKSPACE_CHANGED",
-          "The selected Claude workspace generation changed; select it again.",
-          true,
-        );
-      }
+      await this.#assertBindingWorkspaceDisjoint(target);
     } catch (error) {
-      this.#workspacePolicies.delete(targetId);
+      this.#selectedStateRoots.delete(targetId);
       throw error;
     }
 
@@ -1782,7 +1346,7 @@ export class ClaudePeerAdapter {
         : { from: options.replyListener.address }),
       maxFrameBytes: this.#limits.maxFrameBytes,
     });
-    const socketPath = binding.record.messagingSocketPath;
+    const socketPath = target.record.messagingSocketPath;
     let state: "prepared" | "performed" | "cancelled" = "prepared";
     const cancel = (): void => {
       if (state !== "prepared") return;
@@ -1813,77 +1377,43 @@ export class ClaudePeerAdapter {
       }
 
       let writeStarted = false;
-      const write = new Promise<void>((resolve, reject) => {
-        const socket = this.#connect(socketPath);
-        const timeoutMs = Math.max(
+      const write = writeSocketPayload(
+        this.#connect,
+        socketPath,
+        frame,
+        Math.max(
           1,
-          Math.min(
-            this.#limits.connectTimeoutMs,
-            options.deadlineAt - this.#now(),
-          ),
-        );
-        const timer = setTimeout(() => {
-          socket.destroy();
-          const deadlineElapsed = this.#now() >= options.deadlineAt;
-          reject(
-            new BridgeError(
-              writeStarted
-                ? "CLAUDE_PEER_WRITE_AMBIGUOUS"
-                : deadlineElapsed
-                  ? "CLAUDE_PEER_MESSAGE_EXPIRED"
-                  : "CLAUDE_PEER_CONNECT_TIMEOUT",
-              writeStarted
-                ? "The Claude peer write began but did not finish in time; do not retry automatically."
-                : deadlineElapsed
-                  ? "The Claude peer message deadline elapsed before any socket write."
-                  : "The Claude peer socket did not accept the write in time.",
-              !writeStarted,
-            ),
-          );
-        }, timeoutMs);
-        timer.unref();
-        socket.once("error", (error) => {
-          clearTimeout(timer);
-          reject(error);
-        });
-        socket.once("connect", () => {
+          Math.min(this.#limits.connectTimeoutMs, options.deadlineAt - this.#now()),
+        ),
+        () => {
           if (options.deadlineAt <= this.#now()) {
-            clearTimeout(timer);
-            socket.destroy();
-            reject(
-              new BridgeError(
-                "CLAUDE_PEER_MESSAGE_EXPIRED",
-                "The Claude peer message deadline elapsed before any socket write.",
-                true,
-              ),
+            throw new BridgeError(
+              "CLAUDE_PEER_MESSAGE_EXPIRED",
+              "The Claude peer message deadline elapsed before any socket write.",
+              true,
             );
-            return;
           }
           writeStarted = true;
-          try {
-            socket.end(frame, () => {
-              clearTimeout(timer);
-              socket.destroy();
-              resolve();
-            });
-          } catch (error) {
-            clearTimeout(timer);
-            socket.destroy();
-            reject(error);
-          }
-        });
-      });
+        },
+      );
       return write.then(
         () => ({ messageId, transportStatus: "transport_written" as const }),
         (error: unknown) => {
           if (error instanceof BridgeError) throw error;
+          const expired = this.#now() >= options.deadlineAt;
           throw new BridgeError(
             writeStarted
               ? "CLAUDE_PEER_WRITE_AMBIGUOUS"
-              : "CLAUDE_PEER_WRITE_FAILED",
+              : expired
+                ? "CLAUDE_PEER_MESSAGE_EXPIRED"
+                : error instanceof Error && error.message === "peer write timeout"
+                  ? "CLAUDE_PEER_CONNECT_TIMEOUT"
+                  : "CLAUDE_PEER_WRITE_FAILED",
             writeStarted
               ? "The Claude peer write began but its outcome is ambiguous; do not retry automatically."
-              : "The Claude peer message was not confirmed written.",
+              : expired
+                ? "The Claude peer message deadline elapsed before any socket write."
+                : "The Claude peer message was not confirmed written.",
             !writeStarted,
           );
         },
@@ -1905,7 +1435,7 @@ export class ClaudePeerAdapter {
       [...this.#listeners].map(async (listener) => listener.close()),
     );
     this.#targets.clear();
-    this.#workspacePolicies.clear();
+    this.#selectedStateRoots.clear();
     const failed = results.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
@@ -1920,13 +1450,10 @@ type ListenerCreateOptions = {
   limits: AdapterLimits;
   createId: () => string;
   connect: ClaudePeerConnect;
-  now: () => number;
   locale: DashboardLocale;
   deliveryNotices: GatewayDeliveryNoticeMode;
-  attestedClaudeCodeVersion: string;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
-  revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
   options: ClaudePeerListenerOptions;
   generation: string;
   registryRename: (source: string, destination: string) => Promise<void>;
@@ -1953,40 +1480,19 @@ type AdvertisedCodexRegistryRecord = {
   updatedAt: number;
   statusUpdatedAt: number;
 };
+type OwnedAdvertisement = Readonly<{
+  record: AdvertisedCodexRegistryRecord;
+  generation: FileGeneration;
+}>;
 
 export class ClaudePeerListener {
   readonly address: string;
   readonly generation: string;
-  readonly #sessionsDir: string;
   readonly #sessionsGeneration: DirectoryGeneration;
-  readonly #expectedUid: number;
   readonly #socketPath: string;
   readonly #socketGeneration: SocketGeneration;
   readonly #server: Server;
-  readonly #limits: AdapterLimits;
-  readonly #createId: () => string;
-  readonly #connect: ClaudePeerConnect;
-  readonly #now: () => number;
-  readonly #locale: DashboardLocale;
-  readonly #deliveryNotices: GatewayDeliveryNoticeMode;
-  readonly #attestedClaudeCodeVersion: string;
-  readonly #resolveReplyAddress: (address: string) => Promise<TargetBinding>;
-  readonly #resolveSessionBinding: (
-    sessionId: string,
-  ) => Promise<TargetBinding>;
-  readonly #revalidateBinding: (binding: TargetBinding) => Promise<TargetBinding>;
-  readonly #options: ClaudePeerListenerOptions;
-  readonly #registryRename: (
-    source: string,
-    destination: string,
-  ) => Promise<void>;
-  readonly #registryOperationHook:
-    | ClaudePeerAdapterTestOverrides["registryOperationHook"]
-    | undefined;
-  readonly #runRegistryMutation: <T>(
-    operation: () => Promise<T>,
-  ) => Promise<T>;
-  readonly #onClosed: () => void;
+  readonly #context: ListenerCreateOptions;
   readonly #connections = new Set<Socket>();
   readonly #inboundReceipts = new Map<string, InboundReceipt>();
   // One bounded exception slot owns an overflow message only long enough to
@@ -1997,8 +1503,7 @@ export class ClaudePeerListener {
   #queuedFrames = 0;
   #inboundQuiesced = false;
   readonly #inboundQuiesceWaiters = new Set<() => void>();
-  #advertisedRecord: AdvertisedCodexRegistryRecord | undefined;
-  #advertisedGeneration: FileGeneration | undefined;
+  #advertisement: OwnedAdvertisement | undefined;
   #closing = false;
   #closed = false;
   #closeOperation: Promise<void> | undefined;
@@ -2012,27 +1517,11 @@ export class ClaudePeerListener {
   ) {
     this.address = `uds:${socketPath}`;
     this.generation = options.generation;
-    this.#sessionsDir = options.sessionsDir;
     this.#sessionsGeneration = sessionsGeneration;
-    this.#expectedUid = options.expectedUid;
     this.#socketPath = socketPath;
     this.#socketGeneration = generation;
     this.#server = server;
-    this.#limits = options.limits;
-    this.#createId = options.createId;
-    this.#connect = options.connect;
-    this.#now = options.now;
-    this.#locale = options.locale;
-    this.#deliveryNotices = options.deliveryNotices;
-    this.#attestedClaudeCodeVersion = options.attestedClaudeCodeVersion;
-    this.#resolveReplyAddress = options.resolveReplyAddress;
-    this.#resolveSessionBinding = options.resolveSessionBinding;
-    this.#revalidateBinding = options.revalidateBinding;
-    this.#options = options.options;
-    this.#registryRename = options.registryRename;
-    this.#registryOperationHook = options.registryOperationHook;
-    this.#runRegistryMutation = options.runRegistryMutation;
-    this.#onClosed = options.onClosed;
+    this.#context = options;
   }
 
   static async create(
@@ -2133,40 +1622,18 @@ export class ClaudePeerListener {
       );
       return listener;
     } catch (error) {
-      let stillOwned = false;
-      if (createdGeneration !== undefined) {
-        try {
-          const current = await lstat(socketPath);
-          stillOwned =
-            current.isSocket() &&
-            sameSocketGeneration(
-              { dev: current.dev, ino: current.ino },
-              createdGeneration,
-            );
-        } catch {
-          // A missing or unreadable path cannot be safely unlinked by
-          // net.Server.close(), which deletes by pathname.
+      try {
+        if (
+          createdGeneration === undefined ||
+          await socketOwnership(socketPath, createdGeneration) !== "owned"
+        ) {
+          throw new Error("callback ownership changed");
         }
-      }
-      let closeConfirmed = false;
-      if (stillOwned) {
-        try {
-          await new Promise<void>((resolve, reject) =>
-            server.close((closeError) =>
-              closeError === undefined ? resolve() : reject(closeError),
-            ),
-          );
-          try {
-            await lstat(socketPath);
-          } catch (closeError) {
-            closeConfirmed =
-              (closeError as NodeJS.ErrnoException).code === "ENOENT";
-          }
-        } catch {
-          // An unconfirmed close cannot safely downgrade a callback failure.
+        await closeServer(server);
+        if (await socketOwnership(socketPath, createdGeneration) !== "missing") {
+          throw new Error("callback close unconfirmed");
         }
-      }
-      if (!closeConfirmed) {
+      } catch {
         server.unref();
         throw new BridgeError(
           "CLAUDE_PEER_CALLBACK_UNSAFE",
@@ -2181,17 +1648,13 @@ export class ClaudePeerListener {
     return this.#closing || this.#closed;
   }
 
-  #isClosingOrClosed(): boolean {
-    return this.#closing || this.#closed;
-  }
-
   #registryPath(): string {
-    return path.join(this.#sessionsDir, `${process.pid}.json`);
+    return path.join(this.#context.sessionsDir, `${process.pid}.json`);
   }
 
   #registryTemporaryPath(): string {
     return path.join(
-      this.#sessionsDir,
+      this.#context.sessionsDir,
       `.${process.pid}.${this.generation}.registry.tmp`,
     );
   }
@@ -2201,11 +1664,11 @@ export class ClaudePeerListener {
   }
 
   async #assertRegistryDirectory(): Promise<void> {
-    const current = await lstat(this.#sessionsDir);
+    const current = await lstat(this.#context.sessionsDir);
     if (
       current.isSymbolicLink() ||
       !current.isDirectory() ||
-      current.uid !== this.#expectedUid ||
+      current.uid !== this.#context.expectedUid ||
       exactMode(current.mode) !== 0o700 ||
       !sameDirectoryGeneration(
         { dev: current.dev, ino: current.ino },
@@ -2225,58 +1688,46 @@ export class ClaudePeerListener {
   > {
     await this.#assertRegistryDirectory();
     const registryPath = this.#registryPath();
-    let before: Awaited<ReturnType<typeof lstat>>;
+    let handle: Awaited<ReturnType<typeof open>>;
     try {
-      before = await lstat(registryPath);
+      handle = await open(
+        registryPath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
-    if (
-      before.isSymbolicLink() ||
-      !before.isFile() ||
-      before.uid !== this.#expectedUid ||
-      exactMode(before.mode) !== 0o600 ||
-      before.size > this.#limits.maxRegistryBytes
-    ) {
-      throw new BridgeError(
-        "REGISTRY_RACED",
-        "The native Codex registry record failed its exact ownership policy.",
-      );
-    }
-    const beforeGeneration = generationOf(before);
-    const handle = await open(
-      registryPath,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-    );
     try {
       const opened = await handle.stat();
       const openedGeneration = generationOf(opened);
       if (
         !opened.isFile() ||
-        opened.uid !== this.#expectedUid ||
+        opened.uid !== this.#context.expectedUid ||
         exactMode(opened.mode) !== 0o600 ||
-        !sameFileGeneration(beforeGeneration, openedGeneration)
+        opened.size > this.#context.limits.maxRegistryBytes
       ) {
         throw new BridgeError(
           "REGISTRY_RACED",
-          "The native Codex registry record changed while opening.",
+          "The native Codex registry record failed its exact ownership policy.",
         );
       }
       const serialized = await handle.readFile({ encoding: "utf8" });
-      if (byteLength(serialized) > this.#limits.maxRegistryBytes) {
+      if (byteLength(serialized) > this.#context.limits.maxRegistryBytes) {
         throw new BridgeError(
           "REGISTRY_TOO_LARGE",
           "The native Codex registry record exceeded its bound.",
         );
       }
-      const after = await lstat(registryPath);
+      const [afterOpen, afterPath] = await Promise.all([
+        handle.stat(),
+        lstat(registryPath),
+      ]);
       if (
-        after.isSymbolicLink() ||
-        !after.isFile() ||
-        after.uid !== this.#expectedUid ||
-        exactMode(after.mode) !== 0o600 ||
-        !sameFileGeneration(openedGeneration, generationOf(after))
+        afterPath.isSymbolicLink() ||
+        !afterPath.isFile() ||
+        !sameFileGeneration(openedGeneration, generationOf(afterOpen)) ||
+        !sameFileGeneration(openedGeneration, generationOf(afterPath))
       ) {
         throw new BridgeError(
           "REGISTRY_RACED",
@@ -2322,52 +1773,19 @@ export class ClaudePeerListener {
       flag: "wx",
       mode: 0o600,
     });
-    let generation: FileGeneration | undefined;
-    try {
-      const created = await lstat(temporaryPath);
-      if (
-        created.isSymbolicLink() ||
-        !created.isFile() ||
-        created.uid !== this.#expectedUid ||
-        exactMode(created.mode) !== 0o600
-      ) {
-        throw new BridgeError(
-          "REGISTRY_RACED",
-          "The native Codex temporary registry record is unsafe.",
-        );
-      }
-      generation = generationOf(created);
-      const handle = await open(
-        temporaryPath,
-        fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+    const created = await lstat(temporaryPath);
+    if (
+      created.isSymbolicLink() ||
+      !created.isFile() ||
+      created.uid !== this.#context.expectedUid ||
+      exactMode(created.mode) !== 0o600
+    ) {
+      throw new BridgeError(
+        "REGISTRY_RACED",
+        "The native Codex temporary registry record is unsafe.",
       );
-      try {
-        const openedStat = await handle.stat();
-        const opened = generationOf(openedStat);
-        if (
-          !openedStat.isFile() ||
-          openedStat.uid !== this.#expectedUid ||
-          exactMode(openedStat.mode) !== 0o600 ||
-          !sameFileGeneration(generation, opened)
-        ) {
-          throw new BridgeError(
-            "REGISTRY_RACED",
-            "The native Codex temporary registry record changed while opening.",
-          );
-        }
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      return { path: temporaryPath, generation };
-    } catch (error) {
-      if (generation !== undefined) {
-        await this.#cleanupOwnedFile(temporaryPath, generation).catch(
-          () => undefined,
-        );
-      }
-      throw error;
     }
+    return { path: temporaryPath, generation: generationOf(created) };
   }
 
   async #cleanupOwnedFile(
@@ -2379,7 +1797,7 @@ export class ClaudePeerListener {
       if (
         current.isFile() &&
         !current.isSymbolicLink() &&
-        current.uid === this.#expectedUid &&
+        current.uid === this.#context.expectedUid &&
         exactMode(current.mode) === 0o600 &&
         sameFileGeneration(generationOf(current), generation)
       ) {
@@ -2387,31 +1805,6 @@ export class ClaudePeerListener {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
-
-  async #syncRegistryDirectory(): Promise<void> {
-    await this.#assertRegistryDirectory();
-    const handle = await open(this.#sessionsDir, fsConstants.O_RDONLY);
-    try {
-      const opened = await handle.stat();
-      if (
-        !opened.isDirectory() ||
-        opened.uid !== this.#expectedUid ||
-        exactMode(opened.mode) !== 0o700 ||
-        !sameDirectoryGeneration(
-          { dev: opened.dev, ino: opened.ino },
-          this.#sessionsGeneration,
-        )
-      ) {
-        throw new BridgeError(
-          "UNSAFE_PEER_DIRECTORY",
-          "The native peer registry directory changed while syncing.",
-        );
-      }
-      await handle.sync();
-    } finally {
-      await handle.close();
     }
   }
 
@@ -2431,7 +1824,7 @@ export class ClaudePeerListener {
         "A native Codex peer requires an absolute working directory.",
       );
     }
-    const sessionId = this.#createId();
+    const sessionId = this.#context.createId();
     if (!UUID_PATTERN.test(sessionId)) {
       throw new BridgeError(
         "INVALID_CODEX_PEER_SESSION_ID",
@@ -2446,7 +1839,7 @@ export class ClaudePeerListener {
       cwd,
       startedAt: now,
       procStart: new Date(now - process.uptime() * 1_000).toString(),
-      version: this.#attestedClaudeCodeVersion,
+      version: "unknown",
       peerProtocol: CLAUDE_PEER_COMPATIBILITY.peerProtocol,
       kind: "interactive",
       entrypoint: "cli",
@@ -2462,8 +1855,8 @@ export class ClaudePeerListener {
     operation: "advertise" | "status" | "unadvertise",
     mutation: () => Promise<T>,
   ): Promise<T> {
-    return await this.#runRegistryMutation(async () => {
-      await this.#registryOperationHook?.({
+    return await this.#context.runRegistryMutation(async () => {
+      await this.#context.registryOperationHook?.({
         operation,
         phase: "entered",
         generation: this.generation,
@@ -2471,7 +1864,7 @@ export class ClaudePeerListener {
       try {
         return await mutation();
       } finally {
-        await this.#registryOperationHook?.({
+        await this.#context.registryOperationHook?.({
           operation,
           phase: "exited",
           generation: this.generation,
@@ -2482,22 +1875,19 @@ export class ClaudePeerListener {
 
   async advertise(name: string, cwd: string): Promise<void> {
     await this.#mutateRegistry("advertise", async () => {
-      if (this.#isClosingOrClosed()) {
+      if (this.closed) {
         throw new BridgeError(
           "CLAUDE_PEER_LISTENER_CLOSED",
           "The Claude peer callback listener is closed.",
         );
       }
-      if (
-        this.#advertisedRecord !== undefined &&
-        this.#advertisedRecord.name !== name
-      ) {
+      if (this.#advertisement !== undefined && this.#advertisement.record.name !== name) {
         throw new BridgeError(
           "CODEX_PEER_ALREADY_ADVERTISED",
           "This gateway process already advertises another Codex peer.",
         );
       }
-      if (this.#advertisedRecord?.name === name) return;
+      if (this.#advertisement?.record.name === name) return;
       const record = this.#newAdvertisedRecord(name, cwd);
       await this.#assertRegistryDirectory();
       await writeFile(this.#registryPath(), this.#serializeRecord(record), {
@@ -2512,93 +1902,49 @@ export class ClaudePeerListener {
           "The native Codex registry record could not be exactly confirmed.",
         );
       }
-      this.#advertisedRecord = record;
-      this.#advertisedGeneration = exact.generation;
+      this.#advertisement = { record, generation: exact.generation };
     });
   }
 
   async updateAdvertisedStatus(status: ClaudePeerStatus): Promise<void> {
-    await this.#mutateRegistry(
-      "status",
-      async () => await this.#updateAdvertisedStatusLocked(status),
-    );
-  }
-
-  async #updateAdvertisedStatusLocked(
-    status: ClaudePeerStatus,
-  ): Promise<void> {
-    if (
-      this.#isClosingOrClosed() ||
-      this.#advertisedRecord === undefined ||
-      this.#advertisedRecord.status === status
-    ) {
-      return;
-    }
-    const currentExact = await this.#recordMatches(
-      this.#advertisedRecord,
-      this.#advertisedGeneration,
-    );
-    if (!currentExact.matches) {
-      this.#advertisedRecord = undefined;
-      this.#advertisedGeneration = undefined;
-      return;
-    }
-    const now = Date.now();
-    const record: AdvertisedCodexRegistryRecord = {
-      ...this.#advertisedRecord,
-      status,
-      updatedAt: now,
-      statusUpdatedAt: now,
-    };
-    const temporary = await this.#createRegistryTemporary(record);
-    try {
-      const stillCurrent = await this.#recordMatches(
-        this.#advertisedRecord,
-        this.#advertisedGeneration,
-      );
-      if (!stillCurrent.matches) return;
-      await this.#registryRename(temporary.path, this.#registryPath());
-      await this.#syncRegistryDirectory();
-      const exact = await this.#recordMatches(record, temporary.generation);
-      if (!exact.matches) {
-        throw new BridgeError(
-          "REGISTRY_RACED",
-          "The updated native Codex registry record could not be exactly confirmed.",
+    await this.#mutateRegistry("status", async () => {
+      const owned = this.#advertisement;
+      if (this.closed || owned === undefined || owned.record.status === status) return;
+      if (!(await this.#recordMatches(owned.record, owned.generation)).matches) {
+        this.#advertisement = undefined;
+        return;
+      }
+      const now = Date.now();
+      const record = { ...owned.record, status, updatedAt: now, statusUpdatedAt: now };
+      const temporary = await this.#createRegistryTemporary(record);
+      try {
+        if (!(await this.#recordMatches(owned.record, owned.generation)).matches) return;
+        await this.#context.registryRename(temporary.path, this.#registryPath());
+        const exact = await this.#recordMatches(record, temporary.generation);
+        if (!exact.matches) {
+          throw new BridgeError(
+            "REGISTRY_RACED",
+            "The updated native Codex registry record could not be exactly confirmed.",
+          );
+        }
+        this.#advertisement = { record, generation: exact.generation };
+      } finally {
+        await this.#cleanupOwnedFile(temporary.path, temporary.generation).catch(
+          () => undefined,
         );
       }
-      this.#advertisedRecord = record;
-      this.#advertisedGeneration = exact.generation;
-    } finally {
-      await this.#cleanupOwnedFile(
-        temporary.path,
-        temporary.generation,
-      ).catch(() => undefined);
-    }
+    });
   }
 
   async unadvertise(name?: string): Promise<void> {
-    await this.#mutateRegistry(
-      "unadvertise",
-      async () => await this.#unadvertiseLocked(name),
-    );
-  }
-
-  async #unadvertiseLocked(name?: string): Promise<void> {
-    if (
-      this.#advertisedRecord === undefined ||
-      (name !== undefined && name !== this.#advertisedRecord.name)
-    ) {
-      return;
-    }
-    const record = this.#advertisedRecord;
-    const generation = this.#advertisedGeneration;
-    this.#advertisedRecord = undefined;
-    this.#advertisedGeneration = undefined;
-    if (generation === undefined) return;
-    const exact = await this.#recordMatches(record, generation);
-    if (!exact.matches) return;
-    await unlink(this.#registryPath()).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
+    await this.#mutateRegistry("unadvertise", async () => {
+      const owned = this.#advertisement;
+      if (owned === undefined || (name !== undefined && name !== owned.record.name)) return;
+      this.#advertisement = undefined;
+      if (!(await this.#recordMatches(owned.record, owned.generation)).matches) return;
+      await unlink(this.#registryPath()).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
     });
   }
 
@@ -2607,7 +1953,7 @@ export class ClaudePeerListener {
     status: "held" | "delivered" | "denied" | "expired",
     diagnostic?: ClaudePeerDeliveryDiagnostic,
   ): Promise<ClaudePeerAcknowledgmentResult> {
-    if (this.#isClosingOrClosed()) {
+    if (this.closed) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -2662,7 +2008,7 @@ export class ClaudePeerListener {
     receiptHandle: string,
     progress: ClaudePeerInboundProgress,
   ): Promise<ClaudePeerAcknowledgmentResult> {
-    if (this.#isClosingOrClosed()) {
+    if (this.closed) {
       throw new BridgeError(
         "CLAUDE_PEER_LISTENER_CLOSED",
         "The Claude peer callback listener is closed.",
@@ -2695,7 +2041,7 @@ export class ClaudePeerListener {
         "The native Claude peer receipt already has a stall notification.",
       );
     }
-    if (this.#deliveryNotices === "quiet") {
+    if (this.#context.deliveryNotices === "quiet") {
       receipt.stallNotification = "settled";
       return { transportStatus: "suppressed" };
     }
@@ -2706,16 +2052,16 @@ export class ClaudePeerListener {
       `queued-for-ms="${queuedForMs}">`;
     const detailedContent = [
       openingTag,
-      CLAUDE_PEER_NOTICE_COPY[this.#locale].stall,
+      CLAUDE_PEER_NOTICE_COPY[this.#context.locale].stall,
       "</gateway-delivery-stall>",
     ].join("\n");
-    const messageId = this.#createId();
+    const messageId = this.#context.createId();
     let progressFrame: Buffer;
     try {
       progressFrame = encodeClaudePeerUserFrame({
         messageId,
         content: detailedContent,
-        maxFrameBytes: this.#limits.maxFrameBytes,
+        maxFrameBytes: this.#context.limits.maxFrameBytes,
       });
     } catch (error) {
       if (!(error instanceof BridgeError) || error.code !== "PEER_FRAME_TOO_LARGE") {
@@ -2724,7 +2070,7 @@ export class ClaudePeerListener {
       progressFrame = encodeClaudePeerUserFrame({
         messageId,
         content: `${openingTag.slice(0, -1)}/>`,
-        maxFrameBytes: this.#limits.maxFrameBytes,
+        maxFrameBytes: this.#context.limits.maxFrameBytes,
       });
     }
 
@@ -2785,21 +2131,21 @@ export class ClaudePeerListener {
         from: this.address,
         orig_msg_id: receipt.originalMessageId,
         msgV: 1,
-        msg_id: this.#createId(),
+        msg_id: this.#context.createId(),
       })}\n`,
       "utf8",
     );
     const diagnosticFrame =
-      diagnostic === undefined || this.#deliveryNotices !== "verbose"
+      diagnostic === undefined || this.#context.deliveryNotices !== "verbose"
         ? undefined
         : encodeClaudePeerUserFrame({
-            messageId: this.#createId(),
+            messageId: this.#context.createId(),
             content: [
               `<gateway-delivery-diagnostic status="expired" code="${diagnostic.code}">`,
-              CLAUDE_PEER_NOTICE_COPY[this.#locale].diagnostic,
+              CLAUDE_PEER_NOTICE_COPY[this.#context.locale].diagnostic,
               "</gateway-delivery-diagnostic>",
             ].join("\n"),
-            maxFrameBytes: this.#limits.maxFrameBytes,
+            maxFrameBytes: this.#context.limits.maxFrameBytes,
           });
     const payload =
       diagnosticFrame === undefined
@@ -2814,32 +2160,18 @@ export class ClaudePeerListener {
   ): Promise<ClaudePeerAcknowledgmentResult> {
     let writeStarted = false;
     try {
-      const binding = await this.#resolveSessionBinding(
+      const binding = await this.#context.resolveSessionBinding(
         receipt.sourceSessionId,
       );
-      await new Promise<void>((resolve, reject) => {
-        const socket = this.#connect(binding.record.messagingSocketPath);
-        let settled = false;
-        const finish = (error?: Error): void => {
-          if (settled) return;
-          settled = true;
-          socket.destroy();
-          if (error === undefined) resolve();
-          else reject(error);
-        };
-        socket.setTimeout(this.#limits.connectTimeoutMs, () =>
-          finish(new Error("peer status timeout")),
-        );
-        socket.once("error", finish);
-        socket.once("connect", () => {
+      await writeSocketPayload(
+        this.#context.connect,
+        binding.record.messagingSocketPath,
+        payload,
+        this.#context.limits.connectTimeoutMs,
+        () => {
           writeStarted = true;
-          try {
-            socket.end(payload, () => finish());
-          } catch (error) {
-            finish(error as Error);
-          }
-        });
-      });
+        },
+      );
     } catch (error) {
       if (writeStarted) {
         throw new BridgeError(
@@ -2859,15 +2191,15 @@ export class ClaudePeerListener {
 
   #accept(socket: Socket): void {
     if (
-      this.#isClosingOrClosed() ||
-      this.#connections.size >= this.#limits.maxConnections
+      this.closed ||
+      this.#connections.size >= this.#context.limits.maxConnections
     ) {
       socket.destroy();
       void this.#notice("CONNECTION_LIMIT");
       return;
     }
     this.#connections.add(socket);
-    socket.setTimeout(this.#limits.connectionIdleMs);
+    socket.setTimeout(this.#context.limits.connectionIdleMs);
     let buffered = Buffer.alloc(0);
     let frames = 0;
     let chain = Promise.resolve();
@@ -2885,9 +2217,9 @@ export class ClaudePeerListener {
     socket.on("data", (chunk: Buffer) => {
       if (rejected) return;
       buffered = Buffer.concat([buffered, chunk]);
-      if (buffered.length > this.#limits.maxFrameBytes + 1) {
+      if (buffered.length > this.#context.limits.maxFrameBytes + 1) {
         const newline = buffered.indexOf(0x0a);
-        if (newline < 0 || newline > this.#limits.maxFrameBytes) {
+        if (newline < 0 || newline > this.#context.limits.maxFrameBytes) {
           reject("FRAME_TOO_LARGE");
           return;
         }
@@ -2895,20 +2227,20 @@ export class ClaudePeerListener {
       while (!rejected) {
         const newline = buffered.indexOf(0x0a);
         if (newline < 0) break;
-        if (newline > this.#limits.maxFrameBytes) {
+        if (newline > this.#context.limits.maxFrameBytes) {
           reject("FRAME_TOO_LARGE");
           break;
         }
         const line = buffered.subarray(0, newline);
         buffered = buffered.subarray(newline + 1);
         frames += 1;
-        if (frames > this.#limits.maxFramesPerConnection) {
+        if (frames > this.#context.limits.maxFramesPerConnection) {
           reject("INVALID_FRAME");
           break;
         }
         let frame: ParsedFrame;
         try {
-          frame = parseFrame(line, this.#limits.maxFrameBytes);
+          frame = parseFrame(line, this.#context.limits.maxFrameBytes);
         } catch (error) {
           if (
             error instanceof BridgeError &&
@@ -2927,7 +2259,7 @@ export class ClaudePeerListener {
         }
         if (
           this.#queuedFrames >=
-          this.#limits.maxConnections * this.#limits.maxFramesPerConnection
+          this.#context.limits.maxConnections * this.#context.limits.maxFramesPerConnection
         ) {
           reject("CONNECTION_LIMIT");
           break;
@@ -2951,7 +2283,7 @@ export class ClaudePeerListener {
             }
           });
       }
-      if (!rejected && buffered.length > this.#limits.maxFrameBytes) {
+      if (!rejected && buffered.length > this.#context.limits.maxFrameBytes) {
         reject("FRAME_TOO_LARGE");
       }
     });
@@ -2964,7 +2296,7 @@ export class ClaudePeerListener {
     frame: ParsedFrame,
     rejectTransport: () => void,
   ): Promise<void> {
-    if (this.#isClosingOrClosed()) return;
+    if (this.closed) return;
     if (frame.type === "control") {
       // Native outbound status is accepted for wire compatibility but is not
       // settlement authority. A confirmed mailbox write is terminal.
@@ -2977,16 +2309,16 @@ export class ClaudePeerListener {
     let binding: TargetBinding | undefined;
     if (frame.from !== undefined) {
       try {
-        binding = await this.#resolveReplyAddress(frame.from);
+        binding = await this.#context.resolveReplyAddress(frame.from);
       } catch {
         await this.#notice("UNREGISTERED_REPLY_ADDRESS");
         return;
       }
     }
-    const inboundId = this.#createId();
+    const inboundId = this.#context.createId();
     if (binding !== undefined && frame.messageId !== undefined) {
       if (
-        this.#inboundReceipts.size >= this.#limits.maxPendingReceipts
+        this.#inboundReceipts.size >= this.#context.limits.maxPendingReceipts
       ) {
         await this.#notice("RECEIPT_LIMIT");
         if (this.#capacitySettlement !== undefined) {
@@ -3014,7 +2346,7 @@ export class ClaudePeerListener {
         stallNotification: "available",
       });
     }
-    await invokeHook(this.#options.onMessage, {
+    await invokeHook(this.#context.options.onMessage, {
       inboundId,
       content: frame.content,
       ...(binding === undefined
@@ -3037,7 +2369,7 @@ export class ClaudePeerListener {
   async #attemptCapacitySettlement(
     settlement: CapacitySettlement,
   ): Promise<void> {
-    if (this.#isClosingOrClosed() || this.#capacitySettlement !== settlement) {
+    if (this.closed || this.#capacitySettlement !== settlement) {
       return;
     }
     settlement.attempts += 1;
@@ -3055,7 +2387,7 @@ export class ClaudePeerListener {
       const retryable =
         error instanceof BridgeError &&
         error.recoverable &&
-        !this.#isClosingOrClosed();
+        !this.closed;
       if (
         !retryable ||
         settlement.attempts >= CAPACITY_SETTLEMENT_MAX_ATTEMPTS
@@ -3077,7 +2409,7 @@ export class ClaudePeerListener {
 
   async #notice(code: ClaudePeerProtocolNotice["code"]): Promise<void> {
     try {
-      await invokeHook(this.#options.onProtocolNotice, { code });
+      await invokeHook(this.#context.options.onProtocolNotice, { code });
     } catch {
       // Protocol callbacks are observational. Never feed callback failures
       // back into the socket or expose raw frame data.
@@ -3108,15 +2440,10 @@ export class ClaudePeerListener {
     this.#capacitySettlement = undefined;
     for (const socket of this.#connections) socket.destroy();
     this.#connections.clear();
-    let callbackPathOwned = false;
     try {
-      const beforeClose = await lstat(this.#socketPath);
       if (
-        !beforeClose.isSocket() ||
-        !sameSocketGeneration(
-          { dev: beforeClose.dev, ino: beforeClose.ino },
-          this.#socketGeneration,
-        )
+        await socketOwnership(this.#socketPath, this.#socketGeneration) !==
+        "owned"
       ) {
         // Node's net.Server.close() unlinks its original pathname even when
         // another same-user object replaced it. Do not call it after an
@@ -3130,55 +2457,23 @@ export class ClaudePeerListener {
           ),
         );
       } else {
-        callbackPathOwned = true;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        this.#server.unref();
-        errors.push(
-          new BridgeError(
-            "CLAUDE_PEER_CALLBACK_CHANGED",
-            "The callback path disappeared; cleanup failed closed.",
-          ),
-        );
-      } else {
-        this.#server.unref();
-        errors.push(error);
-      }
-    }
-
-    if (callbackPathOwned) {
-      try {
-        await new Promise<void>((resolve, reject) =>
-          this.#server.close((error) =>
-            error === undefined ? resolve() : reject(error),
-          ),
-        );
-      } catch (error) {
-        errors.push(error);
-      }
-      try {
-        const stat = await lstat(this.#socketPath);
+        await closeServer(this.#server);
         if (
-          stat.isSocket() &&
-          sameSocketGeneration(
-            { dev: stat.dev, ino: stat.ino },
-            this.#socketGeneration,
-          )
+          await socketOwnership(this.#socketPath, this.#socketGeneration) ===
+          "owned"
         ) {
           await unlink(this.#socketPath);
         }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          errors.push(error);
-        }
       }
+    } catch (error) {
+      this.#server.unref();
+      errors.push(error);
     }
 
     this.#closing = false;
     this.#closed = true;
     try {
-      this.#onClosed();
+      this.#context.onClosed();
     } catch (error) {
       errors.push(error);
     }

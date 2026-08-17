@@ -74,7 +74,9 @@ Claude Code's cross-session feature is official. Embassy's use of its external
 registry and peer socket shape remains an internal adapter: require native
 peer protocol 1 and validate every consumed field and frame. Unknown top-level
 registry fields may be ignored; required and consumed fields remain strict,
-and rejected-record or observed-empty counts must stay loud. Codex registration
+and rejected-record or observed-empty counts must stay loud. Embassy derives
+the registry and callback roots from the verified current OS user; it does not
+inspect a Claude launcher or configuration file. Codex registration
 performs no provider I/O. Its bounded observer is display-only: it may report
 freshness and safe codes but never authorizes, rejects, or delays a delivery.
 Every Codex delivery instead creates an operation-local transport,

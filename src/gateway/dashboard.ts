@@ -43,21 +43,15 @@ export type DashboardSnapshot = GatewayPublicSnapshot;
 
 export const DASHBOARD_FILE_NAME = "gateway-dashboard.html";
 export const DASHBOARD_ZH_CN_FILE_NAME = "gateway-dashboard.zh-CN.html";
-/** Retained as an API compatibility constant. Static snapshots never refresh. */
-export const DASHBOARD_DEFAULT_REFRESH_SECONDS = 15;
 export const DASHBOARD_MESSAGE_LIMIT = DASHBOARD_MODEL_LIMITS.messages;
-export const DASHBOARD_MESSAGE_HISTORY_LIMIT = DASHBOARD_MODEL_LIMITS.messageEvents;
 export const DASHBOARD_CONNECTOR_LIMIT = DASHBOARD_MODEL_LIMITS.connectors;
 export const DASHBOARD_AVAILABLE_PEER_LIMIT = DASHBOARD_MODEL_LIMITS.availablePeers;
-export const DASHBOARD_AVAILABLE_PEER_INPUT_LIMIT = 256;
 export const DASHBOARD_ROUTE_LIMIT = DASHBOARD_MODEL_LIMITS.routes;
 export const DASHBOARD_ALERT_LIMIT = DASHBOARD_MODEL_LIMITS.alerts;
 export const DASHBOARD_MAX_HTML_BYTES = 256 * 1024;
 
 export type DashboardRenderOptions = {
   locale?: DashboardLocale;
-  /** Deprecated and ignored: v1 snapshots are deliberately inert. */
-  refreshSeconds?: number;
 };
 
 const HTML_ESCAPE_PATTERN = /[&<>"']/g;

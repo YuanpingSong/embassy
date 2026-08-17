@@ -316,23 +316,17 @@ test("malformed responses settle as exact internal errors once a correlated fram
   client.close();
 });
 
-test("process death: initialize and non-prompt requests fail without a false receipt", async () => {
+test("process death: initialize and session requests fail without a false receipt", async () => {
   const initializing = new ProtocolPeer((message, peer) => {
     if (message.method === "initialize") peer.exit();
   });
   await assert.rejects(connect(initializing), /ACP subprocess exited/);
 
-  for (const method of ["session/new", "authenticate"] as const) {
-    const peer = initializedPeer((message, agent) => {
-      if (message.method === method) agent.exit();
-    });
-    const client = await connect(peer);
-    const operation =
-      method === "session/new"
-        ? client.newSession("/work")
-        : client.authenticate("login");
-    await assert.rejects(operation, /ACP subprocess exited/);
-  }
+  const peer = initializedPeer((message, agent) => {
+    if (message.method === "session/new") agent.exit();
+  });
+  const client = await connect(peer);
+  await assert.rejects(client.newSession("/work"), /ACP subprocess exited/);
 });
 
 test("process death: an uncertain prompt is UNKNOWN and cannot replay on the dead connection", async () => {

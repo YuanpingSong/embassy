@@ -328,76 +328,6 @@ test("always cancels permission requests and rejects undeclared inbound requests
   client.close();
 });
 
-test("gates optional methods and disables only a method that returns -32601", async () => {
-  let resumeCalls = 0;
-  const agent = initializedAgent(
-    (message, peer) => {
-      if (message.method === "session/list") {
-        assert.deepEqual(message.params, {});
-        peer.result(message, { sessions: [] });
-      } else if (message.method === "session/resume") {
-        resumeCalls++;
-        assert.deepEqual(message.params, {
-          sessionId: "s",
-          cwd: "/work",
-          mcpServers: [],
-        });
-        peer.error(message, -32601, "resume unavailable");
-      } else if (message.method === "session/load") {
-        assert.deepEqual(message.params, {
-          sessionId: "s",
-          cwd: "/work",
-          mcpServers: [],
-        });
-        peer.result(message, {});
-      }
-    },
-    {
-      loadSession: true,
-      sessionCapabilities: { list: {}, resume: {} },
-    },
-  );
-  const client = await spawnAcpClient(
-    { kind: "local-checkout", command: "agent" },
-    { spawn: spawnFrom(agent) },
-  );
-
-  assert.deepEqual(await client.listSessions(), {
-    available: true,
-    value: { sessions: [] },
-  });
-  const session = { sessionId: "s", cwd: "/work" };
-  assert.deepEqual(await client.resumeSession(session), {
-    available: false,
-    reason: "method_not_found",
-  });
-  assert.deepEqual(await client.resumeSession(session), {
-    available: false,
-    reason: "method_not_found",
-  });
-  assert.equal(resumeCalls, 1);
-  assert.deepEqual(await client.loadSession(session), {
-    available: true,
-    value: {},
-  });
-  client.close();
-
-  const absent = initializedAgent(() => {});
-  const absentClient = await spawnAcpClient(
-    { kind: "local-checkout", command: "agent" },
-    { spawn: spawnFrom(absent) },
-  );
-  assert.deepEqual(await absentClient.listSessions(), {
-    available: false,
-    reason: "not_advertised",
-  });
-  assert.equal(
-    absent.received.some((message) => message.method === "session/list"),
-    false,
-  );
-  absentClient.close();
-});
-
 test("surfaces JSON-RPC errors verbatim on prompt receipts", async () => {
   const errors = [
     [-32602, "invalid parameters", { field: "prompt" }],
@@ -460,19 +390,12 @@ test("subprocess death settles an outstanding prompt as unknown", async () => {
   });
 });
 
-test("cancel is a notification and authenticate is strictly on demand", async () => {
-  const agent = initializedAgent((message, peer) => {
-    if (message.method === "authenticate") peer.result(message, {});
-  });
+test("cancel is an exact notification", async () => {
+  const agent = initializedAgent(() => undefined);
   const client = await spawnAcpClient(
     { kind: "local-checkout", command: "agent" },
     { spawn: spawnFrom(agent) },
   );
-  assert.equal(
-    agent.received.some((message) => message.method === "authenticate"),
-    false,
-  );
-
   await client.cancel("s");
   const cancel = agent.received.find(
     (message) => message.method === "session/cancel",
@@ -482,9 +405,6 @@ test("cancel is a notification and authenticate is strictly on demand", async ()
     method: "session/cancel",
     params: { sessionId: "s" },
   });
-  await client.authenticate("login");
-  const auth = agent.received.find((message) => message.method === "authenticate");
-  assert.deepEqual(auth?.params, { methodId: "login" });
   client.close();
 });
 

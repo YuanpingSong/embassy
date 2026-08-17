@@ -221,6 +221,7 @@ export const dashboardCopyKeys = [
   "diagnostics.codexDoctor.orphaned",
   "diagnostics.codexDoctor.attached",
   "diagnostics.codexDoctor.observation_stale",
+  "diagnostics.codexDoctor.managed_layout_missing",
   "diagnostics.codexDoctor.unknown",
   "diagnostics.registry.title",
   "diagnostics.registry.entriesScanned",

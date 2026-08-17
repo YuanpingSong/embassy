@@ -5,6 +5,7 @@ import {
   CODEX_DOCTOR_MAX_PROCESSES,
   CODEX_DOCTOR_MAX_SOCKET_HOLDERS,
   diagnoseCodexAttachment,
+  diagnoseMissingManagedCodexLayout,
   type CodexDoctorInspection,
 } from "../src/gateway/codex-doctor.js";
 
@@ -72,6 +73,25 @@ test("Embassy self and descendants do not count as external holders", async () =
     ],
     socketHolderPids: [daemon.pid, embassyPid, 101, 102],
   }), { conditions: ["orphaned"] });
+});
+
+test("missing managed layout is actionable only with a bounded non-Embassy socket holder", async () => {
+  const cases: readonly [CodexDoctorInspection, "managed_layout_missing" | "unknown"][] = [
+    [{ processes: [{ pid: 400, parentPid: 1, executablePath: "/synthetic/stale-codex" }], socketHolderPids: [400] }, "managed_layout_missing"],
+    [{ processes: [], socketHolderPids: [] }, "unknown"],
+    [{ processes: [{ pid: embassyPid, parentPid: 1, executablePath: "/synthetic/embassy" }], socketHolderPids: [embassyPid] }, "unknown"],
+    [{ processes: [], socketHolderPids: [400] }, "unknown"],
+  ];
+  for (const [inspection, condition] of cases) {
+    assert.deepEqual(await diagnoseMissingManagedCodexLayout({
+      socketPath, embassyPid,
+      inspector: { inspect: async (request) => {
+        assert.deepEqual(request, { socketPath, maximumProcesses: CODEX_DOCTOR_MAX_PROCESSES,
+          maximumSocketHolders: CODEX_DOCTOR_MAX_SOCKET_HOLDERS });
+        return inspection;
+      } },
+    }), { conditions: [condition] });
+  }
 });
 
 test("roles require exact executable-path and bundle evidence", async () => {

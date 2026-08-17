@@ -242,9 +242,11 @@ kernel lock.
 
 Embassy's provider-facing access is intentionally enumerable:
 
-- read and execute the configured Claude launcher only for bounded automatic
-  path, version-banner, and compatibility observation;
-- read the live Claude session registry and connect validated peer sockets;
+- derive the fixed Claude registry and callback roots from the verified current
+  OS user, without reading a Claude launcher or configuration file;
+- read the live Claude session registry and validate only the registry record,
+  peer socket, PID, workspace, state-root, and generation evidence used by the
+  current operation;
 - create and later remove its one callback socket and one registry record;
 - resolve the managed Codex installation and open one attested local App Server
   connection per operation; and
@@ -253,7 +255,8 @@ Embassy's provider-facing access is intentionally enumerable:
 
 The Claude-owned external sessions registry root must be owned by the current
 UID with exact mode 0700 before Embassy enumerates it; failure quarantines and
-write-fences only Claude. Within an admitted root, individual registry records
+write-fences only Claude, including when that registry root is absent. Within
+an admitted root, individual registry records
 and peer sockets retain their bounded schema, file/socket type, PID/path and
 allowed-root correlation, accessibility, liveness, and generation checks.
 Embassy invents no additional owner or mode rule for those individual

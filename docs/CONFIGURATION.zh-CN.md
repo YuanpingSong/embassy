@@ -1,6 +1,6 @@
 # 配置与提供方契约
 
-Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇集所有变量、提供方传输契约、托管启动解析规则与寻址模型。没有配置文件；所有值均为环境变量或 CLI 标志。
+Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇集所有变量、提供方传输契约、提供方运行时规则与寻址模型。没有配置文件；所有值均为环境变量或 CLI 标志。
 
 ---
 
@@ -9,11 +9,10 @@ Embassy 通过各命令启动时读取的环境变量进行配置。本文档汇
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`，当 `XDG_STATE_HOME` 未设置时为 `$HOME/.local/state/agent-embassy` | 私有状态、控制套接字和仪表盘；覆盖值必须为绝对路径，且不会迁移固定的主机级租约 |
-| `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`，解析到当前已验证的版本目标 | Claude Code 启动器的绝对路径；不搜索 `PATH` |
 | `DSH_HOME` | `$HOME/.dsh` | DeepSeek Harness checkout 根目录；当自有目录与 `package.json` 存在时，Embassy 会在首次投递时惰性运行 `pnpm --dir <home> run demo:acp` |
 | `EMBASSY_STEERING_ENABLED` | `1` | 全局 Claude→Codex `STEER:` 停用开关；精确设为 `0` 后，所有 Claude→Codex 正文都按朝向 Codex 的普通排队消息处理；朝向 Claude 的邮箱写入时机不受影响 |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
-| `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes` 与 `TRACK:` 开启请求会被拒绝，已有监视会在重启时结算。没有活跃监视时，`DONE:` 不产生作用；`untrack` 不会因开关而被特别拒绝，而是返回 `NOT_FOUND`。取值只能是 `1` 或 `0`，其他值均为配置错误 |
+| `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes` 与 `TRACK:` 开启请求会被拒绝。活跃监视只存在于内存中，并随代理进程结束；重启后绝不恢复。没有活跃监视时，`DONE:` 不产生作用；`untrack` 不会因开关而被特别拒绝，而是返回 `NOT_FOUND`。取值只能是 `1` 或 `0`，其他值均为配置错误 |
 | `EMBASSY_LOCALE` | `en` | CLI 输出语言，精确取值 `en` 或 `zh-CN`。`--lang` 标志会覆盖当次调用；未设置或为空表示 `en`，其他任何取值都是参数错误 |
 | `EMBASSY_HOSTS` | `this-mac` | 以逗号分隔的 1 到 32 个唯一小写主机别名。**v1 启动器只接受单个精确值 `this-mac`**：任何其他列表——包括包含 `this-mac` 的更长列表——都会让 `embassy serve` 以 `GATEWAY_REMOTE_PROVIDER_DISABLED` 关闭失败。该变量是为推迟的远程领事馆功能预留的，目前没有可用的设置 |
 
@@ -75,7 +74,7 @@ Embassy 路由四种提供方：Claude 使用对等协议 1，Codex 使用托管
 
 运行时仍会严格解析每个已知注册表字段、帧和响应；未知的 Claude 注册表顶层字段会被忽略，因为 Embassy 从不使用它们。公开状态中的 Claude 连接器行会携带可选的有界 `registry` 观测：`entriesScanned`、`parseableRecords`、单调的 `parseableRecordSeenSinceBoot`、按安全代码分组且有界的 `rejected`，以及 `rejectedCodesOmitted`。两种仪表盘会醒目呈现同一事实：如果 Claude 正在运行，但自代理启动以来从未观测到带可解析必需字段的记录，它的注册表布局可能已更改。
 
-托管 Codex 安装通过精确已验证路径解析；`PATH` 上其他位置的 `codex` 不会被使用或修改。Claude 从 `EMBASSY_CLAUDE_BIN` 或官方用户级启动器解析，从不搜索 `PATH`。DeepSeek 只使用上方已验证的 checkout 根目录。Grok Build 使用发布版固定的 ACP 启动。版本字符串如存在，也只是有界诊断元数据。
+托管 Codex 安装通过精确已验证路径解析；`PATH` 上其他位置的 `codex` 不会被使用或修改。Claude 注册表与回调根目录从已验证的当前 OS 用户派生；不会读取 Claude 启动器或配置文件。DeepSeek 只使用上方已验证的 checkout 根目录。Grok Build 使用发布版固定的 ACP 启动。版本字符串如存在，也只是有界诊断元数据。
 
 ## 寻址
 

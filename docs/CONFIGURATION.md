@@ -2,7 +2,7 @@
 
 Embassy is configured through environment variables read when each command
 starts. This document collects every variable, provider transport contracts,
-managed-launch resolution rules, and
+provider runtime rules, and
 the addressing model. There is no configuration file; all values are env vars
 or CLI flags.
 
@@ -13,11 +13,10 @@ or CLI flags.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute and does not relocate the fixed host-wide lease |
-| `EMBASSY_CLAUDE_BIN` | `$HOME/.local/bin/claude`, resolved to its current verified version target | Absolute Claude Code launcher path; `PATH` is not searched |
 | `DSH_HOME` | `$HOME/.dsh` | DeepSeek Harness checkout root; when its owned directory and `package.json` are present, Embassy launches `pnpm --dir <home> run demo:acp` lazily on first dispatch |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
-| `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts and to settle stored watches on restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
+| `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts. Active watches are memory-only and end with the broker process; they are never restored after restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
 | `EMBASSY_LOCALE` | `en` | CLI output language, exactly `en` or `zh-CN`. The `--lang` flag overrides it for the invocation that carries it; an unset or empty value means `en`, and any other value is an argument error |
 | `EMBASSY_HOSTS` | `this-mac` | Comma-separated list of 1 through 32 unique lowercase host aliases. **The v1 launcher accepts only the single exact value `this-mac`**: any other list — including a longer one that contains `this-mac` — fails `embassy serve` closed with `GATEWAY_REMOTE_PROVIDER_DISABLED`. The variable exists for the deferred remote-consulate work and has no useful setting today |
 
@@ -106,7 +105,7 @@ Only unsafe OS evidence for Embassy-owned or executed artifacts and Embassy call
 
 Runtime parsing remains strict on every known registry field, frame, and response; unknown top-level Claude registry fields are ignored because Embassy never consumes them. The Claude connector row in public status carries optional bounded `registry` observations: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. Both dashboards render the same evidence loudly: if Claude is running but no record with parseable required fields has been observed since broker start, its registry layout may have changed.
 
-The managed Codex installation is resolved by exact verified path; a `codex` elsewhere on `PATH` is neither used nor modified. Claude is resolved from `EMBASSY_CLAUDE_BIN` or the official per-user launcher, never by searching `PATH`. DeepSeek uses only the attested checkout root above. Grok Build uses the release-pinned ACP launch. Version strings, when present, are bounded diagnostic metadata only.
+The managed Codex installation is resolved by exact verified path; a `codex` elsewhere on `PATH` is neither used nor modified. Claude registry and callback roots are derived from the verified current OS user; no Claude launcher or configuration file is read. DeepSeek uses only the attested checkout root above. Grok Build uses the release-pinned ACP launch. Version strings, when present, are bounded diagnostic metadata only.
 
 ## Addressing
 
