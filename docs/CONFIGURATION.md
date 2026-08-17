@@ -28,21 +28,22 @@ omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
 node is the fixed SSH destination for `embassy peer-stdio`. A missing file keeps
 the broker local-only as `this-mac`.
 
-### Offline state upgrade
+### Private state reset
 
-Schema 3 is the broker's only native state format. Before starting this release
-against schema-2 state, stop the broker and run:
+Version 2.0 accepts only fresh schema-4 private state; it does not convert or
+rewrite older state. Before the reset, use the old running broker's `status`
+and delivery lookups to verify that no queued, armed, or accepted work remains
+and every delivery has settled. Then:
 
-```bash
-embassy convert-state-v2-to-v3
-```
+1. Stop the broker.
+2. Move `gateway-state.json` aside so the old ledger remains recoverable.
+3. Keep `nodes.json` in place.
+4. Start the version-2 broker to create fresh state.
+5. Re-register routes, select the Claude route, and pair the intended edges.
 
-The command resolves the same configured state directory as `serve`; it accepts
-no alternate state-path argument and starts no providers, helpers, discovery,
-listener, or control socket. It verifies a byte-identical v2 backup before
-atomically installing and reading back v3 state. Normal output contains only
-success and the backup basename. If conversion fails, use the exact normalized
-safe code; do not retry a commit-unknown result or hand-edit the state file.
+An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
+does not mutate the state file. There is no conversion command or automatic
+recovery path.
 
 The live dashboard is available directly at `http://127.0.0.1:41961/` while
 its foreground companion runs. Its port is a per-invocation CLI choice, not an

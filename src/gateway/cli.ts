@@ -24,7 +24,6 @@ import { DEFAULT_LIVE_DASHBOARD_PORT, runLiveDashboardCommand,
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
-import { convertGatewayStateV2ToV3, type GatewayStateV2ToV3Result } from "./state-v2-to-v3.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -40,7 +39,7 @@ export const EMBASSY_VERSION = "1.9.5";
 const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
-  "serve", "health", "status", "doctor", "convert-state-v2-to-v3", "delivery-status",
+  "serve", "health", "status", "doctor", "delivery-status",
   "wait-delivery", "untrack", "refresh-dashboard", "dashboard", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send-to-claude", "send-to-codex", "reply",
@@ -63,7 +62,6 @@ type Writable = { write(chunk: string, callback?: (error?: Error | null) => void
 type GatewayControlSender = <M extends GatewayControlMethod>(options: SendGatewayControlRequestOptions<M>) => Promise<GatewayControlResponse<M>>;
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
 type LiveDashboardRunner = (options: LiveDashboardCommandOptions) => Promise<LiveDashboardCommandOutcome | void>;
-type GatewayStateConverter = (options: Readonly<{ stateDir: string; hostId?: string }>) => Promise<GatewayStateV2ToV3Result>;
 type PeerStdioRunner = (options: Parameters<typeof runPeerStdio>[0]) => PeerStdioSession;
 
 export type GatewayCliDependencies = {
@@ -76,7 +74,6 @@ export type GatewayCliDependencies = {
   sendRequest?: GatewayControlSender;
   runServer?: GatewayServerRunner;
   runLiveDashboard?: LiveDashboardRunner;
-  convertState?: GatewayStateConverter;
   serverSignal?: AbortSignal;
   liveDashboardSignal?: AbortSignal;
   validateControlSocket?: (stateDir: string, socketPath: string) => Promise<void>;
@@ -322,7 +319,6 @@ async function buildRequest(
   switch (command) {
     case "serve":
     case "dashboard":
-    case "convert-state-v2-to-v3":
     case "peer-stdio":
       return fault();
     case "health": case "status": case "doctor": case "refresh-dashboard": return fault();
@@ -502,6 +498,11 @@ function writeFailure(
   } }));
   stderr.write(fixedStderr(locale, options.kind));
 }
+function writeStateResetHint(stderr: Writable, locale: DashboardLocale, code: string): void {
+  if (code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED" || code === "CORRUPT_GATEWAY_STATE") {
+    stderr.write(`[embassy] ${getCliCopy(locale)["hint.stateResetRequired"]}\n`);
+  }
+}
 function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
 }
@@ -657,14 +658,6 @@ export async function runGatewayCli(
       if (!serverReady) fault("SERVER_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
-    if (command === "convert-state-v2-to-v3") {
-      emptyParams(common.args);
-      const config = loadConfig(env);
-      const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(config.stateDir);
-      const converted = await (dependencies.convertState ?? convertGatewayStateV2ToV3)({ stateDir: config.stateDir, hostId: inventory.host });
-      success({ converted: true, backupFile: path.basename(converted.backupFile) });
-      return gatewayCliExitCodes.ok;
-    }
     if (command === "dashboard") {
       liveDashboardPort = parseLiveDashboardArgs(common.args);
       const outcome = await (dependencies.runLiveDashboard ?? runLiveDashboardCommand)({
@@ -773,6 +766,7 @@ export async function runGatewayCli(
       writeFailure(stdout, stderr, locale, command, error.code, {
         retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
+      writeStateResetHint(stderr, locale, error.code);
       if (error.code === "LIVE_DASHBOARD_PORT_IN_USE" && liveDashboardPort !== undefined) {
         const hint = getCliCopy(locale)["hint.dashboardPortInUse"].replace("{port}", String(liveDashboardPort));
         stderr.write(`[embassy] ${hint}\n`);

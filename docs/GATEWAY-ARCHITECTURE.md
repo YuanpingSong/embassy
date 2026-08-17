@@ -170,7 +170,7 @@ The status below is intentionally narrower than the target architecture.
 
 | Component | Current evidence |
 | --- | --- |
-| Neutral gateway types, native-v3 metadata store, bounded attempt state machine, queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention |
+| Neutral gateway types, private-v4 metadata store, bounded attempt state machine, queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
 | Static metadata-only dashboard renderer and atomic publisher | **Implemented**, deterministic security tests; the static renderer requires no browser or HTTP server |
 | Opt-in live dashboard companion (`embassy dashboard --live`) | **Implemented**, deterministic tests over the stable loopback listener, direct multi-browser access, projection, request guards, and four bounded route actions; it is a separate foreground process, never part of `embassy serve` |
@@ -181,7 +181,7 @@ The status below is intentionally narrower than the target architecture.
 | Local provider adapters and Embassy-node federation | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup, plus bounded catalog reconciliation and destination-owned handoff over the fixed attach-only SSH transport |
 | Universal shell peer mailbox | **Implemented**, alias-plus-token same-UID attribution, hash-only durable ownership, bounded long polling, stdout-flush receipts, and restart uncertainty tests; no PID binding, token file, Keychain entry, or daemon |
 | Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and restart attempt-phase tests |
-| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v3 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
+| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v4 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
@@ -489,7 +489,7 @@ result contains both its conversation ID and a fresh opaque delivery
 correlation handle called a delivery token.
 The token has the closed form `dlv_` followed by exactly 24 base64url
 characters (`A-Z`, `a-z`, `0-9`, `_`, or `-`). It addresses one bounded
-private-v3 message/status row and is not a provider receipt handle or a
+private-v4 message/status row and is not a provider receipt handle or a
 provider native identifier. It is stored only in the mode-0600 broker state
 and never appears in a public snapshot, normal log, provider receipt, or
 dashboard.
@@ -571,7 +571,7 @@ The closed version 1 method family is exactly these sixteen methods:
   available-peer inventory;
 - `pair` and `unpair`, the two-endpoint permission edge;
 - `delivery_status`, a lookup by an opaque correlation handle retained only in
-  bounded private v3 state;
+  bounded private v4 state;
 - `untrack`, which closes one active progress watch by conversation token;
 - `send_to_claude` and `send_to_codex`, the provider-specific sends;
 - `reply`, the correlated reply operation; and
@@ -582,23 +582,19 @@ mutation route additionally calls `pair`, `unpair`,
 `remove_codex_registration`, and `refresh_dashboard`, and nothing else.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-eighteen implemented commands are
-`serve`, `health`, `status`, `delivery-status`, `wait-delivery`, `untrack`,
+twenty-two implemented commands are
+`serve`, `health`, `status`, `doctor`, `delivery-status`, `wait-delivery`, `untrack`,
 `refresh-dashboard`, `dashboard`, `register-codex`, `unregister-codex`,
 `select-claude`, `unselect-claude`, `pair`, `unpair`, `send-to-claude`,
-`send-to-codex`, `reply`, and `convert-state-v2-to-v3`. `dashboard` requires `--live` and accepts an
+`send-to-codex`, `reply`, `register-peer`, `unregister-peer`, `await`, and
+`peer-stdio`. `dashboard` requires `--live` and accepts an
 optional `--lang en|zh-CN` and `--port <n>`; it starts the companion process
 rather than issuing a single control request. Message bodies are non-empty
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line and
 never returns a thread ID, provider-native ID, path, address, or message body.
 These commands require the foreground broker, except that `serve` starts it in
-the current terminal and `convert-state-v2-to-v3` is an offline one-shot
-upgrade. The converter uses only the normally resolved state directory,
-requires the controller lock, installs strict native schema 3 through an
-fsynced atomic replacement, and reports only success plus the verified v2
-backup basename. It starts no provider, helper, listener, discovery, or control
-socket. The launcher never daemonizes itself.
+the current terminal. The launcher never daemonizes itself.
 
 `register-codex --alias <new> --succeeds <current>` is one atomic logical-route
 transaction. It verifies the inherited identity of the replacement task,
@@ -927,7 +923,7 @@ the static pair, which is always written in both languages.
 
 The private store may retain:
 
-- schema-3 logical registrations with aliases, registration IDs, and exact
+- schema-4 logical registrations with aliases, registration IDs, and exact
   provider-native route handles inside the closed private binding schema;
 - consent edges tied to exact registration IDs, so alias reuse cannot inherit
   permission;
@@ -951,13 +947,12 @@ may resume once only after their exact registration and consent authority is
 rechecked; armed and accepted work settles without replay. Callback, native
 receipt, conversation, and reply capabilities are not reconstructed.
 
-Private schema 3 is the binary's only native store format; the bounded public
-snapshot deliberately remains schema version 2. Upgrading an existing schema-2
-state requires the offline `embassy convert-state-v2-to-v3` command before
-starting the broker. It verifies and retains a byte-identical v2 backup, then
-atomically installs and reads back strict v3 state. The runtime performs no
-in-binary migration or best-effort rewrite; any non-v3 state produces the
-ordinary strict corrupt-state error.
+Private schema 4 is the binary's only native store format; the bounded public
+snapshot deliberately remains schema version 2. The runtime performs no
+migration or best-effort rewrite. An old or unknown private schema refuses with
+`GATEWAY_STATE_SCHEMA_UNSUPPORTED` without mutating the state file; the operator
+must follow the reset-only runbook in `docs/CONFIGURATION.md`. A malformed
+schema-4 document produces the ordinary strict corrupt-state error.
 
 ## Minimum filesystem and process access
 

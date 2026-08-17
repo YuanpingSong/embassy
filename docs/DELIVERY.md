@@ -28,7 +28,7 @@ Embassy.
 
 - **Progress watches are independent evidence.** An opt-in watch may outlive an opener that expired before delivery, so a worker can remain unaware of the original assignment even while thread activity keeps the watch healthy. Owners should check the opener's `delivery-status` separately before assuming the assignment text arrived.
 
-- **Restarts keep clean work only.** Queued and reserved bodies persist under bounded retention and may resume once against the same logical route and consent edge. Armed or accepted work at crash settles ambiguous or unconfirmed and is never replayed. Each retained message keeps its opaque delivery token and status in the private v3 state, so the sender can continue checking that exact attempt after restart. No pending waiter, shell receipt, reply, or conversation capability survives.
+- **Restarts keep clean work only.** Queued and reserved bodies persist under bounded retention and may resume once against the same logical route and consent edge. Armed or accepted work at crash settles ambiguous or unconfirmed and is never replayed. Each retained message keeps its opaque delivery token and status in the private v4 state, so the sender can continue checking that exact attempt after restart. No pending waiter, shell receipt, reply, or conversation capability survives.
 
 Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. The dashboard distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.
 
@@ -76,7 +76,7 @@ classified as an ambiguous write or replayed.
 
 ## Delivery tokens
 
-Every accepted `send-to-claude`, `send-to-codex`, and `reply` returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v3 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, provider receipt, or dashboard.
+Every accepted `send-to-claude`, `send-to-codex`, and `reply` returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v4 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, provider receipt, or dashboard.
 
 ```bash
 embassy delivery-status --token dlv_<token>

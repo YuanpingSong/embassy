@@ -47,7 +47,6 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "docs/DELIVERY.zh-CN.md",
     "README.zh-CN.md",
     "dist/src/gateway/live-dashboard.js",
-    "dist/src/gateway/state-v2-to-v3.js",
   ]) {
     assert.ok(expected.includes(packagePath), packagePath);
   }
@@ -117,6 +116,20 @@ test("package checker rejects missing and regex-shaped extra files", async (t) =
 
   await writeFile(
     reportPath,
+    JSON.stringify([{
+      ...report,
+      files: report.files.filter(
+        ({ path: packagePath }) => packagePath !== "dist/src/gateway/store.js",
+      ),
+    }]),
+    "utf8",
+  );
+  const missing = runChecker(["--report", reportPath]);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /missing: .*store\.js/);
+
+  await writeFile(
+    reportPath,
     JSON.stringify([
       {
         ...report,
@@ -132,21 +145,4 @@ test("package checker rejects missing and regex-shaped extra files", async (t) =
   assert.equal(unexpected.status, 1);
   assert.match(unexpected.stderr, /unexpected: .*surprise-runtime\.js/);
 
-  await writeFile(
-    reportPath,
-    JSON.stringify([
-      {
-        ...report,
-        files: report.files.filter(
-          ({ path: packagePath }) =>
-            packagePath !==
-            "dist/src/gateway/state-v2-to-v3.js",
-        ),
-      },
-    ]),
-    "utf8",
-  );
-  const missing = runChecker(["--report", reportPath]);
-  assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /missing: .*state-v2-to-v3\.js/);
 });

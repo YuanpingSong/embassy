@@ -14,7 +14,6 @@ export const cliCopyZhCn = {
   health                 检查代理健康状态
   status                 读取公开状态快照
   doctor                 诊断 Codex 桌面应用连接状态
-  convert-state-v2-to-v3 备份后转换已停止代理的状态
   refresh-dashboard      刷新发现结果并发布两份静态仪表盘
   dashboard --live [--port <n>]
                          打开实时状态与有限路由同意操作
@@ -55,6 +54,8 @@ export const cliCopyZhCn = {
     "消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。",
   "hint.progressWatchOwnerConflict":
     "此配对已有由另一参与方拥有的监视；请先让该所有者运行 `embassy untrack --conversation <conversation-token>`。",
+  "hint.stateResetRequired":
+    "必须重置状态；请按照 docs/CONFIGURATION.zh-CN.md#私有状态重置 操作。重置会放弃所有未结算工作。升级后如需检查未结算工作，请在重置前暂时使用 Embassy 1.9.x。",
   "error.input": "请求被拒绝。",
   "error.decision": "网关拒绝了该请求。",
   "error.unavailable": "网关不可用。",

@@ -146,17 +146,17 @@ export type GatewayMessageRecord = QueuedMessageMetadata & {
   sequence: number; deliveryToken?: string; sourceRegistrationId: string | null; targetRegistrationId: string | null; consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
   state: GatewayMessageState;
 };
-export type GatewayLegacyMessageActivity = {
-  type: "legacy_message"; event: NormalizedMessageEvent;
+export type GatewayMessageActivity = {
+  type: "message_activity"; event: NormalizedMessageEvent;
 };
 export type GatewayRuntimeActivity = {
   type: "activity"; event: PublicGatewayActivityEvent;
 };
 export type GatewayStateActivity =
-  | GatewayLegacyMessageActivity
+  | GatewayMessageActivity
   | GatewayRuntimeActivity;
 export type GatewayPersistedState = {
-  schemaVersion: 3; commit: { sequence: number; id: string }; createdAt: string; updatedAt: string; eventSequence: number; routes: GatewayRouteRecord[];
+  schemaVersion: 4; commit: { sequence: number; id: string }; createdAt: string; updatedAt: string; eventSequence: number; routes: GatewayRouteRecord[];
   consentEdges: GatewayConsentEdgeRecord[]; messages: GatewayMessageRecord[]; dedupe: DedupeRecord[]; rateBuckets: RateBucket[]; activity: GatewayStateActivity[]; accounting: GatewayAccounting;
 };
 export type PublicRouteSnapshot = {

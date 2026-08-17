@@ -118,7 +118,6 @@ test("bare invocation and help flags print localized usage without side effects"
     const help = stdout.chunks.join("");
     assert.match(help, current.expected);
     assert.match(help, /refresh-dashboard/);
-    assert.match(help, /convert-state-v2-to-v3/);
     assert.match(help, /wait-delivery/);
     assert.match(help, /untrack/);
     assert.match(help, /register-peer/);
@@ -130,133 +129,6 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.equal(stderr.chunks.join(""), "");
   }
-});
-
-test("offline state conversion uses only configured state and prints no private evidence", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const stateDir = "/private/fake-state";
-  let convertedStateDir: string | undefined, convertedHost: string | undefined;
-  let unrelatedWork = false;
-  const code = await runGatewayCli(["convert-state-v2-to-v3"], {
-    env: { EMBASSY_STATE_DIR: stateDir },
-    stdout,
-    stderr,
-    loadConfig: () => ({
-      stateDir,
-      controlSocketPath: `${stateDir}/control.sock`,
-      allowedHosts: ["this-mac"],
-      steeringEnabled: true,
-      inboundMode: "paired",
-      stallNoticeMs: 30_000,
-      limits: {} as never,
-    }),
-    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"], configured: true }),
-    convertState: async ({ stateDir: actual, hostId }) => {
-      convertedStateDir = actual; convertedHost = hostId;
-      return {
-        backupFile: "gateway-state.v2.backup.json",
-        commitId: "PRIVATE_COMMIT_ID",
-        commitSequence: 41,
-      };
-    },
-    validateControlSocket: async () => {
-      unrelatedWork = true;
-    },
-    sendRequest: async () => {
-      unrelatedWork = true;
-      throw new Error("converter must not contact control");
-    },
-    runServer: async () => {
-      unrelatedWork = true;
-    },
-    runLiveDashboard: async () => {
-      unrelatedWork = true;
-    },
-  });
-
-  assert.equal(code, gatewayCliExitCodes.ok);
-  assert.equal(convertedStateDir, stateDir);
-  assert.equal(convertedHost, "m5dev");
-  assert.equal(unrelatedWork, false);
-  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
-    ok: true,
-    command: "convert-state-v2-to-v3",
-    result: {
-      converted: true,
-      backupFile: "gateway-state.v2.backup.json",
-    },
-  });
-  assert.equal(stdout.chunks.join("").includes("PRIVATE_COMMIT_ID"), false);
-  assert.equal(stdout.chunks.join("").includes(stateDir), false);
-  assert.equal(stderr.chunks.join(""), "");
-});
-
-test("offline state conversion rejects options before configuration", async () => {
-  let worked = false;
-  const stdout = capture();
-  const code = await runGatewayCli(
-    ["convert-state-v2-to-v3", "--state-dir", "/tmp/other"],
-    {
-      env: {},
-      stdout,
-      stderr: capture(),
-      loadConfig: () => {
-        worked = true;
-        throw new Error("must not load configuration");
-      },
-      convertState: async () => {
-        worked = true;
-        throw new Error("must not convert");
-      },
-    },
-  );
-  assert.equal(code, gatewayCliExitCodes.invalidInput);
-  assert.equal(worked, false);
-  assert.equal(
-    (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error
-      .code,
-    "INVALID_ARGUMENTS",
-  );
-});
-
-test("offline state conversion exposes commit uncertainty as non-retryable ambiguity", async () => {
-  const stdout = capture();
-  const code = await runGatewayCli(["convert-state-v2-to-v3"], {
-    env: {},
-    stdout,
-    stderr: capture(),
-    loadConfig: () => ({
-      stateDir: "/private/fake-state",
-      controlSocketPath: "/private/fake-state/control.sock",
-      allowedHosts: ["this-mac"],
-      steeringEnabled: true,
-      inboundMode: "paired",
-      stallNoticeMs: 30_000,
-      limits: {} as never,
-    }),
-    loadNodeInventory: async () => ({ host: "this-mac", nodes: [], configured: false }),
-    convertState: async () => {
-      throw new BridgeError(
-        "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
-        "PRIVATE_CONVERTER_DIAGNOSTIC",
-        true,
-      );
-    },
-  });
-
-  assert.equal(code, gatewayCliExitCodes.ambiguous);
-  const output = stdout.chunks.join("");
-  assert.deepEqual(JSON.parse(output), {
-    ok: false,
-    command: "convert-state-v2-to-v3",
-    error: {
-      code: "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
-      ambiguous: true,
-      retryable: false,
-    },
-  });
-  assert.equal(output.includes("PRIVATE_CONVERTER_DIAGNOSTIC"), false);
 });
 
 test("removed compatibility commands fail before configuration or control work", async () => {
@@ -2500,6 +2372,49 @@ test("oversized stdin renders its localized hint while generic input rejection d
       current.expected,
     );
     assert.equal(stderr.chunks.join(""), current.stderr);
+  }
+});
+
+test("unsupported and corrupt private state print the localized reset instruction", async () => {
+  const codes = ["GATEWAY_STATE_SCHEMA_UNSUPPORTED", "CORRUPT_GATEWAY_STATE"] as const;
+  const locales = [
+    {
+      env: {},
+      rejection: "request rejected.",
+      hint:
+        "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 1.9.x before resetting.",
+    },
+    {
+      env: { EMBASSY_LOCALE: "zh-CN" },
+      rejection: "请求被拒绝。",
+      hint:
+        "必须重置状态；请按照 docs/CONFIGURATION.zh-CN.md#私有状态重置 操作。重置会放弃所有未结算工作。升级后如需检查未结算工作，请在重置前暂时使用 Embassy 1.9.x。",
+    },
+  ] as const;
+  for (const code of codes) {
+    for (const locale of locales) {
+      const stdout = capture();
+      const stderr = capture();
+      const exitCode = await runGatewayCli(["serve"], {
+        env: locale.env,
+        stdout,
+        stderr,
+        runServer: async () => {
+          throw new BridgeError(code, "private loader detail must not render");
+        },
+      });
+      assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+      assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+        ok: false,
+        command: "serve",
+        error: { code, ambiguous: false, retryable: false },
+      });
+      assert.equal(
+        stderr.chunks.join(""),
+        `[embassy] ${locale.rejection}\n[embassy] ${locale.hint}\n`,
+      );
+      assert.doesNotMatch(stderr.chunks.join(""), /private loader detail/u);
+    }
   }
 });
 

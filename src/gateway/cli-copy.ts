@@ -9,6 +9,7 @@ export const cliCopyKeys = [
   "hint.controlInvalidResponse",
   "hint.messageTooLarge",
   "hint.progressWatchOwnerConflict",
+  "hint.stateResetRequired",
   "error.input",
   "error.decision",
   "error.unavailable",

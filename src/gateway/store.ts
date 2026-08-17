@@ -14,7 +14,7 @@ import type { AcceptMessageInput, AcceptMessageResult, AuthorizeMessageInput,
   AuthorizeMessageResult, DeadlinePressureBucket, DedupeRecord, DeliveryState, EnqueueMessageInput,
   EnqueueMessageResult, EnqueueNativeIngressInput, EnqueueNativeReplyInput,
   GatewayAccounting, GatewayConsentEdgeRecord, GatewayConsentEndpoint,
-  GatewayLegacyMessageActivity, GatewayMessageRecord, GatewayMessageState,
+  GatewayMessageActivity, GatewayMessageRecord, GatewayMessageState,
   GatewayPersistedState, GatewayPreparedWriteEvidence, GatewayPrivateRouteInspection,
   GatewayPublicSnapshot, GatewayRouteRecord, GatewayRuntimeActivity,
   GatewayStoreDependencies, LogicalRouteBinding, MessageDirection, NormalizedMessageEvent,
@@ -37,6 +37,7 @@ const ALIAS_PATTERN =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const PRIVATE_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const REGISTRATION_ID_PATTERN = /^reg_[A-Za-z0-9_-]{1,252}$/;
 const PEER_ROUTE_HANDLE_PATTERN = /^peer:[0-9a-f]{64}$/;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const MESSAGE_ID_PATTERN =
@@ -44,9 +45,7 @@ const MESSAGE_ID_PATTERN =
 const MESSAGE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
 const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 const FINGERPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-// New/public tokens are exact 24-character handles. The wider private read
-// bound keeps pre-release v3 artifacts written before that correction bootable.
-const DELIVERY_TOKEN_PATTERN = /^dlv_[A-Za-z0-9_-]{24,128}$/;
+const DELIVERY_TOKEN_PATTERN = /^dlv_[A-Za-z0-9_-]{24}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROVIDERS = new Set<string>(gatewayProviders);
 const REGISTRATION_MODES = new Set<string>(routeRegistrationModes);
@@ -135,12 +134,13 @@ function isRoute(value: unknown): value is GatewayRouteRecord {
     typeof value.alias === "string" &&
     ALIAS_PATTERN.test(value.alias) &&
     isLogicalBinding(value.binding) &&
+    REGISTRATION_ID_PATTERN.test(value.binding.registrationId) &&
     typeof value.registrationMode === "string" &&
     REGISTRATION_MODES.has(value.registrationMode) &&
     (value.binding.provider !== "peer" || value.registrationMode === "federated_peer" ||
       PEER_ROUTE_HANDLE_PATTERN.test(value.binding.routeHandle)) &&
     typeof value.enabled === "boolean" &&
-    (value.busyPolicy === "queue" || value.busyPolicy === "refuse") &&
+    value.busyPolicy === "queue" &&
     isIsoTimestamp(value.registeredAt) &&
     isIsoTimestamp(value.updatedAt) &&
     isCounters(value.counters)
@@ -516,20 +516,20 @@ function isRuntimeActivity(value: unknown): value is GatewayRuntimeActivity {
     (event.safeErrorCode === undefined || isSafeCode(event.safeErrorCode))
   );
 }
-function isLegacyActivity(value: unknown): value is GatewayLegacyMessageActivity {
+function isMessageActivity(value: unknown): value is GatewayMessageActivity {
   return (
     isObject(value) &&
     hasOnlyKeys(value, ["type", "event"]) &&
-    value.type === "legacy_message" &&
+    value.type === "message_activity" &&
     isNormalizedEvent(value.event)
   );
 }
-export function isGatewayPersistedStateV3(value: unknown): value is GatewayPersistedState {
+export function isGatewayPersistedStateV4(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
     !hasOnlyKeys(value, ["schemaVersion", "commit", "createdAt", "updatedAt", "eventSequence",
       "routes", "consentEdges", "messages", "dedupe", "rateBuckets", "activity", "accounting"]) ||
-    value.schemaVersion !== 3 ||
+    value.schemaVersion !== 4 ||
     !isObject(value.commit) ||
     !hasOnlyKeys(value.commit, ["sequence", "id"]) ||
     !isNonNegativeInteger(value.commit.sequence) ||
@@ -552,7 +552,7 @@ export function isGatewayPersistedStateV3(value: unknown): value is GatewayPersi
       isIsoTimestamp(bucket.windowStartedAt) && isNonNegativeInteger(bucket.count)) ||
     !Array.isArray(value.activity) ||
     !value.activity.every(
-      (entry) => isLegacyActivity(entry) || isRuntimeActivity(entry),
+      (entry) => isMessageActivity(entry) || isRuntimeActivity(entry),
     ) ||
     !isAccounting(value.accounting)
   ) {
@@ -848,7 +848,7 @@ export class GatewayStore {
         const now = this.now();
         const loaded = await this.loadStateFile();
         this.state = loaded ?? {
-          schemaVersion: 3,
+          schemaVersion: 4,
           commit: { sequence: 0, id: this.randomId() },
           createdAt: now.toISOString(), updatedAt: now.toISOString(),
           eventSequence: 0, routes: [],
@@ -1811,10 +1811,10 @@ export class GatewayStore {
       const currentEvents = state.messages.map((message) =>
         this.projectMessageEvent(message),
       );
-      const legacyEvents = state.activity
+      const messageEvents = state.activity
         .filter(
-          (entry): entry is GatewayLegacyMessageActivity =>
-            entry.type === "legacy_message",
+          (entry): entry is GatewayMessageActivity =>
+            entry.type === "message_activity",
         )
         .map((entry) => structuredClone(entry.event));
       const activityEvents = state.activity
@@ -1822,7 +1822,7 @@ export class GatewayStore {
           (entry): entry is GatewayRuntimeActivity => entry.type === "activity",
         )
         .map((entry) => structuredClone(entry.event));
-      const messages = [...legacyEvents, ...currentEvents]
+      const messages = [...messageEvents, ...currentEvents]
         .sort((left, right) => left.sequence - right.sequence)
         .slice(-gatewayPublicSnapshotLimits.messages);
       const pressureBuckets: DeadlinePressureBucket[] = [
@@ -1866,7 +1866,7 @@ export class GatewayStore {
           activityEvents: 0,
           messages: Math.max(
             0,
-            legacyEvents.length + currentEvents.length - messages.length,
+            messageEvents.length + currentEvents.length - messages.length,
           ),
           alerts: 0,
         },
@@ -1922,6 +1922,7 @@ export class GatewayStore {
       !isObject(input) ||
       !ALIAS_PATTERN.test(input.alias) ||
       !isLogicalBinding(input.binding) ||
+      !REGISTRATION_ID_PATTERN.test(input.binding.registrationId) ||
       !REGISTRATION_MODES.has(input.registrationMode) ||
       (input.binding.provider === "peer" && input.registrationMode !== "federated_peer" &&
         !PEER_ROUTE_HANDLE_PATTERN.test(input.binding.routeHandle)) ||
@@ -2318,7 +2319,7 @@ export class GatewayStore {
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
     state.eventSequence += 1;
     state.activity.push({
-      type: "legacy_message",
+      type: "message_activity",
       event: {
         sequence: state.eventSequence, timestamp: now.toISOString(),
         messageIdSuffix: suffix,
@@ -2991,11 +2992,14 @@ export class GatewayStore {
     } catch {
       throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state is not valid JSON.");
     }
-    if (isObject(parsed) && parsed.schemaVersion === 2) {
-      throw new BridgeError("GATEWAY_STATE_CONVERSION_REQUIRED", "The gateway state must be converted offline before this release can start.");
+    if (isObject(parsed) && Object.hasOwn(parsed, "schemaVersion") && parsed.schemaVersion !== 4) {
+      throw new BridgeError(
+        "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
+        "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside, keep nodes.json, then restart and re-register, select, and pair routes.",
+      );
     }
-    if (!isGatewayPersistedStateV3(parsed)) {
-      throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state failed strict v3 schema validation.");
+    if (!isGatewayPersistedStateV4(parsed)) {
+      throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state failed strict v4 schema validation.");
     }
     this.assertConfiguredBounds(parsed);
     return parsed;

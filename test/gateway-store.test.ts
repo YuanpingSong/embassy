@@ -16,7 +16,7 @@ import type { GatewayConfig } from "../src/gateway/config.js";
 import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import {
   GatewayStore,
-  isGatewayPersistedStateV3,
+  isGatewayPersistedStateV4,
 } from "../src/gateway/store.js";
 import type {
   GatewayMessageRecord,
@@ -129,13 +129,13 @@ function route(
 const claude = route(
   "claude",
   "advisor@this-mac",
-  "reg-claude-0001",
+  "reg_claude_0001",
   "claude-session-private-0001",
 );
 const codex = route(
   "codex",
   "codex-reviewer@this-mac",
-  "reg-codex-0001",
+  "reg_codex_0001",
   "codex-thread-private-0001",
 );
 
@@ -203,7 +203,7 @@ async function authorize(store: GatewayStore, attempt: Awaited<ReturnType<typeof
   });
 }
 
-test("new stores are strict native v3 and public projection redacts private IDs", async () => {
+test("new stores are strict native v4 and public projection redacts private IDs", async () => {
   const { store } = await fixture();
   await store.initialize();
   await paired(store);
@@ -214,7 +214,7 @@ test("new stores are strict native v3 and public projection redacts private IDs"
 
   const body = await readFile(store.stateFilePath, "utf8");
   const state = JSON.parse(body) as Record<string, unknown>;
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
   assert.deepEqual(Object.keys(state), [
     "schemaVersion",
     "commit",
@@ -229,7 +229,7 @@ test("new stores are strict native v3 and public projection redacts private IDs"
     "activity",
     "accounting",
   ]);
-  assert.equal(isGatewayPersistedStateV3(state), true);
+  assert.equal(isGatewayPersistedStateV4(state), true);
   assert.equal(body.includes("endpointGeneration"), false);
   assert.equal(body.includes("ownerLease"), false);
   assert.equal(body.includes("connectors"), false);
@@ -307,13 +307,13 @@ test("delivery token allocation is deterministic and retries bounded collisions"
   assert.equal(exhaustedCalls, 8);
 });
 
-test("runtime distinguishes v2 conversion requirement from corrupt v3", async () => {
+test("runtime refuses unsupported schemas without mutating state", async () => {
   const first = await fixture();
   await first.store.initialize();
   await first.store.close();
   await writeFile(
     first.store.stateFilePath,
-    `${JSON.stringify({ schemaVersion: 2, arbitrary: "not validated" })}\n`,
+    `${JSON.stringify({ schemaVersion: 3, arbitrary: "not validated" })}\n`,
     { mode: 0o600 },
   );
   await assert.rejects(
@@ -321,16 +321,14 @@ test("runtime distinguishes v2 conversion requirement from corrupt v3", async ()
     (error: unknown) =>
       error instanceof Error &&
       "code" in error &&
-      error.code === "GATEWAY_STATE_CONVERSION_REQUIRED",
+      error.code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED" &&
+      /move gateway-state\.json aside.*keep nodes\.json/iu.test(error.message),
   );
   const unchanged = await readFile(first.store.stateFilePath, "utf8");
-  assert.match(unchanged, /"schemaVersion":2/u);
+  assert.match(unchanged, /"schemaVersion":3/u);
 
-  await writeFile(
-    first.store.stateFilePath,
-    `${JSON.stringify({ schemaVersion: 3 })}\n`,
-    { mode: 0o600 },
-  );
+  const corruptCurrent = `${JSON.stringify({ schemaVersion: 4 })}\n`;
+  await writeFile(first.store.stateFilePath, corruptCurrent, { mode: 0o600 });
   await assert.rejects(
     new GatewayStore(first.config).initialize(),
     (error: unknown) =>
@@ -338,6 +336,7 @@ test("runtime distinguishes v2 conversion requirement from corrupt v3", async ()
       "code" in error &&
       error.code === "CORRUPT_GATEWAY_STATE",
   );
+  assert.equal(await readFile(first.store.stateFilePath, "utf8"), corruptCurrent);
 });
 
 test("consent is canonical, lease-bound, and never inferred from alias prefixes", async () => {
@@ -346,13 +345,13 @@ test("consent is canonical, lease-bound, and never inferred from alias prefixes"
   const deceptiveClaude = route(
     "claude",
     "codex-looking@this-mac",
-    "reg-claude-deceptive",
+    "reg_claude_deceptive",
     "session-deceptive",
   );
   const deceptiveCodex = route(
     "codex",
     "codex-actual@this-mac",
-    "reg-codex-actual",
+    "reg_codex_actual",
     "thread-actual",
   );
   await store.registerRoute(deceptiveClaude);
@@ -372,8 +371,8 @@ test("consent is canonical, lease-bound, and never inferred from alias prefixes"
       ({ provider, registrationId }) => ({ provider, registrationId }),
     ),
     [
-      { provider: "claude", registrationId: "reg-claude-deceptive" },
-      { provider: "codex", registrationId: "reg-codex-actual" },
+      { provider: "claude", registrationId: "reg_claude_deceptive" },
+      { provider: "codex", registrationId: "reg_codex_actual" },
     ],
   );
   await store.close();
@@ -413,7 +412,7 @@ test("ordinary enqueue fences both exact registrations before admission", async 
   const replacementSource = route(
     "claude",
     claude.alias,
-    "reg-claude-fence-replacement-1",
+    "reg_claude_fence_replacement_1",
     "claude-session-fence-replacement-1",
   );
   await store.replaceClaudeSelection(replacementSource);
@@ -448,7 +447,7 @@ test("ordinary enqueue fences both exact registrations before admission", async 
   const replacementTarget = route(
     "claude",
     replacementSource.alias,
-    "reg-claude-fence-replacement-2",
+    "reg_claude_fence_replacement_2",
     "claude-session-fence-replacement-2",
   );
   await store.replaceClaudeSelection(replacementTarget);
@@ -484,7 +483,7 @@ test("same-alias replacement fences native admission, succession, pair, and unpa
   const current = route(
     "codex",
     codex.alias,
-    "reg-codex-race-current",
+    "reg_codex_race_current",
     "codex-thread-race-current",
   );
   await store.registerRoute(current);
@@ -500,7 +499,7 @@ test("same-alias replacement fences native admission, succession, pair, and unpa
   const successor = route(
     "codex",
     "codex-race-successor@this-mac",
-    "reg-codex-race-successor",
+    "reg_codex_race_successor",
     "codex-thread-race-successor",
   );
   const staleOperations = [
@@ -665,7 +664,7 @@ test("prepared evidence is bound to the exact raw body and transport kind", asyn
 test("peer targets require peer mailbox prepared evidence", async () => {
   const { store } = await fixture();
   await store.initialize();
-  const peer = route("peer", "peer-shell@this-mac", "reg-peer-0001",
+  const peer = route("peer", "peer-shell@this-mac", "reg_peer_0001",
     `peer:${"a".repeat(64)}`);
   await assert.rejects(store.registerRoute({ ...peer, binding: {
     ...peer.binding, routeHandle: `peer_${"a".repeat(32)}`,
@@ -676,7 +675,7 @@ test("peer targets require peer mailbox prepared evidence", async () => {
   const hostile = JSON.parse(await readFile(store.stateFilePath, "utf8"));
   hostile.routes.find((candidate: { alias: string }) => candidate.alias === peer.alias)
     .binding.routeHandle = `peer_${"a".repeat(32)}`;
-  assert.equal(isGatewayPersistedStateV3(hostile), false);
+  assert.equal(isGatewayPersistedStateV4(hostile), false);
   await store.addConsentEdge(consentInput(codex, peer));
   await store.enqueueMessage({ sourceAlias: codex.alias, targetAlias: peer.alias,
     body: "peer body", dedupeKey: "peer-prepared" });
@@ -694,13 +693,42 @@ test("peer targets require peer mailbox prepared evidence", async () => {
   await store.close();
 });
 
+test("route registration refuses legacy identifiers before persistence", async () => {
+  const { store, config } = await fixture();
+  await store.initialize();
+  await store.registerRoute(codex);
+  const before = await readFile(store.stateFilePath);
+  await assert.rejects(
+    store.registerRoute(route(
+      "claude",
+      "claude-legacy@this-mac",
+      "lease_legacy",
+      "claude-session-legacy",
+    )),
+    (error: unknown) => error instanceof Error && "code" in error &&
+      error.code === "INVALID_ROUTE_BINDING",
+  );
+  assert.deepEqual(await readFile(store.stateFilePath), before);
+  await store.close();
+
+  const reopened = new GatewayStore(config);
+  await reopened.initialize();
+  assert.equal(
+    (await reopened.inspectPrivateRoutes()).some(
+      (candidate) => candidate.binding.registrationId === "lease_legacy",
+    ),
+    false,
+  );
+  await reopened.close();
+});
+
 test("armed ACP coarse terminal is the sole pre-acceptance unconfirmed arm", async () => {
   const { store } = await fixture();
   await store.initialize();
   const deepseek = route(
     "deepseek",
     "dsh-worker@this-mac",
-    "reg-deepseek-worker",
+    "reg_deepseek_worker",
     "deepseek-config-worker",
   );
   await store.registerRoute(claude);
@@ -1141,7 +1169,7 @@ test("Codex succession is one idempotent replacement with exact phase settlement
   const replacement = route(
     "codex",
     "codex-successor@this-mac",
-    "reg-codex-successor",
+    "reg_codex_successor",
     "codex-thread-successor",
   );
   const replaced = await store.replaceCodexRegistrationAtomic({
@@ -1315,7 +1343,7 @@ test("late exact-owner cleanup cannot remove an alias replacement", async () => 
   const replacement = route(
     "codex",
     codex.alias,
-    "reg-codex-replacement",
+    "reg_codex_replacement",
     "codex-thread-replacement",
   );
   await store.registerRoute(replacement);
@@ -1345,7 +1373,7 @@ test("Claude replacement resolves one exact selection and preserves additive pee
   const other = route(
     "claude",
     "other@this-mac",
-    "reg-claude-other",
+    "reg_claude_other",
     "claude-session-other",
   );
   await store.registerRoute(claude);
@@ -1364,7 +1392,7 @@ test("Claude replacement resolves one exact selection and preserves additive pee
   const swapped = route(
     "claude",
     renamed.alias,
-    "reg-claude-swapped",
+    "reg_claude_swapped",
     "claude-session-swapped",
   );
   await store.replaceClaudeSelection(swapped);
@@ -1389,7 +1417,7 @@ test("native replies reject a non-Claude or cross-host transient authority", asy
           provider: "deepseek",
           hostId: "this-mac",
           routeHandle: "deepseek-target",
-          registrationId: "reg-deepseek-target",
+          registrationId: "reg_deepseek_target",
         },
       },
       body: "reply",
@@ -1463,7 +1491,7 @@ test("normalized rejections commit suffix-only activity without fabricating mess
     entry.type,
     entry.event.state,
     entry.event.safeErrorCode,
-  ]), [["legacy_message", "rejected", "INVALID_DEADLINE"]]);
+  ]), [["message_activity", "rejected", "INVALID_DEADLINE"]]);
   assert.equal(raw.accounting.rejected, 1);
   assert.equal(
     raw.routes.find((entry) => entry.alias === claude.alias)?.counters.rejected,
@@ -1508,7 +1536,7 @@ test("interleaved message and runtime activity share one strict sequence", async
   await store.close();
 });
 
-test("strict v3 rejects corrupted authority and disclosure-bearing activity", async () => {
+test("strict v4 rejects corrupted authority and disclosure-bearing activity", async () => {
   const { store } = await fixture();
   await store.initialize();
   await paired(store);
@@ -1516,10 +1544,19 @@ test("strict v3 rejects corrupted authority and disclosure-bearing activity", as
   const raw = JSON.parse(await readFile(store.stateFilePath, "utf8"));
   const wrongDirection = structuredClone(raw);
   wrongDirection.messages[0].direction = "deepseek_to_codex";
-  assert.equal(isGatewayPersistedStateV3(wrongDirection), false);
+  assert.equal(isGatewayPersistedStateV4(wrongDirection), false);
   const wrongConsent = structuredClone(raw);
   wrongConsent.messages[0].consentEdge[0].registrationId = "wrong-registration";
-  assert.equal(isGatewayPersistedStateV3(wrongConsent), false);
+  assert.equal(isGatewayPersistedStateV4(wrongConsent), false);
+  const legacyRegistration = structuredClone(raw);
+  legacyRegistration.routes[0].binding.registrationId = "lease_legacy";
+  assert.equal(isGatewayPersistedStateV4(legacyRegistration), false);
+  const legacyBusyPolicy = structuredClone(raw);
+  legacyBusyPolicy.routes[0].busyPolicy = "refuse";
+  assert.equal(isGatewayPersistedStateV4(legacyBusyPolicy), false);
+  const legacyDeliveryToken = structuredClone(raw);
+  legacyDeliveryToken.messages[0].deliveryToken += "x";
+  assert.equal(isGatewayPersistedStateV4(legacyDeliveryToken), false);
   const injectedActivity = structuredClone(raw);
   injectedActivity.activity.push({
     type: "activity",
@@ -1535,11 +1572,11 @@ test("strict v3 rejects corrupted authority and disclosure-bearing activity", as
     },
   });
   injectedActivity.eventSequence += 1;
-  assert.equal(isGatewayPersistedStateV3(injectedActivity), false);
+  assert.equal(isGatewayPersistedStateV4(injectedActivity), false);
   await store.close();
 });
 
-test("strict v3 binds open and transient native aliases to the exact route host", async () => {
+test("strict v4 binds open and transient native aliases to the exact route host", async () => {
   const { store } = await fixture({ inboundMode: "open" });
   await store.initialize();
   await store.registerRoute(codex);
@@ -1577,17 +1614,17 @@ test("strict v3 binds open and transient native aliases to the exact route host"
   });
   assert.match(explicitReply.deliveryToken ?? "", /^dlv_/u);
   const raw = JSON.parse(await readFile(store.stateFilePath, "utf8"));
-  assert.equal(isGatewayPersistedStateV3(raw), true);
+  assert.equal(isGatewayPersistedStateV4(raw), true);
   const badIngress = structuredClone(raw);
   badIngress.messages.find(
     (message: { direction: string }) => message.direction === "claude_to_codex",
   ).sourceAlias = "native@other-host";
-  assert.equal(isGatewayPersistedStateV3(badIngress), false);
+  assert.equal(isGatewayPersistedStateV4(badIngress), false);
   const badReply = structuredClone(raw);
   badReply.messages.find(
     (message: { direction: string }) => message.direction === "codex_to_claude",
   ).targetAlias = "native@other-host";
-  assert.equal(isGatewayPersistedStateV3(badReply), false);
+  assert.equal(isGatewayPersistedStateV4(badReply), false);
   await store.close();
 });
 
@@ -1735,6 +1772,7 @@ test("peer catalog reconciliation and destination enqueue commit one destination
   const renamed = "dsh-renamed@m5dev"; await store.reconcilePeerCatalog("m5dev", catalog(2, renamed));
   assert.equal((await store.inspectPrivateRoutes()).find((route) => route.registrationMode === "federated_peer")?.alias, renamed);
   const mirror = (await store.inspectPrivateRoute(renamed))!;
+  assert.match(mirror.binding.registrationId, /^reg_[A-Za-z0-9_-]+$/u);
   const authorize = async (body: string, phase: "armed" | "accepted") => {
     const reserved = await store.reserveMessage(local.alias); assert.equal(reserved.status, "reserved");
     if (reserved.status !== "reserved") return;

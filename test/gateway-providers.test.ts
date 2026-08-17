@@ -791,12 +791,12 @@ test("service restart restores selected Claude authority into per-operation prep
   const storedClaude = {
     alias: "advisor@this-mac",
     binding: { provider: "claude" as const, hostId: "this-mac", routeHandle: "target-selected",
-      registrationId: "registration_claude_restored" }, registrationMode: "selected_live_peer" as const,
+      registrationId: "reg_claude_restored" }, registrationMode: "selected_live_peer" as const,
   };
   const storedCodex = {
     alias: "codex-main@this-mac",
     binding: { provider: "codex" as const, hostId: "this-mac", routeHandle: THREAD_ID,
-      registrationId: "registration_codex_restored" }, registrationMode: "explicit_opt_in" as const,
+      registrationId: "reg_codex_restored" }, registrationMode: "explicit_opt_in" as const,
   };
   const seed = new GatewayStore(config);
   await seed.initialize();

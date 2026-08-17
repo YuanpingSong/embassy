@@ -246,7 +246,6 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `serve` | operator | Start the foreground broker and dashboard |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
 | `refresh-dashboard` | operator | Refresh provider discovery and regenerate both static dashboard files |
-| `convert-state-v2-to-v3` | operator, broker stopped | Back up and convert the configured private state to native v3 without starting providers or the broker |
 | `dashboard --live [--lang en\|zh-CN] [--port <n>]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
@@ -259,6 +258,10 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session: `--from <codex-alias> --to <claude-alias>`, body on stdin, optional `--expects-reply` and `--track [--idle-minutes <n>]` |
 | `send-to-codex` | Claude session | Same flags and stdin body, using the inherited native reply identity |
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin, optional `--track [--idle-minutes <n>]` |
+
+Version 2.0 accepts only fresh private state. Follow the
+[reset-only state runbook](docs/CONFIGURATION.md#private-state-reset) before
+starting it over an older installation.
 
 `--track` opens a progress watch over the conversation; `--idle-minutes <n>`
 sets the idle interval for bounded liveness nudges (1–1440, default 5, rejected
@@ -273,7 +276,7 @@ or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 - **Compatibility is tested offline; runtime is best effort.** The release-owned support matrix records exact tested artifacts, protocols, capabilities, stop fidelity, limitations, and test dates. Runtime never imports that matrix and never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
-- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v3 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, provider receipt, or dashboard. Raw provider frames stay memory-only. The static dashboard files remain metadata-only; the live dashboard shows retained bodies.
+- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v4 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, provider receipt, or dashboard. Raw provider frames stay memory-only. The static dashboard files remain metadata-only; the live dashboard shows retained bodies.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.
 

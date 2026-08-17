@@ -429,8 +429,8 @@ async function paired(
   });
 }
 
-const claude = route("claude", "advisor@this-mac", "claude-session-a", "reg-claude-a");
-const codex = route("codex", "codex-main@this-mac", THREAD_A, "reg-codex-a");
+const claude = route("claude", "advisor@this-mac", "claude-session-a", "reg_claude_a");
+const codex = route("codex", "codex-main@this-mac", THREAD_A, "reg_codex_a");
 
 test("peer registration persists only its hash and exact token owns idempotence and removal", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
@@ -635,7 +635,7 @@ test("start restores logical observations and helper advertisements without prov
     assert.deepEqual(codexProvider.observed, [{
       alias: codex.alias,
       routeHandle: THREAD_A,
-      registrationId: "reg-codex-a",
+      registrationId: "reg_codex_a",
     }]);
     assert.deepEqual(claudeProvider.advertised, [codex.alias]);
     assert.equal(codexProvider.dispatches.length, 0);
@@ -643,7 +643,7 @@ test("start restores logical observations and helper advertisements without prov
     assert.equal(snapshot.schemaVersion, 2);
     assert.deepEqual(snapshot.routes.map((item) => item.alias).sort(), [claude.alias, codex.alias]);
     assert.equal(JSON.stringify(snapshot).includes(THREAD_A), false);
-    assert.equal(JSON.stringify(snapshot).includes("reg-codex-a"), false);
+    assert.equal(JSON.stringify(snapshot).includes("reg_codex_a"), false);
   } finally {
     await subject.close();
   }
@@ -884,11 +884,11 @@ test("a fresh canonical-host broker exports its startup-owned routes to a config
 
 test("a this-mac mixed-provider catalog is strict, opaque, and excludes local-only authority", async () => {
   const routes = [
-    route("claude", "advisor@this-mac", "00000000-0000-4000-8000-000000000001", "lease_claude"),
-    route("codex", "codex-main@this-mac", THREAD_A, "lease_codex_main"),
-    route("codex", "codex-review@this-mac", THREAD_B, "lease_codex_review"),
-    route("deepseek", "dsh-main@this-mac", "deepseek-session", "lease_deepseek"),
-    route("grok", "grok-main@this-mac", "grok-session", "lease_grok"),
+    route("claude", "advisor@this-mac", "00000000-0000-4000-8000-000000000001", "reg_claude"),
+    route("codex", "codex-main@this-mac", THREAD_A, "reg_codex_main"),
+    route("codex", "codex-review@this-mac", THREAD_B, "reg_codex_review"),
+    route("deepseek", "dsh-main@this-mac", "deepseek-session", "reg_deepseek"),
+    route("grok", "grok-main@this-mac", "grok-session", "reg_grok"),
   ];
   const subject = await fixture((["claude", "codex", "deepseek", "grok"] as const)
     .map((provider) => new FakeProvider({ provider, hostId: "this-mac" })), {
@@ -1014,7 +1014,7 @@ test("stale removal and succession controls preserve a same-alias replacement", 
         alias: codex.alias,
         binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
       });
-      const unrelated = route("codex", codex.alias, THREAD_C, `reg-${operation}-replacement`);
+      const unrelated = route("codex", codex.alias, THREAD_C, `reg_${operation}_replacement`);
       await subject.store.registerRoute(unrelated);
       release.resolve();
       assert.deepEqual(
@@ -1084,7 +1084,7 @@ test("stale pair and unpair controls cannot act on replacement endpoints", async
         alias: codex.alias,
         binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
       });
-      const replacement = route("codex", codex.alias, THREAD_C, `reg-${operation}-pair`);
+      const replacement = route("codex", codex.alias, THREAD_C, `reg_${operation}_pair`);
       await subject.store.registerRoute(replacement);
       release.resolve();
       assert.deepEqual(await pending, { accepted: false, code: "rejected" });
@@ -1160,7 +1160,7 @@ test("confirmed removal atomically terminalizes phase truth and drops consent", 
     assert.equal(byBody.get("queued")?.state, "ambiguous");
     assert.equal(byBody.get("armed")?.state, "unconfirmed");
     assert.equal(queued.accepted && armedEnqueue.accepted && acceptedEnqueue.accepted, true);
-    assert.deepEqual(codexProvider.forgotten, ["reg-codex-a"]);
+    assert.deepEqual(codexProvider.forgotten, ["reg_codex_a"]);
     assert.deepEqual(claudeProvider.unadvertised, [codex.alias]);
   } finally {
     await subject.close();
@@ -1182,9 +1182,9 @@ function evidenceFor(
 }
 
 test("same-target FIFO and different-target parallelism hold at the armed boundary", async () => {
-  const source = route("codex", "codex-source@this-mac", THREAD_A, "reg-source");
-  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg-dsh-one");
-  const grok = route("grok", "grok-one@this-mac", "acp-two", "reg-grok-one");
+  const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
+  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg_dsh_one");
+  const grok = route("grok", "grok-one@this-mac", "acp-two", "reg_grok_one");
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const paused = new FakeProvider(
@@ -1235,9 +1235,9 @@ test("same-target FIFO and different-target parallelism hold at the armed bounda
 });
 
 test("90s post-write pause keeps control live, advances observers and refuses a late overwrite", async () => {
-  const source = route("codex", "codex-source@this-mac", THREAD_A, "reg-source");
-  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg-dsh-one");
-  const grok = route("grok", "grok-one@this-mac", "acp-two", "reg-grok-one");
+  const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
+  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg_dsh_one");
+  const grok = route("grok", "grok-one@this-mac", "acp-two", "reg_grok_one");
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const paused = new FakeProvider({ provider: "deepseek", hostId: "this-mac" }, "pause_armed");
@@ -1578,8 +1578,8 @@ test("exact-leading native STEER uses the separate lane while native mail stays 
 });
 
 test("unpair after authorization makes the exact armed attempt ambiguous", async () => {
-  const source = route("codex", "codex-source@this-mac", THREAD_A, "reg-source");
-  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg-dsh-one");
+  const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
+  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg_dsh_one");
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const deepseekProvider = new FakeProvider({ provider: "deepseek", hostId: "this-mac" }, "pause_armed");
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
@@ -1643,7 +1643,7 @@ test("delivery status and public observations stay native-ID-free", async () => 
     assert.equal(status.found && status.state, "stalled");
     const observation = await subject.service.observeSnapshot();
     assert.equal(JSON.stringify(observation).includes(THREAD_A), false);
-    assert.equal(JSON.stringify(observation).includes("reg-codex-a"), false);
+    assert.equal(JSON.stringify(observation).includes("reg_codex_a"), false);
     codexProvider.pauseRelease.resolve();
     await eventually(async () => {
       const current = await subject.handlers.deliveryStatus({ token: send.deliveryToken });
@@ -1840,7 +1840,7 @@ test("a progress-watch nudge cannot cross an endpoint replacement after its regi
       "claude",
       claude.alias,
       claude.binding.routeHandle,
-      "reg-claude-nudge-replacement",
+      "reg_claude_nudge_replacement",
     );
     await subject.store.registerRoute(replacement);
     await subject.store.addConsentEdge({
@@ -2560,7 +2560,7 @@ test("provider replyText reverses an exact native ingress through native_reply a
       alias: codex.alias,
       binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
     });
-    const replacement = route("codex", codex.alias, THREAD_B, "reg-codex-race");
+    const replacement = route("codex", codex.alias, THREAD_B, "reg_codex_race");
     await subject.store.registerRoute(replacement);
     await subject.store.addConsentEdge({
       aliases: [claude.alias, codex.alias],

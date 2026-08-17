@@ -628,7 +628,7 @@ test("assembly failure closes every resource not yet owned by a service", async 
   assert.equal(signals.listenerCount(), 0);
 });
 
-test("state preflight preserves both conversion and cleanup failures", async () => {
+test("state preflight preserves both unsupported-schema and cleanup failures", async () => {
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
     EMBASSY_STATE_DIR: "/synthetic/controller-state",
@@ -641,8 +641,8 @@ test("state preflight preserves both conversion and cleanup failures", async () 
       events.push("initialize-store");
       assert.deepEqual(options, { deferPersistence: true });
       throw new BridgeError(
-        "GATEWAY_STATE_CONVERSION_REQUIRED",
-        "synthetic v2 state requires offline conversion",
+        "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
+        "synthetic old state requires reset",
       );
     },
     close: async () => {
@@ -687,7 +687,7 @@ test("state preflight preserves both conversion and cleanup failures", async () 
       assert.ok(cause.errors[0] instanceof BridgeError);
       assert.equal(
         (cause.errors[0] as BridgeError).code,
-        "GATEWAY_STATE_CONVERSION_REQUIRED",
+        "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
       );
       assert.ok(cause.errors[1] instanceof AggregateError);
       assert.equal((cause.errors[1] as AggregateError).errors.length, 1);

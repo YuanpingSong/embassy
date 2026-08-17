@@ -30,7 +30,7 @@ import type {
  * Property under test — every accepted message reaches EXACTLY ONE of the six
  * explicit terminal outcomes with an allowlisted reason, under randomized
  * busy/idle churn, scripted dispatch faults, clock jumps, and full service
- * restarts. Bodies survive only in the bounded private v3 ledger; every
+ * restarts. Bodies survive only in the bounded private v4 ledger; every
  * accepted message must remain neither silently lost nor double-settled.
  */
 
@@ -597,7 +597,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
     "ledger tracks every accepted send",
   );
 
-  // v3 retains bodies only in the bounded private ledger and its bounded
+  // v4 retains bodies only in the bounded private ledger and its bounded
   // public projection. Report their retained presence without assuming that
   // an old terminal row must survive capacity eviction.
   const snapshot = await handlers.listSnapshot();

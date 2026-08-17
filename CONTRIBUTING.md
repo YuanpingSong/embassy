@@ -124,7 +124,7 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
   terminal failure, ambiguity, expiry, and restart abandonment.
 - Never retry an ambiguous provider write. Requeue only a confirmed clean
   deferral that has not crossed an ambiguous mutation boundary.
-- The private mode-0600 v3 ledger retains bounded queued and recent bodies,
+- The private mode-0600 v4 ledger retains bounded queued and recent bodies,
   opaque delivery tokens, and status. Queued or reserved work may resume once
   within its deadline and attempt budget against the same exact route and edge.
   Armed work settles `ambiguous`; accepted work settles `unconfirmed`; neither

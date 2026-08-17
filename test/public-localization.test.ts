@@ -200,7 +200,7 @@ test("public locales document provenance framing and recipient continuation", as
   }
 });
 
-test("delivery-token documentation preserves private v3 restart continuity", async () => {
+test("delivery-token documentation preserves private v4 restart continuity", async () => {
   const [english, chinese, architecture, englishReadme, chineseReadme] =
     await Promise.all([
       readPublicFile("docs/DELIVERY.md"),

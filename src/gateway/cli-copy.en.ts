@@ -14,7 +14,6 @@ Commands:
   health                 Check broker health
   status                 Read the public status snapshot
   doctor                 Diagnose Codex Desktop attachment
-  convert-state-v2-to-v3 Convert stopped-broker state after making a backup
   refresh-dashboard      Refresh discovery and publish both static dashboards
   dashboard --live [--port <n>]
                          Open live status and bounded route consent
@@ -55,6 +54,8 @@ Options:
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
   "hint.progressWatchOwnerConflict":
     "this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.",
+  "hint.stateResetRequired":
+    "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 1.9.x before resetting.",
   "error.input": "request rejected.",
   "error.decision": "gateway rejected the request.",
   "error.unavailable": "gateway unavailable.",
