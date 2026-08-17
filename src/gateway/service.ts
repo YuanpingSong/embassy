@@ -472,7 +472,7 @@ export class GatewayService {
       const now = this.now().getTime();
       this.nextDiscoveryAt = now + DISCOVERY_INTERVAL_MS;
       this.nextDoctorAt = now + CODEX_DOCTOR_INTERVAL_MS;
-      this.nextPeerRefreshAt = (this.config.peerNodes?.length ?? 0) > 0 ? now : 0;
+      this.nextPeerRefreshAt = this.config.peerNodes.length > 0 ? now : 0;
       for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
       await this.publish();
       this.scheduleWake();
@@ -594,8 +594,8 @@ export class GatewayService {
   }
 
   private async buildPeerCatalog(peerHost: string): Promise<PeerCatalogResult> {
-    const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
-    if (!(this.config.peerNodes ?? []).includes(peerHost))
+    const localHost = this.config.hostId;
+    if (!this.config.peerNodes.includes(peerHost))
       throw new BridgeError("PEER_NOT_CONFIGURED", "The requested peer host is not configured.");
     const [snapshot, privateRoutes, privateEdges] = await Promise.all([
       this.snapshot(), this.store.inspectPrivateRoutes(), this.store.inspectPrivateConsentEdges(),
@@ -633,7 +633,7 @@ export class GatewayService {
   }
 
   private async receivePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<Readonly<{ accepted: true }>> {
-    if (!(this.config.peerNodes ?? []).includes(peerHost))
+    if (!this.config.peerNodes.includes(peerHost))
       throw new BridgeError("PEER_NOT_CONFIGURED", "The sending peer host is not configured.");
     const enqueued = await this.store.enqueuePeerHandoff(peerHost, handoff);
     if (enqueued.messageId !== undefined) {
@@ -849,7 +849,7 @@ export class GatewayService {
 
   private async advertise(route: GatewayPrivateRouteInspection): Promise<void> {
     const hostId = route.registrationMode === "federated_peer"
-      ? (this.config.hostId ?? this.config.allowedHosts[0]!) : route.binding.hostId;
+      ? this.config.hostId : route.binding.hostId;
     await this.claudeAdapter(hostId)?.advertiseNativeSourcePeer?.({
       alias: route.alias,
       sourceProvider: route.binding.provider,
@@ -859,7 +859,7 @@ export class GatewayService {
 
   private async unadvertise(route: GatewayPrivateRouteInspection): Promise<void> {
     const hostId = route.registrationMode === "federated_peer"
-      ? (this.config.hostId ?? this.config.allowedHosts[0]!) : route.binding.hostId;
+      ? this.config.hostId : route.binding.hostId;
     await this.claudeAdapter(hostId)?.unadvertiseNativeSourcePeer?.(route.alias);
   }
 
@@ -992,12 +992,12 @@ export class GatewayService {
       this.kick(existing.alias, existing.binding.registrationId);
       return undefined;
     }
-    if (params.token !== undefined || !params.alias.endsWith(`@${this.config.hostId ?? this.config.allowedHosts[0]}`)) {
+    if (params.token !== undefined || !params.alias.endsWith(`@${this.config.hostId}`)) {
       throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
     }
     const token = `peer_${randomBytes(24).toString("base64url")}`;
     await this.store.registerRoute({ alias: params.alias, binding: {
-      provider: "peer", hostId: this.config.hostId ?? this.config.allowedHosts[0]!,
+      provider: "peer", hostId: this.config.hostId,
       routeHandle: peerHandle(process.getuid!(), params.alias, token), registrationId: registrationId(),
     }, registrationMode: "explicit_opt_in" });
     const installed = (await this.store.inspectPrivateRoute(params.alias))!;
@@ -1132,7 +1132,7 @@ export class GatewayService {
     const endpoints = await this.resolvePairEndpoints(params, true);
     const aliases = endpoints.aliases;
     const ownerHost = aliases.map(aliasHost).sort()[0]!;
-    if ((this.config.hostId ?? this.config.allowedHosts[0]) !== ownerHost) throw new ConsentOwnerError(ownerHost);
+    if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
     const attestation = pairParamThreadAttestation(params);
     if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
@@ -1145,7 +1145,7 @@ export class GatewayService {
     const endpoints = await this.resolvePairEndpoints(params, false);
     const aliases = endpoints.aliases;
     const ownerHost = aliases.map(aliasHost).sort()[0]!;
-    if ((this.config.hostId ?? this.config.allowedHosts[0]) !== ownerHost) throw new ConsentOwnerError(ownerHost);
+    if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
     const attestation = pairParamThreadAttestation(params);
     if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
@@ -2003,7 +2003,7 @@ export class GatewayService {
     receiptHandle?: string;
   }>): Promise<void> {
     const target = await this.store.inspectPrivateRoute(event.targetAlias);
-    const localHost = this.config.hostId ?? this.config.allowedHosts[0];
+    const localHost = this.config.hostId;
     if (target === undefined || (target.binding.hostId !== event.endpoint.hostId &&
       !(target.registrationMode === "federated_peer" && event.endpoint.hostId === localHost))) {
       throw new BridgeError("ROUTE_NOT_AVAILABLE", "The native target is absent.");
@@ -2543,7 +2543,7 @@ export class GatewayService {
       const due = [
         this.nextDiscoveryAt || now + DISCOVERY_INTERVAL_MS,
         this.nextDoctorAt || now + CODEX_DOCTOR_INTERVAL_MS,
-        ...((this.config.peerNodes?.length ?? 0) > 0
+        ...(this.config.peerNodes.length > 0
           ? [this.nextPeerRefreshAt || now + PEER_REFRESH_INTERVAL_MS]
           : []),
         ...(deadlineAt === undefined ? [] : [Date.parse(deadlineAt)]),
@@ -2587,8 +2587,8 @@ export class GatewayService {
   }
 
   private async refreshPeers(): Promise<void> {
-    const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
-    await Promise.all((this.config.peerNodes ?? []).map(async (peerHost) => {
+    const localHost = this.config.hostId;
+    await Promise.all(this.config.peerNodes.map(async (peerHost) => {
       let failureCode: "PEER_DIAL_FAILED" | "PEER_TUNNEL_UNAVAILABLE" = "PEER_TUNNEL_UNAVAILABLE";
       try {
         let client = this.peerClients.get(peerHost);

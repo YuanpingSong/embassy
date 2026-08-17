@@ -18,15 +18,15 @@ below.
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
 | `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts. Active watches are memory-only and end with the broker process; they are never restored after restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
 | `EMBASSY_LOCALE` | `en` | CLI output language, exactly `en` or `zh-CN`. The `--lang` flag overrides it for the invocation that carries it; an unset or empty value means `en`, and any other value is an argument error |
-| `EMBASSY_HOSTS` | `this-mac` | Legacy host-list parser: the value must still be 1 through 32 unique lowercase aliases, but it is not federation authority. Without `nodes.json`, `serve` remains local-only as `this-mac` regardless of this value. When `nodes.json` is configured, explicitly setting this variable fails closed with `INVALID_GATEWAY_CONFIGURATION` |
 
 Federation authority comes only from `nodes.json` in `EMBASSY_STATE_DIR`. It
 must be a current-user-owned mode-0600 regular file whose exact object shape is
 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`.
-`host` names this broker; `nodes` contains 1 through 31 unique OpenSSH aliases,
+`host` names this broker; `nodes` contains 0 through 31 unique OpenSSH aliases,
 omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
-node is the fixed SSH destination for `embassy peer-stdio`. A missing file keeps
-the broker local-only as `this-mac`.
+node is the fixed SSH destination for `embassy peer-stdio`. The file is mandatory;
+when it is absent, Embassy prints the exact `nodes:[]` local-only fix and refuses startup.
+Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
 
 ### Private state reset
 
@@ -85,7 +85,7 @@ two hours.
 
 A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity replacement.
 
-The public launcher remains host-local. Under the implemented allowlisted SSH federation, each broker serves one local host identity and exchanges only bounded route catalogs and destination-owned handoffs with configured Embassy nodes. `register-codex` remains a local task registration: its optional `--host <id>` and alias suffix must name that broker's local host. `--host` is also mutually exclusive with `--succeeds`, which always inherits the succeeded alias's host.
+The public launcher remains host-local. Under allowlisted SSH federation, each broker serves the exact host identity attested by `nodes.json`. `register-codex` infers that host; the alias (and any `--succeeds` alias) must use the same suffix.
 
 ## Claude Code's own setting: `crossSessionInbound`
 

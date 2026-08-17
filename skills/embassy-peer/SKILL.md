@@ -13,7 +13,7 @@ If `CALLER_IDENTITY_CONFLICT` reports that both agent identities were inherited,
 
 ## Select a peer
 
-Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. A broker without a federation inventory defaults to `this-mac`; configured allowlisted Embassy nodes exchange bounded public route catalogs and destination-owned handoffs over fixed attach-only SSH. Ask the user to choose a selector when it is ambiguous.
+Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. The mandatory private `nodes.json` names the local host; configured allowlisted Embassy nodes exchange bounded public route catalogs and destination-owned handoffs over fixed attach-only SSH. Ask the user to choose a selector when it is ambiguous.
 
 Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
 

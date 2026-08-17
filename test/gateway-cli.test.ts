@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -24,7 +24,7 @@ import {
   type GatewayCliDependencies,
   gatewayCliCommands,
   gatewayCliExitCodes,
-  runGatewayCli,
+  runGatewayCli as runGatewayCliBase,
 } from "../src/gateway/cli.js";
 import { PeerHandlerError } from "../src/gateway/peer-stdio.js";
 
@@ -37,6 +37,9 @@ const CONVERSATION_ID = "conv_0123456789abcdef";
 const DELIVERY_TOKEN = "dlv_0123456789abcdefghijklmn";
 const PEER_TOKEN = `peer_${"a".repeat(32)}`;
 const PEER_RECEIPT = `prc_${"b".repeat(24)}`;
+const TEST_INVENTORY = { host: "this-mac", nodes: [] } as const;
+const runGatewayCli: typeof runGatewayCliBase = (argv, dependencies = {}) =>
+  runGatewayCliBase(argv, { loadNodeInventory: async () => TEST_INVENTORY, ...dependencies });
 const NOW = "2026-08-07T12:34:56.000Z";
 const DEADLINE = "2099-08-07T12:35:56.000Z";
 const SECRET_BODY = "BODY_SENTINEL_NEVER_RENDER";
@@ -239,7 +242,7 @@ function input(body = ""): Readable {
 
 test("peer registration emits its credential once and authenticated lifecycle never echoes it", async () => {
   const config = { stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-    allowedHosts: ["this-mac"], steeringEnabled: true, inboundMode: "paired" as const,
+    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired" as const,
     stallNoticeMs: 30_000, limits: {} as never };
   const requests: unknown[] = [];
   const dependencies = (stdout: Capture, env: NodeJS.ProcessEnv = {}, stdin = input()): GatewayCliDependencies => ({
@@ -284,7 +287,7 @@ test("peer stdin framing preserves the body and the three caller principals stay
   const requests: unknown[] = [], stdout = capture(); let control = 0;
   const base: GatewayCliDependencies = {
     env: {}, stdout, stderr: capture(), loadConfig: () => ({ stateDir: "/private/state",
-      controlSocketPath: "/private/state/control.sock", allowedHosts: ["this-mac"], steeringEnabled: true,
+      controlSocketPath: "/private/state/control.sock", allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,
       inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: unknown }) => { control += 1; requests.push(request);
@@ -366,7 +369,7 @@ test("await long-polls silently and acknowledges only after the exact frame flus
   const running = runGatewayCli(["await", "--alias", "peer-cursor@this-mac", "--token-stdin"], {
     env: {}, stdin: input(`${PEER_TOKEN}\n`), stdout, stderr: capture(),
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-      allowedHosts: ["this-mac"], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: { method: string } }) => {
       methods.push(request.method);
@@ -391,7 +394,7 @@ test("await sends no receipt or second stdout frame when stdout fails", async ()
     env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, stdin: input(), stderr,
     stdout: { write() { throw new Error("synthetic stdout failure"); } },
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-      allowedHosts: ["this-mac"], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: { method: string } }) => { methods.push(request.method);
       return { protocolVersion: 1, ok: true, result: { state: "message", frame: "one frame\n", receipt: PEER_RECEIPT } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
@@ -410,6 +413,7 @@ async function privateState(): Promise<{
   roots.add(root);
   const stateDir = path.join(root, "state");
   await mkdir(stateDir, { mode: 0o700 });
+  await writeFile(path.join(stateDir, "nodes.json"), '{"version":1,"host":"this-mac","nodes":[]}', { mode: 0o600 });
   return { root, stateDir, socketPath: path.join(stateDir, "control.sock") };
 }
 
@@ -575,9 +579,9 @@ test("all client commands use one private control socket and expose only normali
       argv: [
         "register-codex",
         "--alias",
-        "codex-next@build-mac",
+        "codex-next@this-mac",
         "--succeeds",
-        "codex-reviewer@build-mac",
+        "codex-reviewer@this-mac",
       ],
       env: {
         CODEX_THREAD_ID: THREAD_ID,
@@ -750,11 +754,11 @@ test("all client commands use one private control socket and expose only normali
       busyPolicy: "queue",
     },
     {
-      alias: "codex-next@build-mac",
+      alias: "codex-next@this-mac",
       threadId: THREAD_ID,
-      hostId: "build-mac",
+      hostId: "this-mac",
       busyPolicy: "queue",
-      succeedsAlias: "codex-reviewer@build-mac",
+      succeedsAlias: "codex-reviewer@this-mac",
     },
   ]);
   assert.deepEqual(unregisters, [
@@ -1026,7 +1030,7 @@ test("all five stderr categories localize without changing stdout protocol", asy
   const fakeConfig = () => ({
     stateDir: "/private/fake-state",
     controlSocketPath: "/private/fake-state/control.sock",
-    allowedHosts: ["this-mac"],
+    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
     inboundMode: "paired" as const,
@@ -1156,7 +1160,7 @@ test("invalid live-upgrade control responses name version skew and client recove
       loadConfig: () => ({
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -1233,7 +1237,7 @@ test("wait-delivery polls at fixed intervals and emits only the terminal status"
       loadConfig: () => ({
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -1294,7 +1298,7 @@ test("wait-delivery returns a retained terminal result after its deadline window
       loadConfig: () => ({
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -1350,7 +1354,7 @@ test("wait-delivery preserves every non-delivered terminal state and uses one fa
         loadConfig: () => ({
           stateDir: "/private/fake-state",
           controlSocketPath: "/private/fake-state/control.sock",
-          allowedHosts: ["this-mac"],
+          allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
           stallNoticeMs: 30_000,
           steeringEnabled: true,
           inboundMode: "paired",
@@ -1379,7 +1383,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
   const fakeConfig = () => ({
     stateDir: "/private/fake-state",
     controlSocketPath: "/private/fake-state/control.sock",
-    allowedHosts: ["this-mac"],
+    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
     inboundMode: "paired" as const,
@@ -1499,7 +1503,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
       loadConfig: () => ({
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -1548,7 +1552,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
       loadConfig: () => ({
         stateDir: "/private/fake-state",
         controlSocketPath: "/private/fake-state/control.sock",
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -1579,7 +1583,7 @@ test("doctor returns normalized conditions while registration stays record-only"
   const config = {
     stateDir: "/private/fake-state",
     controlSocketPath: "/private/fake-state/control.sock",
-    allowedHosts: ["this-mac"],
+    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
     inboundMode: "paired" as const,
@@ -1682,7 +1686,7 @@ test("watch-owner conflict preserves its code and localizes the untrack remedy",
         loadConfig: () => ({
           stateDir: "/private/fake-state",
           controlSocketPath: "/private/fake-state/control.sock",
-          allowedHosts: ["this-mac"],
+          allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
           stallNoticeMs: 30_000,
           steeringEnabled: true,
           inboundMode: "paired",
@@ -1748,17 +1752,6 @@ test("identity, stdin, and argument failures happen before any control request",
         "register-codex",
         "--succeeds",
         "codex-reviewer@this-mac",
-      ],
-      env: { CODEX_THREAD_ID: THREAD_ID },
-      code: "INVALID_ARGUMENTS",
-    },
-    {
-      argv: [
-        "register-codex",
-        "--alias",
-        "codex-next@this-mac",
-        "--succeeds",
-        "codex-reviewer@build-mac",
       ],
       env: { CODEX_THREAD_ID: THREAD_ID },
       code: "INVALID_ARGUMENTS",
@@ -2014,7 +2007,7 @@ test("peer-stdio attests the private control socket before opening the protocol"
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
       allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
       inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
-    loadNodeInventory: async () => ({ host: "studio", nodes: ["m5dev"], configured: true }),
+    loadNodeInventory: async () => ({ host: "studio", nodes: ["m5dev"] }),
     validateControlSocket: async () => { throw new Error("unsafe socket"); },
     sendRequest: async () => { requested = true; throw new Error("must not send"); },
     runPeerStdio: () => { opened = true; return { done: Promise.resolve(), close: () => undefined }; },
@@ -2032,7 +2025,7 @@ test("peer-stdio sources initialization authority from the running broker", asyn
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
       allowedHosts: ["m5dev", "this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,
       inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
-    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"], configured: true }),
+    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"] }),
     validateControlSocket: async () => undefined,
     sendRequest: async () => ({ protocolVersion: 1, ok: false,
       error: { code: "HANDLER_FAILURE", message: "The gateway could not complete the control request." } }),
@@ -2054,7 +2047,7 @@ test("peer-stdio consumes its initialization catalog once, then returns to broke
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
       allowedHosts: ["m5dev", "this-mac"], hostId: "m5dev", peerNodes: ["this-mac"], steeringEnabled: true,
       inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
-    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"], configured: true }),
+    loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"] }),
     validateControlSocket: async () => undefined,
     sendRequest: (async () => { requests += 1; return { protocolVersion: 1, ok: true, result: catalog }; }) as
       NonNullable<GatewayCliDependencies["sendRequest"]>,
@@ -2415,6 +2408,19 @@ test("unsupported and corrupt private state print the localized reset instructio
       );
       assert.doesNotMatch(stderr.chunks.join(""), /private loader detail/u);
     }
+  }
+});
+
+test("missing mandatory inventory prints its exact one-line fix in both locales", async () => {
+  const locales = [["en", "request rejected.", 'at ~/.local/state/agent-embassy, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {"version":1,"host":"<host>","nodes":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.'],
+    ["zh-CN", "请求被拒绝。", '请在 ~/.local/state/agent-embassy 将该目录创建为 mode-0700，把 {"version":1,"host":"<host>","nodes":[]} 中的 <host> 替换为所选的小写主机名，并在该目录中保存为 mode-0600 的 nodes.json，然后再次运行 embassy serve。'],
+  ] as const;
+  for (const [locale, rejection, hint] of locales) {
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCli(["serve", "--lang", locale], { stdout, stderr,
+      runServer: async () => { throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail"); } });
+    assert.equal(code, gatewayCliExitCodes.invalidInput); assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_NODE_INVENTORY_REQUIRED");
+    assert.equal(stderr.chunks.join(""), `[embassy] ${rejection}\n[embassy] ${hint}\n`);
   }
 });
 

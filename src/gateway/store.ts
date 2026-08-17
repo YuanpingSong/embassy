@@ -921,7 +921,7 @@ export class GatewayStore {
     settlements: readonly TerminalMessageSettlement[]; routes: readonly GatewayPrivateRouteInspection[];
   }>> {
     return this.mutate((state, now) => {
-      const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
+      const localHost = this.config.hostId;
       if (!this.config.allowedHosts.includes(peerHost) || peerHost === localHost ||
         !catalog.complete || catalog.truncated || catalog.routes.some((route) => route.host !== peerHost) ||
         catalog.consentEdges.some((edge) => edge.ownerHost !== peerHost)) {
@@ -985,7 +985,7 @@ export class GatewayStore {
   }
   async enqueuePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<EnqueueMessageResult> {
     return this.mutate((state, now) => {
-      const localHost = this.config.hostId ?? this.config.allowedHosts[0]!;
+      const localHost = this.config.hostId;
       if (!this.config.allowedHosts.includes(peerHost) || peerHost === localHost || handoff.source.host !== peerHost ||
         handoff.target.host !== localHost || handoff.edgeOwnerHost !== [peerHost, localHost].sort()[0] ||
         handoff.edgeRef !== peerEdgeRef([handoff.source, handoff.target]))
@@ -1357,7 +1357,7 @@ export class GatewayStore {
         throw new BridgeError("ROUTE_UNREGISTERED", "The native ingress target registration is no longer current.");
       }
       const nativeSourceHost = target.registrationMode === "federated_peer"
-        ? (this.config.hostId ?? this.config.allowedHosts[0]) : target.binding.hostId;
+        ? this.config.hostId : target.binding.hostId;
       if (
         input.source.binding.provider !== "claude" ||
         input.source.binding.hostId !== nativeSourceHost ||
@@ -1805,7 +1805,7 @@ export class GatewayStore {
             },
           ],
           host: edgeOwnerHost(edge.endpoints), counters: { ...edge.counters },
-          mutable: edgeOwnerHost(edge.endpoints) === (this.config.hostId ?? this.config.allowedHosts[0]),
+          mutable: edgeOwnerHost(edge.endpoints) === this.config.hostId,
         }),
       );
       const currentEvents = state.messages.map((message) =>
@@ -1917,7 +1917,7 @@ export class GatewayStore {
     };
   }
   private validateRouteInput(input: RegisterRouteInput): void {
-    const localHost = this.config.hostId ?? this.config.allowedHosts[0];
+    const localHost = this.config.hostId;
     if (
       !isObject(input) ||
       !ALIAS_PATTERN.test(input.alias) ||
@@ -2658,7 +2658,7 @@ export class GatewayStore {
     if (
       state.routes.some(
         (route) => !this.config.allowedHosts.includes(route.binding.hostId) ||
-          !routeModeMatchesHost(route, this.config.hostId ?? this.config.allowedHosts[0]),
+          !routeModeMatchesHost(route, this.config.hostId),
       ) ||
       state.routes.length > this.config.limits.maxRoutes ||
       state.consentEdges.length > this.config.limits.maxConsentEdges ||
@@ -2790,7 +2790,7 @@ export class GatewayStore {
     }
     if (!markerExists) {
       const entries = await readdir(root);
-      if (existed && entries.length > 0) {
+      if (existed && entries.some((entry) => entry !== "nodes.json")) {
         throw new BridgeError("GATEWAY_STATE_DIRECTORY_NOT_OWNED", "The existing state directory is non-empty and lacks the ownership marker.");
       }
       const marker = await open(

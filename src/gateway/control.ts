@@ -42,7 +42,6 @@ export const GATEWAY_CONTROL_MAX_CONNECTIONS = 32;
 const MAX_SOCKET_PATH_BYTES = 100;
 const MAX_REPLY_ADDRESS_BYTES = 256;
 const MAX_REVISION = Number.MAX_SAFE_INTEGER;
-const DEFAULT_HOST_ID = "this-mac";
 const ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
@@ -68,7 +67,7 @@ export type GatewayControlMethod = (typeof gatewayControlMethods)[number];
 export type GatewayBusyPolicy = "queue";
 
 export type RegisterCodexParams = {
-  alias: string; threadId: string; hostId?: string; busyPolicy?: GatewayBusyPolicy;
+  alias: string; threadId: string; hostId: string; busyPolicy: GatewayBusyPolicy;
   succeedsAlias?: string;
 };
 export type ValidatedRegisterCodexParams = {
@@ -424,17 +423,15 @@ const isPeerHandoffResult = (value: unknown): boolean => {
   try { decodePeerResult("handoff", value); return true; } catch { return false; }
 };
 function decodeRegister(value: unknown): ValidatedRegisterCodexParams {
-  if (!isRecord(value) || !exact(value, ["alias", "threadId"], ["hostId", "busyPolicy", "succeedsAlias"]) ||
+  if (!isRecord(value) || !exact(value, ["alias", "threadId", "hostId", "busyPolicy"], ["succeedsAlias"]) ||
       !alias(value.alias) || !value.alias.startsWith("codex-") || !uuid(value.threadId) ||
-      (value.hostId !== undefined && !host(value.hostId)) ||
-      (value.busyPolicy !== undefined && value.busyPolicy !== "queue") ||
+      !host(value.hostId) || value.busyPolicy !== "queue" ||
       (value.succeedsAlias !== undefined && (!alias(value.succeedsAlias) || !value.succeedsAlias.startsWith("codex-")))) invalid();
-  const hostId = value.hostId ?? DEFAULT_HOST_ID;
-  if (!value.alias.endsWith(`@${hostId}`) ||
+  if (!value.alias.endsWith(`@${value.hostId}`) ||
       (value.succeedsAlias !== undefined &&
-       (value.succeedsAlias === value.alias || !value.succeedsAlias.endsWith(`@${hostId}`)))) invalid();
-  return { alias: value.alias, threadId: value.threadId.toLowerCase(), hostId,
-    busyPolicy: "queue", ...(value.succeedsAlias === undefined ? {} : { succeedsAlias: value.succeedsAlias }) };
+       (value.succeedsAlias === value.alias || !value.succeedsAlias.endsWith(`@${value.hostId}`)))) invalid();
+  return { alias: value.alias, threadId: value.threadId.toLowerCase(), hostId: value.hostId,
+    busyPolicy: value.busyPolicy, ...(value.succeedsAlias === undefined ? {} : { succeedsAlias: value.succeedsAlias }) };
 }
 function decodeUnregister(value: unknown): UnregisterCodexParams {
   if (!shape(value, { alias, threadId: uuid }) || !(value.alias as string).startsWith("codex-")) invalid();

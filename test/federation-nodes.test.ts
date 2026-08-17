@@ -28,13 +28,10 @@ async function rejectsConfiguration(promise: Promise<unknown>, pattern: RegExp):
   });
 }
 
-test("missing nodes.json selects the local-only inventory", async (t) => {
+test("missing nodes.json refuses without inventing a local identity", async (t) => {
   const stateDir = await stateFixture(t);
-  assert.deepEqual(await loadGatewayNodeInventory(stateDir), {
-    host: "this-mac",
-    nodes: [],
-    configured: false,
-  });
+  await assert.rejects(loadGatewayNodeInventory(stateDir), (error: unknown) =>
+    error instanceof BridgeError && error.code === "GATEWAY_NODE_INVENTORY_REQUIRED");
 });
 
 test("loads an exact bounded static inventory and freezes its result", async (t) => {
@@ -48,7 +45,6 @@ test("loads an exact bounded static inventory and freezes its result", async (t)
   assert.deepEqual(inventory, {
     host: "studio",
     nodes: ["m5dev", "lab-mac"],
-    configured: true,
   });
   assert.equal(Object.isFrozen(inventory), true);
   assert.equal(Object.isFrozen(inventory.nodes), true);

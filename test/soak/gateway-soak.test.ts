@@ -329,13 +329,12 @@ function soakConfig(stateDir: string): GatewayConfig {
   return {
     ...loadBaseGatewayConfig({
       EMBASSY_STATE_DIR: stateDir,
-      EMBASSY_HOSTS: "this-mac",
       EMBASSY_MESSAGE_DEADLINE_MS: "60000",
       EMBASSY_MAX_QUEUE_MESSAGES: "100",
       EMBASSY_MAX_QUEUE_PER_ROUTE: "20",
       EMBASSY_MAX_IN_FLIGHT: "16",
       EMBASSY_RATE_LIMIT: "10000",
-    }),
+    }, { host: "this-mac", nodes: [] }),
     inboundMode: "open",
   };
 }

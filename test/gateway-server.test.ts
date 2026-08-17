@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import { LocalCodexTransportError, managedCodexControlSocketPath,
   type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { runGatewayCli, gatewayCliExitCodes } from "../src/gateway/cli.js";
-import { loadGatewayConfig } from "../src/gateway/config.js";
+import { loadGatewayConfig as loadGatewayConfigBase } from "../src/gateway/config.js";
 import { sendGatewayControlRequest } from "../src/gateway/control.js";
 import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
@@ -19,7 +19,7 @@ import type {
   LocalCodexGatewayProvider,
 } from "../src/gateway/providers.js";
 import {
-  runGatewayServer,
+  runGatewayServer as runGatewayServerBase,
   type GatewayServerDependencies,
   type GatewayServerReadyResult,
 } from "../src/gateway/server.js";
@@ -30,6 +30,10 @@ import { dashboardFixture } from "./dashboard-fixture.js";
 const SYNTHETIC_HOME = "/synthetic/login-home";
 const SYNTHETIC_SECRET = "SYNTHETIC_CREDENTIAL_MUST_NOT_BE_FORWARDED";
 const SYNTHETIC_CODEX_VERSION = "0.147.0";
+const loadGatewayConfig = (env: NodeJS.ProcessEnv) =>
+  loadGatewayConfigBase(env, { host: "this-mac", nodes: [] });
+const runGatewayServer: typeof runGatewayServerBase = (options, dependencies = {}) =>
+  runGatewayServerBase(options, { loadNodeInventory: async () => ({ host: "this-mac", nodes: [] }), ...dependencies });
 
 function runtime(): AttestedClaudePeerRuntime {
   return {
@@ -401,6 +405,8 @@ test("a real boot snapshot passes the strict status and doctor clients", async (
     EMBASSY_STATE_DIR: stateDir,
   };
   const config = loadGatewayConfig(env);
+  await mkdir(config.stateDir, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(config.stateDir, "nodes.json"), '{"version":1,"host":"this-mac","nodes":[]}', { mode: 0o600 });
   const abort = new AbortController();
   const signals = signalHarness();
 

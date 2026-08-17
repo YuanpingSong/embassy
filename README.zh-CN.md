@@ -54,7 +54,7 @@ Desktop 仅在启动时附着到托管独立 App Server。如果 Desktop 已打�
 
 ### 1. 启动 Embassy
 
-在与 Claude Code 和 Codex 相同的 OS 账户下运行前台代理：
+创建[配置文档](docs/CONFIGURATION.zh-CN.md)所述的必需私有 `nodes.json` 后，在与 Claude Code 和 Codex 相同的 OS 账户下运行前台代理：
 
 ```bash
 embassy serve

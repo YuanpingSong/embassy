@@ -88,6 +88,8 @@ async function fixture(
     stateDir,
     controlSocketPath: path.join(stateDir, "control.sock"),
     allowedHosts: ["this-mac"],
+    hostId: "this-mac",
+    peerNodes: [],
     stallNoticeMs: 2_500,
     steeringEnabled: true,
     inboundMode: dependencies.inboundMode ?? "paired",
@@ -1638,6 +1640,21 @@ test("runtime requires exact private modes for state directories and files", asy
   await chmod(setup.store.stateFilePath, 0o400);
   await assert.rejects(new GatewayStore(setup.config).initialize(), /exact mode 600/u);
   await chmod(setup.store.stateFilePath, 0o600);
+});
+
+test("an unowned state directory admits exactly nodes.json before its ownership marker", async () => {
+  const accepted = await fixture();
+  await mkdir(accepted.stateDir, { mode: 0o700 });
+  await writeFile(path.join(accepted.stateDir, "nodes.json"), '{"version":1,"host":"this-mac","nodes":[]}', { mode: 0o600 });
+  await accepted.store.initialize(); await accepted.store.close();
+
+  const rejected = await fixture();
+  await mkdir(rejected.stateDir, { mode: 0o700 });
+  await writeFile(path.join(rejected.stateDir, "nodes.json"), '{"version":1,"host":"this-mac","nodes":[]}', { mode: 0o600 });
+  await writeFile(path.join(rejected.stateDir, "foreign"), "untouched", { mode: 0o600 });
+  await assert.rejects(rejected.store.initialize(),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_DIRECTORY_NOT_OWNED");
+  assert.equal(await readFile(path.join(rejected.stateDir, "foreign"), "utf8"), "untouched");
 });
 
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {

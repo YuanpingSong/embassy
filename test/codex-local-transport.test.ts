@@ -253,6 +253,7 @@ test("managed installation pins release binary and already-running private socke
     assert.notEqual(metadataChanged.endpointGeneration, first.endpointGeneration);
     const attested = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: fixture.home },
       },
       { loginHome: () => fixture.home },
@@ -276,6 +277,7 @@ test("startup attests version-drifted Codex installations without opening App Se
       let spawnCalls = 0;
       const factory = await createLocalCodexTransportFactory(
         {
+          hostId: "this-mac",
           environment: { HOME: installation.home },
         },
         {
@@ -303,6 +305,7 @@ test("per-operation factory resolution attests the exact current managed release
     let spawnCalls = 0;
     const candidate = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: drifted.home },
       },
       {
@@ -328,6 +331,7 @@ test("bounded prerelease builds remain OS-attested without connecting", async ()
     let spawnCalls = 0;
     const candidate = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: drifted.home },
       },
       {
@@ -353,6 +357,7 @@ test("unsafe release leaves remain rejected before provider construction", async
     await assert.rejects(
       createLocalCodexTransportFactory(
         {
+          hostId: "this-mac",
           environment: { HOME: drifted.home },
         },
         { loginHome: () => drifted.home },
@@ -439,6 +444,7 @@ test("missing App Server socket stays OS-attested and never bootstraps", async (
     let spawnCalls = 0;
     const factory = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: fixture.home },
       },
       {
@@ -506,6 +512,7 @@ test("factory spawns only resolved proxy with strict options and owns cleanup", 
   try {
     const factory = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: {
           HOME: fixture.home,
           USER: "tester",
@@ -559,6 +566,7 @@ test("first post-upgrade frame writes through the child proxy Duplex", async () 
   try {
     const factory = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: fixture.home },
         gracefulExitMs: 1,
         signalTimeoutMs: 10,
@@ -595,6 +603,7 @@ test("factory rejects a managed endpoint generation change during handshake", as
   try {
     const factory = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: fixture.home },
         gracefulExitMs: 1,
         signalTimeoutMs: 10,
@@ -644,6 +653,7 @@ test("factory fails closed when discarded stderr crosses its bound during handsh
   try {
     const factory = await createLocalCodexTransportFactory(
       {
+        hostId: "this-mac",
         environment: { HOME: fixture.home },
         gracefulExitMs: 1,
         maxStderrBytes: 4,

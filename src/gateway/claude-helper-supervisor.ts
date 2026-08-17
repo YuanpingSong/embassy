@@ -31,7 +31,7 @@ export type ClaudeNativeHelperClientCallbacks = Readonly<{
   onExit: (event: Readonly<{ code: number | null; signal: NodeJS.Signals | null }>) => void;
 }>;
 export type ClaudeNativeHelperClientStartOptions = Readonly<{
-  entryPath?: string; runtime: AttestedClaudePeerRuntime; hostId: "this-mac";
+  entryPath?: string; runtime: AttestedClaudePeerRuntime; hostId: string;
   locale: DashboardLocale; deliveryNotices: GatewayDeliveryNoticeMode;
   maxPendingMessages: number; registration: ClaudeNativeHelperRegistration;
   callbacks: ClaudeNativeHelperClientCallbacks;
@@ -129,7 +129,7 @@ export class ClaudeNativeHelperSupervisor {
     const old = this.#helpers.get(input.alias); if (old) { if (old.sourceProvider !== input.sourceProvider) throw fault("PROVENANCE_ENVELOPE_INVALID"); return; }
     if (this.#helpers.size >= this.options.maxHelpers) throw fault("CLAUDE_NATIVE_HELPER_CAPACITY", true);
     let helper: Helper | undefined, earlyExit = false; const buffered: ClaudeNativeHelperEvent[] = [];
-    const client = await this.#factory({ runtime: this.options.runtime, hostId: "this-mac", locale: this.options.locale,
+    const client = await this.#factory({ runtime: this.options.runtime, hostId: this.options.identity.hostId, locale: this.options.locale,
       deliveryNotices: this.options.deliveryNotices, maxPendingMessages: this.options.maxPendingMessages, registration: input,
       callbacks: { onEvent: (event) => helper ? this.#event(helper, event) : buffered.push(event),
         onExit: () => helper ? this.#exit(helper) : earlyExit = true } });

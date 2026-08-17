@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
 import type { AcpLaunchSpec } from "./acp-client.js";
+import type { GatewayNodeInventory } from "./federation-nodes.js";
 import { PROGRESS_WATCH_DEFAULT_CAPACITY, PROGRESS_WATCH_HARD_CAPACITY } from "./progress-watch-machine.js";
 import { gatewayPublicSnapshotLimits, type GatewayInboundMode, type GatewayStoreLimits } from "./types.js";
 
@@ -10,11 +11,10 @@ export type GatewayDeliveryNoticeMode = (typeof gatewayDeliveryNoticeModes)[numb
 export type GatewayAcpProviderConfig = Readonly<{ provider: "deepseek" | "grok"; alias: string;
   /** Test/operator injection; omitted entries use the reviewed provider default. */ launch?: AcpLaunchSpec }>;
 export type GatewayConfig = { stateDir: string; controlSocketPath: string; allowedHosts: readonly string[];
-  hostId?: string; peerNodes?: readonly string[];
+  hostId: string; peerNodes: readonly string[];
   steeringEnabled: boolean; trackingEnabled?: boolean; inboundMode: GatewayInboundMode; stallNoticeMs: number;
   deliveryNotices?: GatewayDeliveryNoticeMode; acpProviders?: readonly GatewayAcpProviderConfig[]; limits: GatewayStoreLimits };
 
-const HOST = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const MAX_STATE_BUDGET = 7 * 1024 * 1024;
 const invalid = (message: string): never => { throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", message); };
 const integer = (env: NodeJS.ProcessEnv, name: string, fallback: number, minimum: number, maximum: number): number => {
@@ -41,20 +41,16 @@ export function defaultGatewayStateDir(env: NodeJS.ProcessEnv = process.env): st
     : path.join(os.homedir(), ".local", "state", "agent-embassy"));
 }
 
-function hosts(value: string | undefined): readonly string[] {
-  const result = (value ?? "this-mac").split(",").map((item) => item.trim()).filter(Boolean);
-  if (result.length === 0 || result.length > 32 || result.some((item) => !HOST.test(item)) || new Set(result).size !== result.length)
-    invalid("EMBASSY_HOSTS must contain 1 through 32 unique lowercase ASCII host aliases separated by commas.");
-  return Object.freeze(result);
-}
-
 function notices(value: string | undefined): GatewayDeliveryNoticeMode {
   const candidate = value ?? "merged";
   return gatewayDeliveryNoticeModes.includes(candidate as GatewayDeliveryNoticeMode) ? candidate as GatewayDeliveryNoticeMode
     : invalid("EMBASSY_DELIVERY_NOTICES must be exactly merged, verbose, or quiet.");
 }
 
-export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
+export function loadGatewayConfig(
+  env: NodeJS.ProcessEnv,
+  inventory: Pick<GatewayNodeInventory, "host" | "nodes">,
+): GatewayConfig {
   const stateDir = path.resolve(defaultGatewayStateDir(env));
   const controlSocketPath = path.join(stateDir, "control.sock");
   if (Buffer.byteLength(controlSocketPath) > 100) invalid("The gateway state path is too long for a portable private Unix-domain control socket.");
@@ -79,13 +75,14 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     (limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY) * 768 + limits.maxQueueMessages * 512;
   if (stateBudget > MAX_STATE_BUDGET) invalid("The combined gateway route, event, dedupe, and queue capacities exceed the durable state byte budget.");
   return {
-    stateDir, controlSocketPath, allowedHosts: hosts(env.EMBASSY_HOSTS), hostId: "this-mac", peerNodes: [],
+    stateDir, controlSocketPath, allowedHosts: Object.freeze([inventory.host, ...inventory.nodes]),
+    hostId: inventory.host, peerNodes: inventory.nodes,
     steeringEnabled: toggle(env, "EMBASSY_STEERING_ENABLED"), trackingEnabled: toggle(env, "EMBASSY_TRACKING_ENABLED"), inboundMode: "paired",
     stallNoticeMs: Math.min(Math.floor(messageDeadlineMs / 2), 120_000),
     deliveryNotices: notices(env.EMBASSY_DELIVERY_NOTICES), limits,
     acpProviders: Object.freeze([
-      { provider: "deepseek", alias: "dsh-main@this-mac" },
-      { provider: "grok", alias: "grok-main@this-mac" },
+      { provider: "deepseek", alias: `dsh-main@${inventory.host}` },
+      { provider: "grok", alias: `grok-main@${inventory.host}` },
     ]),
   };
 }

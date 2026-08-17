@@ -52,6 +52,8 @@ export const cliCopyZhCn = {
     "客户端与网关进程的版本可能不一致；请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。",
   "hint.messageTooLarge":
     "消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。",
+  "hint.nodeInventoryRequired":
+    "请在 {stateDir} 将该目录创建为 mode-0700，把 {\"version\":1,\"host\":\"<host>\",\"nodes\":[]} 中的 <host> 替换为所选的小写主机名，并在该目录中保存为 mode-0600 的 nodes.json，然后再次运行 embassy serve。",
   "hint.progressWatchOwnerConflict":
     "此配对已有由另一参与方拥有的监视；请先让该所有者运行 `embassy untrack --conversation <conversation-token>`。",
   "hint.stateResetRequired":

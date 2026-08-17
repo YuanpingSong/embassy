@@ -12,9 +12,13 @@ import {
   DEFAULT_LIVE_DASHBOARD_PORT,
   createGatewayLiveDashboardActions,
   createGatewayLiveDashboardObserver,
-  runLiveDashboardCommand,
+  runLiveDashboardCommand as runLiveDashboardCommandBase,
   type LiveDashboardCommandOptions,
 } from "../src/gateway/live-dashboard-command.js";
+const TEST_INVENTORY = { host: "this-mac", nodes: [] } as const;
+const runLiveDashboardCommand = (options: Omit<LiveDashboardCommandOptions, "inventory">,
+  dependencies?: Parameters<typeof runLiveDashboardCommandBase>[1]) =>
+  runLiveDashboardCommandBase({ inventory: TEST_INVENTORY, ...options }, dependencies);
 import type { StartLiveDashboardOptions } from "../src/gateway/live-dashboard.js";
 import type { GatewayPublicSnapshot } from "../src/gateway/types.js";
 
@@ -97,9 +101,9 @@ function cliHarness(
       stdout,
       stderr,
       runLiveDashboard,
-      loadConfig: () => {
-        throw new Error("the injected live runner owns configuration");
-      },
+      loadConfig: () => ({ stateDir: STATE_DIR, controlSocketPath: CONTROL_SOCKET_PATH,
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+        steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
       validateControlSocket: async () => {
         throw new Error("the injected live runner owns socket validation");
       },
@@ -316,7 +320,7 @@ test("live command validates private state, opens one scrubbed stable URL, and w
         return {
           stateDir: STATE_DIR,
           controlSocketPath: CONTROL_SOCKET_PATH,
-          allowedHosts: ["this-mac"],
+          allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
           stallNoticeMs: 30_000,
           steeringEnabled: true,
           inboundMode: "paired",
@@ -569,7 +573,7 @@ test("control socket validation fails before signal, server, observer, or opener
             return {
               stateDir: STATE_DIR,
               controlSocketPath: CONTROL_SOCKET_PATH,
-              allowedHosts: ["this-mac"],
+              allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
               stallNoticeMs: 30_000,
               steeringEnabled: true,
               inboundMode: "paired",
@@ -622,7 +626,7 @@ test("a pre-aborted live command never starts, opens, or emits ready", async () 
       loadConfig: () => ({
         stateDir: STATE_DIR,
         controlSocketPath: CONTROL_SOCKET_PATH,
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -673,7 +677,7 @@ test("pre-ready cancellation is a clean integrated CLI exit with no readiness cl
     loadConfig: () => ({
       stateDir: STATE_DIR,
       controlSocketPath: CONTROL_SOCKET_PATH,
-      allowedHosts: ["this-mac"],
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
       stallNoticeMs: 30_000,
       steeringEnabled: true,
       inboundMode: "paired",
@@ -707,7 +711,7 @@ test("SIGTERM during integrated CLI startup exits cleanly without a ready record
     loadConfig: () => ({
       stateDir: STATE_DIR,
       controlSocketPath: CONTROL_SOCKET_PATH,
-      allowedHosts: ["this-mac"],
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
       stallNoticeMs: 30_000,
       steeringEnabled: true,
       inboundMode: "paired",
@@ -751,7 +755,7 @@ test("a signal releases a hung startup without opening or emitting ready", async
       loadConfig: () => ({
         stateDir: STATE_DIR,
         controlSocketPath: CONTROL_SOCKET_PATH,
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -803,7 +807,7 @@ test("a cancelled startup fences a late open and closes any late-owned dashboard
       loadConfig: () => ({
         stateDir: STATE_DIR,
         controlSocketPath: CONTROL_SOCKET_PATH,
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -869,7 +873,7 @@ test("a cancelled startup fences a late open and closes any late-owned dashboard
       loadConfig: () => ({
         stateDir: STATE_DIR,
         controlSocketPath: CONTROL_SOCKET_PATH,
-        allowedHosts: ["this-mac"],
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
         inboundMode: "paired",
@@ -936,7 +940,7 @@ test("live command cleans signal ownership after pre-ready open failure", async 
         loadConfig: () => ({
           stateDir: STATE_DIR,
           controlSocketPath: CONTROL_SOCKET_PATH,
-          allowedHosts: ["this-mac"],
+          allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
           stallNoticeMs: 30_000,
           steeringEnabled: true,
           inboundMode: "paired",

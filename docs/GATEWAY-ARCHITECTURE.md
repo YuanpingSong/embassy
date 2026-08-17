@@ -664,7 +664,7 @@ does not publish candidates, select or connect to a peer, write a provider
 socket, request provider history, start a model turn, or contact a remote host.
 Validated target bindings may retain private native and socket-derived evidence
 memory-only until rescan or close, but none enters public state or persistence.
-Its ready result reports local host `this-mac`, dashboard filename
+Its ready result reports the exact local host from `nodes.json`, dashboard filename
 `gateway-dashboard.html`, and `codexMode: "native_messaging"` without exposing
 paths.
 
@@ -701,17 +701,7 @@ may outlive an opener whose own delivery expired, so check the opener's
 
 ## Codex connectors and remote hosts
 
-In the target multi-host design, each allowlisted execution host has a separate
-connector because each host has its own App Server and native state:
-
-- `this-mac`: the managed local App Server shared with Desktop;
-- `build-mac`: a host-local remote App Server reached through an attach-only SSH
-  proxy; and
-- `lab-mac.example`: the same design, still unprobed and disabled by default.
-
-The shipped foreground launcher accepts only `this-mac`; it rejects any remote
-host configuration. The two SSH connectors above remain planned rather than
-runnable v1 routes.
+Each broker's mandatory `nodes.json` gives its local connector an explicit host identity; `this-mac` has no reserved meaning. Configured peers exchange only body-free local catalogs and destination-owned handoffs over fixed SSH.
 
 The local connector resolves the managed standalone Codex release by exact
 owned path; it does not use `PATH`. That installation is separate from

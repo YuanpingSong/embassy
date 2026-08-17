@@ -52,6 +52,8 @@ Options:
     "client/broker version skew is likely; rebuild or repoint this client to the broker's Embassy installation, then retry.",
   "hint.messageTooLarge":
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
+  "hint.nodeInventoryRequired":
+    "at {stateDir}, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {\"version\":1,\"host\":\"<host>\",\"nodes\":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.",
   "hint.progressWatchOwnerConflict":
     "this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.",
   "hint.stateResetRequired":

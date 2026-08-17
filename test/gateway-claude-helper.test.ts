@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -262,14 +263,17 @@ test("production helper child owns TTL and non-consuming foreign preparation fen
     kind: "interactive", entrypoint: "cli", messagingSocketPath: ready.socketPath, name: "claude-fake", status: "idle",
     updatedAt: Date.now(), statusUpdatedAt: Date.now() };
   await writeFile(recordPath, JSON.stringify(record), { mode: 0o600 });
-  let helper: ClaudeNativeHelperClient | undefined;
-  const command = { ...prepare, binding: { ...route, routeHandle }, sourceAlias: "codex-real@this-mac",
-    targetAlias: "claude-fake@this-mac", stateRoot, deadlineAt: new Date(Date.now() + 30_000).toISOString() } as const;
+  let helper: ClaudeNativeHelperClient | undefined, resolveInbound!: () => void; const inbound = new Promise<void>((resolve) => { resolveInbound = resolve; });
+  const command = { ...prepare, binding: { ...route, hostId: "studio", routeHandle }, sourceAlias: "codex-real@studio",
+    targetAlias: "claude-fake@studio", stateRoot, deadlineAt: new Date(Date.now() + 30_000).toISOString() } as const;
   try {
     helper = await ClaudeNativeHelperClient.start({ entryPath: path.join(repoRoot, "dist/src/gateway/claude-helper.js"),
-      runtime: { sessionsDir, socketDir }, hostId: "this-mac", locale: "en", deliveryNotices: "merged", maxPendingMessages: 8,
+      runtime: { sessionsDir, socketDir }, hostId: "studio", locale: "en", deliveryNotices: "merged", maxPendingMessages: 8,
       registration: { alias: command.sourceAlias, sourceProvider: "codex", cwd: workspace },
-      callbacks: { onEvent: () => undefined, onExit: () => undefined } });
+      callbacks: { onEvent: (event) => { if (JSON.stringify(event).includes('"sourceAlias":"claude-fake@studio"')) resolveInbound(); }, onExit: () => undefined } });
+    const helperRecord = JSON.parse(await readFile(path.join(sessionsDir, `${helper.pid}.json`), "utf8")) as { messagingSocketPath: string }; await new Promise<void>((resolve, reject) => { const socket = connect(helperRecord.messagingSocketPath, () => socket.end(JSON.stringify({
+      msgV: 1, msg_id: "00000000-0000-7000-8000-000000000333", type: "user", message: { role: "user", content: "inbound" }, priority: "next", from: `uds:${ready.socketPath}` }) + "\n")); socket.on("error", reject); socket.on("close", () => resolve()); });
+    await Promise.race([inbound, delay(1_000).then(() => assert.fail("custom-host inbound was not forwarded"))]);
     const expired = await helper.request({ ...command, messageId: "expires" }); assert.ok("preparationId" in expired);
     await delay(CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS + 50);
     for (const method of ["perform_dispatch", "cancel_dispatch"] as const)
@@ -287,6 +291,8 @@ test("production helper child owns TTL and non-consuming foreign preparation fen
     await assert.rejects(helper.request({ ...command, messageId: "workspace-drift" }),
       (error: unknown) => error instanceof BridgeError && error.code === "CLAUDE_PEER_WORKSPACE_UNSAFE");
     await chmod(workspace, 0o700); assert.equal(wires.length, 1);
+    await assert.rejects(helper.request({ ...command, binding: { ...command.binding, hostId: "m5dev" }, messageId: "foreign-host" }),
+      (error: unknown) => error instanceof BridgeError && error.code === "CLAUDE_ROUTE_MISMATCH");
     await writeFile(recordPath, JSON.stringify({ ...record,
       sessionId: "00000000-0000-7000-8000-000000000222", updatedAt: Date.now() }), { mode: 0o600 });
     await assert.rejects(helper.request({ ...command, messageId: "stale-uuid" }),

@@ -13,7 +13,6 @@ const ATTESTED = new WeakSet<object>();
 export type GatewayNodeInventory = Readonly<{
   host: string;
   nodes: readonly string[];
-  configured: boolean;
 }>;
 
 export type GatewayNodeInventoryDependencies = Readonly<{
@@ -27,9 +26,6 @@ const attest = (inventory: GatewayNodeInventory): GatewayNodeInventory => {
   ATTESTED.add(inventory);
   return inventory;
 };
-const localOnly = (): GatewayNodeInventory => attest(Object.freeze({
-  host: "this-mac", nodes: Object.freeze([]), configured: false,
-}));
 export const isAttestedGatewayNodeInventory = (
   inventory: GatewayNodeInventory | undefined,
   host: string,
@@ -70,17 +66,21 @@ function parseInventory(text: string): GatewayNodeInventory {
     return invalid("nodes.json must be exactly {version:1, host:<lowercase host>, nodes:[<lowercase host>...]}.");
   }
   const nodes = parsed.nodes as string[];
-  if (nodes.length === 0 || nodes.length + 1 > MAX_HOSTS ||
+  if (nodes.length + 1 > MAX_HOSTS ||
       new Set(nodes).size !== nodes.length ||
       nodes.includes(parsed.host)) {
-    return invalid("nodes.json must name 1 through 32 unique hosts, with the local host absent from nodes.");
+    return invalid("nodes.json must name 0 through 31 unique peer hosts, with the local host absent from nodes.");
   }
-  return attest(Object.freeze({ host: parsed.host, nodes: Object.freeze([...nodes]), configured: true }));
+  return attest(Object.freeze({ host: parsed.host, nodes: Object.freeze([...nodes]) }));
 }
+
+const required = (): never => {
+  throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "The mandatory private nodes.json inventory is absent.");
+};
 
 /**
  * Load the static federation inventory from the already-selected Embassy state
- * directory. Missing configuration is deliberately local-only.
+ * directory. Host identity has no default; a missing inventory refuses.
  */
 export async function loadGatewayNodeInventory(
   stateDir: string,
@@ -96,7 +96,7 @@ export async function loadGatewayNodeInventory(
   }
   let root: Awaited<ReturnType<typeof lstat>>;
   try { root = await inspect(stateDir); } catch (error) {
-    if (isErrno(error, "ENOENT")) return localOnly();
+    if (isErrno(error, "ENOENT")) return required();
     return invalid("The Embassy state directory for nodes.json cannot be safely verified.");
   }
   if (root.isSymbolicLink() || !root.isDirectory() || (root.mode & 0o777) !== 0o700) {
@@ -113,7 +113,7 @@ export async function loadGatewayNodeInventory(
     before = await inspect(filePath);
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
-      return localOnly();
+      return required();
     }
     return invalid("nodes.json cannot be safely inspected.");
   }

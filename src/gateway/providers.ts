@@ -44,7 +44,6 @@ import type {
   GatewayProvider,
 } from "./types.js";
 
-const LOCAL_HOST = "this-mac";
 const NATIVE_CLAUDE_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const PUBLIC_ALIAS =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -155,8 +154,8 @@ export type LocalClaudeGatewayProviderOptions = {
   runtime: AttestedClaudePeerRuntime;
   /** Fixed controller-owned root re-attested by each selected-route dispatch. */
   stateRoot: string;
-  hostId?: string;
-  nodeInventory?: GatewayNodeInventory;
+  hostId: string;
+  nodeInventory: GatewayNodeInventory;
   /** Locale for bounded notices written into native Claude sessions. */
   locale?: DashboardLocale;
   /** Gateway-authored user-frame policy; native receipt status is unchanged. */
@@ -189,15 +188,14 @@ type ClaudeSelectedRoute = {
   observationDirty: boolean;
 };
 
-function exactLocalHost(hostId: string | undefined, inventory?: GatewayNodeInventory): string {
-  const resolved = hostId ?? LOCAL_HOST;
-  if (resolved !== LOCAL_HOST && !isAttestedGatewayNodeInventory(inventory, resolved)) {
+function exactLocalHost(hostId: string, inventory: GatewayNodeInventory): string {
+  if (!isAttestedGatewayNodeInventory(inventory, hostId)) {
     throw new BridgeError(
       "GATEWAY_REMOTE_PROVIDER_DISABLED",
-      "A custom local host coordinate requires the attested nodes.json inventory.",
+      "The local host coordinate requires the attested nodes.json inventory.",
     );
   }
-  return resolved;
+  return hostId;
 }
 
 function positiveBounded(
@@ -854,7 +852,7 @@ export function createLocalClaudeGatewayProvider(
 
 export type LocalCodexGatewayProviderOptions = {
   hostId: string;
-  nodeInventory?: GatewayNodeInventory;
+  nodeInventory: GatewayNodeInventory;
   operation: StatelessCodexOperationTransport;
   createObservationFactory?: () => Promise<LocalCodexTransportFactory>;
   observationPollMs?: number;
@@ -996,8 +994,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
 
   constructor(options: LocalCodexGatewayProviderOptions) {
     if (
-      (options.hostId !== LOCAL_HOST &&
-        !isAttestedGatewayNodeInventory(options.nodeInventory, options.hostId)) ||
+      !isAttestedGatewayNodeInventory(options.nodeInventory, options.hostId) ||
       options.operation === undefined ||
       typeof options.operation.execute !== "function"
     ) {

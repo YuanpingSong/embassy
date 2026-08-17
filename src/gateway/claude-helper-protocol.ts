@@ -15,7 +15,7 @@ export type ClaudeNativeHelperRegistration = Readonly<{
 }>;
 export type ClaudeNativeHelperInitialization = Readonly<{
   protocolVersion: 1; type: "initialize"; requestId: string;
-  runtime: AttestedClaudePeerRuntime; hostId: "this-mac";
+  runtime: AttestedClaudePeerRuntime; hostId: string;
   locale: DashboardLocale; deliveryNotices: GatewayDeliveryNoticeMode;
   maxPendingMessages: number; registration: ClaudeNativeHelperRegistration;
 }>;
@@ -56,6 +56,7 @@ const SAFE = /^[A-Z][A-Z0-9_]{0,95}$/;
 const ID = /^[A-Za-z0-9_-]{16,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALIAS = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
+const HOST = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const CONVERSATION = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const PREPARATION = /^prep_[A-Za-z0-9_-]{24}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -71,7 +72,7 @@ function exact(v: Record<string, unknown>, required: string[], optional: string[
 }
 function route(v: unknown): v is LogicalRouteBinding {
   return rec(v) && exact(v, ["provider", "hostId", "routeHandle", "registrationId"]) &&
-    v.provider === "claude" && v.hostId === "this-mac" &&
+    v.provider === "claude" && typeof v.hostId === "string" && HOST.test(v.hostId) &&
     typeof v.routeHandle === "string" && UUID.test(v.routeHandle) && str(v.registrationId, 256);
 }
 function command(v: unknown): v is ClaudeNativeHelperCommand {
@@ -110,7 +111,7 @@ export function isClaudeNativeHelperParentMessage(v: unknown): v is ClaudeNative
   if (v.type !== "initialize" || !exact(v, ["protocolVersion", "type", "requestId", "runtime", "hostId", "locale",
     "deliveryNotices", "maxPendingMessages", "registration"]) || !rec(v.runtime) || !rec(v.registration)) return false;
   return exact(v.runtime, ["sessionsDir", "socketDir"]) && str(v.runtime.sessionsDir) && v.runtime.sessionsDir.startsWith("/") &&
-    str(v.runtime.socketDir) && v.runtime.socketDir.startsWith("/") && v.hostId === "this-mac" &&
+    str(v.runtime.socketDir) && v.runtime.socketDir.startsWith("/") && typeof v.hostId === "string" && HOST.test(v.hostId) &&
     (v.locale === "en" || v.locale === "zh-CN") && ["merged", "verbose", "quiet"].includes(String(v.deliveryNotices)) &&
     Number.isSafeInteger(v.maxPendingMessages) && Number(v.maxPendingMessages) >= 1 && Number(v.maxPendingMessages) <= 4_096 &&
     exact(v.registration, ["alias", "sourceProvider", "cwd"]) && source(v.registration.alias, v.registration.sourceProvider) &&

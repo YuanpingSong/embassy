@@ -86,7 +86,7 @@ export type ManagedCodexRuntimeTarget = {
 export type LocalCodexTransportFactoryOptions = {
   environment?: NodeJS.ProcessEnv;
   gracefulExitMs?: number;
-  hostId?: string;
+  hostId: string;
   maxStderrBytes?: number;
   signalTimeoutMs?: number;
   spawnTimeoutMs?: number;
@@ -725,7 +725,7 @@ class Factory implements LocalCodexTransportFactory {
       this.availabilityFailure = installation.availabilityFailure;
     }
     this.protocolVersion = installation.appServerVersion;
-    this.hostId = options.hostId ?? "this-mac";
+    this.hostId = options.hostId;
     this.diagnosticInstallation = Object.freeze({
       binaryPath: installation.binaryPath,
       controlSocketPath: installation.controlSocketPath,
@@ -865,7 +865,7 @@ export async function createLocalCodexTransportFactory(
   options: LocalCodexTransportFactoryOptions,
   dependencies: LocalCodexTransportDependencies = {},
 ): Promise<LocalCodexTransportFactory> {
-  if (!HOST_PATTERN.test(options.hostId ?? "this-mac")) {
+  if (!HOST_PATTERN.test(options.hostId)) {
     throw new LocalCodexTransportError("INVALID_CONFIGURATION");
   }
   const source = options.environment ?? process.env;

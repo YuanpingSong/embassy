@@ -276,7 +276,7 @@ test(
     const home = await shortHomeFixture(t);
     const stateDir = path.join(home, HOST_ROOT);
     const lease = await acquireGatewayInstanceLease(home);
-    const config = loadGatewayConfig({ EMBASSY_STATE_DIR: stateDir });
+    const config = loadGatewayConfig({ EMBASSY_STATE_DIR: stateDir }, { host: "this-mac", nodes: [] });
     const store = new GatewayStore(config);
 
     await store.initialize();

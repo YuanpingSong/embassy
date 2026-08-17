@@ -1,4 +1,5 @@
 import { userInfo } from "node:os";
+import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { createAcpGatewayProvider, type AcpGatewayProviderOptions } from "./acp-provider.js";
 import type { AcpLaunchSpec } from "./acp-client.js";
@@ -11,7 +12,7 @@ import { createStatelessCodexOperationTransport, type StatelessCodexOperationTra
   type StatelessCodexOperationTransportOptions } from "./codex-stateless-transport.js";
 import { createSystemCodexDoctorInspector, diagnoseCodexAttachment,
   diagnoseMissingManagedCodexLayout, type CodexDoctorInspector } from "./codex-doctor.js";
-import { loadGatewayConfig, type GatewayConfig } from "./config.js";
+import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { DASHBOARD_FILE_NAME } from "./dashboard.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { resolveDeepSeekAcpLaunch, type DeepSeekAcpLaunch, type DeepSeekDetectOptions } from "./deepseek-detect.js";
@@ -24,7 +25,6 @@ import { GatewayService, type GatewayProviderAdapter, type GatewayServiceOptions
 import { GatewayStore } from "./store.js";
 import { gatewayInboundModes, type GatewayInboundMode } from "./types.js";
 
-export const GATEWAY_LOCAL_HOST_ID = "this-mac";
 const GROK_ACP_LAUNCH = Object.freeze({
   kind: "npx", package: "@xai-official/grok@1.0.5", args: ["agent", "stdio"],
 } satisfies AcpLaunchSpec);
@@ -34,7 +34,7 @@ export type GatewayServerOptions = { env?: NodeJS.ProcessEnv; inboundMode?: Gate
 type ServerService = Readonly<{ start: (signal?: AbortSignal) => Promise<void>; close: () => Promise<void> }>;
 type Signal = "SIGINT" | "SIGTERM";
 export type GatewayServerDependencies = {
-  loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig; loginHome?: () => string;
+  loadConfig?: (env: NodeJS.ProcessEnv, inventory: GatewayNodeInventory) => GatewayConfig; loginHome?: () => string;
   loadNodeInventory?: (stateDir: string) => Promise<GatewayNodeInventory>;
   attestClaudeRuntime?: () => Promise<AttestedClaudePeerRuntime>; createClaudeProvider?: (options: LocalClaudeGatewayProviderOptions) => GatewayProviderAdapter;
   acquireInstanceLease?: (home: string) => Promise<GatewayInstanceLease>; createStore?: (config: GatewayConfig) => GatewayStore;
@@ -129,21 +129,14 @@ export async function runGatewayServer(
     stopped = true; startupAbort?.abort(); return { kind: "shutdown" } as const;
   });
   try {
-    const loaded = d.loadConfig(env);
-    const inventory = await d.loadNodeInventory(loaded.stateDir);
-    if (inventory.configured && env.EMBASSY_HOSTS !== undefined) {
-      throw serverError("INVALID_GATEWAY_CONFIGURATION", "nodes.json and EMBASSY_HOSTS cannot both define gateway hosts.");
-    }
+    const inventory = await d.loadNodeInventory(path.resolve(defaultGatewayStateDir(env)));
+    const loaded = d.loadConfig(env, inventory);
     const inboundMode = options.inboundMode ?? loaded.inboundMode;
     if (!(gatewayInboundModes as readonly string[]).includes(inboundMode)) {
       throw serverError("INVALID_GATEWAY_CONFIGURATION", "The gateway inbound mode must be paired or open.");
     }
-    const localHost = inventory.host;
-    const config = { ...loaded, inboundMode, hostId: localHost, peerNodes: inventory.nodes,
-      allowedHosts: Object.freeze([localHost, ...inventory.nodes]),
-      ...(loaded.acpProviders === undefined ? {} : { acpProviders: loaded.acpProviders.map((definition) => ({ ...definition,
-        alias: definition.alias.endsWith(`@${GATEWAY_LOCAL_HOST_ID}`)
-          ? `${definition.alias.slice(0, -GATEWAY_LOCAL_HOST_ID.length)}${localHost}` : definition.alias })) }) };
+    const localHost = loaded.hostId;
+    const config = { ...loaded, inboundMode };
     const home = d.loginHome();
     const acquiring = d.acquireInstanceLease(home).then(
       (value) => ({ kind: "lease", value }) as const,

@@ -529,6 +529,8 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       params: {
         alias: "codex-main@this-mac",
         threadId: THREAD_ID.toUpperCase(),
+        hostId: "this-mac",
+        busyPolicy: "queue",
       },
     },
   });
@@ -826,6 +828,7 @@ test("normalizes a same-host Codex succession without exposing private identifie
         alias,
         threadId: THREAD_ID.toUpperCase(),
         hostId: "build-mac",
+        busyPolicy: "queue",
         succeedsAlias,
       },
     },

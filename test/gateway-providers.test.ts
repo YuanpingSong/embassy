@@ -6,11 +6,12 @@ import {
   mkdtemp,
   realpath,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setImmediate as delayImmediate } from "node:timers/promises";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
 import type {
@@ -43,10 +44,11 @@ import type {
 } from "../src/gateway/codex-stateless-transport.js";
 import { createStatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
+import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
 import { composeProvenanceEnvelope } from "../src/gateway/provenance-envelope.js";
 import { GatewayStore } from "../src/gateway/store.js";
 import {
-  createLocalClaudeGatewayProvider,
+  createLocalClaudeGatewayProvider as createLocalClaudeGatewayProviderBase,
   createLocalCodexGatewayProvider,
 } from "../src/gateway/providers.js";
 import {
@@ -63,6 +65,15 @@ const GATEWAY_MESSAGE_ID = "gateway-message-001";
 const SAFE_WORKSPACE = "/workspace/synthetic-project";
 const INITIAL_LISTENER_GENERATION = "listener_generation_1";
 const SYNTHETIC_CONVERSATION_ID = "conv_0123456789abcdef";
+const inventoryRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "embassy-provider-inventory-")));
+await writeFile(path.join(inventoryRoot, "nodes.json"), '{"version":1,"host":"this-mac","nodes":[]}', { mode: 0o600 });
+const nodeInventory = await loadGatewayNodeInventory(inventoryRoot);
+await writeFile(path.join(inventoryRoot, "nodes.json"), '{"version":1,"host":"studio","nodes":[]}', { mode: 0o600 });
+const studioInventory = await loadGatewayNodeInventory(inventoryRoot);
+const localIdentity = { hostId: "this-mac", nodeInventory } as const;
+const createLocalClaudeGatewayProvider = (options: Omit<Parameters<typeof createLocalClaudeGatewayProviderBase>[0], "hostId" | "nodeInventory">) =>
+  createLocalClaudeGatewayProviderBase({ ...localIdentity, ...options });
+after(async () => await rm(inventoryRoot, { recursive: true, force: true }));
 
 function claudeProvenance(
   sourceAlias = "codex-reviewer@this-mac",
@@ -541,7 +552,8 @@ test("Claude logical identity stays independent of runtime evidence", () => {
     stateRoot: "/synthetic/controller-state",
     peerFactory: () => new FakeClaudePeer() as never,
   });
-  const future = createLocalClaudeGatewayProvider({
+  const future = createLocalClaudeGatewayProviderBase({
+    hostId: "studio", nodeInventory: studioInventory,
     runtime: changedRuntime,
     stateRoot: "/synthetic/controller-state",
     peerFactory: () => new FakeClaudePeer() as never,
@@ -549,7 +561,10 @@ test("Claude logical identity stays independent of runtime evidence", () => {
 
   assert.deepEqual(first.identity, { provider: "claude", hostId: "this-mac" });
   assert.deepEqual(changed.identity, first.identity);
-  assert.deepEqual(future.identity, first.identity);
+  assert.deepEqual(future.identity, { provider: "claude", hostId: "studio" });
+  assert.throws(() => createLocalClaudeGatewayProviderBase({ hostId: "this-mac", nodeInventory: studioInventory,
+    runtime: claudeRuntime(), stateRoot: "/synthetic/controller-state", peerFactory: () => new FakeClaudePeer() as never }),
+  (error: unknown) => error instanceof BridgeError && error.code === "GATEWAY_REMOTE_PROVIDER_DISABLED");
 });
 
 test("supervised Claude helpers preserve prepared-write evidence and provider binding", async () => {
@@ -787,7 +802,7 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
 
 test("service restart restores selected Claude authority into per-operation preparation", async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "embassy-claude-restart-")));
-  const config = loadGatewayConfig({ EMBASSY_STATE_DIR: path.join(root, "state") });
+  const config = loadGatewayConfig({ EMBASSY_STATE_DIR: path.join(root, "state") }, { host: "this-mac", nodes: [] });
   const storedClaude = {
     alias: "advisor@this-mac",
     binding: { provider: "claude" as const, hostId: "this-mac", routeHandle: "target-selected",
@@ -935,9 +950,10 @@ function createCodexProviderFixture(
     operation.observationHandler = observer.observe;
   }
   const provider = createLocalCodexGatewayProvider({
-    hostId: "this-mac",
-    operation,
     ...options,
+    hostId: options.hostId ?? localIdentity.hostId,
+    nodeInventory: options.nodeInventory ?? localIdentity.nodeInventory,
+    operation,
   });
   const observed = callbacks();
   return { observed, operation, provider };

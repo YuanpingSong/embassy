@@ -12,11 +12,11 @@ import { callerIdentityConflictHintZhCn } from "./cli-copy.zh-CN.js";
 import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   GATEWAY_CONTROL_MAX_RESPONSE_BYTES, GATEWAY_CONTROL_PROTOCOL_VERSION,
   GatewayControlTransportError, isClaudeSessionSelector, isGatewayAlias,
-  isGatewayConversationId, isGatewayDeliveryToken, isGatewayHostId,
+  isGatewayConversationId, isGatewayDeliveryToken,
   isGatewayReplyAddress, sendGatewayControlRequest, type GatewayControlMethod,
   type GatewayControlRequest, type GatewayControlResponse,
   type SendGatewayControlRequestOptions } from "./control.js";
-import { loadGatewayConfig, type GatewayConfig } from "./config.js";
+import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import { DEFAULT_LIVE_DASHBOARD_PORT, runLiveDashboardCommand,
@@ -27,7 +27,6 @@ import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-st
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DEFAULT_HOST_ID = "this-mac";
 const CLI_MAX_OUTPUT_BYTES = GATEWAY_CONTROL_MAX_RESPONSE_BYTES;
 const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
@@ -69,7 +68,7 @@ export type GatewayCliDependencies = {
   stdin?: AsyncIterable<unknown>;
   stdout?: Writable;
   stderr?: Writable;
-  loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig;
+  loadConfig?: (env: NodeJS.ProcessEnv, inventory: GatewayNodeInventory) => GatewayConfig;
   loadNodeInventory?: (stateDir: string) => Promise<GatewayNodeInventory>;
   sendRequest?: GatewayControlSender;
   runServer?: GatewayServerRunner;
@@ -309,6 +308,7 @@ async function buildRequest(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   stdin: AsyncIterable<unknown>,
+  loadLocalHost: () => Promise<string>,
 ): Promise<GatewayControlRequest> {
   const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
     health: "health", status: "list_snapshot", doctor: "list_snapshot",
@@ -336,20 +336,19 @@ async function buildRequest(
       return envelope("untrack", { conversationId });
     }
     case "register-codex": {
-      const options = parseOptions(args, ["alias", "host", "succeeds"]);
+      const options = parseOptions(args, ["alias", "succeeds"]);
       const alias = requireCodexAlias(options, "alias");
       const succeedsAlias = options.succeeds === undefined ? undefined : requireCodexAlias(options, "succeeds");
       count(options, succeedsAlias === undefined ? 1 : 2, 2);
-      if (succeedsAlias !== undefined && options.host !== undefined) fault();
-      const host = succeedsAlias === undefined ? (options.host ?? DEFAULT_HOST_ID) : gatewayAliasHost(alias);
+      const threadId = requireExclusiveCodexThreadId(env);
+      if (succeedsAlias === alias) fault();
+      const localHost = await loadLocalHost();
       if (
-        typeof host !== "string" ||
-        !isGatewayHostId(host) ||
-        !alias.endsWith(`@${host}`) ||
-        (succeedsAlias !== undefined && (succeedsAlias === alias || gatewayAliasHost(succeedsAlias) !== host))
+        !alias.endsWith(`@${localHost}`) ||
+        (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== localHost)
       ) fault();
       return envelope("register_codex", {
-        alias, threadId: requireExclusiveCodexThreadId(env), hostId: host, busyPolicy: "queue",
+        alias, threadId, hostId: localHost, busyPolicy: "queue",
         ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
       });
     }
@@ -598,6 +597,11 @@ export async function runGatewayCli(
   let locale = fallbackCliLocale(argv.slice(1), env);
   let serverReady = false, dashboardReady = false;
   let liveDashboardPort: number | undefined;
+  let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig }> | undefined;
+  const loadIdentity = () => identity ??= (async () => {
+    const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(path.resolve(defaultGatewayStateDir(env)));
+    return { inventory, config: loadConfig(env, inventory) };
+  })();
   const success = (result: unknown): void => {
     stdout.write(serializedOutput({ ok: true, command: command!, result }));
   };
@@ -613,8 +617,7 @@ export async function runGatewayCli(
     if (command === "peer-stdio") {
       emptyParams(common.args);
       try {
-        const config = loadConfig(env);
-        const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(config.stateDir);
+        const { config, inventory } = await loadIdentity();
         await validateSocket(config.stateDir, config.controlSocketPath);
         let peerHost: string | undefined, firstCatalog: import("./peer-protocol.js").PeerCatalogResult | undefined;
         const request = async <M extends "peer_catalog" | "peer_handoff">(
@@ -660,8 +663,9 @@ export async function runGatewayCli(
     }
     if (command === "dashboard") {
       liveDashboardPort = parseLiveDashboardArgs(common.args);
+      const { inventory } = await loadIdentity();
       const outcome = await (dependencies.runLiveDashboard ?? runLiveDashboardCommand)({
-        env, locale, port: liveDashboardPort, loadConfig, sendRequest, validateControlSocket: validateSocket,
+        env, locale, port: liveDashboardPort, inventory, loadConfig, sendRequest, validateControlSocket: validateSocket,
         ...(dependencies.liveDashboardSignal === undefined ? {} : { signal: dependencies.liveDashboardSignal }),
         onReady: async (result) => {
           if (dashboardReady) fault("LIVE_DASHBOARD_READY_ALREADY_EMITTED");
@@ -672,8 +676,8 @@ export async function runGatewayCli(
       if (!dashboardReady) throw new Error("LIVE_DASHBOARD_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
-    const request = await buildRequest(command, common.args, env, stdin);
-    const config = loadConfig(env);
+    const request = await buildRequest(command, common.args, env, stdin, async () => (await loadIdentity()).config.hostId);
+    const { config } = await loadIdentity();
     await validateSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;
     let waited: GatewayControlResponse<"delivery_status"> | undefined;
@@ -767,6 +771,10 @@ export async function runGatewayCli(
         retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
       writeStateResetHint(stderr, locale, error.code);
+      if (error.code === "GATEWAY_NODE_INVENTORY_REQUIRED") {
+        const stateDir = env.EMBASSY_STATE_DIR ?? (env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, "agent-embassy") : "~/.local/state/agent-embassy");
+        stderr.write(`[embassy] ${getCliCopy(locale)["hint.nodeInventoryRequired"].replace("{stateDir}", stateDir)}\n`);
+      }
       if (error.code === "LIVE_DASHBOARD_PORT_IN_USE" && liveDashboardPort !== undefined) {
         const hint = getCliCopy(locale)["hint.dashboardPortInUse"].replace("{port}", String(liveDashboardPort));
         stderr.write(`[embassy] ${hint}\n`);

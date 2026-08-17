@@ -14,9 +14,9 @@ Embassy 主要通过各命令启动时读取的环境变量进行配置。本文
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude 发送方通知策略：`merged` 保留停滞通知并把终局诊断合并到原生状态；`verbose` 同时发送两者；`quiet` 不发送任何网关用户帧通知 |
 | `EMBASSY_TRACKING_ENABLED` | `1` | 全局进度监视停用开关；精确设为 `0` 后，`--track`、`--idle-minutes` 与 `TRACK:` 开启请求会被拒绝。活跃监视只存在于内存中，并随代理进程结束；重启后绝不恢复。没有活跃监视时，`DONE:` 不产生作用；`untrack` 不会因开关而被特别拒绝，而是返回 `NOT_FOUND`。取值只能是 `1` 或 `0`，其他值均为配置错误 |
 | `EMBASSY_LOCALE` | `en` | CLI 输出语言，精确取值 `en` 或 `zh-CN`。`--lang` 标志会覆盖当次调用；未设置或为空表示 `en`，其他任何取值都是参数错误 |
-| `EMBASSY_HOSTS` | `this-mac` | 保留的旧版主机列表解析器：取值仍必须是 1 到 32 个唯一小写别名，但不构成联合权限。没有 `nodes.json` 时，无论此值为何，`serve` 都保持仅本地的 `this-mac`。已配置 `nodes.json` 时，显式设置此变量会以 `INVALID_GATEWAY_CONFIGURATION` 关闭失败 |
 
-联合权限仅来自 `EMBASSY_STATE_DIR` 中的 `nodes.json`。它必须是当前用户所有的 mode-0600 普通文件，且对象形状必须精确为 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`。`host` 指定当前代理；`nodes` 包含 1 到 31 个唯一的 OpenSSH 别名，不得包含 `host`，使联合总主机数不超过 32。每个列出的节点都是 `embassy peer-stdio` 的固定 SSH 目的地。文件缺失时，代理保持仅本地的 `this-mac`。
+联合权限仅来自 `EMBASSY_STATE_DIR` 中的 `nodes.json`。它必须是当前用户所有的 mode-0600 普通文件，且对象形状必须精确为 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`。`host` 指定当前代理；`nodes` 包含 0 到 31 个唯一的 OpenSSH 别名，不得包含 `host`，使联合总主机数不超过 32。该文件是必需的；缺失时 Embassy 会打印精确的 `nodes:[]` 仅本地修复方法并拒绝启动。
+移除节点不会删除其持久镜像；在缺少该节点的配置下重启前，请重置私有状态。
 
 ### 私有状态重置
 
@@ -58,7 +58,7 @@ Embassy 主要通过各命令启动时读取的环境变量进行配置。本文
 
 初始发送方从 CLI 结果获得完整 `conv_` 令牌，接收方则从入站消息的来源封装和回复提示中获得同一个令牌。令牌是内存中的参与方范围定位符，不是权限凭据：每次 `reply` 都会重新检查调用方身份、参与关系和实时路由。代理重启后令牌不再存在；路由失效或身份替换后，也不得重试或重构旧令牌。
 
-公开发布的启动器仍绑定本地主机。在已实现的 SSH 许可清单联合模式下，每个代理只服务一个本地主机身份，并仅与已配置的 Embassy 节点交换有界路由目录和由目的地负责的交接。`register-codex` 仍是本地任务注册；其可选的 `--host <id>` 与别名后缀必须指向该代理的本地主机。`--host` 仍与 `--succeeds` 互斥，后者始终继承被接替别名的主机。
+公开发布的启动器仍绑定本地主机。在 SSH 许可清单联合模式下，每个代理服务 `nodes.json` 已验证的精确主机身份。`register-codex` 会推断该主机；别名及任何 `--succeeds` 别名都必须使用相同后缀。
 
 ## Claude Code 自身的设置：`crossSessionInbound`
 

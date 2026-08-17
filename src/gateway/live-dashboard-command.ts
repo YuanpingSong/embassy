@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { BridgeError } from "../errors.js";
 import type { DashboardLocale } from "./dashboard-copy.js";
 import { loadGatewayConfig, type GatewayConfig } from "./config.js";
+import type { GatewayNodeInventory } from "./federation-nodes.js";
 import {
   GATEWAY_CONTROL_PROTOCOL_VERSION,
   sendGatewayControlRequest,
@@ -54,7 +55,8 @@ export type LiveDashboardCommandOptions = Readonly<{
   port?: number;
   signal?: AbortSignal;
   onReady: (result: LiveDashboardReadyResult) => void | Promise<void>;
-  loadConfig?: (env: NodeJS.ProcessEnv) => GatewayConfig;
+  inventory: GatewayNodeInventory;
+  loadConfig?: (env: NodeJS.ProcessEnv, inventory: GatewayNodeInventory) => GatewayConfig;
   validateControlSocket: (
     stateDir: string,
     socketPath: string,
@@ -380,7 +382,7 @@ export async function runLiveDashboardCommand(
       process.off(signal, listener);
     });
 
-  const config = loadConfig(env);
+  const config = loadConfig(env, options.inventory);
   await options.validateControlSocket(
     config.stateDir,
     config.controlSocketPath,

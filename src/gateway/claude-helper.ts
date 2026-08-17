@@ -30,6 +30,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
   if (!process.send) return;
   let adapter: ClaudePeerAdapter | undefined, listener: ClaudePeerListener | undefined;
   let registration: ClaudeNativeHelperInitialization["registration"] | undefined;
+  let hostId: string | undefined;
   let maxPending = 0, preparation: Preparation | undefined, admitted = 0, closing = false;
   const routes = new Map<string, string>();
   let operations = Promise.resolve(), sends = Promise.resolve();
@@ -62,7 +63,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     let alias: string | undefined;
     try { const discovery = await active.discover(); const found = !discovery.truncated && discovery.peers.find((peer) =>
       peer.targetId === source && peer.kind === "interactive" && peer.alias === message.sourceAlias);
-      if (found) alias = `${found.alias}@this-mac`; } catch { /* stale */ }
+      if (found && hostId) alias = `${found.alias}@${hostId}`; } catch { /* stale */ }
     if (!alias) { await expireReceipt(message.receiptHandle, "CLAUDE_SOURCE_ROUTE_STALE"); return; }
     if (!routes.has(source) && routes.size >= maxPending) { await expireReceipt(message.receiptHandle, "CLAUDE_NATIVE_INGRESS_CAPACITY"); return; }
     routes.set(source, alias);
@@ -78,10 +79,10 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
         onProtocolNotice: (notice) => event({ event: "protocol_notice", value: { code: notice.code } }) });
       const suffix = `@${message.hostId}`;
       if (!message.registration.alias.endsWith(suffix)) throw new BridgeError("INVALID_CODEX_PEER_ALIAS", "The helper alias targets another host.");
-      adapter = created; listener = opened; registration = message.registration; maxPending = message.maxPendingMessages;
+      adapter = created; listener = opened; registration = message.registration; hostId = message.hostId; maxPending = message.maxPendingMessages;
       await opened.advertise(message.registration.alias.slice(0, -suffix.length), message.registration.cwd);
       return { generation: opened.generation };
-    } catch (error) { adapter = undefined; listener = undefined; registration = undefined;
+    } catch (error) { adapter = undefined; listener = undefined; registration = undefined; hostId = undefined;
       await opened?.close().catch(() => undefined); await created.close().catch(() => undefined); throw error; }
   };
   const prepare = async (command: Extract<ClaudeNativeHelperCommand, { method: "prepare_dispatch" }>): Promise<ClaudeNativeHelperResult> => {
@@ -89,6 +90,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     const active = adapter, opened = listener, advertised = registration;
     if (!active || !opened || !advertised || advertised.alias !== command.sourceAlias || advertised.sourceProvider !== command.sourceProvider)
       throw new BridgeError("CLAUDE_NATIVE_HELPER_NOT_INITIALIZED", "The exact native source advertisement is unavailable.", true);
+    if (command.binding.hostId !== hostId) throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The selected Claude route targets another host.");
     const deadlineAt = Date.parse(command.deadlineAt);
     if (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now()) throw new BridgeError("CLAUDE_PEER_MESSAGE_EXPIRED", "The message expired before preparation.", true);
     if (command.authorization === "selected_route") {
@@ -121,7 +123,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     if (!listener || !registration) throw new BridgeError("CLAUDE_NATIVE_HELPER_NOT_INITIALIZED", "The helper is not initialized.");
     if (command.method === "update_status") { if (command.alias === registration.alias) await listener.updateAdvertisedStatus(command.status); return ok(); }
     if (command.method === "unadvertise") { if (command.alias === registration.alias) {
-      await listener.unadvertise(command.alias.slice(0, command.alias.lastIndexOf("@"))); registration = undefined; routes.clear(); } return ok(); }
+      await listener.unadvertise(command.alias.slice(0, command.alias.lastIndexOf("@"))); registration = undefined; hostId = undefined; routes.clear(); } return ok(); }
     if (command.method === "update_inbound_status") { await listener.acknowledge(command.receiptHandle, command.status,
       command.diagnosticCode ? { code: command.diagnosticCode } : undefined); return ok(); }
     if (command.method === "notify_inbound_progress") { await listener.notifyInboundProgress(command.receiptHandle, command.progress); return ok(); }
@@ -129,7 +131,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     release(); await listener.close(); return ok();
   };
   async function shutdown(): Promise<void> {
-    if (closing) return; closing = true; release(); const active = adapter; adapter = undefined; listener = undefined; registration = undefined;
+    if (closing) return; closing = true; release(); const active = adapter; adapter = undefined; listener = undefined; registration = undefined; hostId = undefined;
     await active?.close().catch(() => undefined); if (process.connected) process.disconnect(); setImmediate(() => process.exit(0));
   }
   process.on("disconnect", shutdown); process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
