@@ -3,7 +3,7 @@ id: emb-79
 title: v1.8 stages 5-8 — four refactor-down lanes to the 18,850 target
 kind: normal
 size: 8
-status: dispatched
+status: landed
 release: v1.8
 updated: 2026-08-17
 ---
@@ -45,3 +45,18 @@ MANAGED_CODEX_UNAVAILABLE; observation_stale reachable; no disclosure.
 = operation-local evidence; observation stays display-only; byte-held Codex
 contract + conformance; TMPDIR=/tmp gates; live drill remains PM-side at
 release. Freeze each seam before shared-file integration.
+
+## LANDED (2026-08-17) — v1.8 core complete
+
+SLICE READY at 5248f77 on exact base eddf8d3: 54 paths, +4,015/−13,491 =
+net −9,476. PINNED CORE 26,421 → 18,595 — required floor and final ceiling
+both cleared by 255. Caps honored with margin (src +2,900/3,500; tests
++1,064/3,500). R1 executed (launcher/version authority deleted;
+compatibility.ts gone); R2 executed (managed_layout_missing display-only).
+368-line Claude wire conformance oracle added (SHA fa4863b6…). PM gate:
+TMPDIR=/tmp isolated worktree, check 518/0, soak 1/0 with every accepted
+message terminal exactly once; core verified by the pinned command; Codex
+contract byte-identical. All four lanes delivered their floors. v1.8 code
+is COMPLETE at 18,595 — under the founder 20k budget by 1,405 and under the
+design target by 255. Remaining: PM live drill (state conversion,
+split-brain matrix, restart taxonomy) → v1.8.0 release.
