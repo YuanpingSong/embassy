@@ -3,7 +3,7 @@ id: emb-92
 title: v2.0 — Claude peer discovery admits background sessions
 kind: normal
 size: 1
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-18
 ---

@@ -3,7 +3,7 @@ id: emb-90
 title: v2.0 R3 — private control cleanup: delete legacy pair arm, bump control protocol
 kind: normal
 size: 2
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-17
 ---
