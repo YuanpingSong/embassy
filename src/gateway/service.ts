@@ -300,9 +300,13 @@ function publicRegistry(
   value: GatewayAdapterRegistryObservation,
   previouslyParseable: boolean,
 ): PublicRegistryObservationSnapshot {
-  const rejected = [...value.rejected]
-    .filter((row) => SAFE_CODE.test(row.safeErrorCode) && Number.isSafeInteger(row.count) && row.count > 0)
-    .sort((left, right) => left.safeErrorCode.localeCompare(right.safeErrorCode));
+  const counts = new Map<string, number>();
+  for (const row of value.rejected)
+    if (SAFE_CODE.test(row.safeErrorCode) && Number.isSafeInteger(row.count) && row.count > 0)
+      counts.set(row.safeErrorCode, (counts.get(row.safeErrorCode) ?? 0) + row.count);
+  const rejected = [...counts].map(([safeErrorCode, count]) => ({ safeErrorCode, count }))
+    .sort((left, right) => left.safeErrorCode < right.safeErrorCode ? -1 :
+      left.safeErrorCode > right.safeErrorCode ? 1 : 0);
   const retained = rejected.slice(0, gatewayPublicSnapshotLimits.registryRejectionCodes);
   return {
     entriesScanned: Math.max(0, value.entriesScanned),
@@ -367,6 +371,7 @@ export class GatewayService {
   private readonly connectors = new Map<string, ConnectorRuntime>();
   private readonly routeObservations = new Map<string, GatewayAdapterRouteObservation>();
   private readonly candidates = new Map<string, Candidate>();
+  private readonly collidingClaudeAliases = new Set<string>();
   private readonly conversations = new Map<string, Conversation>();
   private readonly messageContexts = new Map<string, MessageContext>();
   private readonly activeAttempts = new Map<string, ActiveAttempt>();
@@ -702,6 +707,7 @@ export class GatewayService {
       };
     });
     const availablePeers = [...this.candidates.values()]
+      .filter((candidate) => !this.collidingClaudeAliases.has(candidate.alias))
       .slice(0, gatewayPublicSnapshotLimits.availablePeers)
       .map((candidate): PublicAvailablePeerSnapshot => ({
         alias: candidate.alias,
@@ -1164,7 +1170,11 @@ export class GatewayService {
   }>> {
     const raw = params.aliases;
     const aliases: [string, string] = [raw[0], raw[1]];
+    if (maySelect && aliases.some((alias) => PUBLIC_ALIAS.test(alias)))
+      await this.refreshClaudeDiscovery().catch(() => undefined);
     for (let index = 0; index < aliases.length; index += 1) {
+      if (maySelect && this.collidingClaudeAliases.has(aliases[index]!))
+        throw new BridgeError("PEER_ALIAS_COLLISION", "The Claude alias is ambiguous.");
       if (PUBLIC_ALIAS.test(aliases[index]!)) continue;
       const selected = await this.resolveClaudeSelector(aliases[index]!, maySelect);
       if (selected === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The Claude selector is unavailable.");
@@ -2647,16 +2657,25 @@ export class GatewayService {
 
   private async refreshClaudeDiscovery(): Promise<void> {
     const seen = new Set<string>();
+    const nextCollisions = new Set<string>();
+    const refreshedHosts = new Set<string>();
     for (const adapter of this.adapters) {
       if (adapter.identity.provider !== "claude" || adapter.discoverClaudePeers === undefined) continue;
       const snapshot = await adapter.discoverClaudePeers();
       const observedAt = this.now().toISOString();
-      for (const peer of snapshot.peers) {
-        if (
-          !PUBLIC_ALIAS.test(peer.alias) ||
-          !peer.alias.endsWith(`@${adapter.identity.hostId}`) ||
-          !PRIVATE_HANDLE.test(peer.routeHandle)
-        ) continue;
+      const peers = snapshot.peers.filter((peer) => PUBLIC_ALIAS.test(peer.alias) &&
+        peer.alias.endsWith(`@${adapter.identity.hostId}`) && PRIVATE_HANDLE.test(peer.routeHandle));
+      const aliasHandles = new Map<string, Set<string>>();
+      for (const peer of peers) {
+        const handles = aliasHandles.get(peer.alias) ?? new Set<string>();
+        handles.add(peer.routeHandle); aliasHandles.set(peer.alias, handles);
+      }
+      const collidingAliases = new Set([...aliasHandles].filter(([, handles]) => handles.size > 1).map(([alias]) => alias));
+      refreshedHosts.add(adapter.identity.hostId);
+      if (!snapshot.complete) for (const alias of this.collidingClaudeAliases)
+        if (alias.endsWith(`@${adapter.identity.hostId}`)) collidingAliases.add(alias);
+      for (const alias of collidingAliases) nextCollisions.add(alias);
+      for (const peer of peers) {
         const key = `${adapter.identity.hostId}\0${peer.routeHandle}`;
         seen.add(key);
         this.candidates.set(key, { ...peer, adapter, observedAt });
@@ -2668,13 +2687,29 @@ export class GatewayService {
         const registry = snapshot.registry ?? adapter.latestRegistryObservation?.();
         if (registry !== undefined) {
           runtime.registry = publicRegistry(
-            registry,
+            { ...registry, rejected: [
+              ...registry.rejected,
+              ...(collidingAliases.size === 0 ? [] : [{ safeErrorCode: "PEER_ALIAS_COLLISION",
+                count: collidingAliases.size }]),
+            ] },
             runtime.registry?.parseableRecordSeenSinceBoot ?? false,
           );
         }
       }
     }
     for (const [key] of this.candidates) if (!seen.has(key)) this.candidates.delete(key);
+    for (const alias of this.collidingClaudeAliases)
+      if (refreshedHosts.has(aliasHost(alias))) this.collidingClaudeAliases.delete(alias);
+    const retainedCollisions = new Set(
+      [...nextCollisions].slice(0, gatewayPublicSnapshotLimits.availablePeers),
+    );
+    // Discovery currently caps rows such that collisions cannot overflow this independent public bound.
+    // If those constants diverge, discard overflow candidates rather than expose an unfenced alias.
+    for (const [key, candidate] of this.candidates)
+      if (nextCollisions.has(candidate.alias) && !retainedCollisions.has(candidate.alias))
+        this.candidates.delete(key);
+    for (const alias of retainedCollisions)
+      this.collidingClaudeAliases.add(alias);
   }
 
   private async refreshCodexDoctor(): Promise<void> {
@@ -2690,8 +2725,11 @@ export class GatewayService {
 
   private async resolveClaudeSelector(selector: string, refresh: boolean): Promise<Candidate | undefined> {
     if (refresh) await this.refreshClaudeDiscovery().catch(() => undefined);
+    if (this.collidingClaudeAliases.has(selector))
+      throw new BridgeError("PEER_ALIAS_COLLISION", "The Claude alias is ambiguous.");
     return [...this.candidates.values()].find(
-      (candidate) => candidate.alias === selector || candidate.routeHandle === selector,
+      (candidate) => candidate.routeHandle === selector ||
+        candidate.alias === selector,
     );
   }
 

@@ -549,6 +549,105 @@ test("background Claude discovery supports select, pair, send, and exact reply",
   } finally { await subject.close(); }
 });
 
+test("duplicate live Claude aliases are rejected without poisoning the snapshot", async () => {
+  const duplicateAlias = "shared-agent@this-mac", uniqueAlias = "unique-bg@this-mac";
+  const firstUuid = "00000000-0000-7000-8000-000000000711";
+  const secondUuid = "00000000-0000-7000-8000-000000000712";
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  let colliding = false, complete = true, duplicateRecord = false;
+  claudeProvider.discoverClaudePeers = async () => {
+    const peers = [
+      { alias: duplicateAlias, routeHandle: firstUuid, kind: "interactive" as const, state: "idle" as const },
+      ...(colliding ? [{ alias: duplicateAlias, routeHandle: secondUuid,
+        kind: "bg" as const, state: "idle" as const }] : []),
+      ...(duplicateRecord ? [{ alias: duplicateAlias, routeHandle: firstUuid,
+        kind: "interactive" as const, state: "idle" as const }] : []),
+      { alias: uniqueAlias, routeHandle: "claude-unique-background", kind: "bg" as const, state: "idle" as const },
+    ];
+    return { complete, peers, registry: { entriesScanned: peers.length, parseableRecords: peers.length,
+      rejected: colliding ? [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 2 }] : [] } };
+  };
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    assert.deepEqual((await subject.handlers.listSnapshot()).availablePeers.map((peer) => peer.alias),
+      [duplicateAlias, uniqueAlias]);
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
+      { accepted: true, code: "ok" });
+    colliding = true;
+    assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
+      { accepted: false, code: "conflict" });
+    const snapshot = await subject.handlers.listSnapshot();
+    assert.deepEqual(snapshot.availablePeers.map((peer) => peer.alias), [uniqueAlias]);
+    assert.deepEqual(snapshot.connectors.find((row) => row.provider === "claude")?.registry?.rejected,
+      [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 3 }]);
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
+      { accepted: false, code: "conflict" });
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: firstUuid }),
+      { accepted: true, code: "ok" });
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: secondUuid }),
+      { accepted: true, code: "ok" });
+    assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
+      { accepted: false, code: "conflict" });
+    colliding = false; complete = false;
+    await subject.handlers.refreshDashboard();
+    const incomplete = await subject.handlers.listSnapshot();
+    assert.equal(incomplete.availablePeers.some((peer) => peer.alias === duplicateAlias), false);
+    assert.deepEqual(incomplete.connectors.find((row) => row.provider === "claude")?.registry?.rejected,
+      [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 1 }]);
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
+      { accepted: false, code: "conflict" });
+    complete = true;
+    await subject.handlers.refreshDashboard();
+    assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
+      (peer) => peer.alias === duplicateAlias), true);
+    assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
+      { accepted: true, code: "ok" });
+    duplicateRecord = true;
+    await subject.handlers.refreshDashboard();
+    const repeated = await subject.handlers.listSnapshot();
+    assert.equal(repeated.availablePeers.filter((peer) => peer.alias === duplicateAlias).length, 1);
+    assert.equal(repeated.connectors.find((row) => row.provider === "claude")?.registry?.rejected.some(
+      (row) => row.safeErrorCode === "PEER_ALIAS_COLLISION"), false);
+    duplicateRecord = false; colliding = true;
+    await subject.handlers.refreshDashboard();
+    assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
+      (peer) => peer.alias === duplicateAlias), false);
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
+      { accepted: false, code: "conflict" });
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: uniqueAlias }),
+      { accepted: true, code: "ok" });
+    assert.deepEqual(await subject.handlers.pair({ aliases: [uniqueAlias, codex.alias] }),
+      { accepted: true, code: "ok" });
+    const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: uniqueAlias, text: "unique candidate remains routable", expectsReply: false });
+    assert.equal(sent.accepted, true);
+    await eventually(() => claudeProvider.dispatches.length === 1);
+  } finally { await subject.close(); }
+});
+
+test("Claude alias collision overflow drops unfenced candidates and keeps diagnostics complete", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const aliases = Array.from({ length: 257 }, (_, index) =>
+    `overflow-${String(index).padStart(3, "0")}@this-mac`);
+  claudeProvider.discoverClaudePeers = async () => ({ complete: true,
+    peers: aliases.flatMap((alias, index) => [
+      { alias, routeHandle: `overflow-${index}-a`, kind: "interactive" as const, state: "idle" as const },
+      { alias, routeHandle: `overflow-${index}-b`, kind: "bg" as const, state: "idle" as const },
+    ]), registry: { entriesScanned: 514, parseableRecords: 514, rejected: [] } });
+  const subject = await fixture([claudeProvider]);
+  try {
+    const snapshot = await subject.handlers.listSnapshot();
+    assert.deepEqual(snapshot.availablePeers, []);
+    assert.deepEqual(snapshot.connectors[0]?.registry?.rejected,
+      [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 257 }]);
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: aliases.at(-1)! }),
+      { accepted: false, code: "not_found" });
+  } finally { await subject.close(); }
+});
+
 test("a peer waiter kicks cleanly deferred mail and exact receipt settles it once", async () => {
   const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
     now: () => Date.parse("2026-08-16T12:00:00.000Z") });
