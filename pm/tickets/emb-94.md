@@ -183,3 +183,83 @@ PM-side compute session limit (resets 05:50 ET) and will be relaunched.
 Landing waits for it — the first freeze's mechanical gate was also clean
 and review still found three blockers; that lesson does not get unlearned
 one slice later.
+
+## Second adversarial verdict (2026-08-18): HOLD — with a PM scope ruling
+
+Replacement slice fc57b9b9. Prior-blocker disposition from the re-review:
+F1 (UUID addressability) genuinely fixed; F4 (duplicate-code merge)
+genuinely fixed; folded items (distinct-routeHandle predicate,
+prune-before-replace) genuinely fixed. Two new blockers and a bundle.
+
+**Verified consent truth that bounds everything below:** misdelivery is
+impossible. The reviewer explicitly tried to route a message consented
+for one session to the other and could not, in BOTH reviews — dispatch
+carries the exact routeHandle+registrationId bound at selection;
+re-selecting the other UUID rebinds and DROPS the old edge rather than
+retargeting it; the reply path cannot impersonate. Delivery-consent is
+intact in every state found.
+
+**SCOPE RULING (PM):** "the ambiguous alias must never be addressable"
+is henceforth scoped to the INTERACTION surfaces — listing, selection,
+pair creation — plus snapshot integrity. The residue the review found
+(the ambiguous NAME persisting in a durable route the operator bound via
+sanctioned UUID recovery; that name accepted by send and exported in the
+federation catalog) is an OPERATOR-MODEL gap, not a consent violation,
+because binding is identity-pinned and misdelivery is proven impossible.
+Closing that residue means re-keying durable routes by session identity
+instead of display name — architectural, deliberately NOT bought inside
+this E1. Filed as a post-v2.0.0 backlog candidate ("routes keyed by
+identity, not display name") with this review as its evidence. The
+false doc sentence this leaves standing (GATEWAY-ARCHITECTURE.md:270-272
+"duplicate name … fails that operation closed" — never true for writes)
+routes to emb-93 (+1 sentence: fence at selection/pairing; pre-bound
+routes retain their identity-pinned binding; UUID recovery).
+
+**CORRECTION #3 ORDERED (all small, all inside the ruling):**
+1. **F2 — overflow fails CLOSED.** The bound currently sheds FENCES
+   while keeping candidate rows: at 257+ colliding aliases the evicted
+   alias re-kills the snapshot and select silently picks one of two —
+   both original symptoms, resurrected by the fix. Unreachable today
+   only because gatewayPublicSnapshotLimits.availablePeers (256) ≥ 2×
+   maxRegistryEntries... actually because the registry cap (256) bounds
+   colliding aliases to ≤128 — an UNDOCUMENTED coincidence between two
+   independently-owned constants. Correction: collisions beyond the
+   fence bound drop their candidate rows entirely (never listed, never
+   resolvable — UUID recovery is knowingly sacrificed in this
+   pathological state only); the diagnostic count keeps reporting ALL
+   detected collisions; the constant dependency gets a code comment.
+2. **F3 (wire half only) — collision refuses as `conflict`, not
+   `not_found`.** The engineer already wrote the right message and
+   attached it to CLAUDE_ROUTE_NOT_FOUND → not_found, indistinguishable
+   from a dead session. Use the collision code that maps to the distinct
+   `conflict` decision. Two operator situations requiring opposite
+   actions become distinguishable at the wire. The dashboard-surface
+   half (attention copy falsely claiming registry scan rejection;
+   counter-semantics overload; the rename/UUID recovery being
+   documented nowhere) stays emb-96 — its body is updated with the
+   review's specifics.
+3. **F4 — the pair fence must evaluate FRESH state**: on the
+   public-alias pair path the fence currently reads state up to 30s
+   stale (fence check `continue`s before the resolver's refresh).
+   Reorder: refresh, then fence.
+4. **F7 — finish the line the diff edited**: publicRegistry sorts by
+   localeCompare while the validator compares code points; latent
+   (all 240 current pairs agree) but armed for the next code added.
+   Sort by code point.
+**Deferred with reasons:** F5 (sanctioned UUID recovery silently drops
+the existing consent edge and the next send reports catch-all
+`rejected`) — pre-existing atomic-swap semantics from v1.1, not this
+slice's defect; backlog with the review's transcript. F6 (fence not
+crash-atomic with the candidate table under a second claude adapter) —
+production wires exactly one adapter; backlog note addressed to whoever
+adds the second, cross-referenced in the identity-keying candidate.
+
+**Budgets for correction #3:** src ≤75 (was 60; measured-remainder rule
+in force), tests ≤150 (was 120) — must include: overflow fail-closed
+(bound+1 aliases → snapshot valid, overflow unresolvable, count
+complete), conflict-code distinction, pair-freshness, and a
+fence→clear→re-fence transition (the re-review found the lane's tests
+never exercise re-fence). Zero new concepts binding. Base unchanged
+9754888. Third freeze = replacement SHA; mech re-gate + TARGETED
+adversarial delta (overflow, conflict code, pair freshness) — the
+negative space is now mapped twice and does not need a third full pass.

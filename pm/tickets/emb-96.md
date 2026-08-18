@@ -52,3 +52,21 @@ the copy, the fixture, and the consuming code all already exist.
 
 **Depends on**: emb-94 landed (this describes its state), and emb-95
 landed (owns the adjacent copy — the two must not both edit it).
+
+## Scope addition from emb-94's second review (2026-08-18)
+
+The review reproduced the full operator surface during a live collision
+and found three falsifications this ticket now owns (wire-side
+`conflict` decision was pulled forward into emb-94 correction #3; the
+rest is here): (1) the dashboard attention item shows
+CLAUDE_REGISTRY_RECORDS_REJECTED with copy claiming records were
+unreadable/rejected while the same object reports every record parsed —
+the collision count is overloaded into a counter whose documented
+semantics are scan rejections (GATEWAY-ARCHITECTURE.md:251-253,
+CONFIGURATION.md:115, DASHBOARD.md:86 — none updated); (2) both
+colliding sessions vanish from the dashboard with no distinguishable
+signal; (3) the recovery the fence design depends on (rename a session,
+or select by UUID) is documented nowhere an operator looks. Any fix must
+keep remedy text true in BOTH discovery states (truncated discovery does
+not clear the fence) and must reconcile or re-home the counter
+semantics.
