@@ -181,3 +181,73 @@ from its trigger — fold into whichever correction touches that copy.
 itemized; measured-remainder rule in force; zero new concepts binding
 (reuse existing codes). Base unchanged 9754888. Replacement freeze with
 new SHA; delta re-gate then landing.
+
+## Second-freeze verdict (2026-08-18): HOLD — correction #2 ordered
+
+SHA c465a872. Mech gate: sha/base/apply/accounting/check 560-560 all
+clean before a concepts halt that was PM-brief error, resolved by
+carrying the first gate's ruling forward (gate norm: superseding-freeze
+briefs must carry prior rulings). Adversarial delta: HOLD.
+
+**What held, emphatically:** the ambiguity core survived 192 additional
+driven cases (168 library-level across 14 mutating shapes × 12 post-
+write behaviors + 24 real-CLI) with zero violations, and no remedy hint
+ever leaks onto an ambiguous mutation. The ACTUAL sandbox shape
+(metadata readable, connect denied on the socket) classifies correctly
+end-to-end with the right hint in both locales and no serve advice. The
+inverse error does not exist: an absent broker is never reported as a
+permission problem, and the SKILL conditioning preserved the correct
+start-the-broker path for the genuinely-absent case. zh-CN asserts the
+same facts. No information leakage.
+
+**F1 (blocking) — the state-dir denial fix does not fire.** cli.ts:678
+calls loadIdentity() BEFORE validateSocket(); federation-nodes.ts:98-101
+converts every non-ENOENT lstat error into
+INVALID_GATEWAY_CONFIGURATION → exit 2, retryable:false, "request
+rejected", no guidance — and CONFIGURATION.md:84 documents that code as
+an env-value problem, steering the operator toward relocating
+EMBASSY_STATE_DIR, the action this diff's own new paragraphs forbid.
+The new branch at cli.ts:449-455 is reachable only by a synthetic
+socket-only-metadata ACL no sandbox produces. The supporting test
+inherits the harness's loadNodeInventory stub — a green proof of
+behavior the binary does not have, in a test named "the real CLI
+preflight". CORRECTION: classify the denial where the FIRST state-dir
+syscall happens — the loader's errno path (EPERM/EACCES on
+lstat/open/read of the state dir or nodes.json) must surface as the
+denied classification (REUSE CONTROL_CONNECT_DENIED; identical remedy),
+while genuine env-value/parse failures keep
+INVALID_GATEWAY_CONFIGURATION. The proving test must run the UNWRAPPED
+CLI: no loadNodeInventory stub, no validateControlSocket stub, no
+sendRequest stub — all three seams named because each has now hollowed
+a test in this wave.
+
+**F2 (fold in) — the narrowing regressed at the copy layer.** cli.ts:746
+prints ONE hedged remedy for both CONTROL_VERSION_MISMATCH and
+CONTROL_INVALID_RESPONSE; a genuine integer mismatch now gets a
+fallback branch (restart) that cannot fix it and burns memory-only
+watches and settles in-flight work. CORRECTION: distinct copy key for
+VERSION_MISMATCH (rebuild/repoint only, no restart branch); the
+two-cause remedy stays only on INVALID_RESPONSE. Copy keys are not
+concepts.
+
+**F4 (fold in, wording)** — "for every Embassy call" is false for
+--version/--help/serve and understates the mechanism (the state-dir and
+nodes.json READS fail first, which is exactly F1's signature). One
+sentence each in CONFIGURATION.md, zh-CN, SKILL.md: every call that
+talks to the broker; reads of the state dir come first.
+
+**Recorded-accepted, NOT in the correction:** F3 — the two-cause remedy
+also prints on non-Embassy garbage and on await_peer correlation
+failures where "retry" is wrong; the error CODE stays precise and the
+hint is advisory; revisit if it bites (the correlation sub-case rides
+the terminal-message-semantics backlog line). F5 —
+CONTROL_SOCKET_MISSING is unreachable from the one-shot CLI (pre-flight
+always pre-empts) but genuinely reachable from the long-lived
+dashboard --live session; kept, reachability noted.
+
+**Budgets:** src ≤70, tests ≤130, docs itemized; measured-remainder
+rule; no new safe codes (copy keys excepted). Base unchanged 9754888 —
+emb-94 landed at da29280 but touches only service.ts + its test,
+disjoint from this slice; landing-tree re-verify covers the stack.
+Third freeze = new SHA; mech re-gate + targeted delta on the F1 path
+only.
