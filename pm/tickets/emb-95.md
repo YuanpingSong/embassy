@@ -298,3 +298,74 @@ Two items of record value despite the artifact being superseded:
    HOLD vacates a freeze while a gate is still running, the PM should
    notify the running gate agent; this flag cost nothing but could have
    cost a halt.
+
+## Third-freeze verdict (2026-08-18): HOLD — correction #3 ordered (narrow)
+
+SHA a771cf3e. MECH GATE CLEAN: accounting exact per-file (79/80, 126/130,
+docs 16), check 561/561, soak 1/1, concepts exact (the four
+pre-authorized codes, nothing beyond, no new mechanism), all EIGHT
+mutations pinned, and the unwrapped test verified genuinely unwrapped —
+it bypasses the stub wrapper by direct import alias, and mutating the
+REAL loader turns it red (impossible if stubbed). The remedy split, the
+denial discriminator (same dir: readable+no-broker → SOCKET_UNAVAILABLE
+vs denied → CONNECT_DENIED), and 18-key locale symmetry all verified.
+
+ADVERSARIAL DELTA: the denial matrix held five ways unwrapped (parent
+000, three ACL shapes, socket-only), boundaries held for eight
+prior-classification cases, no ownership masquerade (assertOwned
+precedes realpath/open — a hostile-planted path cannot present as
+denial), broker-down stays distinguishable, ambiguity sentinel intact
+after the cli.ts edit (incl. version-skewed and malformed replies to
+started writes staying AMBIGUOUS), --version/--help unaffected, no
+leakage. But: HOLD.
+
+**F1 (blocking, INTRODUCED by correction #2) — `embassy serve` on a
+denied state dir now claims "the broker may be running… Do not start a
+second broker."** serve calls the same loader (server.ts:132) before the
+instance lease, so the unscoped reclassification routes the boot path
+into the client-shaped denial hint — three false statements (no broker
+exists; nothing connected; the one correct action is prohibited), both
+locales, where base merely misclassified without asserting anything
+false. Compounds with SKILL.md:37 which tells the agent to run serve.
+CORRECTION: scope the denied classification to CLIENT calls; serve's
+loader failure gets a serve-appropriate honest message (cannot access
+the state directory due to local policy — grant access) with NO
+broker-may-be-running claim and NO second-broker prohibition.
+
+**F2 (fold in, one sentence)** — EMBASSY_STATE_DIR pointing at a
+genuinely inaccessible foreign path (root-owned target, typo) is
+byte-identical to the sandbox denial; the two need opposite actions and
+the errno cannot distinguish them. CORRECTION: hedge the denied hint in
+both locales: if access was expected to work, also verify
+EMBASSY_STATE_DIR points at this user's own state directory.
+
+**F4 (fold in) — three of four loader branches unpinned**; reverting the
+nodes.json open branch to the old convert-to-config behavior passes the
+ENTIRE suite, and that branch is real (ACL deny read on nodes.json
+alone, executed). CORRECTION: pin each REACHABLE branch (nodes.json
+lstat/open/read) with a mutation-red test. The realpath branch is
+unexercisable on macOS (root lstat always fails first): engineer's
+choice — delete the defensive branch or keep it with an honest
+unreachability comment; record which.
+
+**Recorded-accepted:** F3 — the unsafe-dir (0755) copy is unreachable
+because the loader's identical predicate refuses first with
+INVALID_GATEWAY_CONFIGURATION; PRE-EXISTING shape (base behaved the
+same), copy is live on the socket arm; noted, not corrected here. F5 —
+peer-stdio reports no access condition (pre-existing catch-all;
+docs name it as a broker call): joins the peer-stdio backlog family
+(--help absence, writeFailure message discard) for post-v2.0.0 pricing.
+Note: mode-000 state dir yields a third indistinguishable "request
+rejected" (mode check precedes errno) — defensible, recorded.
+
+**Budgets:** src ≤90 (was 80; target = measured), tests ≤160, docs
+itemized if touched; measured-remainder rule; no new safe codes.
+Fourth freeze = new SHA; gate = mech + micro-delta on serve behavior,
+the hedged hint, and the branch pins ONLY.
+
+Ledger note: three HOLDs on this slice, each correction fixing exactly
+what it aimed at while relocating the misdiagnosis one surface over —
+loader pre-empted CLI, then serve inherited the loader. The classifier
+is now right at every surface except the one that starts the broker;
+the ambiguity core never wobbled once across ~400 driven cases. This is
+what an honest-copy slice on a trust seam costs.
