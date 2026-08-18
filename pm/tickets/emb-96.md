@@ -70,3 +70,25 @@ or select by UUID) is documented nowhere an operator looks. Any fix must
 keep remedy text true in BOTH discovery states (truncated discovery does
 not clear the fence) and must reconcile or re-home the counter
 semantics.
+
+## Scope additions from emb-94's third review (2026-08-18)
+
+Preferred implementation, adopted from the review: ONE marked
+representative row per colliding alias in availablePeers —
+`safeErrorCode: PEER_ALIAS_COLLISION` on a single synthesized row —
+which satisfies unique(peers), makes the shipped alias_collision
+guidance reachable (dashboard-model.ts:680, peerIsSelectable false,
+dashboard-copy.en.ts:371 + zh-CN), and NAMES the colliding alias so the
+rename remedy is executable. Also owned here now: the A7 variant (a
+claude adapter supplying neither snapshot.registry nor
+latestRegistryObservation leaves a detected collision with zero
+diagnostic anywhere — contract permits it even though the shipped
+provider always returns registry); atomic fence apply (per-adapter or
+unconditional) + an honest invariant comment in refreshClaudeDiscovery;
+priority pinning of the collision diagnostic against the 32-code
+registry cap; and the code-point-sort straddle test (two synthetic codes
+across a `_` boundary) that pins publicRegistry ordering repo-wide.
+
+PM recommendation on record: promote this ticket into v2.0.0 — the
+fence (emb-94, landed da29280) deliberately creates a state that is
+currently invisible to the operator.

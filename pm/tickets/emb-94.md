@@ -3,7 +3,7 @@ id: emb-94
 title: v2.0 RELEASE BLOCKER — duplicate peer aliases invalidate the whole public snapshot
 kind: bug
 size: 1
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-18
 ---
@@ -263,3 +263,58 @@ never exercise re-fence). Zero new concepts binding. Base unchanged
 9754888. Third freeze = replacement SHA; mech re-gate + TARGETED
 adversarial delta (overflow, conflict code, pair freshness) — the
 negative space is now mapped twice and does not need a third full pass.
+
+## Third freeze: verdicts and LANDING (2026-08-18)
+
+SHA bded0016 (supersedes fc57b9b9). MECHANICAL GATE CLEAN: accounting
+exact (service.ts 60/75, tests 99/150), check 559/559, soak 1/1,
+hygiene clean, 8 of 9 mechanisms independently mutation-pinned. Row (i)
+(code-point sort) is present and correct but GREEN-BUT-LATENT — the
+comparators provably disagree over the legal code alphabet yet no test
+in the repo discriminates them (every fixture carries ≤1 distinct
+code); PM ruling: pinning test delegated to emb-96 (two-code straddle
+across a `_` boundary) rather than a fourth freeze for a latent-only
+hazard. Spot checks all as ordered: 257 colliding aliases → snapshot
+valid, zero selectable, full count reported; fenced alias → conflict
+while both UUIDs select; pair fences fresh state without a prior
+discovery tick.
+
+ADVERSARIAL DELTA: four of five correction claims HOLD outright
+(overflow fail-closed incl. boundary-oscillation over six adversarial
+refresh cycles and deterministic retention; sort fix genuine;
+fence→clear→re-fence byte-identical diagnostics; incomplete/complete
+evidence exact). Reviewer verdict was HOLD on F1: the fenced alias
+VANISHES from availablePeers rather than being MARKED, so the shipped
+alias_collision dashboard affordance stays dead and the operator cannot
+learn which alias to rename. PM OVERRULE, recorded transparently: the
+finding is CORRECT and is verbatim emb-96's deliverable, routed there
+BEFORE this review ran; the vanish behavior is unchanged across all
+three freezes (not a correction regression); the release blocker —
+snapshot death — is dead. The review's design direction (ONE marked
+representative row per colliding alias: satisfies unique(peers), lights
+the shipped affordance, names the alias) is adopted into emb-96 as the
+preferred implementation. PM RECOMMENDATION to founder: promote emb-96
+into the v2.0.0 release set — with the fence landed, collision is now a
+state the gateway deliberately creates, and shipping it invisible is
+the weakest part of the story.
+
+Folded into emb-96 from this review: the A7 zero-diagnostic variant
+(adapter supplying no registry → collision with no evidence anywhere);
+F2 non-atomic fence apply (any throw between candidate insert and fence
+apply restores the original bug — unreachable today with the single
+pinned adapter, but the diff's own comment understates the invariant;
+apply per-adapter or unconditionally, and correct the comment); F4
+(collision diagnostic has no priority pinning against the 32-code cap);
+the code-point-sort pinning test. Recorded-accepted (not emb-96): F5
+(+1 discovery scan per pair, incl. pairs with no Claude alias — consent
+events are rare; measured, accepted); F6 (UUID selector bypasses the
+pair fence and plants the ambiguous name on the edge — inside the
+standing scope ruling, operator-model residue); overflow aliases report
+not_found rather than conflict (rows discarded — legible only via the
+count; pathological state only).
+
+LANDED on public main as **da29280** from the gate tree the checks ran
+in (main had not moved from base 9754888, so gate tree = landing tree).
+Status: landed. emb-93's base is main AFTER emb-95 also lands — emb-93
+and emb-95 collide on control.ts and SKILL.md, so the green light waits
+for both.
