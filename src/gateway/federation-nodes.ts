@@ -34,6 +34,11 @@ export const isAttestedGatewayNodeInventory = (
 const invalid = (message: string): never => {
   throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", message);
 };
+const inaccessible = (error: unknown, message: string): never => {
+  if (isErrno(error, "EPERM") || isErrno(error, "EACCES"))
+    throw new BridgeError("CONTROL_CONNECT_DENIED", "Local policy denied access to the Embassy state directory.", true);
+  return invalid(message);
+};
 
 function assertOwned(uid: number, getuid: () => number | undefined): void {
   const expected = getuid();
@@ -97,7 +102,7 @@ export async function loadGatewayNodeInventory(
   let root: Awaited<ReturnType<typeof lstat>>;
   try { root = await inspect(stateDir); } catch (error) {
     if (isErrno(error, "ENOENT")) return required();
-    return invalid("The Embassy state directory for nodes.json cannot be safely verified.");
+    return inaccessible(error, "The Embassy state directory for nodes.json cannot be safely verified.");
   }
   if (root.isSymbolicLink() || !root.isDirectory() || (root.mode & 0o777) !== 0o700) {
     return invalid("The Embassy state directory for nodes.json must be a private mode-0700 directory.");
@@ -115,7 +120,7 @@ export async function loadGatewayNodeInventory(
     if (isErrno(error, "ENOENT")) {
       return required();
     }
-    return invalid("nodes.json cannot be safely inspected.");
+    return inaccessible(error, "nodes.json cannot be safely inspected.");
   }
   if (before.isSymbolicLink() || !before.isFile() ||
       (before.mode & 0o777) !== 0o600 || before.size > MAX_NODES_FILE_BYTES) {
@@ -126,8 +131,8 @@ export async function loadGatewayNodeInventory(
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await openFile(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  } catch {
-    return invalid("nodes.json cannot be safely opened.");
+  } catch (error) {
+    return inaccessible(error, "nodes.json cannot be safely opened.");
   }
   try {
     const opened = await handle.stat();
@@ -152,6 +157,9 @@ export async function loadGatewayNodeInventory(
       return invalid("nodes.json changed while it was being read.");
     }
     return parseInventory(buffer.subarray(0, offset).toString("utf8"));
+  } catch (error) {
+    if (error instanceof BridgeError) throw error;
+    return inaccessible(error, "nodes.json cannot be safely read.");
   } finally {
     await handle.close();
   }

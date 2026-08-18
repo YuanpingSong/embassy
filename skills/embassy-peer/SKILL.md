@@ -23,13 +23,18 @@ Accept a Claude session UUID only when the user supplies it or it is already par
 
 ## Check the gateway
 
+Before any Embassy client call that talks to the broker, the CLI reads the state
+directory and `nodes.json`, then connects to the private control socket. Grant a
+sandboxed Codex task that directory as a writable root, or approve equivalent
+local access. Do not relocate state or start a second broker to work around a denial.
+
 Run this before a state-changing operation:
 
 ```sh
 embassy health
 ```
 
-If Embassy is unavailable, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
+If Embassy is unavailable, follow any accompanying denied-access or unsafe-path guidance first. Only when no access or unsafe-path condition is reported, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
 Embassy presents Claude, Codex, DeepSeek, Grok, and shell peers as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
 

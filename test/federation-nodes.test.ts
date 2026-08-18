@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, open, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -96,5 +96,36 @@ test("rejects an inventory owned by another uid through the audit seam", async (
   await rejectsConfiguration(
     loadGatewayNodeInventory(stateDir, { getuid: () => 2 ** 31 - 1 }),
     /owned by the current process user/,
+  );
+});
+
+test("preserves permission-denied inventory inspection as a recoverable access failure", async () => {
+  const denied = Object.assign(new Error("private errno detail"), { code: "EACCES" });
+  await assert.rejects(loadGatewayNodeInventory("/private/state", {
+    lstat: async () => { throw denied; },
+  }), (error: unknown) => error instanceof BridgeError &&
+    error.code === "CONTROL_CONNECT_DENIED" && error.recoverable &&
+    !error.message.includes("EACCES"));
+});
+
+test("preserves denied nodes.json lstat, open, and read branches independently", async (t) => {
+  const stateDir = await stateFixture(t);
+  const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: [] });
+  const denied = () => Object.assign(new Error("private errno detail"), { code: "EACCES" });
+  const cases = [
+    { lstat: (async (target: string) => {
+      if (target === filePath) throw denied();
+      return await lstat(target);
+    }) as typeof lstat },
+    { open: (async () => { throw denied(); }) as typeof open },
+    { open: (async (target: string, flags: number) => {
+      const handle = await open(target, flags);
+      handle.read = (async () => { throw denied(); }) as typeof handle.read;
+      return handle;
+    }) as typeof open },
+  ];
+  for (const dependencies of cases) await assert.rejects(
+    loadGatewayNodeInventory(stateDir, dependencies),
+    (error: unknown) => error instanceof BridgeError && error.code === "CONTROL_CONNECT_DENIED",
   );
 });

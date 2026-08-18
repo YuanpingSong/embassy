@@ -48,8 +48,14 @@ export const cliCopyZhCn = {
     "dashboard 需要 --live；静态文件由 serve 和 refresh-dashboard 发布。",
   "hint.dashboardPortInUse":
     "实时仪表盘端口 {port} 已被占用；请关闭占用进程，或使用 --port <n> 选择其他端口。",
+  "hint.controlConnectDenied":
+    "网关进程可能仍在运行，但当前进程无权连接；请授予此任务对网关状态目录的写入权限，然后重试。请勿启动第二个网关进程。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。",
   "hint.controlInvalidResponse":
-    "客户端与网关进程的版本可能不一致；请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。",
+    "如果任一 Embassy 安装近期发生变化，请重新构建客户端或将其重新指向网关进程所用的安装；否则请重启网关进程，然后重试。",
+  "hint.controlVersionMismatch":
+    "请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。",
+  "hint.stateAccessDenied":
+    "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。",
   "hint.messageTooLarge":
     "消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。",
   "hint.nodeInventoryRequired":
@@ -64,7 +70,7 @@ export const cliCopyZhCn = {
   "error.ambiguous": "结果不确定；请勿自动重试。",
   "error.failure": "命令失败。",
   "error.unsafe":
-    "网关状态目录或套接字的权限或所有者异常。请先确认该路径未被其他进程控制，再运行 embassy serve。",
+    "网关状态目录或套接字的权限或所有者异常。请核对精确路径、所有者和模式后再重试。",
   "error.tokenUnknown": "无法识别该投递令牌；它可能已过期，或已超出有界保留范围。",
   "error.deliveryTimeout":
     "该投递尚未结算；网关仍在运行。请稍后使用 embassy delivery-status 再次查询。",

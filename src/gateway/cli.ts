@@ -446,7 +446,13 @@ export async function validatePrivateGatewayControlSocket(
   let state, socket;
   try {
     [state, socket] = await Promise.all([lstat(stateDir), lstat(socketPath)]);
-  } catch { throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true); }
+  } catch (error) {
+    const code = error !== null && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code : undefined;
+    if (code === "EPERM" || code === "EACCES")
+      throw new CliFault("CONTROL_CONNECT_DENIED", true, "hint.controlConnectDenied");
+    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
+  }
   const uid = process.getuid?.();
   if (state.isSymbolicLink() || !state.isDirectory() || (state.mode & 0o777) !== 0o700 || (uid !== undefined && state.uid !== uid)) {
     throw new CliFault("CONTROL_STATE_UNSAFE", false, undefined, "unsafe");
@@ -737,9 +743,13 @@ export async function runGatewayCli(
         ambiguous, retryable: ambiguous ? false : error.recoverable,
         kind: ambiguous ? "ambiguous" : "unavailable",
       });
-      if (error.code === "CONTROL_INVALID_RESPONSE") {
+      if (error.code === "CONTROL_VERSION_MISMATCH") {
+        stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlVersionMismatch"]}\n`);
+      } else if (error.code === "CONTROL_INVALID_RESPONSE") {
         stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlInvalidResponse"]}\n`);
       }
+      if (error.code === "CONTROL_CONNECT_DENIED")
+        stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlConnectDenied"]}\n`);
       return ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable;
     }
     if (error instanceof CliFault) {
@@ -763,6 +773,8 @@ export async function runGatewayCli(
         retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
       writeStateResetHint(stderr, locale, error.code);
+      if (error.code === "CONTROL_CONNECT_DENIED") stderr.write(`[embassy] ${getCliCopy(locale)[
+        command === "serve" ? "hint.stateAccessDenied" : "hint.controlConnectDenied"]}\n`);
       if (error.code === "GATEWAY_NODE_INVENTORY_REQUIRED") {
         const stateDir = env.EMBASSY_STATE_DIR ?? (env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, "agent-embassy") : "~/.local/state/agent-embassy");
         stderr.write(`[embassy] ${getCliCopy(locale)["hint.nodeInventoryRequired"].replace("{stateDir}", stateDir)}\n`);

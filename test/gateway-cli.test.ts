@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -1137,12 +1137,12 @@ test("all five stderr categories localize without changing stdout protocol", asy
   }
 });
 
-test("invalid live-upgrade control responses name version skew and client recovery", async () => {
+test("genuine control-version mismatches name version skew and client recovery", async () => {
   const expected = {
     en:
-      "[embassy] gateway unavailable.\n[embassy] client/broker version skew is likely; rebuild or repoint this client to the broker's Embassy installation, then retry.\n",
+      "[embassy] gateway unavailable.\n[embassy] rebuild or repoint this client to the broker's Embassy installation, then retry.\n",
     "zh-CN":
-      "[embassy] 网关不可用。\n[embassy] 客户端与网关进程的版本可能不一致；请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。\n",
+      "[embassy] 网关不可用。\n[embassy] 请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。\n",
   } as const;
 
   for (const locale of ["en", "zh-CN"] as const) {
@@ -1164,7 +1164,7 @@ test("invalid live-upgrade control responses name version skew and client recove
       validateControlSocket: async () => undefined,
       sendRequest: async () => {
         throw new GatewayControlTransportError(
-          "CONTROL_INVALID_RESPONSE",
+          "CONTROL_VERSION_MISMATCH",
           "private skew detail",
         );
       },
@@ -1175,7 +1175,7 @@ test("invalid live-upgrade control responses name version skew and client recove
       ok: false,
       command: "health",
       error: {
-        code: "CONTROL_INVALID_RESPONSE",
+        code: "CONTROL_VERSION_MISMATCH",
         ambiguous: false,
         retryable: true,
       },
@@ -1185,6 +1185,32 @@ test("invalid live-upgrade control responses name version skew and client recove
       `${stdout.chunks.join("")} ${stderr.chunks.join("")}`,
       /private skew detail/,
     );
+  }
+});
+
+test("connect denial and invalid responses print their distinct honest remedies", async () => {
+  const hints = {
+    en: {
+      CONTROL_CONNECT_DENIED: "[embassy] the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.\n",
+      CONTROL_INVALID_RESPONSE: "[embassy] if either Embassy installation changed recently, rebuild or repoint this client to the broker's installation; otherwise restart the broker, then retry.\n",
+    },
+    "zh-CN": {
+      CONTROL_CONNECT_DENIED: "[embassy] 网关进程可能仍在运行，但当前进程无权连接；请授予此任务对网关状态目录的写入权限，然后重试。请勿启动第二个网关进程。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。\n",
+      CONTROL_INVALID_RESPONSE: "[embassy] 如果任一 Embassy 安装近期发生变化，请重新构建客户端或将其重新指向网关进程所用的安装；否则请重启网关进程，然后重试。\n",
+    },
+  } as const;
+  for (const locale of ["en", "zh-CN"] as const) for (const code of
+    ["CONTROL_CONNECT_DENIED", "CONTROL_INVALID_RESPONSE"] as const) {
+    const stdout = capture(), stderr = capture();
+    await runGatewayCli(["health", "--lang", locale], { env: {}, stdout, stderr,
+      loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+        steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
+      validateControlSocket: async () => undefined,
+      sendRequest: async () => { throw new GatewayControlTransportError(code, "private detail"); } });
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, code);
+    assert.match(stderr.chunks.join(""), new RegExp(hints[locale][code].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    if (code === "CONTROL_CONNECT_DENIED") assert.doesNotMatch(stderr.chunks.join(""), /embassy serve/);
   }
 });
 
@@ -2300,9 +2326,42 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
   });
   assert.equal(
     result.stderr,
-    "[embassy] gateway state directory or socket has unexpected permissions or ownership. Verify nothing else controls that path before running embassy serve.\n",
+    "[embassy] gateway state directory or socket has unexpected permissions or ownership. Verify the exact path, owner, and modes before retrying.\n",
   );
   assert.doesNotMatch(result.stdout, new RegExp(state.root.replaceAll("/", "\\/")));
+});
+
+test("the unwrapped CLI reports an inaccessible inventory path as denied", async (t) => {
+  const state = await privateState();
+  const server = await startGatewayControlServer({ stateDir: state.stateDir, socketPath: state.socketPath,
+    handlers: { health: () => ({ status: "ok", revision: 1 }) } as GatewayControlHandlers });
+  t.after(async () => await server.close());
+  const canonicalStateDir = await realpath(state.stateDir);
+  const actual = async (argv: string[] = ["health"]) => {
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCliBase(argv, {
+      env: { EMBASSY_STATE_DIR: canonicalStateDir }, stdin: input(), stdout, stderr,
+    });
+    return { code, stdout: stdout.chunks.join(""), stderr: stderr.chunks.join("") };
+  };
+  const baseline = await actual();
+  assert.equal(baseline.code, gatewayCliExitCodes.ok, JSON.stringify(baseline));
+  await chmod(state.root, 0o000);
+  try {
+    const result = await actual();
+    assert.equal(result.code, gatewayCliExitCodes.unavailable);
+    assert.equal(JSON.parse(result.stdout).error.code, "CONTROL_CONNECT_DENIED");
+    assert.match(result.stderr, /grant this task write access/);
+    assert.match(result.stderr, /EMBASSY_STATE_DIR/);
+    assert.doesNotMatch(result.stderr, /embassy serve/);
+    for (const [locale, hint] of [["en", "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker."],
+      ["zh-CN", "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。"]] as const) {
+      const serve = await actual(["serve", "--lang", locale]);
+      assert.equal(serve.code, gatewayCliExitCodes.unavailable);
+      assert.match(serve.stderr, new RegExp(hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.doesNotMatch(serve.stderr, /broker may be running|网关进程可能仍在运行|second broker|第二个网关/);
+    }
+  } finally { await chmod(state.root, 0o700); }
 });
 
 test("oversized stdin renders its localized hint while generic input rejection does not", async () => {

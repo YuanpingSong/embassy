@@ -1853,6 +1853,32 @@ test("client bounds time and output and rejects malformed responses", async () =
       !error.message.includes(THREAD_ID),
   );
   await closeTrackedServer(malformed.server, malformed.connections);
+
+  const skewed = trackedServer((socket) => socket.end(`${JSON.stringify({
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION + 1,
+    ok: true, result: { status: "ok", revision: 1 },
+  })}\n`));
+  await new Promise<void>((resolve, reject) => {
+    skewed.server.once("error", reject); skewed.server.listen(socketPath, resolve);
+  });
+  await assert.rejects(sendGatewayControlRequest({ socketPath, request: {
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {},
+  } }), (error: unknown) => error instanceof GatewayControlTransportError &&
+    error.code === "CONTROL_VERSION_MISMATCH");
+  await closeTrackedServer(skewed.server, skewed.connections);
+  for (const protocolVersion of [undefined, "2"] as const) {
+    const invalidVersion = trackedServer((socket) => socket.end(`${JSON.stringify({
+      protocolVersion, ok: true, result: { status: "ok", revision: 1 },
+    })}\n`));
+    await new Promise<void>((resolve, reject) => {
+      invalidVersion.server.once("error", reject); invalidVersion.server.listen(socketPath, resolve);
+    });
+    await assert.rejects(sendGatewayControlRequest({ socketPath, request: {
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {},
+    } }), (error: unknown) => error instanceof GatewayControlTransportError &&
+      error.code === "CONTROL_INVALID_RESPONSE");
+    await closeTrackedServer(invalidVersion.server, invalidVersion.connections);
+  }
 });
 
 test("client marks only lost mutation responses ambiguous after write starts", async () => {
@@ -1960,10 +1986,34 @@ test("client marks only lost mutation responses ambiguous after write starts", a
     }),
     (error: unknown) =>
       error instanceof GatewayControlTransportError &&
-      error.code === "CONTROL_CONNECT_FAILED" &&
+      error.code === "CONTROL_SOCKET_MISSING" &&
       !error.ambiguous &&
       error.recoverable,
   );
 
   assert.equal((await lstat(stateDir)).isDirectory(), true);
+});
+
+test("client distinguishes denied, missing, and unserved control sockets", async () => {
+  const { socketPath } = await privateState();
+  const request = { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+    method: "health" as const, params: {} };
+  const createConnection = net.createConnection;
+  try {
+    for (const [systemCode, expected] of [["EPERM", "CONTROL_CONNECT_DENIED"],
+      ["ENOENT", "CONTROL_SOCKET_MISSING"], ["ECONNREFUSED", "CONTROL_LISTENER_UNAVAILABLE"]] as const) {
+      net.createConnection = (() => { const socket = new net.Socket(); queueMicrotask(() =>
+        socket.emit("error", Object.assign(new Error("connect failed"), { code: systemCode }))); return socket;
+      }) as typeof net.createConnection;
+      await assert.rejects(sendGatewayControlRequest({ socketPath, request }),
+        (error: unknown) => error instanceof GatewayControlTransportError && error.code === expected);
+    }
+    net.createConnection = (() => { const socket = new net.Socket();
+      socket.write = (() => true) as typeof socket.write;
+      queueMicrotask(() => { socket.emit("connect"); socket.emit("error",
+        Object.assign(new Error("post-connect denied"), { code: "EPERM" })); }); return socket;
+    }) as typeof net.createConnection;
+    await assert.rejects(sendGatewayControlRequest({ socketPath, request }),
+      (error: unknown) => error instanceof GatewayControlTransportError && error.code === "CONTROL_CONNECT_FAILED");
+  } finally { net.createConnection = createConnection; }
 });

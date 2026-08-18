@@ -48,8 +48,14 @@ Options:
     "dashboard requires --live; static files are published by serve and refresh-dashboard.",
   "hint.dashboardPortInUse":
     "live dashboard port {port} is already in use; close the holding process or choose another with --port <n>.",
+  "hint.controlConnectDenied":
+    "the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   "hint.controlInvalidResponse":
-    "client/broker version skew is likely; rebuild or repoint this client to the broker's Embassy installation, then retry.",
+    "if either Embassy installation changed recently, rebuild or repoint this client to the broker's installation; otherwise restart the broker, then retry.",
+  "hint.controlVersionMismatch":
+    "rebuild or repoint this client to the broker's Embassy installation, then retry.",
+  "hint.stateAccessDenied":
+    "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker.",
   "hint.messageTooLarge":
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
   "hint.nodeInventoryRequired":
@@ -64,7 +70,7 @@ Options:
   "error.ambiguous": "outcome ambiguous; do not retry automatically.",
   "error.failure": "command failed.",
   "error.unsafe":
-    "gateway state directory or socket has unexpected permissions or ownership. Verify nothing else controls that path before running embassy serve.",
+    "gateway state directory or socket has unexpected permissions or ownership. Verify the exact path, owner, and modes before retrying.",
   "error.tokenUnknown":
     "delivery token not recognized; it may have expired or left bounded retention.",
   "error.deliveryTimeout":

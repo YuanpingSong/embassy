@@ -225,9 +225,13 @@ const TRANSPORT_MESSAGES: Record<string, string> = {
   SOCKET_PERMISSION_FAILED: "The gateway control socket permissions could not be secured.",
   SOCKET_CLEANUP_CONFLICT: "The gateway control socket path changed during cleanup.",
   CONTROL_CONNECT_FAILED: "The gateway control socket could not be reached.",
+  CONTROL_CONNECT_DENIED: "The gateway control socket connection was denied by local policy.",
+  CONTROL_SOCKET_MISSING: "The gateway control socket does not exist at the configured path.",
+  CONTROL_LISTENER_UNAVAILABLE: "Nothing is listening on the gateway control socket.",
   CONTROL_TIMEOUT: "The gateway control request timed out.",
   CONTROL_RESPONSE_TOO_LARGE: "The gateway control response exceeds the client limit.",
   CONTROL_INVALID_RESPONSE: "The gateway returned an invalid control response. Restart the broker, then retry.",
+  CONTROL_VERSION_MISMATCH: "The gateway control protocol version does not match this client.",
   CONTROL_CONNECTION_CLOSED: "The gateway closed before returning a control response.",
   CONTROL_OUTCOME_AMBIGUOUS: "The gateway may have applied the control mutation before the response was lost; do not retry automatically.",
 };
@@ -730,7 +734,9 @@ function serializeResponse(response: GatewayControlResponse): Buffer {
   } catch { return Buffer.from(`${JSON.stringify(errorResponse("INVALID_HANDLER_RESPONSE"))}\n`); } }
 
 type FrameFailure = "closed" | "error" | "timeout" | "too_large" | "multiple";
-class FrameFault extends Error { constructor(readonly kind: FrameFailure) { super(kind); } }
+class FrameFault extends Error {
+  constructor(readonly kind: FrameFailure, readonly systemCode?: string) { super(kind); }
+}
 function readOneFrame(socket: Socket, maximum: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     let buffered = Buffer.alloc(0); let settled = false;
@@ -749,7 +755,7 @@ function readOneFrame(socket: Socket, maximum: number): Promise<Buffer> {
     };
     const onEnd = (): void => finish(new FrameFault("closed")); const onTimeout = (): void => finish(new FrameFault("timeout"));
     socket.on("data", onData); socket.once("end", onEnd); socket.once("timeout", onTimeout);
-    socket.once("error", () => finish(new FrameFault("error")));
+    socket.once("error", (error: NodeJS.ErrnoException) => finish(new FrameFault("error", error.code)));
   });
 }
 function respond(socket: Socket, response: GatewayControlResponse): void {
@@ -1098,7 +1104,8 @@ export async function startGatewayControlServer(
 }
 
 function decodeResponse<M extends GatewayControlMethod>(method: M, params: RequestParams[M], value: unknown): GatewayControlResponse<M> {
-  if (!isRecord(value) || value.protocolVersion !== GATEWAY_CONTROL_PROTOCOL_VERSION) throw controlTransportError("CONTROL_INVALID_RESPONSE");
+  if (!isRecord(value) || !Number.isSafeInteger(value.protocolVersion)) throw controlTransportError("CONTROL_INVALID_RESPONSE");
+  if (value.protocolVersion !== GATEWAY_CONTROL_PROTOCOL_VERSION) throw controlTransportError("CONTROL_VERSION_MISMATCH");
   if (value.ok === false) {
     if (!shape(value, { protocolVersion: oneOf(GATEWAY_CONTROL_PROTOCOL_VERSION), ok: oneOf(false), error: (item) =>
       shape(item, { code: (code) => typeof code === "string" && Object.hasOwn(WIRE_ERROR_MESSAGES, code),
@@ -1148,12 +1155,18 @@ export async function sendGatewayControlRequest<M extends GatewayControlMethod>(
       try {
         const response = decodeResponse(options.request.method, request.params as RequestParams[M], decodeJson(responseFrame, "INVALID_JSON"));
         if (!settled) { settled = true; socket.destroy(); resolve(response); }
-      } catch { fail(controlTransportError("CONTROL_INVALID_RESPONSE")); }
+      } catch (error) { fail(error instanceof GatewayControlTransportError
+        ? error : controlTransportError("CONTROL_INVALID_RESPONSE")); }
     }, (error: unknown) => {
       const kind = error instanceof FrameFault ? error.kind : "error";
+      const systemCode = !writeStarted && error instanceof FrameFault ? error.systemCode : undefined;
       const code = kind === "timeout" ? "CONTROL_TIMEOUT" :
         kind === "too_large" ? "CONTROL_RESPONSE_TOO_LARGE" :
-          kind === "closed" ? "CONTROL_CONNECTION_CLOSED" : "CONTROL_CONNECT_FAILED";
+          kind === "closed" ? "CONTROL_CONNECTION_CLOSED" :
+            systemCode === "EPERM" || systemCode === "EACCES"
+              ? "CONTROL_CONNECT_DENIED" : systemCode === "ENOENT"
+                ? "CONTROL_SOCKET_MISSING" : systemCode === "ECONNREFUSED"
+                  ? "CONTROL_LISTENER_UNAVAILABLE" : "CONTROL_CONNECT_FAILED";
       fail(controlTransportError(code));
     });
   });
