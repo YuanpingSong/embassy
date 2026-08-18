@@ -251,3 +251,17 @@ emb-94 landed at da29280 but touches only service.ts + its test,
 disjoint from this slice; landing-tree re-verify covers the stack.
 Third freeze = new SHA; mech re-gate + targeted delta on the F1 path
 only.
+
+## Contest ruling #1 on correction #2 (2026-08-18) — GRANTED
+
+Engineer measured the first coherent cut at 79 src (cap 70): cli-copy.en
+8, cli-copy.ts 2, cli-copy.zh-CN 8, cli.ts 16, control.ts 23,
+federation-nodes.ts 22. The +9 is the ruling's own thoroughness — the
+full first-failure boundary in the loader (root lstat, canonical
+resolution, nodes.json lstat/open/read) plus the distinct
+VERSION_MISMATCH copy key in both locales. The named compression
+alternatives each violate the order. GRANTED: src ≤80, target 79.
+federation-nodes.ts formally joins the window (implicit in correction
+#2's "classify where the first syscall happens"; made explicit here).
+All other caps and scope unchanged: tests ≤130 (measured 122), docs 16,
+no new safe codes. Freeze itemizes per file as measured.
