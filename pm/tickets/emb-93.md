@@ -87,3 +87,21 @@ riding doc fixes (README federation line at README.md:227, peer-stdio
 missing from --help, release-note line for emb-88's token/busyPolicy
 narrowings), then both machines install and run the reset drill, then
 the cross-machine message proof with this-mac.
+
+## Contest ruling #1 (2026-08-18) — GRANTED, with a premise correction
+
+Engineer disproved part of the binding against the fresh base: the
+ticket (via emb-90's review) called SelectClaudeParams.codexThreadId
+"decoded and read by nobody" — true of the SERVICE, but cli.ts:378-385
+still PRODUCES the field from inherited CODEX_THREAD_ID. A parser-only
+cut would leave the CLI emitting a key the closed v2 decoder refuses:
+every select-claude run inside a Codex task would break, shipped as a
+"dead code" cut. The complete dead-authority cut is producer + parser +
+consumers: cli.ts 11, control.ts 23, service.ts 4 = 38 changed, net −24.
+
+GRANTED: src ≤40, target 38. All other caps and scope unchanged. The
+binding's premise paragraph is corrected by this ruling; the deletion
+REMAINS correct under founder option (a) — the field carried authority
+nothing enforced — but the cut is now honest about what it removes.
+Verifying-against-the-moved-base before editing is the standard; this
+contest is the standard working.
