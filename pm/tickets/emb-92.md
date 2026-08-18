@@ -60,3 +60,31 @@ freeze. After landing, the PM runs the m5dev broker from the main build
 (operator step, PM-side) and the engineer completes `select-claude` to
 the PM session. Until then, coordination rides the records branch and
 founder relay.
+
+## Contest ruling #1 (2026-08-18)
+
+Engineer found the anticipated seam before editing: emitting the real
+`"bg"` kind requires widening `GatewayAdapterDiscovery.kind`
+(src/gateway/service.ts:102) from `"interactive"` to
+`"interactive" | "bg"` — a shared file frozen under emb-90.
+
+GRANTED: exactly that one line in service.ts joins emb-92's window.
+Conditions: (a) it is the ONLY service.ts change — a second line there
+is a new contest; (b) src cap unchanged (≤40; engineer projects a
+comfortable fit); (c) sequencing: emb-90 is gate-clean (555/555,
+accounting exact) with adversarial review in flight and is expected to
+land on main imminently — before freezing, fetch, and if main has moved
+past 788a6f3, rebase the lane onto the landed tip and freeze with that
+base; if emb-90 is still unlanded at freeze time, freeze on 788a6f3 and
+declare the service.ts line explicitly in the freeze message. Landing
+order is the PM's problem, not the engineer's.
+
+Ops note (same exchange): the earlier registration failure was
+CLI-side — v1.9.5 `register-codex` defaults `--host` to `this-mac`
+(cli.ts:31) and faults when the alias suffix disagrees (cli.ts:349-354).
+Verified against broker-side validation (server.ts:143 derives
+allowedHosts from the nodes inventory = [m5dev, this-mac];
+service.ts:995 requires the alias to end with the broker hostId):
+`embassy register-codex --alias codex-embassy-swe3@m5dev --host m5dev`
+is the correct invocation on this host. The --host flag dies in v2.0
+(emb-89 already deleted it on main).
