@@ -128,3 +128,29 @@ alternative if the PM session's auto-name proves digit-start at
 switch-on: name the session (named bg sessions exist in production —
 `screenshot-main`); if bg sessions prove un-nameable, that fact comes
 back to the founder as a decision point, not into this slice.
+
+## Contest ruling #3 (2026-08-18) — GRANTED
+
+Engineer's pre-freeze adversarial pass found the real blocker: the
+supervised helper still rejects bg sessions at both round-trip
+boundaries — claude-helper.ts:63-66 (inbound requires kind
+"interactive"; a bg reply expires CLAUDE_SOURCE_ROUTE_STALE) and
+claude-helper.ts:96-100 (outbound prep requires "interactive"; a
+selected bg target fails CLAUDE_ROUTE_MISMATCH). Provider/service
+fixtures bypassed the helper, so the green 557/557 did not prove
+acceptance criterion 2 — the exact green-suite-proves-the-wrong-thing
+class emb-90's F2 just taught us. Caught before freeze by the
+engineer's own verification. That is the protocol at its best.
+
+GRANTED: (a) src/gateway/claude-helper.ts joins the window for exactly
+those two predicates — widened to admit "bg" alongside "interactive";
+daemon/daemon-worker remain excluded at BOTH helper boundaries, same as
+everywhere else; (b) the existing production-helper fixture in
+test/gateway-claude-helper.test.ts flips kind "interactive" → "bg",
+proving both directions through the real child — if both kinds can be
+parametrized within budget, prefer that; otherwise the flip stands
+(interactive safety is structural: the predicate widens, never
+replaces); (c) src cap unchanged (≤40; 12 projected); tests cap raised
+80 → 82 as requested — asking for 2 lines instead of golfing them away
+is accounting honesty, granted on sight; (d) R stays R3. Freeze must
+itemize the claude-helper.ts lines in the src bucket.
