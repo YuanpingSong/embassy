@@ -7,7 +7,10 @@ import {
   gatewayCliExitCodes,
   type GatewayCliDependencies,
 } from "../src/gateway/cli.js";
-import { GatewayControlTransportError } from "../src/gateway/control.js";
+import {
+  GATEWAY_CONTROL_PROTOCOL_VERSION,
+  GatewayControlTransportError,
+} from "../src/gateway/control.js";
 import {
   DEFAULT_LIVE_DASHBOARD_PORT,
   createGatewayLiveDashboardActions,
@@ -336,7 +339,7 @@ test("live command validates private state, opens one scrubbed stable URL, and w
         events.push("observe");
         observedRequests.push(options);
         return {
-          protocolVersion: 1,
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
           ok: true,
           result: { snapshotRevision: 7, snapshot: emptySnapshot() },
         };
@@ -418,7 +421,7 @@ test("live command validates private state, opens one scrubbed stable URL, and w
     {
       socketPath: CONTROL_SOCKET_PATH,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "observe_snapshot",
         params: {},
       },
@@ -455,13 +458,13 @@ test("live dashboard actions forward only the four closed control methods", asyn
       ).request.method;
       if (method === "unpair") {
         return {
-          protocolVersion: 1,
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
           ok: true,
           result: { accepted: false, code: "busy" },
         };
       }
       return {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: true,
         result: {
           accepted: true,
@@ -501,7 +504,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
     {
       socketPath: CONTROL_SOCKET_PATH,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "pair",
         params: {
           aliases: ["claude-reviewer@this-mac", "codex-builder@this-mac"],
@@ -511,7 +514,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
     {
       socketPath: CONTROL_SOCKET_PATH,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "unpair",
         params: {
           aliases: ["grok-builder@this-mac", "dsh-reviewer@this-mac"],
@@ -521,7 +524,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
     {
       socketPath: CONTROL_SOCKET_PATH,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "remove_codex_registration",
         params: { alias: "codex-orphan@this-mac" },
       },
@@ -529,7 +532,7 @@ test("live dashboard actions forward only the four closed control methods", asyn
     {
       socketPath: CONTROL_SOCKET_PATH,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "refresh_dashboard",
         params: {},
       },
@@ -915,7 +918,7 @@ test("observer rejects a closed broker error without exposing its wire diagnosti
   const observer = createGatewayLiveDashboardObserver(
     CONTROL_SOCKET_PATH,
     (async () => ({
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       ok: false,
       error: { code: "HANDLER_FAILURE", message: "private broker detail" },
     })) as NonNullable<LiveDashboardCommandOptions["sendRequest"]>,

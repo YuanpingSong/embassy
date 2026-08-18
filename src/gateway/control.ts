@@ -32,7 +32,7 @@ import { decodePeerParams, decodePeerResult, type PeerCatalogResult,
   type PeerHandoffParams, type PeerHandoffResult } from "./peer-protocol.js";
 import { isPeerMailboxAwaitResult, type PeerMailboxAwaitResult } from "./peer-mailbox.js";
 
-export const GATEWAY_CONTROL_PROTOCOL_VERSION = 1 as const;
+export const GATEWAY_CONTROL_PROTOCOL_VERSION = 2 as const;
 export const GATEWAY_CONTROL_MAX_FRAME_BYTES = 32 * 1024;
 export const GATEWAY_CONTROL_MAX_RESPONSE_BYTES = 256 * 1024;
 export const GATEWAY_CONTROL_MAX_MESSAGE_BYTES = 16 * 1024;
@@ -77,24 +77,10 @@ export type ValidatedRegisterCodexParams = {
 export type UnregisterCodexParams = { alias: string; threadId: string };
 export type RemoveCodexRegistrationParams = { alias: string };
 export type SelectClaudeParams = { alias: string; codexThreadId?: string };
-export type LegacyPairParams = {
-  claudeAlias: string; codexAlias: string; codexThreadId?: string;
-};
-export type GenericPairParams = {
+export type PairParams = {
   aliases: readonly [string, string];
   threadAttestation?: Readonly<{ alias: string; threadId: string }>;
 };
-export type PairParams = LegacyPairParams | GenericPairParams;
-export function pairParamAliases(params: Readonly<PairParams>): readonly [string, string] {
-  return "aliases" in params ? params.aliases : [params.claudeAlias, params.codexAlias];
-}
-export function pairParamThreadAttestation(
-  params: Readonly<PairParams>,
-): Readonly<{ alias: string; threadId: string }> | undefined {
-  if ("aliases" in params) return params.threadAttestation;
-  return params.codexThreadId === undefined
-    ? undefined : { alias: params.codexAlias, threadId: params.codexThreadId };
-}
 type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean; trackIdleMinutes?: number };
 type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
 export type SendToClaudeParams = SendBase & ({ threadId: string; peerToken?: never } | { peerToken: string; threadId?: never });
@@ -136,10 +122,10 @@ type ValidatedParams = Omit<RequestParams, "register_codex" | "send_to_claude" |
   send_to_codex: ValidatedSendToCodexParams;
 };
 export type GatewayControlRequest = {
-  [M in GatewayControlMethod]: { protocolVersion: 1; method: M; params: RequestParams[M] }
+  [M in GatewayControlMethod]: { protocolVersion: typeof GATEWAY_CONTROL_PROTOCOL_VERSION; method: M; params: RequestParams[M] }
 }[GatewayControlMethod];
 type ValidatedGatewayControlRequest = {
-  [M in GatewayControlMethod]: { protocolVersion: 1; method: M; params: ValidatedParams[M] }
+  [M in GatewayControlMethod]: { protocolVersion: typeof GATEWAY_CONTROL_PROTOCOL_VERSION; method: M; params: ValidatedParams[M] }
 }[GatewayControlMethod];
 
 export type GatewayDecisionCode =
@@ -211,10 +197,10 @@ export type GatewayWireErrorCode =
   | "UNKNOWN_METHOD" | "MULTIPLE_FRAMES" | "SERVER_BUSY" | "REQUEST_TIMEOUT"
   | "HANDLER_FAILURE" | "INVALID_HANDLER_RESPONSE" | "RESPONSE_TOO_LARGE";
 export type GatewayControlErrorResponse = {
-  protocolVersion: 1; ok: false; error: { code: GatewayWireErrorCode; message: string };
+  protocolVersion: typeof GATEWAY_CONTROL_PROTOCOL_VERSION; ok: false; error: { code: GatewayWireErrorCode; message: string };
 };
 export type GatewayControlSuccessResponse<M extends GatewayControlMethod = GatewayControlMethod> = {
-  protocolVersion: 1; ok: true; result: ResultByMethod[M];
+  protocolVersion: typeof GATEWAY_CONTROL_PROTOCOL_VERSION; ok: true; result: ResultByMethod[M];
 };
 export type GatewayControlResponse<M extends GatewayControlMethod = GatewayControlMethod> =
   GatewayControlSuccessResponse<M> | GatewayControlErrorResponse;
@@ -447,31 +433,18 @@ function decodeSelection(value: unknown): SelectClaudeParams {
     ...(value.codexThreadId === undefined ? {} : { codexThreadId: value.codexThreadId.toLowerCase() }) };
 }
 function decodePair(value: unknown): PairParams {
-  if (!isRecord(value)) invalid();
-  if (Object.hasOwn(value, "aliases")) {
-    if (!exact(value, ["aliases"], ["threadAttestation"]) || !Array.isArray(value.aliases) ||
-        value.aliases.length !== 2 || !alias(value.aliases[0]) || !alias(value.aliases[1]) ||
-        value.aliases[0] === value.aliases[1]) invalid();
-    let threadAttestation: GenericPairParams["threadAttestation"];
-    if (value.threadAttestation !== undefined) {
-      if (!shape(value.threadAttestation, { alias, threadId: uuid }) ||
-          !value.aliases.includes(value.threadAttestation.alias)) invalid();
-      threadAttestation = { alias: value.threadAttestation.alias as string,
-        threadId: (value.threadAttestation.threadId as string).toLowerCase() };
-    }
-    return { aliases: [value.aliases[0], value.aliases[1]],
-      ...(threadAttestation === undefined ? {} : { threadAttestation }) };
+  if (!isRecord(value) || !exact(value, ["aliases"], ["threadAttestation"]) || !Array.isArray(value.aliases) ||
+      value.aliases.length !== 2 || !alias(value.aliases[0]) || !alias(value.aliases[1]) ||
+      value.aliases[0] === value.aliases[1]) invalid();
+  let threadAttestation: PairParams["threadAttestation"];
+  if (value.threadAttestation !== undefined) {
+    if (!shape(value.threadAttestation, { alias, threadId: uuid }) ||
+        !value.aliases.includes(value.threadAttestation.alias)) invalid();
+    threadAttestation = { alias: value.threadAttestation.alias as string,
+      threadId: (value.threadAttestation.threadId as string).toLowerCase() };
   }
-  if (!exact(value, ["claudeAlias", "codexAlias"], ["codexThreadId"]) ||
-      typeof value.claudeAlias !== "string" || !isClaudeSessionSelector(value.claudeAlias) ||
-      !alias(value.codexAlias) || !value.codexAlias.startsWith("codex-") ||
-      (value.codexThreadId !== undefined && !uuid(value.codexThreadId)) ||
-      value.claudeAlias === value.codexAlias ||
-      (alias(value.claudeAlias) && value.claudeAlias.slice(value.claudeAlias.lastIndexOf("@") + 1) !==
-        value.codexAlias.slice(value.codexAlias.lastIndexOf("@") + 1))) invalid();
-  return { claudeAlias: UUID_PATTERN.test(value.claudeAlias) ? value.claudeAlias.toLowerCase() : value.claudeAlias,
-    codexAlias: value.codexAlias,
-    ...(value.codexThreadId === undefined ? {} : { codexThreadId: value.codexThreadId.toLowerCase() }) };
+  return { aliases: [value.aliases[0], value.aliases[1]],
+    ...(threadAttestation === undefined ? {} : { threadAttestation }) };
 }
 function commonSend(value: unknown, required: readonly string[], optional: readonly string[]): JsonRecord {
   if (!isRecord(value) || !exact(value, required, optional) || !alias(value.fromAlias) ||
@@ -731,24 +704,24 @@ const descriptors = {
 
 function parseRequestObject(value: unknown): ValidatedGatewayControlRequest {
   if (!isRecord(value) || !exact(value, ["protocolVersion", "method", "params"])) invalid();
-  if (value.protocolVersion !== 1) throw new ProtocolFault("UNSUPPORTED_VERSION");
+  if (value.protocolVersion !== GATEWAY_CONTROL_PROTOCOL_VERSION) throw new ProtocolFault("UNSUPPORTED_VERSION");
   if (typeof value.method !== "string" || !Object.hasOwn(descriptors, value.method))
     throw new ProtocolFault("UNKNOWN_METHOD");
   const method = value.method as GatewayControlMethod;
-  return { protocolVersion: 1, method, params: descriptors[method].decode(value.params) } as ValidatedGatewayControlRequest;
+  return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params: descriptors[method].decode(value.params) } as ValidatedGatewayControlRequest;
 }
 function decodeJson(frame: Buffer, invalidCode: GatewayWireErrorCode): unknown {
   try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame)); }
   catch { throw new ProtocolFault(invalidCode); } }
 function errorResponse(code: GatewayWireErrorCode): GatewayControlErrorResponse {
-  return { protocolVersion: 1, ok: false, error: { code, message: WIRE_ERROR_MESSAGES[code] } }; }
+  return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false, error: { code, message: WIRE_ERROR_MESSAGES[code] } }; }
 async function dispatch(
   request: ValidatedGatewayControlRequest, handlers: GatewayControlHandlers,
 ): Promise<GatewayControlResponse> {
   const descriptor = descriptors[request.method]; const handler = handlers[descriptor.handler] as unknown as (params?: unknown) => MaybePromise<unknown>;
   try {
     const result = await (Object.keys(request.params).length === 0 ? handler() : handler(request.params));
-    return { protocolVersion: 1, ok: true, result } as GatewayControlSuccessResponse;
+    return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result } as GatewayControlSuccessResponse;
   } catch { return errorResponse("HANDLER_FAILURE"); }
 }
 function serializeResponse(response: GatewayControlResponse): Buffer {
@@ -1125,16 +1098,16 @@ export async function startGatewayControlServer(
 }
 
 function decodeResponse<M extends GatewayControlMethod>(method: M, params: RequestParams[M], value: unknown): GatewayControlResponse<M> {
-  if (!isRecord(value) || value.protocolVersion !== 1) throw controlTransportError("CONTROL_INVALID_RESPONSE");
+  if (!isRecord(value) || value.protocolVersion !== GATEWAY_CONTROL_PROTOCOL_VERSION) throw controlTransportError("CONTROL_INVALID_RESPONSE");
   if (value.ok === false) {
-    if (!shape(value, { protocolVersion: oneOf(1), ok: oneOf(false), error: (item) =>
+    if (!shape(value, { protocolVersion: oneOf(GATEWAY_CONTROL_PROTOCOL_VERSION), ok: oneOf(false), error: (item) =>
       shape(item, { code: (code) => typeof code === "string" && Object.hasOwn(WIRE_ERROR_MESSAGES, code),
         message: (message) => typeof message === "string" }) }) ||
       !isRecord(value.error) || value.error.message !== WIRE_ERROR_MESSAGES[value.error.code as GatewayWireErrorCode])
       throw controlTransportError("CONTROL_INVALID_RESPONSE");
     return value as GatewayControlErrorResponse;
   }
-  if (!shape(value, { protocolVersion: oneOf(1), ok: oneOf(true), result: descriptors[method].result }))
+  if (!shape(value, { protocolVersion: oneOf(GATEWAY_CONTROL_PROTOCOL_VERSION), ok: oneOf(true), result: descriptors[method].result }))
     throw controlTransportError("CONTROL_INVALID_RESPONSE");
   if (method === "register_peer" && isRecord(value.result) && value.result.accepted === true &&
       Object.hasOwn(params, "token") === Object.hasOwn(value.result, "token"))

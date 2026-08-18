@@ -435,7 +435,7 @@ function assertWireError(
   response: Record<string, unknown>,
   code: string,
 ): void {
-  assert.equal(response.protocolVersion, 1);
+  assert.equal(response.protocolVersion, GATEWAY_CONTROL_PROTOCOL_VERSION);
   assert.equal(response.ok, false);
   assert.equal(
     (response.error as { code: string }).code,
@@ -444,6 +444,7 @@ function assertWireError(
 }
 
 test("serves the two directional routes and emits metadata-only responses", async () => {
+  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 2);
   const { stateDir, socketPath } = await privateState();
   let registered: ValidatedRegisterCodexParams | undefined;
   let toClaude: ValidatedSendToClaudeParams | undefined;
@@ -512,10 +513,10 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   assert.deepEqual(
     await sendGatewayControlRequest({
       socketPath,
-      request: { protocolVersion: 1, method: "health", params: {} },
+      request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {} },
     }),
     {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       ok: true,
       result: { status: "ok", revision: 7 },
     },
@@ -524,7 +525,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "register_codex",
       params: {
         alias: "codex-main@this-mac",
@@ -537,7 +538,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "select_claude",
       params: { alias: "claude-one@build-mac" },
     },
@@ -545,7 +546,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "unselect_claude",
       params: { alias: "claude-one@build-mac" },
     },
@@ -560,27 +561,25 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     await sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method,
         params: {
-          claudeAlias: "claude-one@this-mac",
-          codexAlias: "codex-main@this-mac",
-          codexThreadId: THREAD_ID.toUpperCase(),
+          aliases: ["claude-one@this-mac", "codex-main@this-mac"],
+          threadAttestation: { alias: "codex-main@this-mac", threadId: THREAD_ID.toUpperCase() },
         },
       },
     });
   }
   const expectedPair = {
-    claudeAlias: "claude-one@this-mac",
-    codexAlias: "codex-main@this-mac",
-    codexThreadId: THREAD_ID,
+    aliases: ["claude-one@this-mac", "codex-main@this-mac"],
+    threadAttestation: { alias: "codex-main@this-mac", threadId: THREAD_ID },
   };
   assert.deepEqual(paired, expectedPair);
   assert.deepEqual(unpaired, expectedPair);
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "remove_codex_registration",
       params: { alias: "codex-orphan@this-mac" },
     },
@@ -589,22 +588,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
-      method: "pair",
-      params: {
-        claudeAlias: "claude-two@this-mac",
-        codexAlias: "codex-main@this-mac",
-      },
-    },
-  });
-  assert.deepEqual(paired, {
-    claudeAlias: "claude-two@this-mac",
-    codexAlias: "codex-main@this-mac",
-  });
-  await sendGatewayControlRequest({
-    socketPath,
-    request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "pair",
       params: {
         aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
@@ -627,7 +611,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   const outbound = await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "send_to_claude",
       params: {
         fromAlias: "codex-main@this-mac",
@@ -642,7 +626,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     await sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "send_to_claude",
         params: {
           fromAlias: "codex-main@this-mac",
@@ -654,7 +638,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       },
     }),
     {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       ok: true,
       result: { accepted: false, code: "watch_owner_conflict" },
     },
@@ -679,13 +663,13 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     await sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "delivery_status",
         params: { token: DELIVERY_TOKEN },
       },
     }),
     {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       ok: true,
       result: {
         found: true,
@@ -700,7 +684,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "send_to_codex",
       params: {
         fromAlias: "claude-one@build-mac",
@@ -721,7 +705,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "reply",
       params: {
         conversationId: CONVERSATION_ID,
@@ -746,7 +730,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
 
   const listed = await sendGatewayControlRequest({
     socketPath,
-    request: { protocolVersion: 1, method: "list_snapshot", params: {} },
+    request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "list_snapshot", params: {} },
   });
   assert.equal(listed.ok, true);
   if (!listed.ok) assert.fail("expected a projected public snapshot");
@@ -771,7 +755,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
 
   const observed = await sendGatewayControlRequest({
     socketPath,
-    request: { protocolVersion: 1, method: "observe_snapshot", params: {} },
+    request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "observe_snapshot", params: {} },
   });
   assert.equal(observed.ok, true);
   if (!observed.ok) assert.fail("expected an atomic public observation");
@@ -783,7 +767,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "unregister_codex",
       params: { alias: "codex-main@this-mac", threadId: THREAD_ID },
     },
@@ -791,7 +775,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "refresh_dashboard",
       params: {},
     },
@@ -822,7 +806,7 @@ test("normalizes a same-host Codex succession without exposing private identifie
   const response = await sendGatewayControlRequest({
     socketPath,
     request: {
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "register_codex",
       params: {
         alias,
@@ -905,17 +889,17 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
   }) });
   const alias = "peer-shell@this-mac";
   assert.deepEqual((await sendGatewayControlRequest({ socketPath, request: {
-    protocolVersion: 1, method: "register_peer", params: { alias },
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params: { alias },
   } })).ok, true);
   assert.deepEqual((await sendGatewayControlRequest({ socketPath, request: {
-    protocolVersion: 1, method: "register_peer", params: { alias, token: PEER_TOKEN },
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params: { alias, token: PEER_TOKEN },
   } })).ok, true);
   for (const [method, params] of [
     ["unregister_peer", { alias, token: PEER_TOKEN }],
     ["await_peer", { alias, token: PEER_TOKEN }],
     ["peer_receipt", { alias, token: PEER_TOKEN, receipt: PEER_RECEIPT }],
   ] as const) assert.equal((await sendGatewayControlRequest({ socketPath, request: {
-    protocolVersion: 1, method, params,
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params,
   } as never })).ok, true);
   assert.deepEqual(calls, [
     { alias }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN },
@@ -929,7 +913,7 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
     { method: "reply", params: { conversationId: CONVERSATION_ID, text: "hello",
       caller: { kind: "peer", alias, token: PEER_TOKEN } } },
   ] as const) assert.equal((await sendGatewayControlRequest({ socketPath, request: {
-    protocolVersion: 1, ...request,
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ...request,
   } as never })).ok, true);
   for (const [method, params] of [
     ["register_peer", { alias: "codex-main@this-mac" }],
@@ -975,7 +959,7 @@ test("client rejects disclosure-bearing peer control results", async () => {
     { method: "await_peer", params: { alias: "peer-shell@this-mac", token: PEER_TOKEN } },
     "CONTROL_INVALID_RESPONSE"],
   ] as const) await assert.rejects(sendGatewayControlRequest({ socketPath, request: {
-    protocolVersion: 1, ...request,
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ...request,
   } as never }), (error: unknown) => error instanceof GatewayControlTransportError &&
     error.code === code);
   await server.close();
@@ -1174,7 +1158,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       {
         claudeAlias: "claude@this-mac",
         codexAlias: "codex@this-mac",
-        aliases: ["claude@this-mac", "codex@this-mac"],
       },
     ],
     [
@@ -1235,7 +1218,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
   assertWireError(
     await rawRequest(
       socketPath,
-      `${JSON.stringify({ protocolVersion: 2, method: "health", params: {} })}\n`,
+      `${JSON.stringify({ protocolVersion: 1, method: "health", params: {} })}\n`,
     ),
     "UNSUPPORTED_VERSION",
   );
@@ -1243,7 +1226,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     await rawRequest(
       socketPath,
       `${JSON.stringify({
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "health",
         params: {},
         extra: true,
@@ -1272,7 +1255,7 @@ test("the client alone decodes closed delivery and receipt results", async () =>
     handlers: handlers({ deliveryStatus: () => candidates.shift() as never }),
   });
   const request = {
-    protocolVersion: 1, method: "delivery_status", params: { token: DELIVERY_TOKEN },
+    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "delivery_status", params: { token: DELIVERY_TOKEN },
   } as const;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     assert.equal((await sendGatewayControlRequest({ socketPath, request })).ok, true);
@@ -1610,7 +1593,7 @@ test("observe_snapshot enforces a closed revision-and-snapshot result", async ()
     await assert.rejects(
       sendGatewayControlRequest({
         socketPath,
-        request: { protocolVersion: 1, method: "observe_snapshot", params: {} },
+        request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "observe_snapshot", params: {} },
       }),
       (error: unknown) => error instanceof GatewayControlTransportError &&
         error.code === "CONTROL_INVALID_RESPONSE",
@@ -1787,7 +1770,7 @@ test("does not unlink a live socket and can recover an exact stale socket", asyn
   });
   const response = await sendGatewayControlRequest({
     socketPath,
-    request: { protocolVersion: 1, method: "health", params: {} },
+    request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {} },
   });
   assert.equal(response.ok, true);
   await recovered.close();
@@ -1818,7 +1801,7 @@ test("client bounds time and output and rejects malformed responses", async () =
   await assert.rejects(
     sendGatewayControlRequest({
       socketPath,
-      request: { protocolVersion: 1, method: "health", params: {} },
+      request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {} },
       maxResponseBytes: 256,
     }),
     (error: unknown) =>
@@ -1835,7 +1818,7 @@ test("client bounds time and output and rejects malformed responses", async () =
   await assert.rejects(
     sendGatewayControlRequest({
       socketPath,
-      request: { protocolVersion: 1, method: "health", params: {} },
+      request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {} },
       timeoutMs: 50,
     }),
     (error: unknown) =>
@@ -1847,7 +1830,7 @@ test("client bounds time and output and rejects malformed responses", async () =
   const malformed = trackedServer((socket) => {
     socket.end(
       `${JSON.stringify({
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: true,
         result: { status: "ok", revision: 1, threadId: THREAD_ID },
       })}\n`,
@@ -1860,7 +1843,7 @@ test("client bounds time and output and rejects malformed responses", async () =
   await assert.rejects(
     sendGatewayControlRequest({
       socketPath,
-      request: { protocolVersion: 1, method: "health", params: {} },
+      request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {} },
     }),
     (error: unknown) =>
       error instanceof GatewayControlTransportError &&
@@ -1886,7 +1869,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
     sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "send_to_claude",
         params: {
           fromAlias: "codex-main@this-mac",
@@ -1918,7 +1901,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
     sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "remove_codex_registration",
         params: { alias: "codex-orphan@this-mac" },
       },
@@ -1945,7 +1928,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
     sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "delivery_status",
         params: { token: DELIVERY_TOKEN },
       },
@@ -1965,7 +1948,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
     sendGatewayControlRequest({
       socketPath,
       request: {
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         method: "send_to_claude",
         params: {
           fromAlias: "codex-main@this-mac",

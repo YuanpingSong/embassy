@@ -385,16 +385,8 @@ async function buildRequest(
     }
     case "pair":
     case "unpair": {
-      const options = parseOptions(args, ["claude", "codex", "from", "to"]);
+      const options = parseOptions(args, ["from", "to"]);
       count(options, 2);
-      const legacyArm = options.claude !== undefined || options.codex !== undefined;
-      if (legacyArm) {
-        if (options.from !== undefined || options.to !== undefined) fault();
-        return envelope(command, {
-          claudeAlias: requireClaudeSelector(options, "claude"), codexAlias: requireCodexAlias(options, "codex"),
-          codexThreadId: requireExclusiveCodexThreadId(env),
-        });
-      }
       return envelope(command, { aliases: requirePairAliases(options) });
     }
     case "send-to-claude":
@@ -625,7 +617,7 @@ export async function runGatewayCli(
           params: M extends "peer_catalog" ? { peerHost: string } : { peerHost: string; handoff: import("./peer-protocol.js").PeerHandoffParams },
         ) => {
           const response = await sendRequest({ socketPath: config.controlSocketPath,
-            request: { protocolVersion: 1, method, params } as Extract<GatewayControlRequest, { method: M }> });
+            request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params } as Extract<GatewayControlRequest, { method: M }> });
           if (!response.ok) throw new PeerHandlerError({ code: -32000, message: "Local broker refused peer authority" });
           return response.result;
         };

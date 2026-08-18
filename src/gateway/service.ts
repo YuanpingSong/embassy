@@ -17,8 +17,6 @@ import {
   type PeerPrincipalParams,
   type PeerReceiptParams,
   type RegisterPeerParams,
-  pairParamAliases,
-  pairParamThreadAttestation,
   type ReplyParams,
   type SelectClaudeParams,
   type UnregisterCodexParams,
@@ -1133,7 +1131,7 @@ export class GatewayService {
     const aliases = endpoints.aliases;
     const ownerHost = aliases.map(aliasHost).sort()[0]!;
     if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
-    const attestation = pairParamThreadAttestation(params);
+    const attestation = params.threadAttestation;
     if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
     const existed = await this.store.hasConsentEdge(endpoints);
@@ -1146,7 +1144,7 @@ export class GatewayService {
     const aliases = endpoints.aliases;
     const ownerHost = aliases.map(aliasHost).sort()[0]!;
     if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
-    const attestation = pairParamThreadAttestation(params);
+    const attestation = params.threadAttestation;
     if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
     const existed = await this.store.hasConsentEdge(endpoints);
@@ -1164,7 +1162,7 @@ export class GatewayService {
     aliases: readonly [string, string];
     expectedRegistrationIds: readonly [string, string];
   }>> {
-    const raw = pairParamAliases(params);
+    const raw = params.aliases;
     const aliases: [string, string] = [raw[0], raw[1]];
     for (let index = 0; index < aliases.length; index += 1) {
       if (PUBLIC_ALIAS.test(aliases[index]!)) continue;

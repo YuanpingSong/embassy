@@ -11,7 +11,10 @@ import { LocalCodexTransportError, managedCodexControlSocketPath,
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { runGatewayCli, gatewayCliExitCodes } from "../src/gateway/cli.js";
 import { loadGatewayConfig as loadGatewayConfigBase } from "../src/gateway/config.js";
-import { sendGatewayControlRequest } from "../src/gateway/control.js";
+import {
+  GATEWAY_CONTROL_PROTOCOL_VERSION,
+  sendGatewayControlRequest,
+} from "../src/gateway/control.js";
 import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
 import type {
@@ -418,7 +421,7 @@ test("a real boot snapshot passes the strict status and doctor clients", async (
         const response = await sendGatewayControlRequest({
           socketPath: config.controlSocketPath,
           request: {
-            protocolVersion: 1,
+            protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
             method: "list_snapshot",
             params: {},
           },

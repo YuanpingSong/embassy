@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { BridgeError } from "../src/errors.js";
 import {
+  GATEWAY_CONTROL_PROTOCOL_VERSION,
   GatewayControlTransportError,
   startGatewayControlServer,
   type GatewayControlHandlers,
@@ -251,8 +252,8 @@ test("peer registration emits its credential once and authenticated lifecycle ne
     sendRequest: (async ({ request }: { request: { method: string; params: Record<string, unknown> } }) => {
       requests.push(request);
       return request.method === "register_peer" && !("token" in request.params)
-        ? { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok", token: PEER_TOKEN } }
-        : { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok" } };
+        ? { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok", token: PEER_TOKEN } }
+        : { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok" } };
     }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
   });
 
@@ -276,10 +277,10 @@ test("peer registration emits its credential once and authenticated lifecycle ne
     dependencies(invalid, { EMBASSY_PEER_TOKEN: PEER_TOKEN })), gatewayCliExitCodes.invalidInput);
   assert.equal(JSON.parse(invalid.chunks.join("")).error.code, "INVALID_ARGUMENTS");
   assert.deepEqual(requests, [
-    { protocolVersion: 1, method: "register_peer", params: { alias: "peer-cursor@this-mac" } },
-    { protocolVersion: 1, method: "register_peer", params: { alias: "peer-shell@this-mac" } },
-    { protocolVersion: 1, method: "register_peer", params: { alias: "peer-cursor@this-mac", token: PEER_TOKEN } },
-    { protocolVersion: 1, method: "unregister_peer", params: { alias: "peer-cursor@this-mac", token: PEER_TOKEN } },
+    { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params: { alias: "peer-cursor@this-mac" } },
+    { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params: { alias: "peer-shell@this-mac" } },
+    { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params: { alias: "peer-cursor@this-mac", token: PEER_TOKEN } },
+    { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "unregister_peer", params: { alias: "peer-cursor@this-mac", token: PEER_TOKEN } },
   ]);
 });
 
@@ -291,19 +292,19 @@ test("peer stdin framing preserves the body and the three caller principals stay
       inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: unknown }) => { control += 1; requests.push(request);
-      return { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok",
+      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok",
         conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
   };
   const fragmented = Readable.from([Buffer.from(PEER_TOKEN.slice(0, 9)), Buffer.from(`${PEER_TOKEN.slice(9)}\n`), Buffer.from("\nexact body")]);
   assert.equal(await runGatewayCli(["send-to-claude", "--from", "peer-cursor@this-mac", "--to", "advisor@this-mac", "--token-stdin"],
     { ...base, stdin: fragmented }), 0);
-  assert.deepEqual(requests[0], { protocolVersion: 1, method: "send_to_claude", params: {
+  assert.deepEqual(requests[0], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send_to_claude", params: {
     fromAlias: "peer-cursor@this-mac", toAlias: "advisor@this-mac", text: "\nexact body",
     expectsReply: false, peerToken: PEER_TOKEN } });
 
   assert.equal(await runGatewayCli(["reply", "--conversation", CONVERSATION_ID, "--alias", "peer-cursor@this-mac"],
     { ...base, env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, stdin: input("reply body") }), 0);
-  assert.deepEqual(requests[1], { protocolVersion: 1, method: "reply", params: {
+  assert.deepEqual(requests[1], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "reply", params: {
     conversationId: CONVERSATION_ID, text: "reply body",
     caller: { kind: "peer", alias: "peer-cursor@this-mac", token: PEER_TOKEN } } });
 
@@ -373,11 +374,11 @@ test("await long-polls silently and acknowledges only after the exact frame flus
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: { method: string } }) => {
       methods.push(request.method);
-      if (request.method === "await_peer" && polls++ === 0) return { protocolVersion: 1, ok: true, result: { state: "timeout" } };
-      if (request.method === "await_peer") return { protocolVersion: 1, ok: true, result: { state: "message", frame, receipt: PEER_RECEIPT } };
-      assert.deepEqual(request, { protocolVersion: 1, method: "peer_receipt", params: {
+      if (request.method === "await_peer" && polls++ === 0) return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { state: "timeout" } };
+      if (request.method === "await_peer") return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { state: "message", frame, receipt: PEER_RECEIPT } };
+      assert.deepEqual(request, { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "peer_receipt", params: {
         alias: "peer-cursor@this-mac", token: PEER_TOKEN, receipt: PEER_RECEIPT } });
-      return { protocolVersion: 1, ok: true, result: { accepted: true, code: "ok" } };
+      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok" } };
     }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
   });
   while (release === undefined) await new Promise((resolve) => setImmediate(resolve));
@@ -397,7 +398,7 @@ test("await sends no receipt or second stdout frame when stdout fails", async ()
       allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: { method: string } }) => { methods.push(request.method);
-      return { protocolVersion: 1, ok: true, result: { state: "message", frame: "one frame\n", receipt: PEER_RECEIPT } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { state: "message", frame: "one frame\n", receipt: PEER_RECEIPT } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
   });
   assert.equal(code, gatewayCliExitCodes.failure);
   assert.deepEqual(methods, ["await_peer"]);
@@ -607,22 +608,20 @@ test("all client commands use one private control socket and expose only normali
     {
       argv: [
         "pair",
-        "--claude",
+        "--from",
         "advisor@this-mac",
-        "--codex",
+        "--to",
         "codex-reviewer@this-mac",
       ],
-      env: { CODEX_THREAD_ID: THREAD_ID },
     },
     {
       argv: [
         "unpair",
-        "--claude",
+        "--from",
         "advisor@this-mac",
-        "--codex",
+        "--to",
         "codex-reviewer@this-mac",
       ],
-      env: { CODEX_THREAD_ID: THREAD_ID },
     },
     {
       argv: [
@@ -719,7 +718,7 @@ test("all client commands use one private control socket and expose only normali
         },
       },
     );
-    assert.equal(result.code, gatewayCliExitCodes.ok);
+    assert.equal(result.code, gatewayCliExitCodes.ok, current.argv.join(" "));
     assert.equal(result.stderr, "");
     const parsed = JSON.parse(result.stdout) as {
       ok: boolean;
@@ -768,9 +767,7 @@ test("all client commands use one private control socket and expose only normali
   assert.deepEqual(unselected, ["advisor@this-mac"]);
   assert.deepEqual(pairs, [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-reviewer@this-mac",
-      codexThreadId: THREAD_ID,
+      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     },
     {
       aliases: ["grok-builder@this-mac", "dsh-reviewer@this-mac"],
@@ -778,9 +775,7 @@ test("all client commands use one private control socket and expose only normali
   ]);
   assert.deepEqual(unpairs, [
     {
-      claudeAlias: "advisor@this-mac",
-      codexAlias: "codex-reviewer@this-mac",
-      codexThreadId: THREAD_ID,
+      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     },
     {
       aliases: ["codex-misleading@this-mac", "claude-misleading@this-mac"],
@@ -1050,7 +1045,7 @@ test("all five stderr categories localize without changing stdout protocol", asy
       argv: ["select-claude", "--alias", "advisor@this-mac"],
       code: gatewayCliExitCodes.rejected,
       sendRequest: async () => ({
-        protocolVersion: 1 as const,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: true as const,
         result: { accepted: false as const, code: "not_found" },
       }),
@@ -1083,7 +1078,7 @@ test("all five stderr categories localize without changing stdout protocol", asy
       argv: ["health"],
       code: gatewayCliExitCodes.failure,
       sendRequest: async () => ({
-        protocolVersion: 1 as const,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: false as const,
         error: {
           code: "HANDLER_FAILURE" as const,
@@ -1254,7 +1249,7 @@ test("wait-delivery polls at fixed intervals and emits only the terminal status"
         const result = statuses[attempts];
         attempts += 1;
         assert.ok(result);
-        return { protocolVersion: 1, ok: true, result };
+        return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result };
       }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
       now: () => clock,
       delay: async (milliseconds) => {
@@ -1307,7 +1302,7 @@ test("wait-delivery returns a retained terminal result after its deadline window
       validateControlSocket: async () => undefined,
       sendRequest: (async () => {
         attempts += 1;
-        return { protocolVersion: 1, ok: true, result };
+        return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result };
       }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
       now: () => Date.parse("2026-08-08T12:10:00.000Z"),
     },
@@ -1363,7 +1358,7 @@ test("wait-delivery preserves every non-delivered terminal state and uses one fa
         validateControlSocket: async () => undefined,
         sendRequest: (async () => {
           attempts += 1;
-          return { protocolVersion: 1, ok: true, result };
+          return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result };
         }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
       },
     );
@@ -1404,7 +1399,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
       sendRequest: (async () => {
         unknownAttempts += 1;
         return {
-          protocolVersion: 1,
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
           ok: true,
           result: { found: false },
         };
@@ -1446,7 +1441,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
       sendRequest: (async () => {
         timeoutAttempts += 1;
         return {
-          protocolVersion: 1,
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
           ok: true,
           result: {
             found: true,
@@ -1560,7 +1555,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => ({
-        protocolVersion: 1,
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: true,
         result: { accepted: false, code: "not_found" },
       })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
@@ -1610,7 +1605,7 @@ test("doctor returns normalized conditions while registration stays record-only"
     loadConfig: () => config,
     validateControlSocket: async () => undefined,
     sendRequest: (async () => ({
-      protocolVersion: 1,
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       ok: true,
       result: snapshot("split_brain"),
     })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
@@ -1644,7 +1639,7 @@ test("doctor returns normalized conditions while registration stays record-only"
       sendRequest: (async () => {
         calls += 1;
         return {
-          protocolVersion: 1,
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
           ok: true,
           result: { accepted: false, code: "rejected" },
         };
@@ -1694,7 +1689,7 @@ test("watch-owner conflict preserves its code and localizes the untrack remedy",
         }),
         validateControlSocket: async () => undefined,
         sendRequest: (async () => ({
-          protocolVersion: 1,
+          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
           ok: true,
           result: {
             accepted: false,
@@ -1826,7 +1821,7 @@ test("identity, stdin, and argument failures happen before any control request",
         "--claude",
         "advisor@this-mac",
         "--to",
-        "dsh-reviewer@this-mac",
+        "codex-reviewer@this-mac",
       ],
       env: { CODEX_THREAD_ID: THREAD_ID },
       code: "INVALID_ARGUMENTS",
@@ -2027,7 +2022,7 @@ test("peer-stdio sources initialization authority from the running broker", asyn
       inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
     loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"] }),
     validateControlSocket: async () => undefined,
-    sendRequest: async () => ({ protocolVersion: 1, ok: false,
+    sendRequest: async () => ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false,
       error: { code: "HANDLER_FAILURE", message: "The gateway could not complete the control request." } }),
     runPeerStdio: (options) => { handler = options; return { done: Promise.resolve(), close: () => undefined }; },
   });
@@ -2049,7 +2044,7 @@ test("peer-stdio consumes its initialization catalog once, then returns to broke
       inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
     loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"] }),
     validateControlSocket: async () => undefined,
-    sendRequest: (async () => { requests += 1; return { protocolVersion: 1, ok: true, result: catalog }; }) as
+    sendRequest: (async () => { requests += 1; return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: catalog }; }) as
       NonNullable<GatewayCliDependencies["sendRequest"]>,
     runPeerStdio: (options) => { handler = options; return { done: Promise.resolve(), close: () => undefined }; },
   });
@@ -2067,11 +2062,11 @@ test("pair and unpair preserve cross-host aliases and owner authority", async ()
       env: {}, stdout, stderr, loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
         allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
         inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }), validateControlSocket: async () => undefined,
-      sendRequest: ((input: { request: unknown }) => { request = input.request; return Promise.resolve({ protocolVersion: 1, ok: true,
+      sendRequest: ((input: { request: unknown }) => { request = input.request; return Promise.resolve({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true,
         result: { accepted: false, code: "conflict", ownerHost: "m5dev" } }); }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
     });
     assert.equal(code, gatewayCliExitCodes.rejected);
-    assert.deepEqual(request, { protocolVersion: 1, method: command,
+    assert.deepEqual(request, { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: command,
       params: { aliases: ["advisor@studio", "codex-main@m5dev"] } });
     assert.equal((JSON.parse(stdout.chunks.join("")) as { result: { ownerHost: string } }).result.ownerHost, "m5dev");
     assert.match(stderr.chunks.join(""), /gateway rejected/);
