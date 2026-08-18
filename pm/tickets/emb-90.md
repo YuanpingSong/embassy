@@ -136,3 +136,12 @@ gate-runner calibration note: R3 gates must name soak explicitly).
 **State**: HOLD. Engineer applies F2+F4 (test bucket has headroom:
 215/230), re-freezes with new SHA; delta re-gate then landing. F1 fork
 awaits founder; emb-93 opens after that ruling.
+
+## F1 resolution (2026-08-18): founder ratified option (a)
+
+OS-boundary model is the truth we document: same-UID control socket is
+the authority for edge minting; consent semantics are enforced at
+delivery (paired-mode membership); agents remain norm-constrained via
+the skill. No attestation restoration. Executed as emb-93 (docs +
+dead-param cut + CHANGELOG), landing before the v2.0.0 release gate.
+emb-90 itself remains HOLD only for the F2+F4 test corrections.
