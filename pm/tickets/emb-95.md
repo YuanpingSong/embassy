@@ -75,3 +75,29 @@ copy fix, and the shipped guidance already warns against relocating
 state to work around access failures. If we later decide sandboxed
 reachability by default is a product goal, that is its own ticket with
 its own review.
+
+## Freeze received (2026-08-18) + release-time ops note
+
+Frozen at SHA 5305351c on base 9754888 (pre-emb-94; files disjoint from
+emb-94's service.ts, so landing order is free). In gate: mechanical pass
+plus an independent adversarial pass focused on ambiguity preservation
+for mutating verbs — a failure after a write that reports as a clean
+pre-write connect error would invite retrying a mutation that already
+applied, which is the worst outcome this slice could buy.
+
+Per-mechanism mutation is required on this gate (norm earned on emb-94's
+F11): each new branch — denied, missing socket, no listener, narrowed
+skew — is defeated independently, and any branch that can be removed
+with the suite still green is unpinned behavior.
+
+F10 from emb-94's review was routed here but arrived after this coherent
+freeze; it is filed as emb-96 (QUEUED) rather than reopening this slice.
+
+**RELEASE-TIME OPS NOTE (belongs in the v2.0.0 runbook, applies to
+emb-93 as well):** this slice edits `skills/embassy-peer/SKILL.md` in
+the repo, but the INSTALLED copies are separate files at
+`~/.claude/skills/embassy-peer/` and `~/.codex/skills/embassy-peer/` on
+BOTH machines. Publishing does not update them. Every machine must
+reinstall the skill after v2.0.0, or agents keep operating from copy
+that this release makes false — the same class of failure emb-93 exists
+to fix.
