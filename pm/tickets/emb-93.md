@@ -66,3 +66,24 @@ check + soak green.
 **Ops note**: after landing, reinstall skills/embassy-peer to
 ~/.claude/skills on both machines (local copies carry the old
 fail-closed claim).
+
+## FOUNDER HOLD — wave stops here (2026-08-18)
+
+Founder ruling: hold after emb-93. The wave runs emb-94 → emb-95 →
+emb-93 and then stands down. emb-91 is NOT dispatched. No release step
+of any kind tonight: no version bump, tag, publish, CHANGELOG
+finalization, reset drill, or live ops. emb-93 may draft the CHANGELOG
+v2.0.0 skeleton per its own binding — drafting is not releasing.
+
+Hold delivered to the engineer over the live channel (conv_hrVMeVbG…),
+not by relay. Instruction included the emb-90 crossing-messages
+precedent: if the hold arrives mid-slice, finish to a COHERENT freeze,
+then stop — never abandon mid-edit to comply faster, and never proceed
+past a freeze on assumption if the PM is unavailable to gate.
+
+RESUME STATE for the next session: gate whatever is frozen, then
+emb-91, then v2.0.0 via pm/runbooks/release-npm.md with the three
+riding doc fixes (README federation line at README.md:227, peer-stdio
+missing from --help, release-note line for emb-88's token/busyPolicy
+narrowings), then both machines install and run the reset drill, then
+the cross-machine message proof with this-mac.
