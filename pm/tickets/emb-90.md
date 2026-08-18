@@ -70,3 +70,69 @@ peer-stdio fixtures correctly remain literal 1). Narrow evidence only:
 typecheck green, focused 82/0. No full check, no gate, no landing, no
 emb-91 — hold respected. Lane parked awaiting founder resume; gate runs
 then.
+
+## Gate + adversarial verdict (2026-08-18, on m5dev)
+
+Mechanical gate CLEAN: sha ✓ base ✓ apply ✓ accounting exact (src 95
+changed net −37 / grant 96; tests 215 / grant 230) ✓ checks 555/555,
+zero fail/cancelled/skipped ✓ hygiene ✓. Adversarial review (fresh-eyes,
+Opus): **HOLD** — two blocking findings, both demonstrated by running
+code, plus a correction bundle.
+
+**F1 (HIGH, → founder ruling, not engineer scope).** The slice deletes
+the only arm that ever produced `threadAttestation`; post-slice, pair/
+unpair have NO code path that attests caller identity, while three
+published surfaces still promise fail-closed behavior
+(GATEWAY-ARCHITECTURE.md:616-619, skills/embassy-peer/SKILL.md:10+86,
+README.md:121+256 — all in the npm `files` list). Demonstrated: bare-env
+`pair` exits 0 and mints the edge; CODEX_THREAD_ID is silently dropped.
+Honest framing (reviewer's own): the surviving generic arm never carried
+identity at base — operator-shell pairing already worked — so the slice
+did not create the capability; it removed the last path where the docs
+were true. Adjacent: `SelectClaudeParams.codexThreadId` is decoded and
+read by nobody, so the whole authority paragraph is stale as a unit.
+Resolution fork (founder's call, trust-model): (a) rewrite docs/SKILL to
+the OS-boundary truth — same-UID socket is the auth, consent semantics
+live in paired-mode delivery, agents constrained by skill norms; or
+(b) restore attestation on the surviving arm — adds permissioning back
+against the standing trust-model directive. PM recommends (a), executed
+as a docs/authority ticket (emb-93) before v2.0.0 ships, with an
+explicit release-note correction of the published claim.
+
+**F2 (MEDIUM, blocking, engineer correction inside this ticket).** The
+literal→symbol substitution made the suite invariant under the version
+value: reviewer set the constant to 7 and all protocol-bearing tests
+passed; no test asserts the control protocol is 2. This is the exact
+class of the v1.9.3 dead-tag postmortem ("the embedded version constant
+and its pinned test were not bumped"). CORRECTION ORDERED: one literal
+assertion pinning GATEWAY_CONTROL_PROTOCOL_VERSION === 2 (plus, at
+engineer's discretion, one frame-level literal-2 assertion).
+
+**F4 (LOW, ordered with F2, test-only).** Drop the now-meaningless
+`CODEX_THREAD_ID` env from the pair/unpair CLI matrix fixtures and
+restore a mixed-arm (`--claude` + `--to`) rejection case.
+
+**F3 (control-plane doc says "version 1", also 6 undocumented federation
+methods since v1.9.0) and F6 (no CHANGELOG v2.0.0 section for either
+accepted break)** → fold into emb-93 with F1's rewrite; CHANGELOG is
+also independently guarded by the release runbook.
+
+**F5 (LOW, narrow)** — peer-stdio flattens CONTROL_INVALID_RESPONSE skew
+into generic −32603 during a cross-install rollout window — DECLINED for
+now: dialer still stage-classifies PEER_DIAL_FAILED; revisit only if the
+v2.0 rollout drill actually hits it.
+
+**Verified sound (kept for the record):** all 22 control verbs refuse
+versions {1,3,"2",null} before param decode with protocolVersion:2 on
+every error frame; zero control-path literals remain (the third-contest
+class is dead); peer wire and helper IPC stay literally 1 — no
+conflation; version skew yields CONTROL_INVALID_RESPONSE ambiguous=false
+with the rebuild hint; socket takeover impossible (SOCKET_IN_USE);
+decodePair behaviorally identical and rejection fixtures got stronger;
+deletion complete across src/test/scripts/docs/workflows/help copy; soak
+passes (1/1, 61.2s — gate brief omitted soak; reviewer covered it;
+gate-runner calibration note: R3 gates must name soak explicitly).
+
+**State**: HOLD. Engineer applies F2+F4 (test bucket has headroom:
+215/230), re-freezes with new SHA; delta re-gate then landing. F1 fork
+awaits founder; emb-93 opens after that ruling.
