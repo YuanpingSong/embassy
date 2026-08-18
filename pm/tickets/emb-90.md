@@ -145,3 +145,16 @@ delivery (paired-mode membership); agents remain norm-constrained via
 the skill. No attestation restoration. Executed as emb-93 (docs +
 dead-param cut + CHANGELOG), landing before the v2.0.0 release gate.
 emb-90 itself remains HOLD only for the F2+F4 test corrections.
+
+## Landed (2026-08-18)
+
+Replacement freeze SHA 2d2781f9, base 788a6f3. Gate CLEAN: sha ✓ base ✓
+apply ✓ accounting exact (src 95 net −37 / grant 96; tests 216 / grant
+230) ✓ check 555/555 ✓ soak 1/1 ✓ hygiene ✓. F2 verified by MUTATION,
+not by inspection: with GATEWAY_CONTROL_PROTOCOL_VERSION forced to 7 the
+protocol-bearing files now fail (69 tests, 1 fail) where the previous
+freeze passed silently; pin is `assert.equal(GATEWAY_CONTROL_PROTOCOL_
+VERSION, 2)` at test/gateway-control.test.ts:447. Constant restored and
+tree re-verified by SHA before landing. F4 corrections present.
+Landed on public main as **5cb2b6d** from the gate tree the check ran in.
+Status: landed.

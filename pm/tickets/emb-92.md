@@ -154,3 +154,25 @@ replaces); (c) src cap unchanged (≤40; 12 projected); tests cap raised
 80 → 82 as requested — asking for 2 lines instead of golfing them away
 is accounting honesty, granted on sight; (d) R stays R3. Freeze must
 itemize the claude-helper.ts lines in the src bucket.
+
+## Landed (2026-08-18)
+
+Freeze SHA cda78d40, base 788a6f3. Gate CLEAN: sha ✓ base ✓ apply ✓
+accounting exact PER FILE (helper 5 / providers 6 / service 2 = 13 /
+grant 40; tests 82 / grant 82) ✓ check 557/557 ✓ soak 1/1 ✓ hygiene ✓.
+Scope verified mechanically against the three contest rulings: file list
+confined to the 3 granted src files + 3 test files; alias grammar
+untouched at every boundary (contest #2 descope held); daemon and
+daemon-worker excluded on every changed src line (widened predicates
+admit exactly "interactive" || "bg"). Test bucket landed at exactly the
+82 the engineer requested and reproduced exactly from numstat — the
+raised cap was honest measurement.
+
+Landing-tree re-verification (emb-90 landed first; both slices touch
+service.ts): patch re-applied to 5cb2b6d, accounting reproduced
+identically, full check 557/557 and soak 1/1 run IN THE LANDING TREE per
+the v1.9.3 rule. Landed on public main as **9754888**. Status: landed.
+
+Note: bg admission is live in source but NOT live on either machine's
+broker — both run published 1.9.5. It becomes operational at the v2.0.0
+release, when both machines install and run the reset drill.
