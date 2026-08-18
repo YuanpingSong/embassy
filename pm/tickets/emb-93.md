@@ -105,3 +105,80 @@ REMAINS correct under founder option (a) — the field carried authority
 nothing enforced — but the cut is now honest about what it removes.
 Verifying-against-the-moved-base before editing is the standard; this
 contest is the standard working.
+
+## Adversarial verdict (2026-08-18): HOLD — correction #1 ordered (docs/copy only, src untouched)
+
+SHA e095cfc9. The CORE IS SOUND, verified hard: the authority rewrite
+executes true in both directions (20-cell pair/unpair/select/unselect ×
+identity-env matrix — no identity field on any frame, docs promise no
+more and no less); identity paths behaviorally identical to the shipped
+binary in 25/25 cells; no surviving producer of the removed keys
+anywhere in the repo; closed decode verified by raw frames; the
+duplicate-name amendment holds clause-by-clause against emb-94's landed
+fence; the README quickstart is internally executable. The src cut is
+clean and DONE — correction #1 touches no source.
+
+**F1 (blocking, scope gap was the PM's) — the published site still
+teaches select-claude as the pairing step.** site/index.html:89/:144/
+:170-172 + zh-CN:89: quickstart runs register → select → pair(wrong
+endpoints) → send, which settles SENDER_NOT_PAIRED — executed.
+addConsentEdge has exactly one caller (pair); selection never touches
+the consent graph. The site was outside the dispatched window; it joins
+it now. Scoping fact that makes the fix safe: `pair --from/--to` exists
+and works on published 1.9.5 AND main, so pair-first site copy is
+version-agnostic-correct and can land ahead of the release. CORRECTION:
+site/index.html + site/zh-CN/index.html — pairing copy and quickstart
+teach select (route) then pair (consent edge, the two endpoints the
+send will use); no visual/design changes (founder owns the site's
+design; this is copy-truth only, flagged for founder visibility).
+
+**F2 (blocking) — the rewrite removed the only disclosure that
+unselect-claude destroys consent edges.** Executed: unselect removed
+BOTH incident edges and settles in-flight work (removeOwnedRoute →
+removeRegistrationMetadata). The Codex-side twin (unregister-codex) is
+documented; the Claude side now claims "selection creates no permission
+edge" without the destructive converse. CORRECTION: one honest sentence
+on each rewritten surface (README, GATEWAY-ARCHITECTURE, SKILL, + zh):
+selecting creates no edge; REMOVING the selected route also removes its
+consent edges and settles their in-flight work.
+
+**F3 (fold in) — the new arch pin is vacuous**: /same-UID.*private
+control socket/s is satisfied by unrelated prose spans; deleting the
+ENTIRE new authority paragraph stays green (executed). Pin the
+paragraph by its own words.
+
+**F4 (fold in) — the Upgrade note omits the two mandatory operator
+actions**: the schema-4 state reset (emb-88; GATEWAY_STATE_SCHEMA_
+UNSUPPORTED otherwise) and mandatory nodes.json (emb-89;
+GATEWAY_NODE_INVENTORY_REQUIRED). Precedent is the 1.9.5 note (concrete
+actions live there). Also: the pair-arm removal files under Changed;
+this file uses Removed. Fix both.
+
+**F6 (fold in, one clause)** — the authority correction must disclose
+that the prior published claim was NEVER ENFORCED on the surviving
+generic arm (executed against shipped 1.9.5-lineage binary: bare-shell
+pair/unpair succeed), not read as a 2.0 relaxation. The v1.x history
+entry stays (history is history); the 2.0 note carries the disclosure.
+
+**F7 (fold in)** — zh-CN asserts capability where EN asserts norm
+(只能 vs "are instructed to", twice). The norm-vs-enforcement
+distinction is this slice's thesis; the zh reader currently keeps the
+retracted guarantee. Match the deontic framing.
+
+**F8 (fold in, one sentence)** — SKILL's --session recovery sentence
+now reads ambiguously as "pair by UUID", which the CLI refuses
+(executed, INVALID_ARGUMENTS); scope it explicitly to selection.
+
+**F5 recorded-accepted:** the installed 2.0.0-rc.1 binary is a live
+producer of codexThreadId, so select/unselect from INSIDE a Codex task
+fails INVALID_REQUEST against a broker carrying this slice while
+succeeding from a terminal — identity-conditional and undiagnosable.
+Narrow (pre-release rc, replaced at the release drill); the release
+runbook already replaces every install. Noted so the drill order stays
+stop-broker → install → start.
+
+**Budgets:** src UNCHANGED (38/40 — do not touch source); tests ≤95
+(the F3 regex fix + any parity additions); docs ≤200 itemized, site
+files join the window. Measured-remainder rule in force. Second freeze
+= new SHA; gate = mech + docs-truth spot re-execution on the corrected
+sentences only.
