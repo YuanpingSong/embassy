@@ -62,7 +62,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     }
     let alias: string | undefined;
     try { const discovery = await active.discover(); const found = !discovery.truncated && discovery.peers.find((peer) =>
-      peer.targetId === source && peer.kind === "interactive" && peer.alias === message.sourceAlias);
+      peer.targetId === source && (peer.kind === "interactive" || peer.kind === "bg") && peer.alias === message.sourceAlias);
       if (found && hostId) alias = `${found.alias}@${hostId}`; } catch { /* stale */ }
     if (!alias) { await expireReceipt(message.receiptHandle, "CLAUDE_SOURCE_ROUTE_STALE"); return; }
     if (!routes.has(source) && routes.size >= maxPending) { await expireReceipt(message.receiptHandle, "CLAUDE_NATIVE_INGRESS_CAPACITY"); return; }
@@ -95,7 +95,8 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     if (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now()) throw new BridgeError("CLAUDE_PEER_MESSAGE_EXPIRED", "The message expired before preparation.", true);
     if (command.authorization === "selected_route") {
       const discovery = await active.discover();
-      if (discovery.truncated || !discovery.peers.some((peer) => peer.targetId === command.binding.routeHandle && peer.kind === "interactive"))
+      if (discovery.truncated || !discovery.peers.some((peer) => peer.targetId === command.binding.routeHandle &&
+        (peer.kind === "interactive" || peer.kind === "bg")))
         throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The selected Claude UUID is no longer live.", true);
       await active.assertTargetWorkspaceDisjoint(command.binding.routeHandle, command.stateRoot!);
     } else if (routes.get(command.binding.routeHandle) !== command.targetAlias) {

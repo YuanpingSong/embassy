@@ -260,7 +260,7 @@ test("production helper child owns TTL and non-consuming foreign preparation fen
   const recordPath = path.join(sessionsDir, `${peer.pid}.json`);
   const record = { pid: peer.pid, sessionId: routeHandle,
     cwd: workspace, startedAt: Date.now(), procStart: ready.procStart, version: "test", peerProtocol: 1,
-    kind: "interactive", entrypoint: "cli", messagingSocketPath: ready.socketPath, name: "claude-fake", status: "idle",
+    kind: "bg", entrypoint: "cli", messagingSocketPath: ready.socketPath, name: "claude-fake", status: "idle",
     updatedAt: Date.now(), statusUpdatedAt: Date.now() };
   await writeFile(recordPath, JSON.stringify(record), { mode: 0o600 });
   let helper: ClaudeNativeHelperClient | undefined, resolveInbound!: () => void; const inbound = new Promise<void>((resolve) => { resolveInbound = resolve; });

@@ -97,7 +97,7 @@ export type GatewayAdapterRouteObservationState =
   | "unobserved";
 
 export type GatewayAdapterDiscovery = Readonly<{
-  alias: string; routeHandle: string; kind: "interactive"; state: GatewayAdapterRouteState;
+  alias: string; routeHandle: string; kind: "interactive" | "bg"; state: GatewayAdapterRouteState;
 }>;
 
 export type GatewayAdapterRegistryObservation = Readonly<{

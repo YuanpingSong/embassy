@@ -142,6 +142,8 @@ class FakeProvider implements GatewayProviderAdapter {
   writes = 0;
   terminalReplyText: string | undefined;
   replyRouteHandle = "claude-session-a";
+  claudeDiscovery = { alias: "advisor@this-mac", routeHandle: "claude-session-a",
+    kind: "interactive" as "interactive" | "bg", state: "idle" as const };
   deferredCode = "ROUTE_BUSY";
   deferAlways = false;
   private deferredOnce = false;
@@ -177,12 +179,7 @@ class FakeProvider implements GatewayProviderAdapter {
     return {
       complete: true,
       peers: this.identity.provider === "claude"
-        ? [{
-            alias: "advisor@this-mac",
-            routeHandle: "claude-session-a",
-            kind: "interactive",
-            state: "idle",
-          }]
+        ? [this.claudeDiscovery]
         : [],
       registry: { entriesScanned: 1, parseableRecords: 1, rejected: [] },
     };
@@ -517,6 +514,38 @@ test("peer principals send both directions and reply through ordinary conversati
     assert.equal(reply.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 2);
     assert.equal(claudeProvider.dispatches[1]?.text, "peer follow-up");
+  } finally { await subject.close(); }
+});
+
+test("background Claude discovery supports select, pair, send, and exact reply", async () => {
+  const backgroundAlias = "bg9a04b5e9@this-mac", backgroundRoute = "claude-session-background";
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  claudeProvider.claudeDiscovery = { alias: backgroundAlias, routeHandle: backgroundRoute,
+    kind: "bg", state: "idle" };
+  claudeProvider.replyRouteHandle = backgroundRoute;
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({
+      alias: codex.alias, threadId: THREAD_A, hostId: "this-mac", busyPolicy: "queue",
+    });
+    assert.deepEqual(await subject.handlers.selectClaude({ alias: backgroundAlias }),
+      { accepted: true, code: "ok" });
+    assert.deepEqual(await subject.handlers.pair({ aliases: [backgroundAlias, codex.alias] }),
+      { accepted: true, code: "ok" });
+    const sent = await subject.handlers.sendToClaude({
+      fromAlias: codex.alias, threadId: THREAD_A, toAlias: backgroundAlias,
+      text: "background round trip", expectsReply: true,
+    });
+    assert.equal(sent.accepted, true);
+    if (!sent.accepted) assert.fail("background send admission");
+    await eventually(() => claudeProvider.dispatches.length === 1);
+    const reply = await subject.handlers.reply({
+      conversationId: sent.conversationId, text: "background reply",
+      caller: { kind: "claude", alias: backgroundAlias, replyAddress: "uds:/synthetic/background.sock" },
+    });
+    assert.equal(reply.accepted, true);
+    await eventually(() => codexProvider.dispatches.some((dispatch) => dispatch.text === "background reply"));
   } finally { await subject.close(); }
 });
 

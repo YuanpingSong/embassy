@@ -500,7 +500,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     const selectedAlias = this.selected.get(resolved.targetId)?.alias;
     if (
       selectedAlias === undefined ||
-      resolved.kind !== "interactive" ||
+      (resolved.kind !== "interactive" && resolved.kind !== "bg") ||
       selectedAlias !== `${resolved.alias}@${this.identity.hostId}`
     ) {
       throw new BridgeError(
@@ -733,7 +733,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     const rows: GatewayAdapterDiscovery[] = [];
     for (const peer of discovery.peers) {
       if (
-        peer.kind !== "interactive" ||
+        (peer.kind !== "interactive" && peer.kind !== "bg") ||
         !NATIVE_CLAUDE_NAME.test(peer.alias)
       ) {
         continue;
@@ -743,7 +743,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       const row: GatewayAdapterDiscovery = {
         alias,
         routeHandle: peer.targetId,
-        kind: "interactive",
+        kind: peer.kind,
         state: claudeRouteState(peer),
       };
       this.discovered.set(peer.targetId, row);

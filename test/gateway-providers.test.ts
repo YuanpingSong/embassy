@@ -203,6 +203,20 @@ class FakeClaudePeer {
       compatibility: "compatible",
     },
     {
+      targetId: "target-background",
+      alias: "bg9a04b5e9",
+      kind: "bg",
+      status: "idle",
+      compatibility: "compatible",
+    },
+    {
+      targetId: "target-daemon-worker",
+      alias: "daemon-worker",
+      kind: "daemon-worker",
+      status: "idle",
+      compatibility: "compatible",
+    },
+    {
       targetId: "target-codex-named-session",
       alias: "codex-cli",
       kind: "interactive",
@@ -368,6 +382,7 @@ class FakeClaudePeer {
 
   async resolveReplyAddress(address: string): Promise<ClaudePeerDescriptor> {
     if (address === "uds:/synthetic/selected.sock") return { ...this.peers[0]! };
+    if (address === "uds:/synthetic/background.sock") return { ...this.peers[3]! };
     return {
       targetId: "target-unselected",
       alias: "other",
@@ -565,6 +580,30 @@ test("Claude logical identity stays independent of runtime evidence", () => {
   assert.throws(() => createLocalClaudeGatewayProviderBase({ hostId: "this-mac", nodeInventory: studioInventory,
     runtime: claudeRuntime(), stateRoot: "/synthetic/controller-state", peerFactory: () => new FakeClaudePeer() as never }),
   (error: unknown) => error instanceof BridgeError && error.code === "GATEWAY_REMOTE_PROVIDER_DISABLED");
+});
+
+test("Claude discovery admits named background sessions but never helper daemons", async () => {
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: claudeRuntime(), stateRoot: "/synthetic/controller-state",
+    peerFactory: () => new FakeClaudePeer() as never,
+  });
+  await provider.initialize(callbacks().callbacks);
+  try {
+    assert.deepEqual((await provider.discoverClaudePeers()).peers, [
+      { alias: "advisor@this-mac", routeHandle: "target-selected", kind: "interactive", state: "idle" },
+      { alias: "bg9a04b5e9@this-mac", routeHandle: "target-background", kind: "bg", state: "idle" },
+      { alias: "codex-cli@this-mac", routeHandle: "target-codex-named-session", kind: "interactive", state: "idle" },
+    ]);
+    assert.deepEqual(await provider.selectRoute({
+      alias: "bg9a04b5e9@this-mac",
+      routeHandle: "target-background",
+    }), { routeHandle: "target-background", state: "idle" });
+    assert.deepEqual(await provider.resolveReplyAddress("uds:/synthetic/background.sock"), {
+      routeHandle: "target-background",
+    });
+  } finally {
+    await provider.close();
+  }
 });
 
 test("supervised Claude helpers preserve prepared-write evidence and provider binding", async () => {
