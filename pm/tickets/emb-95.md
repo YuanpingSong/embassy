@@ -265,3 +265,36 @@ federation-nodes.ts formally joins the window (implicit in correction
 #2's "classify where the first syscall happens"; made explicit here).
 All other caps and scope unchanged: tests ≤130 (measured 122), docs 16,
 no new safe codes. Freeze itemizes per file as measured.
+
+## Resumed mech-gate report for c465a872 (2026-08-18, post-HOLD)
+
+The resumed mechanical gate completed after the adversarial HOLD was
+already ruled: GATE CLEAN for the c465a872 artifact — accounting exact,
+560/560, soak 1/1, concepts PASS by carried ruling, all seven mutations
+RED, locale symmetry 17=17=17, all five spot checks correct (incl.
+mode-000 socket printing no serve advice, and state-dir denial
+classifying as denied WITH the loader stubbed — see below).
+
+Two items of record value despite the artifact being superseded:
+1. **Independent convergence on the F1 seam.** Row (h) confirmed the
+   named end-to-end test drives real pre-flight + real transport, but
+   flagged unprompted that the suite's file-local wrapper stubs
+   loadNodeInventory on every invocation — the exact seam the
+   adversarial pass proved hollow (the loader pre-empts the denied
+   classification in the unwrapped binary). Mechanical and adversarial
+   verification converged on the same defect from opposite directions;
+   correction #2's unwrapped-CLI requirement (all three seams named) is
+   confirmed as the right cure.
+2. **Lane "drift" during the gate — resolved as legitimate, no
+   violation.** The gate observed the lane change mid-run (12 files,
+   new hash, federation-nodes.ts appearing). Timeline: the c465a872
+   freeze was VACATED by the adversarial HOLD and correction #2 was
+   ordered and contest-granted before the resumed gate finished; the
+   observed writes are the engineer executing correction #2 exactly as
+   instructed. The gate agent was right to flag rather than assume —
+   a frozen lane changing mid-gate is normally a stop-everything event
+   — and the verdict correctly binds to the archived patch
+   (emb95c.patch), not the lane. Process note for the gate norm: when a
+   HOLD vacates a freeze while a gate is still running, the PM should
+   notify the running gate agent; this flag cost nothing but could have
+   cost a halt.
