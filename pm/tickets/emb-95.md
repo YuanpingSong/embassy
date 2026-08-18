@@ -101,3 +101,11 @@ BOTH machines. Publishing does not update them. Every machine must
 reinstall the skill after v2.0.0, or agents keep operating from copy
 that this release makes false — the same class of failure emb-93 exists
 to fix.
+
+## Gate interruption note (2026-08-18)
+
+Both emb-95 verification passes (mechanical + adversarial) were
+interrupted mid-run by a PM-side compute session limit (resets 05:50 ET).
+The freeze at SHA 5305351c is untouched and remains the gated artifact;
+passes relaunch after reset. No results from the interrupted runs are
+used.

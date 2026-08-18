@@ -159,3 +159,27 @@ two mechanisms are mutually redundant and one is dead. Mutating a single
 predicate proves that predicate, not the design. Where mechanisms can
 cover for each other, mutate EACH independently — added to the gate
 norm earned on emb-90.
+
+## Replacement freeze: mechanical gate CLEAN (2026-08-18)
+
+SHA fc57b9b9, base 9754888. GATE CLEAN: sha ✓ base ✓ apply ✓ accounting
+exact (service.ts 45/60; tests 72/120) ✓ check 558/558 ✓ soak 1/1 ✓
+hygiene ✓ file list ✓ zero-concept ✓ (types/control/claude-peer blob
+SHAs byte-identical to base; PEER_ALIAS_COLLISION and
+CLAUDE_ROUTE_NOT_FOUND both pre-exist).
+
+Per-mechanism mutation table — every mechanism independently pinned
+(baseline 49/0; each mutation alone → 48/1, file restored and SHA
+re-verified between): (a) availablePeers alias fence RED; (b1) pair-loop
+fence alone RED; (b2) resolver fence alone RED; (c) distinct-routeHandle
+predicate RED; (d) incomplete-discovery retention RED; (e) publicRegistry
+duplicate-code merge RED. The F11 mutual-coverage defect is demonstrably
+absent. Executed spot checks: both colliding UUIDs select ok while the
+shared alias returns not_found (F1 dead); duplicate safe codes merge and
+the snapshot validates (F4 dead).
+
+VERDICT PENDING: adversarial re-review was interrupted mid-run by a
+PM-side compute session limit (resets 05:50 ET) and will be relaunched.
+Landing waits for it — the first freeze's mechanical gate was also clean
+and review still found three blockers; that lesson does not get unlearned
+one slice later.
