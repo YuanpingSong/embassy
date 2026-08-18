@@ -3,7 +3,7 @@ id: emb-95
 title: v2.0 — sandbox-denied control socket reports the wrong cause and the wrong fix
 kind: bug
 size: 1
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-18
 ---
@@ -369,3 +369,52 @@ loader pre-empted CLI, then serve inherited the loader. The classifier
 is now right at every surface except the one that starts the broker;
 the ambiguity core never wobbled once across ~400 driven cases. This is
 what an honest-copy slice on a trust seam costs.
+
+## Fourth-freeze verdicts and LANDING (2026-08-18)
+
+SHA 7c28641e. MECH GATE CLEAN: accounting exact (78/90, 158/160, docs
+16), check 562/562 RUN TWICE (flake chase: did not reproduce; third
+green run in the reviewer's worktree — treated as environmental with
+three data points), soak 1/1, concepts exact, realpath deletion clean
+with no orphans, ALL mutation rows red including the three nodes.json
+branch pins individually (k2 — last round's silent-revert regression —
+now red) and the serve-routing pin. Spot checks: serve honest in both
+locales with base-comparison byte-identical on its three other failure
+modes; client hedge live; 19-key locale symmetry (compile-enforced —
+deleting a zh key fails tsc).
+
+MICRO ADVERSARIAL: GO. Serve prose honest, routing cannot cross (all
+three other CONTROL_CONNECT_DENIED producers have no serve caller;
+probed seven commands under denial — every one takes the client
+presentation), realpath deletion unreachable under every real denial
+mechanism incl. live seatbelt profiles, ambiguity core untouched.
+
+Correction bundle priced at landing:
+- **F1 → emb-97 (MUST land before v2.0.0 release):** the EPERM half of
+  the errno predicate is unpinned — deleting it passes the whole suite
+  green while fully restoring the original incident under the REAL
+  sandbox mechanism (seatbelt raises EPERM; every test fakes EACCES).
+  Product correct today, verified under seatbelt; the missing piece is
+  the incident's own regression test. Also folded into emb-97: F2 (the
+  serve hint lacks the verify-EMBASSY_STATE_DIR hedge the client hint
+  got — the boot path is where stale env vars live) and F4 (the
+  read-branch catch converts EIO/TypeError into "nodes.json invalid,"
+  non-retryable — narrow to errno-shaped errors, rethrow the rest).
+- **F3 → backlog with reasons:** serve's stdout envelope carries
+  CONTROL_CONNECT_DENIED though serve never opens a control connection —
+  machine-readable semantics debt; a fix needs either a new code
+  (concept) or overload; rides the transport-code cleanup family.
+- **F5 recorded (pre-existing):** peer-stdio swallows everything —
+  joins its backlog family. **F6 recorded:** hedge/do-not-relocate
+  never co-appear in one output; docs+skill carry the counter-rule.
+
+LANDED on public main as **1f5f42c**, stacked on emb-94: patch applied
+cleanly to da29280, full check 564/564 and soak 1/1 IN THE LANDING TREE
+(564 = 562 + emb-94's 2), pushed. Status: landed.
+
+Ledger: four freezes, three HOLDs, one GO. Each HOLD fixed its target
+while the misdiagnosis relocated (transport → pre-flight → loader →
+serve); the ambiguity core survived ~400 driven cases without one
+violation. The gate norms earned here: superseding-freeze briefs carry
+prior rulings; every classification branch pins the errno THAT THE REAL
+MECHANISM RAISES, not a convenient sibling.
