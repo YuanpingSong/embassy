@@ -88,3 +88,43 @@ service.ts:995 requires the alias to end with the broker hostId):
 `embassy register-codex --alias codex-embassy-swe3@m5dev --host m5dev`
 is the correct invocation on this host. The --host flag dies in v2.0
 (emb-89 already deleted it on main).
+
+## Contest ruling #2 (2026-08-18) — DESCOPED, window not expanded
+
+Engineer's fixture proved the finding before editing: a digit-start name
+(`9a04b5e9@host`) is filtered by the full alias grammar at ten
+production boundaries (providers, service, control, store, types,
+peer-protocol, peer-mailbox, provenance-envelope, claude-helper-protocol,
+claude-helper-supervisor) — including persisted route state and
+provenance validation. The requested expansion (ten files, tests >80,
+verification R4) correctly prices what that change IS. The finding is
+right; the feature is not worth it.
+
+RULING: the name-grammar widening is CUT from emb-92 entirely.
+Acceptance criterion (5) (digit-start names as valid candidates) is
+dropped; the alias grammar stays untouched at every boundary. Reasons,
+in order: (1) the mission is the founder's bg-admission ruling, and the
+PM seat runs under a deliberate letter-start name — digit-start only
+serves sessions nobody named, a convenience; (2) ten boundaries
+including store.ts and provenance-envelope.ts is R4 trust/persistence
+blast radius, indefensible for a convenience inside an E1; (3) fleet
+compatibility: peer wire is v1 and the this-mac broker (v1.9.5)
+enforces the letter-start grammar — a locally widened grammar mints
+aliases the other node rejects, breaking grammar uniformity mid-flight.
+The uniform grammar is a validation asset; we don't trade it here.
+
+emb-92 is now part 1 only: the two kind predicates admit "bg", the
+granted one-line service.ts type widening, carrying the real kind on the
+discovery row, and focused tests with letter-start bg fixtures. Caps
+stand: src ≤40, tests ≤80. TMPDIR=/tmp rerun for the INVALID_SOCKET_PATH
+service test acknowledged — that is the pinned check environment.
+Unfreeze and proceed.
+
+BACKLOG (declined-for-now, with reasons recorded here): digit-start
+session addressability. Returns only if a real need appears for
+addressing unnamed sessions, as its own ticket priced at the R4 it
+actually is, riding a release that versions the peer wire. Preferred
+alternative if the PM session's auto-name proves digit-start at
+switch-on: name the session (named bg sessions exist in production —
+`screenshot-main`); if bg sessions prove un-nameable, that fact comes
+back to the founder as a decision point, not into this slice.
