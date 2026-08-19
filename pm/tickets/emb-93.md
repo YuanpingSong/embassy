@@ -3,7 +3,7 @@ id: emb-93
 title: v2.0 — pair authority story: OS-boundary docs rewrite + dead attestation params cut
 kind: normal
 size: 2
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-08-18
 ---
@@ -182,3 +182,25 @@ stop-broker → install → start.
 files join the window. Measured-remainder rule in force. Second freeze
 = new SHA; gate = mech + docs-truth spot re-execution on the corrected
 sentences only.
+
+## Replacement freeze verdicts and LANDING (2026-08-18) — WAVE CLOSED
+
+SHA 4eceb182, src sub-hash 9d344066 byte-identical to the verified cut
+(correction #1 proven docs-only cryptographically). FINAL GATE CLEAN:
+accounting exact across all three itemized buckets, check 565/565, soak
+1/1, hygiene clean, concepts inherited-and-reconfirmed. The F3 pin is no
+longer vacuous: deleting the entire authority paragraph now reddens
+public-localization (proven by mutation). Every ruled correction
+re-executed true: the SITE QUICKSTART runs end-to-end against a real
+broker through the real CLI and the send is ACCEPTED (register → select
+→ pair the exact send endpoints → conv_/dlv_ tokens returned) in both
+locale variants; the unselect disclosure is present on all four
+surfaces AND demonstrated (edge paired → unselect → consentEdges []);
+CHANGELOG has the pair-arm removal under Removed, both mandatory
+upgrade actions, and the never-enforced disclosure verbatim; zh-CN uses
+应 (norm) with EN intact; --session recovery scoped to selection.
+
+LANDED on public main as **c022cf2** from the gate tree the checks ran
+in (main had not moved from base 1f5f42c). Status: landed.
+
+The v2.0 deletion wave stands down here per the founder hold.
