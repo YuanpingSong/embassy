@@ -1137,8 +1137,6 @@ export class GatewayService {
     const aliases = endpoints.aliases;
     const ownerHost = aliases.map(aliasHost).sort()[0]!;
     if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
-    const attestation = params.threadAttestation;
-    if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
     const existed = await this.store.hasConsentEdge(endpoints);
     await this.store.addConsentEdge(endpoints);
@@ -1150,8 +1148,6 @@ export class GatewayService {
     const aliases = endpoints.aliases;
     const ownerHost = aliases.map(aliasHost).sort()[0]!;
     if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
-    const attestation = params.threadAttestation;
-    if (attestation !== undefined) await this.assertThread(attestation.alias, attestation.threadId);
     this.assertWritable();
     const existed = await this.store.hasConsentEdge(endpoints);
     const result = await this.store.removeConsentEdge(endpoints);

@@ -76,10 +76,9 @@ export type ValidatedRegisterCodexParams = {
 };
 export type UnregisterCodexParams = { alias: string; threadId: string };
 export type RemoveCodexRegistrationParams = { alias: string };
-export type SelectClaudeParams = { alias: string; codexThreadId?: string };
+export type SelectClaudeParams = { alias: string };
 export type PairParams = {
   aliases: readonly [string, string];
-  threadAttestation?: Readonly<{ alias: string; threadId: string }>;
 };
 type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean; trackIdleMinutes?: number };
 type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
@@ -430,25 +429,15 @@ function decodeRemoval(value: unknown): RemoveCodexRegistrationParams {
   if (!shape(value, { alias }) || !(value.alias as string).startsWith("codex-")) invalid();
   return { alias: value.alias as string }; }
 function decodeSelection(value: unknown): SelectClaudeParams {
-  if (!isRecord(value) || !exact(value, ["alias"], ["codexThreadId"]) ||
-      typeof value.alias !== "string" || !isClaudeSessionSelector(value.alias) ||
-      (value.codexThreadId !== undefined && !uuid(value.codexThreadId))) invalid();
-  return { alias: UUID_PATTERN.test(value.alias) ? value.alias.toLowerCase() : value.alias,
-    ...(value.codexThreadId === undefined ? {} : { codexThreadId: value.codexThreadId.toLowerCase() }) };
+  if (!isRecord(value) || !exact(value, ["alias"]) ||
+      typeof value.alias !== "string" || !isClaudeSessionSelector(value.alias)) invalid();
+  return { alias: UUID_PATTERN.test(value.alias) ? value.alias.toLowerCase() : value.alias };
 }
 function decodePair(value: unknown): PairParams {
-  if (!isRecord(value) || !exact(value, ["aliases"], ["threadAttestation"]) || !Array.isArray(value.aliases) ||
+  if (!isRecord(value) || !exact(value, ["aliases"]) || !Array.isArray(value.aliases) ||
       value.aliases.length !== 2 || !alias(value.aliases[0]) || !alias(value.aliases[1]) ||
       value.aliases[0] === value.aliases[1]) invalid();
-  let threadAttestation: PairParams["threadAttestation"];
-  if (value.threadAttestation !== undefined) {
-    if (!shape(value.threadAttestation, { alias, threadId: uuid }) ||
-        !value.aliases.includes(value.threadAttestation.alias)) invalid();
-    threadAttestation = { alias: value.threadAttestation.alias as string,
-      threadId: (value.threadAttestation.threadId as string).toLowerCase() };
-  }
-  return { aliases: [value.aliases[0], value.aliases[1]],
-    ...(threadAttestation === undefined ? {} : { threadAttestation }) };
+  return { aliases: [value.aliases[0], value.aliases[1]] };
 }
 function commonSend(value: unknown, required: readonly string[], optional: readonly string[]): JsonRecord {
   if (!isRecord(value) || !exact(value, required, optional) || !alias(value.fromAlias) ||

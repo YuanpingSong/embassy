@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { gatewayControlMethods } from "../src/gateway/control.js";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -33,6 +34,45 @@ function fencedBlocks(
 function captures(text: string, pattern: RegExp): string[] {
   return [...text.matchAll(pattern)].map((match) => match[1] ?? "");
 }
+
+test("v2 authority docs match the closed control contract", async () => {
+  const [readme, chineseReadme, architecture, skill, changelog, site, chineseSite] = await Promise.all([
+    readPublicFile("README.md"), readPublicFile("README.zh-CN.md"),
+    readPublicFile("docs/GATEWAY-ARCHITECTURE.md"), readPublicFile("skills/embassy-peer/SKILL.md"),
+    readPublicFile("CHANGELOG.md"), readPublicFile("site/index.html"),
+    readPublicFile("site/zh-CN/index.html"),
+  ]);
+  assert.match(architecture, /closed version 2 method family is exactly these twenty-two methods/i);
+  for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
+  assert.match(architecture, /Pair and unpair mutate only the exact two\s+named endpoints/);
+  assert.match(architecture, /Paired mode still rechecks exact edge membership at\s+delivery/);
+  assert.match(architecture, /operating\s+norm, not an additional gateway identity check/);
+  for (const document of [readme, architecture, skill]) {
+    assert.match(document, /same-UID.*private control socket/is);
+    assert.match(
+      document,
+      /Remov(?:ing|es?) the selected route,?\s+(?:also\s+)?removes? its incident consent edges,?\s+and settles?/i,
+    );
+    assert.doesNotMatch(
+      document,
+      /select-claude[^\n]*shorthand|pair[^\n]*inherited `CODEX_THREAD_ID`/i,
+    );
+  }
+  assert.match(chineseReadme, /同 UID.*私有控制套接字/su);
+  assert.match(chineseReadme, /移除已选择的路由及其关联的同意边[^\n]*结算/u);
+  assert.doesNotMatch(chineseReadme, /代理(?:仍)?只能创建/u);
+  assert.match(skill, /UUID recovery applies only to selection/);
+  for (const page of [site, chineseSite]) {
+    assert.match(page, /embassy pair --from codex-embassy@this-mac --to claude-main@this-mac/);
+    assert.doesNotMatch(page, /embassy pair --from claude-main@this-mac --to dsh-main@this-mac/);
+  }
+  assert.match(changelog, /private control protocol is version 2/i);
+  assert.match(changelog, /### Removed[\s\S]*legacy `--claude` \/ `--codex` arm is removed/);
+  assert.match(changelog, /private state reset/);
+  assert.match(changelog, /mandatory private `nodes\.json`/);
+  assert.match(changelog, /was never enforced by the surviving generic arm/);
+  assert.match(changelog, /Authority-model correction:/);
+});
 
 test("Simplified Chinese README preserves the complete executable contract", async () => {
   const [english, chinese] = await Promise.all([

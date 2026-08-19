@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.0] - Unreleased
+
+### Changed
+
+- The private control protocol is version 2; version-1 control frames are refused rather than interpreted through a compatibility arm.
+
+### Removed
+
+- `pair` and `unpair` accept only explicit `--from` / `--to` endpoints; the legacy `--claude` / `--codex` arm is removed.
+
+### Upgrade note
+
+- Before starting version 2.0, complete the [private state reset](docs/CONFIGURATION.md#private-state-reset) after settling all work under 1.9.x, and create the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md) (use `nodes:[]` for a local-only broker).
+- Authority-model correction: the prior published claim that generic `pair` and `unpair` attested an inherited endpoint identity was never enforced by the surviving generic arm. Same-UID access to the private control socket authorizes pair, unpair, select, and unselect controls. These operations do not attest inherited provider identity. Delivery in paired mode still requires the exact consent edge, and agents remain instructed to mutate only user-chosen edges.
+
 ## [1.9.5] - 2026-08-17
 
 ### Fixed

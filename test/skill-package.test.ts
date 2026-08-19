@@ -89,6 +89,8 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /versions are diagnostic metadata, not routing authority/);
   assert.match(skill, /release-owned offline support matrix/);
   assert.match(skill, /pair --from .* --to/);
+  assert.match(skill, /same-UID control-plane operations authorized by the private control socket/);
+  assert.match(skill, /selection is a separate operator control and creates no permission edge/i);
   assert.match(skill, /Registration commits only the logical route record and performs no provider or App Server I\/O/);
   assert.match(skill, /Every Codex operation independently attests the current interface and resumes the exact registered task/);
   assert.match(skill, /bounded observation is display-only and never routing authority or a dispatch gate/);

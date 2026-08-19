@@ -114,11 +114,17 @@ Pick one name from `availablePeers`:
 embassy select-claude --alias advisor@this-mac
 ```
 
-Run this from the operator terminal, or from inside the Codex task — either works, because `select-claude` uses an inherited Codex identity when one is present and resolves the sole registered task when one is not. `embassy select-claude --session <uuid>` selects the same session by its native UUID.
+Run this from any same-UID process that can reach the private control socket. `embassy select-claude --session <uuid>` selects the same session by its native UUID.
 
-You should see `"accepted":true`. Registration and selection together form a pair — this Claude session and this Codex task can now exchange messages through Embassy.
+You should see `"accepted":true`. Selection creates no permission edge. Create the user-chosen edge explicitly:
 
-To connect any two routes from different providers, name both ends explicitly with `embassy pair --from <alias> --to <alias>`; many edges can coexist. The command must run under an inherited endpoint identity that belongs to the requested edge. The live dashboard offers the same bounded, confirmed operation to the local operator.
+```bash
+embassy pair --from codex-reviewer@this-mac --to advisor@this-mac
+```
+
+Conversely, `unselect-claude` removes the selected route, removes its incident consent edges, and settles their in-flight work from the durable attempt phase.
+
+To connect any two routes from different providers, name both ends explicitly with `embassy pair --from <alias> --to <alias>`; many edges can coexist. Same-UID access to the private control socket authorizes the command, and agents must create only the edge the user chose. The live dashboard offers the same bounded, confirmed operation.
 
 ### 4. Send a message
 
@@ -205,7 +211,7 @@ The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html`
 
 Embassy publishes each registered Codex task into Claude Code's live-session registry as its own `codex-*` peer. Claude sessions discover those tasks through `ListAgents`; Codex uses its managed App Server. DeepSeek and Grok Build are boot-registered ACP routes whose owned subprocess and one route-local session start lazily on first dispatch. Universal shell peers use `peer-*` aliases and a pull mailbox authenticated by an alias plus one-time-minted token.
 
-A pair is one explicit permission edge between two named routes from different providers, bounded at 128 edges by default. Every edge is created explicitly with generic `pair --from/--to`; `select-claude` remains the one-Codex-task shorthand for a Claude↔Codex edge. Nothing is implied. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out for supported native inbound senders.
+A pair is one explicit permission edge between two named routes from different providers, bounded at 128 edges by default. Every edge is created explicitly with generic `pair --from/--to`; the same-UID private control socket is the command's authority, while agents are instructed to create only user-chosen edges. Selection is separate and implies no consent. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out for supported native inbound senders.
 
 Delivery timing is directional. Once routing and pre-write checks pass, every Claude-bound body is written immediately to Claude's native mailbox regardless of its observed busy or idle state. `transport_written` records that mailbox write and is the Claude-bound terminal `delivered` boundary; it does not mean Claude read or consumed the body. Codex-bound ordinary bodies instead queue while the task is busy and start a turn when it goes idle. In the Claude-to-Codex direction only, a body with an exact leading `STEER:` prefix may enter the active turn at the App Server's next tool-call boundary; if that boundary is unavailable, the message returns to the normal queue.
 
@@ -253,8 +259,8 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
 | `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
-| `pair` / `unpair` | endpoint participant | Add or remove one cross-provider edge by naming both ends: `embassy pair --from advisor@this-mac --to grok-main@this-mac`; the inherited caller must belong to the edge |
-| `select-claude` / `unselect-claude` | operator or Codex task | One-task shorthand for `pair`/`unpair`, taking `--alias <name@host>` or `--session <uuid>`: resolves the Codex end only when it is unambiguous (inherited or sole registered task), otherwise fails closed |
+| `pair` / `unpair` | same-UID control client | Add or remove one user-chosen cross-provider edge by naming both ends: `embassy pair --from advisor@this-mac --to grok-main@this-mac` |
+| `select-claude` / `unselect-claude` | same-UID control client | Select or remove one Claude route using `--alias <name@host>` or `--session <uuid>`; selection creates no permission edge |
 | `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session: `--from <codex-alias> --to <claude-alias>`, body on stdin, optional `--expects-reply` and `--track [--idle-minutes <n>]` |
 | `send-to-codex` | Claude session | Same flags and stdin body, using the inherited native reply identity |
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin, optional `--track [--idle-minutes <n>]` |

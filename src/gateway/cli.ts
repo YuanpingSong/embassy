@@ -221,12 +221,6 @@ function requireExclusiveCodexThreadId(env: NodeJS.ProcessEnv): string {
   if (hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
   return requireCodexThreadId(env);
 }
-function optionalCodexThreadId(env: NodeJS.ProcessEnv): string | undefined {
-  const threadId = env.CODEX_THREAD_ID;
-  if (threadId === undefined || threadId.length === 0) return undefined;
-  if (!THREAD_ID_PATTERN.test(threadId)) fault("CODEX_IDENTITY_REQUIRED");
-  return threadId.toLowerCase();
-}
 function optionalClaudeReplyAddress(env: NodeJS.ProcessEnv): string | undefined {
   const socketPath = env.CLAUDE_CODE_MESSAGING_SOCKET;
   if (socketPath === undefined || socketPath.length === 0) return undefined;
@@ -378,10 +372,7 @@ async function buildRequest(
       const options = parseOptions(args, ["alias", "session"]);
       count(options, 1);
       const selector = requireClaudeSelector(options, options.alias === undefined ? "session" : "alias");
-      const codexThreadId = optionalCodexThreadId(env);
-      return envelope(command === "select-claude" ? "select_claude" : "unselect_claude", {
-        alias: selector, ...(codexThreadId === undefined ? {} : { codexThreadId }),
-      });
+      return envelope(command === "select-claude" ? "select_claude" : "unselect_claude", { alias: selector });
     }
     case "pair":
     case "unpair": {

@@ -658,8 +658,7 @@ test("a peer waiter kicks cleanly deferred mail and exact receipt settles it onc
     assert.ok(minted.accepted && "token" in minted);
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
-    await subject.handlers.pair({ aliases: [codex.alias, "peer-shell@this-mac"],
-      threadAttestation: { alias: codex.alias, threadId: THREAD_A } });
+    await subject.handlers.pair({ aliases: [codex.alias, "peer-shell@this-mac"] });
     const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "peer-shell@this-mac", text: "mailbox payload", expectsReply: true });
     assert.ok(sent.accepted);
@@ -715,8 +714,7 @@ test("queued peer mail resumes once after restart under the same hash-only princ
     assert.ok(minted.accepted && "token" in minted);
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
-    await subject.handlers.pair({ aliases: [codex.alias, "peer-restart@this-mac"],
-      threadAttestation: { alias: codex.alias, threadId: THREAD_A } });
+    await subject.handlers.pair({ aliases: [codex.alias, "peer-restart@this-mac"] });
     const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "peer-restart@this-mac", text: "survive restart", expectsReply: true });
     assert.ok(sent.accepted);

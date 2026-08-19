@@ -86,8 +86,8 @@
 <div class="steps">
 <div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>复制</button></div><p>启动 broker。它不开启任何网络监听 — 一切留在这台机器上。配置中声明的 ACP 提供方会在启动时注册各自的路由（默认 <code style="border:none;background:none;padding:0">dsh-main@this-mac</code> 与 <code style="border:none;background:none;padding:0">grok-main@this-mac</code>）；它们的子进程按需惰性启动，直到第一条需要它的消息到来。</p></div>
 <div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@this-mac</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@this-mac" hidden>复制</button></div><p>在 Codex 任务内部运行 — 身份从任务继承，绝不冒充。请让你的智能体来执行。</p></div>
-<div><div class="cmd2"><code>embassy select-claude --alias claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@this-mac" hidden>复制</button></div><p>将 Claude 会话与任务配对。配对是双向同意：只有配对双方可以通话。</p></div>
-<div><div class="cmd2"><code>embassy pair --from claude-main@this-mac --to dsh-main@this-mac</code><button type="button" class="cp" data-copy="embassy pair --from claude-main@this-mac --to dsh-main@this-mac" hidden>复制</button></div><p>其余每一条边都需要一条显式命令。两端必须都已注册、在线、位于同一主机，且分属不同提供方。四个提供方给出十二个有序方向，每个方向都依托一条你有意建立的同意边 — 没有任何一条是默认开启的。</p></div>
+<div><div class="cmd2"><code>embassy select-claude --alias claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@this-mac" hidden>复制</button></div><p>选择 Claude 路由。选择不会创建同意边。</p></div>
+<div><div class="cmd2"><code>embassy pair --from codex-embassy@this-mac --to claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@this-mac --to claude-main@this-mac" hidden>复制</button></div><p>显式创建下一条发送将使用的双向同意边。两端必须都已注册、在线、位于同一主机，且分属不同提供方。</p></div>
 <div><div class="cmd2"><code>embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
 Which auth middleware did you settle on?
 MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，绝不作为参数。你会收到一个 <code style="border:none;background:none;padding:0">dlv_</code> 回执和一个 <code style="border:none;background:none;padding:0">conv_</code> 令牌。</p></div>
@@ -168,8 +168,8 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <span class="p">$</span> embassy register-codex --alias codex-embassy@this-mac<br>
 <span class="c"># 操作者：从 `embassy status` 的 availablePeers 中选一个名字：</span><br>
 <span class="p">$</span> embassy select-claude --alias claude-main@this-mac<br>
-<span class="c"># 其余任意一条边 — 两端已注册、在线、同主机、不同提供方：</span><br>
-<span class="p">$</span> embassy pair --from claude-main@this-mac --to dsh-main@this-mac<br>
+<span class="c"># 创建下一条发送将使用的同意边：</span><br>
+<span class="p">$</span> embassy pair --from codex-embassy@this-mac --to claude-main@this-mac<br>
 <span class="c"># 在 Codex 任务内 — 正文经 stdin 传入，绝不作为参数：</span><br>
 <span class="p">$</span> embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
 Which auth middleware did you settle on?<br>

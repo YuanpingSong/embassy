@@ -353,7 +353,6 @@ async function registerAndSelect(
   assert.deepEqual(registered, { accepted: true, code: "ok" }, "registerCodex");
   const selected = await handlers.selectClaude({
     alias: "claude-one@this-mac",
-    codexThreadId: THREAD_ID,
   });
   assert.deepEqual(selected, { accepted: true, code: "ok" }, "selectClaude");
   const paired = await handlers.pair({

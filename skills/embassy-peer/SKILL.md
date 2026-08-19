@@ -1,13 +1,13 @@
 ---
 name: embassy-peer
-description: Operate Embassy through current name@host or Claude session-UUID selectors and universal peer-* shell routes. Use when an agent needs to register for inbound messaging, await shell-peer mail, list available peers, refresh the operator's static dashboard, manage a Codex-attested pair, send or reply under its own principal, or unregister without exposing provider credentials, socket paths, or message bodies.
+description: Operate Embassy through current name@host or Claude session-UUID selectors and universal peer-* shell routes. Use when an agent needs to register for inbound messaging, await shell-peer mail, list available peers, refresh the operator's static dashboard, manage a user-chosen pair, send or reply under its own principal, or unregister without exposing provider credentials, socket paths, or message bodies.
 ---
 
 # Embassy Peer Gateway
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Provider-authorized operations require exactly one principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting principal; never choose one on the caller's behalf. Operator-only `serve`, health, status, refresh, select, and unselect commands do not infer a provider principal. A shell-peer token authorizes only that peer's send, reply, await, receipt, and unregister operations; it never authorizes `pair` or `unpair`. Those commands carry the inherited `CODEX_THREAD_ID` as attestation when run inside a Codex task and otherwise fail closed; only the operator-facing live dashboard creates or removes an edge without that task attestation.
+Registration, send, reply, await, receipt, and unregister operations require the exact principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting required principal; never choose one on the caller's behalf. `pair`, `unpair`, `select-claude`, and `unselect-claude` are same-UID control-plane operations authorized by the private control socket, not by inherited provider identity. Agents remain norm-bound to create or remove only the exact edges the user chose; paired-mode membership is rechecked at delivery.
 
 If `CALLER_IDENTITY_CONFLICT` reports that both agent identities were inherited, explain that the Codex App Server daemon may have been started inside an agent session. Tell the operator to run `codex app-server daemon restart` from a normal terminal. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
 
@@ -17,7 +17,7 @@ Address a Claude session by its latest `name@host` or by a user-supplied native 
 
 Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
 
-Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native records carrying Embassy's supported explicit versioned advertisement marker are excluded because they are not Claude destinations; a genuine unmarked Claude session remains visible even when its name starts with `codex-*`. A send never pairs with a Claude session automatically. Create the exact user-chosen edge with `pair` — or the one-task shorthand `select-claude` — before sending; an unpaired destination is not routable.
+Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native records carrying Embassy's supported explicit versioned advertisement marker are excluded because they are not Claude destinations; a genuine unmarked Claude session remains visible even when its name starts with `codex-*`. A send never pairs with a Claude session automatically. Select the Claude route, then create the exact user-chosen edge with `pair` before sending; an unpaired destination is not routable.
 
 Accept a Claude session UUID only when the user supplies it or it is already part of the current task context. Never discover one by scanning history or configuration, and never infer a peer from a thread ID, process ID, working directory, socket path, or title.
 
@@ -88,13 +88,13 @@ Create one explicit cross-provider edge by naming both ends. Each endpoint must 
 embassy pair --from codex-reviewer@this-mac --to advisor@this-mac
 ```
 
-Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. Run `pair` and `unpair` from inside a registered Codex task so the CLI reads the inherited `CODEX_THREAD_ID`; a plain operator shell fails closed with `CODEX_IDENTITY_REQUIRED` — use the live dashboard or the one-task shorthand instead. Remove exactly the named edge:
+Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. The same-UID private control socket authorizes this control-plane mutation; Embassy does not attest an inherited provider identity for pair or unpair. Create or remove only the exact user-chosen edge. Remove it by naming both endpoints:
 
 ```sh
 embassy unpair --from codex-reviewer@this-mac --to advisor@this-mac
 ```
 
-When the Codex end is unambiguous — inherited from the calling task, or the sole registered task — the one-task shorthand forms or removes the same edge:
+Claude selection is a separate operator control and creates no permission edge:
 
 ```sh
 embassy select-claude --alias advisor@this-mac
@@ -106,17 +106,17 @@ Or address the same logical session directly by UUID:
 embassy select-claude --session 123e4567-e89b-42d3-a456-426614174000
 ```
 
-Remove the same one-task edge by naming the Claude endpoint:
+Remove the selected Claude route by naming that endpoint:
 
 ```sh
 embassy unselect-claude --alias advisor@this-mac
 ```
 
-With zero or several possible Codex ends, the shorthands fail closed and name the explicit verb; never guess an end on the caller's behalf.
+After selection, use explicit `pair --from <alias> --to <alias>` before sending; never infer or guess an edge on the user's behalf.
 
 Let the gateway resolve either selector against the current genuine Claude discovery snapshot. It refreshes process and socket coordinates by UUID; those transport details are never caller inputs. If discovery is ambiguous, incompatible, or unavailable, stop on the result.
 
-If the paired session is offline or was renamed while Embassy was stopped, the user may instead supply its UUID with `--session`. Pairing and removal manage only the gateway edge. They do not start, interrupt, configure, or terminate Claude Code.
+If the selected session is offline or was renamed while Embassy was stopped, the user may recover selection by supplying its UUID with `select-claude --session`. UUID recovery applies only to selection; `pair` still requires two aliases. `unselect-claude` removes the selected route, removes its incident consent edges, and settles their in-flight work from the durable attempt phase. These controls do not start, interrupt, configure, or terminate Claude Code.
 
 ## Register a Codex task
 

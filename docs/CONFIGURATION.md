@@ -103,9 +103,9 @@ that decision. Configure it in Claude Code, not in Embassy.
 This is the one prerequisite you must actively toggle, and it is the most
 common first-run failure — because it fails *late*. Quickstart step 3
 (`select-claude`) prints `"accepted":true` whether or not the setting is
-enabled: selection only creates Embassy's own permission edge and never
-consults Claude's native inbound policy. The refusal appears at step 4, when
-the send reaches the Claude end. If registration and selection both succeeded
+enabled: selection creates no permission edge and never consults Claude's
+native inbound policy. Create an explicit edge with `pair`; the refusal appears
+when the send reaches the Claude end. If registration, selection, and pairing succeeded
 but your first `send-to-claude` does not arrive, check `crossSessionInbound` on
 the destination session before suspecting the route.
 

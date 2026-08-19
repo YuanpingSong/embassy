@@ -26,7 +26,7 @@ from a session that already holds a pair edge to the addressed Codex task;
 `embassy serve --inbound open` is the explicit opt-out that restores any exact
 compatible live same-UID session as an inbound sender without making it
 outbound-selected. Outbound Codex-to-Claude sends likewise require the pair
-edge, created by `pair` or the one-task `select-claude` shorthand. It provides
+edge created by explicit `pair`; Claude selection alone creates no edge. It provides
 a single private operational view across the two products without rebuilding
 either agent runtime.
 
@@ -268,8 +268,11 @@ lookup aliases; it never changes the selected UUID. Immediately before a
 Claude-bound write, Embassy performs a fresh bounded registry scan, resolves
 that byte-identical UUID exactly once, and revalidates its current workspace,
 process, socket, and used-artifact generation. An incomplete scan, duplicate
-name or UUID, changed UUID, or unsafe current coordinate fails that operation
-closed. A name alone never restores or retargets a durable selection.
+UUID, changed UUID, or unsafe current coordinate fails that operation closed.
+A duplicate display name is fenced from listing, selection, and pair creation;
+a pre-bound route retains its identity-pinned binding, and an operator-supplied
+UUID remains the recovery selector. A name alone never restores or retargets a
+durable selection.
 
 The dashboard is the single pane for the human. It shows both sanitized
 available/selected Claude aliases and explicitly registered Codex aliases,
@@ -559,7 +562,7 @@ controller-owned mode-0700 state directory. The socket and state files are
 mode 0600. Frames are size-bounded and closed against unknown keys, methods,
 versions, and enum values.
 
-The closed version 1 method family is exactly these sixteen methods:
+The closed version 2 method family is exactly these twenty-two methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
@@ -574,8 +577,12 @@ The closed version 1 method family is exactly these sixteen methods:
   bounded private v4 state;
 - `untrack`, which closes one active progress watch by conversation token;
 - `send_to_claude` and `send_to_codex`, the provider-specific sends;
-- `reply`, the correlated reply operation; and
-- `refresh_dashboard`, which refreshes provider discovery and republishes.
+- `reply`, the correlated reply operation;
+- `refresh_dashboard`, which refreshes provider discovery and republishes;
+- `peer_catalog` and `peer_handoff`, the private federation catalog and
+  destination-owned handoff operations; and
+- `register_peer`, `unregister_peer`, `await_peer`, and `peer_receipt`, the
+  shell-peer registration, mailbox, and flush-before-receipt operations.
 
 The live dashboard companion calls `observe_snapshot` for every read; its
 mutation route additionally calls `pair`, `unpair`,
@@ -609,24 +616,22 @@ manual-recovery state.
 input is normalized to lowercase. No command returns the
 UUID, and no historical name remains routable after a rename.
 
-Provider-authorized mutations require one exclusive inherited principal.
+Provider-authorized registration, send, and reply operations require one exclusive inherited principal.
 Codex registration, unregister, and Codex-to-Claude send require only a valid
 `CODEX_THREAD_ID`; they fail if a non-empty Claude messaging socket is also
 inherited. Claude-to-Codex send requires only the raw inherited Claude socket
 path and fails if a non-empty Codex thread ID is also present. `reply` likewise
-fails with both identities or neither. `pair` and `unpair` also require an
-exclusive inherited `CODEX_THREAD_ID`: naming both endpoints does not make them
-operator commands, and they fail `CODEX_IDENTITY_REQUIRED` from a plain terminal
-or `CALLER_IDENTITY_CONFLICT` from inside a Claude session.
+fails with both identities or neither.
 
-`select-claude` and `unselect-claude` are the operator-runnable shorthand.
-They do not ignore provider identity — they consume an inherited
-`CODEX_THREAD_ID` when one is present, to resolve the Codex end, and reject a
-malformed one — but they tolerate its absence and then resolve the Codex end
-from the sole registered task. Selection is not a weaker operation than
-`pair`: it atomically creates the same permission edge. The health, status,
-dashboard refresh, live dashboard, untrack, and serve commands are the ones
-that genuinely ignore provider identities.
+`pair`, `unpair`, `select-claude`, and `unselect-claude` are control-plane
+operations authorized by access to the same-UID private socket; they do not
+attest inherited provider identity. Pair and unpair mutate only the exact two
+named endpoints, while selection installs or removes one Claude route and
+creates no consent edge. Paired mode still rechecks exact edge membership at
+delivery. Removing the selected route also removes its incident consent edges
+and settles their in-flight work from the durable attempt phase. Agents are
+instructed to create or remove only user-chosen edges; that is an operating
+norm, not an additional gateway identity check.
 
 The foreground command is:
 

@@ -565,14 +565,12 @@ test("serves the two directional routes and emits metadata-only responses", asyn
         method,
         params: {
           aliases: ["claude-one@this-mac", "codex-main@this-mac"],
-          threadAttestation: { alias: "codex-main@this-mac", threadId: THREAD_ID.toUpperCase() },
         },
       },
     });
   }
   const expectedPair = {
     aliases: ["claude-one@this-mac", "codex-main@this-mac"],
-    threadAttestation: { alias: "codex-main@this-mac", threadId: THREAD_ID },
   };
   assert.deepEqual(paired, expectedPair);
   assert.deepEqual(unpaired, expectedPair);
@@ -592,19 +590,11 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       method: "pair",
       params: {
         aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
-        threadAttestation: {
-          alias: "dsh-misleading@this-mac",
-          threadId: THREAD_ID.toUpperCase(),
-        },
       },
     },
   });
   assert.deepEqual(paired, {
     aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
-    threadAttestation: {
-      alias: "dsh-misleading@this-mac",
-      threadId: THREAD_ID,
-    },
   });
 
   const secretText = "transient body that must not appear in the response";
@@ -1132,6 +1122,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["observe_snapshot", { extra: true }],
     ["remove_codex_registration", { alias: "claude@this-mac" }],
     ["remove_codex_registration", { alias: "codex-main" }],
+    ["select_claude", { alias: "claude@this-mac", codexThreadId: THREAD_ID }],
     ["pair", { aliases: ["one@this-mac", "one@this-mac"] }],
     ["pair", { aliases: ["one@this-mac"] }],
     ["pair", { aliases: ["one@this-mac", "two@this-mac"], extra: true }],
