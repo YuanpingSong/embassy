@@ -55,7 +55,7 @@ Options:
   "hint.controlVersionMismatch":
     "rebuild or repoint this client to the broker's Embassy installation, then retry.",
   "hint.stateAccessDenied":
-    "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker.",
+    "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   "hint.messageTooLarge":
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
   "hint.nodeInventoryRequired":

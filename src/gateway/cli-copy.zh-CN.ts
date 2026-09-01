@@ -55,7 +55,7 @@ export const cliCopyZhCn = {
   "hint.controlVersionMismatch":
     "请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。",
   "hint.stateAccessDenied":
-    "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。",
+    "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。",
   "hint.messageTooLarge":
     "消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。",
   "hint.nodeInventoryRequired":

@@ -100,18 +100,18 @@ test("rejects an inventory owned by another uid through the audit seam", async (
 });
 
 test("preserves permission-denied inventory inspection as a recoverable access failure", async () => {
-  const denied = Object.assign(new Error("private errno detail"), { code: "EACCES" });
+  const denied = Object.assign(new Error("private errno detail"), { code: "EPERM" });
   await assert.rejects(loadGatewayNodeInventory("/private/state", {
     lstat: async () => { throw denied; },
   }), (error: unknown) => error instanceof BridgeError &&
     error.code === "CONTROL_CONNECT_DENIED" && error.recoverable &&
-    !error.message.includes("EACCES"));
+    !error.message.includes("EPERM"));
 });
 
 test("preserves denied nodes.json lstat, open, and read branches independently", async (t) => {
   const stateDir = await stateFixture(t);
   const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: [] });
-  const denied = () => Object.assign(new Error("private errno detail"), { code: "EACCES" });
+  const denied = () => Object.assign(new Error("private errno detail"), { code: "EPERM" });
   const cases = [
     { lstat: (async (target: string) => {
       if (target === filePath) throw denied();
@@ -128,4 +128,13 @@ test("preserves denied nodes.json lstat, open, and read branches independently",
     loadGatewayNodeInventory(stateDir, dependencies),
     (error: unknown) => error instanceof BridgeError && error.code === "CONTROL_CONNECT_DENIED",
   );
+
+  const unexpected = new Error("unexpected read failure");
+  await assert.rejects(loadGatewayNodeInventory(stateDir, {
+    open: (async (target: string, flags: number) => {
+      const handle = await open(target, flags);
+      handle.read = (async () => { throw unexpected; }) as typeof handle.read;
+      return handle;
+    }) as typeof open,
+  }), (error: unknown) => error === unexpected);
 });

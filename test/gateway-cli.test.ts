@@ -2354,8 +2354,8 @@ test("the unwrapped CLI reports an inaccessible inventory path as denied", async
     assert.match(result.stderr, /grant this task write access/);
     assert.match(result.stderr, /EMBASSY_STATE_DIR/);
     assert.doesNotMatch(result.stderr, /embassy serve/);
-    for (const [locale, hint] of [["en", "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker."],
-      ["zh-CN", "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。"]] as const) {
+    for (const [locale, hint] of [["en", "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory."],
+      ["zh-CN", "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。"]] as const) {
       const serve = await actual(["serve", "--lang", locale]);
       assert.equal(serve.code, gatewayCliExitCodes.unavailable);
       assert.match(serve.stderr, new RegExp(hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

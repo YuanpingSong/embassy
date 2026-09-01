@@ -159,6 +159,7 @@ export async function loadGatewayNodeInventory(
     return parseInventory(buffer.subarray(0, offset).toString("utf8"));
   } catch (error) {
     if (error instanceof BridgeError) throw error;
+    if (!isErrnoShape(error)) throw error;
     return inaccessible(error, "nodes.json cannot be safely read.");
   } finally {
     await handle.close();
@@ -166,6 +167,10 @@ export async function loadGatewayNodeInventory(
 }
 
 function isErrno(error: unknown, code: string): boolean {
+  return isErrnoShape(error) && error.code === code;
+}
+
+function isErrnoShape(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null &&
-    "code" in error && (error as NodeJS.ErrnoException).code === code;
+    "code" in error && typeof (error as NodeJS.ErrnoException).code === "string";
 }
