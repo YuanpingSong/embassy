@@ -3,7 +3,7 @@ id: emb-91
 title: v2.0 R4 — one send verb: `embassy send --from --to`
 kind: normal
 size: 1
-status: dispatched
+status: landed
 release: v2.0.0
 updated: 2026-09-01
 ---
@@ -150,3 +150,32 @@ session limit (resets 14:00 ET). Relaunched on the flagship tier under
 the subagent-tier rule's stated-reason exception: release-gating
 consent-critical review, Opus pool exhausted, founder's delivery order
 standing. Landing waits on it.
+
+## Adversarial verdict and LANDING (2026-09-01) — CHARTER COMPLETE
+
+Flagship-tier matrix review (Opus pool exhausted; tier-rule
+stated-reason exception): **GO.** 17 authority cells + 15
+direction-confusion cells executed against a real control server —
+every forged/mismatched principal refused, no cell silently enqueued,
+adapter logs contain exactly the accepted cells' frames. The
+resolution→re-attestation gap was DRIVEN three ways: mid-send
+re-registration refuses (assertThread); the only legal cross-provider
+alias flip (peer→claude) is caught by consent edges pinning exact
+registrationIds; with an operator-consented edge for the new binding it
+correctly delivers. Provenance attributes resolved sources in every
+frame; replies round-trip both directions on one conv token;
+STEER stays claude→codex-only; dual identity fail-closed with the
+env -u remedy shown exactly when both identities present.
+
+Correction bundle (post-release pricing): F1 stale-target refusals read
+route_mismatch for codex/claude principals but not_found for peer
+principals — distinguishability asymmetry, all cells fail closed; F2
+zero-identity send names CLAUDE_IDENTITY_REQUIRED even codex-direction
+(neutral CALLER_IDENTITY_REQUIRED exists); F3 pre-existing peer-reply
+INTERNAL_ERROR shape; F4 codexDoctor.attached copy implies Desktop is a
+supported host. Cosmetic: SEND_TO_CODEX_CMD constant name.
+
+LANDED on public main as **7efec97** from the gate tree (main unmoved
+from base). Status: landed. The v2.0 charter (emb-87 inventory →
+emb-88/89/90/91 cuts + emb-92..97 riders) is COMPLETE; the release
+runbook runs next.
