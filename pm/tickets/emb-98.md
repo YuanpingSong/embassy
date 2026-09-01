@@ -3,7 +3,7 @@ id: emb-98
 title: v2.0.1 — hermetic dashboard-command tests; CI has been red since emb-89
 kind: bug
 size: 1
-status: dispatched
+status: landed
 release: v2.0.1
 updated: 2026-09-01
 ---
@@ -53,3 +53,38 @@ landing protocol verified everything locally and never watched CI on
 the push; two weeks red went unnoticed. Every future landing includes
 a CI-conclusion check, and the release runbook gains a pre-flight
 "CI green on the release base" gate before step 2.
+
+## Gate, landing, and RELEASE (2026-09-01)
+
+Direct PM gate (44-line test-only slice): SHA db5a0470 exact, base
+6afbbb4, accounting exact (33+/11− one file), hygiene clean,
+scrubbed-HOME repro now 14/14 (was 3 fail + 7 cancelled), full check
+565/565. LANDED as d934bb3. CI on the push: **SUCCESS — first green
+since emb-88, two weeks.** Acceptance criterion (3) satisfied.
+
+**v2.0.1 RELEASED**: Release commit b862513, tag v2.0.1, pipeline run
+33534126964 green end-to-end, GitHub release live (not draft), npm
+serves agent-embassy@2.0.1 (verified outside-in). v2.0.0 stands as the
+project's second dead tag per the never-move rule.
+
+**DRILL COMPLETE, both machines**: m5dev — stop → install 2.0.1 →
+state guillotine (v3 ledger preserved as gateway-state.v3-pre201-drill)
+→ fresh schema-4 → PM re-select, engineer re-register, pair, and a
+LIVE ROUND TRIP through the new unified `embassy send` verb (engineer
+reply: "ROUND TRIP COMPLETE: Embassy 2.0.1 send/reply is live on fresh
+schema-4 state"). this-mac (over SSH) — install 2.0.1 → guillotine →
+fresh broker → shell-peer mailbox registered with the one-shell token
+pattern → CROSS-MACHINE PROOF: m5dev→this-mac over peer wire v1,
+delivered + PEER_HANDOFF_CONFIRMED, full provenance envelope consumed
+by `embassy await` on the target. Skills reinstalled from the released
+tree on both machines, both harnesses.
+
+Drill notes for the record: (1) the dual-authority fail-closed fired
+live when the PM eval'd the peer token into env AND piped it to
+--token-stdin — the exact A14-class cell the emb-91 matrix verified,
+now observed in production; recovery per protocol (fresh alias,
+one-shell pattern). One drill artifact message queued on
+peer-v201@this-mac expires harmlessly at deadline. (2) register-peer
+recovery re-registration of a live-tokened alias refuses route_mismatch
+— matches the pinned-identity design; noted for the skill's recovery
+section. Status: landed.
