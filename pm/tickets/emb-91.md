@@ -81,3 +81,33 @@ Conditions:
 Rider scope confirmed as projected: README setup section +
 CALLER_IDENTITY_CONFLICT surfaces specifically; no dashboard-copy
 expansion.
+
+## Contest ruling #2 (2026-09-01) — GRANTED
+
+Measured at the first compiling end-to-end cut: src 146 (75+/71−) vs
+130; tests 250 (106+/144−) vs 120; docs 77 itemized.
+
+Src: GRANTED ≤150, target 146. The +16 includes 12 lines fixing the
+live dashboard's two now-false Desktop setup remedies. My contest-#1
+scope line said "no dashboard-copy EXPANSION" — this is not expansion,
+it is TRUTH-REPAIR of an existing surface rendered false by the same
+upstream change the rider exists to document, raised through the
+contest channel BEFORE freeze (the correct moment — contrast the
+emb-93/F10 lesson where late routing crossed a coherent freeze).
+Leaving a documented-false remedy in shipped copy to fit a projection
+would invert the wave's entire standard.
+
+Tests: GRANTED ≤250, target as measured. The +130 is mechanical rename
+fallout — two closed handler names die, so every existing ambiguity and
+settlement matrix must call the sole `send` handler; 144 deletions
+against 106 additions is churn, not growth (net −38). The two dodges
+(legacy handler aliases; dropping R3 matrices) were correctly
+self-rejected — one violates no-shims, the other weakens the gate.
+
+Carried conditions unchanged: surface purity (CLI and closed union
+contain only `send`), the method enumeration updates in-slice,
+direction derives from resolved providers, peer wire v1 stated in the
+freeze. GATE NOTE for the record: with rename-churn this large, the
+gate must specifically verify that converted matrices preserved their
+assertion strength — the loosened-surviving-assertion check gets its
+own line in the brief.
