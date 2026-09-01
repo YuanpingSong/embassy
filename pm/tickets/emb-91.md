@@ -50,3 +50,34 @@ green; (6) per-locale parity on every touched copy/doc surface.
 
 **Gate**: mech + targeted adversarial on the direction-derivation only
 (mis-routing = consent violation; everything else is deletion + copy).
+
+## Contest ruling #1 (2026-09-01) — GRANTED with conditions
+
+Engineer measured the coherent cut at 98-125 src (target ~112) against
+the ≤60 cap, per-file with line ranges: the closed control-method union,
+params/result/handler maps, both decoders, and descriptors all change
+when two wire methods become one — the exact cost class emb-90 taught
+(one legacy arm = 95 lines). The dodge (keeping send_to_claude/
+send_to_codex under a new CLI verb) violates "deleted end to end" and
+was correctly rejected by the engineer before proposing it.
+
+GRANTED: src ≤130, target ≤115. Tests ≤120 and docs-itemized unchanged.
+Conditions:
+(a) SURFACE PURITY is the binding: the CLI exposes only `send`; the
+    closed v2 control union contains only `send` (both directional
+    methods gone). Internal implementation helpers (sendToClaude/
+    sendToCodex as private functions) are the engineer's domain — the
+    ticket binds the surface, not the internals. The control protocol
+    is unreleased, so reshaping the v2 method set costs nothing;
+    peer wire stays v1 untouched (state in the freeze).
+(b) THE 22-METHOD ENUMERATION emb-93 just fixed in GATEWAY-ARCHITECTURE
+    must update in this same slice to the new set and count — the doc
+    must never claim methods the union lacks, one slice after we paid
+    to make it true.
+(c) DIRECTION AUTHORIZATION derives from the RESOLVED source/target
+    providers, never from caller-supplied hints — this is the targeted
+    adversarial's entire focus at gate (mis-routing = consent
+    violation), so build it to be attacked.
+Rider scope confirmed as projected: README setup section +
+CALLER_IDENTITY_CONFLICT surfaces specifically; no dashboard-copy
+expansion.
