@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, test } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
 import {
@@ -31,6 +34,25 @@ const STATE_DIR = "/private/embassy-state";
 const CONTROL_SOCKET_PATH = `${STATE_DIR}/control.sock`;
 const DASHBOARD_PORT = 53_421;
 const DASHBOARD_URL = `http://127.0.0.1:${DASHBOARD_PORT}/`;
+const roots = new Set<string>();
+
+afterEach(async () => {
+  await Promise.all([...roots].map(async (root) => {
+    roots.delete(root);
+    await rm(root, { recursive: true, force: true });
+  }));
+});
+
+async function runHermeticGatewayCli(
+  argv: readonly string[],
+  dependencies: GatewayCliDependencies,
+): Promise<number> {
+  const stateDir = await realpath(await mkdtemp(path.join(os.tmpdir(), "embassy-dashboard-cli-")));
+  roots.add(stateDir);
+  await writeFile(path.join(stateDir, "nodes.json"), JSON.stringify({ version: 1, ...TEST_INVENTORY }), { mode: 0o600 });
+  return runGatewayCli(argv, { ...dependencies,
+    env: { ...dependencies.env, EMBASSY_STATE_DIR: stateDir } });
+}
 
 type Capture = Readonly<{
   chunks: string[];
@@ -172,7 +194,7 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
       CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
       ...current.env,
     });
-    const code = await runGatewayCli(current.argv, harness.dependencies);
+    const code = await runHermeticGatewayCli(current.argv, harness.dependencies);
     assert.equal(code, gatewayCliExitCodes.ok);
     assert.deepEqual(calls, [current.expected]);
     assert.deepEqual(JSON.parse(harness.stdout.chunks.join("")), {
@@ -210,7 +232,7 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
     const harness = cliHarness(async () => {
       ran = true;
     });
-    const code = await runGatewayCli(argv, harness.dependencies);
+    const code = await runHermeticGatewayCli(argv, harness.dependencies);
     assert.equal(code, gatewayCliExitCodes.invalidInput, argv.join(" "));
     assert.equal(ran, false, argv.join(" "));
     assert.deepEqual(JSON.parse(harness.stdout.chunks.join("")), {
@@ -234,7 +256,7 @@ test("dashboard --live preserves its closed grammar and uses common locale prece
   const invalidEnvironment = cliHarness(async () => {
     ranWithInvalidEnvironment = true;
   }, { EMBASSY_LOCALE: "zh" });
-  const invalidEnvironmentCode = await runGatewayCli(
+  const invalidEnvironmentCode = await runHermeticGatewayCli(
     ["dashboard", "--live"],
     invalidEnvironment.dependencies,
   );
@@ -270,7 +292,7 @@ test("live dashboard ready output exposes its public URL and no private launch m
     PRIVATE_CAPABILITY: "capability-secret",
   });
 
-  const code = await runGatewayCli(
+  const code = await runHermeticGatewayCli(
     ["dashboard", "--live", "--lang", "zh-CN"],
     harness.dependencies,
   );
@@ -669,7 +691,7 @@ test("pre-ready cancellation is a clean integrated CLI exit with no readiness cl
   const stdout = capture();
   const stderr = capture();
   let validated = 0;
-  const code = await runGatewayCli(["dashboard", "--live"], {
+  const code = await runHermeticGatewayCli(["dashboard", "--live"], {
     env: {
       CODEX_THREAD_ID: THREAD_ID,
       CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
@@ -707,7 +729,7 @@ test("SIGTERM during integrated CLI startup exits cleanly without a ready record
   const started = new Promise<void>((resolve) => {
     startedResolve = resolve;
   });
-  const run = runGatewayCli(["dashboard", "--live"], {
+  const run = runHermeticGatewayCli(["dashboard", "--live"], {
     env: {},
     stdout,
     stderr,
@@ -1050,7 +1072,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
     const harness = cliHarness(async () => {
       throw current.error;
     });
-    const code = await runGatewayCli(
+    const code = await runHermeticGatewayCli(
       current.argv,
       harness.dependencies,
     );
@@ -1066,7 +1088,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
   }
 
   const noReady = cliHarness(async () => undefined);
-  const noReadyCode = await runGatewayCli(
+  const noReadyCode = await runHermeticGatewayCli(
     ["dashboard", "--live"],
     noReady.dependencies,
   );
@@ -1091,7 +1113,7 @@ test("CLI normalizes live failures before ready and emits no second JSON after r
     });
     throw new Error("private cleanup detail");
   });
-  const code = await runGatewayCli(
+  const code = await runHermeticGatewayCli(
     ["dashboard", "--live"],
     postReady.dependencies,
   );
@@ -1116,7 +1138,7 @@ test("duplicate live ready callbacks cannot append protocol output", async () =>
     await options.onReady(result);
     await options.onReady(result);
   });
-  const code = await runGatewayCli(
+  const code = await runHermeticGatewayCli(
     ["dashboard", "--live"],
     harness.dependencies,
   );
