@@ -111,3 +111,42 @@ freeze. GATE NOTE for the record: with rename-churn this large, the
 gate must specifically verify that converted matrices preserved their
 assertion strength — the loosened-surviving-assertion check gets its
 own line in the brief.
+
+## Mechanical gate verdict (2026-09-01): CLEAN — one accepted relocation
+
+Freeze SHA 3fe73bc2, base 5ca9b4f. GATE CLEAN: accounting exact
+(src 146/150, tests 250/250 at-cap recomputed, docs 81 itemized), check
+565/565, soak 1/1, concepts 1-authorized (`send`, nothing else new in
+any closed set), hygiene clean. Mutations: removed-verb rejection RED;
+re-attestation fence RED; hardcoded direction RED in BOTH matrices (7
+and 12 fails respectively — the directional coverage is real).
+Assertion-strength verified by mechanical sweep (verb-token
+normalization + diff across all ten files), not sampling alone:
+residual = one deleted case, four added lines, three stub merges.
+Executed: both directions through the real CLI land on the correct
+adapters with no cross-leak; old verbs refuse as UNKNOWN_COMMAND with
+zero dispatches; the 21-method enumeration matches code exactly; BOTH
+published quickstarts (site + README, en/zh byte-identical command
+sets) execute end-to-end.
+
+**Finding #1, PM ruling — ACCEPTED semantic relocation.** Base refused
+a single-identity wrong-direction send client-side
+(CALLER_IDENTITY_CONFLICT, exit 2, body never crossed the socket); the
+collapsed verb refuses broker-side (route_mismatch, exit 3, body
+transits the same-UID control socket, zero dispatch). Under the
+ratified OS-boundary model this is where the check BELONGS — the broker
+is the authority — and the service-layer refusal is test-pinned
+(mutation b + the strengthened peer-principals test). Property
+knowingly traded: a doomed body now reaches the same-UID broker before
+refusal; within the trust boundary, no other principal observes it.
+Recorded, not corrected.
+
+Cosmetic parked: tab-deliveries.tsx keeps constant name
+SEND_TO_CODEX_CMD with the new command as its value — internal
+identifier, post-release sweep.
+
+Adversarial matrix review: first run killed mid-flight by the Opus
+session limit (resets 14:00 ET). Relaunched on the flagship tier under
+the subagent-tier rule's stated-reason exception: release-gating
+consent-critical review, Opus pool exhausted, founder's delivery order
+standing. Landing waits on it.
