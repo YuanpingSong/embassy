@@ -43,3 +43,12 @@ surrounding code.
 wave after emb-93. Work order: emb-93 first, then STAND DOWN. emb-97 is
 first in queue at resume and MUST land before the v2.0.0 release gate
 (it is on the release checklist).
+
+## HOLD LIFTED — dispatched live (2026-09-01)
+
+Founder authorized the v2.0.0 release (2026-09-01). Base UPDATE: main
+is now c022cf2 (emb-93 landed after this ticket was written); emb-93
+touched cli.ts/control.ts/service.ts + docs — disjoint from this
+ticket's window (federation-nodes.ts, cli-copy files, tests), so the
+binding applies unchanged on the new base. Work order: emb-97 first
+(release-gating), then emb-91, then the release.
