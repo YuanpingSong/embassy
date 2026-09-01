@@ -4,12 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [2.0.0] - Unreleased
+## [2.0.0] - 2026-09-01
 
 ### Changed
 
 - The private control protocol is version 2; version-1 control frames are refused rather than interpreted through a compatibility arm.
 - One provider-neutral `embassy send --from <alias> --to <alias>` replaces both provider-named send verbs; the broker derives direction from the resolved route providers.
+
+### Added
+
+- Background Claude Code sessions are first-class peers: discovery, selection, pairing, and message exchange work for `bg` sessions alongside interactive ones.
+
+### Fixed
+
+- Two live Claude sessions sharing a display name no longer poison the public snapshot (previously `embassy status` failed entirely until restart): the colliding alias is fenced from listing, selection, and pairing while both sessions stay addressable by exact session UUID, and diagnostics count the collision.
+- Connect-stage failures classify honestly: a permission-denied state directory or socket reports `CONTROL_CONNECT_DENIED` with the real remedy (grant this process access to the state directory; never start a second broker) in both locales; missing socket, nothing listening, and control-protocol version mismatch are distinct codes with distinct remedies. The real macOS-sandbox errno (EPERM) is regression-pinned.
 
 ### Removed
 
