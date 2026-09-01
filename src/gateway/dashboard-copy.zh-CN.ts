@@ -251,9 +251,9 @@ export const dashboardCopyZhCn = {
   "diagnostics.connectors.empty": "没有连接器元数据。",
   "diagnostics.connectors.caption": "本地提供方连接器状态",
   "diagnostics.codexDoctor.split_brain":
-    "桌面应用正在使用私有 App Server；Embassy 无法访问其任务。请重新启动：/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT",
+    "桌面应用正在使用私有 App Server；Embassy 无法访问其任务。请使用由托管独立 App Server 支持的 Codex CLI 任务；Desktop 26.820+ 存在上游附着回退 #41112。",
   "diagnostics.codexDoctor.orphaned":
-    "守护进程正在运行，但没有桌面客户端连接；线程无法加载。请运行：/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT，然后打开你的 Codex 任务。",
+    "托管守护进程正在运行，但没有受支持的 Codex CLI 客户端连接；请在 Codex CLI 中打开该确切任务。",
   "diagnostics.codexDoctor.attached": "桌面应用已连接到受管理的 App Server。",
   "diagnostics.codexDoctor.observation_stale":
     "连接器观察已过期；当前健康状态尚未得到证明。",

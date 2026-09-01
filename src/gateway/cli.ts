@@ -41,7 +41,7 @@ export const gatewayCliCommands = [
   "serve", "health", "status", "doctor", "delivery-status",
   "wait-delivery", "untrack", "refresh-dashboard", "dashboard", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
-  "send-to-claude", "send-to-codex", "reply",
+  "send", "reply",
   "register-peer", "unregister-peer", "await",
   "peer-stdio",
 ] as const;
@@ -380,8 +380,7 @@ async function buildRequest(
       count(options, 2);
       return envelope(command, { aliases: requirePairAliases(options) });
     }
-    case "send-to-claude":
-    case "send-to-codex": {
+    case "send": {
       const options = parseOptions(
         args, ["from", "to", "idle-minutes"], ["expects-reply", "track", "token-stdin"],
       );
@@ -390,19 +389,19 @@ async function buildRequest(
       const principals = Number(hasIdentity(env.CODEX_THREAD_ID)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
       if (principals > 1) throw callerIdentityConflictFault(env);
       const fromAlias = requireAlias(options, "from");
-      const toAlias = command === "send-to-claude" ? requireClaudeSelector(options, "to") : requireAlias(options, "to");
+      const toAlias = requireClaudeSelector(options, "to");
       const idleMinutes = trackIdleMinutes(options);
       const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
-      const authority = peer === undefined ? command === "send-to-claude"
-        ? requireExclusiveCodexThreadId(env) : requireExclusiveClaudeReplyAddress(env) : undefined;
+      const authority = peer === undefined ? hasIdentity(env.CODEX_THREAD_ID)
+        ? { threadId: requireExclusiveCodexThreadId(env) }
+        : { replyAddress: requireExclusiveClaudeReplyAddress(env) }
+        : { peerToken: peer.token };
       const common = {
         fromAlias, toAlias, text: peer?.text ?? await readMessageBody(stdin),
         expectsReply: options["expects-reply"] === true,
         ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
       };
-      return command === "send-to-claude"
-        ? envelope("send_to_claude", { ...common, ...(peer === undefined ? { threadId: authority } : { peerToken: peer.token }) })
-        : envelope("send_to_codex", { ...common, ...(peer === undefined ? { replyAddress: authority } : { peerToken: peer.token }) });
+      return envelope("send", { ...common, ...authority });
     }
     case "reply": {
       const options = parseOptions(args, ["conversation", "alias", "idle-minutes"], ["track", "token-stdin"]);

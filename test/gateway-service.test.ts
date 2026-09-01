@@ -499,11 +499,15 @@ test("peer principals send both directions and reply through ordinary conversati
     await subject.handlers.selectClaude({ alias: claude.alias });
     await subject.handlers.pair({ aliases: ["peer-shell@this-mac", codex.alias] });
     await subject.handlers.pair({ aliases: ["peer-shell@this-mac", claude.alias] });
-    const toCodex = await subject.handlers.sendToCodex({ fromAlias: "peer-shell@this-mac",
+    const toCodex = await subject.handlers.send({ fromAlias: "peer-shell@this-mac",
       peerToken: minted.token, toAlias: codex.alias, text: "STEER: peer stays ordinary", expectsReply: true });
-    const toClaude = await subject.handlers.sendToClaude({ fromAlias: "peer-shell@this-mac",
+    const toClaude = await subject.handlers.send({ fromAlias: "peer-shell@this-mac",
       peerToken: minted.token, toAlias: claude.alias, text: "peer to claude", expectsReply: true });
     assert.equal(toCodex.accepted, true); assert.equal(toClaude.accepted, true);
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, replyAddress: "uds:/test/forged.sock", toAlias: claude.alias, text: "wrong principal", expectsReply: false }),
+      { accepted: false, code: "route_mismatch" });
+    assert.deepEqual(await subject.handlers.send({ fromAlias: claude.alias, threadId: THREAD_A, toAlias: codex.alias, text: "wrong principal", expectsReply: false }),
+      { accepted: false, code: "route_mismatch" });
     await eventually(() => codexProvider.dispatches.length === 1 && claudeProvider.dispatches.length === 1);
     assert.equal(codexProvider.dispatches[0]?.sourceProvider, "peer");
     assert.equal(codexProvider.dispatches[0]?.steer, undefined);
@@ -533,7 +537,7 @@ test("background Claude discovery supports select, pair, send, and exact reply",
       { accepted: true, code: "ok" });
     assert.deepEqual(await subject.handlers.pair({ aliases: [backgroundAlias, codex.alias] }),
       { accepted: true, code: "ok" });
-    const sent = await subject.handlers.sendToClaude({
+    const sent = await subject.handlers.send({
       fromAlias: codex.alias, threadId: THREAD_A, toAlias: backgroundAlias,
       text: "background round trip", expectsReply: true,
     });
@@ -621,7 +625,7 @@ test("duplicate live Claude aliases are rejected without poisoning the snapshot"
       { accepted: true, code: "ok" });
     assert.deepEqual(await subject.handlers.pair({ aliases: [uniqueAlias, codex.alias] }),
       { accepted: true, code: "ok" });
-    const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
+    const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: uniqueAlias, text: "unique candidate remains routable", expectsReply: false });
     assert.equal(sent.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 1);
@@ -659,7 +663,7 @@ test("a peer waiter kicks cleanly deferred mail and exact receipt settles it onc
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
     await subject.handlers.pair({ aliases: [codex.alias, "peer-shell@this-mac"] });
-    const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
+    const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "peer-shell@this-mac", text: "mailbox payload", expectsReply: true });
     assert.ok(sent.accepted);
     const received = await subject.handlers.awaitPeer({ alias: "peer-shell@this-mac", token: minted.token });
@@ -715,7 +719,7 @@ test("queued peer mail resumes once after restart under the same hash-only princ
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
     await subject.handlers.pair({ aliases: [codex.alias, "peer-restart@this-mac"] });
-    const sent = await subject.handlers.sendToClaude({ fromAlias: codex.alias, threadId: THREAD_A,
+    const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "peer-restart@this-mac", text: "survive restart", expectsReply: true });
     assert.ok(sent.accepted);
     await eventually(() => subject.timers.rows.some((row) =>
@@ -847,7 +851,7 @@ test("peer handoff preserves every write boundary and never replays uncertainty"
         const original = subject.store.acceptMessage.bind(subject.store);
         subject.store.acceptMessage = async (input) => { await original(input); throw new Error("accept commit uncertain"); };
       }
-      const sent = await subject.handlers.sendToCodex({ fromAlias: local.alias, toAlias: remote.alias,
+      const sent = await subject.handlers.send({ fromAlias: local.alias, toAlias: remote.alias,
         text: `peer ${mode}`, replyAddress: "uds:/test/reply.sock", expectsReply: false });
       assert.equal(sent.accepted, true, JSON.stringify(sent));
       await eventually(async () => { const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken }); return status.found && status.terminal; });
@@ -882,7 +886,7 @@ test("an unavailable peer requeues once without a hot dispatch loop", async () =
     await subject.store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
     const reserve = subject.store.reserveMessage.bind(subject.store);
     subject.store.reserveMessage = async (...args) => { reserves += 1; return await reserve(...args); };
-    const sent = await subject.handlers.sendToCodex({ fromAlias: local.alias, toAlias: remote.alias,
+    const sent = await subject.handlers.send({ fromAlias: local.alias, toAlias: remote.alias,
       text: "wait for tunnel", replyAddress: "uds:/test/reply.sock", expectsReply: false });
     assert.equal(sent.accepted, true); await eventually(() => reserves === 1);
     for (let index = 0; index < 5; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1550,7 +1554,7 @@ test("clean prewrite retry waits 500ms while terminal input failure never retrie
   try {
     for (const [index, code] of providerSpecificCodes.entries()) {
       provider.deferredCode = code;
-      const sent = await table.handlers.sendToCodex({
+      const sent = await table.handlers.send({
         fromAlias: claude.alias,
         toAlias: codex.alias,
         text: `deferred ${code}`,
@@ -1608,7 +1612,7 @@ test("three STEER writes reach the exact accepted Codex operation while ordinary
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const start = await subject.handlers.sendToCodex({
+    const start = await subject.handlers.send({
       fromAlias: claude.alias,
       toAlias: codex.alias,
       text: "long running start",
@@ -1618,7 +1622,7 @@ test("three STEER writes reach the exact accepted Codex operation while ordinary
     assert.equal(start.accepted, true);
     await codexProvider.pauseEntered.promise;
     for (let index = 1; index <= 3; index += 1) {
-      const steer = await subject.handlers.sendToCodex({
+      const steer = await subject.handlers.send({
         fromAlias: claude.alias,
         toAlias: codex.alias,
         text: `STEER: correction ${index}`,
@@ -1634,7 +1638,7 @@ test("three STEER writes reach the exact accepted Codex operation while ordinary
     assert.equal(new Set(steerAttempts).size, 3);
     assert.equal(codexProvider.dispatches[0]?.text, "long running start");
 
-    const fourth = await subject.handlers.sendToCodex({
+    const fourth = await subject.handlers.send({
       fromAlias: claude.alias,
       toAlias: codex.alias,
       text: "STEER: correction 4",
@@ -1674,7 +1678,7 @@ test("exact-leading native STEER uses the separate lane while native mail stays 
     text,
   });
   try {
-    assert.equal((await subject.handlers.sendToCodex({
+    assert.equal((await subject.handlers.send({
       fromAlias: claude.alias,
       toAlias: codex.alias,
       text: "paused native lane owner",
@@ -1755,7 +1759,7 @@ test("delivery status and public observations stay native-ID-free", async () => 
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const send = await subject.handlers.sendToCodex({
+    const send = await subject.handlers.send({
       fromAlias: claude.alias,
       toAlias: codex.alias,
       text: "private body",
@@ -1825,7 +1829,7 @@ test("live-only progress watches open, settle, and disappear across every owners
   });
   let replacement: GatewayService | undefined;
   try {
-    const opened = await subject.handlers.sendToClaude({
+    const opened = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -1848,7 +1852,7 @@ test("live-only progress watches open, settle, and disappear across every owners
     assert.equal(snapshot.progressWatches?.length, 0);
     assert.equal(snapshot.progressWatchEvents?.at(-1)?.reason, "done");
 
-    const pairedWatch = await subject.handlers.sendToClaude({
+    const pairedWatch = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -1862,7 +1866,7 @@ test("live-only progress watches open, settle, and disappear across every owners
     assert.equal(snapshot.progressWatchEvents?.at(-1)?.reason, "pair_removed");
 
     await subject.handlers.pair({ aliases: [claude.alias, codex.alias] });
-    const restartWatch = await subject.handlers.sendToClaude({
+    const restartWatch = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -1890,7 +1894,7 @@ test("live-only progress watches open, settle, and disappear across every owners
     await replacement.start();
     assert.equal((await replacement.snapshot()).progressWatches?.length, 0);
     const replacementHandlers = replacement.handlers();
-    const removalWatch = await replacementHandlers.sendToClaude({
+    const removalWatch = await replacementHandlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -1921,7 +1925,7 @@ test("a progress-watch nudge cannot cross an endpoint replacement after its regi
   const entered = deferred<void>();
   const release = deferred<void>();
   try {
-    const opened = await subject.handlers.sendToClaude({
+    const opened = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2000,7 +2004,7 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const first = await subject.handlers.sendToClaude({
+    const first = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2015,7 +2019,7 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
     subject.clock.advance(500);
     await subject.timers.runDue();
     await eventually(() => retryingClaude.dispatches.length === 2);
-    const second = await subject.handlers.sendToClaude({
+    const second = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2039,7 +2043,7 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
       codexProvider.dispatches.map((dispatch) => dispatch.text),
       ["first answer", "second answer"],
     );
-    const third = await subject.handlers.sendToClaude({
+    const third = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2058,7 +2062,7 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
     await subject.handlers.pair({
       aliases: [claude.alias, "codex-next@this-mac"],
     });
-    const fourth = await subject.handlers.sendToClaude({
+    const fourth = await subject.handlers.send({
       fromAlias: "codex-next@this-mac",
       threadId: THREAD_B,
       toAlias: claude.alias,
@@ -2093,7 +2097,7 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
     await eventually(() => codexProvider.dispatches.length === 3);
     assert.equal(codexProvider.dispatches.at(-1)?.text, "new source answer");
 
-    const fifth = await subject.handlers.sendToClaude({
+    const fifth = await subject.handlers.send({
       fromAlias: "codex-next@this-mac",
       threadId: THREAD_B,
       toAlias: claude.alias,
@@ -2128,7 +2132,7 @@ test("a Claude reply arriving inside the authorized write is released only after
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const send = await subject.handlers.sendToClaude({
+    const send = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2153,7 +2157,7 @@ test("an ambiguous armed Claude write keeps its FIFO tombstone across source suc
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const first = await subject.handlers.sendToClaude({
+    const first = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2170,7 +2174,7 @@ test("an ambiguous armed Claude write keeps its FIFO tombstone across source suc
       succeedsAlias: codex.alias,
     }), { accepted: true, code: "ok" });
     await subject.handlers.pair({ aliases: [claude.alias, "codex-next@this-mac"] });
-    const second = await subject.handlers.sendToClaude({
+    const second = await subject.handlers.send({
       fromAlias: "codex-next@this-mac",
       threadId: THREAD_B,
       toAlias: claude.alias,
@@ -2221,7 +2225,7 @@ test("an ambiguous armed Claude write consumes one late reply after consent is r
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const first = await subject.handlers.sendToClaude({
+    const first = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2239,7 +2243,7 @@ test("an ambiguous armed Claude write consumes one late reply after consent is r
       code: "ok",
     });
     claudeProvider.pauseRelease.resolve();
-    const second = await subject.handlers.sendToClaude({
+    const second = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2288,7 +2292,7 @@ test("a correlated Claude reply cannot cross a same-alias registration replaceme
     return await enqueue(input);
   };
   try {
-    const sent = await subject.handlers.sendToClaude({
+    const sent = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2357,7 +2361,7 @@ test("an initial send cannot inherit a same-alias caller replacement after attes
     return await enqueue(input);
   };
   try {
-    const sending = subject.handlers.sendToClaude({
+    const sending = subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2404,7 +2408,7 @@ test("a reply-address send cannot cross a same-alias Claude reselection", async 
     return await enqueue(input);
   };
   try {
-    const sending = subject.handlers.sendToCodex({
+    const sending = subject.handlers.send({
       fromAlias: claude.alias,
       toAlias: codex.alias,
       text: "racing reply-address send",
@@ -2438,7 +2442,7 @@ test("reply attestation and an old conversation token cannot cross same-alias re
   const entered = deferred<void>();
   const release = deferred<void>();
   try {
-    const opened = await subject.handlers.sendToClaude({
+    const opened = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2499,7 +2503,7 @@ test("selected Claude replies require an exact inherited reply capability", asyn
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const opened = await subject.handlers.sendToClaude({
+    const opened = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
@@ -2746,7 +2750,7 @@ test("shutdown cancels a queued native receipt before closing its helper", async
     seed: async (store) => paired(store, claude, codex),
   });
   try {
-    const blocking = await subject.handlers.sendToCodex({
+    const blocking = await subject.handlers.send({
       fromAlias: claude.alias,
       toAlias: codex.alias,
       text: "block target",
@@ -2869,14 +2873,14 @@ test("restart composes queued, reserved, armed, and accepted phase truth without
       token = queued.deliveryToken;
     } else {
       const sent = phase === "armed"
-        ? await subject.handlers.sendToClaude({
+        ? await subject.handlers.send({
             fromAlias: codex.alias,
             threadId: THREAD_A,
             toAlias: claude.alias,
             text: `restart ${phase}`,
             expectsReply: false,
           })
-        : await subject.handlers.sendToCodex({
+        : await subject.handlers.send({
             fromAlias: claude.alias,
             toAlias: codex.alias,
             text: `restart ${phase}`,

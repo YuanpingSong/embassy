@@ -37,16 +37,13 @@ Embassy 专为单人、单一 macOS 账户以及你已信任以该用户身份�
 
 ## 快速开始
 
-**前置要求：** macOS 与 Node.js 20+。Claude 路由要求对等协议 1；Codex 路由要求 Desktop 使用托管独立 App Server。DeepSeek 是可选提供方，通过 `DSH_HOME`（默认 `~/.dsh`）指向的本地 checkout 中 `demo:acp` 脚本启动；Grok Build 也是可选提供方，通过发布版固定的 ACP 包启动。Shell 对等方只需要本地 CLI 与其仅铸造一次的令牌。发布版自有的[支持矩阵](support/provider-support-matrix.json)记录精确已测的提供方构件与能力；它只是发布证据，绝不是运行时允许列表：
+**前置要求：** macOS 与 Node.js 20+。Claude 路由要求对等协议 1；Codex 路由使用由托管独立 App Server 支持的 Codex CLI 任务。DeepSeek 是可选提供方，通过 `DSH_HOME`（默认 `~/.dsh`）指向的本地 checkout 中 `demo:acp` 脚本启动；Grok Build 也是可选提供方，通过发布版固定的 ACP 包启动。Shell 对等方只需要本地 CLI 与其仅铸造一次的令牌。发布版自有的[支持矩阵](support/provider-support-matrix.json)记录精确已测的提供方构件与能力；它只是发布证据，绝不是运行时允许列表：
 
 ```bash
-~/.codex/packages/standalone/current/codex app-server daemon start
-/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT
+codex app-server daemon start
 ```
 
-第一条命令在托管守护进程未运行时启动它（也提供 `restart` 与 `stop` 子命令）；第二条以指向该守护进程的方式启动 ChatGPT 桌面应用。`CODEX_APP_SERVER_USE_LOCAL_DAEMON` 未见于 OpenAI 文档；它经验证适用于当前 Desktop 构建，未来可能变化。请在普通终端中运行守护进程命令，切勿在代理会话内运行：Codex 任务会继承守护进程的环境，因此在 Claude Code 会话内启动的守护进程会把该会话的身份泄漏到每个任务中，注册将以 `CALLER_IDENTITY_CONFLICT` 关闭失败——请在普通终端执行 `codex app-server daemon restart` 修复。你选择作为目的地的 Claude 会话需要启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)——这是 Claude Code 自身的设置，在 Claude Code 中配置，而非在 Embassy 中。
-
-Desktop 仅在启动时附着到托管独立 App Server。如果 Desktop 已打开时守护进程重启，单纯等待不会让该应用进程重新连接：请完全退出 Desktop，重新运行 `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`，再打开该确切任务。
+请从普通终端运行托管守护进程，并使用 Codex CLI 作为受支持的任务宿主。Desktop 26.820 及更高版本中的 `CODEX_APP_SERVER_USE_LOCAL_DAEMON` 附着已损坏（[openai/codex#41112](https://github.com/openai/codex/issues/41112)），因此不属于受支持设置。若 `CALLER_IDENTITY_CONFLICT` 报告两种身份，请只在调用点移除不需要的继承身份：Codex 侧使用 `env -u CLAUDE_CODE_MESSAGING_SOCKET embassy …`，Claude 侧使用 `env -u CODEX_THREAD_ID embassy …`。Claude 目的地仍需启用 [`crossSessionInbound`](docs/CONFIGURATION.zh-CN.md)。
 
 运行时投递采用尽力而为模式。版本与构建字符串只是未经验证的元数据，绝不授予或撤销路由权限。同意加上精确的逻辑路由/会话身份会授权一次尝试；当前逐操作传输与相关证据决定诚实结果。接口不受支持或发生变化时，Embassy 会返回提供方局部的安全代码，而不是在线兼容性等级。Embassy 仍会验证信任边界：精确自有或执行的构件与状态路径、实际使用构件的代际、被消费协议字段的严格结构、Claude 对等协议 1、有界队列，以及结果不确定的写入绝不重放。
 
@@ -84,6 +81,8 @@ embassy register-codex --alias codex-reviewer@this-mac
 ### 可选：注册通用 shell 对等方
 
 本地 shell harness 可以作为 `peer-*` 路由加入，无需插件、稳定 shell、守护进程、PID 绑定、令牌文件或 Keychain 条目：
+
+当 Codex 原生入站投递不可用时，此 shell-peer 邮箱就是受支持的备用通道：注册一次，只在代理内存中保存令牌，并通过有界 `await` 调用接收消息。
 
 ```bash
 embassy register-peer --alias peer-reviewer@this-mac
@@ -124,7 +123,7 @@ embassy pair --from codex-reviewer@this-mac --to advisor@this-mac
 从已注册的 Codex 任务中，通过标准输入发送：
 
 ```bash
-embassy send-to-claude \
+embassy send \
   --from codex-reviewer@this-mac \
   --to advisor@this-mac \
   --expects-reply <<'MSG'
@@ -134,10 +133,10 @@ MSG
 
 你应看到一个 `conv_` 对话令牌和一个 `dlv_` 投递令牌。因为此次发送请求了回复，Claude 的响应会被自动路由回 Codex 任务。反方向上，兼容的 Claude 会话使用其原生的 `ListAgents` 和 `SendMessage` 工具联系 `codex-reviewer`——无需 Embassy 命令。
 
-`send-to-codex` 是同一方向的 CLI 形式，供偏好显式命令的 Claude 会话使用。它接受相同的标志并从标准输入读取正文，并且必须在该 Claude 会话内运行，才能继承该会话的回复标识：
+同一命令也可从 Claude 会话向反方向发送，并继承该会话的回复标识：
 
 ```bash
-embassy send-to-codex \
+embassy send \
   --from advisor@this-mac \
   --to codex-reviewer@this-mac \
   --expects-reply <<'MSG'
@@ -232,8 +231,7 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | `await` | 已注册 shell 对等方 | 以有界 30 秒迭代长轮询 peer 邮箱；每条路由一个等待者、全局 16 个，且只在 stdout 刷新后确认回执 |
 | `pair` / `unpair` | 同 UID 控制客户端 | 显式指定两端来添加或移除一条用户选择的跨提供方边：`embassy pair --from advisor@this-mac --to grok-main@this-mac` |
 | `select-claude` / `unselect-claude` | 同 UID 控制客户端 | 使用 `--alias <name@host>` 或 `--session <uuid>` 选择或移除一条 Claude 路由；选择不会创建权限边 |
-| `send-to-claude` | 已注册的 Codex 任务 | 向已配对的 Claude 会话发送一条有界消息：`--from <codex-alias> --to <claude-alias>`，正文从标准输入读取，可选 `--expects-reply` 与 `--track [--idle-minutes <n>]` |
-| `send-to-codex` | Claude 会话 | 标志与正文输入方式相同，使用继承的原生回复标识 |
+| `send` | 已注册的 Codex 任务、Claude 会话或 shell 对等方 | 在已配对路由之间发送一条有界标准输入消息：`--from <alias> --to <alias>`，可选 `--expects-reply` 与 `--track [--idle-minutes <n>]`；broker 根据解析后的提供方推导方向 |
 | `reply` | 对话令牌持有方 | 使用初始发送时返回或随入站来源提示收到的完整令牌继续一个活跃对话：`--conversation conv_<token> --alias <你的别名>`，正文从标准输入读取，可选 `--track [--idle-minutes <n>]`；调用方、对话参与关系和路由会重新检查 |
 
 版本 2.0 只接受全新的私有状态。用旧安装启动前，请遵循

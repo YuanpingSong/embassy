@@ -21,8 +21,7 @@ import {
   type SelectClaudeParams,
   type UnregisterCodexParams,
   type ValidatedRegisterCodexParams,
-  type ValidatedSendToClaudeParams,
-  type ValidatedSendToCodexParams,
+  type ValidatedSendParams,
 } from "./control.js";
 import { publishGatewayDashboard } from "./dashboard.js";
 import type { CodexDoctorResult } from "./codex-doctor.js";
@@ -579,8 +578,7 @@ export class GatewayService {
       observeSnapshot: () => this.observeSnapshot(),
       deliveryStatus: (params) => this.deliveryStatus(params.token),
       untrack: (params) => decide(async () => this.untrack(params.conversationId)),
-      sendToClaude: (params) => this.sendToClaude(params),
-      sendToCodex: (params) => this.sendToCodex(params),
+      send: (params) => this.send(params),
       reply: (params) => this.reply(params),
       refreshDashboard: async () => {
         if (this.closing) {
@@ -1199,12 +1197,31 @@ export class GatewayService {
     return route;
   }
 
-  private async sendToClaude(params: ValidatedSendToClaudeParams): Promise<GatewaySendResult> {
+  private async send(params: ValidatedSendParams): Promise<GatewaySendResult> {
+    const source = await this.store.inspectPrivateRoute(params.fromAlias);
+    const directTarget = await this.store.inspectPrivateRoute(params.toAlias);
+    const target = directTarget ?? await this.resolveSelectedClaudeRoute(params.toAlias);
+    if (source?.binding.provider === "codex" && (target?.binding.provider === "claude" || target?.binding.provider === "peer") && "threadId" in params) {
+      return this.sendToClaude(params);
+    }
+    if (source?.binding.provider === "claude" && (target?.binding.provider === "codex" || target?.binding.provider === "peer") && "replyAddress" in params) {
+      return this.sendToCodex(params);
+    }
+    if (source?.binding.provider === "peer" && "peerToken" in params) {
+      return target?.binding.provider === "claude" ? this.sendToClaude(params) : this.sendToCodex(params);
+    }
+    return { accepted: false, code: "route_mismatch" };
+  }
+
+  private async sendToClaude(params: ValidatedSendParams): Promise<GatewaySendResult> {
     try {
       this.assertWritable();
       const source = "peerToken" in params && params.peerToken !== undefined
         ? await this.assertPeer({ alias: params.fromAlias, token: params.peerToken })
-        : await this.assertThread(params.fromAlias, params.threadId);
+        : params.threadId === undefined
+          ? undefined
+          : await this.assertThread(params.fromAlias, params.threadId);
+      if (source === undefined) throw new BridgeError("ROUTE_NOT_AVAILABLE", "The source route is absent.");
       const direct = await this.store.inspectPrivateRoute(params.toAlias);
       const target = direct?.binding.provider === "peer" ? direct : await this.resolveSelectedClaudeRoute(params.toAlias);
       if (target === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
@@ -1224,7 +1241,7 @@ export class GatewayService {
     }
   }
 
-  private async sendToCodex(params: ValidatedSendToCodexParams): Promise<GatewaySendResult> {
+  private async sendToCodex(params: ValidatedSendParams): Promise<GatewaySendResult> {
     try {
       this.assertWritable();
       let source: GatewayPrivateRouteInspection | undefined;

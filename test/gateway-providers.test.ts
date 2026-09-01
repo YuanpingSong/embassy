@@ -867,7 +867,7 @@ test("service restart restores selected Claude authority into per-operation prep
     publishDashboard: async () => path.join(config.stateDir, "dashboard.html"), nativePeerCwd: root });
   try {
     await service.start(); await waitFor(() => helpers.length === 1);
-    const sent = await service.handlers().sendToClaude({ fromAlias: storedCodex.alias, threadId: THREAD_ID,
+    const sent = await service.handlers().send({ fromAlias: storedCodex.alias, threadId: THREAD_ID,
       toAlias: storedClaude.alias, text: "post-restart", expectsReply: false });
     assert.equal(sent.accepted, true);
     await waitFor(() => helpers[0]!.commands.some((command) => command.method === "prepare_dispatch"));

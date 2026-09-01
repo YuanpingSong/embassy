@@ -88,7 +88,7 @@
 <div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@this-mac</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@this-mac" hidden>复制</button></div><p>在 Codex 任务内部运行 — 身份从任务继承，绝不冒充。请让你的智能体来执行。</p></div>
 <div><div class="cmd2"><code>embassy select-claude --alias claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@this-mac" hidden>复制</button></div><p>选择 Claude 路由。选择不会创建同意边。</p></div>
 <div><div class="cmd2"><code>embassy pair --from codex-embassy@this-mac --to claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@this-mac --to claude-main@this-mac" hidden>复制</button></div><p>显式创建下一条发送将使用的双向同意边。两端必须都已注册、在线、位于同一主机，且分属不同提供方。</p></div>
-<div><div class="cmd2"><code>embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
+<div><div class="cmd2"><code>embassy send --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
 Which auth middleware did you settle on?
 MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，绝不作为参数。你会收到一个 <code style="border:none;background:none;padding:0">dlv_</code> 回执和一个 <code style="border:none;background:none;padding:0">conv_</code> 令牌。</p></div>
 <div><div class="cmd2"><code>embassy dashboard --live</code><button type="button" class="cp" data-copy="embassy dashboard --live" hidden>复制</button></div><p>看着回执结算，措辞诚实 — 或用 <code style="border:none;background:none;padding:0">embassy status</code> 获取一次性快照。</p></div>
@@ -171,7 +171,7 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <span class="c"># 创建下一条发送将使用的同意边：</span><br>
 <span class="p">$</span> embassy pair --from codex-embassy@this-mac --to claude-main@this-mac<br>
 <span class="c"># 在 Codex 任务内 — 正文经 stdin 传入，绝不作为参数：</span><br>
-<span class="p">$</span> embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
+<span class="p">$</span> embassy send --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
 Which auth middleware did you settle on?<br>
 MSG<br>
 <span class="c"># 观察回执结算（可选）：</span><br>

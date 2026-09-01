@@ -59,8 +59,8 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z
 export const gatewayControlMethods = [
   "health", "register_codex", "unregister_codex", "remove_codex_registration",
   "select_claude", "unselect_claude", "pair", "unpair", "list_snapshot",
-  "observe_snapshot", "delivery_status", "untrack", "send_to_claude",
-  "send_to_codex", "reply", "refresh_dashboard", "peer_catalog", "peer_handoff",
+  "observe_snapshot", "delivery_status", "untrack", "send", "reply",
+  "refresh_dashboard", "peer_catalog", "peer_handoff",
   "register_peer", "unregister_peer", "await_peer", "peer_receipt",
 ] as const;
 export type GatewayControlMethod = (typeof gatewayControlMethods)[number];
@@ -82,10 +82,16 @@ export type PairParams = {
 };
 type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean; trackIdleMinutes?: number };
 type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
-export type SendToClaudeParams = SendBase & ({ threadId: string; peerToken?: never } | { peerToken: string; threadId?: never });
-export type ValidatedSendToClaudeParams = ValidatedSendBase & ({ threadId: string; peerToken?: never } | { peerToken: string; threadId?: never });
-export type SendToCodexParams = SendBase & ({ replyAddress: string; peerToken?: never } | { peerToken: string; replyAddress?: never });
-export type ValidatedSendToCodexParams = ValidatedSendBase & ({ replyAddress: string; peerToken?: never } | { peerToken: string; replyAddress?: never });
+export type SendParams = SendBase & (
+  | { threadId: string; replyAddress?: never; peerToken?: never }
+  | { replyAddress: string; threadId?: never; peerToken?: never }
+  | { peerToken: string; threadId?: never; replyAddress?: never }
+);
+export type ValidatedSendParams = ValidatedSendBase & (
+  | { threadId: string; replyAddress?: never; peerToken?: never }
+  | { replyAddress: string; threadId?: never; peerToken?: never }
+  | { peerToken: string; threadId?: never; replyAddress?: never }
+);
 export type GatewayReplyCaller =
   | { kind: "codex"; alias: string; threadId: string }
   | { kind: "claude"; alias: string; replyAddress?: string }
@@ -108,17 +114,15 @@ type RequestParams = {
   select_claude: SelectClaudeParams; unselect_claude: SelectClaudeParams;
   pair: PairParams; unpair: PairParams; list_snapshot: Record<string, never>;
   observe_snapshot: Record<string, never>; delivery_status: DeliveryStatusParams;
-  untrack: UntrackParams; send_to_claude: SendToClaudeParams;
-  send_to_codex: SendToCodexParams; reply: ReplyParams;
+  untrack: UntrackParams; send: SendParams; reply: ReplyParams;
   refresh_dashboard: Record<string, never>; peer_catalog: PeerCatalogParams;
   peer_handoff: PeerHandoffControlParams;
   register_peer: RegisterPeerParams; unregister_peer: PeerPrincipalParams;
   await_peer: PeerPrincipalParams; peer_receipt: PeerReceiptParams;
 };
-type ValidatedParams = Omit<RequestParams, "register_codex" | "send_to_claude" | "send_to_codex"> & {
+type ValidatedParams = Omit<RequestParams, "register_codex" | "send"> & {
   register_codex: ValidatedRegisterCodexParams;
-  send_to_claude: ValidatedSendToClaudeParams;
-  send_to_codex: ValidatedSendToCodexParams;
+  send: ValidatedSendParams;
 };
 export type GatewayControlRequest = {
   [M in GatewayControlMethod]: { protocolVersion: typeof GATEWAY_CONTROL_PROTOCOL_VERSION; method: M; params: RequestParams[M] }
@@ -158,8 +162,7 @@ type ResultByMethod = {
   select_claude: GatewayDecision; unselect_claude: GatewayDecision;
   pair: GatewayDecision; unpair: GatewayDecision; list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
-  untrack: GatewayDecision; send_to_claude: GatewaySendResult;
-  send_to_codex: GatewaySendResult; reply: GatewaySendResult;
+  untrack: GatewayDecision; send: GatewaySendResult; reply: GatewaySendResult;
   refresh_dashboard: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
   peer_handoff: PeerHandoffResult;
   register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
@@ -179,8 +182,7 @@ export type GatewayControlHandlers = {
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
   deliveryStatus: (params: Readonly<DeliveryStatusParams>) => MaybePromise<GatewayDeliveryStatusResult>;
   untrack: (params: Readonly<UntrackParams>) => MaybePromise<GatewayDecision>;
-  sendToClaude: (params: Readonly<ValidatedSendToClaudeParams>) => MaybePromise<GatewaySendResult>;
-  sendToCodex: (params: Readonly<ValidatedSendToCodexParams>) => MaybePromise<GatewaySendResult>;
+  send: (params: Readonly<ValidatedSendParams>) => MaybePromise<GatewaySendResult>;
   reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewaySendResult>;
   refreshDashboard: () => MaybePromise<GatewayRefreshResult>;
   peerCatalog?: (params: Readonly<PeerCatalogParams>) => MaybePromise<PeerCatalogResult>;
@@ -439,36 +441,22 @@ function decodePair(value: unknown): PairParams {
       value.aliases[0] === value.aliases[1]) invalid();
   return { aliases: [value.aliases[0], value.aliases[1]] };
 }
-function commonSend(value: unknown, required: readonly string[], optional: readonly string[]): JsonRecord {
-  if (!isRecord(value) || !exact(value, required, optional) || !alias(value.fromAlias) ||
-      !alias(value.toAlias) || !messageText(value.text) ||
-      (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean") ||
-      (value.trackIdleMinutes !== undefined && !trackMinutes(value.trackIdleMinutes))) invalid();
-  return value; }
-function decodeSendClaude(value: unknown): ValidatedSendToClaudeParams {
-  if (!isRecord(value) || !exact(value, ["fromAlias", "toAlias", "text"], ["threadId", "peerToken", "expectsReply", "trackIdleMinutes"]) ||
-      !alias(value.fromAlias) || (value.threadId === undefined) === (value.peerToken === undefined) ||
+function decodeSend(value: unknown): ValidatedSendParams {
+  if (!isRecord(value) || !exact(value, ["fromAlias", "toAlias", "text"],
+    ["threadId", "replyAddress", "peerToken", "expectsReply", "trackIdleMinutes"]) ||
+      !alias(value.fromAlias) || typeof value.toAlias !== "string" || !isClaudeSessionSelector(value.toAlias) ||
+      !messageText(value.text) || [value.threadId, value.replyAddress, value.peerToken].filter((item) => item !== undefined).length !== 1 ||
       (value.threadId !== undefined && !uuid(value.threadId)) ||
-      (value.peerToken !== undefined && !peerToken(value.peerToken)) || typeof value.toAlias !== "string" ||
-      !isClaudeSessionSelector(value.toAlias) || !messageText(value.text) ||
+      (value.replyAddress !== undefined && (typeof value.replyAddress !== "string" || !isGatewayReplyAddress(value.replyAddress))) ||
+      (value.peerToken !== undefined && !peerToken(value.peerToken)) ||
       (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean") ||
       (value.trackIdleMinutes !== undefined && !trackMinutes(value.trackIdleMinutes))) invalid();
-  return { fromAlias: value.fromAlias,
-    toAlias: UUID_PATTERN.test(value.toAlias) ? value.toAlias.toLowerCase() : value.toAlias,
-    text: value.text, expectsReply: value.expectsReply ?? false,
-    ...(typeof value.threadId === "string" ? { threadId: value.threadId.toLowerCase() } : { peerToken: value.peerToken as string }),
-    ...(value.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: value.trackIdleMinutes }) };
-}
-function decodeSendCodex(value: unknown): ValidatedSendToCodexParams {
-  const row = commonSend(value, ["fromAlias", "toAlias", "text"], ["replyAddress", "peerToken", "expectsReply", "trackIdleMinutes"]);
-  if ((row.replyAddress === undefined) === (row.peerToken === undefined) ||
-      (row.replyAddress !== undefined && (typeof row.replyAddress !== "string" || !isGatewayReplyAddress(row.replyAddress))) ||
-      (row.peerToken !== undefined && !peerToken(row.peerToken))) invalid();
-  const replyAddress = row.replyAddress !== undefined;
-  return { fromAlias: row.fromAlias as string, toAlias: row.toAlias as string, text: row.text as string,
-    ...(replyAddress ? { replyAddress: row.replyAddress as string } : { peerToken: row.peerToken as string }),
-    expectsReply: row.expectsReply === true,
-    ...(row.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: row.trackIdleMinutes as number }) };
+  const authority = value.threadId !== undefined ? { threadId: (value.threadId as string).toLowerCase() }
+    : value.replyAddress !== undefined ? { replyAddress: value.replyAddress as string }
+    : { peerToken: value.peerToken as string };
+  return { fromAlias: value.fromAlias, toAlias: UUID_PATTERN.test(value.toAlias) ? value.toAlias.toLowerCase() : value.toAlias,
+    text: value.text, ...authority, expectsReply: value.expectsReply === true,
+    ...(value.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: value.trackIdleMinutes }) } as ValidatedSendParams;
 }
 function normalizeReplyCaller(value: unknown): GatewayReplyCaller {
   if (!isRecord(value)) invalid();
@@ -685,7 +673,7 @@ const descriptors = {
   pair: { handler: "pair", decode: decodePair, result: isDecision, mutation: true }, unpair: { handler: "unpair", decode: decodePair, result: isDecision, mutation: true },
   list_snapshot: { handler: "listSnapshot", decode: emptyParams, result: isGatewaySnapshot, mutation: false }, observe_snapshot: { handler: "observeSnapshot", decode: emptyParams, result: isSnapshotObservation, mutation: false },
   delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false }, untrack: { handler: "untrack", decode: decodeUntrack, result: isDecision, mutation: false },
-  send_to_claude: { handler: "sendToClaude", decode: decodeSendClaude, result: isSendResult, mutation: true }, send_to_codex: { handler: "sendToCodex", decode: decodeSendCodex, result: isSendResult, mutation: true },
+  send: { handler: "send", decode: decodeSend, result: isSendResult, mutation: true },
   reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_dashboard: { handler: "refreshDashboard", decode: emptyParams, result: isRefreshResult, mutation: false },
   peer_catalog: { handler: "peerCatalog", decode: decodePeerCatalog, result: isPeerCatalog, mutation: false },
   peer_handoff: { handler: "peerHandoff", decode: decodePeerHandoff, result: isPeerHandoffResult, mutation: true },

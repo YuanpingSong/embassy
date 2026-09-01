@@ -471,7 +471,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
       // Claude -> Codex send.
       const body = `${SOAK_BODY}_${i}`;
       codex.plan(body, planPool[Math.floor(random() * planPool.length)]!);
-      const accepted = await handlers.sendToCodex({
+      const accepted = await handlers.send({
         fromAlias: "claude-one@this-mac",
         toAlias: "codex-main@this-mac",
         text: body,
@@ -488,7 +488,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
       // Codex -> Claude send.
       const body = `${SOAK_BODY}_${i}`;
       claude.plan(body, planPool[Math.floor(random() * planPool.length)]!);
-      const accepted = await handlers.sendToClaude({
+      const accepted = await handlers.send({
         fromAlias: "codex-main@this-mac",
         threadId: THREAD_ID,
         toAlias: "claude-one@this-mac",

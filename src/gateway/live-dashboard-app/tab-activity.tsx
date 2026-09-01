@@ -42,7 +42,7 @@ namespace Embassy {
 
   /** Teaching command for the empty stream (verified real CLI verb). */
   const ACTIVITY_EMPTY_COMMAND =
-    "embassy send-to-codex --from <alias> --to <alias>";
+    "embassy send --from <alias> --to <alias>";
 
   const activityCountFormatters = new Map<Locale, Intl.NumberFormat>();
 

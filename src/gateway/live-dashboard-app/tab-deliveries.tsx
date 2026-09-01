@@ -53,7 +53,7 @@ namespace Embassy {
   const DELIVERY_STATE_FILTERS_COVER_THE_UNION: DeliveryStateCoverage = true;
 
   /** Teaching command for both empty states (a real CLI verb; body on stdin). */
-  const SEND_TO_CODEX_CMD = "embassy send-to-codex --from <alias> --to <alias>";
+  const SEND_TO_CODEX_CMD = "embassy send --from <alias> --to <alias>";
 
   const countFormatters = new Map<Locale, Intl.NumberFormat>();
 

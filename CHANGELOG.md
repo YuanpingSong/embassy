@@ -9,10 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The private control protocol is version 2; version-1 control frames are refused rather than interpreted through a compatibility arm.
+- One provider-neutral `embassy send --from <alias> --to <alias>` replaces both provider-named send verbs; the broker derives direction from the resolved route providers.
 
 ### Removed
 
 - `pair` and `unpair` accept only explicit `--from` / `--to` endpoints; the legacy `--claude` / `--codex` arm is removed.
+- State schema 4 no longer tolerates legacy 24-character delivery tokens or missing `busyPolicy`; older private state must use the reset-only upgrade path.
+- `send-to-claude` and `send-to-codex` are removed with no compatibility aliases.
 
 ### Upgrade note
 

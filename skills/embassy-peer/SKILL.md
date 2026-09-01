@@ -9,7 +9,7 @@ Use only the installed `embassy` CLI. Treat it as the sole facade over the priva
 
 Registration, send, reply, await, receipt, and unregister operations require the exact principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting required principal; never choose one on the caller's behalf. `pair`, `unpair`, `select-claude`, and `unselect-claude` are same-UID control-plane operations authorized by the private control socket, not by inherited provider identity. Agents remain norm-bound to create or remove only the exact edges the user chose; paired-mode membership is rechecked at delivery.
 
-If `CALLER_IDENTITY_CONFLICT` reports that both agent identities were inherited, explain that the Codex App Server daemon may have been started inside an agent session. Tell the operator to run `codex app-server daemon restart` from a normal terminal. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
+If `CALLER_IDENTITY_CONFLICT` reports both inherited identities, strip only the unwanted identity at the call site: use `env -u CLAUDE_CODE_MESSAGING_SOCKET embassy …` for a Codex-side call, or `env -u CODEX_THREAD_ID embassy …` for a Claude-side call. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
 
 ## Select a peer
 
@@ -165,7 +165,7 @@ Pass a non-empty UTF-8 body through standard input. Never place message text in 
 From a registered Codex task to a paired Claude session:
 
 ```sh
-embassy send-to-claude \
+embassy send \
   --from codex-reviewer@this-mac \
   --to advisor@this-mac <<'GATEWAY_MESSAGE'
 Please review the current approach and note the main risk in your own session.

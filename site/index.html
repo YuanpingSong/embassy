@@ -88,7 +88,7 @@
 <div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@this-mac</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@this-mac" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
 <div><div class="cmd2"><code>embassy select-claude --alias claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@this-mac" hidden>Copy</button></div><p>Select the Claude route. Selection creates no consent edge.</p></div>
 <div><div class="cmd2"><code>embassy pair --from codex-embassy@this-mac --to claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@this-mac --to claude-main@this-mac" hidden>Copy</button></div><p>Create the explicit bidirectional consent edge used by the next send. Both endpoints must be registered, live, on the same host, and on different providers.</p></div>
-<div><div class="cmd2"><code>embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
+<div><div class="cmd2"><code>embassy send --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
 Which auth middleware did you settle on?
 MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never an argument. You get a <code style="border:none;background:none;padding:0">dlv_</code> receipt and a <code style="border:none;background:none;padding:0">conv_</code> token back.</p></div>
 <div><div class="cmd2"><code>embassy dashboard --live</code><button type="button" class="cp" data-copy="embassy dashboard --live" hidden>Copy</button></div><p>Watch receipts settle, honestly worded — or <code style="border:none;background:none;padding:0">embassy status</code> for a one-shot snapshot.</p></div>
@@ -171,7 +171,7 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <span class="c"># create the consent edge the next send uses:</span><br>
 <span class="p">$</span> embassy pair --from codex-embassy@this-mac --to claude-main@this-mac<br>
 <span class="c"># from the Codex task — body via stdin, never an argument:</span><br>
-<span class="p">$</span> embassy send-to-claude --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
+<span class="p">$</span> embassy send --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
 Which auth middleware did you settle on?<br>
 MSG<br>
 <span class="c"># watch receipts settle (optional):</span><br>

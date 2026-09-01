@@ -1,7 +1,7 @@
 import type { CliCopy } from "./cli-copy.js";
 
 export const callerIdentityConflictHintEn =
-  "both agent identities were inherited; the Codex App Server daemon may have been started inside an agent session. From a normal terminal, run: codex app-server daemon restart";
+  "both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID";
 
 export const cliCopyEn = {
   "help.usage": `Embassy — local messaging for Claude Code and Codex
@@ -25,12 +25,12 @@ Commands:
                          Unregister a universal shell peer
   await --alias <peer-alias> [--token-stdin]
                          Wait for one peer message and acknowledge stdout
+  peer-stdio             Serve the bounded federation protocol on stdin/stdout
   select-claude          Select a discovered Claude session
   unselect-claude        Clear the Claude selection
   pair [--from <alias> --to <alias>] Add one cross-provider consent edge
   unpair [--from <alias> --to <alias>] Remove one cross-provider consent edge
-  send-to-claude         Send stdin to the selected Claude route
-  send-to-codex          Send stdin to a registered Codex route
+  send                   Send stdin between paired provider routes
   reply                  Reply with a conversation token
   delivery-status        Read a delivery token
   wait-delivery          Wait for terminal delivery status

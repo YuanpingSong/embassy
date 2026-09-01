@@ -41,16 +41,13 @@ Embassy is built for one person, one macOS account, and agents you already trust
 
 ## Quickstart
 
-**Requirements:** macOS and Node.js 20+. Claude routes require peer protocol 1; Codex routes require Desktop configured to use its managed standalone App Server. DeepSeek is optional and launches from `DSH_HOME` (default `~/.dsh`) through the checkout's `demo:acp` script; Grok Build is optional and launches the release-pinned ACP package. A shell peer needs only the local CLI and its one-time token. The release-owned [support matrix](support/provider-support-matrix.json) records the exact tested provider artifacts and capabilities; it is release evidence, never a runtime allowlist:
+**Requirements:** macOS and Node.js 20+. Claude routes require peer protocol 1; Codex routes use Codex CLI tasks with the managed standalone App Server. DeepSeek is optional and launches from `DSH_HOME` (default `~/.dsh`) through the checkout's `demo:acp` script; Grok Build is optional and launches the release-pinned ACP package. A shell peer needs only the local CLI and its one-time token. The release-owned [support matrix](support/provider-support-matrix.json) records the exact tested provider artifacts and capabilities; it is release evidence, never a runtime allowlist:
 
 ```bash
-~/.codex/packages/standalone/current/codex app-server daemon start
-/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT
+codex app-server daemon start
 ```
 
-The first command starts the managed daemon if it is not already running (`restart` and `stop` also exist); the second launches the ChatGPT desktop app pointed at it. `CODEX_APP_SERVER_USE_LOCAL_DAEMON` is not documented by OpenAI; it is observed to work with this Desktop build and may change. Run the daemon command from a normal terminal, never from inside an agent session: Codex tasks inherit the daemon's environment, so a daemon started inside a Claude Code session leaks that session's identity into every task and registration fails closed with `CALLER_IDENTITY_CONFLICT` — fix it from a normal terminal with `codex app-server daemon restart`. The Claude session you select as a destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled — that is Claude Code's own setting, configured in Claude Code, not in Embassy.
-
-Desktop attaches to the managed standalone App Server when it launches. If the daemon restarts while Desktop is already open, waiting alone does not reconnect that app process: fully quit Desktop, rerun `/usr/bin/open --env CODEX_APP_SERVER_USE_LOCAL_DAEMON=1 -a ChatGPT`, and reopen the exact task.
+Run the managed daemon from a normal terminal and use Codex CLI as the supported task host. Desktop's `CODEX_APP_SERVER_USE_LOCAL_DAEMON` attachment is broken in Desktop 26.820 and later ([openai/codex#41112](https://github.com/openai/codex/issues/41112)), so it is not a supported setup. If `CALLER_IDENTITY_CONFLICT` reports both identities, strip only the unwanted inherited identity at the call site: use `env -u CLAUDE_CODE_MESSAGING_SOCKET embassy …` for a Codex-side call, or `env -u CODEX_THREAD_ID embassy …` for a Claude-side call. The Claude destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled.
 
 Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. Consent plus exact logical route/session identity authorizes an attempt; the current per-operation transport and correlated evidence determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned or executed artifacts and state paths, generations of artifacts it actually uses, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
 
@@ -92,6 +89,8 @@ Registration records the exact inherited task identity and performs no App Serve
 
 A local shell harness can join as a `peer-*` route without a plugin, stable shell, daemon, PID binding, token file, or Keychain entry:
 
+When native Codex inbound dispatch is unavailable, this shell-peer mailbox is the supported fallback channel: register once, keep its token only in agent memory, and receive with bounded `await` calls.
+
 ```bash
 embassy register-peer --alias peer-reviewer@this-mac
 ```
@@ -131,7 +130,7 @@ To connect any two routes from different providers, name both ends explicitly wi
 From the registered Codex task, send via stdin:
 
 ```bash
-embassy send-to-claude \
+embassy send \
   --from codex-reviewer@this-mac \
   --to advisor@this-mac \
   --expects-reply <<'MSG'
@@ -141,10 +140,10 @@ MSG
 
 You should see a `conv_` conversation token and a `dlv_` delivery token. Because this send requested a reply, Claude's response is automatically routed back to the Codex task. In the other direction, a compatible Claude session uses its native `ListAgents` and `SendMessage` tools to contact `codex-reviewer` — no Embassy command needed.
 
-`send-to-codex` is the CLI form of that same direction, for a Claude session that prefers an explicit command. It takes the same flags and reads the body from stdin, and it must run inside the Claude session so it inherits that session's reply identity:
+The same command runs in the other direction from a Claude session and inherits that session's reply identity:
 
 ```bash
-embassy send-to-codex \
+embassy send \
   --from advisor@this-mac \
   --to codex-reviewer@this-mac \
   --expects-reply <<'MSG'
@@ -230,7 +229,7 @@ Four embassy terms name real features:
 - **Registration and pairing** are the permission model: a Codex task is explicitly registered, and each pair is one explicit Claude↔Codex edge — only paired ends exchange messages, and many edges can coexist. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
 - **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only dashboard.
 - **The pouch** is transit and the archive: bounded bodies, retained under bounded limits, private to your OS account — sealed against other users, not against you.
-- **Consulates** are the roadmap: the same model extended to Codex tasks on remote hosts over attach-only SSH — designed, and deliberately disabled in v1.
+- **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery and consent authority.
 
 ## For agents
 
@@ -261,8 +260,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
 | `pair` / `unpair` | same-UID control client | Add or remove one user-chosen cross-provider edge by naming both ends: `embassy pair --from advisor@this-mac --to grok-main@this-mac` |
 | `select-claude` / `unselect-claude` | same-UID control client | Select or remove one Claude route using `--alias <name@host>` or `--session <uuid>`; selection creates no permission edge |
-| `send-to-claude` | registered Codex task | Send one bounded message to a paired Claude session: `--from <codex-alias> --to <claude-alias>`, body on stdin, optional `--expects-reply` and `--track [--idle-minutes <n>]` |
-| `send-to-codex` | Claude session | Same flags and stdin body, using the inherited native reply identity |
+| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message between paired routes: `--from <alias> --to <alias>`, optional `--expects-reply` and `--track [--idle-minutes <n>]`; the broker derives direction from the resolved providers |
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin, optional `--track [--idle-minutes <n>]` |
 
 Version 2.0 accepts only fresh private state. Follow the

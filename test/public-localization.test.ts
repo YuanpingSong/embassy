@@ -42,7 +42,7 @@ test("v2 authority docs match the closed control contract", async () => {
     readPublicFile("CHANGELOG.md"), readPublicFile("site/index.html"),
     readPublicFile("site/zh-CN/index.html"),
   ]);
-  assert.match(architecture, /closed version 2 method family is exactly these twenty-two methods/i);
+  assert.match(architecture, /closed version 2 method family is exactly these twenty-one methods/i);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
   assert.match(architecture, /Pair and unpair mutate only the exact two\s+named endpoints/);
   assert.match(architecture, /Paired mode still rechecks exact edge membership at\s+delivery/);

@@ -906,7 +906,7 @@ test("attention teaching commands are real CLI verbs", () => {
     ],
   );
   const verbs =
-    /^(EMBASSY_[A-Z_]+=\S+ )?embassy (serve|health|status|delivery-status|wait-delivery|refresh-dashboard|dashboard|register-codex|unregister-codex|select-claude|unselect-claude|send-to-claude|send-to-codex|reply)\b/;
+    /^(EMBASSY_[A-Z_]+=\S+ )?embassy (serve|health|status|delivery-status|wait-delivery|refresh-dashboard|dashboard|register-codex|unregister-codex|select-claude|unselect-claude|send|reply)\b/;
   for (const view of views) {
     assert.match(view.command, verbs);
   }

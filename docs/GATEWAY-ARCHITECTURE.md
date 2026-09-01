@@ -487,7 +487,7 @@ hatch.
 
 ### Delivery status and bounded waits
 
-Every accepted control-plane `send_to_claude`, `send_to_codex`, or `reply`
+Every accepted control-plane `send` or `reply`
 result contains both its conversation ID and a fresh opaque delivery
 correlation handle called a delivery token.
 The token has the closed form `dlv_` followed by exactly 24 base64url
@@ -562,7 +562,7 @@ controller-owned mode-0700 state directory. The socket and state files are
 mode 0600. Frames are size-bounded and closed against unknown keys, methods,
 versions, and enum values.
 
-The closed version 2 method family is exactly these twenty-two methods:
+The closed version 2 method family is exactly these twenty-one methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
@@ -576,7 +576,7 @@ The closed version 2 method family is exactly these twenty-two methods:
 - `delivery_status`, a lookup by an opaque correlation handle retained only in
   bounded private v4 state;
 - `untrack`, which closes one active progress watch by conversation token;
-- `send_to_claude` and `send_to_codex`, the provider-specific sends;
+- `send`, whose direction is derived from the resolved endpoint providers;
 - `reply`, the correlated reply operation;
 - `refresh_dashboard`, which refreshes provider discovery and republishes;
 - `peer_catalog` and `peer_handoff`, the private federation catalog and
@@ -589,11 +589,11 @@ mutation route additionally calls `pair`, `unpair`,
 `remove_codex_registration`, and `refresh_dashboard`, and nothing else.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-twenty-two implemented commands are
+twenty-one implemented commands are
 `serve`, `health`, `status`, `doctor`, `delivery-status`, `wait-delivery`, `untrack`,
 `refresh-dashboard`, `dashboard`, `register-codex`, `unregister-codex`,
-`select-claude`, `unselect-claude`, `pair`, `unpair`, `send-to-claude`,
-`send-to-codex`, `reply`, `register-peer`, `unregister-peer`, `await`, and
+`select-claude`, `unselect-claude`, `pair`, `unpair`, `send`,
+`reply`, `register-peer`, `unregister-peer`, `await`, and
 `peer-stdio`. `dashboard` requires `--live` and accepts an
 optional `--lang en|zh-CN` and `--port <n>`; it starts the companion process
 rather than issuing a single control request. Message bodies are non-empty
@@ -612,7 +612,7 @@ manual-recovery state.
 
 `select-claude --alias <current-name@host>` and
 `select-claude --session <uuid>` select the same logical session.
-`send-to-claude --to` accepts either form only after explicit selection. UUID
+`send --to` accepts either form only after explicit selection. UUID
 input is normalized to lowercase. No command returns the
 UUID, and no historical name remains routable after a rename.
 
@@ -683,7 +683,7 @@ thread/session generation, source alias, bounds, and conversation state.
 
 ### Progress watches
 
-`send-to-claude`, `send-to-codex`, and `reply` each accept an opt-in `--track`
+`send` and `reply` each accept an opt-in `--track`
 flag that opens one progress watch over the resulting conversation, plus an
 optional `--idle-minutes <n>` that sets how long the watched thread may sit idle
 before each bounded liveness nudge. If the watch ultimately times out, Embassy

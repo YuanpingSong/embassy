@@ -106,7 +106,7 @@ common first-run failure — because it fails *late*. Quickstart step 3
 enabled: selection creates no permission edge and never consults Claude's
 native inbound policy. Create an explicit edge with `pair`; the refusal appears
 when the send reaches the Claude end. If registration, selection, and pairing succeeded
-but your first `send-to-claude` does not arrive, check `crossSessionInbound` on
+but your first `send` does not arrive, check `crossSessionInbound` on
 the destination session before suspecting the route.
 
 ## Provider and runtime contract

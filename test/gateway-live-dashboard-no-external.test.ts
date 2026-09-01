@@ -247,7 +247,6 @@ test("every embassy command in the bundle names a real CLI verb", () => {
   }
 
   for (const phantom of [
-    "embassy send ",
     "embassy attest",
     "embassy restart",
     "embassy status --watch",

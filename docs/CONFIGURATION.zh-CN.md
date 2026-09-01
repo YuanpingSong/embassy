@@ -68,7 +68,7 @@ Embassy 主要通过各命令启动时读取的环境变量进行配置。本文
 
 `crossSessionInbound` 是 Claude Code 的原生跨会话消息设置：它决定一个 Claude 会话接受、挂起还是拒绝来自其他会话的消息。Embassy 需要在你选择作为 Codex→Claude 目的地的会话上启用此设置，且无法覆盖该决定。请在 Claude Code 中配置它，而不是在 Embassy 中。
 
-这是你唯一必须主动开启的前置条件，也是最常见的首次运行故障——因为它**失败得很晚**。快速开始的第 3 步（`select-claude`）无论该设置是否启用都会打印 `"accepted":true`：选择不会创建权限边，也不查询 Claude 的原生入站策略。请使用 `pair` 显式创建权限边；拒绝要到消息抵达 Claude 端时才出现。如果注册、选择与配对都成功，但第一条 `send-to-claude` 没有送达，请先检查目的地会话上的 `crossSessionInbound`，再去怀疑路由。
+这是你唯一必须主动开启的前置条件，也是最常见的首次运行故障——因为它**失败得很晚**。快速开始的第 3 步（`select-claude`）无论该设置是否启用都会打印 `"accepted":true`：选择不会创建权限边，也不查询 Claude 的原生入站策略。请使用 `pair` 显式创建权限边；拒绝要到消息抵达 Claude 端时才出现。如果注册、选择与配对都成功，但第一条 `send` 没有送达，请先检查目的地会话上的 `crossSessionInbound`，再去怀疑路由。
 
 ## 提供方与运行时契约
 

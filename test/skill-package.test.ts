@@ -43,7 +43,7 @@ test("skill exposes only the stable gateway operating surface", async () => {
     "unpair",
     "register-codex",
     "unregister-codex",
-    "send-to-claude",
+    "send",
     "reply",
   ];
 
@@ -60,7 +60,7 @@ test("skill exposes only the stable gateway operating surface", async () => {
   assert.match(skill, /standard input/);
   assert.match(skill, /native bidirectional messaging/);
   assert.match(skill, /codex-\*/);
-  assert.doesNotMatch(skill, /embassy send-to-codex\b/);
+  assert.doesNotMatch(skill, /embassy send-to-(?:claude|codex)\b/);
   assert.doesNotMatch(skill, /--(?:text|message|body)\b/);
 });
 
@@ -99,8 +99,8 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /SENDER_NOT_PAIRED/);
   assert.match(skill, /serve --inbound open/);
   assert.match(skill, /CALLER_IDENTITY_CONFLICT/);
-  assert.match(skill, /normal terminal/);
-  assert.match(skill, /codex app-server daemon restart/);
+  assert.match(skill, /env -u CLAUDE_CODE_MESSAGING_SOCKET/);
+  assert.match(skill, /env -u CODEX_THREAD_ID/);
   assert.match(skill, /wrong principal/);
   assert.match(skill, /Direction determines timing/);
   assert.match(skill, /Claude-bound send or correlated reply writes immediately/);

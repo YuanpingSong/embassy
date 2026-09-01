@@ -35,8 +35,7 @@ import {
   sendGatewayControlRequest,
   startGatewayControlServer,
   type ValidatedRegisterCodexParams,
-  type ValidatedSendToClaudeParams,
-  type ValidatedSendToCodexParams,
+  type ValidatedSendParams,
 } from "../src/gateway/control.js";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
@@ -343,13 +342,7 @@ function handlers(
       deadlineAt: DEADLINE,
     }),
     untrack: () => ({ accepted: true, code: "ok" }),
-    sendToClaude: () => ({
-      accepted: true,
-      code: "ok",
-      conversationId: CONVERSATION_ID,
-      deliveryToken: DELIVERY_TOKEN,
-    }),
-    sendToCodex: () => ({
+    send: () => ({
       accepted: true,
       code: "ok",
       conversationId: CONVERSATION_ID,
@@ -447,8 +440,8 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 2);
   const { stateDir, socketPath } = await privateState();
   let registered: ValidatedRegisterCodexParams | undefined;
-  let toClaude: ValidatedSendToClaudeParams | undefined;
-  let toCodex: ValidatedSendToCodexParams | undefined;
+  let toClaude: ValidatedSendParams | undefined;
+  let toCodex: ValidatedSendParams | undefined;
   let paired: unknown;
   let unpaired: unknown;
   let removedCodexAlias: string | undefined;
@@ -473,23 +466,15 @@ test("serves the two directional routes and emits metadata-only responses", asyn
         removedCodexAlias = alias;
         return { accepted: true, code: "ok" };
       },
-      sendToClaude: (params) => {
+      send: (params) => {
         if (params.text === "TRACK: owner conflict") {
           return {
             accepted: false as const,
             code: "watch_owner_conflict" as const,
           };
         }
-        toClaude = { ...params };
-        return {
-          accepted: true,
-          code: "ok",
-          conversationId: CONVERSATION_ID,
-          deliveryToken: DELIVERY_TOKEN,
-        };
-      },
-      sendToCodex: (params) => {
-        toCodex = { ...params };
+        if ("replyAddress" in params) toCodex = { ...params };
+        else toClaude = { ...params };
         return {
           accepted: true,
           code: "ok",
@@ -602,7 +587,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     socketPath,
     request: {
       protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "send_to_claude",
+      method: "send",
       params: {
         fromAlias: "codex-main@this-mac",
         threadId: THREAD_ID,
@@ -617,7 +602,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       socketPath,
       request: {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "send_to_claude",
+        method: "send",
         params: {
           fromAlias: "codex-main@this-mac",
           threadId: THREAD_ID,
@@ -675,7 +660,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     socketPath,
     request: {
       protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "send_to_codex",
+      method: "send",
       params: {
         fromAlias: "claude-one@build-mac",
         toAlias: "codex-main@this-mac",
@@ -836,8 +821,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "observe_snapshot",
     "delivery_status",
     "untrack",
-    "send_to_claude",
-    "send_to_codex",
+    "send",
     "reply",
     "refresh_dashboard",
     "peer_catalog",
@@ -896,9 +880,9 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
     { alias, token: PEER_TOKEN, receipt: PEER_RECEIPT },
   ]);
   for (const request of [
-    { method: "send_to_claude", params: { fromAlias: alias, peerToken: PEER_TOKEN,
+    { method: "send", params: { fromAlias: alias, peerToken: PEER_TOKEN,
       toAlias: "claude-main@this-mac", text: "hello" } },
-    { method: "send_to_codex", params: { fromAlias: alias, peerToken: PEER_TOKEN,
+    { method: "send", params: { fromAlias: alias, peerToken: PEER_TOKEN,
       toAlias: "codex-main@this-mac", text: "hello" } },
     { method: "reply", params: { conversationId: CONVERSATION_ID, text: "hello",
       caller: { kind: "peer", alias, token: PEER_TOKEN } } },
@@ -911,10 +895,10 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
     ["unregister_peer", { alias, token: `${PEER_TOKEN}x` }],
     ["await_peer", { alias, token: PEER_TOKEN, extra: true }],
     ["peer_receipt", { alias, token: PEER_TOKEN, receipt: `${PEER_RECEIPT}x` }],
-    ["send_to_claude", { fromAlias: alias, toAlias: "claude-main@this-mac", text: "x" }],
-    ["send_to_claude", { fromAlias: alias, threadId: THREAD_ID, peerToken: PEER_TOKEN,
+    ["send", { fromAlias: alias, toAlias: "claude-main@this-mac", text: "x" }],
+    ["send", { fromAlias: alias, threadId: THREAD_ID, peerToken: PEER_TOKEN,
       toAlias: "claude-main@this-mac", text: "x" }],
-    ["send_to_codex", { fromAlias: alias, peerToken: PEER_TOKEN,
+    ["send", { fromAlias: alias, peerToken: PEER_TOKEN,
       replyAddress: "uds:/tmp/reply.sock", toAlias: "codex-main@this-mac", text: "x" }],
   ] as const) assertWireError(await rawRequest(socketPath, wireRequest(method, params)), "INVALID_REQUEST");
   await server.close();
@@ -1073,7 +1057,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       },
     ],
     [
-      "send_to_claude",
+      "send",
       {
         fromAlias: "codex@this-mac",
         threadId: THREAD_ID,
@@ -1082,7 +1066,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       },
     ],
     [
-      "send_to_claude",
+      "send",
       {
         fromAlias: "codex@this-mac",
         threadId: THREAD_ID,
@@ -1091,7 +1075,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       },
     ],
     [
-      "send_to_claude",
+      "send",
       {
         fromAlias: "codex@this-mac",
         threadId: "not-a-uuid",
@@ -1100,7 +1084,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       },
     ],
     [
-      "send_to_claude",
+      "send",
       {
         fromAlias: "codex@this-mac",
         threadId: THREAD_ID,
@@ -1109,7 +1093,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
       },
     ],
     [
-      "send_to_codex",
+      "send",
       {
         fromAlias: "claude@build-mac",
         toAlias: "codex@this-mac",
@@ -1313,7 +1297,7 @@ test("never reflects handler exceptions", async () => {
     stateDir,
     socketPath,
     handlers: handlers({
-      sendToClaude: () => {
+      send: () => {
         throw new Error(`${THREAD_ID} ${secretText}`);
       },
     }),
@@ -1321,7 +1305,7 @@ test("never reflects handler exceptions", async () => {
 
   const failed = await rawRequest(
     socketPath,
-    wireRequest("send_to_claude", {
+    wireRequest("send", {
       fromAlias: "codex-main@this-mac",
       threadId: THREAD_ID,
       toAlias: "claude-one@build-mac",
@@ -1887,7 +1871,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
       socketPath,
       request: {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "send_to_claude",
+        method: "send",
         params: {
           fromAlias: "codex-main@this-mac",
           threadId: THREAD_ID,
@@ -1966,7 +1950,7 @@ test("client marks only lost mutation responses ambiguous after write starts", a
       socketPath,
       request: {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "send_to_claude",
+        method: "send",
         params: {
           fromAlias: "codex-main@this-mac",
           threadId: THREAD_ID,

@@ -1,7 +1,7 @@
 import type { CliCopy } from "./cli-copy.js";
 
 export const callerIdentityConflictHintZhCn =
-  "同时继承了两种代理身份；Codex App Server 守护进程可能是在代理会话内启动的。请在普通终端中运行：codex app-server daemon restart";
+  "同时继承了两种代理身份；Codex 侧调用请使用 env -u CLAUDE_CODE_MESSAGING_SOCKET 重试，Claude 侧调用请使用 env -u CODEX_THREAD_ID 重试";
 
 export const cliCopyZhCn = {
   "help.usage": `Embassy — Claude Code 与 Codex 的本地消息通道
@@ -25,12 +25,12 @@ export const cliCopyZhCn = {
                          注销通用 shell 对等方
   await --alias <对等别名> [--token-stdin]
                          等待一条对等消息并在标准输出后确认
+  peer-stdio             在标准输入／输出上提供有界联邦协议
   select-claude          选择已发现的 Claude 会话
   unselect-claude        清除 Claude 选择
   pair [--from <别名> --to <别名>] 添加一条跨提供商同意边
   unpair [--from <别名> --to <别名>] 移除一条跨提供商同意边
-  send-to-claude         将标准输入发送到所选 Claude 路由
-  send-to-codex          将标准输入发送到已注册 Codex 路由
+  send                   在已配对的提供方路由之间发送标准输入
   reply                  使用会话令牌回复
   delivery-status        读取投递令牌状态
   wait-delivery          等待终结投递状态

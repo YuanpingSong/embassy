@@ -17,8 +17,7 @@ import {
   type PairParams,
   type ReplyParams,
   type ValidatedRegisterCodexParams,
-  type ValidatedSendToClaudeParams,
-  type ValidatedSendToCodexParams,
+  type ValidatedSendParams,
 } from "../src/gateway/control.js";
 import {
   EMBASSY_VERSION,
@@ -49,9 +48,9 @@ const BOTH_IDENTITIES = {
   CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
 } as const;
 const CALLER_IDENTITY_CONFLICT_HINT_EN =
-  "[embassy] both agent identities were inherited; the Codex App Server daemon may have been started inside an agent session. From a normal terminal, run: codex app-server daemon restart\n";
+  "[embassy] both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID\n";
 const CALLER_IDENTITY_CONFLICT_HINT_ZH_CN =
-  "[embassy] 同时继承了两种代理身份；Codex App Server 守护进程可能是在代理会话内启动的。请在普通终端中运行：codex app-server daemon restart\n";
+  "[embassy] 同时继承了两种代理身份；Codex 侧调用请使用 env -u CLAUDE_CODE_MESSAGING_SOCKET 重试，Claude 侧调用请使用 env -u CODEX_THREAD_ID 重试\n";
 const roots = new Set<string>();
 
 const execFileAsync = promisify(execFile);
@@ -136,7 +135,7 @@ test("bare invocation and help flags print localized usage without side effects"
 });
 
 test("removed compatibility commands fail before configuration or control work", async () => {
-  for (const command of ["compat-check", "compat-certify"]) {
+  for (const command of ["compat-check", "compat-certify", "send-to-claude", "send-to-codex"]) {
     let worked = false;
     const stdout = capture();
     const stderr = capture();
@@ -296,9 +295,9 @@ test("peer stdin framing preserves the body and the three caller principals stay
         conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
   };
   const fragmented = Readable.from([Buffer.from(PEER_TOKEN.slice(0, 9)), Buffer.from(`${PEER_TOKEN.slice(9)}\n`), Buffer.from("\nexact body")]);
-  assert.equal(await runGatewayCli(["send-to-claude", "--from", "peer-cursor@this-mac", "--to", "advisor@this-mac", "--token-stdin"],
+  assert.equal(await runGatewayCli(["send", "--from", "peer-cursor@this-mac", "--to", "advisor@this-mac", "--token-stdin"],
     { ...base, stdin: fragmented }), 0);
-  assert.deepEqual(requests[0], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send_to_claude", params: {
+  assert.deepEqual(requests[0], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send", params: {
     fromAlias: "peer-cursor@this-mac", toAlias: "advisor@this-mac", text: "\nexact body",
     expectsReply: false, peerToken: PEER_TOKEN } });
 
@@ -314,7 +313,7 @@ test("peer stdin framing preserves the body and the three caller principals stay
     { env: {}, body: `${PEER_TOKEN}\r\nbody` },
   ]) {
     const before = control, out = capture();
-    const code = await runGatewayCli(["send-to-codex", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
+    const code = await runGatewayCli(["send", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
       { ...base, ...current, stdin: input(current.body), stdout: out });
     assert.equal(code, gatewayCliExitCodes.invalidInput);
     assert.equal(control, before);
@@ -338,11 +337,11 @@ test("peer token framing is exact, bounded, and rejects before control work", as
       chunks: [highByte], code: "INVALID_MESSAGE_INPUT",
     },
     {
-      argv: ["send-to-codex", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
+      argv: ["send", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
       chunks: [Buffer.from(`${PEER_TOKEN}\n`), Buffer.alloc(16 * 1024 + 1, 0x61)], code: "MESSAGE_TOO_LARGE",
     },
     {
-      argv: ["send-to-codex", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
+      argv: ["send", "--from", "peer-cursor@this-mac", "--to", "codex-main@this-mac", "--token-stdin"],
       chunks: [Buffer.from(`${PEER_TOKEN}\n`), Buffer.from([0xc3, 0x28])], code: "INVALID_MESSAGE_INPUT",
     },
   ];
@@ -452,8 +451,8 @@ test("all client commands use one private control socket and expose only normali
   const unselected: string[] = [];
   const pairs: PairParams[] = [];
   const unpairs: PairParams[] = [];
-  const sendsToClaude: ValidatedSendToClaudeParams[] = [];
-  const sendsToCodex: ValidatedSendToCodexParams[] = [];
+  const sendsToClaude: ValidatedSendParams[] = [];
+  const sendsToCodex: ValidatedSendParams[] = [];
   const replies: ReplyParams[] = [];
   const deliveryStatuses: string[] = [];
   const untracked: string[] = [];
@@ -504,17 +503,8 @@ test("all client commands use one private control socket and expose only normali
       untracked.push(conversationId);
       return { accepted: true, code: "ok" };
     },
-    sendToClaude: (params) => {
-      sendsToClaude.push({ ...params });
-      return {
-        accepted: true,
-        code: "ok",
-        conversationId: CONVERSATION_ID,
-        deliveryToken: DELIVERY_TOKEN,
-      };
-    },
-    sendToCodex: (params) => {
-      sendsToCodex.push({ ...params });
+    send: (params) => {
+      ("replyAddress" in params ? sendsToCodex : sendsToClaude).push({ ...params });
       return {
         accepted: true,
         code: "ok",
@@ -645,7 +635,7 @@ test("all client commands use one private control socket and expose only normali
     },
     {
       argv: [
-        "send-to-claude",
+        "send",
         "--from",
         "codex-reviewer@this-mac",
         "--to",
@@ -657,7 +647,7 @@ test("all client commands use one private control socket and expose only normali
     },
     {
       argv: [
-        "send-to-claude",
+        "send",
         "--from",
         "codex-reviewer@this-mac",
         "--to",
@@ -668,7 +658,7 @@ test("all client commands use one private control socket and expose only normali
     },
     {
       argv: [
-        "send-to-codex",
+        "send",
         "--from",
         "advisor@this-mac",
         "--to",
@@ -737,8 +727,7 @@ test("all client commands use one private control socket and expose only normali
     );
     assert.doesNotMatch(result.stdout, /cc-socks|45201|BODY_SENTINEL/);
     if (
-      current.argv[0] === "send-to-claude" ||
-      current.argv[0] === "send-to-codex" ||
+      current.argv[0] === "send" ||
       current.argv[0] === "reply"
     ) {
       assert.equal(parsed.result?.deliveryToken, DELIVERY_TOKEN);
@@ -1510,7 +1499,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
   let attempts = 0;
   const code = await runGatewayCli(
     [
-      "send-to-claude",
+      "send",
       "--from",
       "codex-reviewer@this-mac",
       "--to",
@@ -1546,7 +1535,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
   assert.equal(attempts, 1);
   assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
     ok: false,
-    command: "send-to-claude",
+    command: "send",
     error: {
       code: "CONTROL_OUTCOME_AMBIGUOUS",
       ambiguous: true,
@@ -1691,7 +1680,7 @@ test("watch-owner conflict preserves its code and localizes the untrack remedy",
     const stderr = capture();
     const code = await runGatewayCli(
       [
-        "send-to-claude",
+        "send",
         "--from",
         "codex-reviewer@this-mac",
         "--to",
@@ -1727,7 +1716,7 @@ test("watch-owner conflict preserves its code and localizes the untrack remedy",
     assert.equal(code, gatewayCliExitCodes.rejected);
     assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
       ok: true,
-      command: "send-to-claude",
+      command: "send",
       result: { accepted: false, code: "watch_owner_conflict" },
     });
     assert.equal(stderr.chunks.join(""), expectedHint[locale]);
@@ -1854,7 +1843,7 @@ test("identity, stdin, and argument failures happen before any control request",
     },
     {
       argv: [
-        "send-to-codex",
+        "send",
         "--from",
         "advisor@this-mac",
         "--to",
@@ -1866,7 +1855,7 @@ test("identity, stdin, and argument failures happen before any control request",
     },
     {
       argv: [
-        "send-to-codex",
+        "send",
         "--from",
         "advisor@this-mac",
         "--to",
@@ -1918,7 +1907,7 @@ test("identity, stdin, and argument failures happen before any control request",
     },
     {
       argv: [
-        "send-to-claude",
+        "send",
         "--from",
         "codex-reviewer@this-mac",
         "--to",
@@ -1930,7 +1919,7 @@ test("identity, stdin, and argument failures happen before any control request",
     },
     {
       argv: [
-        "send-to-codex",
+        "send",
         "--from",
         "advisor@this-mac",
         "--to",
@@ -1942,19 +1931,7 @@ test("identity, stdin, and argument failures happen before any control request",
     },
     {
       argv: [
-        "send-to-codex",
-        "--from",
-        "advisor@this-mac",
-        "--to",
-        "codex-reviewer@this-mac",
-      ],
-      env: { CODEX_THREAD_ID: THREAD_ID },
-      body: SECRET_BODY,
-      code: "CALLER_IDENTITY_CONFLICT",
-    },
-    {
-      argv: [
-        "send-to-claude",
+        "send",
         "--from",
         "codex-reviewer@this-mac",
         "--to",
@@ -2281,13 +2258,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       }),
       deliveryStatus: () => ({ found: false }),
       untrack: () => ({ accepted: true, code: "ok" }),
-      sendToClaude: () => ({
-        accepted: true,
-        code: "ok",
-        conversationId: CONVERSATION_ID,
-        deliveryToken: DELIVERY_TOKEN,
-      }),
-      sendToCodex: () => ({
+      send: () => ({
         accepted: true,
         code: "ok",
         conversationId: CONVERSATION_ID,
@@ -2394,7 +2365,7 @@ test("oversized stdin renders its localized hint while generic input rejection d
     let requested = false;
     const exitCode = await runGatewayCli(
       [
-        "send-to-claude",
+        "send",
         "--from",
         "codex-reviewer@this-mac",
         "--to",
