@@ -11,6 +11,10 @@ Safety rules (binding on every step):
 
 Steps, in order — each gates the next:
 
+0. CI pre-flight: the release base commit's CI run on main concluded
+   SUCCESS (`gh run list --branch main`). A red or missing CI
+   conclusion stops the release before any version pin — local checks
+   do not substitute for the pipeline's own legs.
 1. Landing tree clean, on main, matching origin/main. If a patch is
    supplied: apply it; it must apply without fuzz.
 2. Version pins, all four: `npm version VERSION --no-git-tag-version`
