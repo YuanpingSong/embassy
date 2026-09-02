@@ -191,3 +191,11 @@ no support-matrix ceremony, no site work beyond the stub.
   the control protocol version so removed methods read as skew, not
   as unknown; emb-107 considers an operator path to clear an orphaned
   Codex registration (was dashboard-only).
+- 2026-09-02 Norms added after emb-101's gate: every slice appends
+  to CHANGELOG `[Unreleased]`; each protocol/schema number is bumped
+  ONCE for the v3 line at first need (schema 5, peer protocol 2,
+  control protocol 3 — all in emb-101); no doc may promise a record
+  that does not exist — emb-109's release note names the Claude
+  Code / Codex CLI versions the cutover drill ran against, and only
+  then may docs say so. Fable-tier engineers/reviewers while the
+  Opus limit holds (resets 05:40 ET).
