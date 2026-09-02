@@ -53,13 +53,19 @@ Runtime delivery is best effort. Version and build strings are unverified metada
 
 ### 1. Start Embassy
 
-Run the foreground broker under the same OS account as Claude Code and Codex. Federation across machines needs a `nodes.json`; see [Configuration](docs/CONFIGURATION.md).
+Install the broker as a launchd agent under the same OS account as Claude Code and Codex, so it starts at login and restarts after a crash:
 
 ```bash
-embassy serve
+embassy service install
 ```
 
+<<<<<<< HEAD
+The install waits up to 10 seconds for the agent to answer a health check and exits non-zero if it never does. A Mac with no logged-in user — an SSH-only federation peer, say — has no `gui` domain and cannot run a launchd agent at all: run `embassy serve` under your own supervisor there. Prefer a foreground process you start and stop by hand? Run `embassy serve` in its own terminal and leave it running — skip `service install` in that case.
+
+In another terminal:
+=======
 You should see `"status":"ready"`. The ready line prints `hostId`: replace `your-host` with that value in every command below. Without a `nodes.json` it is this machine's hostname, and Embassy writes that file for you on first start. In another terminal:
+>>>>>>> dfd9efe (emb-106: corrections 2 — lock recovery by liveness, grammar-valid placeholder, chmod/fsync/cleanup, config from the reloaded inventory)
 
 ```bash
 embassy health
@@ -70,6 +76,8 @@ embassy status
 that list is empty, start a Claude Code session and run
 `embassy refresh`, which rescans for Claude sessions; the next `status`
 should show it.
+
+Every alias below ends in `@your-host`: replace `your-host` with this machine's host. The broker prints it as `hostId` on its ready line — in your terminal under `embassy serve`, or in `~/Library/Logs/agent-embassy/broker.log` under the launchd agent — and name an alias for the wrong host and the CLI tells you which one this machine uses. Federation across machines needs a `nodes.json`; without one Embassy writes that file itself on first start, naming this machine by its own hostname (see [Configuration](docs/CONFIGURATION.md)).
 
 ### 2. Register the Codex task
 
@@ -231,6 +239,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | Command | Run by | Purpose |
 | --- | --- | --- |
 | `serve` | operator | Start the foreground broker |
+| `service install` / `service uninstall` / `service status` | operator | Register the broker as this user's macOS launchd agent, remove it, or report what launchd knows about it |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
 | `refresh` | operator | Rescan for Claude sessions |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |

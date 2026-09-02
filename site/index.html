@@ -79,7 +79,7 @@
 <div class="wrap">
 <p class="eyebrow">How it works</p>
 <h2>Six commands to a working route</h2>
-<p class="lede">Each command is what the shipped CLI accepts once you substitute your host. Replace <code style="border:none;background:none;padding:0">your-host</code> with the <code style="border:none;background:none;padding:0">hostId</code> on the <code style="border:none;background:none;padding:0">embassy serve</code> ready line.</p>
+<p class="lede">Each command is what the shipped CLI accepts once you substitute your host. Replace <code style="border:none;background:none;padding:0">your-host</code> with the <code style="border:none;background:none;padding:0">hostId</code> on the broker's ready line.</p>
 <div class="steps">
 <div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>Copy</button></div><p>Start the broker. It opens no network listener — everything stays on this machine.</p></div>
 <div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@your-host</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@your-host" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
@@ -148,7 +148,7 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <div class="qs">
 <span class="p">$</span> npm install -g agent-embassy<br>
 <span class="p">$</span> embassy serve<br>
-<span class="c"># your-host is the hostId printed on the serve ready line</span><br>
+<span class="c"># your-host is the hostId on the broker's ready line</span><br>
 <span class="c"># inside your Codex task — ask the agent to run it:</span><br>
 <span class="p">$</span> embassy register-codex --alias codex-embassy@your-host<br>
 <span class="c"># as the operator, pick a name from `embassy status` availablePeers:</span><br>

@@ -7,7 +7,7 @@ description: Operate Embassy through current name@host or Claude session-UUID se
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the `embassy serve` ready line, also shown by `embassy status`.
+Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the broker's ready line, which the CLI also names in full whenever an alias is given for another host.
 
 Registration, send, reply, await, receipt, and unregister operations require the exact principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting required principal; never choose one on the caller's behalf. `pair`, `unpair`, `select-claude`, and `unselect-claude` are same-UID control-plane operations authorized by the private control socket, not by inherited provider identity. Agents remain norm-bound to create or remove only the exact edges the user chose; paired-mode membership is rechecked at delivery.
 
@@ -36,7 +36,7 @@ Run this before a state-changing operation:
 embassy health
 ```
 
-If Embassy is unavailable, follow any accompanying denied-access or unsafe-path guidance first. Only when no access or unsafe-path condition is reported, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
+If Embassy is unavailable, follow any accompanying denied-access or unsafe-path guidance first. `CONTROL_SOCKET_UNAVAILABLE`, `CONTROL_SOCKET_MISSING`, and `CONTROL_LISTENER_UNAVAILABLE` each carry Embassy's own hint, which names the resolved state directory: run `embassy service install` once to keep the broker running as a launchd agent, or `embassy serve` in a trusted local terminal. Only when no access or unsafe-path condition is reported, stop and report that hint verbatim, state directory included — a state directory you did not expect is itself the diagnosis. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process (or `embassy service uninstall` a launchd-managed one) rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
 Embassy presents Claude, Codex, and shell peers as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
 

@@ -42,8 +42,9 @@ identity change.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
 
 Examples throughout this documentation write aliases as `name@your-host`;
-substitute your own host — the `hostId` on the `embassy serve` ready line, also
-shown by `embassy status` — wherever `your-host` appears.
+substitute your own host — the `hostId` on the broker's ready line — wherever
+`your-host` appears. Naming another host in an alias is refused with a message
+that states the host this machine actually uses and the file it was read from.
 
 ### Private state reset
 
@@ -84,6 +85,102 @@ A recovered lock is renamed to `.gateway-controller.lock.stale-<uuid>` rather
 than deleted, so a crash stays diagnosable; a later start removes those once
 they are more than seven days old. Never delete a lock while a broker is
 running.
+
+## Service
+
+`embassy service install` registers the broker as a per-user macOS launchd
+agent instead of a foreground process kept alive by hand:
+
+- **Agent**: label `com.agent-embassy.broker`, written to
+  `~/Library/LaunchAgents/com.agent-embassy.broker.plist` (mode 0644).
+  `RunAtLoad` starts it at login. `KeepAlive` is `{ Crashed: true }`, which
+  per `launchd.plist(5)` relaunches the job **only** when it died from a
+  signal typically associated with a crash — `SIGSEGV`, `SIGBUS`, `SIGILL`,
+  `SIGABRT` — throttled to at most once every 5 seconds. Nothing else brings
+  it back: not a clean exit, not a non-zero exit, not a plain `kill`
+  (`SIGTERM`), and not one of the broker's deliberate boot refusals (an
+  unsupported state schema, another instance holding the lease). That is on
+  purpose. A refusal exits once and stays down: run `embassy service status`
+  and read the log rather than waiting for a relaunch that will not come.
+- **Logs**: stdout and stderr are both captured to
+  `~/Library/Logs/agent-embassy/broker.log` (the log directory is created
+  mode 0700). **There is no rotation** — Embassy never truncates or rolls this
+  file, so a long-lived agent's log is yours to prune. Uninstalling leaves it
+  in place.
+- **Environment**: every `EMBASSY_*` variable set in the installing shell,
+  plus `XDG_STATE_HOME`, is captured into the plist at install time, and the
+  install prints the captured key names. These are configuration, not
+  secrets; nothing else — no API key, no token, no `PATH` — is copied.
+  `EMBASSY_STATE_DIR` and `XDG_STATE_HOME` must be absolute. The agent runs
+  with exactly those captured values for its whole life: changing them in
+  your shell afterwards has no effect, and the only way to change what the
+  agent runs with is to run `embassy service install` again.
+- **Stop it**: `embassy service uninstall` boots the agent out of launchd and
+  then waits — polling `launchctl print` every 250 ms for up to 10 seconds —
+  until launchctl answers that the label is *not found*; only then does it
+  remove the plist. launchd unloads asynchronously, so `bootout` returning 0
+  is not proof. Any other answer leaves the plist in place. If launchctl
+  reported an error, its stderr is quoted. If `bootout` returned 0 and the
+  label is still there at the end of the wait, there is nothing of
+  launchctl's to quote — `print` succeeded, and its stdout is never quoted —
+  so the message says how long it waited instead.
+- **Check it**: `embassy service status` reports `loaded`, `not loaded`, or
+  `unknown`. `unknown` — launchctl could not run, or printed something this
+  version does not recognize — is reported as such with launchctl's *stderr*
+  quoted, and exits non-zero; it is never rendered as "not loaded". Status
+  also reports whether the plist exists and whether the program the plist
+  points at is still on disk (a Node binary under a version manager can be
+  removed out from under an installed agent). `service` is the one command
+  that reports local paths — its plist, its log, a missing program — because
+  managing those files is what it does; launchctl's *stdout* is never quoted
+  anywhere, since a `print` dump contains the agent's environment values.
+
+Install replaces its own loaded agent: it boots the existing
+`com.agent-embassy.broker` out, waits for launchctl to confirm the label is
+gone, and only then probes the host-wide instance lease. So re-running
+`embassy service install` over a running launchd agent is the supported way to
+change its configuration.
+
+If the lease still cannot be taken after that, install refuses and quotes the
+lease's own message verbatim (bounded, like every quoted string on this
+path, at 512 bytes). That message is worth reading: `instance-lease`
+reports the same condition for about ten situations, most of which are not
+another broker at all — a symlinked path component under `~/.local/state`, a
+non-empty lease root with no ownership marker, a lock file whose mode or owner
+drifted. A holder's pid is named only when the recorded pid is verifiably
+alive, because the lock record keeps the *last* holder and is routinely stale.
+Nothing has been written to disk at this point.
+
+**Rollback.** A failure after `launchctl bootstrap` — a non-zero `bootstrap`,
+a `print` that cannot confirm the agent, a failing `kickstart` — is rolled
+back, and the error says exactly what the rollback achieved:
+
+- the new agent is booted out and confirmed gone; then
+- if a readable plist was already there, its previous bytes are written back,
+  and it is re-bootstrapped **only if that agent was loaded when install
+  started** — the restart is then confirmed by `launchctl print`, not by an
+  exit code. A plist that was merely sitting on disk, unloaded, is restored
+  and left unloaded: a failed install must not start a broker you did not
+  have running, which would take the host lease behind your back;
+- if there was no previous plist, the one this install wrote is removed;
+- if the previous plist could not be read (it was oversized, or unreadable),
+  it is **left in place rather than deleted** — deleting it would be a silent
+  uninstall — and the error says the plist on disk is the one this install
+  wrote;
+- if the new agent cannot be confirmed unloaded, the plist is **left alone**
+  and the error says so — a half-installed agent is reported, never hidden.
+
+The post-install health check is *not* one of those failures. By then the
+agent is installed and loaded, and it stays that way: a broker that does not
+answer is reported, and the command exits non-zero, but nothing is undone.
+
+Install waits up to 10 seconds of wall clock for that health check, capping
+each attempt at 1 second. If the broker never answers, the command exits
+non-zero, names the log file, and reports the last code it observed. If that
+last code is a decisive refusal rather than silence — `CONTROL_STATE_UNSAFE`,
+`CONTROL_SOCKET_UNSAFE`, `CONTROL_CONNECT_DENIED`, `CONTROL_VERSION_MISMATCH`
+— it exits with that code's own class and points at `embassy health`, which
+explains it.
 
 ## Advanced bounds
 
