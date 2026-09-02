@@ -26,7 +26,7 @@ import {
   gatewayCliExitCodes,
   runGatewayCli as runGatewayCliBase,
 } from "../src/gateway/cli.js";
-import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
+import { ensureGatewayNodeInventoryFile, loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
 import { runGatewayServer as runGatewayServerBase } from "../src/gateway/server.js";
 import { GatewayStore } from "../src/gateway/store.js";
@@ -1195,6 +1195,20 @@ test("a refused serve prints the remedy for each state-directory refusal it can 
       kind: "[embassy] gateway unavailable.\n",
     },
     {
+      name: "a live pid under a machine name that cannot be represented",
+      plant: async (dir: string) => {
+        await writeFile(path.join(dir, ".agent-embassy-state"), marker, { mode: 0o600 });
+        await writeFile(path.join(dir, ".gateway-controller.lock"),
+          lock({ pid: 4242, hostname: "a name with spaces" }), { mode: 0o600 });
+      },
+      alive: true,
+      exitCode: gatewayCliExitCodes.unavailable,
+      code: "GATEWAY_STATE_IN_USE",
+      hint: (dir: string) =>
+        `another broker may own ${dir}: if \`embassy serve\` is not running anywhere, the lock ${dir}/.gateway-controller.lock is stale — remove it and start again.`,
+      kind: "[embassy] gateway unavailable.\n",
+    },
+    {
       name: "the lock cannot be read as a record",
       plant: async (dir: string) => {
         await writeFile(path.join(dir, ".agent-embassy-state"), marker, { mode: 0o600 });
@@ -1240,6 +1254,68 @@ test("a refused serve prints the remedy for each state-directory refusal it can 
     assert.equal(JSON.parse(stdout.chunks.join("")).error.code, current.code, current.name);
     assert.equal(stderr.chunks.join(""), `${current.kind}[embassy] ${current.hint(stateDir)}\n`, current.name);
   }
+});
+
+test("a first-boot write that fails tells the operator which of the two outcomes happened", async (t) => {
+  // The distinction the operator acts on: nothing was written, or the file is
+  // there and only the directory entry never reached the disk.
+  const full = () => Object.assign(new Error("simulated device full"), { code: "ENOSPC" });
+  const cases = [
+    {
+      name: "nothing was written",
+      open: () => (async () => { throw full(); }) as never,
+      hint: (dir: string) => `nodes.json could not be written at ${dir} (disk full, read-only, or quota?)`,
+    },
+    {
+      name: "written, but the directory could not be synced",
+      open: (dir: string) => (async (target: unknown, ...rest: unknown[]) => {
+        if (target === dir) throw Object.assign(new Error("simulated io error"), { code: "EIO" });
+        return (await import("node:fs/promises")).open(target as string, rest[0] as number, rest[1] as number);
+      }) as never,
+      hint: (dir: string) =>
+        `nodes.json was written at ${dir} but the directory could not be synced; start again and check the volume`,
+    },
+  ] as const;
+
+  for (const current of cases) {
+    const stateDir = await realpath(await mkdtemp("/tmp/embassy-cli-write-"));
+    await chmod(stateDir, 0o700);
+    t.after(async () => rm(stateDir, { recursive: true, force: true }));
+    const stdout = capture(), stderr = capture();
+    const exitCode = await runGatewayCliBase(["serve"], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+      runServer: (options) => runGatewayServerBase(options, {
+        loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
+        acquireInstanceLease: async () => inertLease(),
+        ensureNodeInventoryFile: async (dir, host) =>
+          ensureGatewayNodeInventoryFile(dir, host, { open: current.open(stateDir) }),
+        createService: () => { throw new Error("startup must refuse before any service is built"); },
+      }),
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.unavailable, current.name);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_STATE_WRITE_FAILED", current.name);
+    assert.equal(
+      stderr.chunks.join(""),
+      `[embassy] gateway unavailable.\n[embassy] ${current.hint(stateDir)}\n`,
+      current.name,
+    );
+  }
+});
+
+test("a hint substitutes once: a value that itself looks like a placeholder is left alone", async () => {
+  // A state directory literally named with braces. One pass means the {given}
+  // inside the substituted path stays text instead of becoming the alias host.
+  const stdout = capture(), stderr = capture();
+  const exitCode = await runGatewayCliBase(["register-codex", "--alias", "codex-x@wrong-host"], {
+    env: { EMBASSY_STATE_DIR: "/tmp/{given}", CODEX_THREAD_ID: THREAD_ID }, stdout, stderr,
+    loadNodeInventory: async (dir) => loadGatewayNodeInventory(dir, { hostname: () => "fixture-host" }),
+    sendRequest: (async () => { throw new Error("must not be called"); }) as never,
+  });
+  assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] request rejected.\n[embassy] no nodes.json has been written at /tmp/{given} yet — a broker writes it on first start; until then this machine defaults to @fixture-host; found @wrong-host\n",
+  );
 });
 
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
@@ -2630,26 +2706,33 @@ test("service install over its own loaded agent boots it out and re-installs", a
   assert.equal(stderr.chunks.join(""), "");
 });
 
-test("service install stops before launchd when the node inventory is missing", async () => {
-  const { home, stateDir, plistPath } = await serviceFixture();
-  const launchd = cliFakeLaunchd();
-  const stdout = capture(), stderr = capture();
-  const code = await runGatewayCli(["service", "install"], {
-    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home, probeHostLease: freeHostLease,
-    runLaunchctl: launchd.run,
-    loadNodeInventory: async () => {
-      throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail", false);
-    },
-    validateControlSocket: async () => { throw new Error("must not check the socket"); },
-    sendRequest: async () => { throw new Error("must not contact the gateway"); },
-  });
+test("service install stops before launchd when the node inventory cannot be read", async () => {
+  // A real refusal from the real loader: nodes.json is optional now, so the
+  // pre-launchd stop has to be provoked by a file that is present and wrong.
+  for (const plant of [
+    async (dir: string) => writeFile(path.join(dir, "nodes.json"), "{ not json", { mode: 0o600 }),
+    async (dir: string) => writeFile(path.join(dir, "nodes.json"),
+      '{"version":1,"host":"this-mac","nodes":[]}\n', { mode: 0o644 }),
+  ]) {
+    const { home, stateDir, plistPath } = await serviceFixture();
+    await chmod(stateDir, 0o700);
+    await plant(stateDir);
+    const launchd = cliFakeLaunchd();
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCliBase(["service", "install"], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+      serviceHomeDir: () => home, probeHostLease: freeHostLease,
+      runLaunchctl: launchd.run,
+      validateControlSocket: async () => { throw new Error("must not check the socket"); },
+      sendRequest: async () => { throw new Error("must not contact the gateway"); },
+    });
 
-  assert.equal(code, gatewayCliExitCodes.invalidInput);
-  assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_NODE_INVENTORY_REQUIRED");
-  assert.deepEqual(launchd.calls, []);
-  await assert.rejects(lstat(plistPath));
-  await assert.rejects(lstat(path.join(home, "Library")));
+    assert.equal(code, gatewayCliExitCodes.invalidInput);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_GATEWAY_CONFIGURATION");
+    assert.deepEqual(launchd.calls, []);
+    await assert.rejects(lstat(plistPath));
+    await assert.rejects(lstat(path.join(home, "Library")));
+  }
 });
 
 test("a failing launchctl bootstrap exits non-zero and prints launchctl's own stderr", async () => {

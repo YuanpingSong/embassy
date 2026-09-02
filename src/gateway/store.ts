@@ -39,9 +39,19 @@ function isStaleDashboardArtifact(name: string): boolean {
   return (STALE_DASHBOARD_FILES as readonly string[]).includes(name) ||
     STALE_DASHBOARD_TEMP_PATTERNS.some((pattern) => pattern.test(name));
 }
-/** Locks this store moved aside as stale; kept a week so a crash stays diagnosable. */
-const STALE_LOCK_PATTERN = /^\.gateway-controller\.lock\.stale-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * Locks this store moved aside as stale, kept a week so a crash stays
+ * diagnosable. The recovery time is in the name, not in the file's mtime:
+ * `rename` carries the crashed lock's own timestamps across, so a broker that
+ * ran for a month would have its lock swept by the very boot that recovered it.
+ */
+const STALE_LOCK_PATTERN = /^\.gateway-controller\.lock\.stale-(\d{13,16})-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const STALE_LOCK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** The recovery time encoded in a stale-lock name, or undefined if this is not one. */
+function staleLockRecoveredAt(name: string): number | undefined {
+  const found = STALE_LOCK_PATTERN.exec(name);
+  return found === null ? undefined : Number(found[1]);
+}
 const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
@@ -859,6 +869,7 @@ export class GatewayStore {
   private lockHandle: FileHandle | undefined;
   private lockToken: string | undefined;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly hostname: () => string;
   private persistenceDeferred = false;
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
     this.config = config;
@@ -868,6 +879,7 @@ export class GatewayStore {
     this.renameStateFile = dependencies.renameStateFile ?? rename;
     this.afterStateFileRename = dependencies.afterStateFileRename;
     this.isProcessAlive = dependencies.isProcessAlive ?? defaultProcessLiveness;
+    this.hostname = dependencies.hostname ?? (() => os.hostname());
   }
   get stateFilePath(): string {
     return path.join(this.rootDir, STATE_FILE);
@@ -2871,7 +2883,8 @@ export class GatewayStore {
     const now = this.now().getTime();
     for (const name of entries) {
       const dashboard = isStaleDashboardArtifact(name);
-      if (!dashboard && !STALE_LOCK_PATTERN.test(name)) continue;
+      const recoveredAt = dashboard ? undefined : staleLockRecoveredAt(name);
+      if (!dashboard && recoveredAt === undefined) continue;
       const filePath = path.join(root, name);
       let info: Awaited<ReturnType<typeof lstat>>;
       try {
@@ -2880,8 +2893,9 @@ export class GatewayStore {
         continue;
       }
       if (info.isSymbolicLink() || !info.isFile() || (uid !== undefined && info.uid !== uid)) continue;
-      // A recovered lock is evidence: keep it for a week, then let it go.
-      if (!dashboard && now - info.mtimeMs <= STALE_LOCK_RETENTION_MS) continue;
+      // A recovered lock is evidence: keep it a week from the recovery that
+      // created it, which is what its name records.
+      if (recoveredAt !== undefined && now - recoveredAt <= STALE_LOCK_RETENTION_MS) continue;
       try {
         await unlink(filePath);
         process.stderr.write(dashboard
@@ -2965,7 +2979,7 @@ export class GatewayStore {
    * the one event an operator most needs to see.
    */
   private async recoverStaleLock(lockPath: string, description: string): Promise<void> {
-    const name = `${CONTROLLER_LOCK}.stale-${randomUUID()}`;
+    const name = `${CONTROLLER_LOCK}.stale-${String(this.now().getTime())}-${randomUUID()}`;
     const moved = await rename(lockPath, path.join(this.rootDir, name)).then(() => true, (error: unknown) => {
       // Another start recovered it first; retry the create either way.
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
@@ -2990,7 +3004,7 @@ export class GatewayStore {
           await handle.writeFile(
             `${JSON.stringify({
               schemaVersion: 1, pid: process.pid,
-              hostname: os.hostname(),
+              hostname: this.hostname(),
               token,
             })}\n`,
             "utf8",
@@ -3032,28 +3046,33 @@ export class GatewayStore {
       } catch {
         throw lockUnverified();
       }
-      if (!isPositiveInteger(owner.pid)) {
-        throw new BridgeError("GATEWAY_STATE_IN_USE", "The gateway state lock does not record a verifiable controller process.", true);
-      }
+      // Parsed, but naming no process: there is nothing to probe and nothing
+      // to claim about it, so this is unverified like any other unreadable
+      // record — never "another broker may own this".
+      if (!isPositiveInteger(owner.pid)) throw lockUnverified();
       // Recovery is decided by process liveness alone; the recorded hostname
       // is informational. A machine that renames itself — a network-triggered
       // rename, a restore onto new hardware — must not wedge its own state
       // directory forever, so a dead pid is stale whatever name wrote it.
       const recorded = boundedHostname(owner.hostname);
-      const detail = { host: recorded ?? "unrecorded", pid: String(owner.pid) };
+      const pid = String(owner.pid);
+      // A name this cannot represent is not reported as a name: the client
+      // hint drops the whole clause rather than printing a placeholder.
+      const detail = recorded === undefined ? { pid } : { host: recorded, pid };
       if (this.isProcessAlive(owner.pid)) {
         // The pid is alive, but nothing here can tell whether it is a broker:
         // pid numbers are reused, and a renamed machine records its old name.
         // Refuse, and hand the client the bounded facts its hint needs.
-        const mine = boundedHostname(os.hostname());
+        const mine = boundedHostname(this.hostname());
         const message = recorded !== undefined && mine !== undefined && recorded === mine
-          ? `A live process (pid ${detail.pid}) recorded on this machine owns this gateway state directory.`
+          ? `A live process (pid ${pid}) recorded on this machine owns this gateway state directory.`
           : recorded === undefined
-            ? `The gateway state lock records pid ${detail.pid} under a machine name that cannot be verified, and a process with that pid is alive here.`
-            : `The gateway state lock records host ${detail.host} and pid ${detail.pid}, and a process with that pid is alive here.`;
+            ? `The gateway state lock records pid ${pid} under a machine name that cannot be verified, and a process with that pid is alive here.`
+            : `The gateway state lock records host ${recorded} and pid ${pid}, and a process with that pid is alive here.`;
         throw new BridgeError("GATEWAY_STATE_IN_USE", message, true, detail);
       }
-      await this.recoverStaleLock(lockPath, `recorded host ${detail.host}, pid ${detail.pid}`);
+      await this.recoverStaleLock(lockPath,
+        recorded === undefined ? `pid ${pid}, machine name unverifiable` : `recorded host ${recorded}, pid ${pid}`);
     }
     throw new BridgeError("GATEWAY_STATE_IN_USE", "Could not acquire exclusive gateway controller ownership.", true);
   }

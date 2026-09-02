@@ -653,4 +653,6 @@ export type GatewayStoreDependencies = {
   afterStateFileRename?: () => void | Promise<void>;
   /** Controller-lock liveness probe; the default is `process.kill(pid, 0)`. */
   isProcessAlive?: (pid: number) => boolean;
+  /** This machine's name as the controller lock records it; the default is `os.hostname()`. */
+  hostname?: () => string;
 };

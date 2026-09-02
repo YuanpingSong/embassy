@@ -7,7 +7,7 @@ description: Operate Embassy through current name@host or Claude session-UUID se
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
-Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the broker's ready line, which the CLI also names in full whenever an alias is given for another host.
+Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the broker's ready line. `register-codex`, `unregister-codex`, `register-peer`, `unregister-peer` and `await` refuse an alias naming another host and state the one this machine uses; `send` and `reply` accept a federated peer's host, so check those aliases yourself.
 
 Registration, send, reply, await, receipt, and unregister operations require the exact principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting required principal; never choose one on the caller's behalf. `pair`, `unpair`, `select-claude`, and `unselect-claude` are same-UID control-plane operations authorized by the private control socket, not by inherited provider identity. Agents remain norm-bound to create or remove only the exact edges the user chose; paired-mode membership is rechecked at delivery.
 

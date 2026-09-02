@@ -59,13 +59,9 @@ Install the broker as a launchd agent under the same OS account as Claude Code a
 embassy service install
 ```
 
-<<<<<<< HEAD
 The install waits up to 10 seconds for the agent to answer a health check and exits non-zero if it never does. A Mac with no logged-in user — an SSH-only federation peer, say — has no `gui` domain and cannot run a launchd agent at all: run `embassy serve` under your own supervisor there. Prefer a foreground process you start and stop by hand? Run `embassy serve` in its own terminal and leave it running — skip `service install` in that case.
 
 In another terminal:
-=======
-You should see `"status":"ready"`. The ready line prints `hostId`: replace `your-host` with that value in every command below. Without a `nodes.json` it is this machine's hostname, and Embassy writes that file for you on first start. In another terminal:
->>>>>>> dfd9efe (emb-106: corrections 2 — lock recovery by liveness, grammar-valid placeholder, chmod/fsync/cleanup, config from the reloaded inventory)
 
 ```bash
 embassy health

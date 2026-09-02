@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -141,6 +141,46 @@ test("no shipped document advertises a deleted surface", async () => {
     }
     for (const pattern of FORBIDDEN_PATTERNS) {
       if (pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
+/**
+ * A merge that was never finished must not ship. emb-106 pushed a README whose
+ * quickstart still carried `<` `<` `<` markers from a conflict resolved in
+ * every file but that one, and nothing in the suite noticed: the docs tests
+ * check for terms, not for structure. This is the structural check. The
+ * markers are assembled rather than written literally so this file cannot
+ * match itself, and the scan covers everything the package ships, history
+ * included — a conflict marker is never correct in any of them.
+ */
+test("no shipped file carries an unresolved merge conflict", async () => {
+  const marker = new RegExp(`^(${"<".repeat(7)}|${"=".repeat(7)}|${">".repeat(7)})( |$)`, "m");
+  const packaged = (JSON.parse(await readPublicFile("package.json")) as { files: string[] }).files;
+  const roots = ["src", "test", "docs", "site", "skills", "scripts", ...packaged];
+  const named = ["README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "AGENTS.md", "package.json"];
+  const files = new Set<string>(named);
+  for (const root of roots) {
+    let stats;
+    try {
+      stats = await stat(path.join(repoRoot, root));
+    } catch {
+      continue; // A packaged build artifact that this checkout has not built.
+    }
+    if (stats.isDirectory()) for (const found of await walk(root)) files.add(found);
+    else files.add(root);
+  }
+  assert.ok(files.has("README.md") && files.has("src/gateway/cli.ts") && files.has("site/index.html"));
+  assert.ok(files.size >= 50, `only ${String(files.size)} files scanned`);
+
+  const offenders: string[] = [];
+  for (const file of [...files].sort()) {
+    if (/\.(png|jpg|jpeg|gif|ico|woff2?)$/.test(file)) continue;
+    const text = await readFile(path.join(repoRoot, file), "utf8");
+    const found = marker.exec(text);
+    if (found !== null) {
+      offenders.push(`${file}:${String(text.slice(0, found.index).split("\n").length)}`);
     }
   }
   assert.deepEqual(offenders, []);

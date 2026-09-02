@@ -62,14 +62,20 @@ const inaccessible = (error: unknown, message: string): never => {
  * class shared with every other access check here; everything else is a
  * recoverable write failure naming its errno and the path it failed on.
  */
-const writeFailed = (error: unknown, filePath: string, what = "could not be durably written"): never => {
+const writeFailed = (error: unknown, filePath: string, stage: "write" | "sync" = "write"): never => {
   if (isErrno(error, "EPERM") || isErrno(error, "EACCES"))
     throw new BridgeError("CONTROL_CONNECT_DENIED", "Local policy denied access to the Embassy state directory.", true);
   const code = isErrnoShape(error) ? error.code ?? "UNKNOWN" : "UNKNOWN";
+  // The stage is the one thing a client must distinguish: nothing was written,
+  // or the file is there and only its directory entry is unflushed.
+  const what = stage === "write"
+    ? "could not be durably written"
+    : "was written but the Embassy state directory could not be synced";
   throw new BridgeError(
     "GATEWAY_STATE_WRITE_FAILED",
     `nodes.json ${what}: ${code} at ${filePath}.`,
     true,
+    { stage },
   );
 };
 /**
@@ -286,7 +292,7 @@ async function writeDefaultInventoryFile(
       await directory.close();
     }
   } catch (error) {
-    return writeFailed(error, stateDir, "was written but the Embassy state directory could not be synced");
+    return writeFailed(error, stateDir, "sync");
   }
   if (installed) process.stderr.write(`[embassy] wrote nodes.json naming this host ${host} in ${stateDir}\n`);
 }

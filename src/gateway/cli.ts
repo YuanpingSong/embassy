@@ -165,6 +165,10 @@ const CLI_HINT = {
     "the lock {stateDir}/.gateway-controller.lock cannot be read as a controller record; if `embassy serve` is not running anywhere, remove that file and start again.",
   nodeInventoryChanged:
     "nodes.json at {stateDir} changed while the broker was starting; start again.",
+  stateWriteFailed:
+    "nodes.json could not be written at {stateDir} (disk full, read-only, or quota?)",
+  stateSyncFailed:
+    "nodes.json was written at {stateDir} but the directory could not be synced; start again and check the volume",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -184,11 +188,16 @@ function resolvedStateDirForHint(env: NodeJS.ProcessEnv): string {
   try { return path.resolve(defaultGatewayStateDir(env)); }
   catch { return env.EMBASSY_STATE_DIR ?? env.XDG_STATE_HOME ?? "unresolvable"; }
 }
-/** Renders a CLI_HINT entry, substituting any {name} placeholders from `vars`. */
+/**
+ * Renders a CLI_HINT entry, substituting {name} placeholders from `vars` in a
+ * single pass: a substituted value is never rescanned, so a state directory
+ * literally named `/tmp/{host}` cannot expand into anything else.
+ */
 function renderHint(hint: CliFaultHint, vars?: Readonly<Record<string, string>>): string {
-  let text: string = CLI_HINT[hint];
-  if (vars !== undefined) for (const [key, value] of Object.entries(vars)) text = text.replaceAll(`{${key}}`, value);
-  return text;
+  const text: string = CLI_HINT[hint];
+  if (vars === undefined) return text;
+  return text.replace(/\{([A-Za-z][A-Za-z0-9]*)\}/g,
+    (token: string, name: string) => Object.hasOwn(vars, name) ? vars[name]! : token);
 }
 const hintLine = (hint: CliFaultHint, env: NodeJS.ProcessEnv): string =>
   `[embassy] ${renderHint(hint, { stateDir: resolvedStateDirForHint(env) })}\n`;
@@ -573,6 +582,7 @@ const BRIDGE_ERROR_HINTS: Readonly<Record<string, CliFaultHint>> = {
   GATEWAY_STATE_IN_USE: "stateInUse",
   GATEWAY_STATE_LOCK_UNVERIFIED: "stateLockUnverified",
   GATEWAY_NODE_INVENTORY_CHANGED: "nodeInventoryChanged",
+  GATEWAY_STATE_WRITE_FAILED: "stateWriteFailed",
 };
 /** The state directory a hint should name, resolved the same way every command resolves it. */
 function hintStateDir(env: NodeJS.ProcessEnv): string {
@@ -586,8 +596,12 @@ function writeBridgeErrorHint(stderr: Writable, error: BridgeError, env: NodeJS.
   const hint = BRIDGE_ERROR_HINTS[error.code];
   if (hint === undefined) return;
   const detail = error.detail;
+  // Two codes render differently depending on what the error could establish:
+  // a lock whose recorded machine name is unrepresentable names no host at
+  // all, and a write that reached the file but not the directory entry says so.
   const named = hint === "stateInUse" && (detail?.host === undefined || detail.pid === undefined)
-    ? "stateInUseUnrecorded" : hint;
+    ? "stateInUseUnrecorded"
+    : hint === "stateWriteFailed" && detail?.stage === "sync" ? "stateSyncFailed" : hint;
   stderr.write(`[embassy] ${renderHint(named, {
     stateDir: hintStateDir(env),
     ...(detail?.host === undefined ? {} : { host: detail.host }),

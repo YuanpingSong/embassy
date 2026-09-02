@@ -78,6 +78,7 @@ async function fixture(
     limits?: Partial<GatewayConfig["limits"]>;
     inboundMode?: GatewayConfig["inboundMode"];
     isProcessAlive?: (pid: number) => boolean;
+    hostname?: () => string;
   }> = {},
 ): Promise<{
   root: string;
@@ -114,6 +115,7 @@ async function fixture(
     ...(dependencies.isProcessAlive === undefined
       ? {}
       : { isProcessAlive: dependencies.isProcessAlive }),
+    ...(dependencies.hostname === undefined ? {} : { hostname: dependencies.hostname }),
   });
   return { root, stateDir, config, clock: testClock, store };
 }
@@ -1751,14 +1753,16 @@ test("a boot refused for out-of-bounds state leaves a planted stale file exactly
 });
 
 const LOCK_NAME = ".gateway-controller.lock";
+const THIS_MACHINE = "fixture-machine.local";
 const lockBody = (owner: Readonly<Record<string, unknown>>): string =>
   `${JSON.stringify({ schemaVersion: 1, token: "00000000-0000-4000-8000-00000000a11e", ...owner })}\n`;
 
-// The four states a controller lock can be found in. Liveness is injected, so
-// none of these depend on a real pid that a real scheduler could reuse.
-test("case 1 of 4: a lock whose recorded pid is alive refuses, carrying the host and pid its hint prints", async () => {
-  for (const recorded of [os.hostname(), "the-old-name.local", 42]) {
-    const setup = await fixture({ isProcessAlive: () => true });
+// The five states a controller lock can be found in. Liveness and this
+// machine's own name are both injected, so nothing here depends on the
+// runner's pid space or on a hostname the lock pattern happens to accept.
+test("case 1 of 5: a live pid refuses and carries the host and pid its hint prints", async () => {
+  for (const recorded of [THIS_MACHINE, "the-old-name.local"]) {
+    const setup = await fixture({ isProcessAlive: () => true, hostname: () => THIS_MACHINE });
     await setup.store.initialize();
     await setup.store.close();
     const lockPath = path.join(setup.stateDir, LOCK_NAME);
@@ -1766,17 +1770,14 @@ test("case 1 of 4: a lock whose recorded pid is alive refuses, carrying the host
     await writeFile(lockPath, planted, { mode: 0o600 });
 
     await assert.rejects(
-      new GatewayStore(setup.config, { isProcessAlive: () => true }).initialize(),
+      new GatewayStore(setup.config, { isProcessAlive: () => true, hostname: () => THIS_MACHINE }).initialize(),
       (error: unknown) => {
         assert.ok(error instanceof BridgeError);
         assert.equal(error.code, "GATEWAY_STATE_IN_USE");
         assert.equal(error.recoverable, true);
-        // Every live-pid branch carries the same bounded detail, including
-        // the same-machine one: pid numbers are reused there too.
-        assert.deepEqual(error.detail, {
-          host: typeof recorded === "string" ? recorded : "unrecorded",
-          pid: "4242",
-        });
+        // Both name-branches carry the same bounded detail, this machine's
+        // own included: pid numbers are reused there too.
+        assert.deepEqual(error.detail, { host: recorded, pid: "4242" });
         return true;
       },
     );
@@ -1784,12 +1785,30 @@ test("case 1 of 4: a lock whose recorded pid is alive refuses, carrying the host
   }
 });
 
-test("case 2 of 4: an empty lock left between create and write is recovered as stale", async () => {
+test("case 1b: a recorded machine name this cannot represent reports no host at all", async () => {
+  const setup = await fixture({ isProcessAlive: () => true, hostname: () => THIS_MACHINE });
+  await setup.store.initialize();
+  await setup.store.close();
+  await writeFile(path.join(setup.stateDir, LOCK_NAME),
+    lockBody({ pid: 4242, hostname: "a name with spaces" }), { mode: 0o600 });
+
+  await assert.rejects(
+    new GatewayStore(setup.config, { isProcessAlive: () => true, hostname: () => THIS_MACHINE }).initialize(),
+    (error: unknown) => {
+      assert.ok(error instanceof BridgeError);
+      assert.equal(error.code, "GATEWAY_STATE_IN_USE");
+      // No host key at all, so no hint can print a placeholder for one.
+      assert.deepEqual(error.detail, { pid: "4242" });
+      return true;
+    },
+  );
+});
+
+test("case 2 of 5: an empty lock left between create and write is recovered as stale", async () => {
   const setup = await fixture({ isProcessAlive: () => true });
   await setup.store.initialize();
   await setup.store.close();
-  const lockPath = path.join(setup.stateDir, LOCK_NAME);
-  await writeFile(lockPath, "", { mode: 0o600 });
+  await writeFile(path.join(setup.stateDir, LOCK_NAME), "", { mode: 0o600 });
 
   const reopened = new GatewayStore(setup.config, { isProcessAlive: () => true });
   await reopened.initialize();
@@ -1797,7 +1816,7 @@ test("case 2 of 4: an empty lock left between create and write is recovered as s
   assert.ok((await readdir(setup.stateDir)).some((name) => name.startsWith(`${LOCK_NAME}.stale-`)));
 });
 
-test("case 3 of 4: an unparsable lock refuses as unverified and is left exactly as found", async () => {
+test("case 3 of 5: an unparsable lock refuses as unverified and is left exactly as found", async () => {
   const setup = await fixture();
   await setup.store.initialize();
   await setup.store.close();
@@ -1813,12 +1832,32 @@ test("case 3 of 4: an unparsable lock refuses as unverified and is left exactly 
   assert.equal(await readFile(lockPath, "utf8"), planted);
 });
 
-test("case 4 of 4: a lock whose recorded pid is dead is recovered, whatever machine name wrote it", async () => {
+test("case 4 of 5: a record that parses but names no process is unverified, never 'in use'", async () => {
+  // Nothing to probe and nothing to claim: saying another broker may own the
+  // directory would be an assertion this record cannot support.
+  for (const owner of [{}, { pid: "4242" }, { pid: 0 }, { pid: -1 }, { pid: 1.5 }]) {
+    const setup = await fixture({ isProcessAlive: () => true });
+    await setup.store.initialize();
+    await setup.store.close();
+    const lockPath = path.join(setup.stateDir, LOCK_NAME);
+    const planted = lockBody({ hostname: THIS_MACHINE, ...owner });
+    await writeFile(lockPath, planted, { mode: 0o600 });
+
+    await assert.rejects(
+      new GatewayStore(setup.config, { isProcessAlive: () => true }).initialize(),
+      (error: unknown) => error instanceof BridgeError &&
+        error.code === "GATEWAY_STATE_LOCK_UNVERIFIED" && error.detail === undefined,
+    );
+    assert.equal(await readFile(lockPath, "utf8"), planted);
+  }
+});
+
+test("case 5 of 5: a lock whose recorded pid is dead is recovered, whatever machine name wrote it", async () => {
   const setup = await fixture();
   await setup.store.initialize();
   await setup.store.close();
-  const lockPath = path.join(setup.stateDir, LOCK_NAME);
-  await writeFile(lockPath, lockBody({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
+  await writeFile(path.join(setup.stateDir, LOCK_NAME),
+    lockBody({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
 
   const reopened = new GatewayStore(setup.config, { isProcessAlive: () => false });
   await reopened.initialize();
@@ -1827,27 +1866,38 @@ test("case 4 of 4: a lock whose recorded pid is dead is recovered, whatever mach
   assert.equal(moved.length, 1);
 });
 
-test("recovered locks are kept for seven days and then swept, and fresh ones are never touched", async () => {
+test("a recovered lock is kept seven days from its recovery, not from the crash it came from", async () => {
   const setup = await fixture();
   await setup.store.initialize();
   await setup.store.close();
-  const aged = path.join(setup.stateDir, `${LOCK_NAME}.stale-00000000-0000-4000-8000-000000000001`);
-  const fresh = path.join(setup.stateDir, `${LOCK_NAME}.stale-00000000-0000-4000-8000-000000000002`);
-  const unrelated = path.join(setup.stateDir, `${LOCK_NAME}.stale-not-a-uuid`);
-  for (const file of [aged, fresh, unrelated]) await writeFile(file, "{}\n", { mode: 0o600 });
-  // The store's clock is the authority for both, so an absolute old mtime is
-  // aged under it and the untouched ones are not.
-  const old = new Date("2020-01-01T00:00:00.000Z");
-  await utimes(aged, old, old);
-  await utimes(unrelated, old, old);
+  // The lock of a broker that had been up a long time: its file timestamps are
+  // ancient, and `rename` carries them across. Only the recovery time counts.
+  const lockPath = path.join(setup.stateDir, LOCK_NAME);
+  await writeFile(lockPath, lockBody({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
+  const ancient = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(lockPath, ancient, ancient);
 
-  const reopened = new GatewayStore(setup.config);
-  await reopened.initialize();
-  await reopened.close();
-  await assert.rejects(lstat(aged));
-  assert.equal(await readFile(fresh, "utf8"), "{}\n");
-  // Only this store's own recovery names are swept; anything else is litter we did not create.
-  assert.equal(await readFile(unrelated, "utf8"), "{}\n");
+  const recovering = new GatewayStore(setup.config, { now: setup.clock.now, isProcessAlive: () => false });
+  await recovering.initialize();
+  await recovering.close();
+  const [recovered] = (await readdir(setup.stateDir)).filter((name) => name.startsWith(`${LOCK_NAME}.stale-`));
+  assert.ok(recovered);
+  // The boot that recovered it must not also sweep it, however old the file is.
+  assert.equal(await readFile(path.join(setup.stateDir, recovered), "utf8").then(() => true), true);
+
+  // Six days later it is still evidence.
+  setup.clock.advance(6 * 24 * 60 * 60 * 1000);
+  const soon = new GatewayStore(setup.config, { now: setup.clock.now });
+  await soon.initialize();
+  await soon.close();
+  assert.ok((await readdir(setup.stateDir)).includes(recovered));
+
+  // Two days after that, it is past the retention window and goes.
+  setup.clock.advance(2 * 24 * 60 * 60 * 1000);
+  const later = new GatewayStore(setup.config, { now: setup.clock.now });
+  await later.initialize();
+  await later.close();
+  assert.equal((await readdir(setup.stateDir)).includes(recovered), false);
 });
 
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {
