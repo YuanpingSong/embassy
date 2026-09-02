@@ -184,3 +184,10 @@ no support-matrix ceremony, no site work beyond the stub.
   bump. Steering KEPT by PM judgment (flagged to founder).
 - 2026-09-02 Branch `v3/subtraction` cut from main b862513 (CI green)
   and pushed. emb-100 dispatched.
+- 2026-09-02 emb-100 adversarial HOLD converted to a correction
+  commit (docs truth + `refresh` failure path). Scope additions from
+  it: emb-106 also removes stale `gateway-dashboard*.html` from the
+  state dir at boot and the cutover runbook says so; emb-109 bumps
+  the control protocol version so removed methods read as skew, not
+  as unknown; emb-107 considers an operator path to clear an orphaned
+  Codex registration (was dashboard-only).
