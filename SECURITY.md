@@ -97,11 +97,6 @@ review, and audit work.
   routing consent between agent endpoints; aliases, conversation tokens,
   inherited environment values, private sockets, and same-user file modes do
   not authenticate one same-user process from another.
-- **Local software through browser-origin checks.** Exact Host, Origin, the
-  `X-Embassy-Request` sentinel, and same-origin response policy constrain what a
-  browser can issue or read across origins. They do not authenticate a loopback
-  caller, its process, or its UID; the live dashboard assumes a trusted
-  single-user machine.
 - **Predictions based on version strings.** A version string is diagnostic
   metadata, never routing authority, security evidence, or attack detection.
   Current path, ownership, protocol, interface, used-artifact generation, and

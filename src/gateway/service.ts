@@ -577,8 +577,15 @@ export class GatewayService {
         if (this.closing) {
           return { accepted: false, code: "unavailable", revision: this.revision };
         }
-        await this.refreshClaudeDiscovery().catch(() => undefined);
-        await this.recordActivity("discovery", "discovery_refreshed", [], true);
+        try {
+          // An operator-triggered rescan reports its own failure. It must never
+          // journal `discovery_refreshed` for a scan that did not complete, and
+          // must never answer `accepted: true` for a provider that is down.
+          await this.refreshClaudeDiscovery();
+          await this.recordActivity("discovery", "discovery_refreshed", [], true);
+        } catch (error) {
+          return { accepted: false, code: decisionFor(error).code, revision: this.revision };
+        }
         return { accepted: true, code: "ok", revision: this.revision };
       },
       peerCatalog: ({ peerHost }) => this.buildPeerCatalog(peerHost),

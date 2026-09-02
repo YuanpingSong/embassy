@@ -5,6 +5,7 @@ import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
 
+import { BridgeError } from "../src/errors.js";
 import type { GatewayConfig } from "../src/gateway/config.js";
 import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
 import type { PeerClient } from "../src/gateway/peer-client.js";
@@ -628,6 +629,41 @@ test("duplicate live Claude aliases are rejected without poisoning the snapshot"
       toAlias: uniqueAlias, text: "unique candidate remains routable", expectsReply: false });
     assert.equal(sent.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 1);
+  } finally { await subject.close(); }
+});
+
+test("an operator rescan reports discovery failure and journals only a completed scan", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider]);
+  const refreshedRows = async (): Promise<number> =>
+    ((await subject.store.publicSnapshot()).activityEvents ?? [])
+      .filter((event) => event.action === "discovery_refreshed").length;
+  try {
+    const baseline = await refreshedRows();
+    const scans = claudeProvider.discoverCalls;
+
+    const working = claudeProvider.discoverClaudePeers.bind(claudeProvider);
+    claudeProvider.discoverClaudePeers = async () => {
+      claudeProvider.discoverCalls += 1;
+      throw new BridgeError("CLAUDE_PROVIDER_UNAVAILABLE", "The Claude provider is unavailable.");
+    };
+    const revision = (await subject.handlers.health()).revision;
+    assert.deepEqual(await subject.handlers.refreshDiscovery(), {
+      accepted: false, code: "unavailable", revision,
+    });
+    assert.equal(claudeProvider.discoverCalls, scans + 1, "the failed rescan still attempted the scan");
+    assert.equal(await refreshedRows(), baseline, "a failed rescan journals no discovery_refreshed row");
+
+    claudeProvider.discoverClaudePeers = working;
+    assert.deepEqual(await subject.handlers.refreshDiscovery(), {
+      accepted: true, code: "ok", revision,
+    });
+    assert.equal(await refreshedRows(), baseline + 1);
+    assert.equal(
+      (await subject.handlers.listSnapshot()).availablePeers.some(
+        (peer) => peer.alias === claudeProvider.claudeDiscovery.alias),
+      true,
+    );
   } finally { await subject.close(); }
 });
 

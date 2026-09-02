@@ -283,7 +283,9 @@ test("security doctrine names defended and deliberately unsupported boundaries",
   assert.match(security, /Anti-runaway containment/);
   assert.match(security, /no local-process authentication/);
   assert.match(security, /no capability or local-user consent/);
-  assert.match(security, /browser can issue or read across origins/);
+  // emb-100 deleted the browser-origin doctrine bullet along with the browser
+  // surface it described; Embassy now creates no network listener at all.
+  assert.doesNotMatch(security, /browser can issue or read across origins/);
   assert.match(security, /Every new audit check must cite the sentence in this doctrine/);
   assert.match(security, /doctrine-change proposal/);
   assert.match(security, /must not\s+silently expand Embassy's claimed boundary/);
@@ -429,7 +431,6 @@ test("marketing pages preserve structure, protocol tokens, and reciprocal locale
       "unconfirmed",
       "ambiguous",
       "held",
-      "127.0.0.1",
     ]) {
       assert.ok(page.includes(token), token);
     }

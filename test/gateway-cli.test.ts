@@ -2225,6 +2225,61 @@ test("serve reports startup failure once and never appends protocol output after
   assert.equal(afterReadyOut.chunks.join("").includes("private shutdown"), false);
 });
 
+test("refresh reports a failed rescan as a decision, not a client-side transport fault", async (t) => {
+  const state = await privateState();
+  let outcome: "fail" | "ok" = "fail";
+  const server = await startGatewayControlServer({
+    stateDir: state.stateDir,
+    socketPath: state.socketPath,
+    handlers: {
+      health: () => ({ status: "ok", revision: 4 }),
+      registerCodex: () => ({ accepted: true, code: "ok" }),
+      unregisterCodex: () => ({ accepted: true, code: "ok" }),
+      selectClaude: () => ({ accepted: true, code: "ok" }),
+      unselectClaude: () => ({ accepted: true, code: "ok" }),
+      pair: () => ({ accepted: true, code: "ok" }),
+      unpair: () => ({ accepted: true, code: "ok" }),
+      listSnapshot: () => emptySnapshot(),
+      observeSnapshot: () => ({ snapshotRevision: 0, snapshot: emptySnapshot() }),
+      deliveryStatus: () => ({ found: false }),
+      untrack: () => ({ accepted: true, code: "ok" }),
+      send: () => ({ accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }),
+      reply: () => ({ accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }),
+      refreshDiscovery: () => outcome === "ok"
+        ? { accepted: true, code: "ok", revision: 4 }
+        : { accepted: false, code: "unavailable", revision: 4 },
+      registerPeer: () => ({ accepted: true, code: "ok", token: PEER_TOKEN }),
+      unregisterPeer: () => ({ accepted: true, code: "ok" }),
+      awaitPeer: () => ({ state: "timeout" }),
+      peerReceipt: () => ({ accepted: true, code: "ok" }),
+    },
+  });
+  t.after(async () => await server.close());
+
+  const failed = await invoke(state.stateDir, ["refresh"]);
+  assert.equal(failed.code, gatewayCliExitCodes.rejected);
+  assert.deepEqual(JSON.parse(failed.stdout), {
+    ok: true,
+    command: "refresh",
+    result: { accepted: false, code: "unavailable", revision: 4 },
+  });
+  // The rejection must reach the operator as the broker's own decision code.
+  // A shape the response validator refuses would instead surface as
+  // CONTROL_INVALID_RESPONSE with a "rebuild or repoint this client" hint.
+  assert.equal(failed.stderr, "[embassy] gateway rejected the request.\n");
+  assert.doesNotMatch(failed.stderr, /rebuild or repoint|CONTROL_INVALID_RESPONSE|CONTROL_VERSION_MISMATCH/);
+
+  outcome = "ok";
+  const accepted = await invoke(state.stateDir, ["refresh"]);
+  assert.equal(accepted.code, gatewayCliExitCodes.ok);
+  assert.deepEqual(JSON.parse(accepted.stdout), {
+    ok: true,
+    command: "refresh",
+    result: { accepted: true, code: "ok", revision: 4 },
+  });
+  assert.equal(accepted.stderr, "");
+});
+
 test("the CLI refuses an insecure state directory before connecting", async (t) => {
   const state = await privateState();
   const server = await startGatewayControlServer({

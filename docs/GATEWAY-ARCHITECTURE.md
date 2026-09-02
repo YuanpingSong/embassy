@@ -142,8 +142,8 @@ probed by this project.
        │              │ callback replies
        ▼              ▼
   ┌──────────────────────── local singleton gateway ───────────────────────┐
-  │ private control UDS │ retained bodies  │ metadata state │ static HTML  │
-  └──────────┬──────────┴──────────────────┴────────────────┴──────────────┘
+  │ private control UDS │ retained bodies  │ metadata state │ public snapshot │
+  └──────────┬──────────┴──────────────────┴────────────────┴─────────────────┘
              │
              ├─ local Codex App Server ─ registered native local tasks
              │
@@ -174,7 +174,7 @@ The status below is intentionally narrower than the target architecture.
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters and Embassy-node federation | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup, plus bounded catalog reconciliation and destination-owned handoff over the fixed attach-only SSH transport |
 | Universal shell peer mailbox | **Implemented**, alias-plus-token same-UID attribution, hash-only durable ownership, bounded long polling, stdout-flush receipts, and restart uncertainty tests; no PID binding, token file, Keychain entry, or daemon |
-| Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, metadata-only publication, and restart attempt-phase tests |
+| Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, bounded public-snapshot projection, and restart attempt-phase tests |
 | Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v4 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
@@ -263,7 +263,9 @@ durable selection.
 
 `embassy status` is the single pane for the human. It shows both sanitized
 available/selected Claude aliases and explicitly registered Codex aliases,
-including their host, current state, last-seen age, and queue depth.
+including their host, current state, last-seen age, and queue depth. The same
+pane also carries the bounded ledger's retained message bodies, so its output is
+as sensitive as the messages themselves.
 The thin skill/CLI exposes the same safe alias list to either provider.
 
 ## Message flows

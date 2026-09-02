@@ -211,7 +211,7 @@ Every settled message produces a receipt. `delivered` means the direction's term
 Four embassy terms name real features:
 
 - **Registration and pairing** are the permission model: a Codex task is explicitly registered, and each pair is one explicit Claude↔Codex edge — only paired ends exchange messages, and many edges can coexist. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
-- **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only status snapshot.
+- **The ledger** is the delivery record: a receipt for every settled message, and a status snapshot that includes retained message bodies from the bounded ledger.
 - **The pouch** is transit and the archive: bounded bodies, retained under bounded limits, private to your OS account — sealed against other users, not against you.
 - **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery and consent authority.
 
@@ -263,7 +263,7 @@ or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 - **Compatibility is tested offline; runtime is best effort.** The release-owned support matrix records exact tested artifacts, protocols, capabilities, stop fidelity, limitations, and test dates. Runtime never imports that matrix and never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
-- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v4 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, or provider receipt. Raw provider frames stay memory-only.
+- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v4 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, or provider receipt. Raw provider frames stay memory-only. `embassy status` shows retained bodies; treat its output as sensitive as the messages themselves.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.
 
