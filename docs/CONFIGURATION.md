@@ -26,8 +26,8 @@ across machines. When it is absent at broker boot, Embassy writes it itself,
 once: mode 0600, naming this host by its own hostname (the first label before
 any dot, lower-cased; `localhost` if that name is not a valid host token),
 with an empty peer list. From that point on the file — not the hostname — is
-this broker's durable identity, so a later hostname change (for example a
-network-triggered rename) has no effect. Federation authority comes only from
+this broker's durable identity: a later hostname change (for example a
+network-triggered rename) does not rename it. Federation authority comes only from
 this file: it must be a current-user-owned mode-0600 regular file whose exact
 object shape is
 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`.
@@ -40,6 +40,10 @@ edges, retained bodies) is keyed by that value, so renaming `host` requires
 the [private state reset](#private-state-reset) below, the same as any other
 identity change.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
+
+Examples throughout this documentation write aliases as `name@your-host`;
+substitute your own host — the `hostId` on the `embassy serve` ready line, also
+shown by `embassy status` — wherever `your-host` appears.
 
 ### Private state reset
 
@@ -57,6 +61,17 @@ and every delivery has settled. Then:
 An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
 does not mutate the state file. There is no conversion command or automatic
 recovery path.
+
+A running broker holds `.gateway-controller.lock` in the state directory,
+recording its pid and the machine name at the time it started. A second start
+refuses with `GATEWAY_STATE_IN_USE`. Recovery is decided by that pid alone:
+once no process holds it the lock is stale, and the next start moves it aside
+by itself — the recorded machine name is informational, so renaming the machine
+never wedges the directory. The one case that still refuses after a crash is a
+lock naming another machine and a pid that happens to be alive on this one; the
+message names both. If that pid is not an Embassy broker, remove
+`.gateway-controller.lock` from the state directory and start again. Never
+delete it while a broker is running.
 
 ## Advanced bounds
 

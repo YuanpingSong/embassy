@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { gatewayControlMethods } from "../src/gateway/control.js";
+import { gatewayControlMethods, isGatewayAlias } from "../src/gateway/control.js";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -73,6 +73,18 @@ const FORBIDDEN = [
 ] as const;
 
 /**
+ * emb-106, the same claim written as prose rather than as one of the exact
+ * backticked phrases above: `nodes.json` is optional now, so nothing shipped
+ * may call it mandatory in any wording, at any distance a single sentence can
+ * put between the two words.
+ */
+const FORBIDDEN_PATTERNS: readonly RegExp[] = [
+  /The file is mandatory/i,
+  /mandatory[\s\S]{0,60}nodes\.json/i,
+  /nodes\.json[\s\S]{0,60}mandatory/i,
+];
+
+/**
  * CHANGELOG.md, .github/release-notes/*, and docs/DECLINED.md are history: they
  * must keep naming what past releases shipped and what we refused to build.
  */
@@ -126,6 +138,9 @@ test("no shipped document advertises a deleted surface", async () => {
     const text = await readFile(path.join(repoRoot, file), "utf8");
     for (const term of FORBIDDEN) {
       if (text.includes(term)) offenders.push(`${file}: ${term}`);
+    }
+    for (const pattern of FORBIDDEN_PATTERNS) {
+      if (pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
     }
   }
   assert.deepEqual(offenders, []);
@@ -207,8 +222,21 @@ test("authority docs match the closed control contract", async () => {
     );
   }
   assert.match(skill, /UUID recovery applies only to selection/);
-  assert.match(site, /embassy pair --from codex-embassy@HOST --to claude-main@HOST/);
-  assert.doesNotMatch(site, /embassy pair --from claude-main@HOST --to dsh-main@HOST/);
+  assert.match(site, /embassy pair --from codex-embassy@your-host --to claude-main@your-host/);
+  assert.doesNotMatch(site, /embassy pair --from claude-main@your-host --to dsh-main@your-host/);
+  // The placeholder is grammar-valid, so a literal paste reaches the CLI's
+  // host-mismatch hint instead of a flat rejection; every surface that uses
+  // it says what to substitute.
+  assert.match(site, /Each command is what the shipped CLI accepts once you substitute your host\./);
+  for (const document of [readme, skill]) assert.match(document, /your-host/);
+  // No shouted placeholder host survives anywhere: the earlier form failed the
+  // alias grammar, so pasting it never reached the hint that explains it.
+  assert.doesNotMatch(readme + skill + site, /@[A-Z]{2,}/);
+  // Every placeholder alias must pass the CLI's own grammar: a literal paste
+  // has to reach the host-mismatch hint, not a flat rejection ahead of it.
+  const placeholders = [...`${readme}\n${skill}\n${site}`.matchAll(/[a-z][a-z0-9_-]*@your-host/g)].map((found) => found[0]);
+  assert.ok(placeholders.length >= 10, `only ${String(placeholders.length)} placeholder aliases found`);
+  for (const alias of new Set(placeholders)) assert.equal(isGatewayAlias(alias), true, alias);
   assert.match(changelog, /private control protocol is version 2/i);
   assert.match(changelog, /### Removed[\s\S]*legacy `--claude` \/ `--codex` arm is removed/);
   assert.match(changelog, /private state reset/);

@@ -26,6 +26,7 @@ import {
   gatewayCliExitCodes,
   runGatewayCli as runGatewayCliBase,
 } from "../src/gateway/cli.js";
+import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
 import { PeerHandlerError } from "../src/gateway/peer-stdio.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
@@ -1144,7 +1145,10 @@ test("register-codex against a broker's real durable host passes CLI validation 
     env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: THREAD_ID }, stdout: stdout2, stderr: stderr2,
   });
   assert.equal(mismatch, gatewayCliExitCodes.invalidInput);
-  assert.match(stderr2.chunks.join(""), /@injected-host; found @wrong-host/);
+  assert.match(
+    stderr2.chunks.join(""),
+    new RegExp(`@injected-host \\(from ${stateDir}/nodes\\.json\\); found @wrong-host`),
+  );
 });
 
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
@@ -2266,33 +2270,54 @@ test("oversized stdin renders its hint while generic input rejection does not", 
   }
 });
 
-test("register-codex alias/host mismatch renders its hint with the exact machine host", async () => {
-  const cases = [
-    { argv: ["register-codex", "--alias", "codex-x@wrong-host"] },
-    { argv: ["register-codex", "--alias", "codex-x@this-mac", "--succeeds", "codex-y@wrong-host"] },
+test("every alias-carrying route command rejects another host's alias, naming the file it read", async () => {
+  // Every command that names a route this machine owns, in both directions.
+  // pair and select take arbitrary peer endpoints and are deliberately absent.
+  const cases: readonly (readonly string[])[] = [
+    ["register-codex", "--alias", "codex-x@wrong-host"],
+    ["register-codex", "--alias", "codex-x@this-mac", "--succeeds", "codex-y@wrong-host"],
+    ["unregister-codex", "--alias", "codex-x@wrong-host"],
+    ["register-peer", "--alias", "peer-x@wrong-host"],
+    ["unregister-peer", "--alias", "peer-x@wrong-host", "--token-stdin"],
+    ["await", "--alias", "peer-x@wrong-host", "--token-stdin"],
   ];
   const expected =
-    "[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac; found @wrong-host. Run `embassy status` or read the serve ready line for the host.\n";
-  for (const current of cases) {
+    "[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac (from /private/fake-state/nodes.json); found @wrong-host\n";
+  for (const argv of cases) {
     const stdout = capture(), stderr = capture();
-    const exitCode = await runGatewayCli(current.argv, { env: { CODEX_THREAD_ID: THREAD_ID }, stdout, stderr });
-    assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+    const codexSide = argv[0]!.endsWith("-codex");
+    const exitCode = await runGatewayCli(argv, {
+      env: { EMBASSY_STATE_DIR: "/private/fake-state", ...(codexSide ? { CODEX_THREAD_ID: THREAD_ID } : {}) },
+      stdin: Readable.from([Buffer.from(`${PEER_TOKEN}\n`)]),
+      stdout, stderr,
+      validateControlSocket: async () => { throw new Error("must not reach the socket"); },
+      sendRequest: (async () => { throw new Error("must not be called"); }) as never,
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.invalidInput, argv.join(" "));
     assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_ARGUMENTS");
-    assert.equal(stderr.chunks.join(""), expected);
+    assert.equal(stderr.chunks.join(""), expected, argv.join(" "));
   }
 });
 
-test("register-peer alias/host mismatch renders the same hint before ever sending to the broker", async () => {
+test("a host identity that is still the transient default says so, and where it would be recorded", async (t) => {
+  // No nodes.json at this state directory: the CLI is running before any
+  // broker ever booted here, so its host is provisional and the hint must
+  // not point at a file that does not exist.
+  const stateDir = await realpath(await mkdtemp("/tmp/embassy-cli-defaulted-"));
+  await chmod(stateDir, 0o700);
+  t.after(async () => rm(stateDir, { recursive: true, force: true }));
+
   const stdout = capture(), stderr = capture();
-  const exitCode = await runGatewayCli(["register-peer", "--alias", "peer-x@wrong-host"], {
-    env: {}, stdout, stderr,
+  const exitCode = await runGatewayCliBase(["register-codex", "--alias", "codex-x@wrong-host"], {
+    env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: THREAD_ID }, stdout, stderr,
+    loadNodeInventory: async (dir) => loadGatewayNodeInventory(dir, { hostname: () => "fixture-host" }),
     sendRequest: (async () => { throw new Error("must not be called"); }) as never,
   });
   assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
   assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_ARGUMENTS");
   assert.equal(
     stderr.chunks.join(""),
-    "[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac; found @wrong-host. Run `embassy status` or read the serve ready line for the host.\n",
+    `[embassy] request rejected.\n[embassy] no nodes.json at ${stateDir} — this machine defaults to @fixture-host until a broker has started; found @wrong-host\n`,
   );
 });
 

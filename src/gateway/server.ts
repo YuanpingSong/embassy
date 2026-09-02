@@ -162,9 +162,18 @@ export async function runGatewayServer(
     store = d.createStore(config);
     await guarded(store.initialize({ deferPersistence: true }));
     // The state directory is claimed and locked now: any nodes.json absence
-    // is durably resolved here, once. From this point the broker's identity
-    // is always the file's, never the transient in-memory default above.
+    // is durably resolved here, once. `config` above was built from the
+    // pre-lock read, so the reloaded file — the durable identity from this
+    // point on — is checked against it for equality here. Only a writer that
+    // raced this boot can make them differ, and a config built on the losing
+    // identity is never run: it refuses instead.
     inventory = await guarded(d.ensureNodeInventoryFile(config.stateDir, inventory.host));
+    if (inventory.host !== localHost) {
+      throw serverError(
+        "GATEWAY_HOST_IDENTITY_CHANGED",
+        `The durable host identity in ${path.join(config.stateDir, "nodes.json")} is ${inventory.host}, but this start was configured for ${localHost}. Start Embassy again so it reads that identity.`,
+      );
+    }
     const runtime = await guarded(Promise.resolve().then(() => d.attestClaudeRuntime()));
     providers.push(d.createClaudeProvider({
       runtime,

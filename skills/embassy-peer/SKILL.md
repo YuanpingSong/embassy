@@ -7,6 +7,8 @@ description: Operate Embassy through current name@host or Claude session-UUID se
 
 Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
 
+Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the `embassy serve` ready line, also shown by `embassy status`.
+
 Registration, send, reply, await, receipt, and unregister operations require the exact principal accepted by that command: inherited Codex identity, inherited Claude identity, or a shell-peer alias plus token. Stop on a missing or conflicting required principal; never choose one on the caller's behalf. `pair`, `unpair`, `select-claude`, and `unselect-claude` are same-UID control-plane operations authorized by the private control socket, not by inherited provider identity. Agents remain norm-bound to create or remove only the exact edges the user chose; paired-mode membership is rechecked at delivery.
 
 If `CALLER_IDENTITY_CONFLICT` reports both inherited identities, strip only the unwanted identity at the call site: use `env -u CLAUDE_CODE_MESSAGING_SOCKET embassy …` for a Codex-side call, or `env -u CODEX_THREAD_ID embassy …` for a Claude-side call. Never inspect, print, clear, or copy either inherited value. Without the dual-identity hint, report only the generic fail-closed result; the caller may simply be the wrong principal.
@@ -57,7 +59,7 @@ Run that refresh only at the passive-discovery authorization stage. Treat the re
 Register a shell-fresh harness under a `peer-*` alias:
 
 ```sh
-embassy register-peer --alias peer-reviewer@HOST
+embassy register-peer --alias peer-reviewer@your-host
 ```
 
 The result prints the raw `peer_` token exactly once. Retain it only in the
@@ -72,7 +74,7 @@ Do not combine it with an inherited Codex identity, Claude identity, or
 harness genuinely retains one stable shell; stdin is the universal floor.
 
 To receive one framed message, run `embassy await --alias
-peer-reviewer@HOST --token-stdin` with the token and trailing newline on
+peer-reviewer@your-host --token-stdin` with the token and trailing newline on
 stdin. The CLI performs bounded 30-second long polls, writes the complete frame
 to stdout, flushes it, then acknowledges its private receipt. Run at most one
 waiter for that registration; the broker allows 16 globally. A missing receipt
@@ -85,19 +87,19 @@ the same alias/token principal.
 Create one explicit cross-provider edge by naming both ends. Each endpoint must be a user-chosen route from the current snapshot:
 
 ```sh
-embassy pair --from codex-reviewer@HOST --to advisor@HOST
+embassy pair --from codex-reviewer@your-host --to advisor@your-host
 ```
 
 Pairs are additive and bounded; many edges may coexist, and `pair` never retires another edge. The same-UID private control socket authorizes this control-plane mutation; Embassy does not attest an inherited provider identity for pair or unpair. Create or remove only the exact user-chosen edge. Remove it by naming both endpoints:
 
 ```sh
-embassy unpair --from codex-reviewer@HOST --to advisor@HOST
+embassy unpair --from codex-reviewer@your-host --to advisor@your-host
 ```
 
 Claude selection is a separate operator control and creates no permission edge:
 
 ```sh
-embassy select-claude --alias advisor@HOST
+embassy select-claude --alias advisor@your-host
 ```
 
 Or address the same logical session directly by UUID:
@@ -109,7 +111,7 @@ embassy select-claude --session 123e4567-e89b-42d3-a456-426614174000
 Remove the selected Claude route by naming that endpoint:
 
 ```sh
-embassy unselect-claude --alias advisor@HOST
+embassy unselect-claude --alias advisor@your-host
 ```
 
 After selection, use explicit `pair --from <alias> --to <alias>` before sending; never infer or guess an edge on the user's behalf.
@@ -123,7 +125,7 @@ If the selected session is offline or was renamed while Embassy was stopped, the
 Register only from the Codex task being named:
 
 ```sh
-embassy register-codex --alias codex-reviewer@HOST
+embassy register-codex --alias codex-reviewer@your-host
 ```
 
 Let the CLI read that task's inherited `CODEX_THREAD_ID`. Never supply the thread ID as an argument, print it, persist it, or register another task by guessing its identity. The alias must start with `codex-`. Registration commits only the logical route record and performs no provider or App Server I/O. Advertisement reconciles separately and best-effort; bounded observation is display-only and never routing authority or a dispatch gate. Every Codex operation independently attests the current interface and resumes the exact registered task before final write authorization.
@@ -133,7 +135,7 @@ until it is removed or explicitly succeeded. To hand the registration to a
 different task on the same host, run this from inside the successor task:
 
 ```sh
-embassy register-codex --alias codex-successor@HOST --succeeds codex-reviewer@HOST
+embassy register-codex --alias codex-successor@your-host --succeeds codex-reviewer@your-host
 ```
 
 This is one atomic logical replacement. The commit cancels queued or reserved
@@ -149,7 +151,7 @@ logical identity.
 Unregister from the same Codex task:
 
 ```sh
-embassy unregister-codex --alias codex-reviewer@HOST
+embassy unregister-codex --alias codex-reviewer@your-host
 ```
 
 If the task identity or selector does not match, stop on the fail-closed result.
@@ -166,8 +168,8 @@ From a registered Codex task to a paired Claude session:
 
 ```sh
 embassy send \
-  --from codex-reviewer@HOST \
-  --to advisor@HOST <<'GATEWAY_MESSAGE'
+  --from codex-reviewer@your-host \
+  --to advisor@your-host <<'GATEWAY_MESSAGE'
 Please review the current approach and note the main risk in your own session.
 GATEWAY_MESSAGE
 ```
@@ -192,7 +194,7 @@ Use the exact public conversation token returned by the gateway; do not construc
 ```sh
 embassy reply \
   --conversation conv_REPLACE_WITH_RETURNED_TOKEN \
-  --alias codex-reviewer@HOST <<'GATEWAY_MESSAGE'
+  --alias codex-reviewer@your-host <<'GATEWAY_MESSAGE'
 Here is the requested adjustment.
 GATEWAY_MESSAGE
 ```

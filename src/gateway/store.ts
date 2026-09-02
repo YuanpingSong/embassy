@@ -91,6 +91,11 @@ function isNonNegativeInteger(value: unknown): value is number {
 function isPositiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
+const LOCK_HOSTNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+/** The lock's own recorded machine name, bounded before it is quoted back. */
+function recordedLockHostname(value: unknown): string {
+  return typeof value === "string" && LOCK_HOSTNAME_PATTERN.test(value) ? value : "an unrecorded host";
+}
 function isIsoTimestamp(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -854,7 +859,6 @@ export class GatewayStore {
       try {
         const now = this.now();
         const loaded = await this.loadStateFile();
-        await this.removeStaleDashboardFiles(this.rootDir);
         this.state = loaded ?? {
           schemaVersion: 5,
           commit: { sequence: 0, id: this.randomId() },
@@ -865,6 +869,7 @@ export class GatewayStore {
           activity: [], accounting: emptyAccounting(),
         };
         this.assertConfiguredBounds(this.state);
+        await this.removeStaleDashboardFiles(this.rootDir);
         this.recoverAfterRestart(now);
         this.prune(this.state, now);
         if (loaded !== undefined) {
@@ -2827,8 +2832,9 @@ export class GatewayStore {
    * regular file owned by this uid is removed (lstat, no symlink following);
    * nothing else in the state directory is touched, and a removal failure
    * never blocks startup. Runs only after the controller lock is held and
-   * loadStateFile() has already succeeded, so a refused boot leaves the
-   * directory exactly as found.
+   * the state this boot will run on has passed both its schema check and
+   * assertConfiguredBounds, so a refused boot leaves the directory exactly
+   * as found.
    */
   private async removeStaleDashboardFiles(root: string): Promise<void> {
     let entries: string[];
@@ -2970,9 +2976,13 @@ export class GatewayStore {
       } catch {
         throw new BridgeError("GATEWAY_STATE_LOCK_UNVERIFIED", "The gateway state lock exists but cannot be safely verified.");
       }
-      if (owner.hostname !== os.hostname() || !isPositiveInteger(owner.pid)) {
-        throw new BridgeError("GATEWAY_STATE_IN_USE", "The gateway state directory is locked by another host or unverifiable process.", true);
+      if (!isPositiveInteger(owner.pid)) {
+        throw new BridgeError("GATEWAY_STATE_IN_USE", "The gateway state lock does not record a verifiable controller process.", true);
       }
+      // Recovery is decided by process liveness alone; the recorded hostname
+      // is informational. A machine that renames itself — a network-triggered
+      // rename, a restore onto new hardware — must not wedge its own state
+      // directory forever, so a dead pid is stale whatever name wrote it.
       let alive = true;
       try {
         process.kill(owner.pid, 0);
@@ -2982,7 +2992,18 @@ export class GatewayStore {
         }
       }
       if (alive) {
-        throw new BridgeError("GATEWAY_STATE_IN_USE", "Another live gateway controller owns this state directory.", true);
+        const recorded = recordedLockHostname(owner.hostname);
+        if (recorded === os.hostname()) {
+          throw new BridgeError("GATEWAY_STATE_IN_USE", "Another live gateway controller owns this state directory.", true);
+        }
+        // Same pid number, different recorded machine: it may be this
+        // machine under its old name, or an unrelated process that inherited
+        // the number. Refuse, and say exactly what to check.
+        throw new BridgeError(
+          "GATEWAY_STATE_IN_USE",
+          `The gateway state lock records host ${recorded} and pid ${String(owner.pid)}, and a process with that pid is alive here. If this is a lock from a machine you renamed and that pid is not an Embassy broker, remove ${CONTROLLER_LOCK} from the gateway state directory and start again.`,
+          true,
+        );
       }
       await rename(
         lockPath,

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
   lstat,
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rename as renameFile,
@@ -1723,6 +1725,70 @@ test("a refused boot never sweeps the state directory: cleanup runs only after l
   // The refused boot must leave the directory exactly as found: cleanup runs
   // only after loadStateFile() succeeds, and this one never did.
   assert.equal(await readFile(stalePath, "utf8"), "<html>stale</html>");
+});
+
+test("a boot refused for out-of-bounds state leaves a planted stale file exactly as found", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.registerRoute(claude);
+  await setup.store.close();
+  const stalePath = path.join(setup.stateDir, "gateway-dashboard.html");
+  await writeFile(stalePath, "<html>stale</html>", { mode: 0o600 });
+
+  // Same directory, a host allowlist the persisted route cannot satisfy: this
+  // refuses inside assertConfiguredBounds, past the schema check.
+  const foreign = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio"] });
+  await assert.rejects(
+    foreign.initialize(),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "CORRUPT_GATEWAY_STATE",
+  );
+  assert.equal(await readFile(stalePath, "utf8"), "<html>stale</html>");
+});
+
+test("a controller lock left by a crash is recovered by pid liveness, whatever machine name wrote it", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  // spawnSync reaps its child before returning, so this pid is certainly
+  // dead: the crash half of "crashed, then the machine was renamed".
+  const dead = spawnSync("/usr/bin/true").pid;
+  assert.equal(typeof dead, "number");
+  const lockPath = path.join(setup.stateDir, ".gateway-controller.lock");
+  await writeFile(
+    lockPath,
+    `${JSON.stringify({ schemaVersion: 1, pid: dead, hostname: "the-old-name.local", token: "00000000-0000-4000-8000-0000000d0ead" })}\n`,
+    { mode: 0o600 },
+  );
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await reopened.close();
+  const entries = await readdir(setup.stateDir);
+  assert.ok(
+    entries.some((name) => name.startsWith(".gateway-controller.lock.stale-")),
+    entries.join(","),
+  );
+});
+
+test("a lock naming another machine with a live pid refuses, naming that host, pid, and remedy", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  const lockPath = path.join(setup.stateDir, ".gateway-controller.lock");
+  const planted = `${JSON.stringify({ schemaVersion: 1, pid: process.pid, hostname: "the-old-name.local", token: "00000000-0000-4000-8000-00000000a11e" })}\n`;
+  await writeFile(lockPath, planted, { mode: 0o600 });
+
+  await assert.rejects(
+    new GatewayStore(setup.config).initialize(),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_IN_USE" &&
+      error.message.includes("the-old-name.local") &&
+      error.message.includes(String(process.pid)) &&
+      error.message.includes(".gateway-controller.lock"),
+  );
+  // A refusal never touches the lock it could not claim.
+  assert.equal(await readFile(lockPath, "utf8"), planted);
 });
 
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {

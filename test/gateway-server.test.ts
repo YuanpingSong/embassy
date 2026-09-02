@@ -10,7 +10,7 @@ import { LocalCodexTransportError, managedCodexControlSocketPath,
   type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig as loadGatewayConfigBase } from "../src/gateway/config.js";
-import { ensureGatewayNodeInventoryFile } from "../src/gateway/federation-nodes.js";
+import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
 import {
   GATEWAY_CONTROL_PROTOCOL_VERSION,
   sendGatewayControlRequest,
@@ -1047,45 +1047,109 @@ test(
   },
 );
 
-test("a real server boot with no nodes.json durably writes it, and the ready result carries that host end to end", async (t) => {
+test("a real boot writes nodes.json, and a later hostname change never moves that durable identity", async (t) => {
   // A short, fixed root: os.tmpdir() on macOS can push the control socket
   // path past the 100-byte Unix-domain-socket portability ceiling.
   const stateDir = await realpath(await mkdtemp("/tmp/embassy-server-e2e-"));
   await chmod(stateDir, 0o700);
-  t.after(async () => rm(stateDir, { recursive: true, force: true }));
-  const abort = new AbortController();
-  let ready: GatewayServerReadyResult | undefined;
-  await runGatewayServer(
-    {
-      env: { EMBASSY_STATE_DIR: stateDir },
-      signal: abort.signal,
-      onReady: (result) => { ready = result; abort.abort(); },
-    },
-    {
-      // The transient default a fresh boot would compute for an injected
-      // hostname — real hostname-to-default derivation is unit-tested in
-      // federation-nodes.test.ts. This test proves the wiring past it: a
-      // real store claiming a real state directory, then a real durable
-      // write and reload through the unmocked federation-nodes function.
-      loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
-      ensureNodeInventoryFile: ensureGatewayNodeInventoryFile,
-      acquireInstanceLease: async () => instanceLease(() => undefined),
-      attestClaudeRuntime: async () => runtime(),
-      createClaudeProvider: () => provider(() => undefined),
-      createCodexOperation: () => statelessOperation(),
-      createCodexObservationFactory: async () => factory(() => undefined),
-      resolveCodexInstallation: async () => {
-        throw new Error("diagnostic resolver must remain lazy");
+  const stores: GatewayStore[] = [];
+  t.after(async () => {
+    for (const store of stores) await store.close().catch(() => undefined);
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  // Everything on the identity path is real: the unmocked loader (only its
+  // hostname reading is injected, as a machine rename is not something a test
+  // can perform), the unmocked first-boot write, a real store claiming and
+  // releasing the real state directory under its controller lock.
+  const boot = async (hostname: string): Promise<GatewayServerReadyResult> => {
+    const abort = new AbortController();
+    let ready: GatewayServerReadyResult | undefined;
+    await runGatewayServerBase(
+      {
+        env: { EMBASSY_STATE_DIR: stateDir },
+        signal: abort.signal,
+        onReady: (result) => { ready = result; abort.abort(); },
       },
-      createCodexProvider: () => provider(() => undefined),
-      createService: () => ({
-        start: async () => undefined,
-        close: async () => undefined,
-      }),
-    },
-  );
-  assert.equal(ready?.hostId, "injected-host");
+      {
+        loadNodeInventory: async (dir) => loadGatewayNodeInventory(dir, { hostname: () => hostname }),
+        createStore: (config) => {
+          const store = new GatewayStore(config);
+          stores.push(store);
+          return store;
+        },
+        acquireInstanceLease: async () => instanceLease(() => undefined),
+        attestClaudeRuntime: async () => runtime(),
+        createClaudeProvider: () => provider(() => undefined),
+        createCodexOperation: () => statelessOperation(),
+        createCodexObservationFactory: async () => factory(() => undefined),
+        resolveCodexInstallation: async () => {
+          throw new Error("diagnostic resolver must remain lazy");
+        },
+        createCodexProvider: () => provider(() => undefined),
+        createService: () => ({
+          start: async () => undefined,
+          close: async () => undefined,
+        }),
+      },
+    );
+    // The stubbed service owns nothing, so this boot's store still holds the
+    // controller lock: release it here, or the next boot could not claim it.
+    await stores[stores.length - 1]!.close();
+    assert.ok(ready);
+    return ready;
+  };
+
+  const written = '{"version":1,"host":"injected-host","nodes":[]}\n';
   const filePath = path.join(stateDir, "nodes.json");
-  assert.equal(await readFile(filePath, "utf8"), '{"version":1,"host":"injected-host","nodes":[]}\n');
+  const first = await boot("Injected-Host.local");
+  assert.equal(first.hostId, "injected-host");
+  assert.equal(await readFile(filePath, "utf8"), written);
   assert.equal((await lstat(filePath)).mode & 0o777, 0o600);
+
+  // The machine renames itself. The ready result must follow the file, not
+  // the hostname, and the file must not be rewritten.
+  const second = await boot("renamed-host.local");
+  assert.equal(second.hostId, "injected-host");
+  assert.equal(await readFile(filePath, "utf8"), written);
+});
+
+test("a nodes.json that appears after the pre-lock read refuses instead of running on a stale identity", async (t) => {
+  const stateDir = await realpath(await mkdtemp("/tmp/embassy-server-race-"));
+  await chmod(stateDir, 0o700);
+  t.after(async () => rm(stateDir, { recursive: true, force: true }));
+  // The file a writer installed while this boot still believed the directory
+  // was empty; the boot's config was already built on the transient default.
+  await writeFile(path.join(stateDir, "nodes.json"), '{"version":1,"host":"other-host","nodes":[]}\n', { mode: 0o600 });
+
+  const stores: GatewayStore[] = [];
+  await assert.rejects(
+    runGatewayServerBase(
+      {
+        env: { EMBASSY_STATE_DIR: stateDir },
+        onReady: () => { throw new Error("a mismatched identity must never reach ready"); },
+      },
+      {
+        loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
+        createStore: (config) => {
+          const store = new GatewayStore(config);
+          stores.push(store);
+          return store;
+        },
+        acquireInstanceLease: async () => instanceLease(() => undefined),
+        attestClaudeRuntime: async () => runtime(),
+        createClaudeProvider: () => provider(() => undefined),
+        createCodexOperation: () => statelessOperation(),
+        createCodexObservationFactory: async () => factory(() => undefined),
+        createCodexProvider: () => provider(() => undefined),
+        createService: () => { throw new Error("startup must refuse before any service is built"); },
+      },
+    ),
+    (error: unknown) => error instanceof BridgeError &&
+      error.code === "GATEWAY_HOST_IDENTITY_CHANGED" && !error.recoverable &&
+      error.message.includes("other-host") && error.message.includes("injected-host") &&
+      error.message.includes(path.join(stateDir, "nodes.json")),
+  );
+  // The refused boot released the controller lock it took.
+  for (const store of stores) await store.close().catch(() => undefined);
 });

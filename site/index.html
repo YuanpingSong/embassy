@@ -79,13 +79,13 @@
 <div class="wrap">
 <p class="eyebrow">How it works</p>
 <h2>Six commands to a working route</h2>
-<p class="lede">Each command is exactly what the shipped CLI accepts.</p>
+<p class="lede">Each command is what the shipped CLI accepts once you substitute your host. Replace <code style="border:none;background:none;padding:0">your-host</code> with the <code style="border:none;background:none;padding:0">hostId</code> on the <code style="border:none;background:none;padding:0">embassy serve</code> ready line.</p>
 <div class="steps">
 <div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>Copy</button></div><p>Start the broker. It opens no network listener — everything stays on this machine.</p></div>
-<div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@HOST</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@HOST" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
-<div><div class="cmd2"><code>embassy select-claude --alias claude-main@HOST</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@HOST" hidden>Copy</button></div><p>Select the Claude route. Selection creates no consent edge.</p></div>
-<div><div class="cmd2"><code>embassy pair --from codex-embassy@HOST --to claude-main@HOST</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@HOST --to claude-main@HOST" hidden>Copy</button></div><p>Create the explicit bidirectional consent edge used by the next send. Both endpoints must be registered, live, on the same host, and on different providers.</p></div>
-<div><div class="cmd2"><code>embassy send --from codex-embassy@HOST --to claude-main@HOST &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@HOST --to claude-main@HOST <<'MSG'
+<div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@your-host</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@your-host" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
+<div><div class="cmd2"><code>embassy select-claude --alias claude-main@your-host</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@your-host" hidden>Copy</button></div><p>Select the Claude route. Selection creates no consent edge.</p></div>
+<div><div class="cmd2"><code>embassy pair --from codex-embassy@your-host --to claude-main@your-host</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@your-host --to claude-main@your-host" hidden>Copy</button></div><p>Create the explicit bidirectional consent edge used by the next send. Both endpoints must be registered, live, on the same host, and on different providers.</p></div>
+<div><div class="cmd2"><code>embassy send --from codex-embassy@your-host --to claude-main@your-host &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@your-host --to claude-main@your-host <<'MSG'
 Which auth middleware did you settle on?
 MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never an argument. You get a <code style="border:none;background:none;padding:0">dlv_</code> receipt and a <code style="border:none;background:none;padding:0">conv_</code> token back.</p></div>
 </div>
@@ -148,14 +148,15 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <div class="qs">
 <span class="p">$</span> npm install -g agent-embassy<br>
 <span class="p">$</span> embassy serve<br>
+<span class="c"># your-host is the hostId printed on the serve ready line</span><br>
 <span class="c"># inside your Codex task — ask the agent to run it:</span><br>
-<span class="p">$</span> embassy register-codex --alias codex-embassy@HOST<br>
+<span class="p">$</span> embassy register-codex --alias codex-embassy@your-host<br>
 <span class="c"># as the operator, pick a name from `embassy status` availablePeers:</span><br>
-<span class="p">$</span> embassy select-claude --alias claude-main@HOST<br>
+<span class="p">$</span> embassy select-claude --alias claude-main@your-host<br>
 <span class="c"># create the consent edge the next send uses:</span><br>
-<span class="p">$</span> embassy pair --from codex-embassy@HOST --to claude-main@HOST<br>
+<span class="p">$</span> embassy pair --from codex-embassy@your-host --to claude-main@your-host<br>
 <span class="c"># from the Codex task — body via stdin, never an argument:</span><br>
-<span class="p">$</span> embassy send --from codex-embassy@HOST --to claude-main@HOST --expects-reply &lt;&lt;'MSG'<br>
+<span class="p">$</span> embassy send --from codex-embassy@your-host --to claude-main@your-host --expects-reply &lt;&lt;'MSG'<br>
 Which auth middleware did you settle on?<br>
 MSG
 </div>

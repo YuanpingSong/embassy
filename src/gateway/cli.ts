@@ -14,7 +14,8 @@ import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   type GatewayControlRequest, type GatewayControlResponse,
   type SendGatewayControlRequestOptions } from "./control.js";
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
-import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
+import { isDefaultedGatewayNodeInventory, loadGatewayNodeInventory,
+  type GatewayNodeInventory } from "./federation-nodes.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
 
@@ -135,7 +136,9 @@ const CLI_HINT = {
   callerIdentityConflict:
     "both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID",
   aliasHostMismatch:
-    "aliases on this machine end with @{localHost}; found @{given}. Run `embassy status` or read the serve ready line for the host.",
+    "aliases on this machine end with @{localHost} (from {stateDir}/nodes.json); found @{given}",
+  aliasHostDefaulted:
+    "no nodes.json at {stateDir} — this machine defaults to @{localHost} until a broker has started; found @{given}",
   controlSocketMissing:
     "no broker is listening at {stateDir}; start it with `embassy serve` under this same OS account, or verify EMBASSY_STATE_DIR is not scrubbed or misdirected (for example by a sandboxed task's HOME).",
 } as const;
@@ -207,6 +210,19 @@ function requireCodexAlias(options: ParsedOptions, name: string): string {
   return alias;
 }
 const gatewayAliasHost = (alias: string): string => alias.slice(alias.lastIndexOf("@") + 1);
+/** This machine's alias host, and whether it is durable or still a default. */
+type LocalHostIdentity = Readonly<{ host: string; defaulted: boolean; stateDir: string }>;
+/**
+ * An alias naming another host is rejected before any broker call. The hint
+ * says where this machine's own host came from, because the two cases have
+ * different remedies: a durable nodes.json is the answer, while a defaulted
+ * identity is still provisional until the first `embassy serve` records it.
+ */
+function aliasHostFault(local: LocalHostIdentity, given: string): CliFault {
+  return new CliFault("INVALID_ARGUMENTS", false,
+    local.defaulted ? "aliasHostDefaulted" : "aliasHostMismatch", undefined,
+    { localHost: local.host, given, stateDir: local.stateDir });
+}
 function requirePairAliases(options: ParsedOptions): readonly [string, string] {
   const from = requireAlias(options, "from");
   const to = requireAlias(options, "to");
@@ -318,7 +334,7 @@ async function buildRequest(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   stdin: AsyncIterable<unknown>,
-  loadLocalHost: () => Promise<string>,
+  loadLocalHost: () => Promise<LocalHostIdentity>,
 ): Promise<GatewayControlRequest> {
   const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
     health: "health", status: "list_snapshot",
@@ -344,24 +360,24 @@ async function buildRequest(
       count(options, succeedsAlias === undefined ? 1 : 2, 2);
       const threadId = requireExclusiveCodexThreadId(env);
       if (succeedsAlias === alias) fault();
-      const localHost = await loadLocalHost();
-      if (!alias.endsWith(`@${localHost}`)) {
-        throw new CliFault("INVALID_ARGUMENTS", false, "aliasHostMismatch", undefined,
-          { localHost, given: gatewayAliasHost(alias) });
-      }
-      if (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== localHost) {
-        throw new CliFault("INVALID_ARGUMENTS", false, "aliasHostMismatch", undefined,
-          { localHost, given: gatewayAliasHost(succeedsAlias) });
+      const local = await loadLocalHost();
+      if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      if (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== local.host) {
+        throw aliasHostFault(local, gatewayAliasHost(succeedsAlias));
       }
       return envelope("register_codex", {
-        alias, threadId, hostId: localHost, busyPolicy: "queue",
+        alias, threadId, hostId: local.host, busyPolicy: "queue",
         ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
       });
     }
     case "unregister-codex": {
       const options = parseOptions(args, ["alias"]);
       count(options, 1);
-      return envelope("unregister_codex", { alias: requireCodexAlias(options, "alias"), threadId: requireExclusiveCodexThreadId(env) });
+      const alias = requireCodexAlias(options, "alias");
+      const threadId = requireExclusiveCodexThreadId(env);
+      const local = await loadLocalHost();
+      if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      return envelope("unregister_codex", { alias, threadId });
     }
     case "register-peer":
     case "unregister-peer":
@@ -372,19 +388,17 @@ async function buildRequest(
       if (hasIdentity(env.CODEX_THREAD_ID) || hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
       if (command !== "register-peer" && options["emit-env"] === true) fault();
       if (options["emit-env"] === true && source !== undefined) fault();
-      if (command === "register-peer") {
-        const localHost = await loadLocalHost();
-        const givenHost = gatewayAliasHost(alias);
-        if (givenHost !== localHost) {
-          throw new CliFault("INVALID_ARGUMENTS", false, "aliasHostMismatch", undefined,
-            { localHost, given: givenHost });
-        }
-      }
+      const requireLocalAlias = async (): Promise<void> => {
+        const local = await loadLocalHost();
+        if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      };
       if (source === undefined) {
         if (command !== "register-peer") fault("CALLER_IDENTITY_REQUIRED");
+        await requireLocalAlias();
         return envelope("register_peer", { alias });
       }
       const { token } = await readPeerInput(stdin, source, false);
+      await requireLocalAlias();
       return envelope(command === "register-peer" ? "register_peer" : command === "unregister-peer" ? "unregister_peer" : "await_peer", { alias, token });
     }
     case "select-claude":
@@ -446,8 +460,9 @@ export async function validatePrivateGatewayControlSocket(
   stateDir: string,
   socketPath: string,
 ): Promise<void> {
-  if (process.platform === "win32")
-    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true, "controlSocketMissing", undefined, { stateDir });
+  // No hint here: on win32 there is no private control socket to be missing,
+  // and nothing about EMBASSY_STATE_DIR would change that.
+  if (process.platform === "win32") throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
   let state, socket;
   try {
     [state, socket] = await Promise.all([lstat(stateDir), lstat(socketPath)]);
@@ -582,10 +597,10 @@ export async function runGatewayCli(
   const command = isCommand(argv[0]) ? argv[0] : undefined;
   const args = argv.slice(1);
   let serverReady = false;
-  let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig }> | undefined;
+  let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig; defaulted: boolean }> | undefined;
   const loadIdentity = () => identity ??= (async () => {
     const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(path.resolve(defaultGatewayStateDir(env)));
-    return { inventory, config: loadConfig(env, inventory) };
+    return { inventory, config: loadConfig(env, inventory), defaulted: isDefaultedGatewayNodeInventory(inventory) };
   })();
   const success = (result: unknown): void => {
     stdout.write(serializedOutput({ ok: true, command: command!, result }));
@@ -644,7 +659,10 @@ export async function runGatewayCli(
       if (!serverReady) fault("SERVER_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
-    const request = await buildRequest(command, args, env, stdin, async () => (await loadIdentity()).config.hostId);
+    const request = await buildRequest(command, args, env, stdin, async () => {
+      const { config, defaulted } = await loadIdentity();
+      return { host: config.hostId, defaulted, stateDir: config.stateDir };
+    });
     const { config } = await loadIdentity();
     await validateSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;

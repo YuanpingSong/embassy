@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, realpath, rename } from "node:fs/promises";
+import { link, lstat, open, realpath, unlink } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import path from "node:path";
 
@@ -11,6 +11,12 @@ const MAX_NODES_FILE_BYTES = 64 * 1024;
 const MAX_HOSTS = 32;
 const HOST_TOKEN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const ATTESTED = new WeakSet<object>();
+/**
+ * Inventories that were defaulted rather than read from a file. Kept parallel
+ * to ATTESTED so the attested object's own shape stays exactly {host, nodes};
+ * the CLI reads this to say where a local host identity came from.
+ */
+const DEFAULTED = new WeakSet<object>();
 
 export type GatewayNodeInventory = Readonly<{
   host: string;
@@ -21,7 +27,7 @@ export type GatewayNodeInventoryDependencies = Readonly<{
   lstat?: typeof lstat;
   open?: typeof open;
   realpath?: typeof realpath;
-  rename?: typeof rename;
+  link?: typeof link;
   getuid?: () => number | undefined;
   hostname?: () => string;
   randomId?: () => string;
@@ -35,6 +41,10 @@ export const isAttestedGatewayNodeInventory = (
   inventory: GatewayNodeInventory | undefined,
   host: string,
 ): boolean => inventory !== undefined && ATTESTED.has(inventory) && inventory.host === host;
+/** True when this inventory is the transient hostname-derived default, not a file. */
+export const isDefaultedGatewayNodeInventory = (
+  inventory: GatewayNodeInventory | undefined,
+): boolean => inventory !== undefined && DEFAULTED.has(inventory);
 
 const invalid = (message: string): never => {
   throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", message);
@@ -43,6 +53,24 @@ const inaccessible = (error: unknown, message: string): never => {
   if (isErrno(error, "EPERM") || isErrno(error, "EACCES"))
     throw new BridgeError("CONTROL_CONNECT_DENIED", "Local policy denied access to the Embassy state directory.", true);
   return invalid(message);
+};
+/**
+ * A first-boot write that fails is not a misconfiguration: ENOSPC, EDQUOT,
+ * EROFS, EIO, EMFILE and their kin are full disks and sick filesystems, and
+ * calling them INVALID_GATEWAY_CONFIGURATION would send the operator to edit
+ * a file that is fine. Only a real denial keeps the CONTROL_CONNECT_DENIED
+ * class shared with every other access check here; everything else is a
+ * recoverable write failure naming its errno and the path it failed on.
+ */
+const writeFailed = (error: unknown, filePath: string): never => {
+  if (isErrno(error, "EPERM") || isErrno(error, "EACCES"))
+    throw new BridgeError("CONTROL_CONNECT_DENIED", "Local policy denied access to the Embassy state directory.", true);
+  const code = isErrnoShape(error) ? error.code ?? "UNKNOWN" : "UNKNOWN";
+  throw new BridgeError(
+    "GATEWAY_STATE_WRITE_FAILED",
+    `nodes.json could not be durably written: ${code} at ${filePath}.`,
+    true,
+  );
 };
 
 function assertOwned(uid: number, getuid: () => number | undefined): void {
@@ -92,7 +120,9 @@ function parseInventory(text: string): GatewayNodeInventory {
 function defaultInventory(hostname: () => string): GatewayNodeInventory {
   const label = hostname().split(".")[0]!.toLowerCase();
   const host = HOST_TOKEN.test(label) ? label : "localhost";
-  return attest(Object.freeze({ host, nodes: Object.freeze([]) }));
+  const inventory = attest(Object.freeze({ host, nodes: Object.freeze([]) }));
+  DEFAULTED.add(inventory);
+  return inventory;
 }
 
 /**
@@ -185,31 +215,54 @@ async function writeDefaultInventoryFile(
   stateDir: string,
   host: string,
   openFile: typeof open,
-  doRename: typeof rename,
+  doLink: typeof link,
   randomId: () => string,
 ): Promise<void> {
+  const filePath = path.join(stateDir, NODES_FILE);
   const tempPath = path.join(stateDir, `.nodes-${randomId()}.json.tmp`);
   const body = `${JSON.stringify({ version: 1, host, nodes: [] })}\n`;
-  let handle: Awaited<ReturnType<typeof open>>;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await openFile(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
   } catch (error) {
-    return inaccessible(error, "nodes.json could not be created in the Embassy state directory.");
+    return writeFailed(error, tempPath);
   }
+  const file = handle;
+  let installed = false;
   try {
-    await handle.writeFile(body, "utf8");
-    await handle.sync();
+    // A restrictive umask or an inherited default ACL can leave the created
+    // file at a mode the reload below would refuse; set it exactly, the same
+    // way the durable state file is written.
+    await file.chmod(0o600);
+    await file.writeFile(body, "utf8");
+    await file.sync();
+    await file.close();
+    handle = undefined;
+    try {
+      // link, not rename: a nodes.json that appeared in the window between
+      // the absence check and here is never clobbered. EEXIST means another
+      // writer won that race, and their file stands untouched — the reload
+      // then reads whatever is actually installed.
+      await doLink(tempPath, filePath);
+      installed = true;
+    } catch (error) {
+      if (!isErrno(error, "EEXIST")) throw error;
+    }
+    const directory = await openFile(stateDir, constants.O_RDONLY);
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   } catch (error) {
-    await handle.close().catch(() => undefined);
-    return inaccessible(error, "nodes.json could not be written in the Embassy state directory.");
+    return writeFailed(error, filePath);
+  } finally {
+    // Every path leaves the directory as it found it apart from the install:
+    // the temp link is dropped after a success, a failure, or a lost race.
+    await handle?.close().catch(() => undefined);
+    await unlink(tempPath).catch(() => undefined);
   }
-  await handle.close();
-  try {
-    await doRename(tempPath, path.join(stateDir, NODES_FILE));
-  } catch (error) {
-    return inaccessible(error, "nodes.json could not be installed in the Embassy state directory.");
-  }
-  process.stderr.write(`[embassy] wrote nodes.json naming this host ${host}\n`);
+  if (installed) process.stderr.write(`[embassy] wrote nodes.json naming this host ${host} in ${stateDir}\n`);
 }
 
 /**
@@ -217,12 +270,12 @@ async function writeDefaultInventoryFile(
  * directory is claimed and its controller lock is held. A present nodes.json
  * is never rewritten — this only fires on a truly first-ever boot of this
  * state directory. Otherwise it atomically writes the exact schema
- * parseInventory expects (temp file + rename, mode 0600) for `host`, then
+ * parseInventory expects (temp file + link, mode 0600) for `host`, then
  * reloads it through loadGatewayNodeInventory: the running broker's identity
  * becomes the file's from this point on, never the transient in-memory
- * default from defaultInventory() above. A write failure refuses with the
- * same classified code loadGatewayNodeInventory itself would use, so a boot
- * never runs on an identity that was never durably recorded.
+ * default from defaultInventory() above. A write failure refuses — denied
+ * as CONTROL_CONNECT_DENIED, anything else as GATEWAY_STATE_WRITE_FAILED —
+ * so a boot never runs on an identity that was never durably recorded.
  *
  * The CLI never calls this. Its own transient default (defaultInventory)
  * stays live only for the narrow window before any broker has ever booted
@@ -246,7 +299,7 @@ export async function ensureGatewayNodeInventoryFile(
   if (!present) {
     await writeDefaultInventoryFile(
       stateDir, host,
-      dependencies.open ?? open, dependencies.rename ?? rename, dependencies.randomId ?? randomUUID,
+      dependencies.open ?? open, dependencies.link ?? link, dependencies.randomId ?? randomUUID,
     );
   }
   return loadGatewayNodeInventory(stateDir, dependencies);

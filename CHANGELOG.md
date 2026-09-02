@@ -16,8 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- `nodes.json` is optional; when absent at boot, the broker writes it once, naming this machine by its own hostname with an empty peer list, and federates with nobody until you edit the file in. That written file — not the hostname — is the broker's durable identity from then on, so a later hostname change never renames a running installation (emb-106).
+- `nodes.json` is optional; when absent at boot, the broker writes it once, naming this machine by its own hostname with an empty peer list, and federates with nobody until you edit the file in. That written file — not the hostname — is the broker's durable identity from then on: renaming the machine does not rename the installation, and a controller lock left behind by a crash is recovered by process liveness rather than by the name that wrote it (emb-106).
 - Stale `gateway-dashboard*.html` files left by 2.x, and their `.tmp` publish artifacts from a crashed 2.x write, are removed from the state dir at boot (emb-106).
+- A `.gateway-controller.lock` left behind by a crash is recovered by process liveness rather than by the machine name recorded in it, so a rename can no longer wedge a state directory permanently. A lock whose recorded pid is still alive keeps refusing with `GATEWAY_STATE_IN_USE`, now naming that recorded host and pid and what to check (emb-106).
 - `embassy refresh` reports a discovery failure honestly instead of claiming success.
 - Private state schema is 5, reset-only: 2.x state is refused with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and never rewritten; follow the [private state reset](docs/CONFIGURATION.md#private-state-reset).
 - Federation peer protocol is 2; a node answering `initialize` with another version surfaces `PEER_PROTOCOL_MISMATCH` on its mirrored routes and in `embassy status` instead of a tunnel fault.
