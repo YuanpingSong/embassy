@@ -35,7 +35,7 @@ Removing a peer does not remove its durable mirrors; reset private state before 
 ### Private state reset
 
 Version 3 accepts only fresh schema-5 private state; it does not convert or
-rewrite older state, including the schema-4 state written by the 2.x line. Before the reset, use the old running broker's `status`
+rewrite older state; the 2.x line's state is refused the same way. Before the reset, use the old running broker's `status`
 and delivery lookups to verify that no queued, armed, or accepted work remains
 and every delivery has settled. Then:
 
@@ -100,7 +100,7 @@ the destination session before suspecting the route.
 
 ## Provider and runtime contract
 
-Embassy routes three providers: Claude over peer protocol 1, Codex over the managed App Server, and universal shell peers over the private control socket. The provider versions each release was tested with are listed in the [CHANGELOG](../CHANGELOG.md). Runtime never reads that record. A build or version fact can qualify the release's “tested with” claim, but it never grants or withholds routing authority.
+Embassy routes three providers: Claude over peer protocol 1, Codex over the managed App Server, and universal shell peers over the private control socket. A build or version fact never grants or withholds routing authority.
 
 Runtime is best effort: an explicit consent edge plus the exact owned route/session identity authorizes an attempt. The current per-operation transport, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health and an exact safe code; it does not create a compatibility tier or block unrelated providers.
 

@@ -30,13 +30,13 @@ test("real-PID helpers own independent records and exact cleanup", async () => {
   const runtime = { sessionsDir, socketDir } as const;
   const entryPath = path.join(repoRoot, "dist/src/gateway/claude-helper.js");
   const exits: number[] = [];
-  const start = (alias: string, sourceProvider: "codex") => ClaudeNativeHelperClient.start({
+  const start = (alias: string, sourceProvider: "codex" | "peer") => ClaudeNativeHelperClient.start({
     entryPath, runtime, hostId: "this-mac", locale: "en", deliveryNotices: "merged", maxPendingMessages: 8,
     registration: { alias, sourceProvider, cwd: root }, callbacks: { onEvent: () => undefined, onExit: () => exits.push(1) },
   });
   let first: ClaudeNativeHelperClient | undefined, second: ClaudeNativeHelperClient | undefined;
   try {
-    first = await start("codex-first@this-mac", "codex"); second = await start("codex-second@this-mac", "codex");
+    first = await start("codex-first@this-mac", "codex"); second = await start("peer-second@this-mac", "peer");
     assert.notEqual(first.pid, second.pid); assert.notEqual(first.pid, process.pid); assert.notEqual(first.generation, second.generation);
     const owned = (client: ClaudeNativeHelperClient) => ({
       record: path.join(sessionsDir, `${client.pid}.json`), socket: path.join(socketDir, `${client.pid}.sock`),
@@ -44,7 +44,7 @@ test("real-PID helpers own independent records and exact cleanup", async () => {
     const a = owned(first), b = owned(second);
     const [recordA, recordB] = await Promise.all([readFile(a.record, "utf8").then(JSON.parse), readFile(b.record, "utf8").then(JSON.parse)]);
     assert.deepEqual([recordA.pid, recordA.name, recordA.messagingSocketPath], [first.pid, "codex-first", a.socket]);
-    assert.deepEqual([recordB.pid, recordB.name, recordB.messagingSocketPath], [second.pid, "codex-second", b.socket]);
+    assert.deepEqual([recordB.pid, recordB.name, recordB.messagingSocketPath], [second.pid, "peer-second", b.socket]);
     await first.close(); first = undefined;
     assert.equal(await missing(a.record), true); assert.equal(await missing(a.socket), true);
     assert.equal(await missing(b.record), false); assert.equal(await missing(b.socket), false);

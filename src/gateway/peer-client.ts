@@ -2,7 +2,7 @@ import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams, type SpawnOpti
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { decodePeerParams, decodePeerResult, encodePeerFrame, peerEdgeRef, PEER_MAX_CATALOG_BYTES, PEER_MAX_REQUEST_BYTES,
-  PEER_METHOD_NOT_FOUND, PEER_REQUEST_TIMEOUT_MS, type PeerCatalogResult, type PeerHandoffParams, type PeerHandoffResult,
+  PEER_METHOD_NOT_FOUND, PEER_PROTOCOL_VERSION, PEER_REQUEST_TIMEOUT_MS, PeerProtocolError, type PeerCatalogResult, type PeerHandoffParams, type PeerHandoffResult,
   type PeerMethod, type PeerMethodParams, type PeerMethodResult, type PeerRpcError, type PeerRpcId } from "./peer-protocol.js";
 
 type Obj = Record<string, unknown>;
@@ -12,7 +12,8 @@ type PeerTimers = Readonly<{ setTimeout: typeof setTimeout; clearTimeout: typeof
 export type PeerPreparedHandoff = Readonly<{ bodyBytes: number; bodySha256: string; frameBytes: number; sha256: string; cancel: () => void; perform: () => Promise<PeerHandoffResult> }>;
 type Pending = Readonly<{ method: PeerMethod; timer: NodeJS.Timeout; resolve: (value: unknown) => void; reject: (error: Error) => void }>;
 export class PeerRequestError extends Error { constructor(readonly detail: PeerRpcError) { super(detail.message); this.name = "PeerRequestError"; } }
-export type PeerFailureClass = "spawn" | "initialize" | "transport";
+/** `protocol`: the peer answered `initialize` with another protocol version, or refused ours as invalid params. */
+export type PeerFailureClass = "spawn" | "initialize" | "protocol" | "transport";
 export class PeerConnectionLostError extends Error { constructor(message = "Peer connection lost", readonly failureClass: PeerFailureClass = "transport") { super(message); this.name = "PeerConnectionLostError"; } }
 
 export class PeerClient {
@@ -21,16 +22,20 @@ export class PeerClient {
   private constructor(private child: Child, private localHost: string, private timers: PeerTimers) { child.stderr.resume(); child.stdout.on("data", (chunk: Buffer) => this.read(chunk));
     child.once("error", () => this.fail(new PeerConnectionLostError())); child.once("exit", () => this.fail(new PeerConnectionLostError())); }
   static async spawn(options: Readonly<{ node: string; localHost: string; spawn?: PeerSpawn; timers?: PeerTimers }>): Promise<PeerClient> {
-    decodePeerParams("initialize", { protocolVersion: 1, host: options.node }); decodePeerParams("initialize", { protocolVersion: 1, host: options.localHost });
+    decodePeerParams("initialize", { protocolVersion: PEER_PROTOCOL_VERSION, host: options.node }); decodePeerParams("initialize", { protocolVersion: PEER_PROTOCOL_VERSION, host: options.localHost });
     let child: Child; try { child = (options.spawn ?? nodeSpawn)("/usr/bin/ssh",
       ["-T", "-x", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no", "-o", "SendEnv=-*", "-o", "Tunnel=no", options.node, "embassy", "peer-stdio"],
       { env: peerEnvironment(process.env), shell: false, stdio: ["pipe", "pipe", "pipe"] }); } catch { throw new PeerConnectionLostError("Peer process could not be spawned", "spawn"); }
-    const client = new PeerClient(child, options.localHost, options.timers ?? { setTimeout, clearTimeout }); try { const result = await client.request("initialize", { protocolVersion: 1, host: options.localHost });
+    const client = new PeerClient(child, options.localHost, options.timers ?? { setTimeout, clearTimeout }); try { const result = await client.request("initialize", { protocolVersion: PEER_PROTOCOL_VERSION, host: options.localHost });
       if (result.host !== options.node) throw new Error(`Peer host mismatch: expected ${options.node}, received ${result.host}`);
-      client.remoteHost = result.host; return client; } catch (error) { client.close(); throw new PeerConnectionLostError(
-        error instanceof Error ? error.message : "Peer initialization failed", "initialize"); }
+      client.remoteHost = result.host; return client; } catch (error) { client.close();
+      // Our initialize params are validated above before they are sent, so a peer that
+      // rejects them as invalid params, or answers with another version, disagrees on the wire itself.
+      if ((error instanceof PeerProtocolError && error.code === "PROTOCOL_MISMATCH") || (error instanceof PeerRequestError && error.detail.code === -32602))
+        throw new PeerConnectionLostError("Peer protocol version mismatch", "protocol");
+      throw new PeerConnectionLostError(error instanceof Error ? error.message : "Peer initialization failed", "initialize"); }
   }
-  get connectionInfo(): Readonly<{ host: string; protocolVersion: 1 }> { return { host: this.remoteHost, protocolVersion: 1 }; }
+  get connectionInfo(): Readonly<{ host: string; protocolVersion: typeof PEER_PROTOCOL_VERSION }> { return { host: this.remoteHost, protocolVersion: PEER_PROTOCOL_VERSION }; }
   async catalog(): Promise<PeerCatalogResult> { const result = await this.request("catalog/get", {});
     const routeIds = result.routes.flatMap((row) => [row.alias, row.ref]), connectorIds = result.connectors.map((row) => row.provider);
     const invalid = (result.complete && result.truncated) || new Set(routeIds).size !== routeIds.length || new Set(connectorIds).size !== connectorIds.length ||
@@ -74,7 +79,9 @@ export class PeerClient {
         void this.write(encodePeerFrame({ jsonrpc: "2.0", id: message.id, error: { code: PEER_METHOD_NOT_FOUND, message: "Method not found" } }, PEER_MAX_REQUEST_BYTES)).catch((error) => this.fail(error)); continue; }
       if (!response(message)) return this.fail(new Error("Peer returned an invalid JSON-RPC response")); const pending = this.pending.get(message.id as PeerRpcId);
       if (!pending) return this.fail(new Error("Peer returned an uncorrelated response")); this.pending.delete(message.id as PeerRpcId); this.timers.clearTimeout(pending.timer);
-      if (Object.hasOwn(message, "error")) { const detail = error(message.error); if (detail === undefined) { const fault = new Error("Peer returned an invalid error response"); pending.reject(fault); this.fail(fault); } else pending.reject(new PeerRequestError(detail)); } else try { pending.resolve(decodePeerResult(pending.method, message.result)); }
+      if (Object.hasOwn(message, "error")) { const detail = error(message.error); if (detail === undefined) { const fault = new Error("Peer returned an invalid error response"); pending.reject(fault); this.fail(fault); } else pending.reject(new PeerRequestError(detail)); } else try {
+        if (pending.method === "initialize" && object(message.result) && typeof message.result.protocolVersion === "number" && message.result.protocolVersion !== PEER_PROTOCOL_VERSION) throw new PeerProtocolError("PROTOCOL_MISMATCH");
+        pending.resolve(decodePeerResult(pending.method, message.result)); }
       catch (fault) { const error = fault instanceof Error ? fault : new Error("Invalid peer result"); pending.reject(error); this.fail(error); }
     } }
   private fail(error: Error): void { if (this.closed) return; this.closed = true; for (const pending of this.pending.values()) { this.timers.clearTimeout(pending.timer); pending.reject(error); } this.pending.clear(); this.child.kill(); }

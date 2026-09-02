@@ -436,7 +436,7 @@ function assertWireError(
 }
 
 test("serves the two directional routes and emits metadata-only responses", async () => {
-  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 2);
+  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 3);
   const { stateDir, socketPath } = await privateState();
   let registered: ValidatedRegisterCodexParams | undefined;
   let toClaude: ValidatedSendParams | undefined;
@@ -1802,18 +1802,23 @@ test("client bounds time and output and rejects malformed responses", async () =
   );
   await closeTrackedServer(malformed.server, malformed.connections);
 
-  const skewed = trackedServer((socket) => socket.end(`${JSON.stringify({
-    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION + 1,
-    ok: true, result: { status: "ok", revision: 1 },
-  })}\n`));
-  await new Promise<void>((resolve, reject) => {
-    skewed.server.once("error", reject); skewed.server.listen(socketPath, resolve);
-  });
-  await assert.rejects(sendGatewayControlRequest({ socketPath, request: {
-    protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {},
-  } }), (error: unknown) => error instanceof GatewayControlTransportError &&
-    error.code === "CONTROL_VERSION_MISMATCH");
-  await closeTrackedServer(skewed.server, skewed.connections);
+  // The previous line's broker (version 2) and a future one are both version
+  // mismatches, never invalid responses: the version is read before the shape.
+  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 3);
+  for (const version of [GATEWAY_CONTROL_PROTOCOL_VERSION - 1, GATEWAY_CONTROL_PROTOCOL_VERSION + 1]) {
+    const skewed = trackedServer((socket) => socket.end(`${JSON.stringify({
+      protocolVersion: version,
+      ok: true, result: { status: "ok", revision: 1 },
+    })}\n`));
+    await new Promise<void>((resolve, reject) => {
+      skewed.server.once("error", reject); skewed.server.listen(socketPath, resolve);
+    });
+    await assert.rejects(sendGatewayControlRequest({ socketPath, request: {
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health", params: {},
+    } }), (error: unknown) => error instanceof GatewayControlTransportError &&
+      error.code === "CONTROL_VERSION_MISMATCH");
+    await closeTrackedServer(skewed.server, skewed.connections);
+  }
   for (const protocolVersion of [undefined, "2"] as const) {
     const invalidVersion = trackedServer((socket) => socket.end(`${JSON.stringify({
       protocolVersion, ok: true, result: { status: "ok", revision: 1 },

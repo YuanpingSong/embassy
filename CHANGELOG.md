@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Removed
+
+- The static dashboard and the live dashboard, with `embassy refresh-dashboard` and `embassy dashboard --live` (emb-100).
+- The ACP-backed DeepSeek and Grok providers with their `dsh-`/`grok-` routes, the offline provider support matrix, and `embassy doctor` with its Codex Desktop classifier (emb-101). The managed-socket holder check stays: a process outside Embassy holding the managed Codex control socket still degrades the Codex connector with `MANAGED_CODEX_UNAVAILABLE`.
+
+### Changed
+
+- `embassy refresh` reports a discovery failure honestly instead of claiming success.
+- Private state schema is 5, reset-only: 2.x state is refused with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and never rewritten; follow the [private state reset](docs/CONFIGURATION.md#private-state-reset).
+- Federation peer protocol is 2; a node answering `initialize` with another version surfaces `PEER_PROTOCOL_MISMATCH` on its mirrored routes and in `embassy status` instead of a tunnel fault.
+- Private control protocol is 3; a client and broker on different lines report `CONTROL_VERSION_MISMATCH`.
+
 ## [2.0.1] - 2026-09-01
 
 Identical product to the unpublished v2.0.0 (its pipeline was failed by a test-hermeticity defect — dashboard-command tests leaned on the developer's real state inventory, red on CI since the mandatory `nodes.json` cut; no product defect). The dashboard-command tests are now hermetic.

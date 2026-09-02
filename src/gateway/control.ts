@@ -32,7 +32,7 @@ import { decodePeerParams, decodePeerResult, type PeerCatalogResult,
   type PeerHandoffParams, type PeerHandoffResult } from "./peer-protocol.js";
 import { isPeerMailboxAwaitResult, type PeerMailboxAwaitResult } from "./peer-mailbox.js";
 
-export const GATEWAY_CONTROL_PROTOCOL_VERSION = 2 as const;
+export const GATEWAY_CONTROL_PROTOCOL_VERSION = 3 as const;
 export const GATEWAY_CONTROL_MAX_FRAME_BYTES = 32 * 1024;
 export const GATEWAY_CONTROL_MAX_RESPONSE_BYTES = 256 * 1024;
 export const GATEWAY_CONTROL_MAX_MESSAGE_BYTES = 16 * 1024;

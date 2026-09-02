@@ -7,7 +7,9 @@ import path from "node:path";
 
 import { BridgeError } from "../src/errors.js";
 import type { GatewayConfig } from "../src/gateway/config.js";
-import type { PeerClient } from "../src/gateway/peer-client.js";
+import { spawnPeerClient, type PeerClient, type PeerSpawn } from "../src/gateway/peer-client.js";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { decodePeerResult, peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
 import {
@@ -447,6 +449,7 @@ test("peer registration persists only its hash and exact token owns idempotence 
     assert.equal(state.includes(expected), true);
     assert.equal(state.includes(token), false);
     await eventually(() => claudeProvider.advertised.includes("peer-shell@this-mac"));
+    assert.equal((await subject.service.snapshot()).alerts.some((alert) => alert.code === "NATIVE_ADVERTISEMENT_FAILED"), false);
     const foreignToken = `${token.slice(0, -1)}${token.endsWith("x") ? "y" : "x"}`;
     assert.notEqual(foreignToken, token);
     assert.deepEqual(await subject.handlers.registerPeer({ alias: "peer-shell@this-mac", token }), {
@@ -1118,6 +1121,46 @@ test("first peer dial failure is host-visible and the next cadence re-dials", as
     await subject.timers.runDue(); await eventually(() => attempts === 2);
     assert.equal((await subject.service.snapshot()).alerts.some((alert) => alert.host === "m5dev" &&
       alert.code === "PEER_DIAL_FAILED"), false);
+  } finally { await subject.close(); }
+});
+
+test("a peer answering initialize with another protocol version surfaces PEER_PROTOCOL_MISMATCH, not a tunnel fault", async () => {
+  // A real PeerClient over a fake wire: the remote is a 2.x node that still speaks version 1.
+  class FakeChild extends EventEmitter {
+    readonly stdin = new PassThrough(); readonly stdout = new PassThrough(); readonly stderr = new PassThrough(); killed = false;
+    kill(): boolean { this.killed = true; queueMicrotask(() => this.emit("exit")); return true; }
+  }
+  const children: FakeChild[] = []; const methods: string[] = [];
+  const spawn: PeerSpawn = () => {
+    const child = new FakeChild(); children.push(child);
+    child.stdin.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString().split("\n").filter(Boolean)) {
+        const request = JSON.parse(line) as { id: number; method: string }; methods.push(request.method);
+        child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1, host: "m5dev",
+          capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } } })}\n`);
+      }
+    });
+    return child as unknown as ReturnType<PeerSpawn>;
+  };
+  const subject = await fixture([new FakeProvider({ provider: "claude", hostId: "studio" })], { hostId: "studio", peerNodes: ["m5dev"],
+    spawnPeer: (options) => spawnPeerClient({ ...options, spawn }) });
+  try {
+    const local: RegisterRouteInput = { alias: "advisor@studio", registrationMode: "selected_live_peer",
+      binding: { provider: "claude", hostId: "studio", routeHandle: "claude-session-a", registrationId: "reg_local" } };
+    const mirrors: RegisterRouteInput[] = [
+      { alias: "codex-main@m5dev", registrationMode: "federated_peer", binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote_codex", registrationId: "reg_mirror_codex" } },
+      { alias: "advisor@m5dev", registrationMode: "federated_peer", binding: { provider: "claude", hostId: "m5dev", routeHandle: "reg_remote_claude", registrationId: "reg_mirror_claude" } },
+    ];
+    await subject.store.registerRoute(local); for (const mirror of mirrors) await subject.store.registerRoute(mirror);
+    await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
+    await subject.timers.runDue(); await eventually(() => children.length === 1 && children[0]!.killed);
+    const snapshot = await subject.service.snapshot();
+    assert.deepEqual(snapshot.alerts.filter((alert) => alert.host === "m5dev").map(({ code, host }) => ({ code, host })),
+      [{ code: "PEER_PROTOCOL_MISMATCH", host: "m5dev" }]);
+    assert.deepEqual(snapshot.routes.filter((route) => route.host === "m5dev").map(({ alias, state, safeErrorCode }) => ({ alias, state, safeErrorCode })).sort((a, b) => a.alias.localeCompare(b.alias)),
+      [{ alias: "advisor@m5dev", state: "stale", safeErrorCode: "PEER_PROTOCOL_MISMATCH" }, { alias: "codex-main@m5dev", state: "stale", safeErrorCode: "PEER_PROTOCOL_MISMATCH" }]);
+    assert.deepEqual(methods, ["initialize"], "no catalog decode is attempted against a mismatched peer");
+    assert.equal(JSON.stringify(snapshot).includes("PEER_TUNNEL_UNAVAILABLE"), false);
   } finally { await subject.close(); }
 });
 

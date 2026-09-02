@@ -33,8 +33,7 @@ either agent runtime.
 Provider versions are best-effort diagnostic metadata, never routing authority.
 An explicit pair plus the exact owned route and session identity authorizes an
 attempt; the current per-operation transport, strict wire, capability, and
-correlated operation facts decide its result. The CHANGELOG lists the provider
-versions each release was tested with; runtime never reads that record. Unsafe OS evidence
+correlated operation facts decide its result. Unsafe OS evidence
 for Embassy-owned or executed artifacts and Embassy callback, control, or state
 paths refuses broker startup; unsafe UID or mode evidence on Claude's external
 sessions registry root quarantines only Claude. A Claude session record whose
@@ -551,7 +550,7 @@ controller-owned mode-0700 state directory. The socket and state files are
 mode 0600. Frames are size-bounded and closed against unknown keys, methods,
 versions, and enum values.
 
-The closed version 2 method family is exactly these twenty methods:
+The closed version 3 method family is exactly these twenty methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
@@ -797,8 +796,7 @@ not themselves require another Desktop restart. A provider or Desktop major
 upgrade may change an internal interface; strict per-operation checks keep the
 responsible route closed if that interface no longer matches. Other providers
 remain available. If the attachment mode changes, a supporting release may
-require a separately announced controlled restart. The CHANGELOG records what
-a release was tested with but never grants runtime authority.
+require a separately announced controlled restart.
 
 ## Persistence and privacy
 
@@ -888,8 +886,7 @@ the preferred least-context setup, but it is not mandatory.
 ## Failure and upgrade policy
 
 - Provider versions are best-effort metadata and never grant or remove routing
-  authority. The CHANGELOG records the tested provider versions without
-  entering runtime. A session record whose peer
+  authority. A session record whose peer
   protocol is not 1 is rejected per record and counted without stopping the
   broker; interface drift degrades only its responsible provider.
 - Unsafe ownership, path, symlink, lease, state, or generation evidence for

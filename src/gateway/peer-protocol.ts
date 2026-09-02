@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { connectorHealthStates, gatewayProviders, routeStates,
   type ConnectorHealth, type GatewayProvider, type RouteState } from "./types.js";
 
-export const PEER_PROTOCOL_VERSION = 1, PEER_MAX_REQUEST_BYTES = 32 * 1024,
+export const PEER_PROTOCOL_VERSION = 2, PEER_MAX_REQUEST_BYTES = 32 * 1024,
   PEER_MAX_CATALOG_BYTES = 256 * 1024, PEER_MAX_BODY_BYTES = 16 * 1024,
   PEER_REQUEST_TIMEOUT_MS = 30_000, PEER_METHOD_NOT_FOUND = -32601;
 export const peerCapabilities = ["catalog", "handoff"] as const;
@@ -11,8 +11,8 @@ export type PeerRpcId = string | number;
 export type PeerRpcError = Readonly<{ code: number; message: string; data?: unknown }>;
 export type PeerMethod = "initialize" | "catalog/get" | "handoff";
 export type PeerEndpoint = Readonly<{ alias: string; provider: GatewayProvider; host: string; routeRef: string }>;
-export type PeerInitializeParams = Readonly<{ protocolVersion: 1; host: string }>;
-export type PeerInitializeResult = Readonly<{ protocolVersion: 1; host: string; capabilities: typeof peerCapabilities;
+export type PeerInitializeParams = Readonly<{ protocolVersion: typeof PEER_PROTOCOL_VERSION; host: string }>;
+export type PeerInitializeResult = Readonly<{ protocolVersion: typeof PEER_PROTOCOL_VERSION; host: string; capabilities: typeof peerCapabilities;
   limits: Readonly<{ requestBytes: number; catalogBytes: number; bodyBytes: number }> }>;
 export type PeerHandoffParams = Readonly<{ originAttemptId: string; originMessageId: string;
   source: PeerEndpoint; target: PeerEndpoint; edgeRef: string; edgeOwnerHost: string; deadlineAt: string;
@@ -61,10 +61,10 @@ export function peerRouteRef(hostId: string, registrationId: string): string {
 export function peerEdgeRef(endpoints: readonly [PeerEndpoint, PeerEndpoint]): string { if (!endpoints.every(endpoint)) throw new PeerProtocolError("INVALID_ENDPOINT");
   const canonical = endpoints.map(({ host, alias, routeRef }) => `${host}\0${alias}\0${routeRef}`).sort().join("\0");
   return `edge_${createHash("sha256").update(canonical).digest("base64url")}`; }
-export function peerInitializeResult(localHost: string): PeerInitializeResult { return { protocolVersion: 1, host: localHost,
+export function peerInitializeResult(localHost: string): PeerInitializeResult { return { protocolVersion: PEER_PROTOCOL_VERSION, host: localHost,
   capabilities: peerCapabilities, limits: { requestBytes: PEER_MAX_REQUEST_BYTES, catalogBytes: PEER_MAX_CATALOG_BYTES, bodyBytes: PEER_MAX_BODY_BYTES } }; }
 export function decodePeerParams<M extends PeerMethod>(method: M, value: unknown): PeerMethodParams[M] {
-  const valid = method === "initialize" ? exact(value, { protocolVersion: (v) => v === 1, host }) : method === "catalog/get" ? exact(value, {}) :
+  const valid = method === "initialize" ? exact(value, { protocolVersion: (v) => v === PEER_PROTOCOL_VERSION, host }) : method === "catalog/get" ? exact(value, {}) :
     exact(value, { originAttemptId: token("attempt_"), originMessageId: token("msg_"), source: endpoint, target: endpoint,
       edgeRef: token("edge_"), edgeOwnerHost: host, deadlineAt: date, expectsReply: bool,
       body: (v) => typeof v === "string" && Buffer.byteLength(v, "utf8") > 0 && Buffer.byteLength(v, "utf8") <= PEER_MAX_BODY_BYTES,
@@ -72,7 +72,7 @@ export function decodePeerParams<M extends PeerMethod>(method: M, value: unknown
   if (!valid) throw new PeerProtocolError("INVALID_PARAMS"); return value as PeerMethodParams[M];
 }
 export function decodePeerResult<M extends PeerMethod>(method: M, value: unknown): PeerMethodResult[M] {
-  const valid = method === "initialize" ? exact(value, { protocolVersion: (v) => v === 1, host,
+  const valid = method === "initialize" ? exact(value, { protocolVersion: (v) => v === PEER_PROTOCOL_VERSION, host,
     capabilities: (v) => Array.isArray(v) && v.length === 2 && v[0] === "catalog" && v[1] === "handoff",
     limits: (v) => exact(v, { requestBytes: (x) => x === PEER_MAX_REQUEST_BYTES, catalogBytes: (x) => x === PEER_MAX_CATALOG_BYTES, bodyBytes: (x) => x === PEER_MAX_BODY_BYTES }) }) :
     method === "handoff" ? exact(value, { accepted: (v) => v === true }) : exact(value, { revision: natural, complete: bool, truncated: bool, generatedAt: date, health: member(health),

@@ -76,7 +76,7 @@ classified as an ambiguous write or replayed.
 
 ## Delivery tokens
 
-Every accepted `send` and `reply` returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v4 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, or provider receipt.
+Every accepted `send` and `reply` returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v5 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, or provider receipt.
 
 ```bash
 embassy delivery-status --token dlv_<token>

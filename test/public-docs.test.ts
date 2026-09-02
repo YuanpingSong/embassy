@@ -32,6 +32,19 @@ const FORBIDDEN = [
   "embassy doctor",
   "provider-support-matrix",
   "support matrix",
+  // No release note names the versions any drill ran against yet; a true
+  // sentence returns only when one does.
+  "tested versions are listed",
+  "versions each release was tested with",
+  "CHANGELOG records",
+  "CHANGELOG lists",
+  // emb-101 bumped the private state schema to 5 and narrowed the providers.
+  "v4 state",
+  "private v4",
+  "schema-4",
+  "schema 4",
+  "four providers",
+  "twelve directions",
 ] as const;
 
 /**

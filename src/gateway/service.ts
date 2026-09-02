@@ -23,7 +23,7 @@ import {
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
 } from "./control.js";
-import { spawnPeerClient, type PeerClient } from "./peer-client.js";
+import { PeerConnectionLostError, spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
 import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import {
@@ -70,6 +70,8 @@ const PEER_TOKEN = /^peer_[A-Za-z0-9_-]{32}$/;
 const DISCOVERY_INTERVAL_MS = 30_000;
 const MANAGED_CODEX_SOCKET_CHECK_INTERVAL_MS = 30_000;
 const PEER_REFRESH_INTERVAL_MS = 30_000;
+const PEER_FAILURE_CODES = ["PEER_DIAL_FAILED", "PEER_TUNNEL_UNAVAILABLE", "PEER_PROTOCOL_MISMATCH"] as const;
+type PeerFailureCode = (typeof PEER_FAILURE_CODES)[number];
 const CLEAN_RETRY_DELAY_MS = 500;
 const MAX_CONVERSATIONS = 1_024;
 const MAX_PENDING_CLAUDE_REPLIES = MAX_CONVERSATIONS;
@@ -2593,7 +2595,7 @@ export class GatewayService {
   private async refreshPeers(): Promise<void> {
     const localHost = this.config.hostId;
     await Promise.all(this.config.peerNodes.map(async (peerHost) => {
-      let failureCode: "PEER_DIAL_FAILED" | "PEER_TUNNEL_UNAVAILABLE" = "PEER_TUNNEL_UNAVAILABLE";
+      let failureCode: PeerFailureCode = "PEER_TUNNEL_UNAVAILABLE";
       try {
         let client = this.peerClients.get(peerHost);
         if (client === undefined) {
@@ -2639,14 +2641,18 @@ export class GatewayService {
           if (row?.enabled === true) this.kick(route.alias, route.binding.registrationId);
         }
         if (viewChanged) this.revision += 1;
-      } catch {
+      } catch (error) {
         this.peerClients.get(peerHost)?.close(); this.peerClients.delete(peerHost);
         if (!this.running || this.closing) return;
+        // A wire-version disagreement is not a tunnel fault: name it so an operator
+        // upgrades the lagging node instead of debugging SSH.
+        if (error instanceof PeerConnectionLostError && error.failureClass === "protocol") failureCode = "PEER_PROTOCOL_MISMATCH";
         this.recordPeerFailure(peerHost, failureCode);
         const observedAt = this.now().toISOString();
+        const mirrorCode = failureCode === "PEER_PROTOCOL_MISMATCH" ? failureCode : "PEER_TUNNEL_UNAVAILABLE";
         for (const route of await this.store.inspectPrivateRoutes()) if (route.registrationMode === "federated_peer" &&
           route.binding.hostId === peerHost) this.peerRouteViews.set(route.alias, { route: route.binding,
-            state: "unobserved", observedAt, safeErrorCode: "PEER_TUNNEL_UNAVAILABLE" });
+            state: "unobserved", observedAt, safeErrorCode: mirrorCode });
       }
     }));
   }
@@ -2756,10 +2762,10 @@ export class GatewayService {
     while (this.runtimeAlerts.length > gatewayPublicSnapshotLimits.alerts) this.runtimeAlerts.shift();
   }
 
-  private recordPeerFailure(host: string, code?: "PEER_DIAL_FAILED" | "PEER_TUNNEL_UNAVAILABLE"): void {
+  private recordPeerFailure(host: string, code?: PeerFailureCode): void {
     for (let index = this.runtimeAlerts.length - 1; index >= 0; index -= 1) {
       const alert = this.runtimeAlerts[index];
-      if (alert?.host === host && (alert.code === "PEER_DIAL_FAILED" || alert.code === "PEER_TUNNEL_UNAVAILABLE"))
+      if (alert?.host === host && (PEER_FAILURE_CODES as readonly string[]).includes(alert.code))
         this.runtimeAlerts.splice(index, 1);
     }
     if (code !== undefined) this.runtimeAlerts.push({ code, severity: "warning", timestamp: this.now().toISOString(), host });

@@ -87,7 +87,8 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /Runtime status is best-effort/);
   assert.match(skill, /observation freshness, connector health, observed metadata, and the last safe code/);
   assert.match(skill, /versions are diagnostic metadata, not routing authority/);
-  assert.match(skill, /tested versions are listed in the CHANGELOG/);
+  // No shipped file may claim that a matrix or the CHANGELOG records tested versions.
+  assert.doesNotMatch(skill, /tested versions are listed|support matrix|CHANGELOG records|CHANGELOG lists/i);
   assert.match(skill, /pair --from .* --to/);
   assert.match(skill, /same-UID control-plane operations authorized by the private control socket/);
   assert.match(skill, /selection is a separate operator control and creates no permission edge/i);

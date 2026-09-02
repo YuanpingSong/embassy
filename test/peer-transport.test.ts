@@ -4,7 +4,7 @@ import { PassThrough, type Writable } from "node:stream";
 import { setImmediate as immediate } from "node:timers/promises";
 import test from "node:test";
 import { PeerConnectionLostError, spawnPeerClient, type PeerSpawn } from "../src/gateway/peer-client.js";
-import { decodePeerParams, decodePeerResult, peerEdgeRef, peerRouteRef, PEER_MAX_BODY_BYTES, PEER_METHOD_NOT_FOUND,
+import { decodePeerParams, decodePeerResult, peerEdgeRef, peerRouteRef, PEER_MAX_BODY_BYTES, PEER_METHOD_NOT_FOUND, PEER_PROTOCOL_VERSION,
   type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { PeerHandlerError, runPeerStdio } from "../src/gateway/peer-stdio.js";
 
@@ -55,7 +55,7 @@ const spawnFrom = (peer: FakePeer, calls: unknown[][] = []): PeerSpawn => (comma
   calls.push([command, args, options]); return peer.child as unknown as ReturnType<PeerSpawn>; };
 function initializedPeer(handler: (message: Rpc, peer: FakePeer) => void = () => {}): FakePeer {
   return new FakePeer((message, peer) => { if (message.method === "initialize") peer.result(message, {
-    protocolVersion: 1, host: "m5dev", capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } }, true);
+    protocolVersion: PEER_PROTOCOL_VERSION, host: "m5dev", capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } }, true);
     else handler(message, peer); });
 }
 
@@ -71,10 +71,28 @@ test("peer client owns the exact fixed SSH launch and correlates catalog and han
   assert.deepEqual(Object.keys(spawnOptions.env).sort(), ["HOME", "LOGNAME", "SSH_AUTH_SOCK", "USER"].filter((key) => process.env[key] !== undefined));
   assert.deepEqual(spawnOptions, { env: Object.fromEntries(["HOME", "USER", "LOGNAME", "SSH_AUTH_SOCK"].flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]])),
     shell: false, stdio: ["pipe", "pipe", "pipe"] });
-  assert.deepEqual(client.connectionInfo, { host: "m5dev", protocolVersion: 1 });
+  assert.equal(PEER_PROTOCOL_VERSION, 2);
+  assert.deepEqual(client.connectionInfo, { host: "m5dev", protocolVersion: 2 });
   assert.deepEqual(await client.catalog(), catalog());
   const prepared = client.prepareHandoff(handoff()); assert.equal(prepared.bodyBytes, 5); assert.equal(prepared.sha256.length, 64);
   assert.deepEqual(await prepared.perform(), { accepted: true }); assert.throws(() => prepared.cancel(), /already consumed/); client.close();
+});
+
+test("a peer on another protocol version is a protocol failure, closed before any catalog request", async () => {
+  // A 2.x node answering with its own version, and one refusing our initialize as invalid params.
+  const legacyResult = new FakePeer((message, peer) => peer.result(message, {
+    protocolVersion: 1, host: "m5dev", capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } }));
+  const legacyRefusal = new FakePeer((message, peer) => peer.send({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "Invalid params" } }));
+  for (const peer of [legacyResult, legacyRefusal]) {
+    await assert.rejects(spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(peer) }),
+      (error) => error instanceof PeerConnectionLostError && error.failureClass === "protocol");
+    assert.equal(peer.child.killed, true);
+    assert.deepEqual(peer.received.map((row) => row.method), ["initialize"]);
+  }
+  // Any other malformed initialize result stays an initialize failure, not a protocol claim.
+  const garbage = new FakePeer((message, peer) => peer.result(message, { protocolVersion: PEER_PROTOCOL_VERSION, host: "m5dev" }));
+  await assert.rejects(spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(garbage) }),
+    (error) => error instanceof PeerConnectionLostError && error.failureClass === "initialize");
 });
 
 test("peer client exposes only a bounded spawn failure class", async () => {
@@ -86,7 +104,7 @@ test("peer client exposes only a bounded spawn failure class", async () => {
 
 test("peer client rejects host drift, unknown inbound requests, uncorrelated replies, and pipe death", async () => {
   const mismatch = new FakePeer((message, peer) => peer.result(message, {
-    protocolVersion: 1, host: "wrong", capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } }));
+    protocolVersion: PEER_PROTOCOL_VERSION, host: "wrong", capabilities: ["catalog", "handoff"], limits: { requestBytes: 32768, catalogBytes: 262144, bodyBytes: 16384 } }));
   await assert.rejects(spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(mismatch) }),
     (error) => error instanceof PeerConnectionLostError && error.failureClass === "initialize" && /host mismatch/.test(error.message));
   assert.equal(mismatch.child.killed, true);
@@ -142,7 +160,7 @@ test("peer-stdio admits only initialized exact methods and keeps handoff refusal
   const send = (message: Rpc): void => { input.write(`${JSON.stringify(message)}\n`); };
   send({ jsonrpc: "2.0", id: 1, method: "catalog/get", params: {} });
   send({ jsonrpc: "2.0", id: 2, method: "invented", params: {} });
-  send({ jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: 1, host: "studio" } });
+  send({ jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: PEER_PROTOCOL_VERSION, host: "studio" } });
   send({ jsonrpc: "2.0", id: 4, method: "catalog/get", params: {} });
   send({ jsonrpc: "2.0", id: 5, method: "handoff", params: handoff() });
   send({ jsonrpc: "2.0", id: 6, method: "catalog/get", params: {} }); send({ jsonrpc: "2.0", id: 7, method: "catalog/get", params: {} }); input.end(); await session.done; await immediate();
@@ -157,7 +175,7 @@ test("peer-stdio closes after an unexpected output failure without writing anoth
   const input = new PassThrough(), frames: string[] = [], callbacks: ((error?: Error) => void)[] = [];
   const output = { write: (frame: string, callback: (error?: Error) => void) => { frames.push(frame); callbacks.push(callback); return false; } } as unknown as Writable;
   const session = runPeerStdio({ localHost: "m5dev", input, output, handlers: { initialize: () => undefined, catalog, handoff: () => ({ accepted: true }) } });
-  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, host: "studio" } })}\n`);
+  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PEER_PROTOCOL_VERSION, host: "studio" } })}\n`);
   input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "catalog/get", params: {} })}\n`); input.end(); await immediate();
   assert.equal(frames.length, 1); callbacks.shift()?.(new Error("backpressure write failed")); await immediate();
   await session.done; assert.equal(frames.length, 1);

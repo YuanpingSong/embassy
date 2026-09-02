@@ -41,7 +41,7 @@ Embassy is built for one person, one macOS account, and agents you already trust
 
 ## Quickstart
 
-**Requirements:** macOS and Node.js 20+. Claude routes require peer protocol 1; Codex routes use Codex CLI tasks with the managed standalone App Server. A shell peer needs only the local CLI and its one-time token. The provider versions each release was tested with are listed in the [CHANGELOG](CHANGELOG.md); they are release evidence, never a runtime allowlist:
+**Requirements:** macOS and Node.js 20+. Claude routes require peer protocol 1; Codex routes use Codex CLI tasks with the managed standalone App Server. A shell peer needs only the local CLI and its one-time token:
 
 ```bash
 codex app-server daemon start
@@ -260,7 +260,7 @@ or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 
 - **Local broker, no listener.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. Embassy binds no TCP port and serves no HTTP.
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and per-operation artifact checks reduce mistakes, but are not a defense against code already running as your OS user.
-- **Tested versions are listed in the CHANGELOG; runtime is best effort.** Each release's CHANGELOG entry records the provider versions it was tested with. Runtime never reads that record and never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
+- **Runtime is best effort.** It never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
 - **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v5 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, or provider receipt. Raw provider frames stay memory-only. `embassy status` shows retained bodies; treat its output as sensitive as the messages themselves.

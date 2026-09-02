@@ -274,12 +274,14 @@ test("foreground assembly wires the local providers and the managed-socket holde
         return provider(() => events.push("close-peer"));
       },
       resolveCodexInstallation: async () => { throw installationError; },
-      createCodexSocketHolderInspector: () => ({ inspect: async (request) => {
-        inspections += 1;
-        assert.equal(request.socketPath, managedCodexControlSocketPath(SYNTHETIC_HOME));
-        const holder = process.pid + 1;
-        return { processes: [{ pid: holder, parentPid: 1 }], socketHolderPids: [holder] };
-      } }),
+      createCodexSocketHolderInspector: () => ({
+        socketHolders: async (socketPath) => {
+          inspections += 1;
+          assert.equal(socketPath, managedCodexControlSocketPath(SYNTHETIC_HOME));
+          return [process.pid + 1];
+        },
+        parentOf: async () => 1,
+      }),
       createService: (options) => {
         serviceOptions = options as unknown as Record<string, unknown>;
         return {
@@ -416,7 +418,8 @@ test("a real boot snapshot passes the strict status client and degrades Codex on
         throw new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
       },
       createCodexSocketHolderInspector: () => ({
-        inspect: async () => ({ processes: [{ pid: process.pid + 1, parentPid: 1 }], socketHolderPids: [process.pid + 1] }),
+        socketHolders: async () => [process.pid + 1],
+        parentOf: async () => 1,
       }),
     },
   );

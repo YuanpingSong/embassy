@@ -181,8 +181,7 @@ silently expanding the boundary through a test or hardening patch.
 - Keep runtime routing authority independent of provider version and build
   metadata. An explicit pair plus the exact owned route and session identity
   authorizes an attempt; current per-operation transport, strict wire, and
-  correlated-operation facts decide its result. The CHANGELOG records the
-  provider versions each release was tested with, but runtime never reads it.
+  correlated-operation facts decide its result.
 - Validate exact OS ownership, path, symlink, lease, state, and used-artifact
   generation boundaries for Embassy-owned or executed artifacts. Unsafe
   evidence there, or for Embassy callback, control, or state paths, may refuse

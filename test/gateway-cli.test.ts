@@ -1991,7 +1991,7 @@ test("peer-stdio sources initialization authority from the running broker", asyn
   });
   assert.equal(code, gatewayCliExitCodes.ok);
   assert.ok(handler);
-  await assert.rejects(Promise.resolve(handler.handlers.initialize({ protocolVersion: 1, host: "this-mac" })),
+  await assert.rejects(Promise.resolve(handler.handlers.initialize({ protocolVersion: 2, host: "this-mac" })),
     (error: unknown) => error instanceof PeerHandlerError && error.detail.code === -32000 &&
       error.detail.message === "Local broker refused peer authority");
 });
@@ -2012,7 +2012,7 @@ test("peer-stdio consumes its initialization catalog once, then returns to broke
     runPeerStdio: (options) => { handler = options; return { done: Promise.resolve(), close: () => undefined }; },
   });
   assert.equal(code, gatewayCliExitCodes.ok); assert.ok(handler);
-  await handler.handlers.initialize({ protocolVersion: 1, host: "this-mac" });
+  await handler.handlers.initialize({ protocolVersion: 2, host: "this-mac" });
   assert.equal(requests, 1);
   assert.deepEqual(await handler.handlers.catalog(), catalog); assert.equal(requests, 1);
   assert.deepEqual(await handler.handlers.catalog(), catalog); assert.equal(requests, 2);
