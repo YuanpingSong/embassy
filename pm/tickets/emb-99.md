@@ -232,3 +232,10 @@ no support-matrix ceremony, no site work beyond the stub.
   touching OS-boundary semantics (identity, locks, launchd, sockets)
   goes to Opus even when the brief looks complete. The adversarial
   read remains mandatory per slice regardless of tier.
+- 2026-09-02 Norm (from emb-108's red landing): a slice that adds
+  tests touching OS facilities (lockf, launchctl, chmod semantics,
+  process liveness) must state in its handoff which tests are
+  platform-bound and how CI's ubuntu legs are satisfied (injection
+  or an explicit skip with reason); the PM asks the adversarial
+  reader to check it. Lane branches do not run CI, so this is the
+  only guard before main.
