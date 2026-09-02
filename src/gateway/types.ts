@@ -651,4 +651,6 @@ export type GatewayStoreLimits = {
 export type GatewayStoreDependencies = {
   now?: () => Date; randomId?: () => string; renameStateFile?: (source: string, target: string) => Promise<void>;
   afterStateFileRename?: () => void | Promise<void>;
+  /** Controller-lock liveness probe; the default is `process.kill(pid, 0)`. */
+  isProcessAlive?: (pid: number) => boolean;
 };

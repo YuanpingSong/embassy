@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -11,9 +10,11 @@ import {
   realpath,
   rename as renameFile,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { test } from "node:test";
+import { BridgeError } from "../src/errors.js";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayConfig } from "../src/gateway/config.js";
@@ -76,6 +77,7 @@ async function fixture(
     renameStateFile?: (source: string, target: string) => Promise<void>;
     limits?: Partial<GatewayConfig["limits"]>;
     inboundMode?: GatewayConfig["inboundMode"];
+    isProcessAlive?: (pid: number) => boolean;
   }> = {},
 ): Promise<{
   root: string;
@@ -109,6 +111,9 @@ async function fixture(
     ...(dependencies.renameStateFile === undefined
       ? {}
       : { renameStateFile: dependencies.renameStateFile }),
+    ...(dependencies.isProcessAlive === undefined
+      ? {}
+      : { isProcessAlive: dependencies.isProcessAlive }),
   });
   return { root, stateDir, config, clock: testClock, store };
 }
@@ -1745,50 +1750,104 @@ test("a boot refused for out-of-bounds state leaves a planted stale file exactly
   assert.equal(await readFile(stalePath, "utf8"), "<html>stale</html>");
 });
 
-test("a controller lock left by a crash is recovered by pid liveness, whatever machine name wrote it", async () => {
-  const setup = await fixture();
-  await setup.store.initialize();
-  await setup.store.close();
+const LOCK_NAME = ".gateway-controller.lock";
+const lockBody = (owner: Readonly<Record<string, unknown>>): string =>
+  `${JSON.stringify({ schemaVersion: 1, token: "00000000-0000-4000-8000-00000000a11e", ...owner })}\n`;
 
-  // spawnSync reaps its child before returning, so this pid is certainly
-  // dead: the crash half of "crashed, then the machine was renamed".
-  const dead = spawnSync("/usr/bin/true").pid;
-  assert.equal(typeof dead, "number");
-  const lockPath = path.join(setup.stateDir, ".gateway-controller.lock");
-  await writeFile(
-    lockPath,
-    `${JSON.stringify({ schemaVersion: 1, pid: dead, hostname: "the-old-name.local", token: "00000000-0000-4000-8000-0000000d0ead" })}\n`,
-    { mode: 0o600 },
-  );
+// The four states a controller lock can be found in. Liveness is injected, so
+// none of these depend on a real pid that a real scheduler could reuse.
+test("case 1 of 4: a lock whose recorded pid is alive refuses, carrying the host and pid its hint prints", async () => {
+  for (const recorded of [os.hostname(), "the-old-name.local", 42]) {
+    const setup = await fixture({ isProcessAlive: () => true });
+    await setup.store.initialize();
+    await setup.store.close();
+    const lockPath = path.join(setup.stateDir, LOCK_NAME);
+    const planted = lockBody({ pid: 4242, hostname: recorded });
+    await writeFile(lockPath, planted, { mode: 0o600 });
 
-  const reopened = new GatewayStore(setup.config);
-  await reopened.initialize();
-  await reopened.close();
-  const entries = await readdir(setup.stateDir);
-  assert.ok(
-    entries.some((name) => name.startsWith(".gateway-controller.lock.stale-")),
-    entries.join(","),
-  );
+    await assert.rejects(
+      new GatewayStore(setup.config, { isProcessAlive: () => true }).initialize(),
+      (error: unknown) => {
+        assert.ok(error instanceof BridgeError);
+        assert.equal(error.code, "GATEWAY_STATE_IN_USE");
+        assert.equal(error.recoverable, true);
+        // Every live-pid branch carries the same bounded detail, including
+        // the same-machine one: pid numbers are reused there too.
+        assert.deepEqual(error.detail, {
+          host: typeof recorded === "string" ? recorded : "unrecorded",
+          pid: "4242",
+        });
+        return true;
+      },
+    );
+    assert.equal(await readFile(lockPath, "utf8"), planted);
+  }
 });
 
-test("a lock naming another machine with a live pid refuses, naming that host, pid, and remedy", async () => {
+test("case 2 of 4: an empty lock left between create and write is recovered as stale", async () => {
+  const setup = await fixture({ isProcessAlive: () => true });
+  await setup.store.initialize();
+  await setup.store.close();
+  const lockPath = path.join(setup.stateDir, LOCK_NAME);
+  await writeFile(lockPath, "", { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config, { isProcessAlive: () => true });
+  await reopened.initialize();
+  await reopened.close();
+  assert.ok((await readdir(setup.stateDir)).some((name) => name.startsWith(`${LOCK_NAME}.stale-`)));
+});
+
+test("case 3 of 4: an unparsable lock refuses as unverified and is left exactly as found", async () => {
   const setup = await fixture();
   await setup.store.initialize();
   await setup.store.close();
-  const lockPath = path.join(setup.stateDir, ".gateway-controller.lock");
-  const planted = `${JSON.stringify({ schemaVersion: 1, pid: process.pid, hostname: "the-old-name.local", token: "00000000-0000-4000-8000-00000000a11e" })}\n`;
+  const lockPath = path.join(setup.stateDir, LOCK_NAME);
+  const planted = "{not json at all\n";
   await writeFile(lockPath, planted, { mode: 0o600 });
 
   await assert.rejects(
     new GatewayStore(setup.config).initialize(),
-    (error: unknown) =>
-      error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_IN_USE" &&
-      error.message.includes("the-old-name.local") &&
-      error.message.includes(String(process.pid)) &&
-      error.message.includes(".gateway-controller.lock"),
+    (error: unknown) => error instanceof BridgeError &&
+      error.code === "GATEWAY_STATE_LOCK_UNVERIFIED" && !error.recoverable,
   );
-  // A refusal never touches the lock it could not claim.
   assert.equal(await readFile(lockPath, "utf8"), planted);
+});
+
+test("case 4 of 4: a lock whose recorded pid is dead is recovered, whatever machine name wrote it", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  const lockPath = path.join(setup.stateDir, LOCK_NAME);
+  await writeFile(lockPath, lockBody({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config, { isProcessAlive: () => false });
+  await reopened.initialize();
+  await reopened.close();
+  const moved = (await readdir(setup.stateDir)).filter((name) => name.startsWith(`${LOCK_NAME}.stale-`));
+  assert.equal(moved.length, 1);
+});
+
+test("recovered locks are kept for seven days and then swept, and fresh ones are never touched", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  const aged = path.join(setup.stateDir, `${LOCK_NAME}.stale-00000000-0000-4000-8000-000000000001`);
+  const fresh = path.join(setup.stateDir, `${LOCK_NAME}.stale-00000000-0000-4000-8000-000000000002`);
+  const unrelated = path.join(setup.stateDir, `${LOCK_NAME}.stale-not-a-uuid`);
+  for (const file of [aged, fresh, unrelated]) await writeFile(file, "{}\n", { mode: 0o600 });
+  // The store's clock is the authority for both, so an absolute old mtime is
+  // aged under it and the untouched ones are not.
+  const old = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(aged, old, old);
+  await utimes(unrelated, old, old);
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await reopened.close();
+  await assert.rejects(lstat(aged));
+  assert.equal(await readFile(fresh, "utf8"), "{}\n");
+  // Only this store's own recovery names are swept; anything else is litter we did not create.
+  assert.equal(await readFile(unrelated, "utf8"), "{}\n");
 });
 
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {

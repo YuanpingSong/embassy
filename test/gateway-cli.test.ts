@@ -27,6 +27,9 @@ import {
   runGatewayCli as runGatewayCliBase,
 } from "../src/gateway/cli.js";
 import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
+import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
+import { runGatewayServer as runGatewayServerBase } from "../src/gateway/server.js";
+import { GatewayStore } from "../src/gateway/store.js";
 import { PeerHandlerError } from "../src/gateway/peer-stdio.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
@@ -1151,6 +1154,83 @@ test("register-codex against a broker's real durable host passes CLI validation 
   );
 });
 
+const inertLease = (): GatewayInstanceLease => ({
+  lost: new Promise<void>(() => undefined),
+  isLost: () => false,
+  close: async () => undefined,
+});
+
+// A refused boot's BridgeError message never reaches a terminal by design, so
+// these run the real store's real refusals through `embassy serve` and assert
+// what an operator actually sees. Only the host-wide lease is stubbed, so
+// nothing outside the temporary state directory is touched.
+test("a refused serve prints the remedy for each state-directory refusal it can hit", async (t) => {
+  const marker = "agent-embassy-state-v1\n";
+  const lock = (owner: Readonly<Record<string, unknown>>): string =>
+    `${JSON.stringify({ schemaVersion: 1, token: "00000000-0000-4000-8000-00000000a11e", ...owner })}\n`;
+  const cases = [
+    {
+      name: "a live pid holds the lock",
+      plant: async (dir: string) => {
+        await writeFile(path.join(dir, ".agent-embassy-state"), marker, { mode: 0o600 });
+        await writeFile(path.join(dir, ".gateway-controller.lock"),
+          lock({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
+      },
+      alive: true,
+      exitCode: gatewayCliExitCodes.unavailable,
+      code: "GATEWAY_STATE_IN_USE",
+      hint: (dir: string) =>
+        `another broker may own ${dir}: if \`embassy serve\` is not running anywhere, the lock ${dir}/.gateway-controller.lock is stale (recorded host the-old-name.local, pid 4242) — remove it and start again.`,
+      kind: "[embassy] gateway unavailable.\n",
+    },
+    {
+      name: "the lock cannot be read as a record",
+      plant: async (dir: string) => {
+        await writeFile(path.join(dir, ".agent-embassy-state"), marker, { mode: 0o600 });
+        await writeFile(path.join(dir, ".gateway-controller.lock"), "{not json at all\n", { mode: 0o600 });
+      },
+      alive: true,
+      exitCode: gatewayCliExitCodes.invalidInput,
+      code: "GATEWAY_STATE_LOCK_UNVERIFIED",
+      hint: (dir: string) =>
+        `the lock ${dir}/.gateway-controller.lock cannot be read as a controller record; if \`embassy serve\` is not running anywhere, remove that file and start again.`,
+      kind: "[embassy] request rejected.\n",
+    },
+    {
+      name: "nodes.json changed under the starting broker",
+      plant: async (dir: string) => {
+        await writeFile(path.join(dir, "nodes.json"), '{"version":1,"host":"other-host","nodes":[]}\n', { mode: 0o600 });
+      },
+      alive: false,
+      exitCode: gatewayCliExitCodes.invalidInput,
+      code: "GATEWAY_NODE_INVENTORY_CHANGED",
+      hint: (dir: string) => `nodes.json at ${dir} changed while the broker was starting; start again.`,
+      kind: "[embassy] request rejected.\n",
+    },
+  ] as const;
+
+  for (const current of cases) {
+    const stateDir = await realpath(await mkdtemp("/tmp/embassy-cli-serve-"));
+    await chmod(stateDir, 0o700);
+    t.after(async () => rm(stateDir, { recursive: true, force: true }));
+    await current.plant(stateDir);
+
+    const stdout = capture(), stderr = capture();
+    const exitCode = await runGatewayCliBase(["serve"], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+      runServer: (options) => runGatewayServerBase(options, {
+        loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
+        acquireInstanceLease: async () => inertLease(),
+        createStore: (config) => new GatewayStore(config, { isProcessAlive: () => current.alive }),
+        createService: () => { throw new Error("startup must refuse before any service is built"); },
+      }),
+    });
+    assert.equal(exitCode, current.exitCode, current.name);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, current.code, current.name);
+    assert.equal(stderr.chunks.join(""), `${current.kind}[embassy] ${current.hint(stateDir)}\n`, current.name);
+  }
+});
+
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
   const stdout = capture();
   const stderr = capture();
@@ -2270,7 +2350,7 @@ test("oversized stdin renders its hint while generic input rejection does not", 
   }
 });
 
-test("every alias-carrying route command rejects another host's alias, naming the file it read", async () => {
+test("every alias-carrying route command rejects another host's alias, naming the file it read", async (t) => {
   // Every command that names a route this machine owns, in both directions.
   // pair and select take arbitrary peer endpoints and are deliberately absent.
   const cases: readonly (readonly string[])[] = [
@@ -2281,13 +2361,19 @@ test("every alias-carrying route command rejects another host's alias, naming th
     ["unregister-peer", "--alias", "peer-x@wrong-host", "--token-stdin"],
     ["await", "--alias", "peer-x@wrong-host", "--token-stdin"],
   ];
+  // A real nodes.json read by the real loader: the hint names the file it
+  // actually read, so the assertion cannot pass against a directory that has none.
+  const stateDir = await realpath(await mkdtemp("/tmp/embassy-cli-arms-"));
+  await chmod(stateDir, 0o700);
+  t.after(async () => rm(stateDir, { recursive: true, force: true }));
+  await writeFile(path.join(stateDir, "nodes.json"), '{"version":1,"host":"this-mac","nodes":[]}\n', { mode: 0o600 });
   const expected =
-    "[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac (from /private/fake-state/nodes.json); found @wrong-host\n";
+    `[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac (from ${stateDir}/nodes.json); found @wrong-host\n`;
   for (const argv of cases) {
     const stdout = capture(), stderr = capture();
     const codexSide = argv[0]!.endsWith("-codex");
-    const exitCode = await runGatewayCli(argv, {
-      env: { EMBASSY_STATE_DIR: "/private/fake-state", ...(codexSide ? { CODEX_THREAD_ID: THREAD_ID } : {}) },
+    const exitCode = await runGatewayCliBase(argv, {
+      env: { EMBASSY_STATE_DIR: stateDir, ...(codexSide ? { CODEX_THREAD_ID: THREAD_ID } : {}) },
       stdin: Readable.from([Buffer.from(`${PEER_TOKEN}\n`)]),
       stdout, stderr,
       validateControlSocket: async () => { throw new Error("must not reach the socket"); },
@@ -2317,7 +2403,7 @@ test("a host identity that is still the transient default says so, and where it 
   assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_ARGUMENTS");
   assert.equal(
     stderr.chunks.join(""),
-    `[embassy] request rejected.\n[embassy] no nodes.json at ${stateDir} — this machine defaults to @fixture-host until a broker has started; found @wrong-host\n`,
+    `[embassy] request rejected.\n[embassy] no nodes.json has been written at ${stateDir} yet — a broker writes it on first start; until then this machine defaults to @fixture-host; found @wrong-host\n`,
   );
 });
 

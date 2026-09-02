@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, open, realpath, unlink } from "node:fs/promises";
+import { link, lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import path from "node:path";
 
@@ -62,16 +62,34 @@ const inaccessible = (error: unknown, message: string): never => {
  * class shared with every other access check here; everything else is a
  * recoverable write failure naming its errno and the path it failed on.
  */
-const writeFailed = (error: unknown, filePath: string): never => {
+const writeFailed = (error: unknown, filePath: string, what = "could not be durably written"): never => {
   if (isErrno(error, "EPERM") || isErrno(error, "EACCES"))
     throw new BridgeError("CONTROL_CONNECT_DENIED", "Local policy denied access to the Embassy state directory.", true);
   const code = isErrnoShape(error) ? error.code ?? "UNKNOWN" : "UNKNOWN";
   throw new BridgeError(
     "GATEWAY_STATE_WRITE_FAILED",
-    `nodes.json could not be durably written: ${code} at ${filePath}.`,
+    `nodes.json ${what}: ${code} at ${filePath}.`,
     true,
   );
 };
+/**
+ * Hard links are the no-clobber install, but exFAT, SMB and other homes
+ * either refuse them (ENOTSUP/EOPNOTSUPP/EPERM) or cannot cross into the
+ * target (EXDEV). Fall back to lstat-then-rename there: the check is a
+ * best-effort no-clobber rather than an atomic one, which is the most those
+ * filesystems can offer, and a first boot on them still succeeds.
+ */
+const LINK_UNSUPPORTED = ["ENOTSUP", "EOPNOTSUPP", "EPERM", "EXDEV"] as const;
+async function installByRename(tempPath: string, filePath: string): Promise<boolean> {
+  try {
+    await lstat(filePath);
+    return false;
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+  }
+  await rename(tempPath, filePath);
+  return true;
+}
 
 function assertOwned(uid: number, getuid: () => number | undefined): void {
   const expected = getuid();
@@ -246,13 +264,9 @@ async function writeDefaultInventoryFile(
       await doLink(tempPath, filePath);
       installed = true;
     } catch (error) {
-      if (!isErrno(error, "EEXIST")) throw error;
-    }
-    const directory = await openFile(stateDir, constants.O_RDONLY);
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
+      if (isErrno(error, "EEXIST")) installed = false;
+      else if (LINK_UNSUPPORTED.some((code) => isErrno(error, code))) installed = await installByRename(tempPath, filePath);
+      else throw error;
     }
   } catch (error) {
     return writeFailed(error, filePath);
@@ -261,6 +275,18 @@ async function writeDefaultInventoryFile(
     // the temp link is dropped after a success, a failure, or a lost race.
     await handle?.close().catch(() => undefined);
     await unlink(tempPath).catch(() => undefined);
+  }
+  // The file exists now; only the directory entry is still unflushed, so a
+  // failure here says exactly that rather than claiming nothing was written.
+  try {
+    const directory = await openFile(stateDir, constants.O_RDONLY);
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } catch (error) {
+    return writeFailed(error, stateDir, "was written but the Embassy state directory could not be synced");
   }
   if (installed) process.stderr.write(`[embassy] wrote nodes.json naming this host ${host} in ${stateDir}\n`);
 }
@@ -275,7 +301,9 @@ async function writeDefaultInventoryFile(
  * becomes the file's from this point on, never the transient in-memory
  * default from defaultInventory() above. A write failure refuses — denied
  * as CONTROL_CONNECT_DENIED, anything else as GATEWAY_STATE_WRITE_FAILED —
- * so a boot never runs on an identity that was never durably recorded.
+ * and a reload that comes back defaulted (the file removed under us) refuses
+ * as GATEWAY_NODE_INVENTORY_CHANGED, so a boot never runs on an identity
+ * that is not the one on disk.
  *
  * The CLI never calls this. Its own transient default (defaultInventory)
  * stays live only for the narrow window before any broker has ever booted
@@ -302,7 +330,17 @@ export async function ensureGatewayNodeInventoryFile(
       dependencies.open ?? open, dependencies.link ?? link, dependencies.randomId ?? randomUUID,
     );
   }
-  return loadGatewayNodeInventory(stateDir, dependencies);
+  const reloaded = await loadGatewayNodeInventory(stateDir, dependencies);
+  // A defaulted reload means the file is absent again: it was removed between
+  // the install and this read. Running would put the broker back on the
+  // transient identity this function exists to retire, so it refuses.
+  if (isDefaultedGatewayNodeInventory(reloaded)) {
+    throw new BridgeError(
+      "GATEWAY_NODE_INVENTORY_CHANGED",
+      `nodes.json at ${filePath} is absent again immediately after it was installed; it was removed while the broker was starting.`,
+    );
+  }
+  return reloaded;
 }
 
 function isErrno(error: unknown, code: string): boolean {

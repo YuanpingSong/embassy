@@ -63,15 +63,27 @@ does not mutate the state file. There is no conversion command or automatic
 recovery path.
 
 A running broker holds `.gateway-controller.lock` in the state directory,
-recording its pid and the machine name at the time it started. A second start
-refuses with `GATEWAY_STATE_IN_USE`. Recovery is decided by that pid alone:
-once no process holds it the lock is stale, and the next start moves it aside
-by itself — the recorded machine name is informational, so renaming the machine
-never wedges the directory. The one case that still refuses after a crash is a
-lock naming another machine and a pid that happens to be alive on this one; the
-message names both. If that pid is not an Embassy broker, remove
-`.gateway-controller.lock` from the state directory and start again. Never
-delete it while a broker is running.
+recording its pid and the machine name at the time it started. What a later
+start does with a lock it finds depends only on that pid:
+
+- **A live pid** — refuses with `GATEWAY_STATE_IN_USE`. Embassy cannot tell a
+  running broker from an unrelated process that inherited the pid number, and
+  that is equally true of a lock written under this machine's earlier name, so
+  it never assumes. The hint it prints names the recorded host and pid: if
+  `embassy serve` is not running anywhere, that lock is stale — remove
+  `.gateway-controller.lock` and start again.
+- **A dead pid** — recovered automatically, whatever machine name the lock
+  records. Renaming a machine cannot wedge its own state directory.
+- **An empty lock**, left by a crash between creating the file and writing it
+  — recovered automatically; it names no owner to check.
+- **A lock that is neither empty nor a readable record** — refuses with
+  `GATEWAY_STATE_LOCK_UNVERIFIED` and is left exactly as found. The hint names
+  the file; remove it once you have confirmed no broker is running.
+
+A recovered lock is renamed to `.gateway-controller.lock.stale-<uuid>` rather
+than deleted, so a crash stays diagnosable; a later start removes those once
+they are more than seven days old. Never delete a lock while a broker is
+running.
 
 ## Advanced bounds
 

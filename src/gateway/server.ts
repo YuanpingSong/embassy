@@ -168,10 +168,15 @@ export async function runGatewayServer(
     // raced this boot can make them differ, and a config built on the losing
     // identity is never run: it refuses instead.
     inventory = await guarded(d.ensureNodeInventoryFile(config.stateDir, inventory.host));
-    if (inventory.host !== localHost) {
+    // Host and nodes both, because `allowedHosts` and `peerNodes` are derived
+    // from `nodes`: a config that agrees on the host but not the peer list is
+    // just as wrong as one that disagrees on the host.
+    if (inventory.host !== localHost ||
+      inventory.nodes.length !== config.peerNodes.length ||
+      inventory.nodes.some((node, index) => node !== config.peerNodes[index])) {
       throw serverError(
-        "GATEWAY_HOST_IDENTITY_CHANGED",
-        `The durable host identity in ${path.join(config.stateDir, "nodes.json")} is ${inventory.host}, but this start was configured for ${localHost}. Start Embassy again so it reads that identity.`,
+        "GATEWAY_NODE_INVENTORY_CHANGED",
+        `${path.join(config.stateDir, "nodes.json")} changed while the broker was starting: it now names host ${inventory.host} with nodes [${inventory.nodes.join(", ")}], but this start was configured for host ${localHost} with nodes [${config.peerNodes.join(", ")}].`,
       );
     }
     const runtime = await guarded(Promise.resolve().then(() => d.attestClaudeRuntime()));

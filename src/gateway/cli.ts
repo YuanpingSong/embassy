@@ -138,9 +138,17 @@ const CLI_HINT = {
   aliasHostMismatch:
     "aliases on this machine end with @{localHost} (from {stateDir}/nodes.json); found @{given}",
   aliasHostDefaulted:
-    "no nodes.json at {stateDir} — this machine defaults to @{localHost} until a broker has started; found @{given}",
+    "no nodes.json has been written at {stateDir} yet — a broker writes it on first start; until then this machine defaults to @{localHost}; found @{given}",
   controlSocketMissing:
     "no broker is listening at {stateDir}; start it with `embassy serve` under this same OS account, or verify EMBASSY_STATE_DIR is not scrubbed or misdirected (for example by a sandboxed task's HOME).",
+  stateInUse:
+    "another broker may own {stateDir}: if `embassy serve` is not running anywhere, the lock {stateDir}/.gateway-controller.lock is stale (recorded host {host}, pid {pid}) — remove it and start again.",
+  stateInUseUnrecorded:
+    "another broker may own {stateDir}: if `embassy serve` is not running anywhere, the lock {stateDir}/.gateway-controller.lock is stale — remove it and start again.",
+  stateLockUnverified:
+    "the lock {stateDir}/.gateway-controller.lock cannot be read as a controller record; if `embassy serve` is not running anywhere, remove that file and start again.",
+  nodeInventoryChanged:
+    "nodes.json at {stateDir} changed while the broker was starting; start again.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -519,6 +527,38 @@ function writeStateResetHint(stderr: Writable, code: string): void {
     stderr.write(`[embassy] ${CLI_HINT.stateResetRequired}\n`);
   }
 }
+/**
+ * A BridgeError's own message never reaches a terminal — stderr carries only
+ * fixed lines and these hints, so nothing private can escape through a
+ * message. Any remedy an operator must actually read therefore lives here,
+ * keyed by code and interpolating only the resolved state directory and the
+ * bounded values the error carried in `detail`.
+ */
+const BRIDGE_ERROR_HINTS: Readonly<Record<string, CliFaultHint>> = {
+  GATEWAY_STATE_IN_USE: "stateInUse",
+  GATEWAY_STATE_LOCK_UNVERIFIED: "stateLockUnverified",
+  GATEWAY_NODE_INVENTORY_CHANGED: "nodeInventoryChanged",
+};
+/** The state directory a hint should name, resolved the same way every command resolves it. */
+function hintStateDir(env: NodeJS.ProcessEnv): string {
+  try {
+    return path.resolve(defaultGatewayStateDir(env));
+  } catch {
+    return "the Embassy state directory";
+  }
+}
+function writeBridgeErrorHint(stderr: Writable, error: BridgeError, env: NodeJS.ProcessEnv): void {
+  const hint = BRIDGE_ERROR_HINTS[error.code];
+  if (hint === undefined) return;
+  const detail = error.detail;
+  const named = hint === "stateInUse" && (detail?.host === undefined || detail.pid === undefined)
+    ? "stateInUseUnrecorded" : hint;
+  stderr.write(`[embassy] ${renderHint(named, {
+    stateDir: hintStateDir(env),
+    ...(detail?.host === undefined ? {} : { host: detail.host }),
+    ...(detail?.pid === undefined ? {} : { pid: detail.pid }),
+  })}\n`);
+}
 function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
 }
@@ -756,6 +796,7 @@ export async function runGatewayCli(
         retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
       writeStateResetHint(stderr, error.code);
+      writeBridgeErrorHint(stderr, error, env);
       if (error.code === "CONTROL_CONNECT_DENIED") stderr.write(`[embassy] ${
         CLI_HINT[command === "serve" ? "stateAccessDenied" : "controlConnectDenied"]}\n`);
       return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;

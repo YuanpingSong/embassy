@@ -1114,42 +1114,51 @@ test("a real boot writes nodes.json, and a later hostname change never moves tha
   assert.equal(await readFile(filePath, "utf8"), written);
 });
 
-test("a nodes.json that appears after the pre-lock read refuses instead of running on a stale identity", async (t) => {
-  const stateDir = await realpath(await mkdtemp("/tmp/embassy-server-race-"));
-  await chmod(stateDir, 0o700);
-  t.after(async () => rm(stateDir, { recursive: true, force: true }));
-  // The file a writer installed while this boot still believed the directory
-  // was empty; the boot's config was already built on the transient default.
-  await writeFile(path.join(stateDir, "nodes.json"), '{"version":1,"host":"other-host","nodes":[]}\n', { mode: 0o600 });
+test("a nodes.json that changed under a starting broker refuses, on the host and on the peer list", async (t) => {
+  // Both halves of the identity: `allowedHosts` and `peerNodes` come from
+  // `nodes`, so a config that agrees on the host but not the peers is just as
+  // stale as one that disagrees on the host.
+  const cases = [
+    { file: '{"version":1,"host":"other-host","nodes":[]}\n', names: ["other-host", "injected-host"] },
+    { file: '{"version":1,"host":"injected-host","nodes":["peer-a"]}\n', names: ["peer-a", "injected-host"] },
+  ] as const;
+  for (const current of cases) {
+    const stateDir = await realpath(await mkdtemp("/tmp/embassy-server-race-"));
+    await chmod(stateDir, 0o700);
+    t.after(async () => rm(stateDir, { recursive: true, force: true }));
+    // The file a writer installed while this boot still believed the
+    // directory held nothing; the boot's config was already built.
+    await writeFile(path.join(stateDir, "nodes.json"), current.file, { mode: 0o600 });
 
-  const stores: GatewayStore[] = [];
-  await assert.rejects(
-    runGatewayServerBase(
-      {
-        env: { EMBASSY_STATE_DIR: stateDir },
-        onReady: () => { throw new Error("a mismatched identity must never reach ready"); },
-      },
-      {
-        loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
-        createStore: (config) => {
-          const store = new GatewayStore(config);
-          stores.push(store);
-          return store;
+    const stores: GatewayStore[] = [];
+    await assert.rejects(
+      runGatewayServerBase(
+        {
+          env: { EMBASSY_STATE_DIR: stateDir },
+          onReady: () => { throw new Error("a changed inventory must never reach ready"); },
         },
-        acquireInstanceLease: async () => instanceLease(() => undefined),
-        attestClaudeRuntime: async () => runtime(),
-        createClaudeProvider: () => provider(() => undefined),
-        createCodexOperation: () => statelessOperation(),
-        createCodexObservationFactory: async () => factory(() => undefined),
-        createCodexProvider: () => provider(() => undefined),
-        createService: () => { throw new Error("startup must refuse before any service is built"); },
-      },
-    ),
-    (error: unknown) => error instanceof BridgeError &&
-      error.code === "GATEWAY_HOST_IDENTITY_CHANGED" && !error.recoverable &&
-      error.message.includes("other-host") && error.message.includes("injected-host") &&
-      error.message.includes(path.join(stateDir, "nodes.json")),
-  );
-  // The refused boot released the controller lock it took.
-  for (const store of stores) await store.close().catch(() => undefined);
+        {
+          loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
+          createStore: (config) => {
+            const store = new GatewayStore(config);
+            stores.push(store);
+            return store;
+          },
+          acquireInstanceLease: async () => instanceLease(() => undefined),
+          attestClaudeRuntime: async () => runtime(),
+          createClaudeProvider: () => provider(() => undefined),
+          createCodexOperation: () => statelessOperation(),
+          createCodexObservationFactory: async () => factory(() => undefined),
+          createCodexProvider: () => provider(() => undefined),
+          createService: () => { throw new Error("startup must refuse before any service is built"); },
+        },
+      ),
+      (error: unknown) => error instanceof BridgeError &&
+        error.code === "GATEWAY_NODE_INVENTORY_CHANGED" && !error.recoverable &&
+        current.names.every((name) => error.message.includes(name)) &&
+        error.message.includes(path.join(stateDir, "nodes.json")),
+    );
+    // The refused boot released the controller lock it took.
+    for (const store of stores) await store.close().catch(() => undefined);
+  }
 });
