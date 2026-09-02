@@ -221,3 +221,8 @@ no support-matrix ceremony, no site work beyond the stub.
   free `check`) follow 104 sequentially; emb-109 last. Gate reviews
   for 104 (adversarial + taste) run concurrently. Shared rate limits
   are the real bottleneck, so no more than three engineers at once.
+- 2026-09-02 Charter amendment (emb-106 gate): "nodes.json optional"
+  now means the broker WRITES it on first boot from the hostname
+  default; identity is never transient past first boot. Lesson: a
+  default must be stable, not merely right — emb-89's "no default"
+  was wrong about the remedy, not about the hazard.
