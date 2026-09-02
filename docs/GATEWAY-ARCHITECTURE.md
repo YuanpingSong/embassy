@@ -665,8 +665,11 @@ and it is a local containment boundary, not proof of a trusted agent process.
 Every mutation additionally checks route ownership, exact
 thread/session generation, source alias, bounds, and conversation state. A name
 currently shared by more than one live Claude session is refused with
-`PEER_ALIAS_COLLISION` inside the send that addressed it, whether by name or by
-UUID; the broker never resolves an ambiguous name by picking first.
+`PEER_ALIAS_COLLISION` inside the send that addressed it BY NAME; the broker
+never resolves an ambiguous name by picking first. The fence is a fence on
+names only: a session UUID is unambiguous, so a UUID selector still reaches its
+session, and a sender is never fenced by its own display name because its
+identity was attested rather than typed.
 
 ## Codex connectors and remote hosts
 

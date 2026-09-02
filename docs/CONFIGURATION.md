@@ -35,8 +35,8 @@ object shape is
 omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
 node is the fixed SSH destination for `embassy peer-stdio`. To adopt
 federation later, edit the existing file and add peers to `nodes` — keep
-`host` exactly as it already reads; every durable record (routes, consent
-edges, retained bodies) is keyed by that value, so renaming `host` requires
+`host` exactly as it already reads; every durable record (routes and
+retained bodies) is keyed by that value, so renaming `host` requires
 the [private state reset](#private-state-reset) below, the same as any other
 identity change.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.

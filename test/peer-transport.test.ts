@@ -144,6 +144,24 @@ test("peer client rejects recursive, noncanonical, and duplicate catalog authori
   await assert.rejects(duplicateClient.catalog(), /canonical projection/); assert.equal(duplicate.child.killed, true);
 });
 
+test("a result this build cannot decode is a protocol mismatch, not a tunnel fault", async () => {
+  // A pre-emb-104 node still answers `catalog/get` with `consentEdges`. It is
+  // reachable and honest; this build simply cannot read it. The operator must
+  // be told to upgrade the node, not to debug SSH.
+  const stale = initializedPeer((message, remote) => { if (message.method === "catalog/get")
+    remote.result(message, { ...catalog(), consentEdges: [] }); });
+  const client = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(stale) });
+  await assert.rejects(client.catalog(),
+    (error: unknown) => error instanceof PeerConnectionLostError && error.failureClass === "protocol");
+  assert.equal(stale.child.killed, true);
+
+  const staleHandoff = initializedPeer((message, remote) => { if (message.method === "handoff")
+    remote.result(message, { accepted: true, edgeRef: "edge_x" }); });
+  const handoffClient = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(staleHandoff) });
+  await assert.rejects(handoffClient.prepareHandoff(handoff()).perform(),
+    (error: unknown) => error instanceof PeerConnectionLostError && error.failureClass === "protocol");
+});
+
 class FakeTimers {
   readonly callbacks = new Map<NodeJS.Timeout, () => void>(); cleared = 0; unrefed = 0;
   readonly setTimeout = ((callback: () => void) => { const timer = { unref: () => { this.unrefed++; } } as unknown as NodeJS.Timeout;

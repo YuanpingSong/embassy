@@ -1080,6 +1080,71 @@ export class GatewayStore {
       return { installed: priorAlias !== replacement.alias, settlements };
     });
   }
+  /**
+   * The refusal half of admission, without the write. A send to a Claude
+   * session that has no route yet would otherwise install one — displacing
+   * another session and settling its queued work — on its way to being
+   * refused for its own reasons: too large, past the deadline window, rate
+   * limited, or into a full queue. Callers that are about to materialize a
+   * route run this first and materialize only if it returns.
+   *
+   * The refusal is still journaled, because a rejection is a fact about a real
+   * attempt; nothing else is written, and the authoritative checks still run
+   * inside `enqueueMessage` itself. `dedupeKey` is optional: a first send's key
+   * is broker-generated and cannot collide, and omitting it keeps this from
+   * inventing one to test against.
+   */
+  async assertEnqueueAdmissible(
+    input: Readonly<{
+      sourceAlias: string; targetAlias: string; direction: MessageDirection;
+      sourceRegistrationId: string; body: string; dedupeKey?: string;
+      conversationIdSuffix?: string; deadlineAt?: string; steer?: true;
+    }>,
+  ): Promise<void> {
+    const bytes = Buffer.byteLength(typeof input.body === "string" ? input.body : "", "utf8");
+    const refusal = await this.read((state) => {
+      const now = this.now();
+      if (bytes > this.config.limits.maxMessageBytes) return "MESSAGE_TOO_LARGE" as const;
+      const deadlineAt = input.deadlineAt ??
+        new Date(now.getTime() + this.config.limits.messageDeadlineMs).toISOString();
+      if (!isIsoTimestamp(deadlineAt) || Date.parse(deadlineAt) <= now.getTime() ||
+        Date.parse(deadlineAt) > now.getTime() + this.config.limits.messageDeadlineMs) {
+        return "INVALID_DEADLINE" as const;
+      }
+      // Read-only rate probe: the real enqueue consumes the token, this only
+      // asks whether one is available.
+      const bucket = state.rateBuckets.find((row) => row.sourceAlias === input.sourceAlias);
+      const windowOpen = bucket === undefined ||
+        now.getTime() - Date.parse(bucket.windowStartedAt) >= this.config.limits.rateWindowMs;
+      if (windowOpen
+        ? state.rateBuckets.filter((row) => row.sourceAlias !== input.sourceAlias).length >=
+          this.config.limits.maxRoutes
+        : bucket.count >= this.config.limits.rateLimitPerRoute) {
+        return "GATEWAY_RATE_LIMITED" as const;
+      }
+      const active = state.messages.filter((message) => message.state.phase !== "terminal");
+      if (active.length >= this.config.limits.maxQueueMessages ||
+        active.filter((message) => message.targetAlias === input.targetAlias).length >=
+          this.config.limits.maxQueueMessagesPerRoute ||
+        state.accounting.queuedBytes + bytes > this.config.limits.maxQueueBytes) {
+        return "GATEWAY_QUEUE_FULL" as const;
+      }
+      return undefined;
+    });
+    if (refusal === undefined) return;
+    await this.mutate((state, now) => {
+      this.recordRejection(state, { sourceAlias: input.sourceAlias, targetAlias: input.targetAlias,
+        direction: input.direction, sourceRegistrationId: input.sourceRegistrationId,
+        targetRegistrationId: input.sourceRegistrationId },
+      bytes, now, refusal, input);
+    });
+    throw new BridgeError(refusal,
+      refusal === "MESSAGE_TOO_LARGE" ? "The message exceeds the configured byte bound."
+        : refusal === "INVALID_DEADLINE" ? "The message deadline must fall inside the configured delivery window."
+          : refusal === "GATEWAY_RATE_LIMITED" ? "The source exceeded the bounded gateway rate window."
+            : "The bounded gateway queue is full.",
+      refusal === "GATEWAY_RATE_LIMITED" || refusal === "GATEWAY_QUEUE_FULL");
+  }
   async enqueueMessage(
     input: EnqueueMessageInput,
   ): Promise<EnqueueMessageResult> {

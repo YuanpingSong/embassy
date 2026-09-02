@@ -27,6 +27,7 @@ import { peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./
 import { GatewayStore } from "./store.js";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
+  directionId,
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
   gatewayRegistrationIngressPrefixes,
@@ -261,7 +262,8 @@ function decisionFor(error: unknown, peerPrincipal = false): Extract<GatewayDeci
   if (error.code.includes("UNAVAILABLE") || error.code.includes("OFFLINE") || error.code.includes("UNOBSERVED")) {
     return { accepted: false, code: "unavailable" };
   }
-  if ((peerPrincipal && error.code === "ROUTE_UNREGISTERED") || error.code.includes("MISMATCH") || error.code.includes("ADDRESS")) {
+  if ((peerPrincipal && error.code === "ROUTE_UNREGISTERED") || error.code.includes("MISMATCH") ||
+    error.code.includes("CHANGED") || error.code.includes("ADDRESS")) {
     return { accepted: false, code: "route_mismatch" };
   }
   return { accepted: false, code: "rejected" };
@@ -276,6 +278,20 @@ function sendRefusal(error: unknown, peerPrincipal = false): Extract<GatewaySend
   const decision = decisionFor(error, peerPrincipal);
   const reason = error instanceof BridgeError && SAFE_CODE.test(error.code) ? error.code : undefined;
   return { accepted: false, code: decision.code, ...(reason === undefined ? {} : { reason }) };
+}
+
+/**
+ * A grammar-valid alias for a session that cannot have the name it discovered
+ * under, because a live session already holds it. The suffix is derived from
+ * the session's own route handle, so it is stable across sends, and it is a
+ * hash rather than the handle itself: a native session UUID must never enter a
+ * public alias.
+ */
+function disambiguatedAlias(alias: string, routeHandle: string): string {
+  const at = alias.lastIndexOf("@");
+  const name = alias.slice(0, at), host = alias.slice(at + 1);
+  const suffix = createHash("sha256").update(routeHandle).digest("hex").slice(0, 8);
+  return `${name.slice(0, 32 - suffix.length - 1)}-${suffix}@${host}`;
 }
 
 function sameBinding(left: LogicalRouteBinding, right: LogicalRouteBinding): boolean {
@@ -994,6 +1010,31 @@ export class GatewayService {
   }
 
   /**
+   * The name this session may take. A name belongs to one route at a time, so
+   * when another Claude route already holds it and THAT route's session is
+   * still live, this session takes a disambiguated name rather than displacing
+   * a working session and cancelling its queued work. Twins that share a
+   * display name therefore both keep routes and both stay reachable by UUID;
+   * only a route whose session is actually gone is displaced.
+   */
+  private claimableAlias(
+    candidate: Candidate, routes: readonly GatewayPrivateRouteInspection[],
+  ): string {
+    const holder = routes.find((route) =>
+      route.alias === candidate.alias &&
+      route.binding.provider === "claude" &&
+      !(route.binding.hostId === candidate.adapter.identity.hostId &&
+        route.binding.routeHandle === candidate.routeHandle));
+    if (holder === undefined) return candidate.alias;
+    const holderIsLive = [...this.candidates.values()].some((row) =>
+      row.adapter.identity.hostId === holder.binding.hostId &&
+      row.routeHandle === holder.binding.routeHandle);
+    return holderIsLive
+      ? disambiguatedAlias(candidate.alias, candidate.routeHandle)
+      : candidate.alias;
+  }
+
+  /**
    * Installs (or brings up to date) the route of one discovered Claude
    * session. The adapter pins the session's route handle, the workspace
    * check keeps deliberately broad workspaces out, and the store reuses the
@@ -1001,7 +1042,7 @@ export class GatewayService {
    * re-anchored or renamed session keeps its identity and in-flight
    * conversations. Any Claude route the install displaced is forgotten and
    * released at the adapter; its work was settled `ENDPOINT_RETIRED` by the
-   * store.
+   * store — and only a route whose own session is gone is ever displaced.
    */
   private async installClaudeRoute(candidate: Candidate): Promise<GatewayPrivateRouteInspection> {
     const adapter = candidate.adapter;
@@ -1014,13 +1055,14 @@ export class GatewayService {
     const before = (await this.store.listLogicalRoutes()).filter(
       (route) => route.binding.provider === "claude",
     );
+    const alias = this.claimableAlias(candidate, before);
     const existing = before.find(
       (route) =>
         route.binding.hostId === adapter.identity.hostId &&
         route.binding.routeHandle === chosen.routeHandle,
     );
     const input: RegisterRouteInput = {
-      alias: candidate.alias,
+      alias,
       binding: {
         provider: "claude",
         hostId: adapter.identity.hostId,
@@ -1048,15 +1090,15 @@ export class GatewayService {
         this.renameConversationCoordinates(prior.alias, retained.alias, prior.binding.registrationId);
       }
     }
-    const installed = (await this.store.inspectPrivateRoute(candidate.alias))!;
+    const installed = (await this.store.inspectPrivateRoute(alias))!;
     this.observeRoute(installed);
-    this.routeObservations.set(candidate.alias, {
+    this.routeObservations.set(alias, {
       route: installed.binding,
       state: chosen.state,
       observedAt: this.now().toISOString(),
     });
     if (result.installed) this.revision += 1;
-    this.kick(candidate.alias);
+    this.kick(alias);
     return installed;
   }
 
@@ -1155,7 +1197,7 @@ export class GatewayService {
       routed !== undefined &&
       routed.binding.hostId === candidate.adapter.identity.hostId &&
       routed.binding.routeHandle === candidate.routeHandle &&
-      routed.alias === candidate.alias
+      routed.alias === this.claimableAlias(candidate, await this.store.listLogicalRoutes())
     ) return routed;
     return await this.installClaudeRoute(candidate);
   }
@@ -1182,8 +1224,12 @@ export class GatewayService {
   private async send(params: ValidatedSendParams): Promise<GatewaySendResult> {
     const target = await this.store.inspectPrivateRoute(params.toAlias);
     if ("replyAddress" in params && params.replyAddress !== undefined) {
+      // A UUID names a Claude session as surely as a name does: recognize it
+      // here, or a Claude-to-Claude send addressed by UUID falls through to the
+      // Codex path and is answered as an unknown target.
       const claudeTarget = target?.binding.provider === "claude" ||
-        (target === undefined && [...this.candidates.values()].some((row) => row.alias === params.toAlias));
+        (target === undefined && [...this.candidates.values()].some((row) =>
+          row.alias === params.toAlias || row.routeHandle === params.toAlias));
       return claudeTarget ? { accepted: false, code: "route_mismatch" } : this.sendToCodex(params);
     }
     if ("threadId" in params && params.threadId !== undefined) {
@@ -1202,7 +1248,24 @@ export class GatewayService {
           : await this.assertThread(params.fromAlias, params.threadId);
       if (source === undefined) throw new BridgeError("ROUTE_NOT_AVAILABLE", "The source route is absent.");
       const direct = await this.store.inspectPrivateRoute(params.toAlias);
-      const target = direct?.binding.provider === "peer" ? direct : await this.resolveClaudeRoute(params.toAlias);
+      let target: GatewayPrivateRouteInspection;
+      if (direct?.binding.provider === "peer") {
+        target = direct;
+      } else {
+        const seen = await this.lookUpClaudeRoute(params.toAlias);
+        // Admission before materialization: a send that is already going to be
+        // refused for its own reasons — too large, outside the deadline
+        // window, rate limited, or into a full queue — must not install a
+        // route or displace another session on its way to that refusal.
+        await this.store.assertEnqueueAdmissible({
+          sourceAlias: params.fromAlias,
+          targetAlias: this.claimedAlias(seen),
+          direction: directionId(source.binding.provider, "claude"),
+          sourceRegistrationId: source.binding.registrationId,
+          body: params.text,
+        });
+        target = await this.materializeClaudeRoute(seen);
+      }
       return await this.enqueueConversation({
         sourceAlias: params.fromAlias,
         targetAlias: target.alias,
@@ -1697,7 +1760,11 @@ export class GatewayService {
           attemptId: attempt.attemptId,
           sourceAlias: attempt.sourceAlias,
           sourceProvider: parsed.sourceProvider,
-          targetAlias: attempt.targetAlias,
+          // The route's CURRENT alias, not the one captured at reserve. The
+          // provider adapters compare this against the alias they hold for the
+          // binding, so a session renamed between reserve and dispatch would
+          // otherwise fail its own delivery over a stale display name.
+          targetAlias: target.alias,
           conversationId,
           binding: target.binding,
           authorization: "selected_route",

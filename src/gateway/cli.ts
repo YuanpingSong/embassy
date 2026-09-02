@@ -174,6 +174,8 @@ const CLI_HINT = {
     "that session's workspace contains the gateway state directory; move one so they no longer overlap, then retry.",
   callerAliasMismatch:
     "--from must be the sending session's own alias; read the name embassy status shows for this session.",
+  targetChanged:
+    "the session you addressed renamed or exited while the send was being set up; run embassy refresh and address it by its current name.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -606,6 +608,7 @@ function refusalHint(
   if (reason === "PEER_ALIAS_COLLISION") return "aliasCollision";
   if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return "workspaceOverlap";
   if (reason === "CLAUDE_ROUTE_MISMATCH") return "callerAliasMismatch";
+  if (reason === "CLAUDE_TARGET_CHANGED") return "targetChanged";
   if ((result as { code?: unknown }).code !== "not_found" || request.method !== "send") return undefined;
   const target = request.params.toAlias;
   return target.startsWith("codex-") || target.startsWith("peer-") ? undefined : "unknownTarget";

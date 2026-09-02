@@ -76,7 +76,17 @@ export class PeerClient {
       if (Object.hasOwn(message, "error")) { const detail = error(message.error); if (detail === undefined) { const fault = new Error("Peer returned an invalid error response"); pending.reject(fault); this.fail(fault); } else pending.reject(new PeerRequestError(detail)); } else try {
         if (pending.method === "initialize" && object(message.result) && typeof message.result.protocolVersion === "number" && message.result.protocolVersion !== PEER_PROTOCOL_VERSION) throw new PeerProtocolError("PROTOCOL_MISMATCH");
         pending.resolve(decodePeerResult(pending.method, message.result)); }
-      catch (fault) { const error = fault instanceof Error ? fault : new Error("Invalid peer result"); pending.reject(error); this.fail(error); }
+      catch (fault) {
+        // A result this build cannot decode is a disagreement about the wire,
+        // not a broken tunnel: the shapes of `catalog/get` and `handoff`
+        // changed within this protocol version's own line, so a lagging node
+        // answers honestly and is still unreadable here. Naming it as a
+        // protocol mismatch sends the operator to upgrade the node instead of
+        // to debug SSH.
+        const error = fault instanceof PeerProtocolError && fault.code === "INVALID_RESULT"
+          ? new PeerConnectionLostError(`Peer ${pending.method} result is not readable by this build`, "protocol")
+          : fault instanceof Error ? fault : new Error("Invalid peer result");
+        pending.reject(error); this.fail(error); }
     } }
   private fail(error: Error): void { if (this.closed) return; this.closed = true; for (const pending of this.pending.values()) { this.timers.clearTimeout(pending.timer); pending.reject(error); } this.pending.clear(); this.child.kill(); }
 }

@@ -428,9 +428,12 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.assertReady();
     const candidate = this.discovered.get(input.routeHandle);
     if (candidate === undefined || candidate.alias !== input.alias) {
+      // The TARGET moved between discovery and this pin — it renamed or left.
+      // A distinct code from the caller-side CLAUDE_ROUTE_MISMATCH, so the CLI
+      // cannot answer "fix your --from" to a problem at the other end.
       throw new BridgeError(
-        "CLAUDE_ROUTE_MISMATCH",
-        "The selected Claude alias no longer matches that exact peer generation.",
+        "CLAUDE_TARGET_CHANGED",
+        "The addressed Claude session no longer matches that exact peer generation.",
       );
     }
     const route = this.selected.get(input.routeHandle);

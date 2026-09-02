@@ -142,8 +142,11 @@ silently expanding the boundary through a test or hardening patch.
   use. A send must never resolve an ambiguous name: a current-name collision is
   a hard `PEER_ALIAS_COLLISION` refusal, never a pick-first delivery.
 - Any exact compatible live same-UID Claude session may reach the one
-  registered `codex-*` peer. Inbound reachability must not select that Claude
-  session for outbound delivery.
+  registered `codex-*` peer, and its own route is installed by that first
+  native send, so the Codex task can reply and address it afterwards. That is
+  the model, not a leak: the OS boundary is the permission and the provenance
+  envelope names the sender, so reachability inbound and outbound are the same
+  fact.
 - Claude's native session UUID is the logical route identity. Current names are
   mutable lookup aliases; historical names do not resolve. A user-supplied UUID
   may be accepted as a CLI selector, but Embassy must never print or discover

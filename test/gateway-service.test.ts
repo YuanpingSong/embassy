@@ -168,12 +168,17 @@ class FakeProvider implements GatewayProviderAdapter {
     };
   }
 
+  /** Aliases this adapter currently holds, mirroring the real adapters' own maps. */
+  readonly aliases = new Map<string, string>();
+
   observeLogicalRoute(input: { alias: string; routeHandle: string; registrationId: string }): void {
     this.observed.push({ ...input });
+    this.aliases.set(input.registrationId, input.alias);
   }
 
   forgetLogicalRoute(registrationId: string): void {
     this.forgotten.push(registrationId);
+    this.aliases.delete(registrationId);
   }
 
   async discoverClaudePeers(): Promise<GatewayAdapterDiscoverySnapshot> {
@@ -236,6 +241,13 @@ class FakeProvider implements GatewayProviderAdapter {
   }
 
   async dispatch(input: GatewayAdapterDispatchInput): Promise<GatewayAdapterDispatchResult> {
+    // The real adapters refuse a dispatch whose target alias is not the one
+    // they hold for that registration (providers.ts, peer-mailbox.ts). The
+    // fake must too, or a stale alias on the dispatch path looks like success.
+    const held = this.aliases.get(input.binding.registrationId);
+    if (held !== undefined && held !== input.targetAlias) {
+      return { state: "failed", safeErrorCode: "ROUTE_UNREGISTERED" };
+    }
     this.dispatches.push(input);
     for (const [count, waiter] of this.dispatchWaiters) {
       if (this.dispatches.length < count) continue;
@@ -662,6 +674,78 @@ test("a colliding Claude alias is refused at send time and stays sticky under a 
   } finally { await subject.close(); }
 });
 
+test("a Claude-to-Claude send is refused the same way whether addressed by name or by UUID", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    // Claude-to-Claude is native, so the broker refuses either addressing form
+    // identically — and neither refusal may be dressed up as an unknown target,
+    // which would send the operator off to rescan for a session that is right
+    // there.
+    for (const target of [claude.alias, claudeProvider.claudeDiscovery.routeHandle]) {
+      assert.deepEqual(
+        await subject.handlers.send({ fromAlias: "advisor-other@this-mac", toAlias: target,
+          text: "claude to claude", replyAddress: "uds:/test/claude-reply.sock", expectsReply: false }),
+        { accepted: false, code: "route_mismatch" },
+        target,
+      );
+    }
+    assert.deepEqual((await subject.store.listLogicalRoutes()).filter(
+      (row) => row.binding.provider === "claude"), []);
+  } finally { await subject.close(); }
+});
+
+test("twins addressed by UUID both keep routes and never retire each other", async () => {
+  const sharedAlias = "twin@this-mac";
+  const firstUuid = "00000000-0000-7000-8000-0000000007a1";
+  const secondUuid = "00000000-0000-7000-8000-0000000007a2";
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  claudeProvider.discoverClaudePeers = async () => ({ complete: true, peers: [
+    { alias: sharedAlias, routeHandle: firstUuid, kind: "interactive" as const, state: "idle" as const },
+    { alias: sharedAlias, routeHandle: secondUuid, kind: "bg" as const, state: "idle" as const },
+  ], registry: { entriesScanned: 2, parseableRecords: 2, rejected: [] } });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  const claudeRoutes = async () => (await subject.store.listLogicalRoutes())
+    .filter((row) => row.binding.provider === "claude");
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    // Alternating UUID sends: each twin is reachable, and neither install may
+    // claim the shared name out from under the other or cancel its work.
+    for (const [index, selector] of [firstUuid, secondUuid, firstUuid, secondUuid].entries()) {
+      const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+        toAlias: selector, text: `twin message ${String(index)}`, expectsReply: false });
+      assert.equal(sent.accepted, true, `${selector} ${String(index)}`);
+    }
+    const routes = await claudeRoutes();
+    assert.equal(routes.length, 2);
+    assert.deepEqual([...routes].map((row) => row.binding.routeHandle).sort(),
+      [firstUuid, secondUuid].sort());
+    // Exactly one of them may hold the ambiguous name; the other took a
+    // grammar-valid disambiguated one, and neither alias leaks a session UUID.
+    assert.equal(routes.filter((row) => row.alias === sharedAlias).length, 1);
+    for (const row of routes) {
+      assert.match(row.alias, /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/);
+      assert.equal(row.alias.includes(firstUuid) || row.alias.includes(secondUuid), false);
+    }
+    // Nothing was retired, so no queued work was cancelled on either twin.
+    const snapshot = await subject.store.publicSnapshot();
+    assert.deepEqual((snapshot.activityEvents ?? []).filter(
+      (event) => event.action === "claude_route_retired"), []);
+    assert.equal(snapshot.messages.some((event) => event.safeErrorCode === "ENDPOINT_RETIRED"), false);
+    // The ambiguous name itself stays unaddressable and unlisted.
+    assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
+      (peer) => peer.alias === sharedAlias), false);
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: sharedAlias, text: "by ambiguous name", expectsReply: false }),
+    { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" });
+  } finally { await subject.close(); }
+});
+
 test("a Claude session's own route installs on its first send and its claimed name is checked", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
@@ -793,7 +877,13 @@ test("a session renamed between reserve and dispatch is delivered to under its n
       const result = await reserve(...args);
       if (!renamed && result.status === "reserved" && result.attempt.body === "survives a rename") {
         renamed = true;
+        // Both halves of what the service does when discovery reports a new
+        // name for a bound session: the store renames the route, and the
+        // adapter is told, so the adapter now holds only the new alias.
         await subject.store.installClaudeRoute({ ...installed, alias: renamedAlias });
+        claudeProvider.observeLogicalRoute({ alias: renamedAlias,
+          routeHandle: installed.binding.routeHandle,
+          registrationId: installed.binding.registrationId });
       }
       return result;
     };

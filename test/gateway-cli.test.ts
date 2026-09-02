@@ -971,7 +971,7 @@ test("genuine control-version mismatches name version skew and client recovery",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-    limits: {} as never,
+        limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: async () => {
@@ -1303,7 +1303,7 @@ test("wait-delivery polls at fixed intervals and emits only the terminal status"
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-    limits: {} as never,
+        limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async (options: {
@@ -1363,7 +1363,7 @@ test("wait-delivery returns a retained terminal result after its deadline window
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-    limits: {} as never,
+        limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => {
@@ -1565,7 +1565,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-    limits: {} as never,
+        limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: async () => {
@@ -1616,7 +1616,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-    limits: {} as never,
+        limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => ({
@@ -1731,6 +1731,10 @@ test("each refusal reason renders exactly the remedy that fits it", async () => 
   assert.deepEqual(await decide(send, { accepted: false, code: "route_mismatch", reason: "CLAUDE_ROUTE_MISMATCH" }), [
     decision,
     "[embassy] --from must be the sending session's own alias; read the name embassy status shows for this session.",
+  ]);
+  assert.deepEqual(await decide(send, { accepted: false, code: "route_mismatch", reason: "CLAUDE_TARGET_CHANGED" }), [
+    decision,
+    "[embassy] the session you addressed renamed or exited while the send was being set up; run embassy refresh and address it by its current name.",
   ]);
   assert.deepEqual(await decide(send, { accepted: false, code: "not_found", reason: "CLAUDE_ROUTE_NOT_FOUND" }), [
     decision,

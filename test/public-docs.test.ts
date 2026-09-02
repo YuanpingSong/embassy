@@ -154,12 +154,16 @@ test("no shipped document advertises a deleted surface", async () => {
 
   const offenders: string[] = [];
   for (const file of files) {
-    const text = await readFile(path.join(repoRoot, file), "utf8");
+    const raw = await readFile(path.join(repoRoot, file), "utf8");
+    // Match against whitespace-collapsed text: a hard-wrapped "consent\nedges"
+    // is the same claim as "consent edges", and a plain `includes` missed it
+    // for a whole slice. Every forbidden term is normalized the same way.
+    const text = raw.replace(/\s+/g, " ");
     for (const term of FORBIDDEN) {
-      if (text.includes(term)) offenders.push(`${file}: ${term}`);
+      if (text.includes(term.replace(/\s+/g, " "))) offenders.push(`${file}: ${term}`);
     }
     for (const pattern of FORBIDDEN_PATTERNS) {
-      if (pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
+      if (pattern.test(raw) || pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
     }
   }
   assert.deepEqual(offenders, []);
