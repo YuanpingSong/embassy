@@ -64,8 +64,11 @@ const FORBIDDEN = [
   "progress watch",
   "liveness check",
   // emb-106: nodes.json is optional, defaulting to a hostname-named single
-  // machine; the mandatory-inventory refusal code no longer exists.
-  "mandatory nodes.json",
+  // machine; the mandatory-inventory refusal code no longer exists. Both
+  // literal forms guard against the exact backticked prose emb-89 shipped
+  // ("mandatory nodes.json" alone never occurs adjacent in markdown).
+  "mandatory private `nodes.json`",
+  "mandatory `nodes.json`",
   "GATEWAY_NODE_INVENTORY_REQUIRED",
 ] as const;
 
@@ -204,8 +207,8 @@ test("authority docs match the closed control contract", async () => {
     );
   }
   assert.match(skill, /UUID recovery applies only to selection/);
-  assert.match(site, /embassy pair --from codex-embassy@this-mac --to claude-main@this-mac/);
-  assert.doesNotMatch(site, /embassy pair --from claude-main@this-mac --to dsh-main@this-mac/);
+  assert.match(site, /embassy pair --from codex-embassy@HOST --to claude-main@HOST/);
+  assert.doesNotMatch(site, /embassy pair --from claude-main@HOST --to dsh-main@HOST/);
   assert.match(changelog, /private control protocol is version 2/i);
   assert.match(changelog, /### Removed[\s\S]*legacy `--claude` \/ `--codex` arm is removed/);
   assert.match(changelog, /private state reset/);

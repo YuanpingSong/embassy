@@ -134,9 +134,19 @@ const CLI_HINT = {
     "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 2.0.x before resetting.",
   callerIdentityConflict:
     "both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID",
+  aliasHostMismatch:
+    "aliases on this machine end with @{localHost}; found @{given}. Run `embassy status` or read the serve ready line for the host.",
+  controlSocketMissing:
+    "no broker is listening at {stateDir}; start it with `embassy serve` under this same OS account, or verify EMBASSY_STATE_DIR is not scrubbed or misdirected (for example by a sandboxed task's HOME).",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
+/** Renders a CLI_HINT entry, substituting any {name} placeholders from `vars`. */
+function renderHint(hint: CliFaultHint, vars?: Readonly<Record<string, string>>): string {
+  let text: string = CLI_HINT[hint];
+  if (vars !== undefined) for (const [key, value] of Object.entries(vars)) text = text.replaceAll(`{${key}}`, value);
+  return text;
+}
 
 type ParsedOptions = Readonly<Record<string, string | true>>;
 class CliFault extends Error {
@@ -145,6 +155,7 @@ class CliFault extends Error {
     readonly retryable = false,
     readonly hint?: CliFaultHint,
     readonly kind?: CliStderrKind,
+    readonly hintVars?: Readonly<Record<string, string>>,
   ) {
     super("The gateway client rejected the request.");
     this.name = "CliFault";
@@ -334,10 +345,14 @@ async function buildRequest(
       const threadId = requireExclusiveCodexThreadId(env);
       if (succeedsAlias === alias) fault();
       const localHost = await loadLocalHost();
-      if (
-        !alias.endsWith(`@${localHost}`) ||
-        (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== localHost)
-      ) fault();
+      if (!alias.endsWith(`@${localHost}`)) {
+        throw new CliFault("INVALID_ARGUMENTS", false, "aliasHostMismatch", undefined,
+          { localHost, given: gatewayAliasHost(alias) });
+      }
+      if (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== localHost) {
+        throw new CliFault("INVALID_ARGUMENTS", false, "aliasHostMismatch", undefined,
+          { localHost, given: gatewayAliasHost(succeedsAlias) });
+      }
       return envelope("register_codex", {
         alias, threadId, hostId: localHost, busyPolicy: "queue",
         ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
@@ -357,6 +372,14 @@ async function buildRequest(
       if (hasIdentity(env.CODEX_THREAD_ID) || hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
       if (command !== "register-peer" && options["emit-env"] === true) fault();
       if (options["emit-env"] === true && source !== undefined) fault();
+      if (command === "register-peer") {
+        const localHost = await loadLocalHost();
+        const givenHost = gatewayAliasHost(alias);
+        if (givenHost !== localHost) {
+          throw new CliFault("INVALID_ARGUMENTS", false, "aliasHostMismatch", undefined,
+            { localHost, given: givenHost });
+        }
+      }
       if (source === undefined) {
         if (command !== "register-peer") fault("CALLER_IDENTITY_REQUIRED");
         return envelope("register_peer", { alias });
@@ -423,7 +446,8 @@ export async function validatePrivateGatewayControlSocket(
   stateDir: string,
   socketPath: string,
 ): Promise<void> {
-  if (process.platform === "win32") throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
+  if (process.platform === "win32")
+    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true, "controlSocketMissing", undefined, { stateDir });
   let state, socket;
   try {
     [state, socket] = await Promise.all([lstat(stateDir), lstat(socketPath)]);
@@ -432,7 +456,7 @@ export async function validatePrivateGatewayControlSocket(
       ? (error as { code?: unknown }).code : undefined;
     if (code === "EPERM" || code === "EACCES")
       throw new CliFault("CONTROL_CONNECT_DENIED", true, "controlConnectDenied");
-    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
+    throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true, "controlSocketMissing", undefined, { stateDir });
   }
   const uid = process.getuid?.();
   if (state.isSymbolicLink() || !state.isDirectory() || (state.mode & 0o777) !== 0o700 || (uid !== undefined && state.uid !== uid)) {
@@ -690,6 +714,9 @@ export async function runGatewayCli(
         stderr.write(`[embassy] ${CLI_HINT.controlVersionMismatch}\n`);
       } else if (error.code === "CONTROL_INVALID_RESPONSE") {
         stderr.write(`[embassy] ${CLI_HINT.controlInvalidResponse}\n`);
+      } else if (error.code === "CONTROL_SOCKET_MISSING" && identity !== undefined) {
+        const { config } = await identity;
+        stderr.write(`[embassy] ${renderHint("controlSocketMissing", { stateDir: config.stateDir })}\n`);
       }
       if (error.code === "CONTROL_CONNECT_DENIED")
         stderr.write(`[embassy] ${CLI_HINT.controlConnectDenied}\n`);
@@ -699,7 +726,7 @@ export async function runGatewayCli(
       writeFailure(stdout, stderr, command, error.code, {
         retryable: error.retryable, kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
-      if (error.hint !== undefined) stderr.write(`[embassy] ${CLI_HINT[error.hint]}\n`);
+      if (error.hint !== undefined) stderr.write(`[embassy] ${renderHint(error.hint, error.hintVars)}\n`);
       return error.retryable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
     if (error instanceof BridgeError) {

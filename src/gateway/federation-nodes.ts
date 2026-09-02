@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, realpath, rename } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import path from "node:path";
 
@@ -20,8 +21,10 @@ export type GatewayNodeInventoryDependencies = Readonly<{
   lstat?: typeof lstat;
   open?: typeof open;
   realpath?: typeof realpath;
+  rename?: typeof rename;
   getuid?: () => number | undefined;
   hostname?: () => string;
+  randomId?: () => string;
 }>;
 
 const attest = (inventory: GatewayNodeInventory): GatewayNodeInventory => {
@@ -176,6 +179,77 @@ export async function loadGatewayNodeInventory(
   } finally {
     await handle.close();
   }
+}
+
+async function writeDefaultInventoryFile(
+  stateDir: string,
+  host: string,
+  openFile: typeof open,
+  doRename: typeof rename,
+  randomId: () => string,
+): Promise<void> {
+  const tempPath = path.join(stateDir, `.nodes-${randomId()}.json.tmp`);
+  const body = `${JSON.stringify({ version: 1, host, nodes: [] })}\n`;
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await openFile(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+  } catch (error) {
+    return inaccessible(error, "nodes.json could not be created in the Embassy state directory.");
+  }
+  try {
+    await handle.writeFile(body, "utf8");
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    return inaccessible(error, "nodes.json could not be written in the Embassy state directory.");
+  }
+  await handle.close();
+  try {
+    await doRename(tempPath, path.join(stateDir, NODES_FILE));
+  } catch (error) {
+    return inaccessible(error, "nodes.json could not be installed in the Embassy state directory.");
+  }
+  process.stderr.write(`[embassy] wrote nodes.json naming this host ${host}\n`);
+}
+
+/**
+ * Broker-boot-only (emb-106 correction): call once, after the state
+ * directory is claimed and its controller lock is held. A present nodes.json
+ * is never rewritten — this only fires on a truly first-ever boot of this
+ * state directory. Otherwise it atomically writes the exact schema
+ * parseInventory expects (temp file + rename, mode 0600) for `host`, then
+ * reloads it through loadGatewayNodeInventory: the running broker's identity
+ * becomes the file's from this point on, never the transient in-memory
+ * default from defaultInventory() above. A write failure refuses with the
+ * same classified code loadGatewayNodeInventory itself would use, so a boot
+ * never runs on an identity that was never durably recorded.
+ *
+ * The CLI never calls this. Its own transient default (defaultInventory)
+ * stays live only for the narrow window before any broker has ever booted
+ * on this state directory — for example, a client command run before the
+ * first `embassy serve`.
+ */
+export async function ensureGatewayNodeInventoryFile(
+  stateDir: string,
+  host: string,
+  dependencies: GatewayNodeInventoryDependencies = {},
+): Promise<GatewayNodeInventory> {
+  const inspect = dependencies.lstat ?? lstat;
+  const filePath = path.join(stateDir, NODES_FILE);
+  let present = true;
+  try {
+    await inspect(filePath);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) present = false;
+    else return inaccessible(error, "nodes.json cannot be safely inspected.");
+  }
+  if (!present) {
+    await writeDefaultInventoryFile(
+      stateDir, host,
+      dependencies.open ?? open, dependencies.rename ?? rename, dependencies.randomId ?? randomUUID,
+    );
+  }
+  return loadGatewayNodeInventory(stateDir, dependencies);
 }
 
 function isErrno(error: unknown, code: string): boolean {

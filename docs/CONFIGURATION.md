@@ -22,15 +22,23 @@ Codex task that directory as a writable root, or approve equivalent local access
 and do not relocate state or start a second broker to work around a denial.
 
 `nodes.json` in `EMBASSY_STATE_DIR` is optional — needed only for federation
-across machines. Federation authority comes only from this file: when present,
-it must be a current-user-owned mode-0600 regular file whose exact object shape is
+across machines. When it is absent at broker boot, Embassy writes it itself,
+once: mode 0600, naming this host by its own hostname (the first label before
+any dot, lower-cased; `localhost` if that name is not a valid host token),
+with an empty peer list. From that point on the file — not the hostname — is
+this broker's durable identity, so a later hostname change (for example a
+network-triggered rename) has no effect. Federation authority comes only from
+this file: it must be a current-user-owned mode-0600 regular file whose exact
+object shape is
 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`.
 `host` names this broker; `nodes` contains 0 through 31 unique OpenSSH aliases,
 omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
-node is the fixed SSH destination for `embassy peer-stdio`. When `nodes.json`
-is absent, this machine runs alone: Embassy names the broker by this host's own
-hostname (the first label before any dot, lower-cased; `localhost` if that name
-is not a valid host token) and federates with nobody.
+node is the fixed SSH destination for `embassy peer-stdio`. To adopt
+federation later, edit the existing file and add peers to `nodes` — keep
+`host` exactly as it already reads; every durable record (routes, consent
+edges, retained bodies) is keyed by that value, so renaming `host` requires
+the [private state reset](#private-state-reset) below, the same as any other
+identity change.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
 
 ### Private state reset

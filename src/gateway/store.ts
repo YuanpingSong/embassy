@@ -30,6 +30,15 @@ const STATE_MARKER_CONTENT = "agent-embassy-state-v1\n";
 const STATE_FILE = "gateway-state.json";
 /** Static dashboard files a 2.x install may have left behind (emb-100 removed the feature; emb-106 sweeps the litter). */
 const STALE_DASHBOARD_FILES = ["gateway-dashboard.html", "gateway-dashboard.zh-CN.html"] as const;
+/** 2.x wrote its dashboards via temp-file + rename; a crash mid-publish could leave one of these behind too. */
+const STALE_DASHBOARD_TEMP_PATTERNS = [
+  /^\.gateway-dashboard\.html\.[^/]+\.tmp$/,
+  /^\.gateway-dashboard\.zh-CN\.html\.[^/]+\.tmp$/,
+] as const;
+function isStaleDashboardArtifact(name: string): boolean {
+  return (STALE_DASHBOARD_FILES as readonly string[]).includes(name) ||
+    STALE_DASHBOARD_TEMP_PATTERNS.some((pattern) => pattern.test(name));
+}
 const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
@@ -845,6 +854,7 @@ export class GatewayStore {
       try {
         const now = this.now();
         const loaded = await this.loadStateFile();
+        await this.removeStaleDashboardFiles(this.rootDir);
         this.state = loaded ?? {
           schemaVersion: 5,
           commit: { sequence: 0, id: this.randomId() },
@@ -2808,20 +2818,28 @@ export class GatewayStore {
         await marker.close();
       }
     }
-    if (existed) {
-      await this.removeStaleDashboardFiles(root);
-    }
     return root;
   }
   /**
-   * Boot-time litter sweep (emb-106): a static `gateway-dashboard*.html` left
-   * by a 2.x install is unlinked once, best-effort. Only a regular file owned
-   * by this uid is removed (lstat, no symlink following); nothing else in the
-   * state directory is touched, and a removal failure never blocks startup.
+   * Boot-time litter sweep (emb-106): the static `gateway-dashboard*.html`
+   * files 2.x published, and any `.tmp` file its temp-file+rename publish
+   * could have left behind mid-crash, are unlinked once, best-effort. Only a
+   * regular file owned by this uid is removed (lstat, no symlink following);
+   * nothing else in the state directory is touched, and a removal failure
+   * never blocks startup. Runs only after the controller lock is held and
+   * loadStateFile() has already succeeded, so a refused boot leaves the
+   * directory exactly as found.
    */
   private async removeStaleDashboardFiles(root: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(root);
+    } catch {
+      return;
+    }
     const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-    for (const name of STALE_DASHBOARD_FILES) {
+    for (const name of entries) {
+      if (!isStaleDashboardArtifact(name)) continue;
       const filePath = path.join(root, name);
       let info: Awaited<ReturnType<typeof lstat>>;
       try {

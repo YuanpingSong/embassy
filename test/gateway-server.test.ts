@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -10,6 +10,7 @@ import { LocalCodexTransportError, managedCodexControlSocketPath,
   type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig as loadGatewayConfigBase } from "../src/gateway/config.js";
+import { ensureGatewayNodeInventoryFile } from "../src/gateway/federation-nodes.js";
 import {
   GATEWAY_CONTROL_PROTOCOL_VERSION,
   sendGatewayControlRequest,
@@ -33,7 +34,11 @@ const SYNTHETIC_CODEX_VERSION = "0.147.0";
 const loadGatewayConfig = (env: NodeJS.ProcessEnv) =>
   loadGatewayConfigBase(env, { host: "this-mac", nodes: [] });
 const runGatewayServer: typeof runGatewayServerBase = (options, dependencies = {}) =>
-  runGatewayServerBase(options, { loadNodeInventory: async () => ({ host: "this-mac", nodes: [] }), ...dependencies });
+  runGatewayServerBase(options, {
+    loadNodeInventory: async () => ({ host: "this-mac", nodes: [] }),
+    ensureNodeInventoryFile: async (_stateDir, host) => ({ host, nodes: [] }),
+    ...dependencies,
+  });
 
 function runtime(): AttestedClaudePeerRuntime {
   return {
@@ -1041,3 +1046,46 @@ test(
     await first;
   },
 );
+
+test("a real server boot with no nodes.json durably writes it, and the ready result carries that host end to end", async (t) => {
+  // A short, fixed root: os.tmpdir() on macOS can push the control socket
+  // path past the 100-byte Unix-domain-socket portability ceiling.
+  const stateDir = await realpath(await mkdtemp("/tmp/embassy-server-e2e-"));
+  await chmod(stateDir, 0o700);
+  t.after(async () => rm(stateDir, { recursive: true, force: true }));
+  const abort = new AbortController();
+  let ready: GatewayServerReadyResult | undefined;
+  await runGatewayServer(
+    {
+      env: { EMBASSY_STATE_DIR: stateDir },
+      signal: abort.signal,
+      onReady: (result) => { ready = result; abort.abort(); },
+    },
+    {
+      // The transient default a fresh boot would compute for an injected
+      // hostname — real hostname-to-default derivation is unit-tested in
+      // federation-nodes.test.ts. This test proves the wiring past it: a
+      // real store claiming a real state directory, then a real durable
+      // write and reload through the unmocked federation-nodes function.
+      loadNodeInventory: async () => ({ host: "injected-host", nodes: [] }),
+      ensureNodeInventoryFile: ensureGatewayNodeInventoryFile,
+      acquireInstanceLease: async () => instanceLease(() => undefined),
+      attestClaudeRuntime: async () => runtime(),
+      createClaudeProvider: () => provider(() => undefined),
+      createCodexOperation: () => statelessOperation(),
+      createCodexObservationFactory: async () => factory(() => undefined),
+      resolveCodexInstallation: async () => {
+        throw new Error("diagnostic resolver must remain lazy");
+      },
+      createCodexProvider: () => provider(() => undefined),
+      createService: () => ({
+        start: async () => undefined,
+        close: async () => undefined,
+      }),
+    },
+  );
+  assert.equal(ready?.hostId, "injected-host");
+  const filePath = path.join(stateDir, "nodes.json");
+  assert.equal(await readFile(filePath, "utf8"), '{"version":1,"host":"injected-host","nodes":[]}\n');
+  assert.equal((await lstat(filePath)).mode & 0o777, 0o600);
+});

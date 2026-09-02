@@ -1076,6 +1076,77 @@ test("connect denial and invalid responses print their distinct honest remedies"
   }
 });
 
+test("CONTROL_SOCKET_MISSING names the resolved state directory in its hint", async () => {
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["health"], { env: {}, stdout, stderr,
+    loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+      steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
+    validateControlSocket: async () => undefined,
+    sendRequest: async () => { throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail"); } });
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "CONTROL_SOCKET_MISSING");
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] gateway unavailable.\n[embassy] no broker is listening at /private/fake-state; start it with `embassy serve` under this same OS account, or verify EMBASSY_STATE_DIR is not scrubbed or misdirected (for example by a sandboxed task's HOME).\n",
+  );
+  assert.doesNotMatch(stderr.chunks.join(""), /private detail/);
+});
+
+test("CONTROL_SOCKET_UNAVAILABLE names the resolved state directory, end to end", async () => {
+  // A short, fixed root: os.tmpdir() on macOS can push the control socket
+  // path past the 100-byte Unix-domain-socket portability ceiling.
+  const stateDir = await mkdtemp("/tmp/embassy-cli-nosocket-");
+  await chmod(stateDir, 0o700);
+  try {
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCli(["status"], { env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr });
+    assert.equal(code, gatewayCliExitCodes.unavailable);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "CONTROL_SOCKET_UNAVAILABLE");
+    assert.equal(
+      stderr.chunks.join(""),
+      `[embassy] gateway unavailable.\n[embassy] no broker is listening at ${stateDir}; start it with \`embassy serve\` under this same OS account, or verify EMBASSY_STATE_DIR is not scrubbed or misdirected (for example by a sandboxed task's HOME).\n`,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("register-codex against a broker's real durable host passes CLI validation (emb-106 F9)", async (t) => {
+  // The broker's own first-boot write, reproduced directly rather than
+  // through a full runGatewayServer boot (covered end to end in
+  // gateway-server.test.ts): a real nodes.json this CLI call reads for
+  // itself, through the unmocked loader — not the file's TEST_INVENTORY
+  // stand-in.
+  const stateDir = await realpath(await mkdtemp("/tmp/embassy-cli-durable-"));
+  await chmod(stateDir, 0o700);
+  t.after(async () => rm(stateDir, { recursive: true, force: true }));
+  await writeFile(path.join(stateDir, "nodes.json"), '{"version":1,"host":"injected-host","nodes":[]}\n', { mode: 0o600 });
+
+  const stdout = capture(), stderr = capture();
+  let sentRequest: unknown;
+  const exitCode = await runGatewayCliBase(["register-codex", "--alias", "codex-x@injected-host"], {
+    env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: THREAD_ID },
+    stdout, stderr,
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: unknown }) => {
+      sentRequest = request;
+      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok" } };
+    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+  assert.equal(stderr.chunks.join(""), "");
+  assert.equal(exitCode, gatewayCliExitCodes.ok);
+  assert.ok(sentRequest);
+
+  // The mismatch hint still fires for a alias not naming that same host.
+  const stdout2 = capture(), stderr2 = capture();
+  const mismatch = await runGatewayCliBase(["register-codex", "--alias", "codex-x@wrong-host"], {
+    env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: THREAD_ID }, stdout: stdout2, stderr: stderr2,
+  });
+  assert.equal(mismatch, gatewayCliExitCodes.invalidInput);
+  assert.match(stderr2.chunks.join(""), /@injected-host; found @wrong-host/);
+});
+
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
   const stdout = capture();
   const stderr = capture();
@@ -2193,6 +2264,36 @@ test("oversized stdin renders its hint while generic input rejection does not", 
     );
     assert.equal(stderr.chunks.join(""), current.stderr);
   }
+});
+
+test("register-codex alias/host mismatch renders its hint with the exact machine host", async () => {
+  const cases = [
+    { argv: ["register-codex", "--alias", "codex-x@wrong-host"] },
+    { argv: ["register-codex", "--alias", "codex-x@this-mac", "--succeeds", "codex-y@wrong-host"] },
+  ];
+  const expected =
+    "[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac; found @wrong-host. Run `embassy status` or read the serve ready line for the host.\n";
+  for (const current of cases) {
+    const stdout = capture(), stderr = capture();
+    const exitCode = await runGatewayCli(current.argv, { env: { CODEX_THREAD_ID: THREAD_ID }, stdout, stderr });
+    assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_ARGUMENTS");
+    assert.equal(stderr.chunks.join(""), expected);
+  }
+});
+
+test("register-peer alias/host mismatch renders the same hint before ever sending to the broker", async () => {
+  const stdout = capture(), stderr = capture();
+  const exitCode = await runGatewayCli(["register-peer", "--alias", "peer-x@wrong-host"], {
+    env: {}, stdout, stderr,
+    sendRequest: (async () => { throw new Error("must not be called"); }) as never,
+  });
+  assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+  assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_ARGUMENTS");
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] request rejected.\n[embassy] aliases on this machine end with @this-mac; found @wrong-host. Run `embassy status` or read the serve ready line for the host.\n",
+  );
 });
 
 test("unsupported and corrupt private state print the reset instruction", async () => {

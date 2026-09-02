@@ -188,7 +188,7 @@ function exactLocalHost(hostId: string, inventory: GatewayNodeInventory): string
   if (!isAttestedGatewayNodeInventory(inventory, hostId)) {
     throw new BridgeError(
       "GATEWAY_REMOTE_PROVIDER_DISABLED",
-      "The local host coordinate requires the attested nodes.json inventory.",
+      "The local host coordinate requires an attested node inventory.",
     );
   }
   return hostId;

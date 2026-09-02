@@ -16,8 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- `nodes.json` is optional; without it the broker names this machine by its hostname and federates with nobody (emb-106).
-- Stale `gateway-dashboard*.html` files left by 2.x are removed from the state dir at boot (emb-106).
+- `nodes.json` is optional; when absent at boot, the broker writes it once, naming this machine by its own hostname with an empty peer list, and federates with nobody until you edit the file in. That written file — not the hostname — is the broker's durable identity from then on, so a later hostname change never renames a running installation (emb-106).
+- Stale `gateway-dashboard*.html` files left by 2.x, and their `.tmp` publish artifacts from a crashed 2.x write, are removed from the state dir at boot (emb-106).
 - `embassy refresh` reports a discovery failure honestly instead of claiming success.
 - Private state schema is 5, reset-only: 2.x state is refused with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and never rewritten; follow the [private state reset](docs/CONFIGURATION.md#private-state-reset).
 - Federation peer protocol is 2; a node answering `initialize` with another version surfaces `PEER_PROTOCOL_MISMATCH` on its mirrored routes and in `embassy status` instead of a tunnel fault.

@@ -19,7 +19,10 @@ session or thread identifiers, or unredacted personal paths.
 
 Embassy is personal software for one macOS user. Each broker remains local to
 one machine; an explicit private `nodes.json` may connect the user's own
-SSH-reachable machines through the user's existing OpenSSH configuration. Run
+SSH-reachable machines through the user's existing OpenSSH configuration.
+Broker identity always comes from that owned mode-0600 `nodes.json`; when it
+is absent, the broker creates it once from this machine's hostname, so a
+later network rename can never change a running identity. Run
 every node only under an OS account that is yours alone and where you trust
 every process already running as that user. Do not expose Embassy sockets or
 state on a network, host it as a service, or use it to share a provider

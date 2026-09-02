@@ -1683,6 +1683,48 @@ test("boot cleanup never follows a symlink planted at the dashboard filename", a
   assert.equal(await readFile(target, "utf8"), "do not touch");
 });
 
+test("boot removes 2.x's stale dashboard publish temp files, and only those", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  const enTemp = path.join(setup.stateDir, ".gateway-dashboard.html.a1b2c3.tmp");
+  const zhTemp = path.join(setup.stateDir, ".gateway-dashboard.zh-CN.html.d4e5f6.tmp");
+  const unrelatedTemp = path.join(setup.stateDir, ".unrelated.tmp");
+  await writeFile(enTemp, "<html>partial</html>", { mode: 0o600 });
+  await writeFile(zhTemp, "<html>partial</html>", { mode: 0o600 });
+  await writeFile(unrelatedTemp, "keep me", { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await assert.rejects(lstat(enTemp));
+  await assert.rejects(lstat(zhTemp));
+  assert.equal(await readFile(unrelatedTemp, "utf8"), "keep me");
+  await reopened.close();
+});
+
+test("a refused boot never sweeps the state directory: cleanup runs only after loadStateFile succeeds", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  await writeFile(
+    setup.store.stateFilePath,
+    `${JSON.stringify({ schemaVersion: 4, arbitrary: "not validated" })}\n`,
+    { mode: 0o600 },
+  );
+  const stalePath = path.join(setup.stateDir, "gateway-dashboard.html");
+  await writeFile(stalePath, "<html>stale</html>", { mode: 0o600 });
+
+  await assert.rejects(
+    new GatewayStore(setup.config).initialize(),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
+  );
+  // The refused boot must leave the directory exactly as found: cleanup runs
+  // only after loadStateFile() succeeds, and this one never did.
+  assert.equal(await readFile(stalePath, "utf8"), "<html>stale</html>");
+});
+
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {
   const setup = await fixture();
   const config = { ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] };
