@@ -205,3 +205,10 @@ no support-matrix ceremony, no site work beyond the stub.
   from GATEWAY-ARCHITECTURE and the dead R1 glob in AGENTS.md; a
   `site/zh-CN/index.html` redirect stub to the English page (the
   deleted page was a declared canonical URL).
+- 2026-09-02 Norm (PM error): a landing record states the CI
+  conclusion only after the watcher's output has been READ — never
+  composed in advance. emb-103's record briefly said "success" for a
+  run that failed on one leg (latent flake, fixed forward by
+  4d00fc4). Fix-forward on main for test-only flakes is allowed under
+  the light gate; engineers on the lane rebase onto main before
+  pushing.
