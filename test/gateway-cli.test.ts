@@ -2371,6 +2371,13 @@ async function serviceFixture(): Promise<{ home: string; stateDir: string; plist
   };
 }
 
+/**
+ * The host lease is free. The real probe spawns /usr/bin/lockf (macOS only),
+ * so every CLI service test injects its answer and runs on every platform.
+ */
+const freeHostLease: NonNullable<GatewayCliDependencies["probeHostLease"]> =
+  async () => ({ held: false });
+
 /** Wall clock that only moves when the code under test sleeps. */
 function sleepDrivenClock(): { now: () => number; delay: (ms: number) => Promise<void> } {
   let clock = 0;
@@ -2392,7 +2399,7 @@ test("service install writes a real plist under a temp home, drives the fake lau
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir, OPENAI_API_KEY: "sk-never" },
     stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: launchd.run,
     validateControlSocket: async () => undefined,
     sendRequest: healthySendRequest,
@@ -2438,7 +2445,7 @@ test("service install over its own loaded agent boots it out and re-installs", a
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: launchd.run,
     validateControlSocket: async () => undefined,
     sendRequest: healthySendRequest,
@@ -2462,7 +2469,7 @@ test("service install stops before launchd when the node inventory is missing", 
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: launchd.run,
     loadNodeInventory: async () => {
       throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail", false);
@@ -2486,7 +2493,7 @@ test("a failing launchctl bootstrap exits non-zero and prints launchctl's own st
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: launchd.run,
     validateControlSocket: async () => undefined,
     sendRequest: healthySendRequest,
@@ -2513,7 +2520,7 @@ test("the install health probe is bounded by wall clock, not by an attempt count
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: launchd.run,
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ timeoutMs }: { timeoutMs?: number }) => {
@@ -2571,7 +2578,7 @@ test("a decisive last observed code exits with that code's own class, not a retr
     const stdout = capture(), stderr = capture();
     const code = await runGatewayCli(["service", "install"], {
       env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-      serviceHomeDir: () => home,
+      serviceHomeDir: () => home, probeHostLease: freeHostLease,
       runLaunchctl: cliFakeLaunchd().run,
       validateControlSocket: async () => undefined,
       sendRequest: async () => { throw scenario.thrown(); },
@@ -2599,7 +2606,7 @@ test("launchctl print stdout never reaches stderr, however the service command f
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     // Loaded, and bootout never actually clears it.
     runLaunchctl: async (args) => args[0] === "print"
       ? { code: 0, stdout: dump, stderr: "" }
@@ -2627,7 +2634,7 @@ test("an errno filesystem failure on the service path is a service failure, not 
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: cliFakeLaunchd().run,
     validateControlSocket: async () => undefined,
     sendRequest: healthySendRequest,
@@ -2653,7 +2660,7 @@ test("an unsafe service path reports the unsafe class, not a plain input rejecti
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: cliFakeLaunchd().run,
     validateControlSocket: async () => undefined,
     sendRequest: healthySendRequest,
@@ -2677,7 +2684,7 @@ test("service status reports unknown and exits non-zero when launchctl cannot an
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "status"], {
     env: {}, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: async () => ({ code: 1, stdout: "", stderr: "spawn /bin/launchctl ENOENT" }),
     loadConfig: () => { throw new Error("status must not load configuration"); },
     sendRequest: async () => { throw new Error("status must not contact the gateway"); },
@@ -2712,7 +2719,7 @@ test("the health probe still terminates when the injected clock never advances",
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: cliFakeLaunchd().run,
     validateControlSocket: async () => undefined,
     sendRequest: async () => {
@@ -2736,7 +2743,7 @@ test("the tail of the health window never fabricates its own last observation", 
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     runLaunchctl: cliFakeLaunchd().run,
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ timeoutMs }: { timeoutMs?: number }) => {
@@ -2767,7 +2774,7 @@ test("a non-errno failure on the service path keeps its own class", async () => 
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
-    serviceHomeDir: () => home,
+    serviceHomeDir: () => home, probeHostLease: freeHostLease,
     // A string `code` alone is not a filesystem failure: CliFault and the
     // lease's spawn failures look like this too.
     runLaunchctl: async () => {

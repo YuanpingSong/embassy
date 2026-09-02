@@ -135,6 +135,10 @@ function baseDeps(
     uid: UID,
     now: clock.now,
     delay: clock.delay,
+    // The real probe spawns /usr/bin/lockf (macOS only). Every test but the
+    // darwin-only one below injects its answer, so the install path is
+    // exercised on every platform CI runs.
+    probeHostLease: async () => ({ held: false }),
     ...overrides,
   };
 }
@@ -321,22 +325,24 @@ test("install kickstarts without -k only when the bootstrapped agent is loaded b
   ]);
 });
 
+const CONTENDED_LEASE = "Another or unverifiable Embassy gateway owns this machine.";
+const NON_CONTENTION_LEASE =
+  "An Embassy host-lease path component is not a current-user real directory.";
+
 test("install refuses while a live broker holds the host lease, naming that pid and quoting the lease", async (t) => {
   const home = await homeFixture(t);
-  const lease = await acquireGatewayInstanceLease(home);
-  t.after(async () => {
-    await lease.close();
-  });
-
   const launchd = fakeLaunchd();
   await assert.rejects(
-    installServiceAgent(baseDeps(home, { runLaunchctl: launchd.run })),
+    installServiceAgent(baseDeps(home, {
+      runLaunchctl: launchd.run,
+      probeHostLease: async () => ({ held: true, pid: 4242, message: CONTENDED_LEASE }),
+    })),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "GATEWAY_INSTANCE_IN_USE" &&
       error.recoverable &&
-      error.message.startsWith(`Another Embassy broker holds the host lease (pid ${process.pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install.`) &&
-      error.message.includes("The lease reported: "),
+      error.message ===
+        `Another Embassy broker holds the host lease (pid 4242, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install. The lease reported: ${CONTENDED_LEASE}`,
   );
   // The lease is probed after our own label is cleared, but still before any
   // write: nothing was installed.
@@ -344,21 +350,21 @@ test("install refuses while a live broker holds the host lease, naming that pid 
   await assert.rejects(lstat(path.join(home, "Library", "LaunchAgents")));
 });
 
-test("a non-contention lease failure quotes the lease verbatim and names no pid", async (t) => {
+test("a lease failure with no live holder quotes the lease and names no pid", async (t) => {
   const home = await homeFixture(t);
-  const elsewhere = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-service-elsewhere-"));
-  t.after(async () => rm(elsewhere, { recursive: true, force: true }));
-  await mkdir(path.join(home, ".local"), { mode: 0o700 });
-  await symlink(elsewhere, path.join(home, ".local", "state"));
-
   const launchd = fakeLaunchd();
   await assert.rejects(
-    installServiceAgent(baseDeps(home, { runLaunchctl: launchd.run })),
+    installServiceAgent(baseDeps(home, {
+      runLaunchctl: launchd.run,
+      // Most GATEWAY_INSTANCE_IN_USE conditions are not another broker at all,
+      // and the probe reports no pid for them.
+      probeHostLease: async () => ({ held: true, message: NON_CONTENTION_LEASE }),
+    })),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "GATEWAY_INSTANCE_IN_USE" &&
       error.message ===
-        "The Embassy host lease could not be acquired, so nothing was installed. The lease reported: An Embassy host-lease path component is not a current-user real directory." &&
+        `The Embassy host lease could not be acquired, so nothing was installed. The lease reported: ${NON_CONTENTION_LEASE}` &&
       !/pid/.test(error.message),
   );
   await assert.rejects(lstat(plistPathIn(home)));
@@ -666,22 +672,54 @@ test("a rollback that cannot confirm the unload leaves the plist in place and sa
   assert.equal((await lstat(plistPathIn(home))).isFile(), true);
 });
 
-test("the lease record is only trusted when this user owns it", async (t) => {
+/**
+ * The one test that drives the real probe rather than a fake, so the default
+ * wiring is proved rather than assumed. It needs /usr/bin/lockf, which is
+ * macOS only — the same reason test/gateway-instance-lease.test.ts skips off
+ * darwin, and the reason every other install test injects a probe.
+ */
+test("the default host-lease probe reads the real lease, and trusts a record only when this user owns it", {
+  skip: process.platform !== "darwin" ? "host lease needs /usr/bin/lockf" : false,
+}, async (t) => {
   const home = await homeFixture(t);
   const lease = await acquireGatewayInstanceLease(home);
   t.after(async () => {
     await lease.close();
   });
-  // The lock file belongs to UID; installing as a different uid must not read
-  // a pid out of it, let alone tell anyone to stop that process.
+
+  /** Deliberately no probeHostLease: this is the production default. */
+  const realProbeDeps = (
+    overrides: Partial<ServiceAgentDependencies> = {},
+  ): ServiceAgentDependencies => {
+    const clock = sleepDrivenClock();
+    return {
+      homeDir: home, runLaunchctl: fakeLaunchd().run, env: {},
+      execPath: EXEC_PATH, cliPath: CLI_PATH, uid: UID,
+      now: clock.now, delay: clock.delay, ...overrides,
+    };
+  };
+
   await assert.rejects(
-    installServiceAgent(baseDeps(home, { runLaunchctl: fakeLaunchd().run, uid: UID + 1 })),
+    installServiceAgent(realProbeDeps()),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "GATEWAY_INSTANCE_IN_USE" &&
+      error.recoverable &&
+      error.message.startsWith(`Another Embassy broker holds the host lease (pid ${process.pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install.`) &&
+      error.message.includes(`The lease reported: ${CONTENDED_LEASE}`),
+  );
+
+  // The lock file belongs to UID; probing as a different uid must not read a
+  // pid out of it, let alone tell anyone to stop that process.
+  await assert.rejects(
+    installServiceAgent(realProbeDeps({ uid: UID + 1 })),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "GATEWAY_INSTANCE_IN_USE" &&
       error.message.startsWith("The Embassy host lease could not be acquired") &&
       !/pid/.test(error.message),
   );
+  await assert.rejects(lstat(plistPathIn(home)));
 });
 
 test("launchctl detail is stderr only, and capped", async (t) => {

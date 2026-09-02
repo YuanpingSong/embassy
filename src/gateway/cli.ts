@@ -18,8 +18,9 @@ import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from ".
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
-import { boundedServiceDetail, defaultRunLaunchctl, installServiceAgent, serviceAgentStatus,
-  uninstallServiceAgent, type RunLaunchctl, type ServiceAgentDependencies } from "./service-agent.js";
+import { boundedServiceDetail, defaultProbeHostLease, defaultRunLaunchctl, installServiceAgent,
+  serviceAgentStatus, uninstallServiceAgent, type ProbeHostLease, type RunLaunchctl,
+  type ServiceAgentDependencies } from "./service-agent.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -73,6 +74,7 @@ export type GatewayCliDependencies = {
   delay?: (milliseconds: number) => Promise<void>;
   runLaunchctl?: RunLaunchctl;
   serviceHomeDir?: () => string;
+  probeHostLease?: ProbeHostLease;
 };
 
 const HELP_USAGE = `Embassy — local messaging for Claude Code and Codex
@@ -747,6 +749,7 @@ export async function runGatewayCli(
         env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
         uid: process.getuid!(),
         delay: dependencies.delay ?? defaultDelay, now: dependencies.now ?? monotonicNow,
+        probeHostLease: dependencies.probeHostLease ?? defaultProbeHostLease,
       };
       try {
         if (subcommand === "install") {

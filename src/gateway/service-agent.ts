@@ -178,6 +178,11 @@ export type ServiceAgentDependencies = Readonly<{
   /** Bounded waits for launchd to finish unloading; injected by tests. */
   delay?: (milliseconds: number) => Promise<void>;
   now?: () => number;
+  /**
+   * The host-lease probe. The default spawns /usr/bin/lockf through
+   * instance-lease.ts and so only answers on macOS; tests inject a fake.
+   */
+  probeHostLease?: ProbeHostLease;
 }>;
 
 const defaultDelay = async (milliseconds: number): Promise<void> =>
@@ -360,42 +365,77 @@ async function readHeldLeasePid(homeDir: string, uid: number): Promise<number | 
 }
 
 /**
- * Refuse to install while the host lease cannot be taken. This reuses the
- * exact detection the broker itself relies on for single-instance
- * correctness: a non-blocking probe of the host-wide advisory lease
- * (acquireGatewayInstanceLease, unmodified). If nobody holds it, the probe
- * briefly acquires it and releases it immediately.
+ * What the host-wide lease says right now. `pid` is present only when a
+ * *live* holder was identified; `message` is the lease's own words for why it
+ * could not be taken.
+ */
+export type HostLeaseProbe =
+  | Readonly<{ held: false }>
+  | Readonly<{ held: true; pid?: number; message: string }>;
+export type ProbeHostLease = (homeDir: string, uid: number) => Promise<HostLeaseProbe>;
+
+/**
+ * The production probe, and the reason this is an injected dependency at all.
+ * It reuses the exact detection the broker relies on for single-instance
+ * correctness — a non-blocking acquire of the host-wide advisory lease
+ * (acquireGatewayInstanceLease, unmodified), released immediately when nobody
+ * holds it. That helper spawns /usr/bin/lockf, which exists only on macOS, so
+ * on any other platform it reports contention that is really a missing
+ * binary. The product is macOS-only and that is correct in production, but it
+ * makes every install path untestable off darwin; tests inject a fake probe
+ * and one darwin-only test drives this default.
  *
  * `GATEWAY_INSTANCE_IN_USE` is not only contention: instance-lease.ts throws
  * it for roughly ten conditions that have nothing to do with another broker
  * (a symlinked path component, a non-empty unmarked lease root, a mode or
- * owner drift). So the original message is always preserved — verbatim up
- * to the same 512-byte bound every other quoted string here carries, which
- * no instance-lease message approaches — and a
- * pid is named only when the recorded holder is genuinely alive — the lock
+ * owner drift). So its message is always carried out of here unchanged, and a
+ * pid is reported only when the recorded holder is genuinely alive — the lock
  * record keeps the *last* holder, and a successful probe writes its own pid
  * there, so an unchecked pid is routinely stale. Never tell someone to stop
  * a dead process.
  */
-async function refuseIfAnotherBrokerHoldsLease(homeDir: string, uid: number): Promise<void> {
+export async function defaultProbeHostLease(
+  homeDir: string,
+  uid: number,
+): Promise<HostLeaseProbe> {
   let lease;
   try {
     lease = await acquireGatewayInstanceLease(homeDir);
   } catch (error) {
     if (error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE") {
       const pid = await readHeldLeasePid(homeDir, uid);
-      const alive = pid !== undefined && isProcessAlive(pid);
-      throw new BridgeError(
-        "GATEWAY_INSTANCE_IN_USE",
-        alive
-          ? `Another Embassy broker holds the host lease (pid ${pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install. The lease reported: ${boundedServiceDetail(error.message)}`
-          : `The Embassy host lease could not be acquired, so nothing was installed. The lease reported: ${boundedServiceDetail(error.message)}`,
-        true,
-      );
+      if (pid !== undefined && isProcessAlive(pid)) {
+        return { held: true, pid, message: error.message };
+      }
+      return { held: true, message: error.message };
     }
     throw error;
   }
   await lease.close();
+  return { held: false };
+}
+
+/**
+ * Refuse to install while the host lease cannot be taken. The lease's own
+ * message is preserved — verbatim up to the same 512-byte bound every other
+ * quoted string here carries, which no instance-lease message approaches —
+ * and a pid is named only when the probe verified it alive.
+ */
+async function refuseIfAnotherBrokerHoldsLease(
+  deps: ServiceAgentDependencies,
+  homeDir: string,
+  uid: number,
+): Promise<void> {
+  const probe = await (deps.probeHostLease ?? defaultProbeHostLease)(homeDir, uid);
+  if (!probe.held) return;
+  const reported = boundedServiceDetail(probe.message);
+  throw new BridgeError(
+    "GATEWAY_INSTANCE_IN_USE",
+    probe.pid === undefined
+      ? `The Embassy host lease could not be acquired, so nothing was installed. The lease reported: ${reported}`
+      : `Another Embassy broker holds the host lease (pid ${probe.pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install. The lease reported: ${reported}`,
+    true,
+  );
 }
 
 /**
@@ -631,7 +671,7 @@ export async function installServiceAgent(
   }
 
   // 3. Only now can a held lease mean somebody else's broker.
-  await refuseIfAnotherBrokerHoldsLease(homeDir, uid);
+  await refuseIfAnotherBrokerHoldsLease(deps, homeDir, uid);
 
   // 4. Side effects begin here. The plist already on disk is read first: a
   //    re-install overwrites it, and a rollback that merely deleted it would
