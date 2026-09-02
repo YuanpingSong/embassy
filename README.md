@@ -53,7 +53,7 @@ Runtime delivery is best effort. Version and build strings are unverified metada
 
 ### 1. Start Embassy
 
-After creating the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md), run the foreground broker under the same OS account as Claude Code and Codex:
+Run the foreground broker under the same OS account as Claude Code and Codex. Federation across machines needs a `nodes.json`; see [Configuration](docs/CONFIGURATION.md).
 
 ```bash
 embassy serve

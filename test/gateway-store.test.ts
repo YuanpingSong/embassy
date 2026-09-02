@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
   realpath,
   rename as renameFile,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { test } from "node:test";
@@ -326,7 +328,7 @@ test("runtime refuses unsupported schemas without mutating state", async () => {
       error instanceof Error &&
       "code" in error &&
       error.code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED" &&
-      /move gateway-state\.json aside.*keep nodes\.json/iu.test(error.message),
+      /move gateway-state\.json aside.*nodes\.json, if you use federation, is untouched/iu.test(error.message),
   );
   const unchanged = await readFile(first.store.stateFilePath, "utf8");
   assert.match(unchanged, /"schemaVersion":4/u);
@@ -1633,6 +1635,52 @@ test("an unowned state directory admits exactly nodes.json before its ownership 
   await assert.rejects(rejected.store.initialize(),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_DIRECTORY_NOT_OWNED");
   assert.equal(await readFile(path.join(rejected.stateDir, "foreign"), "utf8"), "untouched");
+});
+
+test("boot removes stale gateway-dashboard files left by a 2.x install and never recreates them", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  const markerPath = path.join(setup.stateDir, ".agent-embassy-state");
+  const markerBefore = await readFile(markerPath, "utf8");
+
+  const enPath = path.join(setup.stateDir, "gateway-dashboard.html");
+  const zhPath = path.join(setup.stateDir, "gateway-dashboard.zh-CN.html");
+  await writeFile(enPath, "<html>stale</html>", { mode: 0o600 });
+  await writeFile(zhPath, "<html>stale</html>", { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await assert.rejects(lstat(enPath));
+  await assert.rejects(lstat(zhPath));
+  // The boot sweep touches only the two stale dashboard files.
+  assert.equal(await readFile(markerPath, "utf8"), markerBefore);
+  assert.match(await readFile(reopened.stateFilePath, "utf8"), /"schemaVersion": 5,/u);
+  await reopened.close();
+
+  // A later boot with nothing left to remove is a no-op: still gone, nothing recreated.
+  const rebooted = new GatewayStore(setup.config);
+  await rebooted.initialize();
+  await assert.rejects(lstat(enPath));
+  await assert.rejects(lstat(zhPath));
+  await rebooted.close();
+});
+
+test("boot cleanup never follows a symlink planted at the dashboard filename", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  const target = path.join(setup.stateDir, "..", "outside-target");
+  await writeFile(target, "do not touch", { mode: 0o600 });
+  const linkPath = path.join(setup.stateDir, "gateway-dashboard.html");
+  await symlink(target, linkPath);
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await reopened.close();
+  assert.equal((await lstat(linkPath)).isSymbolicLink(), true);
+  assert.equal(await readFile(target, "utf8"), "do not touch");
 });
 
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {

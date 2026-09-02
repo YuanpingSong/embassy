@@ -130,8 +130,6 @@ const CLI_HINT = {
     "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   messageTooLarge:
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
-  nodeInventoryRequired:
-    "at {stateDir}, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {\"version\":1,\"host\":\"<host>\",\"nodes\":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.",
   stateResetRequired:
     "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 2.0.x before resetting.",
   callerIdentityConflict:
@@ -715,10 +713,6 @@ export async function runGatewayCli(
       writeStateResetHint(stderr, error.code);
       if (error.code === "CONTROL_CONNECT_DENIED") stderr.write(`[embassy] ${
         CLI_HINT[command === "serve" ? "stateAccessDenied" : "controlConnectDenied"]}\n`);
-      if (error.code === "GATEWAY_NODE_INVENTORY_REQUIRED") {
-        const stateDir = env.EMBASSY_STATE_DIR ?? (env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, "agent-embassy") : "~/.local/state/agent-embassy");
-        stderr.write(`[embassy] ${CLI_HINT.nodeInventoryRequired.replace("{stateDir}", stateDir)}\n`);
-      }
       return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
     writeFailure(stdout, stderr, command, "INTERNAL_ERROR", { kind: "failure" });

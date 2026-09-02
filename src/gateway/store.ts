@@ -28,6 +28,8 @@ import type { AcceptMessageInput, AcceptMessageResult, AuthorizeMessageInput,
 const STATE_MARKER = ".agent-embassy-state";
 const STATE_MARKER_CONTENT = "agent-embassy-state-v1\n";
 const STATE_FILE = "gateway-state.json";
+/** Static dashboard files a 2.x install may have left behind (emb-100 removed the feature; emb-106 sweeps the litter). */
+const STALE_DASHBOARD_FILES = ["gateway-dashboard.html", "gateway-dashboard.zh-CN.html"] as const;
 const CONTROLLER_LOCK = ".gateway-controller.lock";
 const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
@@ -2806,7 +2808,35 @@ export class GatewayStore {
         await marker.close();
       }
     }
+    if (existed) {
+      await this.removeStaleDashboardFiles(root);
+    }
     return root;
+  }
+  /**
+   * Boot-time litter sweep (emb-106): a static `gateway-dashboard*.html` left
+   * by a 2.x install is unlinked once, best-effort. Only a regular file owned
+   * by this uid is removed (lstat, no symlink following); nothing else in the
+   * state directory is touched, and a removal failure never blocks startup.
+   */
+  private async removeStaleDashboardFiles(root: string): Promise<void> {
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    for (const name of STALE_DASHBOARD_FILES) {
+      const filePath = path.join(root, name);
+      let info: Awaited<ReturnType<typeof lstat>>;
+      try {
+        info = await lstat(filePath);
+      } catch {
+        continue;
+      }
+      if (info.isSymbolicLink() || !info.isFile() || (uid !== undefined && info.uid !== uid)) continue;
+      try {
+        await unlink(filePath);
+        process.stderr.write(`[embassy] removed stale ${name} left by an earlier Embassy release from the gateway state directory\n`);
+      } catch {
+        // Best-effort cleanup; leave the file in place if it cannot be removed.
+      }
+    }
   }
   private assertOwnedPrivate(uid: number, mode: number, kind: string): void {
     if (typeof process.getuid === "function" && uid !== process.getuid()) {
@@ -2993,7 +3023,7 @@ export class GatewayStore {
     if (isObject(parsed) && Object.hasOwn(parsed, "schemaVersion") && parsed.schemaVersion !== 5) {
       throw new BridgeError(
         "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
-        "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside, keep nodes.json, then restart and re-register, select, and pair routes.",
+        "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside — nodes.json, if you use federation, is untouched — then restart and re-register, select, and pair routes.",
       );
     }
     if (!isGatewayPersistedStateV5(parsed)) {

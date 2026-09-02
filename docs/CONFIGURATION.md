@@ -21,13 +21,16 @@ directory and `nodes.json`, then connects to the control socket; grant a sandbox
 Codex task that directory as a writable root, or approve equivalent local access,
 and do not relocate state or start a second broker to work around a denial.
 
-Federation authority comes only from `nodes.json` in `EMBASSY_STATE_DIR`. It
-must be a current-user-owned mode-0600 regular file whose exact object shape is
+`nodes.json` in `EMBASSY_STATE_DIR` is optional — needed only for federation
+across machines. Federation authority comes only from this file: when present,
+it must be a current-user-owned mode-0600 regular file whose exact object shape is
 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`.
 `host` names this broker; `nodes` contains 0 through 31 unique OpenSSH aliases,
 omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
-node is the fixed SSH destination for `embassy peer-stdio`. The file is mandatory;
-when it is absent, Embassy prints the exact `nodes:[]` local-only fix and refuses startup.
+node is the fixed SSH destination for `embassy peer-stdio`. When `nodes.json`
+is absent, this machine runs alone: Embassy names the broker by this host's own
+hostname (the first label before any dot, lower-cased; `localhost` if that name
+is not a valid host token) and federates with nobody.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
 
 ### Private state reset
@@ -39,7 +42,7 @@ and every delivery has settled. Then:
 
 1. Stop the broker.
 2. Move `gateway-state.json` aside so the old ledger remains recoverable.
-3. Keep `nodes.json` in place.
+3. `nodes.json`, if you use federation, is untouched.
 4. Start the version-3 broker to create fresh state.
 5. Re-register routes, select the Claude route, and pair the intended edges.
 

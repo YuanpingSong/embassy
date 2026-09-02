@@ -63,6 +63,10 @@ const FORBIDDEN = [
   "idle-minutes",
   "progress watch",
   "liveness check",
+  // emb-106: nodes.json is optional, defaulting to a hostname-named single
+  // machine; the mandatory-inventory refusal code no longer exists.
+  "mandatory nodes.json",
+  "GATEWAY_NODE_INVENTORY_REQUIRED",
 ] as const;
 
 /**

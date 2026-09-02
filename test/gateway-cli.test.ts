@@ -2225,15 +2225,6 @@ test("unsupported and corrupt private state print the reset instruction", async 
   }
 });
 
-test("missing mandatory inventory prints its exact one-line fix", async () => {
-  const hint = 'at ~/.local/state/agent-embassy, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {"version":1,"host":"<host>","nodes":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.';
-  const stdout = capture(), stderr = capture();
-  const code = await runGatewayCli(["serve"], { stdout, stderr,
-    runServer: async () => { throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail"); } });
-  assert.equal(code, gatewayCliExitCodes.invalidInput); assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_NODE_INVENTORY_REQUIRED");
-  assert.equal(stderr.chunks.join(""), `[embassy] request rejected.\n[embassy] ${hint}\n`);
-});
-
 test("package metadata publishes the client and its runtime dependency", async () => {
   const packageJson = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),

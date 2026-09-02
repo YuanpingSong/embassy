@@ -649,8 +649,9 @@ does not publish candidates, select or connect to a peer, write a provider
 socket, request provider history, start a model turn, or contact a remote host.
 Validated target bindings may retain private native and socket-derived evidence
 memory-only until rescan or close, but none enters public state or persistence.
-Its ready result reports the exact local host from `nodes.json` and
-`codexMode: "native_messaging"` without exposing paths.
+Its ready result reports the exact local host — from `nodes.json`, or this
+host's own hostname when that file is absent — and `codexMode: "native_messaging"`
+without exposing paths.
 
 There is no arbitrary filesystem operation, shell command, SSH command, App
 Server method, Claude registry mutation, credential argument, approval reply,
@@ -662,7 +663,7 @@ thread/session generation, source alias, bounds, and conversation state.
 
 ## Codex connectors and remote hosts
 
-Each broker's mandatory `nodes.json` gives its local connector an explicit host identity; `this-mac` has no reserved meaning. Configured peers exchange only body-free local catalogs and destination-owned handoffs over fixed SSH.
+Each broker's local connector has an explicit host identity, from `nodes.json` when federating or from this host's own hostname otherwise; `this-mac` has no reserved meaning. Configured peers exchange only body-free local catalogs and destination-owned handoffs over fixed SSH.
 
 The local connector resolves the managed standalone Codex release by exact
 owned path; it does not use `PATH`. That installation is separate from

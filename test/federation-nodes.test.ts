@@ -4,7 +4,9 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
-import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
+import { isAttestedGatewayNodeInventory, loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
+
+const injectedHostname = () => "Fixture-Host.local";
 
 async function stateFixture(t: TestContext): Promise<string> {
   const stateDir = await realpath(await mkdtemp("/tmp/embassy-nodes-"));
@@ -28,10 +30,28 @@ async function rejectsConfiguration(promise: Promise<unknown>, pattern: RegExp):
   });
 }
 
-test("missing nodes.json refuses without inventing a local identity", async (t) => {
+test("absent nodes.json defaults to an attested single-machine inventory named by the hostname", async (t) => {
   const stateDir = await stateFixture(t);
-  await assert.rejects(loadGatewayNodeInventory(stateDir), (error: unknown) =>
-    error instanceof BridgeError && error.code === "GATEWAY_NODE_INVENTORY_REQUIRED");
+  const inventory = await loadGatewayNodeInventory(stateDir, { hostname: injectedHostname });
+  assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  assert.equal(Object.isFrozen(inventory), true);
+  assert.equal(Object.isFrozen(inventory.nodes), true);
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "fixture-host"), true);
+});
+
+test("absent state directory defaults the same way, without ever creating it", async (t) => {
+  const stateDir = path.join(await stateFixture(t), "does-not-exist");
+  const inventory = await loadGatewayNodeInventory(stateDir, { hostname: injectedHostname });
+  assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "fixture-host"), true);
+  await assert.rejects(lstat(stateDir));
+});
+
+test("a hostname that fails HOST_TOKEN defaults to localhost instead", async (t) => {
+  const stateDir = await stateFixture(t);
+  const inventory = await loadGatewayNodeInventory(stateDir, { hostname: () => "My_Weird_Host!" });
+  assert.deepEqual(inventory, { host: "localhost", nodes: [] });
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "localhost"), true);
 });
 
 test("loads an exact bounded static inventory and freezes its result", async (t) => {
@@ -81,6 +101,19 @@ test("rejects unsafe roots and unsafe inventory artifacts", async (t) => {
   const looseFile = await writeInventory(looseDir, { version: 1, host: "studio", nodes: [] });
   await chmod(looseFile, 0o644);
   await rejectsConfiguration(loadGatewayNodeInventory(looseDir), /mode-0600 regular file/);
+});
+
+test("a present but unreadable nodes.json still refuses; it never falls back to the default", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("root bypasses file permissions");
+    return;
+  }
+  const stateDir = await stateFixture(t);
+  const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: [] });
+  await chmod(filePath, 0o000);
+  await assert.rejects(loadGatewayNodeInventory(stateDir), (error: unknown) =>
+    error instanceof BridgeError &&
+    (error.code === "CONTROL_CONNECT_DENIED" || error.code === "INVALID_GATEWAY_CONFIGURATION"));
 });
 
 test("rejects oversized inventories before parsing", async (t) => {

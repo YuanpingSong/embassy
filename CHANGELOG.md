@@ -12,9 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The ACP-backed DeepSeek and Grok providers with their `dsh-`/`grok-` routes, the offline provider support matrix, and `embassy doctor` with its Codex Desktop classifier (emb-101). The managed-socket holder check stays: a process outside Embassy holding the managed Codex control socket still degrades the Codex connector with `MANAGED_CODEX_UNAVAILABLE`.
 - zh-CN localization, the `--lang` option, and the copy-table layer (emb-102).
 - Progress watches: `TRACK:`/`DONE:`, `--track`, `--idle-minutes`, `untrack`, the automated liveness nudge, `EMBASSY_TRACKING_ENABLED`, `EMBASSY_MAX_WATCHES` (emb-103). A body beginning `TRACK:` or `DONE:` is now delivered verbatim as an ordinary message. Busy-gating (`ROUTE_BUSY` deferral and requeue), `STEER:`, and the queued-ahead marker are unchanged.
+- `GATEWAY_NODE_INVENTORY_REQUIRED` (emb-106).
 
 ### Changed
 
+- `nodes.json` is optional; without it the broker names this machine by its hostname and federates with nobody (emb-106).
+- Stale `gateway-dashboard*.html` files left by 2.x are removed from the state dir at boot (emb-106).
 - `embassy refresh` reports a discovery failure honestly instead of claiming success.
 - Private state schema is 5, reset-only: 2.x state is refused with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and never rewritten; follow the [private state reset](docs/CONFIGURATION.md#private-state-reset).
 - Federation peer protocol is 2; a node answering `initialize` with another version surfaces `PEER_PROTOCOL_MISMATCH` on its mirrored routes and in `embassy status` instead of a tunnel fault.

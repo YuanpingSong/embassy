@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
+import { hostname as osHostname } from "node:os";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
@@ -20,6 +21,7 @@ export type GatewayNodeInventoryDependencies = Readonly<{
   open?: typeof open;
   realpath?: typeof realpath;
   getuid?: () => number | undefined;
+  hostname?: () => string;
 }>;
 
 const attest = (inventory: GatewayNodeInventory): GatewayNodeInventory => {
@@ -79,13 +81,22 @@ function parseInventory(text: string): GatewayNodeInventory {
   return attest(Object.freeze({ host: parsed.host, nodes: Object.freeze([...nodes]) }));
 }
 
-const required = (): never => {
-  throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "The mandatory private nodes.json inventory is absent.");
-};
+/**
+ * Absent nodes.json (and an absent state directory) is the single-machine
+ * case: attest a federation-free default named by this machine's own short
+ * hostname, falling back to "localhost" when that name fails HOST_TOKEN.
+ */
+function defaultInventory(hostname: () => string): GatewayNodeInventory {
+  const label = hostname().split(".")[0]!.toLowerCase();
+  const host = HOST_TOKEN.test(label) ? label : "localhost";
+  return attest(Object.freeze({ host, nodes: Object.freeze([]) }));
+}
 
 /**
  * Load the static federation inventory from the already-selected Embassy state
- * directory. Host identity has no default; a missing inventory refuses.
+ * directory. An absent state directory or absent nodes.json defaults to a
+ * federation-free single-machine inventory named by this host's hostname; a
+ * present-but-unreadable inventory still refuses.
  */
 export async function loadGatewayNodeInventory(
   stateDir: string,
@@ -96,12 +107,13 @@ export async function loadGatewayNodeInventory(
   const openFile = dependencies.open ?? open;
   const getuid = dependencies.getuid ?? (() =>
     typeof process.getuid === "function" ? process.getuid() : undefined);
+  const hostname = dependencies.hostname ?? osHostname;
   if (!path.isAbsolute(stateDir) || path.resolve(stateDir) !== stateDir) {
     return invalid("The Embassy state directory for nodes.json must be an absolute normalized path.");
   }
   let root: Awaited<ReturnType<typeof lstat>>;
   try { root = await inspect(stateDir); } catch (error) {
-    if (isErrno(error, "ENOENT")) return required();
+    if (isErrno(error, "ENOENT")) return defaultInventory(hostname);
     return inaccessible(error, "The Embassy state directory for nodes.json cannot be safely verified.");
   }
   if (root.isSymbolicLink() || !root.isDirectory() || (root.mode & 0o777) !== 0o700) {
@@ -118,7 +130,7 @@ export async function loadGatewayNodeInventory(
     before = await inspect(filePath);
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
-      return required();
+      return defaultInventory(hostname);
     }
     return inaccessible(error, "nodes.json cannot be safely inspected.");
   }
