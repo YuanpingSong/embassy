@@ -186,9 +186,7 @@ broker.
   ownership.
 - The control plane is a private Unix-domain socket in a controller-owned
   mode-0700 state directory. `embassy serve` has no TCP or HTTP listener; its
-  only listeners are private Unix-domain sockets. The opt-in
-  `embassy dashboard --live` companion is a separate process with its own
-  loopback HTTP listener — see "Live companion boundary" below.
+  only listeners are private Unix-domain sockets.
 - Provider startup validates exact OS ownership, path, symlink, lease, state,
   and generation evidence. Unsafe evidence for Embassy-owned or executed
   artifacts and Embassy callback, control, or state paths refuses broker
@@ -236,9 +234,8 @@ broker.
   opening or closing copies of its reserved framing tags before composing the
   real outer frame. Framing or size failure occurs before provider write and is
   never an ambiguous write.
-- The only network listener Embassy can create belongs to the opt-in
-  `embassy dashboard --live` companion, described under "Live companion
-  boundary". Everything enumerated above concerns `embassy serve`.
+- Embassy creates no network listener at all. Everything enumerated above
+  concerns `embassy serve`.
 
 ## Filesystem boundary
 
@@ -295,71 +292,25 @@ never replayed.
 
 For a shell peer, durable route ownership stores only
 `peer:<sha256(uid NUL alias NUL token)>`; the raw peer token and private mailbox
-receipts never enter state, logs, snapshots, dashboards, or routed frames.
+receipts never enter state, logs, snapshots, or routed frames.
 Pending waiters, acknowledgements, and the bounded exact-duplicate receipt
 tombstone are memory-only. A restart therefore cannot falsely confirm a
 stdout write whose acknowledgement was not observed.
 
 The full `conv_` token exposed to a CLI initiator or routed recipient travels
 only inside the accepted CLI result or transient provider payload. It is never
-persisted, journaled, logged, placed in a receipt, projected through public
-events or snapshots, or rendered on either dashboard; public metadata may
-retain only an existing non-reconstructable suffix. Broker-owned marker fields
+persisted, journaled, logged, placed in a receipt, or projected through public
+events or snapshots; public metadata may retain only an existing
+non-reconstructable suffix. Broker-owned marker fields
 introduce no socket paths, Codex thread IDs, Claude session UUIDs, endpoint
 generations, or private route handles. The untrusted body remains opaque text
 and may itself contain sender-provided strings.
 
 The closed private binding store may retain the exact Codex thread ID and Claude
 session UUID required for logical ownership. Native IDs are
-forbidden from public snapshots, normalized events, the dashboard, aliases,
+forbidden from public snapshots, normalized events, aliases,
 logs, errors, and CLI output. A Claude UUID may enter only as a user-supplied
 explicit CLI selector; Embassy never discovers or prints it publicly.
-
-The static dashboard is two atomically rewritten mode-0600 files, not a web
-application: `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`, both
-written on every publish and cross-linked in the page. They contain allowlisted
-metadata only and have no JavaScript, external assets, storage, telemetry,
-mutation endpoint, or self-refresh. Any process already running as the same OS
-user can read them.
-
-### Live companion boundary
-
-`embassy dashboard --live` binds exact `127.0.0.1` on one stable port: `41961`
-by default, or the integer from the per-invocation `--port <n>` option (1024
-through 65535). It is a separate foreground process from `embassy serve` and
-serves the direct root URL `http://127.0.0.1:<port>/`. Multiple windows and
-browsers may use that URL while the companion runs. If the port is occupied,
-startup fails with `LIVE_DASHBOARD_PORT_IN_USE`, points to `--port`, and never
-falls back to another port.
-
-The live companion has no login, capability token, URL fragment, cookie,
-browser session, random instance path, or bootstrap file. Its intended posture
-is one operator and software already trusted under that operator's macOS UID.
-The HTTP listener deliberately does not authenticate processes or OS users,
-so this is a trusted single-user-machine assumption, not a same-UID
-enforcement mechanism: any local software that can reach or spoof loopback can
-read retained message bodies from the live view and invoke its bounded actions.
-
-The exact Host header is checked on every request. Navigation GETs may omit
-Origin; every POST requires the exact Origin plus
-`X-Embassy-Request: 1`. `OPTIONS` is rejected and no CORS headers are sent.
-Those checks block ambient cross-origin browser requests but do not authenticate
-local software. There are no generic control or provider routes, telemetry, or
-external assets. The sole mutation route accepts only exact pair, unpair,
-refresh-discovery, and named Codex-registration-removal JSON bodies, capped at
-1 KiB and six confirmed actions per minute. Registration removal requires an
-in-page consequence confirmation; it removes incident consent edges and
-settles active work by its durable write phase. The browser cannot create a
-registration, send, reply, approve,
-interrupt, change settings, or invoke arbitrary broker/provider methods.
-
-Reports involving the live companion are in scope if they demonstrate a
-non-loopback bind, a bypass of the documented Host/Origin/sentinel action
-guards from a browser origin, or authority beyond the four allowlisted
-actions. Access by local software or another local UID is within the documented
-trusted-machine model and is not itself treated as an authentication bypass,
-because this surface intentionally has no such authentication boundary.
-
 
 ## Validation boundary
 

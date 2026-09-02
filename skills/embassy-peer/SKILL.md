@@ -1,6 +1,6 @@
 ---
 name: embassy-peer
-description: Operate Embassy through current name@host or Claude session-UUID selectors and universal peer-* shell routes. Use when an agent needs to register for inbound messaging, await shell-peer mail, list available peers, refresh the operator's static dashboard, manage a user-chosen pair, send or reply under its own principal, or unregister without exposing provider credentials, socket paths, or message bodies.
+description: Operate Embassy through current name@host or Claude session-UUID selectors and universal peer-* shell routes. Use when an agent needs to register for inbound messaging, await shell-peer mail, list available peers, rescan for Claude sessions, manage a user-chosen pair, send or reply under its own principal, or unregister without exposing provider credentials, socket paths, or message bodies.
 ---
 
 # Embassy Peer Gateway
@@ -15,7 +15,7 @@ If `CALLER_IDENTITY_CONFLICT` reports both inherited identities, strip only the 
 
 Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. The mandatory private `nodes.json` names the local host; configured allowlisted Embassy nodes exchange bounded public route catalogs and destination-owned handoffs over fixed attach-only SSH. Ask the user to choose a selector when it is ambiguous.
 
-Run `embassy status` to read the current snapshot. Run `embassy refresh-dashboard` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
+Run `embassy status` to read the current snapshot. Run `embassy refresh` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
 
 Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native records carrying Embassy's supported explicit versioned advertisement marker are excluded because they are not Claude destinations; a genuine unmarked Claude session remains visible even when its name starts with `codex-*`. A send never pairs with a Claude session automatically. Select the Claude route, then create the exact user-chosen edge with `pair` before sending; an unpaired destination is not routable.
 
@@ -44,13 +44,13 @@ List the public snapshot:
 embassy status
 ```
 
-Regenerate the metadata-only dashboard:
+Rescan for Claude sessions:
 
 ```sh
-embassy refresh-dashboard
+embassy refresh
 ```
 
-Run that refresh only at the passive-discovery authorization stage. Treat the response as a normalized refresh result; it does not reveal the path. The operator-facing page is `gateway-dashboard.html` in the configured state directory, by default `~/.local/state/agent-embassy/`. Use the operator's configured location when it differs. Do not search for the file or scan controller-owned paths.
+Run that refresh only at the passive-discovery authorization stage. Treat the response as a normalized refresh result; it reveals no path. Read the result of the rescan with `embassy status`.
 
 ## Register and await as a shell peer
 
@@ -231,9 +231,9 @@ The private v4 message ledger is bounded. Under pressure, its oldest terminal ro
 
 ## Interpret queue state
 
-Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `delivery-status` for the accepted delivery, or `status` and the dashboard for aggregate route state, when the user asks for progress. The optional `pendingForMs` field is age since acceptance, including in-flight time. `stalled` remains nonterminal. A Claude-bound tracker may be briefly `queued` for routing or pre-write work, but a busy Claude observation never idle-gates it: after those checks, the native mailbox write is immediate and `transport_written` settles `delivered`.
+Treat `accepted` as gateway ownership, not proof that the peer read or answered the message. Use `delivery-status` for the accepted delivery, or `status` for aggregate route state, when the user asks for progress. The optional `pendingForMs` field is age since acceptance, including in-flight time. `stalled` remains nonterminal. A Claude-bound tracker may be briefly `queued` for routing or pre-write work, but a busy Claude observation never idle-gates it: after those checks, the native mailbox write is immediate and `transport_written` settles `delivered`.
 
-For native Claude-to-Codex ingress, Embassy first attempts immediate dispatch. A terminal result observed before the one-second prompt boundary produces only its terminal acknowledgement; native `held` is sent only when the body truly remains queued or dispatch is still nonterminal at that boundary, followed later by the terminal acknowledgement. Claude's rendered “approved and released” notice means only that the paired-consent gateway accepted and released the body to the recipient queue — released is not read, and no human approval is implied. The default `merged` notice policy separately sends at most one nonterminal stall user frame exactly at `floor(messageDeadlineMs / 2)`, containing only a bounded pending age and allowlisted reason. The operator may choose `verbose` to retain the additional terminal diagnostic user frame or `quiet` to suppress gateway-authored user-frame notices; native status and dashboard truth do not change. Codex-bound ordinary work queues while the Codex task is active or temporarily unavailable. Only when the user explicitly asks to steer the active Codex turn may a Claude sender put the exact prefix `STEER:` at the beginning of the body. Embassy uses the exact accepted operation's same-session capability at the next tool-call boundary, never mid-generation or by interruption. Clean boundary refusal returns it to the normal queue; the cap is three steers per exact active operation. Embassy never calls `turn/interrupt` and never retries an ambiguous write.
+For native Claude-to-Codex ingress, Embassy first attempts immediate dispatch. A terminal result observed before the one-second prompt boundary produces only its terminal acknowledgement; native `held` is sent only when the body truly remains queued or dispatch is still nonterminal at that boundary, followed later by the terminal acknowledgement. Claude's rendered “approved and released” notice means only that the paired-consent gateway accepted and released the body to the recipient queue — released is not read, and no human approval is implied. The default `merged` notice policy separately sends at most one nonterminal stall user frame exactly at `floor(messageDeadlineMs / 2)`, containing only a bounded pending age and allowlisted reason. The operator may choose `verbose` to retain the additional terminal diagnostic user frame or `quiet` to suppress gateway-authored user-frame notices; native status truth does not change. Codex-bound ordinary work queues while the Codex task is active or temporarily unavailable. Only when the user explicitly asks to steer the active Codex turn may a Claude sender put the exact prefix `STEER:` at the beginning of the body. Embassy uses the exact accepted operation's same-session capability at the next tool-call boundary, never mid-generation or by interruption. Clean boundary refusal returns it to the normal queue; the cap is three steers per exact active operation. Embassy never calls `turn/interrupt` and never retries an ambiguous write.
 
 Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, widen tools, alter inbound-message policy, or interrupt a turn to force delivery. Report `held`, refused, incompatible, full, expired, unavailable, or `STEER_QUEUE_SUPERSEDED` outcomes or safe error codes without treating them as additional `delivery-status` states and without retrying. Native receipt settlement follows the originating Claude session's stable UUID and revalidates its current endpoint before every stall or terminal write; names, PIDs, and sockets are not receipt identity. Ordinary process/socket rotation for the same Claude UUID is refreshed for that write. After a gateway restart, queued or reserved messages and their delivery tokens/status remain inspectable in the bounded private v4 ledger and may resume once within their deadline and attempt budget against the same exact route and consent edge. Armed work settles `ambiguous`; accepted work settles `unconfirmed`; neither is replayed. Conversations, reply/native capabilities, raw provider frames, callbacks, pending replies, and socket paths remain memory-only. Best-effort observation may refresh what status displays, but it never authorizes or gates delivery.
 
@@ -248,19 +248,6 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.
 
 
-Agents do not use the live dashboard. It is an operator-facing browser surface
-on exact `127.0.0.1`, using stable port `41961` by default or the
-per-invocation `--port <n>`. It deliberately has no login, token, cookie, browser
-session, or local-process/UID authentication and assumes a trusted single-user
-machine; local software that can reach or spoof loopback can use it. Its only
-mutations are explicitly confirmed two-endpoint pair, unpair,
-refresh-discovery, and named Codex-registration-removal actions. Confirmed
-`remove_codex_registration` may remove any named Codex registration; its atomic
-commit removes incident consent edges and conversation, reply, or native
-capabilities, and settles queued/reserved work `cancelled`, armed work
-`ambiguous`, and accepted work `unconfirmed`. It has no registration creation,
-send, reply, approval,
-interruption, settings, or generic provider authority. Agent-facing paths
-remain `embassy status` for a sanitized snapshot and the static
-`gateway-dashboard.html` for offline metadata. A status snapshot observation
-may settle already-due delivery deadlines before projecting state.
+Embassy has no browser surface. The agent-facing path is `embassy status` for a
+sanitized snapshot. A status snapshot observation may settle already-due
+delivery deadlines before projecting state.

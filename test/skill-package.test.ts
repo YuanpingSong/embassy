@@ -36,7 +36,7 @@ test("skill exposes only the stable gateway operating surface", async () => {
     "health",
     "serve",
     "status",
-    "refresh-dashboard",
+    "refresh",
     "select-claude",
     "unselect-claude",
     "pair",

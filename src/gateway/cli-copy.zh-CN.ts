@@ -14,9 +14,7 @@ export const cliCopyZhCn = {
   health                 检查代理健康状态
   status                 读取公开状态快照
   doctor                 诊断 Codex 桌面应用连接状态
-  refresh-dashboard      刷新发现结果并发布两份静态仪表盘
-  dashboard --live [--port <n>]
-                         打开实时状态与有限路由同意操作
+  refresh                重新扫描 Claude 会话
   register-codex         注册或继任 Codex 任务
   unregister-codex       注销当前 Codex 任务
   register-peer --alias <对等别名> [--token-stdin|--emit-env]
@@ -40,14 +38,9 @@ export const cliCopyZhCn = {
   --lang en|zh-CN        本地化面向用户的文本
   --token-stdin          从标准输入首个 LF 结尾行读取对等令牌
   --emit-env             将首次注册令牌输出为 export 命令
-  --port <n>             实时仪表盘端口，1024–65535（默认 41961）
   --version, -v          输出版本
   --help, -h             显示此帮助
 `,
-  "hint.dashboardLiveRequired":
-    "dashboard 需要 --live；静态文件由 serve 和 refresh-dashboard 发布。",
-  "hint.dashboardPortInUse":
-    "实时仪表盘端口 {port} 已被占用；请关闭占用进程，或使用 --port <n> 选择其他端口。",
   "hint.controlConnectDenied":
     "网关进程可能仍在运行，但当前进程无权连接；请授予此任务对网关状态目录的写入权限，然后重试。请勿启动第二个网关进程。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。",
   "hint.controlInvalidResponse":

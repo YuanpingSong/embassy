@@ -379,7 +379,6 @@ async function fixture(
     timers,
     ...(options.codexDoctor === undefined ? {} : { codexDoctor: options.codexDoctor }),
     ...(options.spawnPeer === undefined ? {} : { spawnPeer: options.spawnPeer }),
-    publishDashboard: async () => path.join(stateDir, "gateway-dashboard.html"),
   });
   await service.start();
   return {
@@ -596,7 +595,7 @@ test("duplicate live Claude aliases are rejected without poisoning the snapshot"
     assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
       { accepted: false, code: "conflict" });
     colliding = false; complete = false;
-    await subject.handlers.refreshDashboard();
+    await subject.handlers.refreshDiscovery();
     const incomplete = await subject.handlers.listSnapshot();
     assert.equal(incomplete.availablePeers.some((peer) => peer.alias === duplicateAlias), false);
     assert.deepEqual(incomplete.connectors.find((row) => row.provider === "claude")?.registry?.rejected,
@@ -604,19 +603,19 @@ test("duplicate live Claude aliases are rejected without poisoning the snapshot"
     assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
       { accepted: false, code: "conflict" });
     complete = true;
-    await subject.handlers.refreshDashboard();
+    await subject.handlers.refreshDiscovery();
     assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
       (peer) => peer.alias === duplicateAlias), true);
     assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
       { accepted: true, code: "ok" });
     duplicateRecord = true;
-    await subject.handlers.refreshDashboard();
+    await subject.handlers.refreshDiscovery();
     const repeated = await subject.handlers.listSnapshot();
     assert.equal(repeated.availablePeers.filter((peer) => peer.alias === duplicateAlias).length, 1);
     assert.equal(repeated.connectors.find((row) => row.provider === "claude")?.registry?.rejected.some(
       (row) => row.safeErrorCode === "PEER_ALIAS_COLLISION"), false);
     duplicateRecord = false; colliding = true;
-    await subject.handlers.refreshDashboard();
+    await subject.handlers.refreshDiscovery();
     assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
       (peer) => peer.alias === duplicateAlias), false);
     assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
@@ -733,8 +732,7 @@ test("queued peer mail resumes once after restart under the same hash-only princ
     const replacementClaude = new FakeProvider({ provider: "claude", hostId: "this-mac" });
     replacement = new GatewayService({ config: subject.config, store,
       adapters: [mailbox, replacementClaude, new FakeProvider({ provider: "codex", hostId: "this-mac" })],
-      now: subject.clock.now, timers: new TestTimers(subject.clock),
-      publishDashboard: async () => path.join(subject.config.stateDir, "gateway-dashboard.html") });
+      now: subject.clock.now, timers: new TestTimers(subject.clock) });
     await replacement.start();
     await eventually(() => replacementClaude.advertised.includes("peer-restart@this-mac"));
     const handlers = replacement.handlers();
@@ -818,7 +816,9 @@ test("federated named routes are read-only at the service boundary", async () =>
       binding: { provider: "claude", hostId: "studio", routeHandle: "claude-session-a", registrationId: "reg_local" } };
     await subject.store.registerRoute(local); await subject.store.registerRoute(remoteCodex); await subject.store.registerRoute(remoteClaude);
     const before = await readFile(subject.store.stateFilePath, "utf8");
-    assert.deepEqual(await subject.handlers.removeCodexRegistration({ alias: remoteCodex.alias }), { accepted: false, code: "not_found" });
+    // `unregister_codex` is the only Codex-removal method left, and its wire decoder
+    // accepts only a UUID thread id, which a federated route ref can never be.
+    assert.deepEqual(await subject.handlers.unregisterCodex({ alias: remoteCodex.alias, threadId: THREAD_A }), { accepted: false, code: "not_found" });
     assert.deepEqual(await subject.handlers.unselectClaude({ alias: remoteClaude.alias }), { accepted: false, code: "not_found" });
     assert.equal(await readFile(subject.store.stateFilePath, "utf8"), before);
   } finally { await subject.close(); }
@@ -1122,7 +1122,7 @@ test("stale removal and succession controls preserve a same-alias replacement", 
               }
               return await removeOwnedRoute(input);
             };
-            return subject.handlers.removeCodexRegistration({ alias: codex.alias });
+            return subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
           })()
         : (() => {
             const original = subject.store.replaceCodexRegistrationAtomic.bind(subject.store);
@@ -1281,7 +1281,7 @@ test("confirmed removal atomically terminalizes phase truth and drops consent", 
       attemptId: accepted.attempt.attemptId,
       lossOutcome: "unconfirmed",
     });
-    const removed = await subject.handlers.removeCodexRegistration({ alias: codex.alias });
+    const removed = await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
     assert.deepEqual(removed, { accepted: true, code: "ok" });
     assert.equal((await subject.store.publicSnapshot()).consentEdges.length, 0);
     const messages = await subject.store.publicSnapshot();
@@ -1590,7 +1590,7 @@ test("Codex correlated acceptance is durable before terminal and removal binds i
     await codexProvider.pauseEntered.promise;
     const accepted = await subject.store.publicSnapshot();
     assert.equal(accepted.messages.at(-1)?.state, "transport_written");
-    await subject.handlers.removeCodexRegistration({ alias: codex.alias });
+    await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
     const terminal = await subject.store.publicSnapshot();
     assert.equal(terminal.messages.at(-1)?.state, "unconfirmed");
     codexProvider.pauseRelease.resolve();
@@ -1889,7 +1889,6 @@ test("live-only progress watches open, settle, and disappear across every owners
       store: reopenedStore,
       now: subject.clock.now,
       timers: subject.timers,
-      publishDashboard: async () => path.join(subject.config.stateDir, "gateway-dashboard.html"),
     });
     await replacement.start();
     assert.equal((await replacement.snapshot()).progressWatches?.length, 0);
@@ -1903,7 +1902,7 @@ test("live-only progress watches open, settle, and disappear across every owners
     });
     assert.equal(removalWatch.accepted, true);
     assert.deepEqual(
-      await replacementHandlers.removeCodexRegistration({ alias: codex.alias }),
+      await replacementHandlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle }),
       { accepted: true, code: "ok" },
     );
     snapshot = await replacement.snapshot();
@@ -2316,7 +2315,7 @@ test("a correlated Claude reply cannot cross a same-alias registration replaceme
     });
     await entered.promise;
     assert.deepEqual(
-      await subject.handlers.removeCodexRegistration({ alias: codex.alias }),
+      await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle }),
       { accepted: true, code: "ok" },
     );
     assert.deepEqual(await subject.handlers.registerCodex({
@@ -2369,7 +2368,7 @@ test("an initial send cannot inherit a same-alias caller replacement after attes
       expectsReply: false,
     });
     await entered.promise;
-    await subject.handlers.removeCodexRegistration({ alias: codex.alias });
+    await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
     await subject.handlers.registerCodex({
       alias: codex.alias,
       threadId: THREAD_B,
@@ -2468,7 +2467,7 @@ test("reply attestation and an old conversation token cannot cross same-alias re
       caller: { kind: "codex", alias: codex.alias, threadId: THREAD_A },
     });
     await entered.promise;
-    await subject.handlers.removeCodexRegistration({ alias: codex.alias });
+    await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
     await subject.handlers.registerCodex({
       alias: codex.alias,
       threadId: THREAD_B,
@@ -2571,7 +2570,7 @@ test("native receipt settlement precedes teardown and closing ingress cannot per
     subject.clock.advance(2_500);
     await subject.timers.runDue();
     assert.deepEqual(
-      await subject.handlers.removeCodexRegistration({ alias: codex.alias }),
+      await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle }),
       { accepted: true, code: "ok" },
     );
     await eventually(() => claudeProvider.unadvertised.includes(codex.alias));
@@ -2908,7 +2907,6 @@ test("restart composes queued, reserved, armed, and accepted phase truth without
       store: secondStore,
       now: subject.clock.now,
       timers: new TestTimers(subject.clock),
-      publishDashboard: async () => path.join(subject.config.stateDir, "gateway-dashboard.html"),
     });
     await secondService.start();
     const secondHandlers = secondService.handlers();

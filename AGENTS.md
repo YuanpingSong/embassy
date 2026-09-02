@@ -74,8 +74,7 @@ hundred wrong lines of copy:
 - R3: `service.ts` dispatch/scheduling, `claude-peer.ts`,
   `codex-app-server.ts`, `codex-local-transport.ts`, `server.ts` boot,
   `control.ts`, `config.ts`.
-- R2: `dashboard-model.ts`, `dashboard.ts`, `live-dashboard-app/*`, CLI
-  argument surfaces.
+- R2: CLI argument surfaces.
 - R1: `*copy*.ts`, `docs/`, README, site, help text.
 
 ### Hard rules (no judgment required)
@@ -122,12 +121,8 @@ sentence supports it, escalate an explicit doctrine-change proposal rather than
 silently expanding the boundary through a test or hardening patch.
 
 - Keep the shipped v1 launcher macOS-only, foreground, same-machine, and
-  local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP.
-  The only network listener is the separately invoked, foreground
-  `embassy dashboard --live` companion: exact IPv4 loopback, one configured
-  stable port, and closed with its command. Its plain loopback URL assumes a
-  trusted single-user machine; preserve exact Host checks on every request and
-  exact Origin plus the sentinel header on every POST.
+  local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP,
+  and Embassy creates no network listener at all.
 - Keep the control plane on one private Unix-domain socket inside the
   controller-owned mode-0700 state directory. Controller files are mode 0600.
 - A Codex task self-registers using its inherited `CODEX_THREAD_ID` and a
@@ -156,8 +151,8 @@ silently expanding the boundary through a test or hardening patch.
   advertisement process. Remove only the exact-owned record and callback socket
   during graceful shutdown; never modify another process's artifacts.
 - Persist message bodies, opaque delivery tokens, and delivery status only in
-  the bounded mode-0600 broker state needed for the private ledger, live
-  dashboard, and queued-delivery recovery. A queued or reserved body may
+  the bounded mode-0600 broker state needed for the private ledger and
+  queued-delivery recovery. A queued or reserved body may
   resume once within its deadline and attempt budget after restart. An armed
   or accepted message settles `ambiguous` or `unconfirmed` and is never
   replayed. Keep conversations, reply and native capabilities, raw provider
@@ -165,8 +160,8 @@ silently expanding the boundary through a test or hardening patch.
   and tool data memory-only.
 - Closed private route state may retain the Codex thread ID and Claude session
   UUID needed for logical ownership and per-operation attestation. Native IDs
-  are forbidden from public snapshots, normalized events, the dashboard,
-  aliases, logs, errors, and CLI output.
+  are forbidden from public snapshots, normalized events, aliases, logs,
+  errors, and CLI output.
 - Treat inherited `CLAUDE_CODE_MESSAGING_SOCKET` as a raw absolute path. It may
   become an in-memory `uds:` capability only; never accept it from an argument,
   print it, persist it, or instruct the user to prefix it.
@@ -206,18 +201,6 @@ silently expanding the boundary through a test or hardening patch.
   never replay an ambiguous write.
 - Preserve bounded queues, messages, callbacks, deadlines, deduplication, rate
   limits, and conversation tables. Never retry an ambiguous write.
-- The dashboard remains an atomically replaced, metadata-only static HTML file
-  with no JavaScript, external assets, storage, telemetry, mutation endpoint,
-  or network listener.
-- The opt-in live companion may render that same bounded public model with
-  local JavaScript and the reviewed pair, unpair, named Codex-registration
-  removal, and refresh-discovery actions. Confirmed registration removal may
-  target any named Codex route; its one state commit removes incident consent
-  edges and conversation, reply, or native capabilities, and settles
-  queued/reserved work `cancelled`, armed work `ambiguous`, and accepted work
-  `unconfirmed`. It must have no provider or generic control method, additional
-  mutation, external asset, storage, service worker, telemetry, or non-loopback
-  listener.
 - Never read, print, copy, accept, persist, or forward credentials, OAuth
   material, Keychain data, transcripts, provider histories, tool data, or raw
   diagnostics. Never write protocol diagnostics to stdout.

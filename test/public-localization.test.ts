@@ -42,7 +42,7 @@ test("v2 authority docs match the closed control contract", async () => {
     readPublicFile("CHANGELOG.md"), readPublicFile("site/index.html"),
     readPublicFile("site/zh-CN/index.html"),
   ]);
-  assert.match(architecture, /closed version 2 method family is exactly these twenty-one methods/i);
+  assert.match(architecture, /closed version 2 method family is exactly these twenty methods/i);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
   assert.match(architecture, /Pair and unpair mutate only the exact two\s+named endpoints/);
   assert.match(architecture, /Paired mode still rechecks exact edge membership at\s+delivery/);
@@ -100,14 +100,10 @@ test("Simplified Chinese README preserves the complete executable contract", asy
 
   for (const token of [
     "embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac",
-    "embassy dashboard --live",
     "embassy delivery-status --token dlv_<token>",
-    "gateway-dashboard.html",
-    "gateway-dashboard.zh-CN.html",
     "dlv_",
     "unconfirmed",
     "ambiguous",
-    "X-Embassy-Request",
   ]) {
     assert.ok(chinese.includes(token), token);
   }
@@ -251,7 +247,7 @@ test("delivery-token documentation preserves private v4 restart continuity", asy
     ]);
 
   assert.match(english, /retained pre-restart token continues to resolve/i);
-  assert.match(english, /never enters a public snapshot, normal log, provider receipt, or dashboard/i);
+  assert.match(english, /never enters a public snapshot, normal log, or provider receipt/i);
   assert.match(chinese, /重启前仍受保留的令牌在重启后会继续解析/u);
   assert.match(chinese, /绝不会进入公开快照、普通日志、提供方回执或任何仪表盘/u);
   assert.match(architecture, /delivery token and status of each retained message survive the restart/i);
@@ -262,47 +258,6 @@ test("delivery-token documentation preserves private v4 restart continuity", asy
     assert.doesNotMatch(document, /delivery tokens? remain memory-only|prior token therefore returns `found: false`/i);
   }
   assert.doesNotMatch(chinese, /投递令牌仍仅存于内存|重启后，先前的令牌会报告/u);
-});
-
-test("current dashboard docs use the stable direct-loopback contract", async () => {
-  const paths = [
-    "README.md",
-    "README.zh-CN.md",
-    "SECURITY.md",
-    "CONTRIBUTING.md",
-    "docs/DASHBOARD.md",
-    "docs/DASHBOARD.zh-CN.md",
-    "docs/CONFIGURATION.md",
-    "docs/CONFIGURATION.zh-CN.md",
-    "docs/GATEWAY-ARCHITECTURE.md",
-    "docs/THREAT-MODEL-dashboard-mutations.md",
-    "skills/embassy-peer/SKILL.md",
-    "site/index.html",
-    "site/zh-CN/index.html",
-  ] as const;
-  const documents = await Promise.all(paths.map(readPublicFile));
-
-  for (const [index, document] of documents.entries()) {
-    const label = paths[index] ?? "unknown";
-    assert.ok(document.includes("41961"), `${label}: stable default port`);
-    assert.ok(document.includes("--port"), `${label}: CLI port override`);
-    assert.doesNotMatch(document, /EMBASSY_DASHBOARD_PORT/, label);
-    assert.doesNotMatch(
-      document,
-      /ephemeral port|OS-assigned port|URL-fragment token|session cookie|bootstrap\.html|one-use (?:256-bit )?(?:URL-fragment )?(?:token|capability)|authenticated (?:HTTP listener|listener|live dashboard|session|snapshot stream|fetch|POST)/i,
-      label,
-    );
-  }
-
-  for (const path of [
-    "README.zh-CN.md",
-    "docs/DASHBOARD.zh-CN.md",
-    "docs/CONFIGURATION.zh-CN.md",
-    "site/zh-CN/index.html",
-  ]) {
-    const document = await readPublicFile(path);
-    assert.doesNotMatch(document, /临时端口|一次性.{0,12}令牌|会话 Cookie/u, path);
-  }
 });
 
 test("security doctrine names defended and deliberately unsupported boundaries", async () => {
@@ -350,8 +305,6 @@ test("current public guidance preserves directional delivery timing", async () =
     chineseReadme,
     englishDelivery,
     chineseDelivery,
-    englishDashboard,
-    chineseDashboard,
     englishSite,
     chineseSite,
     skill,
@@ -361,8 +314,6 @@ test("current public guidance preserves directional delivery timing", async () =
     readPublicFile("README.zh-CN.md"),
     readPublicFile("docs/DELIVERY.md"),
     readPublicFile("docs/DELIVERY.zh-CN.md"),
-    readPublicFile("docs/DASHBOARD.md"),
-    readPublicFile("docs/DASHBOARD.zh-CN.md"),
     readPublicFile("site/index.html"),
     readPublicFile("site/zh-CN/index.html"),
     readPublicFile("skills/embassy-peer/SKILL.md"),
@@ -372,7 +323,6 @@ test("current public guidance preserves directional delivery timing", async () =
   for (const [label, document] of [
     ["README.md", englishReadme],
     ["docs/DELIVERY.md", englishDelivery],
-    ["docs/DASHBOARD.md", englishDashboard],
     ["site/index.html", englishSite],
     ["skills/embassy-peer/SKILL.md", skill],
     ["docs/GATEWAY-ARCHITECTURE.md", architecture],
@@ -387,7 +337,6 @@ test("current public guidance preserves directional delivery timing", async () =
   for (const [label, document] of [
     ["README.zh-CN.md", chineseReadme],
     ["docs/DELIVERY.zh-CN.md", chineseDelivery],
-    ["docs/DASHBOARD.zh-CN.md", chineseDashboard],
     ["site/zh-CN/index.html", chineseSite],
   ] as const) {
     assert.match(document, /朝向 Claude/u, label);
@@ -477,9 +426,6 @@ test("marketing pages preserve structure, protocol tokens, and reciprocal locale
     assert.match(page, /<\/html>\s*$/);
     assert.equal(/<script[^>]*\ssrc=/i.test(page), false);
     for (const token of [
-      "embassy dashboard --live",
-      "gateway-dashboard.html",
-      "gateway-dashboard.zh-CN.html",
       "unconfirmed",
       "ambiguous",
       "held",

@@ -64,7 +64,7 @@ embassy health
 embassy status
 ```
 
-`status` 列出 `availablePeers`——你可以选择的在线 Claude 会话。如果该列表为空，请先启动一个 Claude Code 会话，然后运行 `embassy refresh-dashboard` 刷新发现；下一次 `status` 应该就能看到该会话。
+`status` 列出 `availablePeers`——你可以选择的在线 Claude 会话。如果该列表为空，请先启动一个 Claude Code 会话，然后运行 `embassy refresh` 重新扫描 Claude 会话；下一次 `status` 应该就能看到该会话。
 
 ### 2. 注册 Codex 任务
 
@@ -160,14 +160,6 @@ Embassy 会在实际写入提供方之前，为双向路由消息添加一个由
 
 该封装是清晰的来源标记，既不是密码学签名，也不表示正文可信。在写入提供方之前，Embassy 会中和不可信正文中嵌套出现的自有保留封装标签；以你的 OS 用户身份运行的任意代码和所有消息文本，始终都是不可信输入。
 
-### 实时查看
-
-`embassy dashboard --live` 在浏览器中打开一个五选项卡流式视图（总览、投递、路由、活动、诊断），默认地址为 `http://127.0.0.1:41961/`。如需为本次启动选择另一个稳定端口，请运行 `embassy dashboard --live --port <n>`，其中整数范围为 1024 到 65535。当前台组件运行时，该 URL 最多支持四个并发实时视图（可分布在窗口、标签页或浏览器中）；在其中一个关闭前，第五条流会被拒绝。若端口已被占用，启动会明确失败并提示使用 `--port`，不会回退到其他端口。详见[仪表盘](docs/DASHBOARD.zh-CN.md)。
-
-实时仪表盘可在明确确认后移除任意具名 Codex 注册。确认步骤会说明后果：代理会删除该注册的同意边、取消已排队或已保留的工作、把已武装的工作结算为结果不确定、把已接受的工作结算为未确认，并且绝不重放后两类不确定工作。
-
-代理还会以 mode 0600 发布静态快照 `gateway-dashboard.html` 与 `gateway-dashboard.zh-CN.html`。实时仪表盘没有登录、令牌、Cookie 或逐浏览器会话：它假定这是一台可信的单用户机器；能够访问或伪造 loopback 的本地软件可以读取仪表盘并调用其有限操作。服务器仍会对每个请求要求精确的 Host 头，并对每个 POST 要求精确的 Origin 与 `X-Embassy-Request`；它不发送 CORS 头，也不接受 `OPTIONS`。
-
 ## 工作原理
 
 ```text
@@ -177,7 +169,7 @@ Embassy 会在实际写入提供方之前，为双向路由消息添加一个由
         │                                             │
         ▼                                             ▼
   ┌──────────────────── Embassy ─────────────────────────────┐
-  │ 显式路由 │ Codex 忙碌排队 │ 回执 │ 仪表盘                 │
+  │ 显式路由 │ Codex 忙碌排队 │ 回执 │ 状态                   │
   └───────────────────────────────────────────────────────────┘
 ```
 
@@ -219,10 +211,9 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 
 | 命令 | 执行者 | 用途 |
 | --- | --- | --- |
-| `serve` | 操作员 | 启动前台代理和仪表盘 |
+| `serve` | 操作员 | 启动前台代理 |
 | `health` / `status` | 操作员 | 检查存活状态并查看脱敏快照 |
-| `refresh-dashboard` | 操作员 | 刷新提供方发现，并重新生成两个静态仪表盘文件 |
-| `dashboard --live [--lang en\|zh-CN] [--port <n>]` | 操作员 | 启动带有限路由同意操作的实时仪表盘组件；需要 `embassy serve` 正在运行 |
+| `refresh` | 操作员 | 重新扫描 Claude 会话 |
 | `delivery-status` | 任一提供方 | 使用 `embassy delivery-status --token dlv_<token>` 读取单条投递跟踪器 |
 | `wait-delivery` | 任一提供方 | 等待该跟踪器结算，直至投递截止时间 |
 | `untrack` | 任一提供方 | 关闭一个活跃的进度监视：`embassy untrack --conversation conv_<token>` |
@@ -264,7 +255,6 @@ cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 | [架构](docs/GATEWAY-ARCHITECTURE.md) | 完整设计：拓扑、适配器、控制平面、威胁模型，以及基于配对同意的入站模型 |
 | [投递](docs/DELIVERY.zh-CN.md) | 投递语义、令牌、结算状态与重试规则 |
 | [配置](docs/CONFIGURATION.zh-CN.md) | 环境变量、提供方契约与寻址规则 |
-| [仪表盘](docs/DASHBOARD.zh-CN.md) | 静态与实时仪表盘设置、安全模型与变更操作 |
 | [安全策略](SECURITY.md) | 如何报告漏洞，以及详细的安全边界 |
 | [贡献指南](CONTRIBUTING.md) | 变更的归属位置，以及如何运行确定性测试套件 |
 | [变更日志](CHANGELOG.md) | 每个版本包含的内容 |

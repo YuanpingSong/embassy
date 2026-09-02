@@ -12,7 +12,7 @@ below.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state, control socket, and dashboard; an override must be absolute and does not relocate the fixed host-wide lease |
+| `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state and control socket; an override must be absolute and does not relocate the fixed host-wide lease |
 | `DSH_HOME` | `$HOME/.dsh` | DeepSeek Harness checkout root; when its owned directory and `package.json` are present, Embassy launches `pnpm --dir <home> run demo:acp` lazily on first dispatch |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
@@ -49,16 +49,6 @@ and every delivery has settled. Then:
 An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
 does not mutate the state file. There is no conversion command or automatic
 recovery path.
-
-The live dashboard is available directly at `http://127.0.0.1:41961/` while
-its foreground companion runs. Its port is a per-invocation CLI choice, not an
-environment setting: pass `--port <n>` with an integer from 1024 through 65535
-to `embassy dashboard --live` when another stable port is needed. Up to four
-concurrent live views — across windows, tabs, or browsers — can use that URL
-while the foreground process runs; a fifth stream is refused until one closes.
-A port collision fails with
-`LIVE_DASHBOARD_PORT_IN_USE`, points to `--port`, and never falls back to an
-ephemeral or alternate port.
 
 ## Advanced bounds
 
@@ -117,7 +107,7 @@ Runtime is best effort: an explicit consent edge plus the exact owned route/sess
 
 Only unsafe OS evidence for Embassy-owned or executed artifacts and Embassy callback, control, or state paths—such as an unsafe lease or state, swapped binary, ownership/path/symlink mismatch, or invalid generation—refuses broker startup. The Claude-owned external sessions registry root is read-side identity evidence: an unsafe UID or mode degrades only Claude with a loud observation while the broker and other providers remain available. Claude still requires native `peerProtocol: 1` per session record: a record that declares any other value is rejected in isolation and included in bounded rejection evidence without stopping the broker or hiding other usable sessions.
 
-Runtime parsing remains strict on every known registry field, frame, and response; unknown top-level Claude registry fields are ignored because Embassy never consumes them. The Claude connector row in public status carries optional bounded `registry` observations: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. Both dashboards render the same evidence loudly: if Claude is running but no record with parseable required fields has been observed since broker start, its registry layout may have changed.
+Runtime parsing remains strict on every known registry field, frame, and response; unknown top-level Claude registry fields are ignored because Embassy never consumes them. The Claude connector row in public status carries optional bounded `registry` observations: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. `embassy status` reports the same evidence: if Claude is running but no record with parseable required fields has been observed since broker start, its registry layout may have changed.
 
 The managed Codex installation is resolved by exact verified path; a `codex` elsewhere on `PATH` is neither used nor modified. Claude registry and callback roots are derived from the verified current OS user; no Claude launcher or configuration file is read. DeepSeek uses only the attested checkout root above. Grok Build uses the release-pinned ACP launch. Version strings, when present, are bounded diagnostic metadata only.
 

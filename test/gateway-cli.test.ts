@@ -93,7 +93,7 @@ test("version flags are deterministic and never contact the gateway", async () =
 test("bare invocation and help flags print localized usage without side effects", async () => {
   const cases = [
     { argv: [] as string[], env: {}, expected: /Usage:/ },
-    { argv: ["-h"], env: {}, expected: /dashboard --live/ },
+    { argv: ["-h"], env: {}, expected: /Rescan for Claude sessions/ },
     {
       argv: ["--help", "--lang", "zh-CN"],
       env: { EMBASSY_LOCALE: "unsupported" },
@@ -120,16 +120,15 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.equal(exitCode, gatewayCliExitCodes.ok);
     const help = stdout.chunks.join("");
     assert.match(help, current.expected);
-    assert.match(help, /refresh-dashboard/);
+    assert.match(help, /^ {2}refresh {2,}\S/m);
     assert.match(help, /wait-delivery/);
     assert.match(help, /untrack/);
     assert.match(help, /register-peer/);
     assert.match(help, /unregister-peer/);
     assert.match(help, /--token-stdin/);
-    assert.match(help, /dashboard --live \[--port <n>\]/);
     assert.match(help, /pair \[--from <[^>]+> --to <[^>]+>\]/);
-    assert.match(help, /--port <n>.*1024.*65535.*41961/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
+    assert.doesNotMatch(help, /dashboard/i);
     assert.equal(stderr.chunks.join(""), "");
   }
 });
@@ -467,7 +466,6 @@ test("all client commands use one private control socket and expose only normali
       unregisters.push({ ...params });
       return { accepted: true, code: "ok" };
     },
-    removeCodexRegistration: () => ({ accepted: true, code: "ok" }),
     selectClaude: ({ alias }) => {
       selected.push(alias);
       return { accepted: true, code: "ok" };
@@ -524,7 +522,7 @@ test("all client commands use one private control socket and expose only normali
         deliveryToken: DELIVERY_TOKEN,
       };
     },
-    refreshDashboard: () => ({
+    refreshDiscovery: () => ({
       accepted: true,
       code: "ok",
       revision: 2,
@@ -561,7 +559,7 @@ test("all client commands use one private control socket and expose only normali
       argv: ["untrack", "--conversation", CONVERSATION_ID],
       env: BOTH_IDENTITIES,
     },
-    { argv: ["refresh-dashboard"], env: BOTH_IDENTITIES },
+    { argv: ["refresh"], env: BOTH_IDENTITIES },
     {
       argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: { CODEX_THREAD_ID: THREAD_ID },
@@ -925,9 +923,6 @@ test("common locale precedence is exact and malformed locale input fails before 
         runServer: async () => {
           worked = true;
         },
-        runLiveDashboard: async () => {
-          worked = true;
-        },
       });
       assert.equal(
         code,
@@ -970,9 +965,6 @@ test("common locale precedence is exact and malformed locale input fails before 
         throw new Error("must not send");
       },
       runServer: async () => {
-        worked = true;
-      },
-      runLiveDashboard: async () => {
         worked = true;
       },
     });
@@ -2113,7 +2105,6 @@ test("serve emits one normalized ready result without using the client socket or
         status: "ready",
         hostId: "this-mac",
         codexMode: "native_messaging",
-        dashboardFile: "gateway-dashboard.html",
       });
     },
   });
@@ -2127,7 +2118,6 @@ test("serve emits one normalized ready result without using the client socket or
       status: "ready",
       hostId: "this-mac",
       codexMode: "native_messaging",
-      dashboardFile: "gateway-dashboard.html",
     },
   });
   assert.equal(stderr.chunks.join(""), "");
@@ -2148,7 +2138,6 @@ test("serve accepts only the exact explicit open-inbound opt-out", async () => {
         status: "ready",
         hostId: "this-mac",
         codexMode: "native_messaging",
-        dashboardFile: "gateway-dashboard.html",
       });
     },
   });
@@ -2219,7 +2208,6 @@ test("serve reports startup failure once and never appends protocol output after
         status: "ready",
         hostId: "this-mac",
         codexMode: "native_messaging",
-        dashboardFile: "gateway-dashboard.html",
       });
       throw new Error("private shutdown detail");
     },
@@ -2246,7 +2234,6 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       health: () => ({ status: "ok", revision: 1 }),
       registerCodex: () => ({ accepted: true, code: "ok" }),
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
-      removeCodexRegistration: () => ({ accepted: true, code: "ok" }),
       selectClaude: () => ({ accepted: true, code: "ok" }),
       unselectClaude: () => ({ accepted: true, code: "ok" }),
       pair: () => ({ accepted: true, code: "ok" }),
@@ -2270,7 +2257,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         conversationId: CONVERSATION_ID,
         deliveryToken: DELIVERY_TOKEN,
       }),
-      refreshDashboard: () => ({
+      refreshDiscovery: () => ({
         accepted: true,
         code: "ok",
         revision: 2,

@@ -13,7 +13,6 @@ import { createStatelessCodexOperationTransport, type StatelessCodexOperationTra
 import { createSystemCodexDoctorInspector, diagnoseCodexAttachment,
   diagnoseMissingManagedCodexLayout, type CodexDoctorInspector } from "./codex-doctor.js";
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
-import { DASHBOARD_FILE_NAME } from "./dashboard.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { resolveDeepSeekAcpLaunch, type DeepSeekAcpLaunch, type DeepSeekDetectOptions } from "./deepseek-detect.js";
 import { acquireGatewayInstanceLease, type GatewayInstanceLease } from "./instance-lease.js";
@@ -28,7 +27,7 @@ import { gatewayInboundModes, type GatewayInboundMode } from "./types.js";
 const GROK_ACP_LAUNCH = Object.freeze({
   kind: "npx", package: "@xai-official/grok@1.0.5", args: ["agent", "stdio"],
 } satisfies AcpLaunchSpec);
-export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: string; codexMode: "native_messaging"; dashboardFile: typeof DASHBOARD_FILE_NAME }>;
+export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: string; codexMode: "native_messaging" }>;
 export type GatewayServerOptions = { env?: NodeJS.ProcessEnv; inboundMode?: GatewayInboundMode;
   locale?: DashboardLocale; signal?: AbortSignal; onReady: (result: GatewayServerReadyResult) => void | Promise<void> };
 type ServerService = Readonly<{ start: (signal?: AbortSignal) => Promise<void>; close: () => Promise<void> }>;
@@ -224,7 +223,7 @@ export async function runGatewayServer(
     await guarded(Promise.resolve().then(() => service!.start(startupAbort?.signal)));
     assertLease();
     const ready = Promise.resolve().then(() => options.onReady({ status: "ready", hostId: localHost,
-      codexMode: "native_messaging", dashboardFile: DASHBOARD_FILE_NAME })).then(
+      codexMode: "native_messaging" })).then(
       () => ({ kind: "ready" }) as const, (error: unknown) => ({ kind: "error", error }) as const);
     const published = await Promise.race([ready, loss, stop]);
     if (published.kind === "error") throw published.error;

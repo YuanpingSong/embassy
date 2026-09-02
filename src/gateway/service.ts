@@ -23,7 +23,6 @@ import {
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
 } from "./control.js";
-import { publishGatewayDashboard } from "./dashboard.js";
 import type { CodexDoctorResult } from "./codex-doctor.js";
 import { spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
@@ -203,7 +202,7 @@ type GatewayServiceTimers = Readonly<{
 
 export type GatewayServiceOptions = Readonly<{
   config: GatewayConfig; adapters?: readonly GatewayProviderAdapter[]; store?: GatewayStore;
-  publishDashboard?: typeof publishGatewayDashboard; now?: () => Date;
+  now?: () => Date;
   nativePeerCwd?: string; timers?: GatewayServiceTimers;
   codexDoctor?: () => Promise<CodexDoctorResult>;
   spawnPeer?: typeof spawnPeerClient;
@@ -356,7 +355,6 @@ export class GatewayService {
   readonly config: GatewayConfig;
   readonly store: GatewayStore;
   private readonly adapters: readonly GatewayProviderAdapter[];
-  private readonly publishDashboard: typeof publishGatewayDashboard;
   private readonly now: () => Date;
   private readonly timers: GatewayServiceTimers;
   private readonly nativePeerCwd: string;
@@ -405,7 +403,6 @@ export class GatewayService {
       options.config,
       options.now === undefined ? {} : { now: options.now },
     );
-    this.publishDashboard = options.publishDashboard ?? publishGatewayDashboard;
     this.now = options.now ?? (() => new Date());
     this.nativePeerCwd = options.nativePeerCwd ?? process.cwd();
     this.codexDoctor = options.codexDoctor;
@@ -476,7 +473,6 @@ export class GatewayService {
       this.nextDoctorAt = now + CODEX_DOCTOR_INTERVAL_MS;
       this.nextPeerRefreshAt = this.config.peerNodes.length > 0 ? now : 0;
       for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
-      await this.publish();
       this.scheduleWake();
       assertActive();
     } catch (error) {
@@ -547,7 +543,6 @@ export class GatewayService {
         this.assertWritable();
         await operation();
         this.revision += 1;
-        await this.publish();
         return { accepted: true, code: "ok" };
       } catch (error) {
         return decisionFor(error, peerPrincipal);
@@ -560,7 +555,7 @@ export class GatewayService {
         try {
           this.assertWritable();
           const token = await this.registerPeer(params);
-          this.revision += 1; await this.publish();
+          this.revision += 1;
           return token === undefined ? { accepted: true, code: "ok" } : { accepted: true, code: "ok", token };
         } catch (error) { return decisionFor(error, true); }
       },
@@ -568,8 +563,6 @@ export class GatewayService {
       awaitPeer: (params) => this.awaitPeer(params),
       peerReceipt: (params) => decide(async () => this.peerReceipt(params), true),
       unregisterCodex: (params) => decide(async () => this.unregisterCodex(params)),
-      removeCodexRegistration: (params) =>
-        decide(async () => this.removeCodexRegistration(params.alias)),
       selectClaude: (params) => decide(async () => this.selectClaude(params)),
       unselectClaude: (params) => decide(async () => this.unselectClaude(params)),
       pair: (params) => decide(async () => this.pair(params)),
@@ -580,13 +573,12 @@ export class GatewayService {
       untrack: (params) => decide(async () => this.untrack(params.conversationId)),
       send: (params) => this.send(params),
       reply: (params) => this.reply(params),
-      refreshDashboard: async () => {
+      refreshDiscovery: async () => {
         if (this.closing) {
           return { accepted: false, code: "unavailable", revision: this.revision };
         }
         await this.refreshClaudeDiscovery().catch(() => undefined);
         await this.recordActivity("discovery", "discovery_refreshed", [], true);
-        await this.publish();
         return { accepted: true, code: "ok", revision: this.revision };
       },
       peerCatalog: ({ peerHost }) => this.buildPeerCatalog(peerHost),
@@ -648,7 +640,7 @@ export class GatewayService {
       this.messageContexts.set(enqueued.messageId, { conversationId, expectsReply: handoff.expectsReply });
       this.kick(target.alias, target.binding.registrationId);
     }
-    this.revision += 1; await this.publish();
+    this.revision += 1;
     return { accepted: true };
   }
 
@@ -1057,14 +1049,6 @@ export class GatewayService {
       route.binding.routeHandle !== params.threadId
     ) {
       throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The exact Codex registration is absent.");
-    }
-    await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
-  }
-
-  private async removeCodexRegistration(alias: string): Promise<void> {
-    const route = await this.store.inspectPrivateRoute(alias);
-    if (route === undefined || route.binding.provider !== "codex" || route.registrationMode === "federated_peer") {
-      throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The Codex registration is absent.");
     }
     await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
   }
@@ -2013,7 +1997,6 @@ export class GatewayService {
       }
     }
     this.revision += 1;
-    void this.publish().catch(() => undefined);
   }
 
   private async onClaudeMessage(event: Readonly<{
@@ -2603,7 +2586,6 @@ export class GatewayService {
     }
     if (!this.running || this.closing) return;
     for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
-    await this.publish();
     this.scheduleWake();
   }
 
@@ -2756,10 +2738,6 @@ export class GatewayService {
 
   private routeObservationStillCurrent(event: GatewayAdapterRouteObservation): boolean {
     return this.connectors.has(connectorKey(event.route));
-  }
-
-  private async publish(): Promise<void> {
-    await this.publishDashboard(this.store.rootDir, await this.snapshot());
   }
 
   private alert(code: string, route?: GatewayPrivateRouteInspection, error?: unknown): void {

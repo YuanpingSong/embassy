@@ -70,7 +70,7 @@ embassy status
 
 `status` lists `availablePeers` — the live Claude sessions you can select. If
 that list is empty, start a Claude Code session and run
-`embassy refresh-dashboard`, which refreshes discovery; the next `status`
+`embassy refresh`, which rescans for Claude sessions; the next `status`
 should show it.
 
 ### 2. Register the Codex task
@@ -123,7 +123,7 @@ embassy pair --from codex-reviewer@this-mac --to advisor@this-mac
 
 Conversely, `unselect-claude` removes the selected route, removes its incident consent edges, and settles their in-flight work from the durable attempt phase.
 
-To connect any two routes from different providers, name both ends explicitly with `embassy pair --from <alias> --to <alias>`; many edges can coexist. Same-UID access to the private control socket authorizes the command, and agents must create only the edge the user chose. The live dashboard offers the same bounded, confirmed operation.
+To connect any two routes from different providers, name both ends explicitly with `embassy pair --from <alias> --to <alias>`; many edges can coexist. Same-UID access to the private control socket authorizes the command, and agents must create only the edge the user chose.
 
 ### 4. Send a message
 
@@ -179,22 +179,6 @@ claim that the body is trustworthy. Embassy neutralizes nested occurrences of
 its reserved framing tags in the untrusted body before provider delivery;
 arbitrary same-user code and all message text remain untrusted input.
 
-### See it live
-
-`embassy dashboard --live` opens a five-tab streaming view in the browser
-(overview, deliveries, routes, activity, diagnostics) at
-`http://127.0.0.1:41961/` by default. To choose another stable port for that
-invocation, run `embassy dashboard --live --port <n>` with an integer from 1024
-through 65535. Up to four concurrent live views — across windows, tabs, or
-browsers — can use that URL while the foreground companion runs; a fifth stream
-is refused until one closes. If the port is occupied, startup fails explicitly,
-points to `--port`, and never falls back to another port. See
-[Dashboard](docs/DASHBOARD.md) for details.
-
-The live dashboard can remove any named Codex registration after an explicit confirmation. The confirmation names the consequence: the broker deletes that registration's consent edges, cancels queued or reserved work, settles armed work ambiguous and accepted work unconfirmed, and never replays either uncertain class.
-
-The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html` and `gateway-dashboard.zh-CN.html`. The live dashboard has no login, token, cookie, or per-browser session: it assumes a trusted single-user machine, and local software that can reach or spoof loopback can read it and invoke its bounded actions. The server still requires the exact Host header on every request and the exact Origin plus `X-Embassy-Request` on every POST; it sends no CORS headers and does not accept `OPTIONS`.
-
 ## How it works
 
 ```text
@@ -204,7 +188,7 @@ The broker also publishes mode-0600 static snapshots as `gateway-dashboard.html`
         │                                             │
         ▼                                             ▼
   ┌──────────────────── Embassy ─────────────────────────────┐
-  │ explicit routes │ Codex busy queue │ receipts │ dashboard │
+  │ explicit routes │ Codex busy queue │ receipts │ status    │
   └───────────────────────────────────────────────────────────┘
 ```
 
@@ -218,7 +202,7 @@ Immediately before the provider write, Embassy gives every routed body one
 broker-owned cross-session marker containing the verified sender alias and a
 recipient reply hint. The full conversation token travels only in the
 initiator's accepted result and the recipient's transient message payload; it
-never enters the dashboard, public snapshot, journal, receipt, or log.
+never enters the public snapshot, journal, receipt, or log.
 
 Every settled message produces a receipt. `delivered` means the direction's terminal provider boundary was observed — toward Codex, the App Server accepted the turn; toward Claude, the native mailbox write completed. Neither means the model read or acted on it. `unconfirmed` and `ambiguous` mean the required evidence is missing; they are terminal states and never auto-retried. See [Delivery](docs/DELIVERY.md) for the full semantics.
 
@@ -227,7 +211,7 @@ Every settled message produces a receipt. `delivered` means the direction's term
 Four embassy terms name real features:
 
 - **Registration and pairing** are the permission model: a Codex task is explicitly registered, and each pair is one explicit Claude↔Codex edge — only paired ends exchange messages, and many edges can coexist. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
-- **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only dashboard.
+- **The ledger** is the delivery record: a receipt for every settled message, and a metadata-only status snapshot.
 - **The pouch** is transit and the archive: bounded bodies, retained under bounded limits, private to your OS account — sealed against other users, not against you.
 - **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery and consent authority.
 
@@ -248,10 +232,9 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 
 | Command | Run by | Purpose |
 | --- | --- | --- |
-| `serve` | operator | Start the foreground broker and dashboard |
+| `serve` | operator | Start the foreground broker |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
-| `refresh-dashboard` | operator | Refresh provider discovery and regenerate both static dashboard files |
-| `dashboard --live [--lang en\|zh-CN] [--port <n>]` | operator | Start the live dashboard companion with bounded route-consent actions; requires a running `embassy serve` |
+| `refresh` | operator | Rescan for Claude sessions |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
 | `untrack` | either provider | Close one active progress watch: `embassy untrack --conversation conv_<token>` |
@@ -275,12 +258,12 @@ or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 
 ## Safety in one minute
 
-- **Local broker, stable loopback dashboard.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. The opt-in `embassy dashboard --live` companion is a separate process and the only listener Embassy can create, bound to exact `127.0.0.1` on stable port `41961` by default (or the per-invocation `--port <n>`). It is deliberately unauthenticated local HTTP for a trusted single-user machine; Host, Origin, and sentinel checks constrain browser-origin requests but do not authenticate local processes or OS users.
+- **Local broker, no listener.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. Embassy binds no TCP port and serves no HTTP.
 - **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and per-operation artifact checks reduce mistakes, but are not a defense against code already running as your OS user.
 - **Compatibility is tested offline; runtime is best effort.** The release-owned support matrix records exact tested artifacts, protocols, capabilities, stop fidelity, limitations, and test dates. Runtime never imports that matrix and never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
-- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v4 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, provider receipt, or dashboard. Raw provider frames stay memory-only. The static dashboard files remain metadata-only; the live dashboard shows retained bodies.
+- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v4 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, or provider receipt. Raw provider frames stay memory-only.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.
 
@@ -298,7 +281,6 @@ See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting
 | [Architecture](docs/GATEWAY-ARCHITECTURE.md) | The full design: topology, adapters, control plane, threat model, and the paired-consent inbound model |
 | [Delivery](docs/DELIVERY.md) | Delivery semantics, tokens, settlement states, and retry rules |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables, provider contracts, and addressing rules |
-| [Dashboard](docs/DASHBOARD.md) | Static and live dashboard setup, security model, and mutation actions |
 | [Security policy](SECURITY.md) | How to report a vulnerability, and the boundary in depth |
 | [Contributing](CONTRIBUTING.md) | Where changes go, and how to run the deterministic suite |
 | [Changelog](CHANGELOG.md) | What each release contains |

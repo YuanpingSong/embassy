@@ -41,8 +41,8 @@ recovery.
 - Update README and architecture documentation when public behavior changes.
 - Verify that public files contain no credentials, native IDs, message bodies,
   local state, or personal absolute paths.
-- Do not commit `node_modules`, `dist`, package archives, generated dashboards,
-  logs, environment files, or live-validation artifacts.
+- Do not commit `node_modules`, `dist`, package archives, logs, environment
+  files, or live-validation artifacts.
 
 ## Architecture rules
 
@@ -131,30 +131,17 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
   is replayed. Conversations, reply/native capabilities, raw frames, callback
   addresses, and socket paths remain memory-only.
 - Persist native route identifiers only in the closed private binding schema.
-  Keep them out of events, snapshots, dashboard rows, logs, errors, and CLI
+  Keep them out of events, snapshots, logs, errors, and CLI
   output. The only CLI exception is a UUID explicitly supplied by the user as a
   Claude selector.
 
 ### Local control surface
 
-`embassy serve` may use one private same-user control UDS and publish two inert,
-metadata-only static dashboard files. It must not listen on TCP or HTTP. The
-only reviewed exception is the separately invoked foreground
-`embassy dashboard --live` companion, which binds exact IPv4 loopback on stable
-port `41961` by default or the validated per-invocation `--port <n>`. It has no
-local-process or UID authentication and therefore assumes a trusted
-single-user machine; exact Host on every request and exact Origin plus
-`X-Embassy-Request` on every POST constrain browser origins, not local
-software. Preserve the direct root URL, multi-window/browser access, collision
-failure with no fallback port, no CORS/`OPTIONS`, and only the reviewed pair,
-unpair, refresh-discovery, and named Codex-registration-removal mutations—never
-a provider or generic control method. Confirmed removal may target any named
-Codex registration; its atomic commit removes incident consent edges and
-conversation, reply, or native capabilities, and settles queued/reserved work
-`cancelled`, armed work `ambiguous`, and accepted work `unconfirmed`. Do not
-add a wildcard/remote listener, external assets, service workers, telemetry,
-or additional mutation endpoints. Keep the public v1 launcher foreground,
-macOS-only, and local-host-only.
+`embassy serve` may use one private same-user control UDS and nothing else. It
+must not listen on TCP or HTTP, and Embassy ships no other listener. Do not add
+a wildcard/remote listener, external assets, service workers, telemetry, or a
+mutation endpoint. Keep the public v1 launcher foreground, macOS-only, and
+local-host-only.
 
 ## Live validation
 
@@ -180,8 +167,8 @@ lease spawns macOS's `/usr/bin/lockf`); macOS runs the full suite.
 
 ## Design honesty rules
 
-These outlive any visual era and bind every surface — dashboards, CLI copy,
-site, docs, in both languages:
+These outlive any visual era and bind every surface — CLI copy, site, docs,
+in both languages:
 
 - Progress is never green. Only a terminal success state may look like one.
 - `delivered` means the write completed; `released` is not read; nothing may
@@ -197,7 +184,8 @@ site, docs, in both languages:
 [`docs/DECLINED.md`](docs/DECLINED.md) records, per release, what we considered
 and chose not to build, each with a one-line reason. It is product
 documentation: a product that documents what it refuses to build is making the
-same promise the dashboard makes—the truth over the appearance of completeness.
+same promise its status output makes—the truth over the appearance of
+completeness.
 PRs that implement something in the ledger must address its reason.
 
 ### Why tickets are priced by the PM

@@ -327,7 +327,6 @@ function handlers(
     health: () => ({ status: "ok", revision: 7 }),
     registerCodex: () => ({ accepted: true, code: "ok" }),
     unregisterCodex: () => ({ accepted: true, code: "ok" }),
-    removeCodexRegistration: () => ({ accepted: true, code: "ok" }),
     selectClaude: () => ({ accepted: true, code: "ok" }),
     unselectClaude: () => ({ accepted: true, code: "ok" }),
     pair: () => ({ accepted: true, code: "ok" }),
@@ -354,7 +353,7 @@ function handlers(
       conversationId: CONVERSATION_ID,
       deliveryToken: DELIVERY_TOKEN,
     }),
-    refreshDashboard: () => ({
+    refreshDiscovery: () => ({
       accepted: true,
       code: "ok",
       revision: 8,
@@ -444,7 +443,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   let toCodex: ValidatedSendParams | undefined;
   let paired: unknown;
   let unpaired: unknown;
-  let removedCodexAlias: string | undefined;
   let reply: unknown;
   const server = await startGatewayControlServer({
     stateDir,
@@ -460,10 +458,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       },
       unpair: (params) => {
         unpaired = { ...params };
-        return { accepted: true, code: "ok" };
-      },
-      removeCodexRegistration: ({ alias }) => {
-        removedCodexAlias = alias;
         return { accepted: true, code: "ok" };
       },
       send: (params) => {
@@ -559,15 +553,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   };
   assert.deepEqual(paired, expectedPair);
   assert.deepEqual(unpaired, expectedPair);
-  await sendGatewayControlRequest({
-    socketPath,
-    request: {
-      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "remove_codex_registration",
-      params: { alias: "codex-orphan@this-mac" },
-    },
-  });
-  assert.equal(removedCodexAlias, "codex-orphan@this-mac");
   await sendGatewayControlRequest({
     socketPath,
     request: {
@@ -751,7 +736,7 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     socketPath,
     request: {
       protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "refresh_dashboard",
+      method: "refresh_discovery",
       params: {},
     },
   });
@@ -812,7 +797,6 @@ test("only exposes queue-mode lifecycle methods", () => {
     "health",
     "register_codex",
     "unregister_codex",
-    "remove_codex_registration",
     "select_claude",
     "unselect_claude",
     "pair",
@@ -823,7 +807,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "untrack",
     "send",
     "reply",
-    "refresh_dashboard",
+    "refresh_discovery",
     "peer_catalog",
     "peer_handoff",
     "register_peer",
@@ -961,7 +945,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     handlers: handlers({
       registerCodex: count,
       unregisterCodex: count,
-      removeCodexRegistration: count,
       pair: count,
       unpair: count,
       deliveryStatus: () => {
@@ -1104,8 +1087,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["delivery_status", { token: "dlv_too-short" }],
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     ["observe_snapshot", { extra: true }],
-    ["remove_codex_registration", { alias: "claude@this-mac" }],
-    ["remove_codex_registration", { alias: "codex-main" }],
     ["select_claude", { alias: "claude@this-mac", codexThreadId: THREAD_ID }],
     ["pair", { aliases: ["one@this-mac", "one@this-mac"] }],
     ["pair", { aliases: ["one@this-mac"] }],
@@ -1134,14 +1115,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
         claudeAlias: "claude@this-mac",
         codexAlias: "codex@this-mac",
       },
-    ],
-    [
-      "remove_codex_registration",
-      { alias: "codex-main@this-mac", threadId: THREAD_ID },
-    ],
-    [
-      "remove_codex_registration",
-      { alias: "codex-main@this-mac", endpointGeneration: "old" },
     ],
     [
       "reply",
@@ -1184,6 +1157,8 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     "compat_check",
     "compat_certify",
     "remove_stale_codex_registration",
+    "remove_codex_registration",
+    "refresh_dashboard",
   ]) {
     assertWireError(
       await rawRequest(socketPath, wireRequest(removedMethod, {})),
@@ -1903,8 +1878,8 @@ test("client marks only lost mutation responses ambiguous after write starts", a
       socketPath,
       request: {
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "remove_codex_registration",
-        params: { alias: "codex-orphan@this-mac" },
+        method: "unregister_codex",
+        params: { alias: "codex-orphan@this-mac", threadId: THREAD_ID },
       },
     }),
     (error: unknown) =>

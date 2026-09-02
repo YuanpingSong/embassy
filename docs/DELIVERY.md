@@ -19,7 +19,7 @@ Embassy.
 
 - **Evidence has three shapes.** `delivered` means the direction's terminal provider boundary was observed. A confirmed Claude mailbox write reaches that boundary immediately. `unconfirmed` means Embassy cannot prove the required terminal boundary despite partial dispatch evidence; it is not a later downgrade from a confirmed Claude mailbox write. `ambiguous` means the write outcome itself is unknown. All three are terminal, and neither `unconfirmed` nor `ambiguous` is a retry authorization — inspect the recipient instead, because a resend can duplicate the message.
 
-- **Native failures.** A Claude-originated route or delivery failure settles as native `expired`; its native acknowledgement always retains the normalized safe code in the reason field. The default `merged` notice mode keeps the early stall frame but suppresses the duplicate terminal `<gateway-delivery-diagnostic>` user frame. `verbose` restores that readable diagnostic frame; `quiet` suppresses all gateway-authored user-frame notices, including stalls, while native status and dashboard truth remain. No notice contains a path, native identifier, exception, or message body. `denied` is reserved for a real user or policy refusal and is not authored by Embassy v1. `held` and transport-written are progress, never success.
+- **Native failures.** A Claude-originated route or delivery failure settles as native `expired`; its native acknowledgement always retains the normalized safe code in the reason field. The default `merged` notice mode keeps the early stall frame but suppresses the duplicate terminal `<gateway-delivery-diagnostic>` user frame. `verbose` restores that readable diagnostic frame; `quiet` suppresses all gateway-authored user-frame notices, including stalls, while native status remains truthful. No notice contains a path, native identifier, exception, or message body. `denied` is reserved for a real user or policy refusal and is not authored by Embassy v1. `held` and transport-written are progress, never success.
 - **Native held is attempt-then-ack.** For Claude→Codex ingress, Embassy first attempts the exact immediate dispatch. A terminal result observed before the one-second prompt boundary produces only its terminal acknowledgement. Native `held` is sent only when the body actually remains queued (including a busy route or clean provider deferral) or dispatch is still nonterminal at that boundary; the terminal acknowledgement follows later. Claude's rendered “approved and released” notice means only that the paired-consent gateway accepted and released the body to the recipient queue. It does not mean a model read it, and it does not imply human approval.
 
 - **Retries are conservative.** Undispatched Codex-bound messages remain queued while the task is busy or temporarily unavailable. Each attempt opens a fresh App Server transport; registration and connector observation never certify reachability. A clean pre-write deferral may return reserved work to the queue. Once the body write is armed, uncertainty is terminal and never replayed. A Claude-bound body may remain queued only for a pre-write route failure or temporary unavailability, never merely because Claude is observed busy. A confirmed delivery failure settles; an ambiguous write is never retried automatically.
@@ -30,7 +30,7 @@ Embassy.
 
 - **Restarts keep clean work only.** Queued and reserved bodies persist under bounded retention and may resume once against the same logical route and consent edge. Armed or accepted work at crash settles ambiguous or unconfirmed and is never replayed. Each retained message keeps its opaque delivery token and status in the private v4 state, so the sender can continue checking that exact attempt after restart. No pending waiter, shell receipt, reply, or conversation capability survives.
 
-Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. The dashboard distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.
+Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. `embassy status` distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.
 
 ## Provenance framing and recipient replies
 
@@ -69,14 +69,14 @@ text beneath Embassy's single authoritative outer frame.
 The full conversation token travels only in the accepted control result and
 transient provider payload; the composed envelope itself is payload-only.
 Aliases retain their existing sanitized public-metadata behavior. The full
-token is never persisted, journaled, logged, snapshotted, placed in a receipt,
-or rendered on either dashboard. A framing, metadata, or size failure happens
+token is never persisted, journaled, logged, snapshotted, or placed in a
+receipt. A framing, metadata, or size failure happens
 before the provider write and settles as a clean failure; it is never
 classified as an ambiguous write or replayed.
 
 ## Delivery tokens
 
-Every accepted `send` and `reply` returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v4 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, provider receipt, or dashboard.
+Every accepted `send` and `reply` returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v4 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, or provider receipt.
 
 ```bash
 embassy delivery-status --token dlv_<token>

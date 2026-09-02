@@ -40,8 +40,6 @@
     "skills/embassy-peer",
     "docs/CONFIGURATION.md",
     "docs/CONFIGURATION.zh-CN.md",
-    "docs/DASHBOARD.md",
-    "docs/DASHBOARD.zh-CN.md",
     "docs/DELIVERY.md",
     "docs/DELIVERY.zh-CN.md",
     "docs/GATEWAY-ARCHITECTURE.md",
@@ -50,12 +48,10 @@
     "README.md",
     "README.zh-CN.md",
     "SECURITY.md",
-    "LICENSE",
-    "assets/live-dashboard",
-    "assets/vendor/react"
+    "LICENSE"
   ],
   "scripts": {
-    "build": "npm run clean && tsc -p tsconfig.build.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm test",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "embassy": "node dist/src/gateway/cli.js",
@@ -65,7 +61,7 @@
     "pretest": "npm run build",
     "start": "node dist/src/gateway/cli.js serve",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json && tsc -p src/gateway/live-dashboard-app/tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json",
     "soak": "tsx --test test/soak/gateway-soak.test.ts"
   },
   "engines": {
@@ -76,7 +72,6 @@
   },
   "devDependencies": {
     "@types/node": "24.10.1",
-    "@types/react": "18.3.12",
     "@types/ws": "8.18.1",
     "tsx": "4.20.6",
     "typescript": "5.9.3"

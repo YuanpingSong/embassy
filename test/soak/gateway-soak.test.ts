@@ -342,7 +342,7 @@ function soakConfig(stateDir: string): GatewayConfig {
 async function registerAndSelect(
   handlers: GatewayControlHandlers,
 ): Promise<void> {
-  const refreshed = await handlers.refreshDashboard();
+  const refreshed = await handlers.refreshDiscovery();
   assert.equal(refreshed.accepted, true);
   const registered = await handlers.registerCodex({
     alias: "codex-main@this-mac",

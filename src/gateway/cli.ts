@@ -19,8 +19,6 @@ import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { isDashboardLocale, type DashboardLocale } from "./locale.js";
-import { DEFAULT_LIVE_DASHBOARD_PORT, runLiveDashboardCommand,
-  type LiveDashboardCommandOutcome, type LiveDashboardCommandOptions } from "./live-dashboard-command.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
@@ -39,7 +37,7 @@ const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
   "serve", "health", "status", "doctor", "delivery-status",
-  "wait-delivery", "untrack", "refresh-dashboard", "dashboard", "register-codex",
+  "wait-delivery", "untrack", "refresh", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send", "reply",
   "register-peer", "unregister-peer", "await",
@@ -60,7 +58,6 @@ export const gatewayCliExitCodes = Object.freeze({
 type Writable = { write(chunk: string, callback?: (error?: Error | null) => void): unknown };
 type GatewayControlSender = <M extends GatewayControlMethod>(options: SendGatewayControlRequestOptions<M>) => Promise<GatewayControlResponse<M>>;
 type GatewayServerRunner = (options: GatewayServerOptions) => Promise<void>;
-type LiveDashboardRunner = (options: LiveDashboardCommandOptions) => Promise<LiveDashboardCommandOutcome | void>;
 type PeerStdioRunner = (options: Parameters<typeof runPeerStdio>[0]) => PeerStdioSession;
 
 export type GatewayCliDependencies = {
@@ -72,9 +69,7 @@ export type GatewayCliDependencies = {
   loadNodeInventory?: (stateDir: string) => Promise<GatewayNodeInventory>;
   sendRequest?: GatewayControlSender;
   runServer?: GatewayServerRunner;
-  runLiveDashboard?: LiveDashboardRunner;
   serverSignal?: AbortSignal;
-  liveDashboardSignal?: AbortSignal;
   validateControlSocket?: (stateDir: string, socketPath: string) => Promise<void>;
   runPeerStdio?: PeerStdioRunner;
   now?: () => number;
@@ -281,20 +276,6 @@ function parseServeInboundMode(args: readonly string[]): "paired" | "open" {
   if (options.inbound !== "open") fault();
   return "open";
 }
-function parseLiveDashboardPort(value: string | true | undefined): number {
-  if (value === undefined) return DEFAULT_LIVE_DASHBOARD_PORT;
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) fault();
-  const port = Number(value);
-  if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535) fault();
-  return port;
-}
-function parseLiveDashboardArgs(args: readonly string[]): number {
-  if (args.length === 0) throw new CliFault("INVALID_ARGUMENTS", false, "hint.dashboardLiveRequired");
-  const options = parseOptions(args, ["port"], ["live"]);
-  count(options, 1, 2);
-  if (options.live !== true) fault();
-  return parseLiveDashboardPort(options.port);
-}
 const envelope = (method: GatewayControlMethod, params: unknown): GatewayControlRequest =>
   ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params }) as GatewayControlRequest;
 async function buildRequest(
@@ -306,16 +287,15 @@ async function buildRequest(
 ): Promise<GatewayControlRequest> {
   const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
     health: "health", status: "list_snapshot", doctor: "list_snapshot",
-    "refresh-dashboard": "refresh_dashboard",
+    refresh: "refresh_discovery",
   };
   const simpleMethod = simple[command];
   if (simpleMethod !== undefined) return envelope(simpleMethod, emptyParams(args));
   switch (command) {
     case "serve":
-    case "dashboard":
     case "peer-stdio":
       return fault();
-    case "health": case "status": case "doctor": case "refresh-dashboard": return fault();
+    case "health": case "status": case "doctor": case "refresh": return fault();
     case "delivery-status":
     case "wait-delivery": {
       const options = parseOptions(args, ["token"]);
@@ -583,8 +563,7 @@ export async function runGatewayCli(
   }
   const command = isCommand(argv[0]) ? argv[0] : undefined;
   let locale = fallbackCliLocale(argv.slice(1), env);
-  let serverReady = false, dashboardReady = false;
-  let liveDashboardPort: number | undefined;
+  let serverReady = false;
   let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig }> | undefined;
   const loadIdentity = () => identity ??= (async () => {
     const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(path.resolve(defaultGatewayStateDir(env)));
@@ -649,21 +628,6 @@ export async function runGatewayCli(
       if (!serverReady) fault("SERVER_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
-    if (command === "dashboard") {
-      liveDashboardPort = parseLiveDashboardArgs(common.args);
-      const { inventory } = await loadIdentity();
-      const outcome = await (dependencies.runLiveDashboard ?? runLiveDashboardCommand)({
-        env, locale, port: liveDashboardPort, inventory, loadConfig, sendRequest, validateControlSocket: validateSocket,
-        ...(dependencies.liveDashboardSignal === undefined ? {} : { signal: dependencies.liveDashboardSignal }),
-        onReady: async (result) => {
-          if (dashboardReady) fault("LIVE_DASHBOARD_READY_ALREADY_EMITTED");
-          success(result); dashboardReady = true;
-        },
-      });
-      if (!dashboardReady && outcome?.status === "cancelled") return gatewayCliExitCodes.ok;
-      if (!dashboardReady) throw new Error("LIVE_DASHBOARD_NOT_READY");
-      return gatewayCliExitCodes.ok;
-    }
     const request = await buildRequest(command, common.args, env, stdin, async () => (await loadIdentity()).config.hostId);
     const { config } = await loadIdentity();
     await validateSocket(config.stateDir, config.controlSocketPath);
@@ -723,7 +687,7 @@ export async function runGatewayCli(
     } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr(locale, "failure"));
     return exitCode;
   } catch (error) {
-    if ((command === "serve" && serverReady) || (command === "dashboard" && dashboardReady)) {
+    if (command === "serve" && serverReady) {
       stderr.write(fixedStderr(locale, "failure"));
       return gatewayCliExitCodes.failure;
     }
@@ -768,10 +732,6 @@ export async function runGatewayCli(
       if (error.code === "GATEWAY_NODE_INVENTORY_REQUIRED") {
         const stateDir = env.EMBASSY_STATE_DIR ?? (env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, "agent-embassy") : "~/.local/state/agent-embassy");
         stderr.write(`[embassy] ${getCliCopy(locale)["hint.nodeInventoryRequired"].replace("{stateDir}", stateDir)}\n`);
-      }
-      if (error.code === "LIVE_DASHBOARD_PORT_IN_USE" && liveDashboardPort !== undefined) {
-        const hint = getCliCopy(locale)["hint.dashboardPortInUse"].replace("{port}", String(liveDashboardPort));
-        stderr.write(`[embassy] ${hint}\n`);
       }
       return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }

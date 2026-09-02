@@ -15,7 +15,6 @@ import {
   GATEWAY_CONTROL_PROTOCOL_VERSION,
   sendGatewayControlRequest,
 } from "../src/gateway/control.js";
-import { renderDashboardHtml } from "../src/gateway/dashboard.js";
 import type { GatewayInstanceLease } from "../src/gateway/instance-lease.js";
 import type {
   LocalClaudeGatewayProvider,
@@ -28,7 +27,6 @@ import {
 } from "../src/gateway/server.js";
 import type { GatewayProviderAdapter } from "../src/gateway/service.js";
 import { GatewayStore } from "../src/gateway/store.js";
-import { dashboardFixture } from "./dashboard-fixture.js";
 
 const SYNTHETIC_HOME = "/synthetic/login-home";
 const SYNTHETIC_SECRET = "SYNTHETIC_CREDENTIAL_MUST_NOT_BE_FORWARDED";
@@ -360,16 +358,11 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
       },
     ],
   );
-  assert.doesNotMatch(
-    renderDashboardHtml(dashboardFixture(), { locale: "en" }),
-    /Not detected|Compatibility checks/u,
-  );
   assert.deepEqual(ready, [
     {
       status: "ready",
       hostId: "this-mac",
       codexMode: "native_messaging",
-      dashboardFile: "gateway-dashboard.html",
     },
   ]);
   assert.deepEqual(events, [

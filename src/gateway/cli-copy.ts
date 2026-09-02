@@ -4,8 +4,6 @@ import type { DashboardLocale } from "./locale.js";
 
 export const cliCopyKeys = [
   "help.usage",
-  "hint.dashboardLiveRequired",
-  "hint.dashboardPortInUse",
   "hint.controlConnectDenied",
   "hint.controlInvalidResponse",
   "hint.controlVersionMismatch",

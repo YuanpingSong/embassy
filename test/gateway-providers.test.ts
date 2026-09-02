@@ -864,7 +864,7 @@ test("service restart restores selected Claude authority into per-operation prep
     discoveryPollMs: 30_000, peerFactory: () => peer as never, nativeHelpers: { maxHelpers: 1,
       factory: async (options) => { const helper = new CapturingNativeHelper(options, 1); helpers.push(helper); return helper; } } });
   const service = new GatewayService({ config, adapters: [provider, new RegistrationOnlyCodexProvider()],
-    publishDashboard: async () => path.join(config.stateDir, "dashboard.html"), nativePeerCwd: root });
+    nativePeerCwd: root });
   try {
     await service.start(); await waitFor(() => helpers.length === 1);
     const sent = await service.handlers().send({ fromAlias: storedCodex.alias, threadId: THREAD_ID,

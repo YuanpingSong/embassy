@@ -22,7 +22,7 @@
 <header class="site">
 <nav class="top" aria-label="Site">
 <a class="nm" href="#"><img src="assets/mark.svg" alt="">Embassy</a>
-<div class="links"><a href="#why">Why</a><a href="#providers">Providers</a><a href="#how">How it works</a><a href="#protocol">Protocol</a><a href="#dashboard">Dashboard</a><a href="#quickstart">Quickstart</a><a href="zh-CN/" lang="zh-CN">中文</a><a href="https://github.com/YuanpingSong/embassy">GitHub ↗</a></div>
+<div class="links"><a href="#why">Why</a><a href="#providers">Providers</a><a href="#how">How it works</a><a href="#protocol">Protocol</a><a href="#quickstart">Quickstart</a><a href="zh-CN/" lang="zh-CN">中文</a><a href="https://github.com/YuanpingSong/embassy">GitHub ↗</a></div>
 </nav>
 </header>
 <main id="main">
@@ -91,7 +91,6 @@
 <div><div class="cmd2"><code>embassy send --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
 Which auth middleware did you settle on?
 MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never an argument. You get a <code style="border:none;background:none;padding:0">dlv_</code> receipt and a <code style="border:none;background:none;padding:0">conv_</code> token back.</p></div>
-<div><div class="cmd2"><code>embassy dashboard --live</code><button type="button" class="cp" data-copy="embassy dashboard --live" hidden>Copy</button></div><p>Watch receipts settle, honestly worded — or <code style="border:none;background:none;padding:0">embassy status</code> for a one-shot snapshot.</p></div>
 </div>
 </div>
 </section>
@@ -123,17 +122,6 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <section class="band" id="new">
 <div class="wrap">
 <div class="release"><span class="v">v1.7.0</span><span>Four providers over ACP, all-to-all routing, and the certification machinery removed.</span><a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">Changelog ↗</a></div>
-</div>
-</section>
-<section class="band" id="dashboard">
-<div class="wrap">
-<p class="eyebrow">Dashboard</p>
-<h2>Watch the embassy work</h2>
-<p class="lede">The optional live dashboard: broker health, the exchange board, per-delivery lifecycles filterable by source and destination provider, consent topology, and honest diagnostics — including retained message bodies, bounded and private to your machine. The static snapshots — gateway-dashboard.html and its gateway-dashboard.zh-CN.html twin — stay metadata-only and need no server at all.</p>
-<figure class="dash" style="margin:0">
-<img src="assets/dashboard.png" alt="The Embassy live dashboard, Overview tab: a stream-connected status strip, healthy chips for the broker and its connectors, and an exchange board pairing two aliases under paired inbound consent.">
-<figcaption>A real dashboard state — Overview tab, metadata only. Captured from the live companion during this release's landing.</figcaption>
-</figure>
 </div>
 </section>
 <section class="band" id="vocabulary">
@@ -173,9 +161,7 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <span class="c"># from the Codex task — body via stdin, never an argument:</span><br>
 <span class="p">$</span> embassy send --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
 Which auth middleware did you settle on?<br>
-MSG<br>
-<span class="c"># watch receipts settle (optional):</span><br>
-<span class="p">$</span> embassy dashboard --live
+MSG
 </div>
 </div>
 </section>

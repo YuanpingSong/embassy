@@ -14,9 +14,7 @@ Commands:
   health                 Check broker health
   status                 Read the public status snapshot
   doctor                 Diagnose Codex Desktop attachment
-  refresh-dashboard      Refresh discovery and publish both static dashboards
-  dashboard --live [--port <n>]
-                         Open live status and bounded route consent
+  refresh                Rescan for Claude sessions
   register-codex         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task
   register-peer --alias <peer-alias> [--token-stdin|--emit-env]
@@ -40,14 +38,9 @@ Options:
   --lang en|zh-CN        Localize user-facing text
   --token-stdin          Read the peer token as the first LF-terminated stdin line
   --emit-env             Print the first registration token as an export command
-  --port <n>             Live dashboard port, 1024–65535 (default 41961)
   --version, -v          Print the version
   --help, -h             Show this help
 `,
-  "hint.dashboardLiveRequired":
-    "dashboard requires --live; static files are published by serve and refresh-dashboard.",
-  "hint.dashboardPortInUse":
-    "live dashboard port {port} is already in use; close the holding process or choose another with --port <n>.",
   "hint.controlConnectDenied":
     "the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   "hint.controlInvalidResponse":

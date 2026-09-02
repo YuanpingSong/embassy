@@ -100,9 +100,6 @@ nav.top .links a:hover{color:var(--cinn)}
 /* release strip */
 .release{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap;border:1px solid var(--rule);border-radius:10px;padding:16px 22px;background:#fafafc}
 .release .v{font-family:var(--mono);font-size:13px;color:var(--cinn)}
-/* dashboard */
-.dash img{width:100%;height:auto;display:block;border:1px solid var(--rule);border-radius:12px}
-.dash figcaption{font-size:13px;color:var(--mut);margin-top:10px}
 /* vocabulary */
 .vocab{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
 .vocab>div{background:var(--cream);border-radius:10px;padding:22px}

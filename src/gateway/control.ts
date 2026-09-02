@@ -57,10 +57,10 @@ const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 export const gatewayControlMethods = [
-  "health", "register_codex", "unregister_codex", "remove_codex_registration",
+  "health", "register_codex", "unregister_codex",
   "select_claude", "unselect_claude", "pair", "unpair", "list_snapshot",
   "observe_snapshot", "delivery_status", "untrack", "send", "reply",
-  "refresh_dashboard", "peer_catalog", "peer_handoff",
+  "refresh_discovery", "peer_catalog", "peer_handoff",
   "register_peer", "unregister_peer", "await_peer", "peer_receipt",
 ] as const;
 export type GatewayControlMethod = (typeof gatewayControlMethods)[number];
@@ -75,7 +75,6 @@ export type ValidatedRegisterCodexParams = {
   succeedsAlias?: string;
 };
 export type UnregisterCodexParams = { alias: string; threadId: string };
-export type RemoveCodexRegistrationParams = { alias: string };
 export type SelectClaudeParams = { alias: string };
 export type PairParams = {
   aliases: readonly [string, string];
@@ -110,12 +109,12 @@ export type PeerReceiptParams = PeerPrincipalParams & { receipt: string };
 
 type RequestParams = {
   health: Record<string, never>; register_codex: RegisterCodexParams;
-  unregister_codex: UnregisterCodexParams; remove_codex_registration: RemoveCodexRegistrationParams;
+  unregister_codex: UnregisterCodexParams;
   select_claude: SelectClaudeParams; unselect_claude: SelectClaudeParams;
   pair: PairParams; unpair: PairParams; list_snapshot: Record<string, never>;
   observe_snapshot: Record<string, never>; delivery_status: DeliveryStatusParams;
   untrack: UntrackParams; send: SendParams; reply: ReplyParams;
-  refresh_dashboard: Record<string, never>; peer_catalog: PeerCatalogParams;
+  refresh_discovery: Record<string, never>; peer_catalog: PeerCatalogParams;
   peer_handoff: PeerHandoffControlParams;
   register_peer: RegisterPeerParams; unregister_peer: PeerPrincipalParams;
   await_peer: PeerPrincipalParams; peer_receipt: PeerReceiptParams;
@@ -158,12 +157,12 @@ export type GatewayRegisterPeerResult = GatewayDecision | { accepted: true; code
 
 type ResultByMethod = {
   health: GatewayHealthResult; register_codex: GatewayDecision;
-  unregister_codex: GatewayDecision; remove_codex_registration: GatewayDecision;
+  unregister_codex: GatewayDecision;
   select_claude: GatewayDecision; unselect_claude: GatewayDecision;
   pair: GatewayDecision; unpair: GatewayDecision; list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
   untrack: GatewayDecision; send: GatewaySendResult; reply: GatewaySendResult;
-  refresh_dashboard: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
+  refresh_discovery: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
   peer_handoff: PeerHandoffResult;
   register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
   await_peer: PeerMailboxAwaitResult; peer_receipt: GatewayDecision;
@@ -173,7 +172,6 @@ export type GatewayControlHandlers = {
   health: () => MaybePromise<GatewayHealthResult>;
   registerCodex: (params: Readonly<ValidatedRegisterCodexParams>) => MaybePromise<GatewayDecision>;
   unregisterCodex: (params: Readonly<UnregisterCodexParams>) => MaybePromise<GatewayDecision>;
-  removeCodexRegistration: (params: Readonly<RemoveCodexRegistrationParams>) => MaybePromise<GatewayDecision>;
   selectClaude: (params: Readonly<SelectClaudeParams>) => MaybePromise<GatewayDecision>;
   unselectClaude: (params: Readonly<SelectClaudeParams>) => MaybePromise<GatewayDecision>;
   pair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
@@ -184,7 +182,7 @@ export type GatewayControlHandlers = {
   untrack: (params: Readonly<UntrackParams>) => MaybePromise<GatewayDecision>;
   send: (params: Readonly<ValidatedSendParams>) => MaybePromise<GatewaySendResult>;
   reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewaySendResult>;
-  refreshDashboard: () => MaybePromise<GatewayRefreshResult>;
+  refreshDiscovery: () => MaybePromise<GatewayRefreshResult>;
   peerCatalog?: (params: Readonly<PeerCatalogParams>) => MaybePromise<PeerCatalogResult>;
   peerHandoff?: (params: Readonly<PeerHandoffControlParams>) => MaybePromise<PeerHandoffResult>;
   registerPeer: (params: Readonly<RegisterPeerParams>) => MaybePromise<GatewayRegisterPeerResult>;
@@ -427,9 +425,6 @@ function decodeRegister(value: unknown): ValidatedRegisterCodexParams {
 function decodeUnregister(value: unknown): UnregisterCodexParams {
   if (!shape(value, { alias, threadId: uuid }) || !(value.alias as string).startsWith("codex-")) invalid();
   return { alias: value.alias as string, threadId: (value.threadId as string).toLowerCase() }; }
-function decodeRemoval(value: unknown): RemoveCodexRegistrationParams {
-  if (!shape(value, { alias }) || !(value.alias as string).startsWith("codex-")) invalid();
-  return { alias: value.alias as string }; }
 function decodeSelection(value: unknown): SelectClaudeParams {
   if (!isRecord(value) || !exact(value, ["alias"]) ||
       typeof value.alias !== "string" || !isClaudeSessionSelector(value.alias)) invalid();
@@ -668,13 +663,13 @@ type Decoder = (value: unknown) => unknown;
 type Descriptor = { handler: keyof GatewayControlHandlers; decode: Decoder; result: Check; mutation: boolean };
 const descriptors = {
   health: { handler: "health", decode: emptyParams, result: isHealthResult, mutation: false }, register_codex: { handler: "registerCodex", decode: decodeRegister, result: isDecision, mutation: true },
-  unregister_codex: { handler: "unregisterCodex", decode: decodeUnregister, result: isDecision, mutation: true }, remove_codex_registration: { handler: "removeCodexRegistration", decode: decodeRemoval, result: isDecision, mutation: true },
+  unregister_codex: { handler: "unregisterCodex", decode: decodeUnregister, result: isDecision, mutation: true },
   select_claude: { handler: "selectClaude", decode: decodeSelection, result: isDecision, mutation: true }, unselect_claude: { handler: "unselectClaude", decode: decodeSelection, result: isDecision, mutation: true },
   pair: { handler: "pair", decode: decodePair, result: isDecision, mutation: true }, unpair: { handler: "unpair", decode: decodePair, result: isDecision, mutation: true },
   list_snapshot: { handler: "listSnapshot", decode: emptyParams, result: isGatewaySnapshot, mutation: false }, observe_snapshot: { handler: "observeSnapshot", decode: emptyParams, result: isSnapshotObservation, mutation: false },
   delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false }, untrack: { handler: "untrack", decode: decodeUntrack, result: isDecision, mutation: false },
   send: { handler: "send", decode: decodeSend, result: isSendResult, mutation: true },
-  reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_dashboard: { handler: "refreshDashboard", decode: emptyParams, result: isRefreshResult, mutation: false },
+  reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_discovery: { handler: "refreshDiscovery", decode: emptyParams, result: isRefreshResult, mutation: false },
   peer_catalog: { handler: "peerCatalog", decode: decodePeerCatalog, result: isPeerCatalog, mutation: false },
   peer_handoff: { handler: "peerHandoff", decode: decodePeerHandoff, result: isPeerHandoffResult, mutation: true },
   register_peer: { handler: "registerPeer", decode: decodeRegisterPeer, result: isRegisterPeerResult, mutation: true },
