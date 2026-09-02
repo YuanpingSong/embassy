@@ -3,6 +3,7 @@
 /** Foreground broker plus bounded metadata-only control client. */
 import { realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
+import { userInfo } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
@@ -17,6 +18,8 @@ import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from ".
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
+import { defaultRunLaunchctl, installServiceAgent, serviceAgentStatus, uninstallServiceAgent,
+  type RunLaunchctl, type ServiceAgentDependencies, type ServiceAgentInstallResult } from "./service-agent.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -30,7 +33,7 @@ export const EMBASSY_VERSION = "2.0.1";
 // test/gateway-cli.test.ts package-metadata assertion.
 
 export const gatewayCliCommands = [
-  "serve", "health", "status", "delivery-status",
+  "serve", "service", "health", "status", "delivery-status",
   "wait-delivery", "refresh", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send", "reply",
@@ -68,6 +71,8 @@ export type GatewayCliDependencies = {
   runPeerStdio?: PeerStdioRunner;
   now?: () => number;
   delay?: (milliseconds: number) => Promise<void>;
+  runLaunchctl?: RunLaunchctl;
+  serviceHomeDir?: () => string;
 };
 
 const HELP_USAGE = `Embassy — local messaging for Claude Code and Codex
@@ -77,6 +82,8 @@ Usage:
 
 Commands:
   serve [--inbound open] Run the socket-only broker (paired inbound by default)
+  service install|uninstall|status
+                         Run the broker as a macOS launchd agent
   health                 Check broker health
   status                 Read the public status snapshot
   refresh                Rescan for Claude sessions
@@ -120,6 +127,8 @@ const CLI_STDERR = {
 } as const;
 /** Exact next-step remedies appended after the summary for the faults that have one. */
 const CLI_HINT = {
+  noBrokerRunning:
+    "No broker is running. Run `embassy service install` once, or `embassy serve` in a terminal.",
   controlConnectDenied:
     "the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   controlInvalidResponse:
@@ -319,6 +328,7 @@ async function buildRequest(
   if (simpleMethod !== undefined) return envelope(simpleMethod, emptyParams(args));
   switch (command) {
     case "serve":
+    case "service":
     case "peer-stdio":
       return fault();
     case "health": case "status": case "refresh": return fault();
@@ -543,6 +553,42 @@ async function waitForDelivery(
   }
 }
 
+const SERVICE_HEALTH_POLL_ATTEMPTS = 5;
+const SERVICE_HEALTH_POLL_INTERVAL_MS = 200;
+
+/**
+ * The install command's own bounded probe: a freshly kickstarted launchd
+ * agent needs a moment to publish its control socket. This never throws —
+ * install already succeeded by the time this runs, so an unhealthy broker
+ * is reported, not treated as an install failure.
+ */
+async function pollServiceHealth(
+  config: GatewayConfig,
+  sendRequest: GatewayControlSender,
+  validateSocket: (stateDir: string, socketPath: string) => Promise<void>,
+  delay: (milliseconds: number) => Promise<void>,
+): Promise<{ ok: true; result: unknown } | { ok: false; code: string }> {
+  let lastCode = "SERVICE_HEALTH_UNAVAILABLE";
+  for (let attempt = 0; attempt < SERVICE_HEALTH_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      await validateSocket(config.stateDir, config.controlSocketPath);
+      const response = await sendRequest({
+        socketPath: config.controlSocketPath,
+        request: envelope("health", {}) as Extract<GatewayControlRequest, { method: "health" }>,
+      });
+      if (response.ok) return { ok: true, result: response.result };
+      lastCode = response.error.code;
+    } catch (error) {
+      lastCode = error instanceof GatewayControlTransportError ? error.code
+        : error instanceof CliFault ? error.code
+        : error instanceof BridgeError ? error.code
+        : "SERVICE_HEALTH_UNAVAILABLE";
+    }
+    if (attempt < SERVICE_HEALTH_POLL_ATTEMPTS - 1) await delay(SERVICE_HEALTH_POLL_INTERVAL_MS);
+  }
+  return { ok: false, code: lastCode };
+}
+
 /** Run one command; foreground runners own and release their signal handlers. */
 export async function runGatewayCli(
   argv: readonly string[] = process.argv.slice(2),
@@ -609,6 +655,40 @@ export async function runGatewayCli(
         stderr.write("Embassy peer transport failed.\n");
         return gatewayCliExitCodes.unavailable;
       }
+    }
+    if (command === "service") {
+      const subcommand = args[0];
+      if (args.length !== 1) fault();
+      if (subcommand !== "install" && subcommand !== "uninstall" && subcommand !== "status") fault();
+      const serviceDeps: ServiceAgentDependencies = {
+        homeDir: (dependencies.serviceHomeDir ?? (() => userInfo().homedir))(),
+        runLaunchctl: dependencies.runLaunchctl ?? defaultRunLaunchctl,
+        env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
+        uid: process.getuid!(),
+      };
+      if (subcommand === "install") {
+        let installed: ServiceAgentInstallResult;
+        try {
+          installed = await installServiceAgent(serviceDeps);
+        } catch (error) {
+          if (error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE") {
+            writeFailure(stdout, stderr, command, error.code, { retryable: true, kind: "unavailable" });
+            stderr.write(`[embassy] ${error.message}\n`);
+            return gatewayCliExitCodes.unavailable;
+          }
+          throw error;
+        }
+        const { config } = await loadIdentity();
+        const health = await pollServiceHealth(config, sendRequest, validateSocket, dependencies.delay ?? defaultDelay);
+        success({ subcommand, ...installed, health });
+        return gatewayCliExitCodes.ok;
+      }
+      if (subcommand === "uninstall") {
+        success({ subcommand, ...(await uninstallServiceAgent(serviceDeps)) });
+        return gatewayCliExitCodes.ok;
+      }
+      success({ subcommand, ...(await serviceAgentStatus(serviceDeps)) });
+      return gatewayCliExitCodes.ok;
     }
     if (command === "serve") {
       await (dependencies.runServer ?? runGatewayServer)({
@@ -695,6 +775,8 @@ export async function runGatewayCli(
       }
       if (error.code === "CONTROL_CONNECT_DENIED")
         stderr.write(`[embassy] ${CLI_HINT.controlConnectDenied}\n`);
+      if (error.code === "CONTROL_SOCKET_MISSING")
+        stderr.write(`[embassy] ${CLI_HINT.noBrokerRunning}\n`);
       return ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable;
     }
     if (error instanceof CliFault) {

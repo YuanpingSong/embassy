@@ -53,13 +53,15 @@ Runtime delivery is best effort. Version and build strings are unverified metada
 
 ### 1. Start Embassy
 
-After creating the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md), run the foreground broker under the same OS account as Claude Code and Codex:
+After creating the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md), install the broker as a launchd agent under the same OS account as Claude Code and Codex, so it survives logout and restarts on crash:
 
 ```bash
-embassy serve
+embassy service install
 ```
 
-You should see `"status":"ready"`. In another terminal:
+The install prints a bounded health check once the agent comes up. Prefer a foreground process you start and stop by hand instead? Run `embassy serve` in its own terminal and leave it running — skip `service install` in that case.
+
+In another terminal:
 
 ```bash
 embassy health

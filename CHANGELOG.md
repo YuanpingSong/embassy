@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `embassy service install|uninstall|status` runs the broker as a launchd agent (macOS); `send`/`status` without a broker now point at it (emb-108).
+
 ### Removed
 
 - The static dashboard and the live dashboard, with `embassy refresh-dashboard` and `embassy dashboard --live` (emb-100).

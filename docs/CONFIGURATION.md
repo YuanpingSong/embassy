@@ -47,6 +47,34 @@ An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
 does not mutate the state file. There is no conversion command or automatic
 recovery path.
 
+## Service
+
+`embassy service install` registers the broker as a per-user macOS launchd
+agent instead of a foreground process kept alive by hand:
+
+- **Agent**: label `com.agent-embassy.broker`, written to
+  `~/Library/LaunchAgents/com.agent-embassy.broker.plist` (mode 0644).
+  `RunAtLoad` and `KeepAlive` are both set, so the broker starts at login and
+  launchd restarts it after a crash, throttled to at most once every 5
+  seconds.
+- **Logs**: stdout and stderr are both captured to
+  `~/Library/Logs/agent-embassy/broker.log` (the log directory is created
+  mode 0700). Uninstalling leaves this file in place.
+- **State**: `EMBASSY_STATE_DIR` is read from the installing process's
+  environment and captured into the plist at install time; changing it later
+  in your shell has no effect on the installed agent until you run
+  `embassy service install` again. No other environment variable — secrets
+  included — is copied into the plist.
+- **Stop it**: `embassy service uninstall` boots the agent out of launchd and
+  removes the plist.
+- **Check it**: `embassy service status` reports whether the agent is
+  loaded, its pid and launchd state while running, and its last exit status
+  otherwise.
+
+Installing refuses if a foreground `embassy serve` currently holds the
+host-wide instance lease, naming that process's pid; stop it first, then
+install. Re-running `embassy service install` over a prior install is safe.
+
 ## Advanced bounds
 
 These variables retain conservative defaults:

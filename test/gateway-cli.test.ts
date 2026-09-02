@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +27,7 @@ import {
   runGatewayCli as runGatewayCliBase,
 } from "../src/gateway/cli.js";
 import { PeerHandlerError } from "../src/gateway/peer-stdio.js";
+import { SERVICE_AGENT_LABEL } from "../src/gateway/service-agent.js";
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const OLD_THREAD_ID_SENTINEL = "00000000-0000-7000-8000-000000000702";
@@ -1074,6 +1075,27 @@ test("connect denial and invalid responses print their distinct honest remedies"
     assert.match(stderr.chunks.join(""), new RegExp(hints[code].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     if (code === "CONTROL_CONNECT_DENIED") assert.doesNotMatch(stderr.chunks.join(""), /embassy serve/);
   }
+});
+
+test("a missing control socket points at embassy service install", async () => {
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["status"], {
+    env: {}, stdout, stderr,
+    loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+      steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
+    validateControlSocket: async () => undefined,
+    sendRequest: async () => {
+      throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail");
+    },
+  });
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "CONTROL_SOCKET_MISSING");
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] gateway unavailable.\n[embassy] No broker is running. Run `embassy service install` once, or `embassy serve` in a terminal.\n",
+  );
+  assert.doesNotMatch(stderr.chunks.join(""), /private detail/);
 });
 
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
@@ -2262,4 +2284,75 @@ test("package metadata publishes the client and its runtime dependency", async (
   assert.equal(packageJson.files.includes("dist/src"), false);
   assert.equal(packageJson.dependencies.ws, "8.21.3");
   assert.equal(packageJson.devDependencies.ws, undefined);
+});
+
+test("service without a subcommand is an argument error, before any control-socket work", async () => {
+  for (const argv of [["service"], ["service", "bogus"], ["service", "install", "extra"]]) {
+    const stdout = capture(), stderr = capture();
+    let worked = false;
+    const code = await runGatewayCli(argv, {
+      env: {}, stdout, stderr,
+      loadConfig: () => { worked = true; throw new Error("must not load configuration"); },
+      validateControlSocket: async () => { worked = true; },
+      sendRequest: async () => { worked = true; throw new Error("must not contact the gateway"); },
+      runLaunchctl: async () => { worked = true; return { code: 0, stdout: "", stderr: "" }; },
+    });
+    assert.equal(code, gatewayCliExitCodes.invalidInput, argv.join(" "));
+    assert.equal(worked, false, argv.join(" "));
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "INVALID_ARGUMENTS", argv.join(" "));
+    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n", argv.join(" "));
+  }
+});
+
+test("service install writes a real plist under a temp home, drives the fake launchctl runner, and reports health", async () => {
+  const temporary = await realpath(os.tmpdir());
+  const home = await mkdtemp(path.join(temporary, "embassy-cli-service-"));
+  await chmod(home, 0o700);
+  roots.add(home);
+
+  const uid = process.getuid!();
+  const target = `gui/${uid}/${SERVICE_AGENT_LABEL}`;
+  const launchctlCalls: string[][] = [];
+  const stateDir = await mkdtemp(path.join(temporary, "embassy-cli-service-state-"));
+  roots.add(stateDir);
+
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir },
+    stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: async (args) => {
+      launchctlCalls.push([...args]);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: { method: string } }) => {
+      assert.equal(request.method, "health");
+      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { status: "ok" } };
+    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.ok);
+  assert.deepEqual(launchctlCalls, [
+    ["bootout", target],
+    ["bootstrap", `gui/${uid}`, path.join(home, "Library", "LaunchAgents", `${SERVICE_AGENT_LABEL}.plist`)],
+    ["kickstart", "-k", target],
+  ]);
+  const parsed = JSON.parse(stdout.chunks.join("")) as {
+    ok: boolean; command: string;
+    result: { subcommand: string; label: string; plistPath: string; logPath: string; health: { ok: boolean } };
+  };
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "service");
+  assert.equal(parsed.result.subcommand, "install");
+  assert.equal(parsed.result.label, SERVICE_AGENT_LABEL);
+  assert.equal(parsed.result.plistPath, path.join(home, "Library", "LaunchAgents", `${SERVICE_AGENT_LABEL}.plist`));
+  assert.equal(parsed.result.health.ok, true);
+  assert.equal(stderr.chunks.join(""), "");
+
+  const plistStat = await lstat(parsed.result.plistPath);
+  assert.equal(plistStat.mode & 0o777, 0o644);
+  const plistContent = await readFile(parsed.result.plistPath, "utf8");
+  assert.match(plistContent, /<string>serve<\/string>/);
 });

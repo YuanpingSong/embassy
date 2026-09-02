@@ -54,6 +54,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "providers",
   "server",
   "service",
+  "service-agent",
   "store",
   "types",
 ];
