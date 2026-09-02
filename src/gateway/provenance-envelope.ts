@@ -157,8 +157,8 @@ export function composeProvenanceEnvelope(
       ? ` from-alias="${input.sourceAlias}"`
       : "";
   const replyCommand =
-    `embassy reply --conversation ${input.conversationId}` +
-    ` --alias ${input.targetAlias}`;
+    `embassy send --conversation ${input.conversationId}` +
+    ` --from ${input.targetAlias}`;
   const hint =
     `<embassy-reply-hint conversation="${input.conversationId}"` +
     ` reply-as="${input.targetAlias}"${exactSourceAttribute}` +

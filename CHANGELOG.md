@@ -38,6 +38,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `availablePeers[].selected` is renamed to `routed` in the public snapshot: it means the session has an installed route, never a permission (emb-104).
 - The native Claude helper IPC protocol is version 2: `selected_route` is the only dispatch authorization and its `stateRoot` is required, so every preparation runs the target-workspace assertion (emb-104).
 - A federation node whose only routes are peer mirrors can persist and reload its state: the loader takes the local host identity from the broker's configuration instead of deriving it from local routes, which previously left a fresh node unable to write after its first peer refresh (emb-104).
+- `send` addresses either a route by name (`--to <alias>`) or an open conversation by its token (`--conversation conv_<token>`), never both and never neither; the conversation form is what `reply` was, and it is how a recipient answers (emb-105). The caller must already own one end of that conversation, the other end stays the binding the conversation recorded — a replaced endpoint still refuses with `CONVERSATION_ROUTE_RETIRED` rather than retargeting — and an answer always expects a reply, so `--expects-reply` is rejected beside `--conversation`. The `reply` control method is gone with it: both CLI verbs build one `send` request, and the closed version 3 method family is now fourteen methods. One code changes shape: a conversation-addressed send with no inherited identity reports `CLAUDE_IDENTITY_REQUIRED`, the code `send` already used, where `reply` reported `CALLER_IDENTITY_REQUIRED`.
+- The `<embassy-reply-hint>` that begins every delivered envelope now names `embassy send --conversation <token> --from <alias>` (emb-105).
+
+### Deprecated
+
+- `embassy reply --conversation <token> --alias <your-alias>` is a deprecated alias for `embassy send --conversation <token> --from <your-alias>` (emb-105). It builds the identical control request and returns the identical result and exit code; only the echoed `command` name differs. It stays for one release because reply hints delivered in envelopes already in flight still name it, and is removed after that.
 
 ## [2.0.1] - 2026-09-01
 

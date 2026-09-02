@@ -43,7 +43,7 @@ test("composes the exact Codex-bound provenance envelope", () => {
   assert.equal(
     compose(),
     `<cross-session-message from-name="embassy-pm@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy send --conversation conv_0123456789abcdef --from codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 Status is green.
 </cross-session-message>`,
   );
@@ -59,7 +59,7 @@ test("composes the exact Claude-bound canonical outer shape", () => {
       body: "PONG",
     }),
     `<cross-session-message from-name="codex-main@this-mac">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="embassy-pm@this-mac" from-provider="codex">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias embassy-pm@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="embassy-pm@this-mac" from-provider="codex">Reply by running \`embassy send --conversation conv_0123456789abcdef --from embassy-pm@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 PONG
 </cross-session-message>`,
   );
@@ -121,7 +121,7 @@ test("adds one broker-owned queued-ahead marker only for a positive Codex count"
   assert.equal(
     compose({ queuedAhead: 2 }),
     `<cross-session-message from-name="embassy-pm@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy send --conversation conv_0123456789abcdef --from codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 <embassy-queued-ahead count="2">2 earlier messages are queued for this route and will arrive at your next turn boundaries.</embassy-queued-ahead>
 Status is green.
 </cross-session-message>`,

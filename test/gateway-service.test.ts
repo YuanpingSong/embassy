@@ -520,8 +520,8 @@ test("peer principals send both directions and reply through ordinary conversati
     assert.equal(codexProvider.dispatches[0]?.steer, undefined);
     assert.equal(claudeProvider.dispatches[0]?.sourceProvider, "peer");
     assert.ok(toClaude.accepted);
-    const reply = await subject.handlers.reply({ conversationId: toClaude.conversationId,
-      text: "peer follow-up", caller: { kind: "peer", alias: "peer-shell@this-mac", token: minted.token } });
+    const reply = await subject.handlers.send({ conversationId: toClaude.conversationId,
+      text: "peer follow-up", fromAlias: "peer-shell@this-mac", peerToken: minted.token });
     assert.equal(reply.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 2);
     assert.equal(claudeProvider.dispatches[1]?.text, "peer follow-up");
@@ -552,9 +552,9 @@ test("background Claude discovery installs its route on first send and replies e
     assert.equal(installed?.binding.routeHandle, backgroundRoute);
     if (!sent.accepted) assert.fail("background send admission");
     await eventually(() => claudeProvider.dispatches.length === 1);
-    const reply = await subject.handlers.reply({
+    const reply = await subject.handlers.send({
       conversationId: sent.conversationId, text: "background reply",
-      caller: { kind: "claude", alias: backgroundAlias, replyAddress: "uds:/synthetic/background.sock" },
+      fromAlias: backgroundAlias, replyAddress: "uds:/synthetic/background.sock",
     });
     assert.equal(reply.accepted, true);
     await eventually(() => codexProvider.dispatches.some((dispatch) => dispatch.text === "background reply"));
@@ -934,9 +934,9 @@ test("a re-anchored Claude session keeps its registration and its in-flight conv
       0,
       "a rename is not a displacement",
     );
-    const reply = await subject.handlers.reply({ conversationId: opened.conversationId,
-      text: "still the same session", caller: { kind: "claude", alias: "advisor-renamed@this-mac",
-        replyAddress: "uds:/test/claude-reply.sock" } });
+    const reply = await subject.handlers.send({ conversationId: opened.conversationId,
+      text: "still the same session", fromAlias: "advisor-renamed@this-mac",
+      replyAddress: "uds:/test/claude-reply.sock" });
     assert.equal(reply.accepted, true);
     await eventually(() => codexProvider.dispatches.some((row) => row.text === "still the same session"));
   } finally { await subject.close(); }
@@ -2165,9 +2165,9 @@ test("TRACK: and DONE: prefixes are ordinary body text and the snapshot carries 
     await eventually(() => claudeProvider.dispatches.length === 1);
     assert.equal(claudeProvider.dispatches[0]?.text, "TRACK: compile the release");
     assert.equal(Object.hasOwn(claudeProvider.dispatches[0] ?? {}, "progressWatchActive"), false);
-    const done = await subject.handlers.reply({
+    const done = await subject.handlers.send({
       conversationId: opened.conversationId, text: "DONE: complete",
-      caller: { kind: "claude", alias: claude.alias, replyAddress: "uds:/test/claude-reply.sock" },
+      fromAlias: claude.alias, replyAddress: "uds:/test/claude-reply.sock",
     });
     assert.equal(done.accepted, true);
     await eventually(() => codexProvider.dispatches.length === 1);
@@ -2645,10 +2645,10 @@ test("reply attestation and an old conversation token cannot cross same-alias re
       }
       return await enqueue(input);
     };
-    const replying = subject.handlers.reply({
+    const replying = subject.handlers.send({
       conversationId: opened.conversationId,
       text: "racing explicit reply",
-      caller: { kind: "codex", alias: codex.alias, threadId: THREAD_A },
+      fromAlias: codex.alias, threadId: THREAD_A,
     });
     await entered.promise;
     await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
@@ -2660,10 +2660,10 @@ test("reply attestation and an old conversation token cannot cross same-alias re
     });
     release.resolve();
     assert.deepEqual(await replying, { accepted: false, code: "rejected", reason: "ROUTE_UNREGISTERED" });
-    assert.deepEqual(await subject.handlers.reply({
+    assert.deepEqual(await subject.handlers.send({
       conversationId: opened.conversationId,
       text: "reuse retired token",
-      caller: { kind: "codex", alias: codex.alias, threadId: THREAD_B },
+      fromAlias: codex.alias, threadId: THREAD_B,
     }), { accepted: false, code: "rejected", reason: "CONVERSATION_ROUTE_RETIRED" });
     assert.equal(
       (await subject.store.publicSnapshot()).messages.some(
@@ -2676,6 +2676,47 @@ test("reply attestation and an old conversation token cannot cross same-alias re
     release.resolve();
     await subject.close();
   }
+});
+
+test("a conversation-addressed send threads the same conversation the other way", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider], {
+    seed: async (store) => routed(store, claude, codex),
+  });
+  try {
+    const opened = await subject.handlers.send({
+      fromAlias: codex.alias, threadId: THREAD_A, toAlias: claude.alias,
+      text: "opening question", expectsReply: false,
+    });
+    if (!opened.accepted) assert.fail("send admission");
+    await eventually(() => claudeProvider.dispatches.length === 1);
+    // A token is a locator, not authority: a caller who owns neither end of
+    // the conversation is refused before anything is enqueued.
+    assert.deepEqual(await subject.handlers.send({
+      conversationId: opened.conversationId, text: "not my conversation",
+      fromAlias: "visitor@this-mac", replyAddress: "uds:/test/claude-reply.sock",
+    }), { accepted: false, code: "route_mismatch", reason: "CONVERSATION_CALLER_MISMATCH" });
+    const answered = await subject.handlers.send({
+      conversationId: opened.conversationId, text: "the answer",
+      fromAlias: claude.alias, replyAddress: "uds:/test/claude-reply.sock",
+    });
+    if (!answered.accepted) assert.fail("conversation admission");
+    assert.equal(answered.conversationId, opened.conversationId);
+    await eventually(() => codexProvider.dispatches.length === 1);
+    const outbound = claudeProvider.dispatches[0]!, back = codexProvider.dispatches[0]!;
+    assert.equal(back.conversationId, outbound.conversationId);
+    assert.deepEqual(
+      [back.sourceAlias, back.targetAlias],
+      [outbound.targetAlias, outbound.sourceAlias],
+    );
+    assert.equal(back.text, "the answer");
+    assert.equal(
+      (await subject.store.publicSnapshot()).messages.some(
+        (message) => message.body === "not my conversation"),
+      false,
+    );
+  } finally { await subject.close(); }
 });
 
 test("selected Claude replies require an exact inherited reply capability", async () => {
@@ -2693,30 +2734,19 @@ test("selected Claude replies require an exact inherited reply capability", asyn
       expectsReply: false,
     });
     if (!opened.accepted) assert.fail("conversation admission");
-    assert.deepEqual(await subject.handlers.reply({
-      conversationId: opened.conversationId,
-      text: "alias only",
-      caller: { kind: "claude", alias: claude.alias },
-    }), { accepted: false, code: "route_mismatch", reason: "CLAUDE_REPLY_ADDRESS_INVALID" });
     claudeProvider.replyRouteHandle = "stale-claude-session";
-    assert.deepEqual(await subject.handlers.reply({
+    assert.deepEqual(await subject.handlers.send({
       conversationId: opened.conversationId,
       text: "stale capability",
-      caller: {
-        kind: "claude",
-        alias: claude.alias,
-        replyAddress: "uds:/test/stale.sock",
-      },
+      fromAlias: claude.alias,
+      replyAddress: "uds:/test/stale.sock",
     }), { accepted: false, code: "route_mismatch", reason: "CLAUDE_REPLY_ADDRESS_INVALID" });
     claudeProvider.replyRouteHandle = claude.binding.routeHandle;
-    const accepted = await subject.handlers.reply({
+    const accepted = await subject.handlers.send({
       conversationId: opened.conversationId,
       text: "exact capability",
-      caller: {
-        kind: "claude",
-        alias: claude.alias,
-        replyAddress: "uds:/test/exact.sock",
-      },
+      fromAlias: claude.alias,
+      replyAddress: "uds:/test/exact.sock",
     });
     assert.equal(accepted.accepted, true);
     await eventually(() => codexProvider.dispatches.some(
@@ -2838,10 +2868,10 @@ test("provider replyText reverses an exact native ingress through the sender's i
       text: "native explicit request",
     });
     await eventually(() => codexProvider.dispatches.length === 2);
-    const explicit = await subject.handlers.reply({
+    const explicit = await subject.handlers.send({
       conversationId: codexProvider.dispatches[1]!.conversationId,
       text: "explicit native reply",
-      caller: { kind: "codex", alias: codex.alias, threadId: THREAD_A },
+      fromAlias: codex.alias, threadId: THREAD_A,
     });
     assert.equal(explicit.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 2);
@@ -2909,10 +2939,10 @@ test("a never-routed native sender is replied to through its installed route", a
     const installed = await subject.store.inspectPrivateRoute("visitor@this-mac");
     assert.equal(installed?.registrationMode, "selected_live_peer");
     assert.equal(installed?.binding.routeHandle, "visitor-session");
-    const reply = await subject.handlers.reply({
+    const reply = await subject.handlers.send({
       conversationId: codexProvider.dispatches[0]!.conversationId,
       text: "reply to a never-selected session",
-      caller: { kind: "codex", alias: codex.alias, threadId: THREAD_A },
+      fromAlias: codex.alias, threadId: THREAD_A,
     });
     assert.equal(reply.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 1);

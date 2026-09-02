@@ -99,9 +99,10 @@ Commands:
   await --alias <peer-alias> [--token-stdin]
                          Wait for one peer message and acknowledge stdout
   peer-stdio             Serve the bounded federation protocol on stdin/stdout
-  send                   Send stdin to a route; a discovered Claude session's
-                         route installs on its first send
-  reply                  Reply with a conversation token
+  send                   Send stdin to a route with --to, or to a conversation
+                         you belong to with --conversation; a discovered Claude
+                         session's route installs on its first send
+  reply                  Deprecated alias for send --conversation
   delivery-status        Read a delivery token
   wait-delivery          Wait for terminal delivery status
 
@@ -282,6 +283,11 @@ function aliasHostFault(local: LocalHostIdentity, given: string): CliFault {
     { localHost: local.host, given, stateDir: local.stateDir });
 }
 
+function requireConversationId(options: ParsedOptions, name: string): string {
+  const conversationId = requireString(options, name);
+  if (!isGatewayConversationId(conversationId)) fault();
+  return conversationId;
+}
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) fault();
@@ -448,43 +454,37 @@ async function buildRequest(
       await requireLocalAlias();
       return envelope(command === "register-peer" ? "register_peer" : command === "unregister-peer" ? "unregister_peer" : "await_peer", { alias, token });
     }
-    case "send": {
-      const options = parseOptions(args, ["from", "to"], ["expects-reply", "token-stdin"]);
-      count(options, 2, 4);
+    // `reply` is the deprecated spelling of `send --conversation`: it names the
+    // caller's own alias `--alias` instead of `--from`, and both verbs build
+    // the one `send` request. Keep it until the reply hints already delivered
+    // in older envelopes have aged out.
+    case "send":
+    case "reply": {
+      const options = command === "reply"
+        ? parseOptions(args, ["conversation", "alias"], ["token-stdin"])
+        : parseOptions(args, ["from", "to", "conversation"], ["expects-reply", "token-stdin"]);
+      count(options, 2, command === "reply" ? 3 : 4);
+      const fromAlias = requireAlias(options, command === "reply" ? "alias" : "from");
+      const conversationId = options.conversation === undefined
+        ? undefined : requireConversationId(options, "conversation");
+      const toAlias = options.to === undefined
+        ? undefined : requireClaudeSelector(options, "to");
+      // One target, and a conversation is always answered expecting a reply.
+      if ((toAlias === undefined) === (conversationId === undefined)) fault();
+      if (conversationId !== undefined && options["expects-reply"] === true) fault();
       const source = peerTokenSource(options, env);
       const principals = Number(hasIdentity(env.CODEX_THREAD_ID)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
       if (principals > 1) throw callerIdentityConflictFault(env);
-      const fromAlias = requireAlias(options, "from");
-      const toAlias = requireClaudeSelector(options, "to");
       const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
       const authority = peer === undefined ? hasIdentity(env.CODEX_THREAD_ID)
         ? { threadId: requireExclusiveCodexThreadId(env) }
         : { replyAddress: requireExclusiveClaudeReplyAddress(env) }
         : { peerToken: peer.token };
-      const common = {
-        fromAlias, toAlias, text: peer?.text ?? await readMessageBody(stdin),
-        expectsReply: options["expects-reply"] === true,
-      };
-      return envelope("send", { ...common, ...authority });
-    }
-    case "reply": {
-      const options = parseOptions(args, ["conversation", "alias"], ["token-stdin"]);
-      count(options, 2, 3);
-      const conversationId = requireString(options, "conversation");
-      if (!isGatewayConversationId(conversationId)) fault();
-      const alias = requireAlias(options, "alias");
-      const threadId = env.CODEX_THREAD_ID, source = peerTokenSource(options, env);
-      const principals = Number(hasIdentity(threadId)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
-      if (principals > 1) throw callerIdentityConflictFault(env);
-      const replyAddress = optionalClaudeReplyAddress(env);
-      const codex = hasIdentity(threadId);
-      if (!codex && replyAddress === undefined && source === undefined) fault("CALLER_IDENTITY_REQUIRED");
-      const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
-      return envelope("reply", {
-        conversationId, text: peer?.text ?? await readMessageBody(stdin),
-        caller: peer !== undefined ? { kind: "peer", alias, token: peer.token } : codex
-          ? { kind: "codex", alias, threadId: requireCodexThreadId(env) }
-          : { kind: "claude", alias, replyAddress: requireClaudeReplyAddress(env) },
+      const target = toAlias === undefined
+        ? { conversationId: conversationId! }
+        : { toAlias, expectsReply: options["expects-reply"] === true };
+      return envelope("send", {
+        fromAlias, text: peer?.text ?? await readMessageBody(stdin), ...target, ...authority,
       });
     }
   }
@@ -594,11 +594,11 @@ function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
 }
 /**
- * A refused send or reply carries a safe `reason` beside its decision code.
- * Each reason has exactly one remedy, and printing the wrong one is worse than
- * printing none: the rescan advice belongs to an unrecognized Claude-shaped
- * target on `send`, never to `reply`, whose not_found means a stale
- * conversation token that no rescan will revive.
+ * A refused send carries a safe `reason` beside its decision code. Each reason
+ * has exactly one remedy, and printing the wrong one is worse than printing
+ * none: the rescan advice belongs to an unrecognized Claude-shaped `--to`,
+ * never to a `--conversation` send, whose not_found means a stale conversation
+ * token that no rescan will revive.
  */
 function refusalHint(
   request: GatewayControlRequest, result: unknown,
@@ -611,6 +611,7 @@ function refusalHint(
   if (reason === "CLAUDE_TARGET_CHANGED") return "targetChanged";
   if ((result as { code?: unknown }).code !== "not_found" || request.method !== "send") return undefined;
   const target = request.params.toAlias;
+  if (target === undefined) return undefined;
   return target.startsWith("codex-") || target.startsWith("peer-") ? undefined : "unknownTarget";
 }
 function responseExitCode(response: GatewayControlResponse): number {

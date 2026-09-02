@@ -141,23 +141,30 @@ MSG
 
 ### 4. Follow up
 
-Either participant can continue the conversation with `reply`. The initiating
-CLI receives the full `conv_` token in its accepted result; the recipient gets
-the same token and an exact reply command in the broker-owned message marker:
+Either participant can continue the conversation by addressing the token
+instead of a name. The initiating CLI receives the full `conv_` token in its
+accepted result; the recipient gets the same token and an exact command in the
+broker-owned message marker:
 
 ```bash
-embassy reply \
+embassy send \
   --conversation conv_<token> \
-  --alias codex-reviewer@your-host <<'MSG'
+  --from codex-reviewer@your-host <<'MSG'
 Please expand on the migration risk.
 MSG
 ```
 
+`--to` and `--conversation` are alternatives: the first addresses a route by
+name, the second an open conversation you already belong to. `embassy reply
+--conversation <token> --alias <your-alias>` is a deprecated spelling of the
+same request, kept for one release because older delivered envelopes still
+show it.
+
 Every routed body reaches either product inside one broker-owned
 `<cross-session-message>` textual frame. It identifies the verified sender
 alias and begins with an `<embassy-reply-hint>` containing the full conversation
-token, the recipient's exact alias, and the corresponding `embassy reply`
-command. Use only that delivered full token and alias; never guess one from a
+token, the recipient's exact alias, and the corresponding
+`embassy send --conversation` command. Use only that delivered full token and alias; never guess one from a
 suffix or substitute the sender's alias. The CLI still rechecks the caller,
 conversation membership, and current route policy, so the hint is
 not a permission bypass.
@@ -229,8 +236,8 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@your-host --succeeds codex-reviewer@your-host` hands the registration to a different task |
 | `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
-| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message: `--from <alias> --to <alias>`, optional `--expects-reply`; direction follows the inherited principal — who is sending — not the route table, and a discovered Claude session's route installs on its first use |
-| `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin |
+| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message: `--from <alias>` with either `--to <alias>` (optionally `--expects-reply`) or `--conversation conv_<token>` to continue a conversation you belong to; direction follows the inherited principal — who is sending — not the route table, and a discovered Claude session's route installs on its first use |
+| `reply` | conversation-token holder | Deprecated alias for `send --conversation <token> --from <your-alias>`, spelled `--conversation conv_<token> --alias <your-alias>`; it builds the identical request and is kept for one release because delivered reply hints still name it |
 
 Version 2.0 accepts only fresh private state. Follow the
 [reset-only state runbook](docs/CONFIGURATION.md#private-state-reset) before

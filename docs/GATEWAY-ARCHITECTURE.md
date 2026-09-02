@@ -440,7 +440,7 @@ broker-owned `cross-session-message` outer element and an
   does not accept.
 - In either direction, the first hint carries the full token in `conversation`
   and the exact recipient alias in `reply-as`, followed by an exact stdin-based
-  `embassy reply --conversation ... --alias ...` instruction and the statement
+  `embassy send --conversation ... --from ...` instruction and the statement
   that caller, conversation, and route policy are rechecked.
 
 Embassy does not synthesize `from`, `from-session`, or `from-mode` attributes:
@@ -458,8 +458,9 @@ consistent structural provenance marker at the model input boundary. A native
 Claude wrapper already present in an inbound body is untrusted nested text
 beneath the Embassy wrapper.
 
-The full token delivered in the hint lets the recipient call `reply`, but it is
-only a participant-scoped conversation locator. The service still validates
+The full token delivered in the hint lets the recipient answer with
+`send --conversation`, but it is only a participant-scoped conversation
+locator. The service still validates
 the inherited caller, current conversation membership, and current route
 policy. The full token remains confined to the accepted control result
 and transient provider payload, and is memory-only: it is never persisted,
@@ -479,7 +480,7 @@ hatch.
 
 ### Delivery status and bounded waits
 
-Every accepted control-plane `send` or `reply`
+Every accepted control-plane `send`
 result contains both its conversation ID and a fresh opaque delivery
 correlation handle called a delivery token.
 The token has the closed form `dlv_` followed by exactly 24 base64url
@@ -554,7 +555,7 @@ controller-owned mode-0700 state directory. The socket and state files are
 mode 0600. Frames are size-bounded and closed against unknown keys, methods,
 versions, and enum values.
 
-The closed version 3 method family is exactly these fifteen methods:
+The closed version 3 method family is exactly these fourteen methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
@@ -565,8 +566,10 @@ The closed version 3 method family is exactly these fifteen methods:
   bounded private v5 state;
 - `send`, whose direction follows the inherited principal — who is sending —
   rather than the route table, and which installs a discovered Claude
-  session's route on its first use;
-- `reply`, the correlated reply operation;
+  session's route on its first use. It addresses either a route by name
+  (`toAlias`) or an open conversation by its token (`conversationId`), never
+  both: the conversation form is the correlated reply operation, and the
+  caller must already own one end of that conversation;
 - `refresh_discovery`, which rescans for Claude sessions;
 - `peer_catalog` and `peer_handoff`, the private federation catalog and
   destination-owned handoff operations; and
@@ -578,7 +581,10 @@ fifteen implemented commands are
 `serve`, `service`, `health`, `status`, `delivery-status`, `wait-delivery`,
 `refresh`, `register-codex`, `unregister-codex`, `send`,
 `reply`, `register-peer`, `unregister-peer`, `await`, and
-`peer-stdio`. Message bodies are non-empty
+`peer-stdio`. `reply --conversation <token> --alias <own-alias>` is a
+deprecated alias for `send --conversation <token> --from <own-alias>`: it
+builds the same `send` request and is kept only until the reply hints already
+delivered in older envelopes have aged out. Message bodies are non-empty
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line, and
 for every broker-protocol command it never returns a thread ID,
@@ -604,12 +610,12 @@ session, and either form installs its route on first use. UUID
 input is normalized to lowercase. No command returns the
 UUID, and no historical name remains routable after a rename.
 
-Provider-authorized registration, send, and reply operations require one exclusive inherited principal.
+Provider-authorized registration and send operations require one exclusive inherited principal.
 Codex registration, unregister, and Codex-to-Claude send require only a valid
 `CODEX_THREAD_ID`; they fail if a non-empty Claude messaging socket is also
 inherited. Claude-to-Codex send requires only the raw inherited Claude socket
-path and fails if a non-empty Codex thread ID is also present. `reply` likewise
-fails with both identities or neither.
+path and fails if a non-empty Codex thread ID is also present. A
+conversation-addressed send likewise fails with both identities or neither.
 
 Installing a Claude route is a side effect of a send, not a command: the
 sending principal is already attested, the addressed session is resolved

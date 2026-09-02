@@ -9,14 +9,12 @@ import {
   type GatewayControlServer,
   type GatewayDecision,
   type GatewayDeliveryStatusResult,
-  type GatewayReplyCaller,
   type GatewayRegisterPeerResult,
   type GatewaySendResult,
   type GatewaySnapshotObservation,
   type PeerPrincipalParams,
   type PeerReceiptParams,
   type RegisterPeerParams,
-  type ReplyParams,
   type UnregisterCodexParams,
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
@@ -270,7 +268,7 @@ function decisionFor(error: unknown, peerPrincipal = false): Extract<GatewayDeci
 }
 
 /**
- * The refusal a send or reply returns: the coarse decision clients branch on,
+ * The refusal a send returns: the coarse decision clients branch on,
  * plus the safe code behind it so the CLI can name the one remedy that fits.
  * Only a BridgeError's own code is carried; anything else stays anonymous.
  */
@@ -292,6 +290,25 @@ function disambiguatedAlias(alias: string, routeHandle: string): string {
   const name = alias.slice(0, at), host = alias.slice(at + 1);
   const suffix = createHash("sha256").update(routeHandle).digest("hex").slice(0, 8);
   return `${name.slice(0, 32 - suffix.length - 1)}-${suffix}@${host}`;
+}
+
+/**
+ * The attested principal behind a conversation-addressed send, in the shape
+ * the conversation checks want. The alias is claimed; the credential beside it
+ * is what the broker actually verifies.
+ */
+type GatewayReplyCaller =
+  | { kind: "codex"; alias: string; threadId: string }
+  | { kind: "claude"; alias: string; replyAddress: string }
+  | { kind: "peer"; alias: string; token: string };
+type RouteSendParams = Extract<ValidatedSendParams, { toAlias: string }>;
+type ConversationSendParams = Extract<ValidatedSendParams, { conversationId: string }>;
+/** The decoder already accepted exactly one credential, so the last arm holds. */
+function replyCaller(params: ConversationSendParams): GatewayReplyCaller {
+  const { fromAlias, threadId, replyAddress, peerToken } = params;
+  return threadId !== undefined ? { kind: "codex", alias: fromAlias, threadId }
+    : replyAddress !== undefined ? { kind: "claude", alias: fromAlias, replyAddress }
+    : { kind: "peer", alias: fromAlias, token: peerToken as string };
 }
 
 function sameBinding(left: LogicalRouteBinding, right: LogicalRouteBinding): boolean {
@@ -572,7 +589,6 @@ export class GatewayService {
       observeSnapshot: () => this.observeSnapshot(),
       deliveryStatus: (params) => this.deliveryStatus(params.token),
       send: (params) => this.send(params),
-      reply: (params) => this.reply(params),
       refreshDiscovery: async () => {
         if (this.closing) {
           return { accepted: false, code: "unavailable", revision: this.revision };
@@ -1222,6 +1238,7 @@ export class GatewayService {
    * native); a shell peer sends to either.
    */
   private async send(params: ValidatedSendParams): Promise<GatewaySendResult> {
+    if (params.conversationId !== undefined) return await this.replyToConversation(params);
     const target = await this.store.inspectPrivateRoute(params.toAlias);
     if ("replyAddress" in params && params.replyAddress !== undefined) {
       // A UUID names a Claude session as surely as a name does: recognize it
@@ -1238,7 +1255,7 @@ export class GatewayService {
     return target === undefined || target.binding.provider === "claude" ? this.sendToClaude(params) : this.sendToCodex(params);
   }
 
-  private async sendToClaude(params: ValidatedSendParams): Promise<GatewaySendResult> {
+  private async sendToClaude(params: RouteSendParams): Promise<GatewaySendResult> {
     try {
       this.assertWritable();
       const source = "peerToken" in params && params.peerToken !== undefined
@@ -1279,7 +1296,7 @@ export class GatewayService {
     }
   }
 
-  private async sendToCodex(params: ValidatedSendParams): Promise<GatewaySendResult> {
+  private async sendToCodex(params: RouteSendParams): Promise<GatewaySendResult> {
     try {
       this.assertWritable();
       let source: GatewayPrivateRouteInspection | undefined;
@@ -1320,13 +1337,19 @@ export class GatewayService {
     }
   }
 
-  private async reply(params: ReplyParams): Promise<GatewaySendResult> {
+  /**
+   * A send addressed by conversation token: the caller must own one end, the
+   * other end is the binding the conversation recorded, and the caller's
+   * principal is the same attested one every send carries.
+   */
+  private async replyToConversation(params: ConversationSendParams): Promise<GatewaySendResult> {
     try {
       this.assertWritable();
       const conversation = this.conversations.get(params.conversationId);
       if (conversation === undefined) throw new BridgeError("CONVERSATION_NOT_FOUND", "The conversation is absent.");
-      const callerBinding = await this.assertReplyCaller(conversation, params.caller);
-      const callerAlias = params.caller.alias;
+      const caller = replyCaller(params);
+      const callerBinding = await this.assertReplyCaller(conversation, caller);
+      const callerAlias = caller.alias;
       const targetAlias = callerAlias === conversation.sourceAlias
         ? conversation.targetAlias
         : conversation.sourceAlias;
@@ -1349,7 +1372,7 @@ export class GatewayService {
         existingConversation: conversation,
       });
     } catch (error) {
-      return sendRefusal(error, params.caller.kind === "peer");
+      return sendRefusal(error, params.peerToken !== undefined);
     }
   }
 
@@ -1372,7 +1395,7 @@ export class GatewayService {
       throw new BridgeError("CODEX_THREAD_MISMATCH", "The task attestation does not match the conversation.");
     }
     if (caller.kind === "claude") {
-      if (caller.replyAddress === undefined || route.binding.provider !== "claude") {
+      if (route.binding.provider !== "claude") {
         throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The inherited reply capability is required.");
       }
       const resolved = await this.claudeAdapter(route.binding.hostId)

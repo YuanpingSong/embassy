@@ -54,7 +54,7 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z
 
 export const gatewayControlMethods = [
   "health", "register_codex", "unregister_codex", "list_snapshot",
-  "observe_snapshot", "delivery_status", "send", "reply",
+  "observe_snapshot", "delivery_status", "send",
   "refresh_discovery", "peer_catalog", "peer_handoff",
   "register_peer", "unregister_peer", "await_peer", "peer_receipt",
 ] as const;
@@ -70,25 +70,24 @@ export type ValidatedRegisterCodexParams = {
   succeedsAlias?: string;
 };
 export type UnregisterCodexParams = { alias: string; threadId: string };
-type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean };
-type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
-export type SendParams = SendBase & (
+type SendBase = { fromAlias: string; text: string };
+type SendAuthority =
   | { threadId: string; replyAddress?: never; peerToken?: never }
   | { replyAddress: string; threadId?: never; peerToken?: never }
-  | { peerToken: string; threadId?: never; replyAddress?: never }
-);
-export type ValidatedSendParams = ValidatedSendBase & (
-  | { threadId: string; replyAddress?: never; peerToken?: never }
-  | { replyAddress: string; threadId?: never; peerToken?: never }
-  | { peerToken: string; threadId?: never; replyAddress?: never }
-);
-export type GatewayReplyCaller =
-  | { kind: "codex"; alias: string; threadId: string }
-  | { kind: "claude"; alias: string; replyAddress?: string }
-  | { kind: "peer"; alias: string; token: string };
-export type ReplyParams = {
-  conversationId: string; text: string; caller: GatewayReplyCaller;
-};
+  | { peerToken: string; threadId?: never; replyAddress?: never };
+/**
+ * A send addresses either a route by name or an open conversation by its
+ * token, never both. The conversation form is what `reply` used to be: the
+ * caller owns one end, the other end is the conversation's recorded binding,
+ * and the answer always expects a reply, so `expectsReply` is not accepted
+ * with it.
+ */
+export type SendParams =
+  | (SendBase & SendAuthority & { toAlias: string; conversationId?: never; expectsReply?: boolean })
+  | (SendBase & SendAuthority & { conversationId: string; toAlias?: never; expectsReply?: never });
+export type ValidatedSendParams =
+  | (SendBase & SendAuthority & { toAlias: string; conversationId?: never; expectsReply: boolean })
+  | (SendBase & SendAuthority & { conversationId: string; toAlias?: never; expectsReply?: never });
 export type DeliveryStatusParams = { token: string };
 export type PeerCatalogParams = { peerHost: string };
 export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
@@ -100,7 +99,7 @@ type RequestParams = {
   health: Record<string, never>; register_codex: RegisterCodexParams;
   unregister_codex: UnregisterCodexParams; list_snapshot: Record<string, never>;
   observe_snapshot: Record<string, never>; delivery_status: DeliveryStatusParams;
-  send: SendParams; reply: ReplyParams;
+  send: SendParams;
   refresh_discovery: Record<string, never>; peer_catalog: PeerCatalogParams;
   peer_handoff: PeerHandoffControlParams;
   register_peer: RegisterPeerParams; unregister_peer: PeerPrincipalParams;
@@ -124,7 +123,7 @@ export type GatewayDecision =
   | { accepted: true; code: "ok" }
   | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
 /**
- * A refused send or reply carries an optional `reason`: the safe error code
+ * A refused send carries an optional `reason`: the safe error code
  * behind the coarse decision. The decision code stays the contract clients
  * branch on; `reason` exists so the CLI can name the one remedy that fits
  * (rename a session, move a workspace, fix `--from`, rescan) instead of
@@ -154,7 +153,7 @@ type ResultByMethod = {
   health: GatewayHealthResult; register_codex: GatewayDecision;
   unregister_codex: GatewayDecision; list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
-  send: GatewaySendResult; reply: GatewaySendResult;
+  send: GatewaySendResult;
   refresh_discovery: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
   peer_handoff: PeerHandoffResult;
   register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
@@ -169,7 +168,6 @@ export type GatewayControlHandlers = {
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
   deliveryStatus: (params: Readonly<DeliveryStatusParams>) => MaybePromise<GatewayDeliveryStatusResult>;
   send: (params: Readonly<ValidatedSendParams>) => MaybePromise<GatewaySendResult>;
-  reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewaySendResult>;
   refreshDiscovery: () => MaybePromise<GatewayRefreshResult>;
   peerCatalog?: (params: Readonly<PeerCatalogParams>) => MaybePromise<PeerCatalogResult>;
   peerHandoff?: (params: Readonly<PeerHandoffControlParams>) => MaybePromise<PeerHandoffResult>;
@@ -405,39 +403,26 @@ function decodeUnregister(value: unknown): UnregisterCodexParams {
   if (!shape(value, { alias, threadId: uuid }) || !(value.alias as string).startsWith("codex-")) invalid();
   return { alias: value.alias as string, threadId: (value.threadId as string).toLowerCase() }; }
 function decodeSend(value: unknown): ValidatedSendParams {
-  if (!isRecord(value) || !exact(value, ["fromAlias", "toAlias", "text"],
-    ["threadId", "replyAddress", "peerToken", "expectsReply"]) ||
-      !alias(value.fromAlias) || typeof value.toAlias !== "string" || !isClaudeSessionSelector(value.toAlias) ||
-      !messageText(value.text) || [value.threadId, value.replyAddress, value.peerToken].filter((item) => item !== undefined).length !== 1 ||
+  if (!isRecord(value) || !exact(value, ["fromAlias", "text"],
+    ["toAlias", "conversationId", "threadId", "replyAddress", "peerToken", "expectsReply"]) ||
+      !alias(value.fromAlias) || !messageText(value.text) ||
+      [value.toAlias, value.conversationId].filter((item) => item !== undefined).length !== 1 ||
+      (value.toAlias !== undefined && (typeof value.toAlias !== "string" || !isClaudeSessionSelector(value.toAlias))) ||
+      (value.conversationId !== undefined && (typeof value.conversationId !== "string" || !isGatewayConversationId(value.conversationId))) ||
+      [value.threadId, value.replyAddress, value.peerToken].filter((item) => item !== undefined).length !== 1 ||
       (value.threadId !== undefined && !uuid(value.threadId)) ||
       (value.replyAddress !== undefined && (typeof value.replyAddress !== "string" || !isGatewayReplyAddress(value.replyAddress))) ||
       (value.peerToken !== undefined && !peerToken(value.peerToken)) ||
-      (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean")) invalid();
+      (value.expectsReply !== undefined &&
+        (typeof value.expectsReply !== "boolean" || value.conversationId !== undefined))) invalid();
   const authority = value.threadId !== undefined ? { threadId: (value.threadId as string).toLowerCase() }
     : value.replyAddress !== undefined ? { replyAddress: value.replyAddress as string }
     : { peerToken: value.peerToken as string };
-  return { fromAlias: value.fromAlias, toAlias: UUID_PATTERN.test(value.toAlias) ? value.toAlias.toLowerCase() : value.toAlias,
-    text: value.text, ...authority, expectsReply: value.expectsReply === true } as ValidatedSendParams;
-}
-function normalizeReplyCaller(value: unknown): GatewayReplyCaller {
-  if (!isRecord(value)) invalid();
-  if (value.kind === "codex" && shape(value, { kind: oneOf("codex"), alias, threadId: uuid }))
-    return { kind: "codex", alias: value.alias as string,
-      threadId: (value.threadId as string).toLowerCase() };
-  if (value.kind === "claude" && isRecord(value) && exact(value, ["kind", "alias"], ["replyAddress"]) &&
-      alias(value.alias) && (value.replyAddress === undefined ||
-      (typeof value.replyAddress === "string" && isGatewayReplyAddress(value.replyAddress))))
-    return { kind: "claude", alias: value.alias,
-      ...(value.replyAddress === undefined ? {} : { replyAddress: value.replyAddress }) };
-  if (value.kind === "peer" && shape(value, { kind: oneOf("peer"), alias: peerAlias, token: peerToken }))
-    return { kind: "peer", alias: value.alias as string, token: value.token as string };
-  return invalid();
-}
-function decodeReply(value: unknown): ReplyParams {
-  if (!isRecord(value) || !exact(value, ["conversationId", "text", "caller"]) ||
-      typeof value.conversationId !== "string" || !isGatewayConversationId(value.conversationId) ||
-      !messageText(value.text)) invalid();
-  return { conversationId: value.conversationId, text: value.text, caller: normalizeReplyCaller(value.caller) };
+  const target = value.conversationId !== undefined
+    ? { conversationId: value.conversationId as string }
+    : { toAlias: UUID_PATTERN.test(value.toAlias as string) ? (value.toAlias as string).toLowerCase() : value.toAlias as string,
+        expectsReply: value.expectsReply === true };
+  return { fromAlias: value.fromAlias, text: value.text, ...target, ...authority } as ValidatedSendParams;
 }
 function decodeDeliveryStatus(value: unknown): DeliveryStatusParams {
   if (!shape(value, { token: (item) => typeof item === "string" && DELIVERY_TOKEN_PATTERN.test(item) })) invalid();
@@ -588,7 +573,7 @@ const descriptors = {
   list_snapshot: { handler: "listSnapshot", decode: emptyParams, result: isGatewaySnapshot, mutation: false }, observe_snapshot: { handler: "observeSnapshot", decode: emptyParams, result: isSnapshotObservation, mutation: false },
   delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false },
   send: { handler: "send", decode: decodeSend, result: isSendResult, mutation: true },
-  reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_discovery: { handler: "refreshDiscovery", decode: emptyParams, result: isRefreshResult, mutation: false },
+  refresh_discovery: { handler: "refreshDiscovery", decode: emptyParams, result: isRefreshResult, mutation: false },
   peer_catalog: { handler: "peerCatalog", decode: decodePeerCatalog, result: isPeerCatalog, mutation: false },
   peer_handoff: { handler: "peerHandoff", decode: decodePeerHandoff, result: isPeerHandoffResult, mutation: true },
   register_peer: { handler: "registerPeer", decode: decodeRegisterPeer, result: isRegisterPeerResult, mutation: true },

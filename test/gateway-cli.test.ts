@@ -14,7 +14,6 @@ import {
   startGatewayControlServer,
   type GatewayControlHandlers,
   type GatewaySnapshot,
-  type ReplyParams,
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
 } from "../src/gateway/control.js";
@@ -302,9 +301,9 @@ test("peer stdin framing preserves the body and the three caller principals stay
 
   assert.equal(await runGatewayCli(["reply", "--conversation", CONVERSATION_ID, "--alias", "peer-cursor@this-mac"],
     { ...base, env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, stdin: input("reply body") }), 0);
-  assert.deepEqual(requests[1], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "reply", params: {
+  assert.deepEqual(requests[1], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send", params: {
     conversationId: CONVERSATION_ID, text: "reply body",
-    caller: { kind: "peer", alias: "peer-cursor@this-mac", token: PEER_TOKEN } } });
+    fromAlias: "peer-cursor@this-mac", peerToken: PEER_TOKEN } });
 
   for (const current of [
     { env: { EMBASSY_PEER_TOKEN: PEER_TOKEN, CODEX_THREAD_ID: THREAD_ID }, body: "body" },
@@ -316,6 +315,54 @@ test("peer stdin framing preserves the body and the three caller principals stay
       { ...base, ...current, stdin: input(current.body), stdout: out });
     assert.equal(code, gatewayCliExitCodes.invalidInput);
     assert.equal(control, before);
+  }
+});
+
+test("send --conversation is the reply path and `reply` is its deprecated alias", async () => {
+  const requests: unknown[] = [];
+  const base = (stdout: ReturnType<typeof capture>): GatewayCliDependencies => ({
+    env: { CODEX_THREAD_ID: THREAD_ID }, stdout, stderr: capture(), stdin: input("the answer"),
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,
+      stallNoticeMs: 30_000, limits: {} as never }),
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ request }: { request: unknown }) => { requests.push(request);
+      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok",
+        conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+  const folded = capture(), aliased = capture();
+  const foldedCode = await runGatewayCli(
+    ["send", "--from", "codex-reviewer@this-mac", "--conversation", CONVERSATION_ID], base(folded));
+  const aliasedCode = await runGatewayCli(
+    ["reply", "--conversation", CONVERSATION_ID, "--alias", "codex-reviewer@this-mac"], base(aliased));
+  assert.equal(foldedCode, gatewayCliExitCodes.ok);
+  assert.equal(aliasedCode, foldedCode);
+  assert.deepEqual(requests[0], { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send", params: {
+    fromAlias: "codex-reviewer@this-mac", text: "the answer",
+    conversationId: CONVERSATION_ID, threadId: THREAD_ID } });
+  // The alias is thin: one wire request, one result, only the echoed command
+  // name distinguishes the two spellings.
+  assert.deepEqual(requests[1], requests[0]);
+  const read = (out: ReturnType<typeof capture>) =>
+    JSON.parse(out.chunks.join("")) as { command: string; result: unknown };
+  assert.deepEqual(read(aliased).result, read(folded).result);
+  assert.deepEqual([read(folded).command, read(aliased).command], ["send", "reply"]);
+
+  // One target and never both; a conversation is always answered expecting a
+  // reply, so --expects-reply has no meaning beside it.
+  for (const argv of [
+    ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac", "--conversation", CONVERSATION_ID],
+    ["send", "--from", "codex-reviewer@this-mac"],
+    ["send", "--from", "codex-reviewer@this-mac", "--conversation", CONVERSATION_ID, "--expects-reply"],
+    ["send", "--from", "codex-reviewer@this-mac", "--conversation", "conv_short"],
+    ["reply", "--conversation", CONVERSATION_ID, "--alias", "advisor@this-mac", "--expects-reply"],
+  ]) {
+    const stdout = capture(), before = requests.length;
+    assert.equal(await runGatewayCli(argv, { ...base(stdout), stdout }),
+      gatewayCliExitCodes.invalidInput, argv.join(" "));
+    assert.equal((JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error.code,
+      "INVALID_ARGUMENTS");
+    assert.equal(requests.length, before);
   }
 });
 
@@ -448,7 +495,7 @@ test("all client commands use one private control socket and expose only normali
   const unregisters: Array<{ alias: string; threadId: string }> = [];
   const sendsToClaude: ValidatedSendParams[] = [];
   const sendsToCodex: ValidatedSendParams[] = [];
-  const replies: ReplyParams[] = [];
+  const replies: ValidatedSendParams[] = [];
   const deliveryStatuses: string[] = [];
   const statusSnapshot = emptySnapshot();
   const handlers: GatewayControlHandlers = {
@@ -477,19 +524,8 @@ test("all client commands use one private control socket and expose only normali
       };
     },
     send: (params) => {
-      ("replyAddress" in params ? sendsToCodex : sendsToClaude).push({ ...params });
-      return {
-        accepted: true,
-        code: "ok",
-        conversationId: CONVERSATION_ID,
-        deliveryToken: DELIVERY_TOKEN,
-      };
-    },
-    reply: (params) => {
-      replies.push({
-        ...params,
-        caller: { ...params.caller },
-      });
+      if (params.conversationId !== undefined) replies.push({ ...params });
+      else ("replyAddress" in params ? sendsToCodex : sendsToClaude).push({ ...params });
       return {
         accepted: true,
         code: "ok",
@@ -688,20 +724,14 @@ test("all client commands use one private control socket and expose only normali
     {
       conversationId: CONVERSATION_ID,
       text: SECRET_BODY,
-      caller: {
-        kind: "codex",
-        alias: "codex-reviewer@this-mac",
-        threadId: THREAD_ID,
-      },
+      fromAlias: "codex-reviewer@this-mac",
+      threadId: THREAD_ID,
     },
     {
       conversationId: CONVERSATION_ID,
       text: SECRET_BODY,
-      caller: {
-        kind: "claude",
-        alias: "advisor@this-mac",
-        replyAddress: REPLY_ADDRESS,
-      },
+      fromAlias: "advisor@this-mac",
+      replyAddress: REPLY_ADDRESS,
     },
   ]);
 });
@@ -2285,7 +2315,6 @@ test("refresh reports a failed rescan as a decision, not a client-side transport
       observeSnapshot: () => ({ snapshotRevision: 0, snapshot: emptySnapshot() }),
       deliveryStatus: () => ({ found: false }),
       send: () => ({ accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }),
-      reply: () => ({ accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }),
       refreshDiscovery: () => outcome === "ok"
         ? { accepted: true, code: "ok", revision: 4 }
         : { accepted: false, code: "unavailable", revision: 4 },
@@ -2337,12 +2366,6 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       }),
       deliveryStatus: () => ({ found: false }),
       send: () => ({
-        accepted: true,
-        code: "ok",
-        conversationId: CONVERSATION_ID,
-        deliveryToken: DELIVERY_TOKEN,
-      }),
-      reply: () => ({
         accepted: true,
         code: "ok",
         conversationId: CONVERSATION_ID,

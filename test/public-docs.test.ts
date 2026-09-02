@@ -268,8 +268,8 @@ test("authority docs match the closed control contract", async () => {
     readPublicFile("CHANGELOG.md"),
     readPublicFile("site/index.html"),
   ]);
-  assert.match(architecture, /closed version 3 method family is exactly these fifteen methods/i);
-  assert.equal(gatewayControlMethods.length, 15);
+  assert.match(architecture, /closed version 3 method family is exactly these fourteen methods/i);
+  assert.equal(gatewayControlMethods.length, 14);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
   assert.match(architecture, /fifteen implemented commands/);
   // The permission model in one sentence, in every authority document.

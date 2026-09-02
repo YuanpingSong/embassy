@@ -267,12 +267,6 @@ function handlers(
       conversationId: CONVERSATION_ID,
       deliveryToken: DELIVERY_TOKEN,
     }),
-    reply: () => ({
-      accepted: true,
-      code: "ok",
-      conversationId: CONVERSATION_ID,
-      deliveryToken: DELIVERY_TOKEN,
-    }),
     refreshDiscovery: () => ({
       accepted: true,
       code: "ok",
@@ -371,17 +365,9 @@ test("serves the two directional routes and emits metadata-only responses", asyn
         return { accepted: true, code: "ok" };
       },
       send: (params) => {
-        if ("replyAddress" in params) toCodex = { ...params };
+        if (params.conversationId !== undefined) reply = structuredClone(params);
+        else if ("replyAddress" in params) toCodex = { ...params };
         else toClaude = { ...params };
-        return {
-          accepted: true,
-          code: "ok",
-          conversationId: CONVERSATION_ID,
-          deliveryToken: DELIVERY_TOKEN,
-        };
-      },
-      reply: (params) => {
-        reply = structuredClone(params);
         return {
           accepted: true,
           code: "ok",
@@ -502,26 +488,20 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     socketPath,
     request: {
       protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "reply",
+      method: "send",
       params: {
         conversationId: CONVERSATION_ID,
         text: secretText,
-        caller: {
-          kind: "codex",
-          alias: "codex-main@this-mac",
-          threadId: THREAD_ID.toUpperCase(),
-        },
+        fromAlias: "codex-main@this-mac",
+        threadId: THREAD_ID.toUpperCase(),
       },
     },
   });
   assert.deepEqual(reply, {
     conversationId: CONVERSATION_ID,
     text: secretText,
-    caller: {
-      kind: "codex",
-      alias: "codex-main@this-mac",
-      threadId: THREAD_ID,
-    },
+    fromAlias: "codex-main@this-mac",
+    threadId: THREAD_ID,
   });
 
   const listed = await sendGatewayControlRequest({
@@ -634,7 +614,6 @@ test("only exposes queue-mode lifecycle methods", () => {
     "observe_snapshot",
     "delivery_status",
     "send",
-    "reply",
     "refresh_discovery",
     "peer_catalog",
     "peer_handoff",
@@ -696,8 +675,8 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
       toAlias: "claude-main@this-mac", text: "hello" } },
     { method: "send", params: { fromAlias: alias, peerToken: PEER_TOKEN,
       toAlias: "codex-main@this-mac", text: "hello" } },
-    { method: "reply", params: { conversationId: CONVERSATION_ID, text: "hello",
-      caller: { kind: "peer", alias, token: PEER_TOKEN } } },
+    { method: "send", params: { fromAlias: alias, peerToken: PEER_TOKEN,
+      conversationId: CONVERSATION_ID, text: "hello" } },
   ] as const) assert.equal((await sendGatewayControlRequest({ socketPath, request: {
     protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ...request,
   } as never })).ok, true);
@@ -777,7 +756,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
         called += 1;
         return { found: false };
       },
-      reply: countSend,
+      send: countSend,
     }),
   });
 
@@ -789,9 +768,22 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
         text: "hello", expectsReply: false, trackIdleMinutes: 5 },
     ],
     [
-      "reply",
-      { conversationId: CONVERSATION_ID, text: "hello",
-        caller: { kind: "codex", alias: "codex-main@this-mac", threadId: THREAD_ID }, trackIdleMinutes: 5 },
+      "send",
+      { fromAlias: "codex-main@this-mac", threadId: THREAD_ID, conversationId: CONVERSATION_ID,
+        text: "hello", trackIdleMinutes: 5 },
+    ],
+    // One target, never both and never neither, and a conversation is always
+    // answered expecting a reply.
+    [
+      "send",
+      { fromAlias: "codex-main@this-mac", threadId: THREAD_ID, toAlias: "claude-one@build-mac",
+        conversationId: CONVERSATION_ID, text: "hello" },
+    ],
+    ["send", { fromAlias: "codex-main@this-mac", threadId: THREAD_ID, text: "hello" }],
+    [
+      "send",
+      { fromAlias: "codex-main@this-mac", threadId: THREAD_ID, conversationId: CONVERSATION_ID,
+        text: "hello", expectsReply: true },
     ],
     [
       "register_codex",
@@ -924,27 +916,21 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     ["observe_snapshot", { extra: true }],
     [
-      "reply",
+      "send",
       {
         conversationId: CONVERSATION_ID,
         text: "hello",
-        caller: {
-          kind: "claude",
-          alias: "claude@build-mac",
-          destination: "codex@this-mac",
-        },
+        fromAlias: "claude@build-mac",
+        destination: "codex@this-mac",
       },
     ],
     [
-      "reply",
+      "send",
       {
         conversationId: "bad-id",
         text: "hello",
-        caller: {
-          kind: "codex",
-          alias: "codex@this-mac",
-          threadId: THREAD_ID,
-        },
+        fromAlias: "codex@this-mac",
+        threadId: THREAD_ID,
       },
     ],
   ];
@@ -1007,8 +993,8 @@ test("a rejected send crosses the wire as a closed decision without conversation
     stateDir,
     socketPath,
     handlers: handlers({
-      send: () => ({ accepted: false, code: remaining.shift()! }),
-      reply: () => ({ accepted: false, code: "busy" }),
+      send: (params) => ({ accepted: false,
+        code: params.conversationId === undefined ? remaining.shift()! : "busy" }),
     }),
   });
 
@@ -1035,9 +1021,9 @@ test("a rejected send crosses the wire as a closed decision without conversation
     socketPath,
     request: {
       protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "reply",
+      method: "send",
       params: { conversationId: CONVERSATION_ID, text: "rejected reply sentinel",
-        caller: { kind: "codex", alias: "codex-main@this-mac", threadId: THREAD_ID } },
+        fromAlias: "codex-main@this-mac", threadId: THREAD_ID },
     },
   });
   assert.equal(replied.ok, true);
