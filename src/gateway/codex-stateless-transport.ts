@@ -497,7 +497,7 @@ class OperationSession {
         return this.cleanDeferred("WRITE_AUTHORIZATION_DENIED");
       }
 
-      // Authorization is the consent linearization point. From here until the
+      // Authorization is the write-authorization linearization point. From here until the
       // exact body-bearing send call there is deliberately no await or yield.
       this.phase = "armed";
       if (!this.prewriteProofValid || !this.markPendingSent(prepared.id)) {

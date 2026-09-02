@@ -37,10 +37,6 @@ test("skill exposes only the stable gateway operating surface", async () => {
     "serve",
     "status",
     "refresh",
-    "select-claude",
-    "unselect-claude",
-    "pair",
-    "unpair",
     "register-codex",
     "unregister-codex",
     "send",
@@ -73,9 +69,9 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /Publish only.*registered `codex-\*` peer record/);
   assert.match(skill, /Do not automatically retry/);
   assert.match(skill, /user-supplied native session UUID/);
-  assert.match(skill, /select-claude --session/);
   assert.match(skill, /old name stops resolving immediately/);
-  assert.match(skill, /send never pairs with a Claude session automatically/i);
+  assert.match(skill, /installs a discovered Claude session's route on its first use/);
+  assert.match(skill, /PEER_ALIAS_COLLISION/);
   assert.match(skill, /crossSessionInbound/);
   assert.match(skill, /Claude, Codex, and shell peers as first-class providers/);
   assert.match(skill, /register-peer --alias peer-reviewer@this-mac/);
@@ -89,16 +85,13 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /versions are diagnostic metadata, not routing authority/);
   // No shipped file may claim that a matrix or the CHANGELOG records tested versions.
   assert.doesNotMatch(skill, /tested versions are listed|support matrix|CHANGELOG records|CHANGELOG lists/i);
-  assert.match(skill, /pair --from .* --to/);
-  assert.match(skill, /same-UID control-plane operations authorized by the private control socket/);
-  assert.match(skill, /selection is a separate operator control and creates no permission edge/i);
+  assert.match(skill, /no separate grant to create or revoke/);
+  assert.match(skill, /same-UID private control socket/);
   assert.match(skill, /Registration commits only the logical route record and performs no provider or App Server I\/O/);
   assert.match(skill, /Every Codex operation independently attests the current interface and resumes the exact registered task/);
   assert.match(skill, /bounded observation is display-only and never routing authority or a dispatch gate/);
   assert.doesNotMatch(skill, /schema_attested|monitor-only|write-attestation/i);
-  assert.match(skill, /default paired mode/);
-  assert.match(skill, /SENDER_NOT_PAIRED/);
-  assert.match(skill, /serve --inbound open/);
+  assert.match(skill, /accepts any compatible live Claude session running as the same OS user/);
   assert.match(skill, /CALLER_IDENTITY_CONFLICT/);
   assert.match(skill, /env -u CLAUDE_CODE_MESSAGING_SOCKET/);
   assert.match(skill, /env -u CODEX_THREAD_ID/);

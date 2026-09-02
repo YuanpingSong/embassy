@@ -835,7 +835,7 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   await provider.close();
 });
 
-test("service restart restores selected Claude authority into per-operation preparation", async () => {
+test("service restart restores an installed Claude route's authority into per-operation preparation", async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "embassy-claude-restart-")));
   const config = loadGatewayConfig({ EMBASSY_STATE_DIR: path.join(root, "state") }, { host: "this-mac", nodes: [] });
   const storedClaude = {
@@ -851,8 +851,6 @@ test("service restart restores selected Claude authority into per-operation prep
   const seed = new GatewayStore(config);
   await seed.initialize();
   await seed.registerRoute(storedClaude); await seed.registerRoute(storedCodex);
-  await seed.addConsentEdge({ aliases: [storedClaude.alias, storedCodex.alias],
-    expectedRegistrationIds: [storedClaude.binding.registrationId, storedCodex.binding.registrationId] });
   await seed.close();
 
   const peer = new FakeClaudePeer(), helpers: CapturingNativeHelper[] = [];

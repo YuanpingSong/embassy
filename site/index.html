@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>Embassy — a local embassy for your AI agents</title>
-<meta name="description" content="Embassy routes messages between Claude Code, Codex, and shell harnesses on one Mac — three providers, six directions, explicit consent per edge, and receipts that never claim more than they proved.">
+<meta name="description" content="Embassy routes messages between Claude Code, Codex, and shell harnesses on one Mac — three providers, six directions, every message says who sent it, and receipts that never claim more than they proved.">
 <link rel="canonical" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="en" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="x-default" href="https://yuanpingsong.github.io/embassy/">
@@ -67,7 +67,7 @@
 <div class="wrap">
 <p class="eyebrow">Providers</p>
 <h2>Three flags, one gate</h2>
-<p class="lede">Claude Code and Codex keep their native transports, because those deliver into the live session you already have open. Any shell harness that can run the CLI joins as a peer with a pull mailbox. Every one of them routes through the same broker, the same consent edges, and the same ledger.</p>
+<p class="lede">Claude Code and Codex keep their native transports, because those deliver into the live session you already have open. Any shell harness that can run the CLI joins as a peer with a pull mailbox. Every one of them routes through the same broker, the same OS boundary, and the same ledger.</p>
 <div class="truths">
 <div><b>Claude Code</b><p>Native peer protocol over a private Unix-domain socket. Mail lands in the live session you are working in: discovery, selection, and a mailbox write with a correlated native receipt. <code style="font-size:13px">peerProtocol 1</code> is exact wire grammar, checked per record.</p></div>
 <div><b>Codex</b><p>The managed App Server over a local subprocess Embassy owns. A registered task is resumed and observed; a message enters at an idle turn or at a validated tool-call boundary — never mid-generation.</p></div>
@@ -78,13 +78,12 @@
 <section class="band" id="how">
 <div class="wrap">
 <p class="eyebrow">How it works</p>
-<h2>Six commands to a working route</h2>
+<h2>Four commands to a working route</h2>
 <p class="lede">Each command is exactly what the shipped CLI accepts.</p>
 <div class="steps">
 <div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>Copy</button></div><p>Start the broker. It opens no network listener — everything stays on this machine.</p></div>
 <div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@this-mac</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@this-mac" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
-<div><div class="cmd2"><code>embassy select-claude --alias claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@this-mac" hidden>Copy</button></div><p>Select the Claude route. Selection creates no consent edge.</p></div>
-<div><div class="cmd2"><code>embassy pair --from codex-embassy@this-mac --to claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@this-mac --to claude-main@this-mac" hidden>Copy</button></div><p>Create the explicit bidirectional consent edge used by the next send. Both endpoints must be registered, live, on the same host, and on different providers.</p></div>
+<div><div class="cmd2"><code>embassy status</code><button type="button" class="cp" data-copy="embassy status" hidden>Copy</button></div><p>Read the current name of the Claude session you want under <code style="border:none;background:none;padding:0">availablePeers</code>. Its route installs the first time you use it.</p></div>
 <div><div class="cmd2"><code>embassy send --from codex-embassy@this-mac --to claude-main@this-mac &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@this-mac --to claude-main@this-mac <<'MSG'
 Which auth middleware did you settle on?
 MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never an argument. You get a <code style="border:none;background:none;padding:0">dlv_</code> receipt and a <code style="border:none;background:none;padding:0">conv_</code> token back.</p></div>
@@ -99,10 +98,10 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <div class="truths">
 <div><b>delivered ≠ read</b><p>Toward Codex, delivered means App Server accepted the turn. Toward Claude, it means the native mailbox write completed. Toward a shell peer, it means the awaiting harness flushed the body to stdout and acknowledged it. None of them implies the body was read, understood, or acted on.</p></div>
 <div><b>direction determines timing</b><p>Codex-bound messages wait for idle or the exact STEER next-tool boundary; a Codex wait may show as held — progress, not success — and Embassy never interrupts mid-generation. Claude-bound messages enter Claude's mailbox immediately, busy or idle. A peer-bound message waits in its mailbox until the harness asks for it.</p></div>
-<div><b>runtime claims only what it proved</b><p>There are no evidence tiers, no compatibility probes, and no version gate anywhere at runtime. Authority to route is consent plus the exact owned route identity; success is what this connection, this route, and this correlated operation demonstrated. Version numbers are unverified metadata, and no version fact grants or withholds anything.</p></div>
+<div><b>runtime claims only what it proved</b><p>There are no evidence tiers, no compatibility probes, and no version gate anywhere at runtime. Authority to route is the OS boundary plus the exact owned route identity; success is what this connection, this route, and this correlated operation demonstrated. Version numbers are unverified metadata, and no version fact grants or withholds anything.</p></div>
 <div><b>an unconfirmed receipt is the honest one</b><p>When Embassy cannot prove the boundary was crossed — a federated handoff whose acceptance never came back, a broker crash with the attempt armed — it settles <code style="font-size:13px">unconfirmed</code> or <code style="font-size:13px">ambiguous</code> rather than call it delivered. A genuine cancellation still settles cancelled. The receipt says what was proved, not what would be tidy.</p></div>
 <div><b>restarts stop dropping mail</b><p>Queued mail survives a broker restart and re-sends exactly once when its route returns. In-flight-at-crash settles ambiguous — never silently lost, never double-sent.</p></div>
-<div><b>consent is per edge, and every message says who sent it</b><p>A routed message needs an exact consent edge between its two endpoints — role-neutral records bound to both endpoints' leases — and paired inbound is the default; <code style="font-size:13px">embassy serve --inbound open</code> is the one deliberate way to relax it. Every routed body arrives inside one broker-composed provenance envelope naming the sender, the originating provider, and the reply token: attribution the sender cannot forge.</p></div>
+<div><b>every message says who sent it</b><p>The permission to message is the one Embassy already lives inside: your OS account, this machine — or a machine you listed in your private <code style="font-size:13px">nodes.json</code> — and an exact name. There is no second grant to hand out or take back, because none could stop code already running as you. What Embassy adds is attribution: every routed body arrives inside one broker-composed provenance envelope naming the sender, the originating provider, and the reply token, and a name shared by two live sessions is refused rather than guessed.</p></div>
 <div><b>the OS boundary is the perimeter</b><p><code style="font-size:13px">embassy serve</code> binds nothing. Identity is attested at the operating-system boundary — same machine, same user, exact executables, private mode-0600 sockets and state — and never asserted by a name. Embassy binds no TCP port and serves no HTTP.</p></div>
 <div><b>bounded by design</b><p>An accepted message is capped at 16 KiB; queues, conversations, retention, and deadlines are all bounded; a lost Codex observation backs off on a fixed ladder instead of spinning. Embassy answers no approval request on any provider's behalf.</p></div>
 <div><b>a routed message is a new input path</b><p>Treat anything that arrives as untrusted input to its receiver — the same discipline you'd apply to any tool result.</p></div>
@@ -125,10 +124,10 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <p class="eyebrow">The vocabulary</p>
 <h2>Words that mean things</h2>
 <div class="vocab">
-<div><h3>Registration &amp; consent edges</h3><p>The permission model. A Codex task registers itself; a Claude session is paired to it; a shell peer registers with its one-time token. An edge is the deliberate act that lets two of them talk, and only the paired may talk — unless you deliberately open inbound.</p></div>
+<div><h3>Registration &amp; provenance</h3><p>The permission model. A Codex task registers itself so the broker records its inherited task identity; a shell peer registers with its one-time token; a Claude session's route installs the first time it is addressed. The boundary that decides who may talk is your OS account — what Embassy guarantees is that every message names its sender.</p></div>
 <div><h3>The ledger</h3><p>Receipts for every delivery, with states that never overclaim. The register of record when you ask "where is my message?"</p></div>
 <div><h3>The pouch</h3><p>Transit. Sealed en route: the broker moves messages, it does not read them.</p></div>
-<div><h3>Consulates</h3><p>Three flags fly today: Claude Code, Codex, and any shell harness that can run the CLI — same embassy, same consent rules for each.</p></div>
+<div><h3>Consulates</h3><p>Three flags fly today: Claude Code, Codex, and any shell harness that can run the CLI — same embassy, same rules for each.</p></div>
 </div>
 </div>
 </section>
@@ -150,10 +149,8 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <span class="p">$</span> embassy serve<br>
 <span class="c"># inside your Codex task — ask the agent to run it:</span><br>
 <span class="p">$</span> embassy register-codex --alias codex-embassy@this-mac<br>
-<span class="c"># as the operator, pick a name from `embassy status` availablePeers:</span><br>
-<span class="p">$</span> embassy select-claude --alias claude-main@this-mac<br>
-<span class="c"># create the consent edge the next send uses:</span><br>
-<span class="p">$</span> embassy pair --from codex-embassy@this-mac --to claude-main@this-mac<br>
+<span class="c"># as the operator, read the session's current name from availablePeers:</span><br>
+<span class="p">$</span> embassy status<br>
 <span class="c"># from the Codex task — body via stdin, never an argument:</span><br>
 <span class="p">$</span> embassy send --from codex-embassy@this-mac --to claude-main@this-mac --expects-reply &lt;&lt;'MSG'<br>
 Which auth middleware did you settle on?<br>

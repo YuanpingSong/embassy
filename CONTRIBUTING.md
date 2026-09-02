@@ -50,13 +50,11 @@ recovery.
 
 - Codex tasks self-register through inherited `CODEX_THREAD_ID` and a
   `codex-*` alias. Never add a thread-ID argument or global task-history scan.
-- Codex-to-Claude sends require a previously selected compatible live session.
-  Do not auto-select during send.
-- In the default `paired` inbound mode, a Claude session reaches the registered
-  native Codex peer only across an existing pair edge; a sender without one is
-  refused `SENDER_NOT_PAIRED` before admission and the refusal is journaled.
-  Only `serve --inbound open` admits any exact compatible live same-UID session.
-  Neither path makes the inbound session outbound-selected.
+- A Codex-to-Claude send installs the addressed session's route on first use;
+  a Claude session's own route installs on its first outbound message. There is
+  no separate grant: the permission is the OS boundary — same UID, same host or
+  a host configured in `nodes.json` — plus the exact alias, and the provenance
+  envelope names the sender.
 - Claude's session UUID is its stable logical identity. Current names are a
   live index; do not add historical-name routing or PID/socket identity.
 - Preserve current-name collision refusal and exact registration fencing.
@@ -64,7 +62,7 @@ recovery.
   performs no provider or App Server I/O. `register-codex --succeeds` is one
   atomic logical replacement that settles queued/reserved work `cancelled`,
   armed work `ambiguous`, and accepted work `unconfirmed`; removes every
-  incident consent edge and conversation, reply, or native capability; and
+  incident conversation, reply, or native capability; and
   installs only the successor. Do not add prepared generations, re-anchoring,
   or recovery journals.
 

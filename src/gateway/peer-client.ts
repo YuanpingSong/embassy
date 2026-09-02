@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { decodePeerParams, decodePeerResult, encodePeerFrame, peerEdgeRef, PEER_MAX_CATALOG_BYTES, PEER_MAX_REQUEST_BYTES,
+import { decodePeerParams, decodePeerResult, encodePeerFrame, PEER_MAX_CATALOG_BYTES, PEER_MAX_REQUEST_BYTES,
   PEER_METHOD_NOT_FOUND, PEER_PROTOCOL_VERSION, PEER_REQUEST_TIMEOUT_MS, PeerProtocolError, type PeerCatalogResult, type PeerHandoffParams, type PeerHandoffResult,
   type PeerMethod, type PeerMethodParams, type PeerMethodResult, type PeerRpcError, type PeerRpcId } from "./peer-protocol.js";
 
@@ -39,15 +39,9 @@ export class PeerClient {
   async catalog(): Promise<PeerCatalogResult> { const result = await this.request("catalog/get", {});
     const routeIds = result.routes.flatMap((row) => [row.alias, row.ref]), connectorIds = result.connectors.map((row) => row.provider);
     const invalid = (result.complete && result.truncated) || new Set(routeIds).size !== routeIds.length || new Set(connectorIds).size !== connectorIds.length ||
-      [...result.routes, ...result.connectors].some((row) => row.host !== this.remoteHost) || result.consentEdges.some((edge) => {
-        const hosts = edge.endpoints.map((endpoint) => endpoint.host).sort();
-        return hosts[0] !== [this.localHost, this.remoteHost].sort()[0] || hosts[1] !== [this.localHost, this.remoteHost].sort()[1] ||
-          edge.ownerHost !== hosts[0] || edge.ownerHost !== this.remoteHost || edge.ref !== peerEdgeRef(edge.endpoints);
-      }) || new Set(result.consentEdges.map((edge) => edge.ref)).size !== result.consentEdges.length ||
+      [...result.routes, ...result.connectors].some((row) => row.host !== this.remoteHost) ||
       result.alerts.some((alert) => (alert.host !== undefined && alert.host !== this.remoteHost) ||
-        (alert.alias !== undefined && !alert.alias.endsWith(`@${this.remoteHost}`))) || result.consentEdges.some((edge) => edge.endpoints
-          .filter((endpoint) => endpoint.host === this.remoteHost).some((endpoint) => !result.routes.some((route) =>
-            route.alias === endpoint.alias && route.provider === endpoint.provider && route.ref === endpoint.routeRef)));
+        (alert.alias !== undefined && !alert.alias.endsWith(`@${this.remoteHost}`)));
     if (invalid) { const error = new Error("Peer catalog is not a local, canonical projection"); this.fail(error); throw error; } return result; }
   prepareHandoff(params: PeerHandoffParams): PeerPreparedHandoff {
     decodePeerParams("handoff", params); if (this.closed) throw new PeerConnectionLostError();

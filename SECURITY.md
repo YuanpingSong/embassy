@@ -93,8 +93,8 @@ review, and audit work.
 
 - **Other local software already running as the same user.** Embassy provides
   no local-process authentication and no capability or local-user consent
-  boundary against software already operating under that UID. Pair edges encode
-  routing consent between agent endpoints; aliases, conversation tokens,
+  boundary against software already operating under that UID. Addressing is
+  routing, not authorization; aliases, conversation tokens,
   inherited environment values, private sockets, and same-user file modes do
   not authenticate one same-user process from another.
 - **Predictions based on version strings.** A version string is diagnostic
@@ -115,7 +115,7 @@ a doctrine-change proposal, including the product and threat-model consequence,
 before adding the check. A test, review finding, or “hardening” patch must not
 silently expand Embassy's claimed boundary.
 
-## Routing and consent
+## Routing and the permission model
 
 - A universal shell peer explicitly registers one `peer-*` alias. Its principal
   is that alias plus a `peer_` token minted and printed exactly once. The token
@@ -125,19 +125,28 @@ silently expand Embassy's claimed boundary.
   there is deliberately no PID binding, token file, Keychain entry, or daemon.
 - A Codex task must explicitly self-register with a `codex-*` alias before it
   can participate.
-- Codex-to-Claude delivery requires an explicit operator-created pair with a
-  compatible live Claude session. Discovery alone is never permission to send.
-- Every registered `codex-*` peer is visible to every compatible live Claude
-  session running as the same OS user, but paired mode accepts only sessions
-  holding an explicit pair edge with that exact task. Other senders settle
-  terminally with `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the
-  explicit opt-out from pairing.
-- Pairs are additive, bounded, and per-edge: adding an edge never retires
-  another, and removing one invalidates its active conversation capabilities
-  before the change is published. Explicitly requested endpoint replacement
+- The permission to message is the OS boundary Embassy already sits inside:
+  the same UID, the same host — or a host the operator configured in the
+  private `nodes.json` — and an exact alias. Embassy holds no separate,
+  revocable grant between two endpoints, and never claimed one could defend
+  against software already running as that UID.
+- A discovered Claude session's logical route is installed by the broker on
+  the session's first use — the first message sent to it, or its first native
+  message out. Installation records identity; it grants nothing that
+  addressing did not already imply.
+- A name is not an identity. A route's identity is its (host, native session
+  UUID) pair: a session that re-anchors or renames itself keeps its
+  registration and its in-flight conversations, while a name that currently
+  belongs to more than one live session is refused with
+  `PEER_ALIAS_COLLISION` at send time and never resolved by picking first.
+- Every routed body carries the broker-composed provenance envelope naming its
+  verified sender. That envelope is the honest part of the model: the receiving
+  agent always learns who sent a message, even though the boundary that stops
+  anyone else is the operating system's.
+- Explicitly requested endpoint replacement
   (`register-codex --succeeds`) is one atomic logical-route transaction: it
-  settles the outgoing route's work by recorded write phase, removes its edges
-  and capabilities, and publishes only the replacement. There is no prepared,
+  settles the outgoing route's work by recorded write phase, removes its
+  capabilities, and publishes only the replacement. There is no prepared,
   activated, re-anchored, or recovery generation and no half-replaced state.
 - Embassy never mutates a Codex task's approval or sandbox policy and never
   answers an approval request. An inbound turn uses the task's existing native
@@ -158,7 +167,7 @@ silently expand Embassy's claimed boundary.
   conversation membership, and current routing policy.
 
 Every routed message is untrusted input capable of steering the receiving
-agent. Registration and routing control reachability; the provenance marker
+agent. The OS boundary and routing control reachability; the provenance marker
 does not make the message content or asserted intent trustworthy.
 
 The literal leading `STEER:` prefix is a protocol instruction, not proof of a
@@ -187,8 +196,8 @@ broker.
   artifacts and Embassy callback, control, or state paths refuses broker
   startup; unsafe UID or mode evidence for Claude's external sessions registry
   root quarantines only Claude. A provider version is best-effort diagnostic
-  metadata and carries no routing authority. Runtime authority comes from an
-  explicit pair, exact owned route and session identity, current
+  metadata and carries no routing authority. Runtime authority comes from the
+  OS boundary, exact owned route and session identity, current
   per-operation transport facts, strict protocol handling, and correlated
   operation results.
   A Claude record whose peer protocol is not 1 is rejected in isolation and
@@ -280,7 +289,7 @@ Raw provider frames, tool data, stderr, callback addresses, and socket paths
 remain memory-only and are discarded on restart. Message bodies are the
 exception: queued and recently delivered bodies are retained under bounded caps
 in the mode-0600 state file. A queued or reserved message may resume once after
-a broker restart against its still-exact logical route and consent edge. An
+a broker restart against its still-exact logical route. An
 armed or accepted message at crash settles ambiguous or unconfirmed and is
 never replayed.
 
@@ -304,7 +313,8 @@ The closed private binding store may retain the exact Codex thread ID and Claude
 session UUID required for logical ownership. Native IDs are
 forbidden from public snapshots, normalized events, aliases,
 logs, errors, and CLI output. A Claude UUID may enter only as a user-supplied
-explicit CLI selector; Embassy never discovers or prints it publicly.
+explicit CLI selector (`embassy send --to <uuid>`); Embassy never discovers or
+prints it publicly.
 
 ## Validation boundary
 

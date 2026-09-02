@@ -197,8 +197,7 @@ test("foreground assembly wires the local providers and the managed-socket holde
     CODEX_THREAD_ID: "00000000-0000-7000-8000-000000000701",
   };
   const config = loadGatewayConfig(env);
-  const effectiveConfig = { ...config, inboundMode: "open" as const };
-  const store = inertStore(effectiveConfig);
+  const store = inertStore(config);
   const abort = new AbortController();
   const signals = signalHarness();
   const events: string[] = [];
@@ -214,7 +213,6 @@ test("foreground assembly wires the local providers and the managed-socket holde
   await runGatewayServer(
     {
       env,
-      inboundMode: "open",
       signal: abort.signal,
       onReady: (result) => {
         events.push("ready");
@@ -249,7 +247,7 @@ test("foreground assembly wires the local providers and the managed-socket holde
       },
       createStore: (received) => {
         events.push("create-store");
-        assert.deepEqual(received, effectiveConfig);
+        assert.deepEqual(received, config);
         return store;
       },
       createCodexOperation: (options) => {
@@ -317,7 +315,7 @@ test("foreground assembly wires the local providers and the managed-socket holde
   assert.equal(typeof codexProviderOptions?.createObservationFactory, "function");
   assert.equal(codexObservationAttempts, 0);
   assert.equal(serviceOptions?.store, store);
-  assert.deepEqual(serviceOptions?.config, effectiveConfig);
+  assert.deepEqual(serviceOptions?.config, config);
   assert.equal(
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
     3,

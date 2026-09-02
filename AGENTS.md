@@ -134,12 +134,13 @@ silently expanding the boundary through a test or hardening patch.
   final write authorization.
 - `register-codex --succeeds` is one atomic logical replacement. It settles
   queued/reserved work `cancelled`, armed work `ambiguous`, and accepted work
-  `unconfirmed`; removes every incident consent edge and conversation, reply,
+  `unconfirmed`; removes every incident conversation, reply,
   or native capability; and installs only the successor. Never add a
   succession journal, prepared generation, activation, re-anchoring, or
   recovery choreography.
-- Codex-to-Claude delivery requires an already-selected compatible Claude
-  session. A send must never select a merely discovered candidate.
+- Codex-to-Claude delivery installs the addressed session's route on first
+  use. A send must never resolve an ambiguous name: a current-name collision is
+  a hard `PEER_ALIAS_COLLISION` refusal, never a pick-first delivery.
 - Any exact compatible live same-UID Claude session may reach the one
   registered `codex-*` peer. Inbound reachability must not select that Claude
   session for outbound delivery.
@@ -179,7 +180,7 @@ silently expanding the boundary through a test or hardening patch.
   `thread/resume.excludeTurns: true`. Require an empty `thread.turns` response
   and never retain returned history.
 - Keep runtime routing authority independent of provider version and build
-  metadata. An explicit pair plus the exact owned route and session identity
+  metadata. The OS boundary plus the exact owned route and session identity
   authorizes an attempt; current per-operation transport, strict wire, and
   correlated-operation facts decide its result.
 - Validate exact OS ownership, path, symlink, lease, state, and used-artifact

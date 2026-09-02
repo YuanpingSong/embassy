@@ -2,13 +2,13 @@ import os from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
 import type { GatewayNodeInventory } from "./federation-nodes.js";
-import { gatewayPublicSnapshotLimits, type GatewayInboundMode, type GatewayStoreLimits } from "./types.js";
+import { gatewayPublicSnapshotLimits, type GatewayStoreLimits } from "./types.js";
 
 export const gatewayDeliveryNoticeModes = ["merged", "verbose", "quiet"] as const;
 export type GatewayDeliveryNoticeMode = (typeof gatewayDeliveryNoticeModes)[number];
 export type GatewayConfig = { stateDir: string; controlSocketPath: string; allowedHosts: readonly string[];
   hostId: string; peerNodes: readonly string[];
-  steeringEnabled: boolean; inboundMode: GatewayInboundMode; stallNoticeMs: number;
+  steeringEnabled: boolean; stallNoticeMs: number;
   deliveryNotices?: GatewayDeliveryNoticeMode; limits: GatewayStoreLimits };
 
 const MAX_STATE_BUDGET = 7 * 1024 * 1024;
@@ -52,7 +52,7 @@ export function loadGatewayConfig(
   if (Buffer.byteLength(controlSocketPath) > 100) invalid("The gateway state path is too long for a portable private Unix-domain control socket.");
   const messageDeadlineMs = integer(env, "EMBASSY_MESSAGE_DEADLINE_MS", 14_400_000, 1_000, 86_400_000);
   const limits: GatewayStoreLimits = {
-    maxRoutes: integer(env, "EMBASSY_MAX_ROUTES", 128, 2, gatewayPublicSnapshotLimits.routes), maxConsentEdges: integer(env, "EMBASSY_MAX_PAIRS", 128, 1, gatewayPublicSnapshotLimits.consentEdges),
+    maxRoutes: integer(env, "EMBASSY_MAX_ROUTES", 128, 2, gatewayPublicSnapshotLimits.routes),
     eventCapacity: integer(env, "EMBASSY_EVENT_CAPACITY", 500, 10, gatewayPublicSnapshotLimits.messages),
     eventTtlMs: integer(env, "EMBASSY_EVENT_TTL_MS", 86_400_000, 60_000, 604_800_000),
     dedupeCapacity: integer(env, "EMBASSY_DEDUPE_CAPACITY", 2_000, 10, 100_000),
@@ -67,12 +67,12 @@ export function loadGatewayConfig(
   if (limits.maxQueueMessagesPerRoute > limits.maxQueueMessages) invalid("EMBASSY_MAX_QUEUE_PER_ROUTE cannot exceed EMBASSY_MAX_QUEUE_MESSAGES.");
   if (limits.maxInFlightMessages > limits.maxQueueMessages) invalid("EMBASSY_MAX_IN_FLIGHT cannot exceed EMBASSY_MAX_QUEUE_MESSAGES.");
   const stateBudget = limits.eventCapacity * 512 + limits.dedupeCapacity * 384 +
-    limits.maxRoutes * 1_280 + limits.maxConsentEdges * 512 + limits.maxQueueMessages * 512;
+    limits.maxRoutes * 1_280 + limits.maxQueueMessages * 512;
   if (stateBudget > MAX_STATE_BUDGET) invalid("The combined gateway route, event, dedupe, and queue capacities exceed the durable state byte budget.");
   return {
     stateDir, controlSocketPath, allowedHosts: Object.freeze([inventory.host, ...inventory.nodes]),
     hostId: inventory.host, peerNodes: inventory.nodes,
-    steeringEnabled: toggle(env, "EMBASSY_STEERING_ENABLED"), inboundMode: "paired",
+    steeringEnabled: toggle(env, "EMBASSY_STEERING_ENABLED"),
     stallNoticeMs: Math.min(Math.floor(messageDeadlineMs / 2), 120_000),
     deliveryNotices: notices(env.EMBASSY_DELIVERY_NOTICES), limits,
   };
