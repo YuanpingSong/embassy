@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rename as renameFile,
+  symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { test } from "node:test";
+import { BridgeError } from "../src/errors.js";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayConfig } from "../src/gateway/config.js";
@@ -72,6 +77,8 @@ async function fixture(
     renameStateFile?: (source: string, target: string) => Promise<void>;
     limits?: Partial<GatewayConfig["limits"]>;
     inboundMode?: GatewayConfig["inboundMode"];
+    isProcessAlive?: (pid: number) => boolean;
+    hostname?: () => string;
   }> = {},
 ): Promise<{
   root: string;
@@ -105,6 +112,10 @@ async function fixture(
     ...(dependencies.renameStateFile === undefined
       ? {}
       : { renameStateFile: dependencies.renameStateFile }),
+    ...(dependencies.isProcessAlive === undefined
+      ? {}
+      : { isProcessAlive: dependencies.isProcessAlive }),
+    ...(dependencies.hostname === undefined ? {} : { hostname: dependencies.hostname }),
   });
   return { root, stateDir, config, clock: testClock, store };
 }
@@ -326,7 +337,7 @@ test("runtime refuses unsupported schemas without mutating state", async () => {
       error instanceof Error &&
       "code" in error &&
       error.code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED" &&
-      /move gateway-state\.json aside.*keep nodes\.json/iu.test(error.message),
+      /move gateway-state\.json aside.*nodes\.json, if you use federation, is untouched/iu.test(error.message),
   );
   const unchanged = await readFile(first.store.stateFilePath, "utf8");
   assert.match(unchanged, /"schemaVersion":4/u);
@@ -1633,6 +1644,260 @@ test("an unowned state directory admits exactly nodes.json before its ownership 
   await assert.rejects(rejected.store.initialize(),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_DIRECTORY_NOT_OWNED");
   assert.equal(await readFile(path.join(rejected.stateDir, "foreign"), "utf8"), "untouched");
+});
+
+test("boot removes stale gateway-dashboard files left by a 2.x install and never recreates them", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  const markerPath = path.join(setup.stateDir, ".agent-embassy-state");
+  const markerBefore = await readFile(markerPath, "utf8");
+
+  const enPath = path.join(setup.stateDir, "gateway-dashboard.html");
+  const zhPath = path.join(setup.stateDir, "gateway-dashboard.zh-CN.html");
+  await writeFile(enPath, "<html>stale</html>", { mode: 0o600 });
+  await writeFile(zhPath, "<html>stale</html>", { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await assert.rejects(lstat(enPath));
+  await assert.rejects(lstat(zhPath));
+  // The boot sweep touches only the two stale dashboard files.
+  assert.equal(await readFile(markerPath, "utf8"), markerBefore);
+  assert.match(await readFile(reopened.stateFilePath, "utf8"), /"schemaVersion": 5,/u);
+  await reopened.close();
+
+  // A later boot with nothing left to remove is a no-op: still gone, nothing recreated.
+  const rebooted = new GatewayStore(setup.config);
+  await rebooted.initialize();
+  await assert.rejects(lstat(enPath));
+  await assert.rejects(lstat(zhPath));
+  await rebooted.close();
+});
+
+test("boot cleanup never follows a symlink planted at the dashboard filename", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  const target = path.join(setup.stateDir, "..", "outside-target");
+  await writeFile(target, "do not touch", { mode: 0o600 });
+  const linkPath = path.join(setup.stateDir, "gateway-dashboard.html");
+  await symlink(target, linkPath);
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await reopened.close();
+  assert.equal((await lstat(linkPath)).isSymbolicLink(), true);
+  assert.equal(await readFile(target, "utf8"), "do not touch");
+});
+
+test("boot removes 2.x's stale dashboard publish temp files, and only those", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  const enTemp = path.join(setup.stateDir, ".gateway-dashboard.html.a1b2c3.tmp");
+  const zhTemp = path.join(setup.stateDir, ".gateway-dashboard.zh-CN.html.d4e5f6.tmp");
+  const unrelatedTemp = path.join(setup.stateDir, ".unrelated.tmp");
+  await writeFile(enTemp, "<html>partial</html>", { mode: 0o600 });
+  await writeFile(zhTemp, "<html>partial</html>", { mode: 0o600 });
+  await writeFile(unrelatedTemp, "keep me", { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config);
+  await reopened.initialize();
+  await assert.rejects(lstat(enTemp));
+  await assert.rejects(lstat(zhTemp));
+  assert.equal(await readFile(unrelatedTemp, "utf8"), "keep me");
+  await reopened.close();
+});
+
+test("a refused boot never sweeps the state directory: cleanup runs only after loadStateFile succeeds", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+
+  await writeFile(
+    setup.store.stateFilePath,
+    `${JSON.stringify({ schemaVersion: 4, arbitrary: "not validated" })}\n`,
+    { mode: 0o600 },
+  );
+  const stalePath = path.join(setup.stateDir, "gateway-dashboard.html");
+  await writeFile(stalePath, "<html>stale</html>", { mode: 0o600 });
+
+  await assert.rejects(
+    new GatewayStore(setup.config).initialize(),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
+  );
+  // The refused boot must leave the directory exactly as found: cleanup runs
+  // only after loadStateFile() succeeds, and this one never did.
+  assert.equal(await readFile(stalePath, "utf8"), "<html>stale</html>");
+});
+
+test("a boot refused for out-of-bounds state leaves a planted stale file exactly as found", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.registerRoute(claude);
+  await setup.store.close();
+  const stalePath = path.join(setup.stateDir, "gateway-dashboard.html");
+  await writeFile(stalePath, "<html>stale</html>", { mode: 0o600 });
+
+  // Same directory, a host allowlist the persisted route cannot satisfy: this
+  // refuses inside assertConfiguredBounds, past the schema check.
+  const foreign = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio"] });
+  await assert.rejects(
+    foreign.initialize(),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "CORRUPT_GATEWAY_STATE",
+  );
+  assert.equal(await readFile(stalePath, "utf8"), "<html>stale</html>");
+});
+
+const LOCK_NAME = ".gateway-controller.lock";
+const THIS_MACHINE = "fixture-machine.local";
+const lockBody = (owner: Readonly<Record<string, unknown>>): string =>
+  `${JSON.stringify({ schemaVersion: 1, token: "00000000-0000-4000-8000-00000000a11e", ...owner })}\n`;
+
+// The five states a controller lock can be found in. Liveness and this
+// machine's own name are both injected, so nothing here depends on the
+// runner's pid space or on a hostname the lock pattern happens to accept.
+test("case 1 of 5: a live pid refuses and carries the host and pid its hint prints", async () => {
+  for (const recorded of [THIS_MACHINE, "the-old-name.local"]) {
+    const setup = await fixture({ isProcessAlive: () => true, hostname: () => THIS_MACHINE });
+    await setup.store.initialize();
+    await setup.store.close();
+    const lockPath = path.join(setup.stateDir, LOCK_NAME);
+    const planted = lockBody({ pid: 4242, hostname: recorded });
+    await writeFile(lockPath, planted, { mode: 0o600 });
+
+    await assert.rejects(
+      new GatewayStore(setup.config, { isProcessAlive: () => true, hostname: () => THIS_MACHINE }).initialize(),
+      (error: unknown) => {
+        assert.ok(error instanceof BridgeError);
+        assert.equal(error.code, "GATEWAY_STATE_IN_USE");
+        assert.equal(error.recoverable, true);
+        // Both name-branches carry the same bounded detail, this machine's
+        // own included: pid numbers are reused there too.
+        assert.deepEqual(error.detail, { host: recorded, pid: "4242" });
+        return true;
+      },
+    );
+    assert.equal(await readFile(lockPath, "utf8"), planted);
+  }
+});
+
+test("case 1b: a recorded machine name this cannot represent reports no host at all", async () => {
+  const setup = await fixture({ isProcessAlive: () => true, hostname: () => THIS_MACHINE });
+  await setup.store.initialize();
+  await setup.store.close();
+  await writeFile(path.join(setup.stateDir, LOCK_NAME),
+    lockBody({ pid: 4242, hostname: "a name with spaces" }), { mode: 0o600 });
+
+  await assert.rejects(
+    new GatewayStore(setup.config, { isProcessAlive: () => true, hostname: () => THIS_MACHINE }).initialize(),
+    (error: unknown) => {
+      assert.ok(error instanceof BridgeError);
+      assert.equal(error.code, "GATEWAY_STATE_IN_USE");
+      // No host key at all, so no hint can print a placeholder for one.
+      assert.deepEqual(error.detail, { pid: "4242" });
+      return true;
+    },
+  );
+});
+
+test("case 2 of 5: an empty lock left between create and write is recovered as stale", async () => {
+  const setup = await fixture({ isProcessAlive: () => true });
+  await setup.store.initialize();
+  await setup.store.close();
+  await writeFile(path.join(setup.stateDir, LOCK_NAME), "", { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config, { isProcessAlive: () => true });
+  await reopened.initialize();
+  await reopened.close();
+  assert.ok((await readdir(setup.stateDir)).some((name) => name.startsWith(`${LOCK_NAME}.stale-`)));
+});
+
+test("case 3 of 5: an unparsable lock refuses as unverified and is left exactly as found", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  const lockPath = path.join(setup.stateDir, LOCK_NAME);
+  const planted = "{not json at all\n";
+  await writeFile(lockPath, planted, { mode: 0o600 });
+
+  await assert.rejects(
+    new GatewayStore(setup.config).initialize(),
+    (error: unknown) => error instanceof BridgeError &&
+      error.code === "GATEWAY_STATE_LOCK_UNVERIFIED" && !error.recoverable,
+  );
+  assert.equal(await readFile(lockPath, "utf8"), planted);
+});
+
+test("case 4 of 5: a record that parses but names no process is unverified, never 'in use'", async () => {
+  // Nothing to probe and nothing to claim: saying another broker may own the
+  // directory would be an assertion this record cannot support.
+  for (const owner of [{}, { pid: "4242" }, { pid: 0 }, { pid: -1 }, { pid: 1.5 }]) {
+    const setup = await fixture({ isProcessAlive: () => true });
+    await setup.store.initialize();
+    await setup.store.close();
+    const lockPath = path.join(setup.stateDir, LOCK_NAME);
+    const planted = lockBody({ hostname: THIS_MACHINE, ...owner });
+    await writeFile(lockPath, planted, { mode: 0o600 });
+
+    await assert.rejects(
+      new GatewayStore(setup.config, { isProcessAlive: () => true }).initialize(),
+      (error: unknown) => error instanceof BridgeError &&
+        error.code === "GATEWAY_STATE_LOCK_UNVERIFIED" && error.detail === undefined,
+    );
+    assert.equal(await readFile(lockPath, "utf8"), planted);
+  }
+});
+
+test("case 5 of 5: a lock whose recorded pid is dead is recovered, whatever machine name wrote it", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  await writeFile(path.join(setup.stateDir, LOCK_NAME),
+    lockBody({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
+
+  const reopened = new GatewayStore(setup.config, { isProcessAlive: () => false });
+  await reopened.initialize();
+  await reopened.close();
+  const moved = (await readdir(setup.stateDir)).filter((name) => name.startsWith(`${LOCK_NAME}.stale-`));
+  assert.equal(moved.length, 1);
+});
+
+test("a recovered lock is kept seven days from its recovery, not from the crash it came from", async () => {
+  const setup = await fixture();
+  await setup.store.initialize();
+  await setup.store.close();
+  // The lock of a broker that had been up a long time: its file timestamps are
+  // ancient, and `rename` carries them across. Only the recovery time counts.
+  const lockPath = path.join(setup.stateDir, LOCK_NAME);
+  await writeFile(lockPath, lockBody({ pid: 4242, hostname: "the-old-name.local" }), { mode: 0o600 });
+  const ancient = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(lockPath, ancient, ancient);
+
+  const recovering = new GatewayStore(setup.config, { now: setup.clock.now, isProcessAlive: () => false });
+  await recovering.initialize();
+  await recovering.close();
+  const [recovered] = (await readdir(setup.stateDir)).filter((name) => name.startsWith(`${LOCK_NAME}.stale-`));
+  assert.ok(recovered);
+  // The boot that recovered it must not also sweep it, however old the file is.
+  assert.equal(await readFile(path.join(setup.stateDir, recovered), "utf8").then(() => true), true);
+
+  // Six days later it is still evidence.
+  setup.clock.advance(6 * 24 * 60 * 60 * 1000);
+  const soon = new GatewayStore(setup.config, { now: setup.clock.now });
+  await soon.initialize();
+  await soon.close();
+  assert.ok((await readdir(setup.stateDir)).includes(recovered));
+
+  // Two days after that, it is past the retention window and goes.
+  setup.clock.advance(2 * 24 * 60 * 60 * 1000);
+  const later = new GatewayStore(setup.config, { now: setup.clock.now });
+  await later.initialize();
+  await later.close();
+  assert.equal((await readdir(setup.stateDir)).includes(recovered), false);
 });
 
 test("federated routes admit same-provider cross-host mail through peer_handoff only", async () => {

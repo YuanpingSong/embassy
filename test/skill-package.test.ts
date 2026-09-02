@@ -78,7 +78,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
   assert.match(skill, /Claude, Codex, and shell peers as first-class providers/);
-  assert.match(skill, /register-peer --alias peer-reviewer@this-mac/);
+  assert.match(skill, /register-peer --alias peer-reviewer@your-host/);
   assert.match(skill, /first\s+stdin line is the exact token/);
   assert.match(skill, /never the token/);
   assert.match(skill, /There is no PID binding or helper daemon/);

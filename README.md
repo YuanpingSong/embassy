@@ -53,7 +53,7 @@ Runtime delivery is best effort. Version and build strings are unverified metada
 
 ### 1. Start Embassy
 
-After creating the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md), install the broker as a launchd agent under the same OS account as Claude Code and Codex, so it starts at login and restarts after a crash:
+Install the broker as a launchd agent under the same OS account as Claude Code and Codex, so it starts at login and restarts after a crash:
 
 ```bash
 embassy service install
@@ -73,15 +73,17 @@ that list is empty, start a Claude Code session and run
 `embassy refresh`, which rescans for Claude sessions; the next `status`
 should show it.
 
+Every alias below ends in `@your-host`: replace `your-host` with this machine's host. The broker prints it as `hostId` on its ready line — in your terminal under `embassy serve`, or in `~/Library/Logs/agent-embassy/broker.log` under the launchd agent — and name an alias for the wrong host and the CLI tells you which one this machine uses. Federation across machines needs a `nodes.json`; without one Embassy writes that file itself on first start, naming this machine by its own hostname (see [Configuration](docs/CONFIGURATION.md)).
+
 ### 2. Register the Codex task
 
 Ask your Codex agent to run this as a shell step in its current turn — the command must run inside the task so it inherits the task's identity:
 
 ```bash
-embassy register-codex --alias codex-reviewer@this-mac
+embassy register-codex --alias codex-reviewer@your-host
 ```
 
-You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `embassy unregister-codex --alias codex-reviewer@this-mac` from inside that same task.
+You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `embassy unregister-codex --alias codex-reviewer@your-host` from inside that same task.
 
 Registration records the exact inherited task identity and performs no App Server I/O. Every delivery opens a fresh attested local transport, initializes it, resumes that exact task with history excluded, and authorizes the body write once. App Server and Desktop restarts therefore do not require re-registration or re-anchoring; a current unavailable or unobservable task keeps the logical route and consent edge while the attempt reports an exact safe code. Embassy never retargets by alias or replays an ambiguously written body.
 
@@ -92,13 +94,13 @@ A local shell harness can join as a `peer-*` route without a plugin, stable shel
 When native Codex inbound dispatch is unavailable, this shell-peer mailbox is the supported fallback channel: register once, keep its token only in agent memory, and receive with bounded `await` calls.
 
 ```bash
-embassy register-peer --alias peer-reviewer@this-mac
+embassy register-peer --alias peer-reviewer@your-host
 ```
 
 Registration prints the `peer_` token exactly once. Keep it in the agent's context and provide it on the first stdin line of every authenticated peer command; when a command also carries a message body, the remaining stdin bytes are the body. Never put the token in argv. For example, wait for inbound mail:
 
 ```bash
-embassy await --alias peer-reviewer@this-mac --token-stdin <<'TOKEN'
+embassy await --alias peer-reviewer@your-host --token-stdin <<'TOKEN'
 peer_<32-character-token>
 TOKEN
 ```
@@ -110,7 +112,7 @@ TOKEN
 Pick one name from `availablePeers`:
 
 ```bash
-embassy select-claude --alias advisor@this-mac
+embassy select-claude --alias advisor@your-host
 ```
 
 Run this from any same-UID process that can reach the private control socket. `embassy select-claude --session <uuid>` selects the same session by its native UUID.
@@ -118,7 +120,7 @@ Run this from any same-UID process that can reach the private control socket. `e
 You should see `"accepted":true`. Selection creates no permission edge. Create the user-chosen edge explicitly:
 
 ```bash
-embassy pair --from codex-reviewer@this-mac --to advisor@this-mac
+embassy pair --from codex-reviewer@your-host --to advisor@your-host
 ```
 
 Conversely, `unselect-claude` removes the selected route, removes its incident consent edges, and settles their in-flight work from the durable attempt phase.
@@ -131,8 +133,8 @@ From the registered Codex task, send via stdin:
 
 ```bash
 embassy send \
-  --from codex-reviewer@this-mac \
-  --to advisor@this-mac \
+  --from codex-reviewer@your-host \
+  --to advisor@your-host \
   --expects-reply <<'MSG'
 Please review the current approach and identify the main risk.
 MSG
@@ -144,8 +146,8 @@ The same command runs in the other direction from a Claude session and inherits 
 
 ```bash
 embassy send \
-  --from advisor@this-mac \
-  --to codex-reviewer@this-mac \
+  --from advisor@your-host \
+  --to codex-reviewer@your-host \
   --expects-reply <<'MSG'
 Summarize the migration risks you found.
 MSG
@@ -160,7 +162,7 @@ the same token and an exact reply command in the broker-owned message marker:
 ```bash
 embassy reply \
   --conversation conv_<token> \
-  --alias codex-reviewer@this-mac <<'MSG'
+  --alias codex-reviewer@your-host <<'MSG'
 Please expand on the migration risk.
 MSG
 ```
@@ -238,10 +240,10 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `refresh` | operator | Rescan for Claude sessions |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
-| `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
+| `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@your-host --succeeds codex-reviewer@your-host` hands the registration to a different task |
 | `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
-| `pair` / `unpair` | same-UID control client | Add or remove one user-chosen cross-provider edge by naming both ends: `embassy pair --from advisor@this-mac --to peer-reviewer@this-mac` |
+| `pair` / `unpair` | same-UID control client | Add or remove one user-chosen cross-provider edge by naming both ends: `embassy pair --from advisor@your-host --to peer-reviewer@your-host` |
 | `select-claude` / `unselect-claude` | same-UID control client | Select or remove one Claude route using `--alias <name@host>` or `--session <uuid>`; selection creates no permission edge |
 | `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message between paired routes: `--from <alias> --to <alias>`, optional `--expects-reply`; the broker derives direction from the resolved providers |
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin |

@@ -15,7 +15,8 @@ import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   type GatewayControlRequest, type GatewayControlResponse,
   type SendGatewayControlRequestOptions } from "./control.js";
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
-import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
+import { isDefaultedGatewayNodeInventory, loadGatewayNodeInventory,
+  type GatewayNodeInventory } from "./federation-nodes.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
 import { boundedServiceDetail, defaultProbeHostLease, defaultRunLaunchctl, installServiceAgent,
@@ -137,7 +138,7 @@ const CLI_STDERR = {
 /** Exact next-step remedies appended after the summary for the faults that have one. */
 const CLI_HINT = {
   noBrokerRunning:
-    "No broker is running (state dir {stateDir}). Run `embassy service install` once, or `embassy serve` in a terminal.",
+    "No broker is running (state dir {stateDir}). Run `embassy service install` once, or `embassy serve` in a terminal — or verify EMBASSY_STATE_DIR is not scrubbed or misdirected (for example by a sandboxed task's HOME).",
   controlConnectDenied:
     "the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   controlInvalidResponse:
@@ -148,12 +149,26 @@ const CLI_HINT = {
     "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   messageTooLarge:
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
-  nodeInventoryRequired:
-    "at {stateDir}, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {\"version\":1,\"host\":\"<host>\",\"nodes\":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.",
   stateResetRequired:
     "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 2.0.x before resetting.",
   callerIdentityConflict:
     "both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID",
+  aliasHostMismatch:
+    "aliases on this machine end with @{localHost} (from {stateDir}/nodes.json); found @{given}",
+  aliasHostDefaulted:
+    "no nodes.json has been written at {stateDir} yet — a broker writes it on first start; until then this machine defaults to @{localHost}; found @{given}",
+  stateInUse:
+    "another broker may own {stateDir}: if `embassy serve` is not running anywhere, the lock {stateDir}/.gateway-controller.lock is stale (recorded host {host}, pid {pid}) — remove it and start again.",
+  stateInUseUnrecorded:
+    "another broker may own {stateDir}: if `embassy serve` is not running anywhere, the lock {stateDir}/.gateway-controller.lock is stale — remove it and start again.",
+  stateLockUnverified:
+    "the lock {stateDir}/.gateway-controller.lock cannot be read as a controller record; if `embassy serve` is not running anywhere, remove that file and start again.",
+  nodeInventoryChanged:
+    "nodes.json at {stateDir} changed while the broker was starting; start again.",
+  stateWriteFailed:
+    "nodes.json could not be written at {stateDir} (disk full, read-only, or quota?)",
+  stateSyncFailed:
+    "nodes.json was written at {stateDir} but the directory could not be synced; start again and check the volume",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -173,8 +188,19 @@ function resolvedStateDirForHint(env: NodeJS.ProcessEnv): string {
   try { return path.resolve(defaultGatewayStateDir(env)); }
   catch { return env.EMBASSY_STATE_DIR ?? env.XDG_STATE_HOME ?? "unresolvable"; }
 }
+/**
+ * Renders a CLI_HINT entry, substituting {name} placeholders from `vars` in a
+ * single pass: a substituted value is never rescanned, so a state directory
+ * literally named `/tmp/{host}` cannot expand into anything else.
+ */
+function renderHint(hint: CliFaultHint, vars?: Readonly<Record<string, string>>): string {
+  const text: string = CLI_HINT[hint];
+  if (vars === undefined) return text;
+  return text.replace(/\{([A-Za-z][A-Za-z0-9]*)\}/g,
+    (token: string, name: string) => Object.hasOwn(vars, name) ? vars[name]! : token);
+}
 const hintLine = (hint: CliFaultHint, env: NodeJS.ProcessEnv): string =>
-  `[embassy] ${CLI_HINT[hint].replace("{stateDir}", resolvedStateDirForHint(env))}\n`;
+  `[embassy] ${renderHint(hint, { stateDir: resolvedStateDirForHint(env) })}\n`;
 
 type ParsedOptions = Readonly<Record<string, string | true>>;
 class CliFault extends Error {
@@ -183,6 +209,7 @@ class CliFault extends Error {
     readonly retryable = false,
     readonly hint?: CliFaultHint,
     readonly kind?: CliStderrKind,
+    readonly hintVars?: Readonly<Record<string, string>>,
   ) {
     super("The gateway client rejected the request.");
     this.name = "CliFault";
@@ -234,6 +261,19 @@ function requireCodexAlias(options: ParsedOptions, name: string): string {
   return alias;
 }
 const gatewayAliasHost = (alias: string): string => alias.slice(alias.lastIndexOf("@") + 1);
+/** This machine's alias host, and whether it is durable or still a default. */
+type LocalHostIdentity = Readonly<{ host: string; defaulted: boolean; stateDir: string }>;
+/**
+ * An alias naming another host is rejected before any broker call. The hint
+ * says where this machine's own host came from, because the two cases have
+ * different remedies: a durable nodes.json is the answer, while a defaulted
+ * identity is still provisional until the first `embassy serve` records it.
+ */
+function aliasHostFault(local: LocalHostIdentity, given: string): CliFault {
+  return new CliFault("INVALID_ARGUMENTS", false,
+    local.defaulted ? "aliasHostDefaulted" : "aliasHostMismatch", undefined,
+    { localHost: local.host, given, stateDir: local.stateDir });
+}
 function requirePairAliases(options: ParsedOptions): readonly [string, string] {
   const from = requireAlias(options, "from");
   const to = requireAlias(options, "to");
@@ -345,7 +385,7 @@ async function buildRequest(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   stdin: AsyncIterable<unknown>,
-  loadLocalHost: () => Promise<string>,
+  loadLocalHost: () => Promise<LocalHostIdentity>,
 ): Promise<GatewayControlRequest> {
   const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
     health: "health", status: "list_snapshot",
@@ -372,20 +412,24 @@ async function buildRequest(
       count(options, succeedsAlias === undefined ? 1 : 2, 2);
       const threadId = requireExclusiveCodexThreadId(env);
       if (succeedsAlias === alias) fault();
-      const localHost = await loadLocalHost();
-      if (
-        !alias.endsWith(`@${localHost}`) ||
-        (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== localHost)
-      ) fault();
+      const local = await loadLocalHost();
+      if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      if (succeedsAlias !== undefined && gatewayAliasHost(succeedsAlias) !== local.host) {
+        throw aliasHostFault(local, gatewayAliasHost(succeedsAlias));
+      }
       return envelope("register_codex", {
-        alias, threadId, hostId: localHost, busyPolicy: "queue",
+        alias, threadId, hostId: local.host, busyPolicy: "queue",
         ...(succeedsAlias === undefined ? {} : { succeedsAlias }),
       });
     }
     case "unregister-codex": {
       const options = parseOptions(args, ["alias"]);
       count(options, 1);
-      return envelope("unregister_codex", { alias: requireCodexAlias(options, "alias"), threadId: requireExclusiveCodexThreadId(env) });
+      const alias = requireCodexAlias(options, "alias");
+      const threadId = requireExclusiveCodexThreadId(env);
+      const local = await loadLocalHost();
+      if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      return envelope("unregister_codex", { alias, threadId });
     }
     case "register-peer":
     case "unregister-peer":
@@ -396,11 +440,17 @@ async function buildRequest(
       if (hasIdentity(env.CODEX_THREAD_ID) || hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) throw callerIdentityConflictFault(env);
       if (command !== "register-peer" && options["emit-env"] === true) fault();
       if (options["emit-env"] === true && source !== undefined) fault();
+      const requireLocalAlias = async (): Promise<void> => {
+        const local = await loadLocalHost();
+        if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      };
       if (source === undefined) {
         if (command !== "register-peer") fault("CALLER_IDENTITY_REQUIRED");
+        await requireLocalAlias();
         return envelope("register_peer", { alias });
       }
       const { token } = await readPeerInput(stdin, source, false);
+      await requireLocalAlias();
       return envelope(command === "register-peer" ? "register_peer" : command === "unregister-peer" ? "unregister_peer" : "await_peer", { alias, token });
     }
     case "select-claude":
@@ -520,6 +570,43 @@ function writeStateResetHint(stderr: Writable, code: string): void {
   if (code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED" || code === "CORRUPT_GATEWAY_STATE") {
     stderr.write(`[embassy] ${CLI_HINT.stateResetRequired}\n`);
   }
+}
+/**
+ * A BridgeError's own message never reaches a terminal — stderr carries only
+ * fixed lines and these hints, so nothing private can escape through a
+ * message. Any remedy an operator must actually read therefore lives here,
+ * keyed by code and interpolating only the resolved state directory and the
+ * bounded values the error carried in `detail`.
+ */
+const BRIDGE_ERROR_HINTS: Readonly<Record<string, CliFaultHint>> = {
+  GATEWAY_STATE_IN_USE: "stateInUse",
+  GATEWAY_STATE_LOCK_UNVERIFIED: "stateLockUnverified",
+  GATEWAY_NODE_INVENTORY_CHANGED: "nodeInventoryChanged",
+  GATEWAY_STATE_WRITE_FAILED: "stateWriteFailed",
+};
+/** The state directory a hint should name, resolved the same way every command resolves it. */
+function hintStateDir(env: NodeJS.ProcessEnv): string {
+  try {
+    return path.resolve(defaultGatewayStateDir(env));
+  } catch {
+    return "the Embassy state directory";
+  }
+}
+function writeBridgeErrorHint(stderr: Writable, error: BridgeError, env: NodeJS.ProcessEnv): void {
+  const hint = BRIDGE_ERROR_HINTS[error.code];
+  if (hint === undefined) return;
+  const detail = error.detail;
+  // Two codes render differently depending on what the error could establish:
+  // a lock whose recorded machine name is unrepresentable names no host at
+  // all, and a write that reached the file but not the directory entry says so.
+  const named = hint === "stateInUse" && (detail?.host === undefined || detail.pid === undefined)
+    ? "stateInUseUnrecorded"
+    : hint === "stateWriteFailed" && detail?.stage === "sync" ? "stateSyncFailed" : hint;
+  stderr.write(`[embassy] ${renderHint(named, {
+    stateDir: hintStateDir(env),
+    ...(detail?.host === undefined ? {} : { host: detail.host }),
+    ...(detail?.pid === undefined ? {} : { pid: detail.pid }),
+  })}\n`);
 }
 function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
@@ -684,10 +771,10 @@ export async function runGatewayCli(
   const command = isCommand(argv[0]) ? argv[0] : undefined;
   const args = argv.slice(1);
   let serverReady = false;
-  let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig }> | undefined;
+  let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig; defaulted: boolean }> | undefined;
   const loadIdentity = () => identity ??= (async () => {
     const inventory = await (dependencies.loadNodeInventory ?? loadGatewayNodeInventory)(path.resolve(defaultGatewayStateDir(env)));
-    return { inventory, config: loadConfig(env, inventory) };
+    return { inventory, config: loadConfig(env, inventory), defaulted: isDefaultedGatewayNodeInventory(inventory) };
   })();
   const success = (result: unknown): void => {
     stdout.write(serializedOutput({ ok: true, command: command!, result }));
@@ -822,7 +909,10 @@ export async function runGatewayCli(
       if (!serverReady) fault("SERVER_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
-    const request = await buildRequest(command, args, env, stdin, async () => (await loadIdentity()).config.hostId);
+    const request = await buildRequest(command, args, env, stdin, async () => {
+      const { config, defaulted } = await loadIdentity();
+      return { host: config.hostId, defaulted, stateDir: config.stateDir };
+    });
     const { config } = await loadIdentity();
     await validateSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;
@@ -902,7 +992,10 @@ export async function runGatewayCli(
       writeFailure(stdout, stderr, command, error.code, {
         retryable: error.retryable, kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
-      if (error.hint !== undefined) stderr.write(hintLine(error.hint, env));
+      // Every hint may name the state directory; a fault that carries its own
+      // bounded values overrides that default with them.
+      if (error.hint !== undefined) stderr.write(`[embassy] ${renderHint(error.hint,
+        { stateDir: resolvedStateDirForHint(env), ...error.hintVars })}\n`);
       if (isNoBrokerCode(error.code)) stderr.write(hintLine("noBrokerRunning", env));
       return error.retryable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
@@ -915,12 +1008,9 @@ export async function runGatewayCli(
         retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
       writeStateResetHint(stderr, error.code);
+      writeBridgeErrorHint(stderr, error, env);
       if (error.code === "CONTROL_CONNECT_DENIED") stderr.write(`[embassy] ${
         CLI_HINT[command === "serve" ? "stateAccessDenied" : "controlConnectDenied"]}\n`);
-      if (error.code === "GATEWAY_NODE_INVENTORY_REQUIRED") {
-        const stateDir = env.EMBASSY_STATE_DIR ?? (env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, "agent-embassy") : "~/.local/state/agent-embassy");
-        stderr.write(`[embassy] ${CLI_HINT.nodeInventoryRequired.replace("{stateDir}", stateDir)}\n`);
-      }
       return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
     writeFailure(stdout, stderr, command, "INTERNAL_ERROR", { kind: "failure" });

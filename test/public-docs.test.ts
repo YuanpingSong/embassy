@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { gatewayControlMethods } from "../src/gateway/control.js";
+import { gatewayControlMethods, isGatewayAlias } from "../src/gateway/control.js";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -63,7 +63,26 @@ const FORBIDDEN = [
   "idle-minutes",
   "progress watch",
   "liveness check",
+  // emb-106: nodes.json is optional, defaulting to a hostname-named single
+  // machine; the mandatory-inventory refusal code no longer exists. Both
+  // literal forms guard against the exact backticked prose emb-89 shipped
+  // ("mandatory nodes.json" alone never occurs adjacent in markdown).
+  "mandatory private `nodes.json`",
+  "mandatory `nodes.json`",
+  "GATEWAY_NODE_INVENTORY_REQUIRED",
 ] as const;
+
+/**
+ * emb-106, the same claim written as prose rather than as one of the exact
+ * backticked phrases above: `nodes.json` is optional now, so nothing shipped
+ * may call it mandatory in any wording, at any distance a single sentence can
+ * put between the two words.
+ */
+const FORBIDDEN_PATTERNS: readonly RegExp[] = [
+  /The file is mandatory/i,
+  /mandatory[\s\S]{0,60}nodes\.json/i,
+  /nodes\.json[\s\S]{0,60}mandatory/i,
+];
 
 /**
  * CHANGELOG.md, .github/release-notes/*, and docs/DECLINED.md are history: they
@@ -119,6 +138,49 @@ test("no shipped document advertises a deleted surface", async () => {
     const text = await readFile(path.join(repoRoot, file), "utf8");
     for (const term of FORBIDDEN) {
       if (text.includes(term)) offenders.push(`${file}: ${term}`);
+    }
+    for (const pattern of FORBIDDEN_PATTERNS) {
+      if (pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
+/**
+ * A merge that was never finished must not ship. emb-106 pushed a README whose
+ * quickstart still carried `<` `<` `<` markers from a conflict resolved in
+ * every file but that one, and nothing in the suite noticed: the docs tests
+ * check for terms, not for structure. This is the structural check. The
+ * markers are assembled rather than written literally so this file cannot
+ * match itself, and the scan covers everything the package ships, history
+ * included — a conflict marker is never correct in any of them.
+ */
+test("no shipped file carries an unresolved merge conflict", async () => {
+  const marker = new RegExp(`^(${"<".repeat(7)}|${"=".repeat(7)}|${">".repeat(7)})( |$)`, "m");
+  const packaged = (JSON.parse(await readPublicFile("package.json")) as { files: string[] }).files;
+  const roots = ["src", "test", "docs", "site", "skills", "scripts", ...packaged];
+  const named = ["README.md", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "AGENTS.md", "package.json"];
+  const files = new Set<string>(named);
+  for (const root of roots) {
+    let stats;
+    try {
+      stats = await stat(path.join(repoRoot, root));
+    } catch {
+      continue; // A packaged build artifact that this checkout has not built.
+    }
+    if (stats.isDirectory()) for (const found of await walk(root)) files.add(found);
+    else files.add(root);
+  }
+  assert.ok(files.has("README.md") && files.has("src/gateway/cli.ts") && files.has("site/index.html"));
+  assert.ok(files.size >= 50, `only ${String(files.size)} files scanned`);
+
+  const offenders: string[] = [];
+  for (const file of [...files].sort()) {
+    if (/\.(png|jpg|jpeg|gif|ico|woff2?)$/.test(file)) continue;
+    const text = await readFile(path.join(repoRoot, file), "utf8");
+    const found = marker.exec(text);
+    if (found !== null) {
+      offenders.push(`${file}:${String(text.slice(0, found.index).split("\n").length)}`);
     }
   }
   assert.deepEqual(offenders, []);
@@ -200,8 +262,21 @@ test("authority docs match the closed control contract", async () => {
     );
   }
   assert.match(skill, /UUID recovery applies only to selection/);
-  assert.match(site, /embassy pair --from codex-embassy@this-mac --to claude-main@this-mac/);
-  assert.doesNotMatch(site, /embassy pair --from claude-main@this-mac --to dsh-main@this-mac/);
+  assert.match(site, /embassy pair --from codex-embassy@your-host --to claude-main@your-host/);
+  assert.doesNotMatch(site, /embassy pair --from claude-main@your-host --to dsh-main@your-host/);
+  // The placeholder is grammar-valid, so a literal paste reaches the CLI's
+  // host-mismatch hint instead of a flat rejection; every surface that uses
+  // it says what to substitute.
+  assert.match(site, /Each command is what the shipped CLI accepts once you substitute your host\./);
+  for (const document of [readme, skill]) assert.match(document, /your-host/);
+  // No shouted placeholder host survives anywhere: the earlier form failed the
+  // alias grammar, so pasting it never reached the hint that explains it.
+  assert.doesNotMatch(readme + skill + site, /@[A-Z]{2,}/);
+  // Every placeholder alias must pass the CLI's own grammar: a literal paste
+  // has to reach the host-mismatch hint, not a flat rejection ahead of it.
+  const placeholders = [...`${readme}\n${skill}\n${site}`.matchAll(/[a-z][a-z0-9_-]*@your-host/g)].map((found) => found[0]);
+  assert.ok(placeholders.length >= 10, `only ${String(placeholders.length)} placeholder aliases found`);
+  for (const alias of new Set(placeholders)) assert.equal(isGatewayAlias(alias), true, alias);
   assert.match(changelog, /private control protocol is version 2/i);
   assert.match(changelog, /### Removed[\s\S]*legacy `--claude` \/ `--codex` arm is removed/);
   assert.match(changelog, /private state reset/);

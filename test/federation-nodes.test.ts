@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdtemp, open, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
-import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
+import { ensureGatewayNodeInventoryFile, isAttestedGatewayNodeInventory,
+  isDefaultedGatewayNodeInventory, loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
+
+const injectedHostname = () => "Fixture-Host.local";
 
 async function stateFixture(t: TestContext): Promise<string> {
   const stateDir = await realpath(await mkdtemp("/tmp/embassy-nodes-"));
@@ -28,10 +31,32 @@ async function rejectsConfiguration(promise: Promise<unknown>, pattern: RegExp):
   });
 }
 
-test("missing nodes.json refuses without inventing a local identity", async (t) => {
+test("absent nodes.json defaults to an attested single-machine inventory named by the hostname", async (t) => {
   const stateDir = await stateFixture(t);
-  await assert.rejects(loadGatewayNodeInventory(stateDir), (error: unknown) =>
-    error instanceof BridgeError && error.code === "GATEWAY_NODE_INVENTORY_REQUIRED");
+  const inventory = await loadGatewayNodeInventory(stateDir, { hostname: injectedHostname });
+  assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  assert.equal(Object.isFrozen(inventory), true);
+  assert.equal(Object.isFrozen(inventory.nodes), true);
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "fixture-host"), true);
+  // The provenance marker the CLI reads to say where a host identity came
+  // from; it lives beside the inventory, never on it.
+  assert.equal(isDefaultedGatewayNodeInventory(inventory), true);
+  assert.deepEqual(Object.keys(inventory).sort(), ["host", "nodes"]);
+});
+
+test("absent state directory defaults the same way, without ever creating it", async (t) => {
+  const stateDir = path.join(await stateFixture(t), "does-not-exist");
+  const inventory = await loadGatewayNodeInventory(stateDir, { hostname: injectedHostname });
+  assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "fixture-host"), true);
+  await assert.rejects(lstat(stateDir));
+});
+
+test("a hostname that fails HOST_TOKEN defaults to localhost instead", async (t) => {
+  const stateDir = await stateFixture(t);
+  const inventory = await loadGatewayNodeInventory(stateDir, { hostname: () => "My_Weird_Host!" });
+  assert.deepEqual(inventory, { host: "localhost", nodes: [] });
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "localhost"), true);
 });
 
 test("loads an exact bounded static inventory and freezes its result", async (t) => {
@@ -81,6 +106,21 @@ test("rejects unsafe roots and unsafe inventory artifacts", async (t) => {
   const looseFile = await writeInventory(looseDir, { version: 1, host: "studio", nodes: [] });
   await chmod(looseFile, 0o644);
   await rejectsConfiguration(loadGatewayNodeInventory(looseDir), /mode-0600 regular file/);
+});
+
+test("a present file with the wrong mode still refuses; it never falls back to the default", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("root bypasses file permissions");
+    return;
+  }
+  // chmod 0 fails the exact-mode-0600 check before any open() is attempted,
+  // so this yields INVALID_GATEWAY_CONFIGURATION, not CONTROL_CONNECT_DENIED
+  // (that EPERM/EACCES class is already covered by the injected-errno tests
+  // below, which simulate a real syscall denial past the mode check).
+  const stateDir = await stateFixture(t);
+  const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: [] });
+  await chmod(filePath, 0o000);
+  await rejectsConfiguration(loadGatewayNodeInventory(stateDir), /mode-0600 regular file/);
 });
 
 test("rejects oversized inventories before parsing", async (t) => {
@@ -137,4 +177,172 @@ test("preserves denied nodes.json lstat, open, and read branches independently",
       return handle;
     }) as typeof open,
   }), (error: unknown) => error === unexpected);
+});
+
+test("ensureGatewayNodeInventoryFile writes the exact default schema on a first boot and reloads it attested", async (t) => {
+  const stateDir = await stateFixture(t);
+  const inventory = await ensureGatewayNodeInventoryFile(stateDir, "fixture-host");
+  assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  assert.equal(isAttestedGatewayNodeInventory(inventory, "fixture-host"), true);
+  const filePath = path.join(stateDir, "nodes.json");
+  const info = await lstat(filePath);
+  assert.equal(info.mode & 0o777, 0o600);
+  assert.equal(info.isSymbolicLink(), false);
+  assert.equal(await readFile(filePath, "utf8"), '{"version":1,"host":"fixture-host","nodes":[]}\n');
+  // No leftover temp file from the write.
+  assert.deepEqual((await readdir(stateDir)).sort(), ["nodes.json"]);
+});
+
+test("ensureGatewayNodeInventoryFile never rewrites a present nodes.json", async (t) => {
+  const stateDir = await stateFixture(t);
+  const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: ["peer-a"] });
+  const before = await lstat(filePath);
+  const inventory = await ensureGatewayNodeInventoryFile(stateDir, "fixture-host");
+  assert.deepEqual(inventory, { host: "studio", nodes: ["peer-a"] });
+  const after = await lstat(filePath);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal(after.ino, before.ino);
+});
+
+test("a hostname change after the file exists never changes the durable identity", async (t) => {
+  const stateDir = await stateFixture(t);
+  const first = await ensureGatewayNodeInventoryFile(stateDir, "original-host");
+  assert.deepEqual(first, { host: "original-host", nodes: [] });
+  // Simulate the machine renaming itself on a later boot: the host passed in
+  // is what defaultInventory() would now compute, but the file already exists.
+  const second = await ensureGatewayNodeInventoryFile(stateDir, "renamed-host");
+  assert.deepEqual(second, { host: "original-host", nodes: [] });
+  assert.equal(isAttestedGatewayNodeInventory(second, "original-host"), true);
+});
+
+test("a write failure refuses with a classified code; it never runs on the transient identity", async (t) => {
+  const stateDir = await stateFixture(t);
+  const denied = Object.assign(new Error("private errno detail"), { code: "EACCES" });
+  await assert.rejects(ensureGatewayNodeInventoryFile(stateDir, "fixture-host", {
+    open: (async () => { throw denied; }) as typeof open,
+  }), (error: unknown) => error instanceof BridgeError &&
+    error.code === "CONTROL_CONNECT_DENIED" && error.recoverable && !error.message.includes("EACCES"));
+  await assert.rejects(lstat(path.join(stateDir, "nodes.json")));
+});
+
+test("an install failure refuses as a write failure, not a configuration error, and leaves no litter", async (t) => {
+  const stateDir = await stateFixture(t);
+  const full = Object.assign(new Error("simulated device full"), { code: "ENOSPC" });
+  await assert.rejects(ensureGatewayNodeInventoryFile(stateDir, "fixture-host", {
+    link: (async () => { throw full; }) as typeof link,
+  }), (error: unknown) => error instanceof BridgeError &&
+    error.code === "GATEWAY_STATE_WRITE_FAILED" && error.recoverable &&
+    error.message.includes("ENOSPC") && error.message.includes(path.join(stateDir, "nodes.json")));
+  await assert.rejects(lstat(path.join(stateDir, "nodes.json")));
+  // The temp file is unlinked on the failure path too.
+  assert.deepEqual(await readdir(stateDir), []);
+});
+
+test("a full disk during the write is a recoverable write failure naming its errno and path", async (t) => {
+  const stateDir = await stateFixture(t);
+  const full = Object.assign(new Error("simulated device full"), { code: "ENOSPC" });
+  await assert.rejects(ensureGatewayNodeInventoryFile(stateDir, "fixture-host", {
+    open: (async () => { throw full; }) as typeof open,
+  }), (error: unknown) => error instanceof BridgeError &&
+    error.code === "GATEWAY_STATE_WRITE_FAILED" && error.recoverable &&
+    error.message.includes("ENOSPC") && error.message.includes(stateDir));
+  await assert.rejects(lstat(path.join(stateDir, "nodes.json")));
+  assert.deepEqual(await readdir(stateDir), []);
+});
+
+test("the written file is mode 0600 even under a umask that would not grant it", async (t) => {
+  const stateDir = await stateFixture(t);
+  // 0o600 & ~0o277 is 0o400: without the explicit chmod the reload below
+  // would refuse the very file this function just wrote.
+  const previous = process.umask(0o277);
+  try {
+    const inventory = await ensureGatewayNodeInventoryFile(stateDir, "fixture-host");
+    assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  } finally {
+    process.umask(previous);
+  }
+  assert.equal((await lstat(path.join(stateDir, "nodes.json"))).mode & 0o777, 0o600);
+  assert.deepEqual(await readdir(stateDir), ["nodes.json"]);
+});
+
+test("a nodes.json created in the stat-to-write window is never clobbered", async (t) => {
+  const stateDir = await stateFixture(t);
+  const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: ["peer-a"] });
+  const before = await lstat(filePath);
+  // The race: this boot's absence check misses a file that is already there,
+  // so the install must lose to it rather than replace it.
+  let blind = true;
+  const missOnce = (async (target: unknown) => {
+    if (blind && target === filePath) {
+      blind = false;
+      throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+    }
+    return lstat(target as string);
+  }) as unknown as typeof lstat;
+  const inventory = await ensureGatewayNodeInventoryFile(stateDir, "fixture-host", { lstat: missOnce });
+  assert.deepEqual(inventory, { host: "studio", nodes: ["peer-a"] });
+  const after = await lstat(filePath);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.deepEqual(await readdir(stateDir), ["nodes.json"]);
+});
+
+test("a filesystem without hard links still gets its first boot, through a no-clobber rename", async (t) => {
+  const stateDir = await stateFixture(t);
+  const unsupported = Object.assign(new Error("simulated exFAT"), { code: "ENOTSUP" });
+  const inventory = await ensureGatewayNodeInventoryFile(stateDir, "fixture-host", {
+    link: (async () => { throw unsupported; }) as typeof link,
+  });
+  assert.deepEqual(inventory, { host: "fixture-host", nodes: [] });
+  const filePath = path.join(stateDir, "nodes.json");
+  assert.equal(await readFile(filePath, "utf8"), '{"version":1,"host":"fixture-host","nodes":[]}\n');
+  assert.equal((await lstat(filePath)).mode & 0o777, 0o600);
+  assert.deepEqual(await readdir(stateDir), ["nodes.json"]);
+});
+
+test("the rename fallback is still no-clobber: a file that appeared in the window survives", async (t) => {
+  const stateDir = await stateFixture(t);
+  const filePath = await writeInventory(stateDir, { version: 1, host: "studio", nodes: ["peer-a"] });
+  const before = await lstat(filePath);
+  let blind = true;
+  const missOnce = (async (target: unknown) => {
+    if (blind && target === filePath) {
+      blind = false;
+      throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+    }
+    return lstat(target as string);
+  }) as unknown as typeof lstat;
+  const inventory = await ensureGatewayNodeInventoryFile(stateDir, "fixture-host", {
+    lstat: missOnce,
+    link: (async () => { throw Object.assign(new Error("simulated exFAT"), { code: "ENOTSUP" }); }) as typeof link,
+  });
+  assert.deepEqual(inventory, { host: "studio", nodes: ["peer-a"] });
+  assert.equal((await lstat(filePath)).ino, before.ino);
+  assert.deepEqual(await readdir(stateDir), ["nodes.json"]);
+});
+
+test("a nodes.json removed between the install and the reload refuses instead of defaulting again", async (t) => {
+  const stateDir = await stateFixture(t);
+  await assert.rejects(ensureGatewayNodeInventoryFile(stateDir, "fixture-host", {
+    // An install that reports success and leaves nothing behind: exactly what
+    // a concurrent `rm nodes.json` looks like from here.
+    link: (async () => undefined) as unknown as typeof link,
+  }), (error: unknown) => error instanceof BridgeError &&
+    error.code === "GATEWAY_NODE_INVENTORY_CHANGED" &&
+    error.message.includes(path.join(stateDir, "nodes.json")));
+});
+
+test("a directory sync that fails says the file was written, not that it was not", async (t) => {
+  const stateDir = await stateFixture(t);
+  const failSync = (async (target: unknown, ...rest: unknown[]) => {
+    if (target === stateDir) throw Object.assign(new Error("simulated io error"), { code: "EIO" });
+    return open(target as string, rest[0] as number, rest[1] as number);
+  }) as unknown as typeof open;
+  await assert.rejects(ensureGatewayNodeInventoryFile(stateDir, "fixture-host", { open: failSync }),
+    (error: unknown) => error instanceof BridgeError &&
+      error.code === "GATEWAY_STATE_WRITE_FAILED" && error.recoverable &&
+      error.message.includes("was written but the Embassy state directory could not be synced") &&
+      error.message.includes("EIO"));
+  // The claim is honest: the file really is installed.
+  assert.equal(await readFile(path.join(stateDir, "nodes.json"), "utf8"), '{"version":1,"host":"fixture-host","nodes":[]}\n');
 });

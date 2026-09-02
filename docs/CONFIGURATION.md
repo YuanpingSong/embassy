@@ -21,14 +21,34 @@ directory and `nodes.json`, then connects to the control socket; grant a sandbox
 Codex task that directory as a writable root, or approve equivalent local access,
 and do not relocate state or start a second broker to work around a denial.
 
-Federation authority comes only from `nodes.json` in `EMBASSY_STATE_DIR`. It
-must be a current-user-owned mode-0600 regular file whose exact object shape is
+`nodes.json` in `EMBASSY_STATE_DIR` is optional — needed only for federation
+across machines. When it is absent at broker boot, Embassy writes it itself,
+once: mode 0600, naming this host by its own hostname (the first label before
+any dot, lower-cased; `localhost` if that name is not a valid host token),
+with an empty peer list. From that point on the file — not the hostname — is
+this broker's durable identity: a later hostname change (for example a
+network-triggered rename) does not rename it. Federation authority comes only from
+this file: it must be a current-user-owned mode-0600 regular file whose exact
+object shape is
 `{"version":1,"host":"<lowercase-host>","nodes":["<lowercase-ssh-alias>",...]}`.
 `host` names this broker; `nodes` contains 0 through 31 unique OpenSSH aliases,
 omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
-node is the fixed SSH destination for `embassy peer-stdio`. The file is mandatory;
-when it is absent, Embassy prints the exact `nodes:[]` local-only fix and refuses startup.
+node is the fixed SSH destination for `embassy peer-stdio`. To adopt
+federation later, edit the existing file and add peers to `nodes` — keep
+`host` exactly as it already reads; every durable record (routes, consent
+edges, retained bodies) is keyed by that value, so renaming `host` requires
+the [private state reset](#private-state-reset) below, the same as any other
+identity change.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
+
+Examples throughout this documentation write aliases as `name@your-host`;
+substitute your own host — the `hostId` on the broker's ready line — wherever
+`your-host` appears. The commands that name a route this machine owns —
+`register-codex` (including `--succeeds`), `unregister-codex`, `register-peer`,
+`unregister-peer` and `await` — refuse an alias naming any other host, and say
+which host this machine uses and the file that came from. `send` and `reply`
+are not restricted this way: their `--to`, `--from` and `--alias` may name a
+federated peer on another host.
 
 ### Private state reset
 
@@ -39,13 +59,34 @@ and every delivery has settled. Then:
 
 1. Stop the broker.
 2. Move `gateway-state.json` aside so the old ledger remains recoverable.
-3. Keep `nodes.json` in place.
+3. `nodes.json`, if you use federation, is untouched.
 4. Start the version-3 broker to create fresh state.
 5. Re-register routes, select the Claude route, and pair the intended edges.
 
 An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
 does not mutate the state file. There is no conversion command or automatic
 recovery path.
+
+A running broker holds `.gateway-controller.lock` in the state directory,
+recording its pid and the machine name at the time it started. What a later
+start does with a lock it finds depends only on that pid:
+
+| Lock found | What the next start does |
+| --- | --- |
+| Records a **live pid** | Refuses with `GATEWAY_STATE_IN_USE`, and prints the recorded host and pid. Embassy cannot tell a running broker from an unrelated process that inherited the pid number, and that is equally true of a lock written under this machine's earlier name, so it never assumes |
+| Records a **dead pid** | Recovers it automatically, whatever machine name the lock records — renaming a machine cannot wedge its own state directory |
+| Is **empty**, from a crash between creating the file and writing it | Recovers it automatically; it names no owner to check |
+| **Parses, but names no process** (no pid, or one that is not a positive integer) | Refuses with `GATEWAY_STATE_LOCK_UNVERIFIED` and leaves it alone — there is nothing to probe, so nothing may be claimed about it |
+| Is **neither empty nor a readable record** | Refuses with `GATEWAY_STATE_LOCK_UNVERIFIED` and leaves it alone |
+
+Both refusals print a hint naming the lock file: once you have confirmed no
+broker is running anywhere, remove `.gateway-controller.lock` and start again.
+A recovered lock is renamed to `.gateway-controller.lock.stale-<recovered-at>-<uuid>`
+rather than deleted, so a crash stays diagnosable; the timestamp in that name
+is when Embassy recovered it, and a later start removes it once that is more
+than seven days ago. (The file's own timestamps are the crashed broker's and
+can be arbitrarily old, so they are not used.) Never delete a lock while a
+broker is running.
 
 ## Service
 

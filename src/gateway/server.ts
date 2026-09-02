@@ -11,7 +11,7 @@ import { createStatelessCodexOperationTransport, type StatelessCodexOperationTra
 import { createSystemCodexSocketHolderInspector, managedCodexSocketHeldOutsideEmbassy,
   type CodexSocketHolderInspector } from "./codex-socket-holder.js";
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
-import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
+import { ensureGatewayNodeInventoryFile, loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { acquireGatewayInstanceLease, type GatewayInstanceLease } from "./instance-lease.js";
 import { LocalPeerMailboxProvider } from "./peer-mailbox.js";
 import { createLocalClaudeGatewayProvider, createLocalCodexGatewayProvider,
@@ -28,6 +28,7 @@ type Signal = "SIGINT" | "SIGTERM";
 export type GatewayServerDependencies = {
   loadConfig?: (env: NodeJS.ProcessEnv, inventory: GatewayNodeInventory) => GatewayConfig; loginHome?: () => string;
   loadNodeInventory?: (stateDir: string) => Promise<GatewayNodeInventory>;
+  ensureNodeInventoryFile?: (stateDir: string, host: string) => Promise<GatewayNodeInventory>;
   attestClaudeRuntime?: () => Promise<AttestedClaudePeerRuntime>; createClaudeProvider?: (options: LocalClaudeGatewayProviderOptions) => GatewayProviderAdapter;
   acquireInstanceLease?: (home: string) => Promise<GatewayInstanceLease>; createStore?: (config: GatewayConfig) => GatewayStore;
   createCodexOperation?: (options: StatelessCodexOperationTransportOptions) => StatelessCodexOperationTransport; createCodexObservationFactory?: (options: LocalCodexTransportFactoryOptions) => Promise<LocalCodexTransportFactory>;
@@ -91,6 +92,7 @@ export async function runGatewayServer(
   const d = {
     loadConfig: dependencies.loadConfig ?? loadGatewayConfig,
     loadNodeInventory: dependencies.loadNodeInventory ?? loadGatewayNodeInventory,
+    ensureNodeInventoryFile: dependencies.ensureNodeInventoryFile ?? ensureGatewayNodeInventoryFile,
     loginHome: dependencies.loginHome ?? (() => userInfo().homedir),
     attestClaudeRuntime: dependencies.attestClaudeRuntime ?? attestClaudePeerRuntime,
     createClaudeProvider: dependencies.createClaudeProvider ?? createLocalClaudeGatewayProvider,
@@ -118,7 +120,7 @@ export async function runGatewayServer(
     stopped = true; startupAbort?.abort(); return { kind: "shutdown" } as const;
   });
   try {
-    const inventory = await d.loadNodeInventory(path.resolve(defaultGatewayStateDir(env)));
+    let inventory = await d.loadNodeInventory(path.resolve(defaultGatewayStateDir(env)));
     const loaded = d.loadConfig(env, inventory);
     const inboundMode = options.inboundMode ?? loaded.inboundMode;
     if (!(gatewayInboundModes as readonly string[]).includes(inboundMode)) {
@@ -159,6 +161,24 @@ export async function runGatewayServer(
 
     store = d.createStore(config);
     await guarded(store.initialize({ deferPersistence: true }));
+    // The state directory is claimed and locked now: any nodes.json absence
+    // is durably resolved here, once. `config` above was built from the
+    // pre-lock read, so the reloaded file — the durable identity from this
+    // point on — is checked against it for equality here. Only a writer that
+    // raced this boot can make them differ, and a config built on the losing
+    // identity is never run: it refuses instead.
+    inventory = await guarded(d.ensureNodeInventoryFile(config.stateDir, inventory.host));
+    // Host and nodes both, because `allowedHosts` and `peerNodes` are derived
+    // from `nodes`: a config that agrees on the host but not the peer list is
+    // just as wrong as one that disagrees on the host.
+    if (inventory.host !== localHost ||
+      inventory.nodes.length !== config.peerNodes.length ||
+      inventory.nodes.some((node, index) => node !== config.peerNodes[index])) {
+      throw serverError(
+        "GATEWAY_NODE_INVENTORY_CHANGED",
+        `${path.join(config.stateDir, "nodes.json")} changed while the broker was starting: it now names host ${inventory.host} with nodes [${inventory.nodes.join(", ")}], but this start was configured for host ${localHost} with nodes [${config.peerNodes.join(", ")}].`,
+      );
+    }
     const runtime = await guarded(Promise.resolve().then(() => d.attestClaudeRuntime()));
     providers.push(d.createClaudeProvider({
       runtime,
