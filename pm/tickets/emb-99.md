@@ -239,3 +239,9 @@ no support-matrix ceremony, no site work beyond the stub.
   or an explicit skip with reason); the PM asks the adversarial
   reader to check it. Lane branches do not run CI, so this is the
   only guard before main.
+- 2026-09-02 Landing norm for lanes that merged main (because a lane
+  rebase would need a force-push): land the lane's verified TREE as
+  one commit on top of main (`git commit-tree <tree> -p <main>`),
+  message listing the lane's commits; main stays linear; lanes are
+  never force-pushed. Verified tree identity is the gate, not the
+  lane's commit graph.
