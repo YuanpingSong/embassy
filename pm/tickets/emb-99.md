@@ -199,3 +199,9 @@ no support-matrix ceremony, no site work beyond the stub.
   Code / Codex CLI versions the cutover drill ran against, and only
   then may docs say so. Fable-tier engineers/reviewers while the
   Opus limit holds (resets 05:40 ET).
+- 2026-09-02 emb-109 (docs + release) scope additions from the
+  emb-102 gate: delete or rewrite `.claude/agents/content-writer.md`
+  (or add `.claude/` to the oracle roots); scrub bare "dashboard"
+  from GATEWAY-ARCHITECTURE and the dead R1 glob in AGENTS.md; a
+  `site/zh-CN/index.html` redirect stub to the English page (the
+  deleted page was a declared canonical URL).
