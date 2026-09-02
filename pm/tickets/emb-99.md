@@ -249,3 +249,9 @@ no support-matrix ceremony, no site work beyond the stub.
   on the strength of a green check — a conflict-marker sweep is part
   of the gate; the oracle (`^(<<<<<<<|=======|>>>>>>>)( |$)` over
   every shipped file incl. CHANGELOG) lands with emb-106 and stays.
+- 2026-09-02 Norm (emb-107 gate): a read-shaped command never
+  mutates durable state or fires an authorization gate as a side
+  effect — the PM's own "status rescans first" line violated it and
+  was reversed. Throwaway principals minted by a command are
+  ephemeral by construction (never persisted), not cleaned up by
+  hope.
