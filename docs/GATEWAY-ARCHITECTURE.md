@@ -274,6 +274,23 @@ pane also carries the bounded ledger's retained message bodies, so its output is
 as sensitive as the messages themselves.
 The thin skill/CLI exposes the same safe alias list to either provider.
 
+That pane has two forms of the same snapshot. Piped, or with `--json`, it is
+the snapshot verbatim — the form every script and the skill read. On a
+terminal it is rendered by `status-view.ts`, a pure function of the snapshot:
+it derives one plain word per connector (`ok`, `stale`, `degraded`), pairs
+every word that is not `ok` with its safe code and a one-line remedy, marks a
+route whose last observation is older than ten minutes `stale` whatever the
+broker called it, and reports a registered Codex task nobody can observe with
+the succession remedy. A connector that merely has nothing to observe is
+`stale`, never `degraded`, and a shell peer with unclaimed mail never moves
+the overall word at all: silence in a pull mailbox is a fact about the
+operator's other terminal. `embassy watch` tails the same snapshot through
+`observe_snapshot`, printing each new message row once and each settlement
+once. `embassy check` proves the whole path end to end — it registers a
+throwaway `peer-*` principal of its own, sends one marked body through the
+ordinary send path, waits for `delivered`, then awaits the correlated reply on
+its own mailbox, and releases the registration again.
+
 ## Message flows
 
 ### Codex to Claude
@@ -577,9 +594,9 @@ The closed version 3 method family is exactly these fourteen methods:
   shell-peer registration, mailbox, and flush-before-receipt operations.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-fifteen implemented commands are
-`serve`, `service`, `health`, `status`, `delivery-status`, `wait-delivery`,
-`refresh`, `register-codex`, `unregister-codex`, `send`,
+seventeen implemented commands are
+`serve`, `service`, `health`, `status`, `watch`, `check`, `delivery-status`,
+`wait-delivery`, `refresh`, `register-codex`, `unregister-codex`, `send`,
 `reply`, `register-peer`, `unregister-peer`, `await`, and
 `peer-stdio`. `reply --conversation <token> --alias <own-alias>` is a
 deprecated alias for `send --conversation <token> --from <own-alias>`: it
@@ -588,10 +605,15 @@ delivered in older envelopes have aged out. Message bodies are non-empty
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line, and
 for every broker-protocol command it never returns a thread ID,
-provider-native ID, path, address, or message body. `service` is the
-deliberate exception: managing local files is what it does, so it reports its
-own plist path, its log path, and any program path in the plist that is no
-longer on disk. Every command but `serve` and `service` requires a running
+provider-native ID, path, address, or message body. There are three deliberate
+exceptions, each of them about something the operator alone is looking at.
+`service` reports its own plist path, its log path, and any program path in
+the plist that is no longer on disk, because managing local files is what it
+does. `status` on a terminal, `watch`, and `check` render for a person instead
+of emitting that JSON line: `status` and `watch` show the snapshot's own
+retained bodies (previewed to one control-free line) and the resolved state
+directory, and `check` prints its own hops. Piped or with `--json`, `status`
+and `watch` are machine-readable again, and every other command is unchanged. Every command but `serve` and `service` requires a running
 broker: `serve`
 starts one in the current terminal, and `service install|uninstall|status`
 manages the macOS launchd agent that runs one, contacting no broker itself

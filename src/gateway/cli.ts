@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 /** Foreground broker plus bounded metadata-only control client. */
+import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,8 @@ import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-st
 import { boundedServiceDetail, defaultProbeHostLease, defaultRunLaunchctl, installServiceAgent,
   serviceAgentStatus, uninstallServiceAgent, type ProbeHostLease, type RunLaunchctl,
   type ServiceAgentDependencies } from "./service-agent.js";
+import { diffWatch, emptyWatchState, renderStatus, renderWatchEvent, STATUS_RECENT_DEFAULT,
+  STATUS_RECENT_MAX, STATUS_RECENT_MIN, terminalPainter, type WatchState } from "./status-view.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -35,7 +38,7 @@ export const EMBASSY_VERSION = "2.0.1";
 // test/gateway-cli.test.ts package-metadata assertion.
 
 export const gatewayCliCommands = [
-  "serve", "service", "health", "status", "delivery-status",
+  "serve", "service", "health", "status", "watch", "check", "delivery-status",
   "wait-delivery", "refresh", "register-codex",
   "unregister-codex",
   "send", "reply",
@@ -76,6 +79,10 @@ export type GatewayCliDependencies = {
   runLaunchctl?: RunLaunchctl;
   serviceHomeDir?: () => string;
   probeHostLease?: ProbeHostLease;
+  /** Aborts `watch`; production installs SIGINT/SIGTERM handlers instead. */
+  watchSignal?: AbortSignal;
+  /** Best-effort broker pid for the `status` header. */
+  readControllerPid?: (stateDir: string) => Promise<number | undefined>;
 };
 
 const HELP_USAGE = `Embassy — local messaging for Claude Code and Codex
@@ -88,7 +95,12 @@ Commands:
   service install|uninstall|status
                          Run the broker as a macOS launchd agent
   health                 Check broker health
-  status                 Read the public status snapshot
+  status [--json] [--recent <n>]
+                         Show the broker, connectors, routes, and recent
+                         messages; JSON when piped or with --json
+  watch [--json]         Tail messages and route activity until Ctrl-C
+  check [--to <alias>] [--timeout <s>]
+                         Round-trip self-test against a registered peer
   refresh                Rescan for Claude sessions
   register-codex         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task
@@ -177,6 +189,8 @@ const CLI_HINT = {
     "--from must be the sending session's own alias; read the name embassy status shows for this session.",
   targetChanged:
     "the session you addressed renamed or exited while the send was being set up; run embassy refresh and address it by its current name.",
+  checkNoTarget:
+    "no Codex task is registered, so there is nothing to check. Run `embassy register-codex --alias codex-<name>@{localHost}` from inside the task, or name any current route with `embassy check --to <alias>`.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -389,8 +403,7 @@ async function buildRequest(
   loadLocalHost: () => Promise<LocalHostIdentity>,
 ): Promise<GatewayControlRequest> {
   const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
-    health: "health", status: "list_snapshot",
-    refresh: "refresh_discovery",
+    health: "health", refresh: "refresh_discovery",
   };
   const simpleMethod = simple[command];
   if (simpleMethod !== undefined) return envelope(simpleMethod, emptyParams(args));
@@ -398,8 +411,11 @@ async function buildRequest(
     case "serve":
     case "service":
     case "peer-stdio":
+    case "status":
+    case "watch":
+    case "check":
       return fault();
-    case "health": case "status": case "refresh": return fault();
+    case "health": case "refresh": return fault();
     case "delivery-status":
     case "wait-delivery": {
       const options = parseOptions(args, ["token"]);
@@ -638,8 +654,11 @@ async function waitForDelivery(
   sendRequest: GatewayControlSender,
   now: () => number,
   delay: (milliseconds: number) => Promise<void>,
+  // `check` bounds this wait by its own budget; `wait-delivery` keeps waiting
+  // to the broker's delivery deadline, which is hours by default.
+  maximumWaitMs?: number,
 ): Promise<WaitDeliveryOutcome> {
-  let deadline: number | undefined;
+  let deadline: number | undefined = maximumWaitMs === undefined ? undefined : now() + maximumWaitMs;
   while (true) {
     const remaining = deadline === undefined ? undefined : deadline - now();
     if (remaining !== undefined && remaining <= 0) return { kind: "timeout" };
@@ -755,6 +774,224 @@ async function pollServiceHealth(
     await delay(Math.min(SERVICE_HEALTH_POLL_INTERVAL_MS, left));
   }
   return { ok: false, lastObserved, elapsedMs: elapsed() };
+}
+
+
+const WATCH_POLL_INTERVAL_MS = 1_000;
+const CHECK_TIMEOUT_DEFAULT_SECONDS = 60;
+const CHECK_TIMEOUT_MAX_SECONDS = 600;
+/** control.ts refuses a request timeout below this, so it is also the floor here. */
+const CONTROL_MIN_REQUEST_TIMEOUT_MS = 50;
+/**
+ * The unit the attempt bound is counted in while `check` awaits a reply: one
+ * attempt per second of budget, plus one. A broker answering `timeout`
+ * instantly therefore cannot spin the loop even if the clock never moves.
+ */
+const CHECK_REPLY_ATTEMPT_MS = 1_000;
+const CONTROLLER_LOCK_FILE = ".gateway-controller.lock";
+const MAX_CONTROLLER_LOCK_BYTES = 4_096;
+
+/**
+ * Whether stdout is a terminal. Reading the stream's own `isTTY` rather than
+ * `process.stdout` keeps this injectable: a test writes to a capture that
+ * declares `isTTY`, and nothing consults the real process.
+ */
+const isTerminal = (output: Writable): boolean => (output as { isTTY?: unknown }).isTTY === true;
+/** Color is opt-out through NO_COLOR, and never carries meaning by itself. */
+const useColor = (output: Writable, env: NodeJS.ProcessEnv): boolean =>
+  isTerminal(output) && (env.NO_COLOR === undefined || env.NO_COLOR.length === 0);
+
+/** A bounded integer option; anything outside the range is an argument fault. */
+function boundedOption(
+  options: ParsedOptions, name: string, fallback: number, minimum: number, maximum: number,
+): number {
+  const raw = options[name];
+  if (raw === undefined) return fallback;
+  if (typeof raw !== "string" || !/^[0-9]{1,9}$/.test(raw)) fault();
+  const value = Number(raw);
+  if (value < minimum || value > maximum) fault();
+  return value;
+}
+
+/**
+ * The broker's pid, from the controller lock its store writes in the state
+ * directory. Best effort and never throws: `status` prints with or without it,
+ * and that file's path is already named in the CLI's own hints, so this
+ * discloses nothing new.
+ */
+export async function readGatewayControllerPid(stateDir: string): Promise<number | undefined> {
+  try {
+    const lockPath = path.join(stateDir, CONTROLLER_LOCK_FILE);
+    const info = await lstat(lockPath);
+    if (!info.isFile() || info.size > MAX_CONTROLLER_LOCK_BYTES) return undefined;
+    const owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+    return Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0 ? Number(owner.pid) : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * `watch` runs until the operator stops it. Tests inject the signal; a real
+ * terminal gets SIGINT/SIGTERM handlers that are removed again on the way out,
+ * so Ctrl-C ends the tail cleanly instead of killing node with 130.
+ */
+function watchInterrupt(signal: AbortSignal | undefined): {
+  signal: AbortSignal; dispose: () => void;
+} {
+  if (signal !== undefined) return { signal, dispose: () => undefined };
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  return { signal: controller.signal, dispose: () => {
+    process.off("SIGINT", stop); process.off("SIGTERM", stop);
+  } };
+}
+
+type CheckHop = Readonly<{ ok: boolean; name: string; detail: string; elapsedMs?: number }>;
+type GatewayCheckOptions = Readonly<{
+  socketPath: string; hostId: string; target: string; timeoutMs: number;
+  sendRequest: GatewayControlSender; stdout: Writable;
+  now: () => number; delay: (milliseconds: number) => Promise<void>; color: boolean;
+}>;
+
+/**
+ * The round-trip self-test. It mints its own principal — a throwaway `peer-*`
+ * registration — rather than borrowing an inherited Codex or Claude identity,
+ * because the operator running it after a Claude Code or Codex upgrade is
+ * usually in a plain terminal with neither. That also gives the reply
+ * somewhere to arrive: the peer mailbox this process is the only waiter on.
+ * The conversation token returned by the send is the correlation seam; the
+ * echoed id is confirmation printed beside it, never a second identity.
+ */
+async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
+  const { sendRequest, socketPath, stdout } = options;
+  const paint = terminalPainter(options.color);
+  const call = async <M extends GatewayControlMethod>(
+    method: M, params: unknown, timeoutMs?: number,
+  ): Promise<GatewayControlResponse<M>> => await sendRequest({
+    socketPath, request: envelope(method, params) as Extract<GatewayControlRequest, { method: M }>,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+  });
+  const hops: CheckHop[] = [];
+  const emit = (hop: CheckHop): CheckHop => {
+    hops.push(hop);
+    const mark = hop.ok ? paint("ok  ", "green") : paint("FAIL", "red");
+    const timing = hop.elapsedMs === undefined ? "" : `  ${String(hop.elapsedMs)} ms`;
+    stdout.write(`  ${mark}  ${hop.name.padEnd(9)}  ${hop.detail}${timing}\n`);
+    return hop;
+  };
+  const alias = `peer-check-${randomBytes(4).toString("hex")}@${options.hostId}`;
+  const id = randomBytes(4).toString("hex");
+  stdout.write(`embassy check ${id} → ${options.target}\n\n`);
+
+  let stage = options.now();
+  const lap = (): number => {
+    const at = options.now();
+    const elapsed = Math.max(0, Math.round(at - stage));
+    stage = at;
+    return elapsed;
+  };
+  const summarize = (exitCode: number): number => {
+    const failed = hops.find((hop) => !hop.ok && hop.name !== "cleanup");
+    stdout.write(`\n${failed === undefined ? "check passed"
+      : `check failed at the ${failed.name} hop`}\n`);
+    return exitCode;
+  };
+  const registered = await call("register_peer", { alias });
+  if (!registered.ok || !("token" in registered.result)) {
+    emit({ ok: false, name: "register", detail: registered.ok
+      ? `the broker refused a temporary check identity (${registered.result.code})`
+      : registered.error.code, elapsedMs: lap() });
+    return summarize(gatewayCliExitCodes.failure);
+  }
+  const token = registered.result.token;
+  emit({ ok: true, name: "register", detail: alias, elapsedMs: lap() });
+
+  // Every later hop runs inside this closure so that one `finally` releases
+  // the temporary identity and the summary line is printed exactly once,
+  // whichever hop gave up first.
+  const roundTrip = async (): Promise<number> => {
+    // The body names no reply verb: the broker's own reply hint, delivered
+    // inside the provenance envelope, always carries the current one.
+    const text = `[embassy check ${id}] Embassy round-trip self-test. Reply with one line repeating ${id}, using the command in this message's reply hint.`;
+    const sent = await call("send", {
+      fromAlias: alias, toAlias: options.target, text, expectsReply: true, peerToken: token });
+    if (!sent.ok) {
+      emit({ ok: false, name: "send", detail: sent.error.code, elapsedMs: lap() });
+      return gatewayCliExitCodes.failure;
+    }
+    if (!sent.result.accepted) {
+      const { code, reason } = sent.result;
+      emit({ ok: false, name: "send",
+        detail: `${code}${reason === undefined ? "" : ` ${reason}`}`, elapsedMs: lap() });
+      return gatewayCliExitCodes.rejected;
+    }
+    const { conversationId, deliveryToken } = sent.result;
+    emit({ ok: true, name: "send", detail: `accepted, conversation …${conversationId.slice(-8)}`, elapsedMs: lap() });
+
+    const delivery = await waitForDelivery(socketPath,
+      envelope("delivery_status", { token: deliveryToken }) as DeliveryStatusRequest,
+      sendRequest, options.now, options.delay, options.timeoutMs);
+    if (delivery.kind !== "response" || !delivery.response.ok || !delivery.response.result.found ||
+        delivery.response.result.state !== "delivered") {
+      const detail = delivery.kind === "timeout"
+        ? `still unsettled after ${String(Math.round(options.timeoutMs / 1_000))} s`
+        : delivery.kind === "unknown" ? "the delivery token left bounded retention"
+        : !delivery.response.ok ? delivery.response.error.code
+        : delivery.response.result.found
+          ? `${delivery.response.result.state}${delivery.response.result.safeErrorCode === undefined
+            ? "" : ` ${delivery.response.result.safeErrorCode}`}`
+          : "the delivery token left bounded retention";
+      emit({ ok: false, name: "delivered", detail, elapsedMs: lap() });
+      return gatewayCliExitCodes.failure;
+    }
+    emit({ ok: true, name: "delivered", detail: "the peer's transport accepted it", elapsedMs: lap() });
+
+    // Two independent bounds, as everywhere else that polls here: the wall
+    // clock, and an attempt count, so a broker that answers "timeout"
+    // instantly cannot spin this loop forever.
+    const replyDeadline = options.now() + options.timeoutMs;
+    const attempts = Math.ceil(options.timeoutMs / CHECK_REPLY_ATTEMPT_MS) + 1;
+    let answered = false;
+    for (let attempt = 0; attempt < attempts && !answered; attempt += 1) {
+      const remaining = replyDeadline - options.now();
+      if (remaining < CONTROL_MIN_REQUEST_TIMEOUT_MS) break;
+      const waited = await call("await_peer", { alias, token },
+        Math.min(PEER_AWAIT_REQUEST_TIMEOUT_MS, Math.floor(remaining)));
+      if (!waited.ok) {
+        if (waited.error.code === "REQUEST_TIMEOUT") continue;
+        emit({ ok: false, name: "reply", detail: waited.error.code, elapsedMs: lap() });
+        return gatewayCliExitCodes.failure;
+      }
+      if (waited.result.state === "timeout") continue;
+      await call("peer_receipt", { alias, token, receipt: waited.result.receipt });
+      const frame = JSON.parse(waited.result.frame) as {
+        result: { conversationId: string; fromAlias: string; text: string };
+      };
+      if (frame.result.conversationId !== conversationId) continue;
+      emit({ ok: true, name: "reply", detail: `${frame.result.fromAlias}${
+        frame.result.text.includes(id) ? ` echoed ${id}` : ` answered without repeating ${id}`}`,
+        elapsedMs: lap() });
+      answered = true;
+    }
+    if (!answered) {
+      emit({ ok: false, name: "reply", detail:
+        `no reply within ${String(Math.round(options.timeoutMs / 1_000))} s — the peer received the message but did not answer`,
+        elapsedMs: lap() });
+      return gatewayCliExitCodes.failure;
+    }
+    return gatewayCliExitCodes.ok;
+  };
+  let exitCode: number;
+  try {
+    exitCode = await roundTrip();
+  } finally {
+    const released = await call("unregister_peer", { alias, token }).catch(() => undefined);
+    emit({ ok: released?.ok === true, name: "cleanup",
+      detail: released?.ok === true ? "temporary check identity removed"
+        : "the temporary check identity could not be removed; it expires with the broker" });
+  }
+  return summarize(exitCode);
 }
 
 /** Run one command; foreground runners own and release their signal handlers. */
@@ -899,6 +1136,111 @@ export async function runGatewayCli(
         stderr.write(`[embassy] ${failure.message}\n`);
         return failure.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
       }
+    }
+    if (command === "status" || command === "watch" || command === "check") {
+      // Options are parsed before anything is loaded or contacted, so an
+      // unknown flag is a flat argument fault with no side effect at all.
+      const options = command === "status" ? parseOptions(args, ["recent"], ["json"])
+        : command === "watch" ? parseOptions(args, [], ["json"])
+        : parseOptions(args, ["to", "timeout"]);
+      count(options, 0, 2);
+      const recent = boundedOption(options, "recent", STATUS_RECENT_DEFAULT,
+        STATUS_RECENT_MIN, STATUS_RECENT_MAX);
+      const timeoutSeconds = boundedOption(options, "timeout", CHECK_TIMEOUT_DEFAULT_SECONDS,
+        1, CHECK_TIMEOUT_MAX_SECONDS);
+      const target = options.to === undefined ? undefined : requireClaudeSelector(options, "to");
+      const { config } = await loadIdentity();
+      await validateSocket(config.stateDir, config.controlSocketPath);
+      const ask = async <M extends GatewayControlMethod>(
+        method: M, params: unknown,
+      ): Promise<GatewayControlResponse<M>> => await sendRequest({
+        socketPath: config.controlSocketPath,
+        request: envelope(method, params) as Extract<GatewayControlRequest, { method: M }>,
+      });
+
+      if (command === "status") {
+        // The rescan runs first so the names on screen are the ones a send
+        // would resolve. A rescan that refuses is reported in the header
+        // rather than failing the command: a stale list still beats none.
+        const rescan = await ask("refresh_discovery", {});
+        const refreshFailure = !rescan.ok ? rescan.error.code
+          : rescan.result.accepted ? undefined : rescan.result.code;
+        const response = await ask("list_snapshot", {});
+        if (!response.ok) {
+          writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
+          return gatewayCliExitCodes.failure;
+        }
+        if (options.json === true || !isTerminal(stdout)) {
+          success(response.result);
+          return gatewayCliExitCodes.ok;
+        }
+        const pid = await (dependencies.readControllerPid ?? readGatewayControllerPid)(config.stateDir);
+        stdout.write(renderStatus(response.result, {
+          stateDir: config.stateDir, version: EMBASSY_VERSION, recent,
+          color: useColor(stdout, env),
+          ...(pid === undefined ? {} : { pid }),
+          ...(refreshFailure === undefined ? {} : { refreshFailure }),
+        }));
+        return gatewayCliExitCodes.ok;
+      }
+
+      if (command === "watch") {
+        const json = options.json === true;
+        const color = !json && useColor(stdout, env);
+        const interrupt = watchInterrupt(dependencies.watchSignal);
+        const delay = dependencies.delay ?? defaultDelay;
+        let state: WatchState | undefined;
+        let revision: number | undefined;
+        try {
+          while (!interrupt.signal.aborted) {
+            const observed = await ask("observe_snapshot", {});
+            if (!observed.ok) {
+              writeFailure(stdout, stderr, command, observed.error.code, { kind: "failure" });
+              return gatewayCliExitCodes.failure;
+            }
+            if (observed.result.snapshotRevision !== revision) {
+              revision = observed.result.snapshotRevision;
+              const diff = diffWatch(state ?? emptyWatchState, observed.result.snapshot);
+              // The first poll only establishes the baseline: replaying the
+              // whole retained ledger the moment a tail starts is noise.
+              if (state !== undefined) {
+                for (const event of diff.events) {
+                  stdout.write(json ? `${JSON.stringify(event)}\n`
+                    : `${renderWatchEvent(event, color)}\n`);
+                }
+              }
+              state = diff.state;
+            }
+            if (interrupt.signal.aborted) break;
+            await delay(WATCH_POLL_INTERVAL_MS);
+          }
+        } finally {
+          interrupt.dispose();
+        }
+        return gatewayCliExitCodes.ok;
+      }
+
+      let chosen = target;
+      if (chosen === undefined) {
+        const snapshot = await ask("list_snapshot", {});
+        if (!snapshot.ok) {
+          writeFailure(stdout, stderr, command, snapshot.error.code, { kind: "failure" });
+          return gatewayCliExitCodes.failure;
+        }
+        chosen = snapshot.result.routes
+          .filter((route) => route.provider === "codex" && route.enabled)
+          .map((route) => route.alias).sort()[0];
+      }
+      if (chosen === undefined) {
+        throw new CliFault("INVALID_ARGUMENTS", false, "checkNoTarget", undefined,
+          { localHost: config.hostId });
+      }
+      return await runGatewayCheck({
+        socketPath: config.controlSocketPath, hostId: config.hostId, target: chosen,
+        timeoutMs: timeoutSeconds * 1_000, sendRequest, stdout,
+        now: dependencies.now ?? Date.now, delay: dependencies.delay ?? defaultDelay,
+        color: useColor(stdout, env),
+      });
     }
     if (command === "serve") {
       emptyParams(args);

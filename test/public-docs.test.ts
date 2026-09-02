@@ -271,7 +271,7 @@ test("authority docs match the closed control contract", async () => {
   assert.match(architecture, /closed version 3 method family is exactly these fourteen methods/i);
   assert.equal(gatewayControlMethods.length, 14);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
-  assert.match(architecture, /fifteen implemented commands/);
+  assert.match(architecture, /seventeen implemented commands/);
   // The permission model in one sentence, in every authority document.
   assert.match(architecture, /A session already bound under the\s+same \(host, session UUID\) keeps its registration/);
   assert.match(architecture, /operating norm, not an additional gateway identity\s+check/);

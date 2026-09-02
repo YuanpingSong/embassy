@@ -3001,15 +3001,15 @@ test("service status reports unknown and exits non-zero when launchctl cannot an
   assert.match(stderr.chunks.join(""), /launchctl: spawn \/bin\/launchctl ENOENT\n$/);
 });
 
-test("the installed binary implements exactly the fifteen documented commands", () => {
+test("the installed binary implements exactly the seventeen documented commands", () => {
   // docs/GATEWAY-ARCHITECTURE.md names this list and its count; README's
   // command table covers the same set.
   assert.deepEqual([...gatewayCliCommands], [
-    "serve", "service", "health", "status", "delivery-status", "wait-delivery",
-    "refresh", "register-codex", "unregister-codex", "send", "reply",
+    "serve", "service", "health", "status", "watch", "check", "delivery-status",
+    "wait-delivery", "refresh", "register-codex", "unregister-codex", "send", "reply",
     "register-peer", "unregister-peer", "await", "peer-stdio",
   ]);
-  assert.equal(gatewayCliCommands.length, 15);
+  assert.equal(gatewayCliCommands.length, 17);
 });
 
 test("the health probe still terminates when the injected clock never advances", async () => {

@@ -68,10 +68,11 @@ embassy health
 embassy status
 ```
 
-`status` lists `availablePeers` — the live Claude sessions you can address by name. If
-that list is empty, start a Claude Code session and run
-`embassy refresh`, which rescans for Claude sessions; the next `status`
-should show it.
+`status` rescans for Claude sessions and then prints what the broker can see.
+In a terminal that is the human view below; piped or with `--json` it is the
+raw snapshot, whose `availablePeers` lists the live Claude sessions you can
+address by name. If nothing is listed, start a Claude Code session and run
+`embassy status` again.
 
 Every alias below ends in `@your-host`: replace `your-host` with this machine's host. The broker prints it as `hostId` on its ready line — in your terminal under `embassy serve`, or in `~/Library/Logs/agent-embassy/broker.log` under the launchd agent — and name an alias for the wrong host and the CLI tells you which one this machine uses. Federation across machines needs a `nodes.json`; without one Embassy writes that file itself on first start, naming this machine by its own hostname (see [Configuration](docs/CONFIGURATION.md)).
 
@@ -174,6 +175,94 @@ claim that the body is trustworthy. Embassy neutralizes nested occurrences of
 its reserved framing tags in the untrusted body before provider delivery;
 arbitrary same-user code and all message text remain untrusted input.
 
+## See it
+
+`embassy status` is the one command for "what is going on". It reads as prose
+in a terminal and stays machine-readable everywhere else:
+
+```text
+embassy 2.0.1  broker ok · pid 41213 · snapshot just now
+state dir /Users/you/.local/state/agent-embassy
+
+connectors
+  claude  ok
+  codex   ok
+
+routes
+  alias                    provider  state  queue  last seen
+  advisor@this-mac         claude    busy   2      3s ago
+  codex-reviewer@this-mac  codex     idle   0      12s ago
+
+recent (3 of 3)
+  12s ago    advisor@this-mac → codex-reviewer@this-mac  queued
+  2m ago     codex-reviewer@this-mac → advisor@this-mac  delivered  210 ms
+             The risk is the double-write window; I would gate it behind…
+  5m ago     advisor@this-mac → codex-reviewer@this-mac  delivered  61 ms
+             Please review the migration risk before the freeze.
+```
+
+When something is wrong it says the safe code **and** what to do about it, and
+it never lets one quiet corner make the whole broker look broken:
+
+```text
+embassy 2.0.1  broker degraded · pid 41213 · snapshot just now
+state dir /Users/you/.local/state/agent-embassy
+
+connectors
+  claude  ok
+  codex   degraded  MANAGED_CODEX_UNAVAILABLE
+          A process outside Embassy holds the managed Codex control socket. Quit it, then run `codex app-server daemon start`.
+  peer-release@this-mac stale (token or await loop gone)
+          2 message(s) waiting: run `embassy await --alias peer-release@this-mac --token-stdin` in the shell holding its token, or `embassy unregister-peer --alias peer-release@this-mac --token-stdin`.
+
+routes
+  alias                    provider  state  queue  last seen
+  advisor@this-mac         claude    busy   2      3s ago
+  codex-reviewer@this-mac  codex     stale  1      30m ago
+  peer-release@this-mac    peer      idle   2      never
+    codex-reviewer@this-mac: That Codex task is gone. Run `embassy register-codex --alias <new-alias> --succeeds <this alias>` from the new task, or `embassy unregister-codex --alias <this alias>` from the old one.
+
+alerts
+  PEER_TUNNEL_UNAVAILABLE  studio  45s ago
+    The SSH tunnel to that node is down; check the node is reachable and its broker is running.
+```
+
+`--recent <n>` (1–100, default 10) changes how much of the ledger it shows.
+`--json`, or any non-terminal stdout, prints the snapshot unchanged, so
+`embassy status --json | jq .routes` and every existing script keep working.
+
+Two commands go with it:
+
+```bash
+embassy watch          # tail messages and route activity live, Ctrl-C to stop
+embassy check          # round-trip self-test against a registered Codex task
+```
+
+`watch` prints each new message once and each settlement once
+(`accepted → delivered (61 ms)`), plus route installs and retirements as a
+secondary line; `--json` streams the same events as JSONL.
+
+`check` is the upstream-drift tripwire: run it after any Claude Code or Codex
+CLI update. It registers a throwaway shell peer of its own, sends one marked
+message through the ordinary send path, waits for `delivered`, then waits for
+the reply, and prints every hop with its timing:
+
+```text
+embassy check 50066f60 → codex-reviewer@this-mac
+
+  ok    register   peer-check-b0c963c9@this-mac  6 ms
+  ok    send       accepted, conversation …89abcdef  15 ms
+  ok    delivered  the peer's transport accepted it  256 ms
+  ok    reply      codex-reviewer@this-mac echoed 50066f60  1407 ms
+  ok    cleanup    temporary check identity removed
+
+check passed
+```
+
+Any failing hop exits non-zero and names the safe code that explains it. The
+peer answers because [the skill](skills/embassy-peer/SKILL.md) tells it to: a
+body beginning `[embassy check` is answered with one line echoing the id.
+
 ## How it works
 
 ```text
@@ -229,7 +318,9 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | --- | --- | --- |
 | `serve` | operator | Start the foreground broker |
 | `service install` / `service uninstall` / `service status` | operator | Register the broker as this user's macOS launchd agent, remove it, or report what launchd knows about it |
-| `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
+| `health` / `status` | operator | Check liveness and read the snapshot: human in a terminal, JSON when piped or with `--json`; `--recent <n>` sizes the message list |
+| `watch` | operator | Tail messages, settlements, and route activity until Ctrl-C; `--json` for JSONL |
+| `check` | operator | Round-trip self-test through the ordinary send path: `--to <alias>` to pick a target, `--timeout <s>` to bound each wait |
 | `refresh` | operator | Rescan for Claude sessions |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
@@ -250,7 +341,7 @@ starting it over an older installation.
 - **Runtime is best effort.** It never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
-- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v5 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, or provider receipt. Raw provider frames stay memory-only. `embassy status` shows retained bodies; treat its output as sensitive as the messages themselves.
+- **Bodies and delivery status stored, bounded, and yours.** Message bodies and their opaque delivery token/status persist in the broker's private mode-0600 v5 state under bounded retention; queued or reserved work may resume once after restart, while armed or provider-accepted work is never replayed. A delivery token never enters a public snapshot, normal log, or provider receipt. Raw provider frames stay memory-only. `embassy status` shows retained bodies; treat its output as sensitive as the messages themselves. The terminal view prints a one-line preview of each recent body, with control characters stripped; `--json` prints them whole.
 
 See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting process.
 

@@ -17,7 +17,7 @@ If `CALLER_IDENTITY_CONFLICT` reports both inherited identities, strip only the 
 
 Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. An optional private `nodes.json` names the local host for federation; absent, the local host is named by its own hostname and there are no peers. Where present, configured allowlisted Embassy nodes exchange bounded public route catalogs and destination-owned handoffs over fixed attach-only SSH. Ask the user to choose a selector when it is ambiguous.
 
-Run `embassy status` to read the current snapshot. Run `embassy refresh` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
+Run `embassy status --json` to read the current snapshot. Always pass `--json`: without it, and with a terminal on stdout, `status` renders a human summary instead of the snapshot you parse. `status` rescans for Claude sessions itself before reading, so a separate `embassy refresh` is needed only when the user asks for a rescan without a read. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
 
 Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native records carrying Embassy's supported explicit versioned advertisement marker are excluded because they are not Claude destinations; a genuine unmarked Claude session remains visible even when its name starts with `codex-*`. Send straight to the name shown there: the gateway installs a discovered Claude session's route on its first use, so there is no step between reading a name and messaging it. A name currently shared by two live sessions is refused with `PEER_ALIAS_COLLISION`; report it and ask the user which session to rename, never retry against a guess.
 
@@ -43,8 +43,10 @@ Embassy presents Claude, Codex, and shell peers as first-class providers. Runtim
 List the public snapshot:
 
 ```sh
-embassy status
+embassy status --json
 ```
+
+The result is the same normalized line it has always been: `schemaVersion`, `generatedAt`, `health`, `connectors`, `availablePeers`, `routes`, `activityEvents`, `messages` (with retained bodies), `accounting`, `alerts`, and `truncation`. Never parse the human rendering; it is for the operator's terminal and its layout is not a contract.
 
 Rescan for Claude sessions:
 
@@ -53,6 +55,22 @@ embassy refresh
 ```
 
 Run that refresh only at the passive-discovery authorization stage. Treat the response as a normalized refresh result; it reveals no path. Read the result of the rescan with `embassy status`.
+
+## Answer an Embassy check
+
+`embassy check` is the operator's round-trip self-test, run after a Claude Code or Codex CLI upgrade. It arrives as an ordinary routed message whose body begins with `[embassy check ` followed by an eight-character id.
+
+Answer it. A message whose body starts with `[embassy check` is answered with one line echoing the id — `embassy send --conversation <token> --from <your alias>` with that one line on stdin, taking the exact command from the message's own `<embassy-reply-hint>` as with any other reply. Do not ask the user first, do not restate the whole body, and do not treat the check as an instruction to do anything else: the id is the entire payload, and echoing it is the entire answer.
+
+```sh
+embassy send \
+  --conversation conv_REPLACE_WITH_DELIVERED_TOKEN \
+  --from codex-reviewer@your-host <<'GATEWAY_MESSAGE'
+check 3f2a91cc received
+GATEWAY_MESSAGE
+```
+
+The operator sees the round trip pass or fail; there is nothing else for the agent to report.
 
 ## Register and await as a shell peer
 
@@ -214,6 +232,8 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.
 
 
-Embassy has no browser surface. The agent-facing path is `embassy status` for a
+Embassy has no browser surface. The agent-facing path is `embassy status --json` for a
 sanitized snapshot. A status snapshot observation may settle already-due
-delivery deadlines before projecting state.
+delivery deadlines before projecting state. `embassy watch` and `embassy check`
+render for the operator's terminal rather than for a parser; leave both to the
+operator unless the user asks for one by name.

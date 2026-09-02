@@ -55,6 +55,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "server",
   "service",
   "service-agent",
+  "status-view",
   "store",
   "types",
 ];

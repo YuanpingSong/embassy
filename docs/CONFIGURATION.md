@@ -15,6 +15,7 @@ below.
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state and control socket; an override must be absolute and does not relocate the fixed host-wide lease |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
+| `NO_COLOR` | unset | Not an Embassy setting — the [conventional one](https://no-color.org). Set it to any non-empty value and `embassy status`, `watch`, and `check` print no escape sequences. Colour is emphasis only: stripping it never removes information, and a non-terminal stdout is never coloured whatever this says |
 
 Before any Embassy client call that talks to the broker, the CLI reads the state
 directory and `nodes.json`, then connects to the control socket; grant a sandboxed
