@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - zh-CN localization, the `--lang` option, and the copy-table layer (emb-102).
 - Progress watches: `TRACK:`/`DONE:`, `--track`, `--idle-minutes`, `untrack`, the automated liveness nudge, `EMBASSY_TRACKING_ENABLED`, `EMBASSY_MAX_WATCHES` (emb-103). A body beginning `TRACK:` or `DONE:` is now delivered verbatim as an ordinary message. Busy-gating (`ROUTE_BUSY` deferral and requeue), `STEER:`, and the queued-ahead marker are unchanged.
 - `GATEWAY_NODE_INVENTORY_REQUIRED` (emb-106).
+- Consent edges, with `embassy pair` / `embassy unpair`, `embassy select-claude` / `embassy unselect-claude`, `embassy serve --inbound`, and `EMBASSY_MAX_PAIRS` (emb-104). The `pair`, `unpair`, `select_claude`, and `unselect_claude` control methods, the `SENDER_NOT_PAIRED` and `CONSENT_OWNER_HOST_REQUIRED` safe codes, the `consentEdges` inventory in private state and in the public snapshot, and the consent rows on the federation catalog and handoff wire are all gone.
 
 ### Changed
 
@@ -30,6 +31,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Private control protocol is 3; a client and broker on different lines report `CONTROL_VERSION_MISMATCH`.
 - `unregister-codex` against a federated (read-only) route now returns `rejected` with `FEDERATED_ROUTE_READ_ONLY` instead of `not_found` (emb-101).
 - The stall and diagnostic notices written into a Claude session now say ``Run `embassy status` for details`` (emb-102).
+- `send` and `reply` install a discovered Claude session's route on first use; the permission to message is same UID + same host (or a configured node) + alias; the provenance envelope names the sender; a colliding alias is refused with `PEER_ALIAS_COLLISION` at send time (emb-104).
+- Private state keeps schema 5 with a shape change: the retired `consentEdges` key makes an existing file fail the exact-key check, so an older schema-5 state file is refused with `CORRUPT_GATEWAY_STATE` and the documented [private state reset](docs/CONFIGURATION.md#private-state-reset) applies (emb-104).
 
 ## [2.0.1] - 2026-09-01
 

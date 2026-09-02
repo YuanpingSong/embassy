@@ -94,7 +94,6 @@ function snapshot(): GatewaySnapshot {
   return {
     schemaVersion: 2,
     generatedAt: NOW,
-    inboundMode: "paired",
     health: "healthy",
     connectors: [
       {
@@ -161,15 +160,14 @@ function snapshot(): GatewaySnapshot {
         counters: { ...counters },
       },
     ],
-    consentEdges: [],
     activityEvents: [
       {
         sequence: 1,
         timestamp: NOW,
-        kind: "pairing",
-        action: "routes_paired",
+        kind: "registration",
+        action: "claude_route_installed",
         outcome: "accepted",
-        aliases: ["claude-one@build-mac", "codex-main@this-mac"],
+        aliases: ["claude-one@build-mac"],
         operatorAction: true,
       },
     ],
@@ -240,7 +238,6 @@ function snapshot(): GatewaySnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      consentEdges: 0,
       activityEvents: 0,
       messages: 0,
       alerts: 0,
@@ -255,10 +252,6 @@ function handlers(
     health: () => ({ status: "ok", revision: 7 }),
     registerCodex: () => ({ accepted: true, code: "ok" }),
     unregisterCodex: () => ({ accepted: true, code: "ok" }),
-    selectClaude: () => ({ accepted: true, code: "ok" }),
-    unselectClaude: () => ({ accepted: true, code: "ok" }),
-    pair: () => ({ accepted: true, code: "ok" }),
-    unpair: () => ({ accepted: true, code: "ok" }),
     listSnapshot: () => snapshot(),
     observeSnapshot: () => ({ snapshotRevision: 3, snapshot: snapshot() }),
     deliveryStatus: () => ({
@@ -368,8 +361,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
   let registered: ValidatedRegisterCodexParams | undefined;
   let toClaude: ValidatedSendParams | undefined;
   let toCodex: ValidatedSendParams | undefined;
-  let paired: unknown;
-  let unpaired: unknown;
   let reply: unknown;
   const server = await startGatewayControlServer({
     stateDir,
@@ -377,14 +368,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     handlers: handlers({
       registerCodex: (params) => {
         registered = { ...params };
-        return { accepted: true, code: "ok" };
-      },
-      pair: (params) => {
-        paired = { ...params };
-        return { accepted: true, code: "ok" };
-      },
-      unpair: (params) => {
-        unpaired = { ...params };
         return { accepted: true, code: "ok" };
       },
       send: (params) => {
@@ -435,59 +418,12 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       },
     },
   });
-  await sendGatewayControlRequest({
-    socketPath,
-    request: {
-      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "select_claude",
-      params: { alias: "claude-one@build-mac" },
-    },
-  });
-  await sendGatewayControlRequest({
-    socketPath,
-    request: {
-      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "unselect_claude",
-      params: { alias: "claude-one@build-mac" },
-    },
-  });
   assert.deepEqual(registered, {
     alias: "codex-main@this-mac",
     threadId: THREAD_ID,
     hostId: "this-mac",
     busyPolicy: "queue",
   });
-  for (const method of ["pair", "unpair"] as const) {
-    await sendGatewayControlRequest({
-      socketPath,
-      request: {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method,
-        params: {
-          aliases: ["claude-one@this-mac", "codex-main@this-mac"],
-        },
-      },
-    });
-  }
-  const expectedPair = {
-    aliases: ["claude-one@this-mac", "codex-main@this-mac"],
-  };
-  assert.deepEqual(paired, expectedPair);
-  assert.deepEqual(unpaired, expectedPair);
-  await sendGatewayControlRequest({
-    socketPath,
-    request: {
-      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      method: "pair",
-      params: {
-        aliases: ["codex-misleading@this-mac", "peer-misleading@this-mac"],
-      },
-    },
-  });
-  assert.deepEqual(paired, {
-    aliases: ["codex-misleading@this-mac", "peer-misleading@this-mac"],
-  });
-
   const secretText = "transient body that must not appear in the response";
   const outbound = await sendGatewayControlRequest({
     socketPath,
@@ -603,7 +539,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     connectors: 0,
     availablePeers: 0,
     routes: 0,
-    consentEdges: 0,
     activityEvents: 0,
     messages: 0,
     alerts: 0,
@@ -695,10 +630,6 @@ test("only exposes queue-mode lifecycle methods", () => {
     "health",
     "register_codex",
     "unregister_codex",
-    "select_claude",
-    "unselect_claude",
-    "pair",
-    "unpair",
     "list_snapshot",
     "observe_snapshot",
     "delivery_status",
@@ -842,8 +773,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     handlers: handlers({
       registerCodex: count,
       unregisterCodex: count,
-      pair: count,
-      unpair: count,
       deliveryStatus: () => {
         called += 1;
         return { found: false };
@@ -994,35 +923,6 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ["delivery_status", { token: "dlv_too-short" }],
     ["delivery_status", { token: DELIVERY_TOKEN, extra: true }],
     ["observe_snapshot", { extra: true }],
-    ["select_claude", { alias: "claude@this-mac", codexThreadId: THREAD_ID }],
-    ["pair", { aliases: ["one@this-mac", "one@this-mac"] }],
-    ["pair", { aliases: ["one@this-mac"] }],
-    ["pair", { aliases: ["one@this-mac", "two@this-mac"], extra: true }],
-    [
-      "pair",
-      {
-        aliases: ["one@this-mac", "two@this-mac"],
-        threadAttestation: { alias: "three@this-mac", threadId: THREAD_ID },
-      },
-    ],
-    [
-      "pair",
-      {
-        aliases: ["one@this-mac", "two@this-mac"],
-        threadAttestation: {
-          alias: "one@this-mac",
-          threadId: THREAD_ID,
-          provider: "codex",
-        },
-      },
-    ],
-    [
-      "unpair",
-      {
-        claudeAlias: "claude@this-mac",
-        codexAlias: "codex@this-mac",
-      },
-    ],
     [
       "reply",
       {
@@ -1067,6 +967,10 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     "remove_codex_registration",
     "refresh_dashboard",
     "untrack",
+    "select_claude",
+    "unselect_claude",
+    "pair",
+    "unpair",
   ]) {
     assertWireError(
       await rawRequest(socketPath, wireRequest(removedMethod, {})),
@@ -1092,6 +996,53 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     ),
     "INVALID_REQUEST",
   );
+  await server.close();
+});
+
+test("a rejected send crosses the wire as a closed decision without conversation detail", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const codes = ["busy", "not_found", "conflict", "route_mismatch", "unavailable", "rejected"] as const;
+  const remaining = [...codes];
+  const server = await startGatewayControlServer({
+    stateDir,
+    socketPath,
+    handlers: handlers({
+      send: () => ({ accepted: false, code: remaining.shift()! }),
+      reply: () => ({ accepted: false, code: "busy" }),
+    }),
+  });
+
+  for (const code of codes) {
+    const response = await sendGatewayControlRequest({
+      socketPath,
+      request: {
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        method: "send",
+        params: { fromAlias: "codex-main@this-mac", threadId: THREAD_ID,
+          toAlias: "claude-one@build-mac", text: "rejected body sentinel", expectsReply: false },
+      },
+    });
+    assert.equal(response.ok, true);
+    if (!response.ok) assert.fail("send decision");
+    // A refusal carries the decision code and nothing else: no conversation
+    // token, no delivery token, no echo of the body or the thread.
+    assert.deepEqual(response.result, { accepted: false, code });
+    assert.equal(JSON.stringify(response).includes(THREAD_ID), false);
+    assert.equal(JSON.stringify(response).includes("rejected body sentinel"), false);
+  }
+
+  const replied = await sendGatewayControlRequest({
+    socketPath,
+    request: {
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+      method: "reply",
+      params: { conversationId: CONVERSATION_ID, text: "rejected reply sentinel",
+        caller: { kind: "codex", alias: "codex-main@this-mac", threadId: THREAD_ID } },
+    },
+  });
+  assert.equal(replied.ok, true);
+  if (!replied.ok) assert.fail("reply decision");
+  assert.deepEqual(replied.result, { accepted: false, code: "busy" });
   await server.close();
 });
 
@@ -1208,8 +1159,12 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   (retiredConditions.connectors[0] as unknown as Record<string, unknown>).codexDoctor = { conditions: ["managed_layout_missing"] };
   assert.equal(isGatewaySnapshot(retiredConditions), false);
   const { truncation: _omitted, ...withoutTruncation } = snapshot();
-  const { inboundMode: _inboundMode, ...withoutInboundMode } = snapshot();
-  const invalidInboundMode = { ...snapshot(), inboundMode: "closed" };
+  // Retired keys are unknown keys: the closed shape refuses a snapshot that
+  // still advertises an inbound mode or a consent-edge inventory.
+  const retiredInboundMode = { ...snapshot(), inboundMode: "paired" };
+  const retiredConsentEdges = { ...snapshot(), consentEdges: [] };
+  const retiredEdgeTruncation = snapshot();
+  (retiredEdgeTruncation.truncation as unknown as Record<string, number>).consentEdges = 0;
   const invalidCount = snapshot();
   invalidCount.truncation.messages = -1;
   const inconsistentQueueAge = snapshot();
@@ -1229,8 +1184,8 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   const invalidActivityKindAction = snapshot();
   const kindAction = invalidActivityKindAction.activityEvents?.[0];
   assert.ok(kindAction);
-  kindAction.kind = "registration";
-  kindAction.action = "routes_paired";
+  kindAction.kind = "discovery";
+  kindAction.action = "claude_route_installed";
   kindAction.operatorAction = true;
   const invalidAutomaticAuthority = snapshot();
   const automaticAuthority = invalidAutomaticAuthority.activityEvents?.[0];
@@ -1291,8 +1246,9 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   }));
   const candidates = [
     withoutTruncation,
-    withoutInboundMode,
-    invalidInboundMode,
+    retiredInboundMode,
+    retiredConsentEdges,
+    retiredEdgeTruncation,
     invalidCount,
     inconsistentQueueAge,
     staleWatchRows,
@@ -1337,31 +1293,20 @@ test("list_snapshot accepts all derived directions and rejects legacy authority 
   ));
 });
 
-test("list_snapshot validates canonical consent endpoints against route bindings", async () => {
-  const { stateDir, socketPath } = await privateState();
+test("list_snapshot keeps route aliases unique and host-coordinated", async () => {
   const canonical = snapshot();
   const claudeRoute = structuredClone(canonical.routes[1]!);
   claudeRoute.alias = "claude-one@this-mac";
   claudeRoute.host = "this-mac";
   canonical.routes.push(claudeRoute);
-  canonical.consentEdges = [
-    {
-      endpoints: [
-        { alias: claudeRoute.alias, provider: "claude" },
-        { alias: "codex-main@this-mac", provider: "codex" },
-      ],
-      host: "this-mac",
-      counters: { ...canonical.routes[0]!.counters },
-    },
-  ];
-  const reversed = structuredClone(canonical);
-  (reversed.consentEdges[0]!.endpoints as unknown as unknown[]).reverse();
-  const providerMismatch = structuredClone(canonical);
-  (providerMismatch.consentEdges[0]!.endpoints[0] as unknown as { provider: string }).provider = "peer";
-  const widenedEndpoint = structuredClone(canonical);
-  (widenedEndpoint.consentEdges[0]!.endpoints[0] as unknown as Record<string, unknown>).lease = "private";
+  const duplicateAlias = structuredClone(canonical);
+  duplicateAlias.routes.push(structuredClone(claudeRoute));
+  const crossHostAlias = structuredClone(canonical);
+  crossHostAlias.routes[2]!.host = "build-mac";
+  const widenedRoute = structuredClone(canonical);
+  (widenedRoute.routes[2] as unknown as Record<string, unknown>).lease = "private";
   assert.equal(isGatewaySnapshot(canonical), true);
-  assert.ok([reversed, providerMismatch, widenedEndpoint].every(
+  assert.ok([duplicateAlias, crossHostAlias, widenedRoute].every(
     (candidate) => !isGatewaySnapshot(candidate),
   ));
 });
@@ -1380,19 +1325,19 @@ test("activity validation binds each kind to its exact action and authority", as
       operatorAction: true,
     },
   ];
-  const selection = snapshot();
-  selection.activityEvents = [
+  const installed = snapshot();
+  installed.activityEvents = [
     {
       sequence: 2,
       timestamp: NOW,
-      kind: "selection",
-      action: "claude_selected",
+      kind: "registration",
+      action: "claude_route_installed",
       outcome: "accepted",
       aliases: ["claude-main@this-mac"],
       operatorAction: true,
     },
   ];
-  const candidates = [registration, selection];
+  const candidates = [registration, installed];
   const server = await startGatewayControlServer({
     stateDir,
     socketPath,

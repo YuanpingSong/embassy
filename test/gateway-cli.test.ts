@@ -14,7 +14,6 @@ import {
   startGatewayControlServer,
   type GatewayControlHandlers,
   type GatewaySnapshot,
-  type PairParams,
   type ReplyParams,
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
@@ -129,7 +128,7 @@ test("bare invocation and help flags print usage without side effects", async ()
     assert.match(help, /register-peer/);
     assert.match(help, /unregister-peer/);
     assert.match(help, /--token-stdin/);
-    assert.match(help, /pair \[--from <[^>]+> --to <[^>]+>\]/);
+    assert.doesNotMatch(help, /select-claude|unselect-claude|\bpair\b|unpair|--inbound/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.doesNotMatch(help, /dashboard/i);
     assert.doesNotMatch(help, /--lang|zh-CN/);
@@ -138,7 +137,8 @@ test("bare invocation and help flags print usage without side effects", async ()
 });
 
 test("removed compatibility commands fail before configuration or control work", async () => {
-  for (const command of ["compat-check", "compat-certify", "send-to-claude", "send-to-codex", "untrack"]) {
+  for (const command of ["compat-check", "compat-certify", "send-to-claude", "send-to-codex", "untrack",
+    "select-claude", "unselect-claude", "pair", "unpair"]) {
     let worked = false;
     const stdout = capture();
     const stderr = capture();
@@ -191,12 +191,10 @@ function emptySnapshot(): GatewaySnapshot {
   return {
     schemaVersion: 2,
     generatedAt: "2026-08-07T12:34:56.000Z",
-    inboundMode: "paired" as const,
     health: "healthy",
     connectors: [],
     availablePeers: [],
     routes: [],
-    consentEdges: [],
     messages: [],
     accounting: {
       accepted: 0,
@@ -217,7 +215,6 @@ function emptySnapshot(): GatewaySnapshot {
       connectors: 0,
       availablePeers: 0,
       routes: 0,
-      consentEdges: 0,
       messages: 0,
       alerts: 0,
     },
@@ -245,8 +242,7 @@ function input(body = ""): Readable {
 
 test("peer registration emits its credential once and authenticated lifecycle never echoes it", async () => {
   const config = { stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired" as const,
-    stallNoticeMs: 30_000, limits: {} as never };
+    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,     stallNoticeMs: 30_000, limits: {} as never };
   const requests: unknown[] = [];
   const dependencies = (stdout: Capture, env: NodeJS.ProcessEnv = {}, stdin = input()): GatewayCliDependencies => ({
     env, stdin, stdout, stderr: capture(), loadConfig: () => config,
@@ -291,7 +287,7 @@ test("peer stdin framing preserves the body and the three caller principals stay
   const base: GatewayCliDependencies = {
     env: {}, stdout, stderr: capture(), loadConfig: () => ({ stateDir: "/private/state",
       controlSocketPath: "/private/state/control.sock", allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,
-      inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+      stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: unknown }) => { control += 1; requests.push(request);
       return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { accepted: true, code: "ok",
@@ -372,7 +368,7 @@ test("await long-polls silently and acknowledges only after the exact frame flus
   const running = runGatewayCli(["await", "--alias", "peer-cursor@this-mac", "--token-stdin"], {
     env: {}, stdin: input(`${PEER_TOKEN}\n`), stdout, stderr: capture(),
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: { method: string } }) => {
       methods.push(request.method);
@@ -397,7 +393,7 @@ test("await sends no receipt or second stdout frame when stdout fails", async ()
     env: { EMBASSY_PEER_TOKEN: PEER_TOKEN }, stdin: input(), stderr,
     stdout: { write() { throw new Error("synthetic stdout failure"); } },
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, inboundMode: "paired", stallNoticeMs: 30_000, limits: {} as never }),
+      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true, stallNoticeMs: 30_000, limits: {} as never }),
     validateControlSocket: async () => undefined,
     sendRequest: (async ({ request }: { request: { method: string } }) => { methods.push(request.method);
       return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { state: "message", frame: "one frame\n", receipt: PEER_RECEIPT } }; }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
@@ -450,10 +446,6 @@ test("all client commands use one private control socket and expose only normali
   const state = await privateState();
   const registrations: ValidatedRegisterCodexParams[] = [];
   const unregisters: Array<{ alias: string; threadId: string }> = [];
-  const selected: string[] = [];
-  const unselected: string[] = [];
-  const pairs: PairParams[] = [];
-  const unpairs: PairParams[] = [];
   const sendsToClaude: ValidatedSendParams[] = [];
   const sendsToCodex: ValidatedSendParams[] = [];
   const replies: ReplyParams[] = [];
@@ -467,22 +459,6 @@ test("all client commands use one private control socket and expose only normali
     },
     unregisterCodex: (params) => {
       unregisters.push({ ...params });
-      return { accepted: true, code: "ok" };
-    },
-    selectClaude: ({ alias }) => {
-      selected.push(alias);
-      return { accepted: true, code: "ok" };
-    },
-    unselectClaude: ({ alias }) => {
-      unselected.push(alias);
-      return { accepted: true, code: "ok" };
-    },
-    pair: (params) => {
-      pairs.push({ ...params });
-      return { accepted: true, code: "ok" };
-    },
-    unpair: (params) => {
-      unpairs.push({ ...params });
       return { accepted: true, code: "ok" };
     },
     listSnapshot: () => statusSnapshot,
@@ -574,56 +550,6 @@ test("all client commands use one private control socket and expose only normali
     {
       argv: ["unregister-codex", "--alias", "codex-reviewer@this-mac"],
       env: { CODEX_THREAD_ID: THREAD_ID },
-    },
-    {
-      argv: ["select-claude", "--alias", "advisor@this-mac"],
-      env: BOTH_IDENTITIES,
-    },
-    {
-      argv: ["select-claude", "--session", CLAUDE_SESSION_ID.toUpperCase()],
-      env: BOTH_IDENTITIES,
-    },
-    {
-      argv: ["unselect-claude", "--alias", "advisor@this-mac"],
-      env: BOTH_IDENTITIES,
-    },
-    {
-      argv: [
-        "pair",
-        "--from",
-        "advisor@this-mac",
-        "--to",
-        "codex-reviewer@this-mac",
-      ],
-    },
-    {
-      argv: [
-        "unpair",
-        "--from",
-        "advisor@this-mac",
-        "--to",
-        "codex-reviewer@this-mac",
-      ],
-    },
-    {
-      argv: [
-        "pair",
-        "--from",
-        "peer-builder@this-mac",
-        "--to",
-        "codex-builder@this-mac",
-      ],
-      env: {},
-    },
-    {
-      argv: [
-        "unpair",
-        "--from",
-        "codex-misleading@this-mac",
-        "--to",
-        "claude-misleading@this-mac",
-      ],
-      env: {},
     },
     {
       argv: [
@@ -732,24 +658,6 @@ test("all client commands use one private control socket and expose only normali
   assert.deepEqual(unregisters, [
     { alias: "codex-reviewer@this-mac", threadId: THREAD_ID },
   ]);
-  assert.deepEqual(selected, ["advisor@this-mac", CLAUDE_SESSION_ID]);
-  assert.deepEqual(unselected, ["advisor@this-mac"]);
-  assert.deepEqual(pairs, [
-    {
-      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
-    },
-    {
-      aliases: ["peer-builder@this-mac", "codex-builder@this-mac"],
-    },
-  ]);
-  assert.deepEqual(unpairs, [
-    {
-      aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
-    },
-    {
-      aliases: ["codex-misleading@this-mac", "claude-misleading@this-mac"],
-    },
-  ]);
   assert.deepEqual(deliveryStatuses, [DELIVERY_TOKEN, DELIVERY_TOKEN]);
   assert.deepEqual(sendsToClaude, [
     {
@@ -805,8 +713,7 @@ test("the removed --lang option is an argument error and locale environment is i
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-    inboundMode: "paired" as const,
-    limits: {} as never,
+        limits: {} as never,
   });
   // Locale-shaped environment (including the removed EMBASSY_LOCALE) never
   // changes stderr and never fails an invocation on its own.
@@ -917,6 +824,39 @@ test("the removed --lang option is an argument error and locale environment is i
       assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
     }
   }
+
+  // For send and reply the loop above is satisfied by the missing required
+  // options alone. Pin the removed flags against otherwise-valid invocations,
+  // so a reintroduced --track or --idle-minutes cannot pass unnoticed.
+  const otherwiseValid = [
+    ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac", "--track"],
+    ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac", "--idle-minutes", "5"],
+    ["reply", "--conversation", CONVERSATION_ID, "--alias", "advisor@this-mac", "--track"],
+    ["reply", "--conversation", CONVERSATION_ID, "--alias", "advisor@this-mac", "--idle-minutes", "5"],
+  ] as const;
+  for (const argv of otherwiseValid) {
+    const stdout = capture();
+    const stderr = capture();
+    let worked = false;
+    const code = await runGatewayCli(argv, {
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      stdin: input(SECRET_BODY),
+      stdout,
+      stderr,
+      loadConfig: () => { worked = true; throw new Error("must not load configuration"); },
+      validateControlSocket: async () => { worked = true; },
+      sendRequest: async () => { worked = true; throw new Error("must not send"); },
+      runServer: async () => { worked = true; },
+    });
+    assert.equal(code, gatewayCliExitCodes.invalidInput, argv.join(" "));
+    assert.equal(worked, false, argv.join(" "));
+    assert.equal(
+      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error.code,
+      "INVALID_ARGUMENTS",
+      argv.join(" "),
+    );
+    assert.equal(stdout.chunks.join("").includes(SECRET_BODY), false);
+  }
 });
 
 test("all five stderr categories print fixed one-line summaries without private detail", async () => {
@@ -926,8 +866,7 @@ test("all five stderr categories print fixed one-line summaries without private 
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-    inboundMode: "paired" as const,
-    limits: {} as never,
+        limits: {} as never,
   });
   const scenarios = [
     {
@@ -940,12 +879,12 @@ test("all five stderr categories print fixed one-line summaries without private 
     },
     {
       kind: "decision",
-      argv: ["select-claude", "--alias", "advisor@this-mac"],
+      argv: ["refresh"],
       code: gatewayCliExitCodes.rejected,
       sendRequest: async () => ({
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: true as const,
-        result: { accepted: false as const, code: "not_found" },
+        result: { accepted: false as const, code: "unavailable", revision: 4 },
       }),
     },
     {
@@ -1032,7 +971,6 @@ test("genuine control-version mismatches name version skew and client recovery",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -1072,7 +1010,7 @@ test("connect denial and invalid responses print their distinct honest remedies"
     await runGatewayCli(["health"], { env: {}, stdout, stderr,
       loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
-        steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
+        steeringEnabled: true, limits: {} as never }),
       validateControlSocket: async () => undefined,
       sendRequest: async () => { throw new GatewayControlTransportError(code, "private detail"); } });
     assert.equal(JSON.parse(stdout.chunks.join("")).error.code, code);
@@ -1365,7 +1303,6 @@ test("wait-delivery polls at fixed intervals and emits only the terminal status"
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -1426,7 +1363,6 @@ test("wait-delivery returns a retained terminal result after its deadline window
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -1482,8 +1418,7 @@ test("wait-delivery preserves every non-delivered terminal state and uses one fa
           allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
           stallNoticeMs: 30_000,
           steeringEnabled: true,
-          inboundMode: "paired",
-          limits: {} as never,
+            limits: {} as never,
         }),
         validateControlSocket: async () => undefined,
         sendRequest: (async () => {
@@ -1511,8 +1446,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-    inboundMode: "paired" as const,
-    limits: {} as never,
+        limits: {} as never,
   });
 
   const unknownOut = capture();
@@ -1631,7 +1565,6 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
@@ -1665,13 +1598,16 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
 });
 
 test("a broker decision rejection has a distinct fixed exit and no diagnostics", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await runGatewayCli(
-    ["select-claude", "--alias", "advisor@this-mac"],
-    {
-      env: {},
-      stdin: input(),
+  const decide = async (
+    argv: readonly string[],
+    result: { accepted: false; code: string },
+    env: NodeJS.ProcessEnv,
+  ) => {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(argv, {
+      env,
+      stdin: input(SECRET_BODY),
       stdout,
       stderr,
       loadConfig: () => ({
@@ -1680,28 +1616,75 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        inboundMode: "paired",
         limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => ({
         protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
         ok: true,
-        result: { accepted: false, code: "not_found" },
+        result,
       })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-    },
-  );
+    });
+    return { code, stdout: stdout.chunks.join(""), stderr: stderr.chunks.join("") };
+  };
 
-  assert.equal(code, gatewayCliExitCodes.rejected);
-  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+  // A busy target route is a decision, not a fault: fixed rejected exit, the
+  // broker's own code on stdout, one fixed line on stderr, nothing else.
+  const busy = await decide(
+    ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac"],
+    { accepted: false, code: "busy" },
+    { CODEX_THREAD_ID: THREAD_ID },
+  );
+  assert.equal(busy.code, gatewayCliExitCodes.rejected);
+  assert.deepEqual(JSON.parse(busy.stdout), {
     ok: true,
-    command: "select-claude",
+    command: "send",
+    result: { accepted: false, code: "busy" },
+  });
+  assert.equal(busy.stderr, "[embassy] gateway rejected the request.\n");
+  assert.equal(busy.stdout.includes(SECRET_BODY), false);
+
+  const busyReply = await decide(
+    ["reply", "--conversation", CONVERSATION_ID, "--alias", "advisor@this-mac"],
+    { accepted: false, code: "busy" },
+    { CODEX_THREAD_ID: THREAD_ID },
+  );
+  assert.equal(busyReply.code, gatewayCliExitCodes.rejected);
+  assert.deepEqual(JSON.parse(busyReply.stdout), {
+    ok: true,
+    command: "reply",
+    result: { accepted: false, code: "busy" },
+  });
+  assert.equal(busyReply.stderr, "[embassy] gateway rejected the request.\n");
+
+  // An unknown target is the one rejection with a remedy the operator cannot
+  // guess: routes install on first send, so the fix is a rescan.
+  const unknown = await decide(
+    ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac"],
+    { accepted: false, code: "not_found" },
+    { CODEX_THREAD_ID: THREAD_ID },
+  );
+  assert.equal(unknown.code, gatewayCliExitCodes.rejected);
+  assert.deepEqual(JSON.parse(unknown.stdout), {
+    ok: true,
+    command: "send",
     result: { accepted: false, code: "not_found" },
   });
   assert.equal(
-    stderr.chunks.join(""),
-    "[embassy] gateway rejected the request.\n",
+    unknown.stderr,
+    "[embassy] gateway rejected the request.\n" +
+      "[embassy] no current route answers to that name. A Claude session is addressed by its live name: " +
+      "run embassy refresh, then read embassy status for the name it has now.\n",
   );
+
+  // The hint is bound to the unknown-target decision, never to every rejection.
+  const refused = await decide(
+    ["register-codex", "--alias", "codex-reviewer@this-mac"],
+    { accepted: false, code: "not_found" },
+    { CODEX_THREAD_ID: THREAD_ID },
+  );
+  assert.equal(refused.code, gatewayCliExitCodes.rejected);
+  assert.equal(refused.stderr, "[embassy] gateway rejected the request.\n");
 });
 
 test("registration stays record-only and localizes the rejection", async () => {
@@ -1711,8 +1694,7 @@ test("registration stays record-only and localizes the rejection", async () => {
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-    inboundMode: "paired" as const,
-    limits: {} as never,
+        limits: {} as never,
   };
 
   const expected = "[embassy] gateway rejected the request.\n";
@@ -1850,17 +1832,6 @@ test("identity, stdin, and argument failures happen before any control request",
       argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: {},
       code: "CODEX_IDENTITY_REQUIRED",
-    },
-    {
-      argv: [
-        "pair",
-        "--claude",
-        "advisor@this-mac",
-        "--to",
-        "codex-reviewer@this-mac",
-      ],
-      env: { CODEX_THREAD_ID: THREAD_ID },
-      code: "INVALID_ARGUMENTS",
     },
     {
       argv: [
@@ -2009,7 +1980,7 @@ test("peer-stdio attests the private control socket before opening the protocol"
     env: {}, stdout: capture(), stderr: capture(),
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
       allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
-      inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
+      stallNoticeMs: 2_500, limits: {} as never }),
     loadNodeInventory: async () => ({ host: "studio", nodes: ["m5dev"] }),
     validateControlSocket: async () => { throw new Error("unsafe socket"); },
     sendRequest: async () => { requested = true; throw new Error("must not send"); },
@@ -2027,7 +1998,7 @@ test("peer-stdio sources initialization authority from the running broker", asyn
     env: {}, stdout: capture(), stderr: capture(),
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
       allowedHosts: ["m5dev", "this-mac"], hostId: "this-mac", peerNodes: [], steeringEnabled: true,
-      inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
+      stallNoticeMs: 2_500, limits: {} as never }),
     loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"] }),
     validateControlSocket: async () => undefined,
     sendRequest: async () => ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false,
@@ -2044,12 +2015,12 @@ test("peer-stdio sources initialization authority from the running broker", asyn
 test("peer-stdio consumes its initialization catalog once, then returns to broker authority", async () => {
   let handler: Parameters<NonNullable<GatewayCliDependencies["runPeerStdio"]>>[0] | undefined, requests = 0;
   const catalog = { revision: 1, complete: true, truncated: false, generatedAt: "2026-08-17T12:00:00.000Z",
-    health: "healthy", connectors: [], routes: [], consentEdges: [], alerts: [] } as const;
+    health: "healthy", connectors: [], routes: [], alerts: [] } as const;
   const code = await runGatewayCli(["peer-stdio"], {
     env: {}, stdout: capture(), stderr: capture(),
     loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
       allowedHosts: ["m5dev", "this-mac"], hostId: "m5dev", peerNodes: ["this-mac"], steeringEnabled: true,
-      inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }),
+      stallNoticeMs: 2_500, limits: {} as never }),
     loadNodeInventory: async () => ({ host: "m5dev", nodes: ["this-mac"] }),
     validateControlSocket: async () => undefined,
     sendRequest: (async () => { requests += 1; return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: catalog }; }) as
@@ -2063,22 +2034,22 @@ test("peer-stdio consumes its initialization catalog once, then returns to broke
   assert.deepEqual(await handler.handlers.catalog(), catalog); assert.equal(requests, 2);
 });
 
-test("pair and unpair preserve cross-host aliases and owner authority", async () => {
-  for (const command of ["pair", "unpair"] as const) {
-    const stdout = capture(), stderr = capture(); let request: unknown;
-    const code = await runGatewayCli([command, "--from", "advisor@studio", "--to", "codex-main@m5dev"], {
-      env: {}, stdout, stderr, loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
-        allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
-        inboundMode: "paired", stallNoticeMs: 2_500, limits: {} as never }), validateControlSocket: async () => undefined,
-      sendRequest: ((input: { request: unknown }) => { request = input.request; return Promise.resolve({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true,
-        result: { accepted: false, code: "conflict", ownerHost: "m5dev" } }); }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-    });
-    assert.equal(code, gatewayCliExitCodes.rejected);
-    assert.deepEqual(request, { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: command,
-      params: { aliases: ["advisor@studio", "codex-main@m5dev"] } });
-    assert.equal((JSON.parse(stdout.chunks.join("")) as { result: { ownerHost: string } }).result.ownerHost, "m5dev");
-    assert.match(stderr.chunks.join(""), /gateway rejected/);
-  }
+test("send preserves cross-host aliases exactly as typed", async () => {
+  const stdout = capture(), stderr = capture(); let request: unknown;
+  const code = await runGatewayCli(["send", "--from", "codex-main@studio", "--to", "advisor@m5dev"], {
+    env: { CODEX_THREAD_ID: THREAD_ID }, stdin: input(SECRET_BODY), stdout, stderr,
+    loadConfig: () => ({ stateDir: "/private/state", controlSocketPath: "/private/state/control.sock",
+      allowedHosts: ["studio", "m5dev"], hostId: "studio", peerNodes: ["m5dev"], steeringEnabled: true,
+      stallNoticeMs: 2_500, limits: {} as never }), validateControlSocket: async () => undefined,
+    sendRequest: ((input: { request: unknown }) => { request = input.request; return Promise.resolve({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true,
+      result: { accepted: false, code: "unavailable" } }); }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+  });
+  assert.equal(code, gatewayCliExitCodes.rejected);
+  assert.deepEqual(request, { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send",
+    params: { fromAlias: "codex-main@studio", toAlias: "advisor@m5dev", text: SECRET_BODY,
+      expectsReply: false, threadId: THREAD_ID } });
+  assert.match(stderr.chunks.join(""), /gateway rejected/);
+  assert.equal(stdout.chunks.join("").includes(SECRET_BODY), false);
 });
 
 test("serve emits one normalized ready result without using the client socket or stdin", async () => {
@@ -2111,7 +2082,6 @@ test("serve emits one normalized ready result without using the client socket or
     runServer: async (options) => {
       calls += 1;
       assert.equal(options.env, env);
-      assert.equal(options.inboundMode, "paired");
       await options.onReady({
         status: "ready",
         hostId: "this-mac",
@@ -2137,29 +2107,15 @@ test("serve emits one normalized ready result without using the client socket or
   assert.equal(stdout.chunks.join("").includes(CLAUDE_SOCKET_PATH), false);
 });
 
-test("serve accepts only the exact explicit open-inbound opt-out", async () => {
-  let observedMode: string | undefined;
-  const exitCode = await runGatewayCli(["serve", "--inbound", "open"], {
-    env: {},
-    stdout: capture(),
-    stderr: capture(),
-    runServer: async (options) => {
-      observedMode = options.inboundMode;
-      await options.onReady({
-        status: "ready",
-        hostId: "this-mac",
-        codexMode: "native_messaging",
-      });
-    },
-  });
-  assert.equal(exitCode, gatewayCliExitCodes.ok);
-  assert.equal(observedMode, "open");
-
+test("serve takes no options at all", async () => {
+  // The broker has one inbound posture: same UID, same host (or a configured
+  // node), addressed by alias. There is no mode to opt out of.
   for (const argv of [
+    ["serve", "--inbound", "open"],
     ["serve", "--inbound"],
     ["serve", "--inbound", "paired"],
-    ["serve", "--inbound", "OPEN"],
-    ["serve", "--inbound", "open", "--inbound", "open"],
+    ["serve", "--open"],
+    ["serve", "extra"],
   ]) {
     let started = false;
     const stdout = capture();
@@ -2246,10 +2202,6 @@ test("refresh reports a failed rescan as a decision, not a client-side transport
       health: () => ({ status: "ok", revision: 4 }),
       registerCodex: () => ({ accepted: true, code: "ok" }),
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
-      selectClaude: () => ({ accepted: true, code: "ok" }),
-      unselectClaude: () => ({ accepted: true, code: "ok" }),
-      pair: () => ({ accepted: true, code: "ok" }),
-      unpair: () => ({ accepted: true, code: "ok" }),
       listSnapshot: () => emptySnapshot(),
       observeSnapshot: () => ({ snapshotRevision: 0, snapshot: emptySnapshot() }),
       deliveryStatus: () => ({ found: false }),
@@ -2299,10 +2251,6 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       health: () => ({ status: "ok", revision: 1 }),
       registerCodex: () => ({ accepted: true, code: "ok" }),
       unregisterCodex: () => ({ accepted: true, code: "ok" }),
-      selectClaude: () => ({ accepted: true, code: "ok" }),
-      unselectClaude: () => ({ accepted: true, code: "ok" }),
-      pair: () => ({ accepted: true, code: "ok" }),
-      unpair: () => ({ accepted: true, code: "ok" }),
       listSnapshot: () => emptySnapshot(),
       observeSnapshot: () => ({
         snapshotRevision: 0,

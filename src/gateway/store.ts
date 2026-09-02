@@ -6,19 +6,19 @@ import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import type { GatewayConfig } from "./config.js";
-import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerEndpoint, type PeerHandoffParams } from "./peer-protocol.js";
+import { peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import { deliveryStates, directionId, gatewayActivityActions, gatewayActivityKinds,
   gatewayProviders, gatewayPublicSnapshotLimits, gatewayRegistrationIngressPrefixes,
   parseDirection, projectGatewayPublicSnapshot, routeRegistrationModes } from "./types.js";
 import type { AcceptMessageInput, AcceptMessageResult, AuthorizeMessageInput,
   AuthorizeMessageResult, DeadlinePressureBucket, DedupeRecord, DeliveryState, EnqueueMessageInput,
-  EnqueueMessageResult, EnqueueNativeIngressInput, EnqueueNativeReplyInput,
-  GatewayAccounting, GatewayConsentEdgeRecord, GatewayConsentEndpoint,
+  EnqueueMessageResult, EnqueueNativeIngressInput,
+  GatewayAccounting,
   GatewayMessageActivity, GatewayMessageRecord, GatewayMessageState,
   GatewayPersistedState, GatewayPreparedWriteEvidence, GatewayPrivateRouteInspection,
   GatewayPublicSnapshot, GatewayRouteRecord, GatewayRuntimeActivity,
-  GatewayStoreDependencies, LogicalRouteBinding, MessageDirection, NormalizedMessageEvent,
-  PublicConsentEdgeSnapshot, PublicGatewayActivityEvent, PublicRouteSnapshot,
+  GatewayStoreDependencies, InstallClaudeRouteResult, LogicalRouteBinding, MessageDirection, NormalizedMessageEvent,
+  PublicGatewayActivityEvent, PublicRouteSnapshot,
   RegisterRouteInput, RemoveRouteAtomicResult, ReplaceCodexRegistrationAtomicInput,
   ReplaceCodexRegistrationAtomicResult, ReserveMessageResult, ResolvePrewriteAttemptInput,
   ResolvePrewriteAttemptResult, RouteCounters, SettleAttemptInput,
@@ -193,61 +193,8 @@ function isRoute(value: unknown): value is GatewayRouteRecord {
     isCounters(value.counters)
   );
 }
-function isConsentEndpoint(value: unknown): value is GatewayConsentEndpoint {
-  return (
-    isObject(value) &&
-    hasOnlyKeys(value, ["alias", "provider", "registrationId"]) &&
-    typeof value.alias === "string" &&
-    ALIAS_PATTERN.test(value.alias) &&
-    isProvider(value.provider) &&
-    isPrivateToken(value.registrationId)
-  );
-}
-function compareConsentEndpoints(
-  left: GatewayConsentEndpoint, right: GatewayConsentEndpoint,
-): number {
-  const providerOrder =
-    gatewayProviders.indexOf(left.provider) -
-    gatewayProviders.indexOf(right.provider);
-  return providerOrder !== 0 ? providerOrder : left.alias.localeCompare(right.alias);
-}
-function canonicalConsentEndpoints(
-  left: GatewayRouteRecord, right: GatewayRouteRecord,
-): readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] {
-  const endpoints: [GatewayConsentEndpoint, GatewayConsentEndpoint] = [
-    {
-      alias: left.alias, provider: left.binding.provider,
-      registrationId: left.binding.registrationId,
-    },
-    {
-      alias: right.alias, provider: right.binding.provider,
-      registrationId: right.binding.registrationId,
-    },
-  ];
-  endpoints.sort(compareConsentEndpoints);
-  return endpoints;
-}
-function consentKey(
-  endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint],
-): string {
-  return endpoints
-    .map((endpoint) =>
-      [endpoint.provider, endpoint.alias, endpoint.registrationId].join("\0"),
-    )
-    .join("\0");
-}
-function edgeOwnerHost(endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint]): string {
-  return endpoints.map((endpoint) => aliasHost(endpoint.alias)).sort()[0]!;
-}
 function peerMirrorRegistrationId(host: string, routeRef: string): string {
   return `reg_peer_${createHash("sha256").update(`${host}\0${routeRef}`).digest("base64url").slice(0, 32)}`;
-}
-function sameConsent(
-  left: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
-  right: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null,
-): boolean {
-  if (left === null || right === null) return left === right;
-  return consentKey(left) === consentKey(right);
 }
 function routeModeMatchesHost(
   route: Pick<GatewayRouteRecord, "binding" | "registrationMode">,
@@ -259,28 +206,6 @@ function routeModeMatchesHost(
   return route.binding.hostId === localHost && (route.binding.provider === "claude"
     ? route.registrationMode === "selected_live_peer"
     : route.registrationMode === "explicit_opt_in");
-}
-function isConsentEdge(value: unknown): value is GatewayConsentEdgeRecord {
-  if (
-    !isObject(value) ||
-    !hasOnlyKeys(value, ["endpoints", "createdAt", "updatedAt", "counters"]) ||
-    !Array.isArray(value.endpoints) ||
-    value.endpoints.length !== 2 ||
-    !value.endpoints.every(isConsentEndpoint)
-  ) {
-    return false;
-  }
-  const endpoints = value.endpoints as unknown as readonly [
-    GatewayConsentEndpoint,
-    GatewayConsentEndpoint,
-  ];
-  return (
-    compareConsentEndpoints(endpoints[0], endpoints[1]) < 0 &&
-    endpoints[0].alias !== endpoints[1].alias &&
-    isIsoTimestamp(value.createdAt) &&
-    isIsoTimestamp(value.updatedAt) &&
-    isCounters(value.counters)
-  );
 }
 function isPrepared(value: unknown): value is GatewayPreparedWriteEvidence {
   return (
@@ -317,16 +242,7 @@ function isAttemptAuthority(value: Record<string, unknown>): boolean {
     isPositiveInteger(value.attemptCount) &&
     typeof value.targetRegistrationId === "string" &&
     isPrivateToken(value.targetRegistrationId) &&
-    (value.sourceRegistrationId === null ||
-      isPrivateToken(value.sourceRegistrationId)) &&
-    (value.consentEdge === null ||
-      (Array.isArray(value.consentEdge) &&
-        value.consentEdge.length === 2 &&
-        value.consentEdge.every(isConsentEndpoint) &&
-        compareConsentEndpoints(
-          value.consentEdge[0] as GatewayConsentEndpoint,
-          value.consentEdge[1] as GatewayConsentEndpoint,
-        ) < 0))
+    isPrivateToken(value.sourceRegistrationId)
   );
 }
 function isMessageState(value: unknown): value is GatewayMessageState {
@@ -338,7 +254,7 @@ function isMessageState(value: unknown): value is GatewayMessageState {
   if (value.phase === "reserved") {
     return (
       hasOnlyKeys(value, ["phase", "attemptId", "attemptCount", "targetRegistrationId",
-        "sourceRegistrationId", "consentEdge", "reservedAt"]) &&
+        "sourceRegistrationId", "reservedAt"]) &&
       isAttemptAuthority(value) &&
       isIsoTimestamp(value.reservedAt)
     );
@@ -346,7 +262,7 @@ function isMessageState(value: unknown): value is GatewayMessageState {
   if (value.phase === "armed") {
     return (
       hasOnlyKeys(value, ["phase", "attemptId", "attemptCount", "targetRegistrationId",
-        "sourceRegistrationId", "consentEdge", "armedAt", "prepared"]) &&
+        "sourceRegistrationId", "armedAt", "prepared"]) &&
       isAttemptAuthority(value) &&
       isIsoTimestamp(value.armedAt) &&
       isPrepared(value.prepared)
@@ -355,7 +271,7 @@ function isMessageState(value: unknown): value is GatewayMessageState {
   if (value.phase === "accepted") {
     return (
       hasOnlyKeys(value, ["phase", "attemptId", "attemptCount", "targetRegistrationId",
-        "sourceRegistrationId", "consentEdge", "acceptedAt", "prepared", "lossOutcome"]) &&
+        "sourceRegistrationId", "acceptedAt", "prepared", "lossOutcome"]) &&
       isAttemptAuthority(value) &&
       isIsoTimestamp(value.acceptedAt) &&
       isPrepared(value.prepared) &&
@@ -390,8 +306,8 @@ function isMessage(value: unknown): value is GatewayMessageRecord {
       value,
       ["sequence", "messageId", "messageIdSuffix", "direction", "sourceAlias",
         "targetAlias", "enqueuedAt", "deadlineAt", "bytes", "sourceRegistrationId",
-        "targetRegistrationId", "consentEdge", "state"],
-      ["conversationIdSuffix", "deliveryToken", "body", "pair", "transientTarget", "steer"],
+        "targetRegistrationId", "state"],
+      ["conversationIdSuffix", "deliveryToken", "body", "steer"],
     )
   ) {
     return false;
@@ -423,21 +339,10 @@ function isMessage(value: unknown): value is GatewayMessageRecord {
     (value.deliveryToken === undefined ||
       (typeof value.deliveryToken === "string" &&
         DELIVERY_TOKEN_PATTERN.test(value.deliveryToken))) &&
-    (value.pair === undefined || value.pair === true) &&
-    (value.transientTarget === undefined || value.transientTarget === true) &&
     (value.steer === undefined || value.steer === true) &&
-    (value.sourceRegistrationId === null ||
-      isPrivateToken(value.sourceRegistrationId)) &&
+    isPrivateToken(value.sourceRegistrationId) &&
     (value.targetRegistrationId === null ||
       isPrivateToken(value.targetRegistrationId)) &&
-    (value.consentEdge === null ||
-      (Array.isArray(value.consentEdge) &&
-        value.consentEdge.length === 2 &&
-        value.consentEdge.every(isConsentEndpoint) &&
-        compareConsentEndpoints(
-          value.consentEdge[0] as GatewayConsentEndpoint,
-          value.consentEdge[1] as GatewayConsentEndpoint,
-        ) < 0)) &&
     isMessageState(value.state) &&
     (value.state.phase === "terminal" ||
       value.state.attemptCount <=
@@ -461,7 +366,7 @@ function isDedupe(value: unknown): value is DedupeRecord {
       value,
       ["fingerprint", "messageIdSuffix", "sourceAlias", "targetAlias", "direction",
         "firstSeenAt", "expiresAt"],
-      ["conversationIdSuffix", "pair"],
+      ["conversationIdSuffix"],
     ) &&
     typeof value.fingerprint === "string" &&
     FINGERPRINT_PATTERN.test(value.fingerprint) &&
@@ -476,8 +381,7 @@ function isDedupe(value: unknown): value is DedupeRecord {
     isIsoTimestamp(value.expiresAt) &&
     (value.conversationIdSuffix === undefined ||
       (typeof value.conversationIdSuffix === "string" &&
-        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix))) &&
-    (value.pair === undefined || value.pair === true)
+        CONVERSATION_SUFFIX_PATTERN.test(value.conversationIdSuffix)))
   );
 }
 function isAccounting(value: unknown): value is GatewayAccounting {
@@ -570,8 +474,10 @@ function isMessageActivity(value: unknown): value is GatewayMessageActivity {
 export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
+    // Exact keys: a file that still carries the retired `consentEdges` key is
+    // refused here as a corrupt document; the documented recovery is a reset.
     !hasOnlyKeys(value, ["schemaVersion", "commit", "createdAt", "updatedAt", "eventSequence",
-      "routes", "consentEdges", "messages", "dedupe", "rateBuckets", "activity", "accounting"]) ||
+      "routes", "messages", "dedupe", "rateBuckets", "activity", "accounting"]) ||
     value.schemaVersion !== 5 ||
     !isObject(value.commit) ||
     !hasOnlyKeys(value.commit, ["sequence", "id"]) ||
@@ -582,8 +488,6 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
     !isNonNegativeInteger(value.eventSequence) ||
     !Array.isArray(value.routes) ||
     !value.routes.every(isRoute) ||
-    !Array.isArray(value.consentEdges) ||
-    !value.consentEdges.every(isConsentEdge) ||
     !Array.isArray(value.messages) ||
     !value.messages.every(isMessage) ||
     !Array.isArray(value.dedupe) ||
@@ -606,7 +510,6 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
   const registrationIds = state.routes.map((route) => route.binding.registrationId);
   const routeTargets = state.routes.map((route) =>
     [route.binding.provider, route.binding.hostId, route.binding.routeHandle].join("\0"));
-  const edgeKeys = state.consentEdges.map((edge) => consentKey(edge.endpoints));
   const messages = state.messages;
   const activitySequences = state.activity.map((entry) => entry.event.sequence);
   const active = messages.filter((message) => message.state.phase !== "terminal");
@@ -622,7 +525,6 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
     routesByAlias.size !== state.routes.length ||
     new Set(registrationIds).size !== registrationIds.length ||
     new Set(routeTargets).size !== routeTargets.length ||
-    new Set(edgeKeys).size !== edgeKeys.length ||
     new Set(messages.map((message) => message.messageId)).size !== messages.length ||
     new Set(tokens).size !== tokens.length ||
     new Set(attemptIds).size !== attempts.length ||
@@ -635,32 +537,6 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
     new Set(state.rateBuckets.map((entry) => entry.sourceAlias)).size !== state.rateBuckets.length
   ) {
     return false;
-  }
-  for (const message of messages) {
-    const direction = parseDirection(message.direction)!;
-    if (
-      (message.pair === true) !== (message.consentEdge !== null) ||
-      (message.sourceRegistrationId === null &&
-        (direction.sourceProvider !== "claude" || message.pair === true)) ||
-      (message.transientTarget === true &&
-        (direction.targetProvider !== "claude" ||
-          message.pair === true ||
-          message.sourceRegistrationId === null))
-    ) {
-      return false;
-    }
-    if (message.consentEdge !== null) {
-      const source = message.consentEdge.find((endpoint) => endpoint.alias === message.sourceAlias);
-      const target = message.consentEdge.find((endpoint) => endpoint.alias === message.targetAlias);
-      if (
-        source?.provider !== direction.sourceProvider ||
-        target?.provider !== direction.targetProvider ||
-        source.registrationId !== message.sourceRegistrationId ||
-        target.registrationId !== message.targetRegistrationId
-      ) {
-        return false;
-      }
-    }
   }
   const localHosts = new Set(state.routes
     .filter((route) => route.registrationMode !== "federated_peer")
@@ -677,72 +553,19 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
     const prefix = gatewayRegistrationIngressPrefixes[route.binding.provider];
     if (prefix !== undefined && !route.alias.startsWith(prefix)) return false;
   }
-  for (const edge of state.consentEdges) {
-    const [leftEndpoint, rightEndpoint] = edge.endpoints;
-    const left = routesByAlias.get(leftEndpoint.alias);
-    const right = routesByAlias.get(rightEndpoint.alias);
-    if (
-      left?.binding.registrationId !== leftEndpoint.registrationId ||
-      right?.binding.registrationId !== rightEndpoint.registrationId ||
-      left.binding.provider !== leftEndpoint.provider ||
-      right.binding.provider !== rightEndpoint.provider ||
-      (left.binding.hostId === right.binding.hostId &&
-        left.binding.provider === right.binding.provider)
-    ) {
-      return false;
-    }
-  }
   for (const message of active) {
     const target = routesByAlias.get(message.targetAlias);
     const source = routesByAlias.get(message.sourceAlias);
     const direction = parseDirection(message.direction)!;
     if (
       message.targetRegistrationId === null ||
-      (message.transientTarget !== true &&
-        (target?.binding.registrationId !== message.targetRegistrationId ||
-          target.binding.provider !== direction.targetProvider)) ||
-      (message.transientTarget === true && direction.targetProvider !== "claude")
+      target?.binding.registrationId !== message.targetRegistrationId ||
+      target.binding.provider !== direction.targetProvider ||
+      source?.binding.registrationId !== message.sourceRegistrationId ||
+      source.binding.provider !== direction.sourceProvider ||
+      (source.binding.hostId === target.binding.hostId &&
+        source.binding.provider === target.binding.provider)
     ) {
-      return false;
-    }
-    if (message.sourceRegistrationId !== null) {
-      if (
-        source?.binding.registrationId !== message.sourceRegistrationId ||
-        source.binding.provider !== direction.sourceProvider ||
-        (target !== undefined && source.binding.hostId === target.binding.hostId &&
-          source.binding.provider === target.binding.provider)
-      ) {
-        return false;
-      }
-    } else if (
-      direction.sourceProvider !== "claude" ||
-      target === undefined ||
-      aliasHost(message.sourceAlias) !== target.binding.hostId
-    ) {
-      return false;
-    }
-    if (message.transientTarget === true) {
-      if (
-        message.pair === true ||
-        message.consentEdge !== null ||
-        message.sourceRegistrationId === null ||
-        source === undefined ||
-        aliasHost(message.targetAlias) !== source.binding.hostId
-      ) {
-        return false;
-      }
-    }
-    if (message.pair === true) {
-      if (
-        message.consentEdge === null ||
-        source === undefined ||
-        target === undefined ||
-        !sameConsent(message.consentEdge, canonicalConsentEndpoints(source, target)) ||
-        !state.consentEdges.some((edge) => sameConsent(edge.endpoints, message.consentEdge))
-      ) {
-        return false;
-      }
-    } else if (message.consentEdge !== null) {
       return false;
     }
     if (
@@ -750,8 +573,7 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
         message.state.phase === "armed" ||
         message.state.phase === "accepted") &&
       (message.state.sourceRegistrationId !== message.sourceRegistrationId ||
-        message.state.targetRegistrationId !== message.targetRegistrationId ||
-        !sameConsent(message.state.consentEdge, message.consentEdge))
+        message.state.targetRegistrationId !== message.targetRegistrationId)
     ) {
       return false;
     }
@@ -813,9 +635,6 @@ function sameBinding(left: LogicalRouteBinding, right: LogicalRouteBinding): boo
     left.registrationId === right.registrationId
   );
 }
-function aliasHost(alias: string): string {
-  return alias.slice(alias.lastIndexOf("@") + 1);
-}
 async function assertNoSymlinkComponents(candidate: string): Promise<void> {
   let cursor = path.resolve(candidate);
   while (true) {
@@ -852,9 +671,6 @@ async function canonicalFuturePath(candidate: string): Promise<string> {
   }
   return cursor;
 }
-type ConsentEdgeInput = Readonly<{
-  aliases: readonly [string, string];   expectedRegistrationIds: readonly [string, string];
-}>;
 export class GatewayStore {
   readonly config: GatewayConfig;
   rootDir: string;
@@ -899,7 +715,7 @@ export class GatewayStore {
           commit: { sequence: 0, id: this.randomId() },
           createdAt: now.toISOString(), updatedAt: now.toISOString(),
           eventSequence: 0, routes: [],
-          consentEdges: [], messages: [],
+          messages: [],
           dedupe: [], rateBuckets: [],
           activity: [], accounting: emptyAccounting(),
         };
@@ -949,9 +765,6 @@ export class GatewayStore {
   async listLogicalRoutes(): Promise<GatewayPrivateRouteInspection[]> {
     return this.inspectPrivateRoutes();
   }
-  async inspectPrivateConsentEdges(): Promise<GatewayConsentEdgeRecord[]> {
-    return this.read((state) => structuredClone(state.consentEdges));
-  }
   async inspectPrivateRoute(
     alias: string,
   ): Promise<GatewayPrivateRouteInspection | undefined> {
@@ -971,8 +784,7 @@ export class GatewayStore {
     return this.mutate((state, now) => {
       const localHost = this.config.hostId;
       if (!this.config.allowedHosts.includes(peerHost) || peerHost === localHost ||
-        !catalog.complete || catalog.truncated || catalog.routes.some((route) => route.host !== peerHost) ||
-        catalog.consentEdges.some((edge) => edge.ownerHost !== peerHost)) {
+        !catalog.complete || catalog.truncated || catalog.routes.some((route) => route.host !== peerHost)) {
         throw new BridgeError("INVALID_PEER_CATALOG", "The peer catalog is not an exact complete projection for this configured host.");
       }
       const desired = new Map(catalog.routes.map((route) => [route.ref, route]));
@@ -1002,30 +814,6 @@ export class GatewayStore {
         }
         route.enabled = row.enabled; route.updatedAt = now.toISOString();
       }
-      const peerOwned = (edge: GatewayConsentEdgeRecord): boolean => edgeOwnerHost(edge.endpoints) === peerHost &&
-        edge.endpoints.some((endpoint) => endpoint.alias.endsWith(`@${peerHost}`));
-      const desiredEdges: Array<readonly [GatewayConsentEndpoint, GatewayConsentEndpoint]> = [];
-      for (const edge of catalog.consentEdges) {
-        const resolved = edge.endpoints.map((endpoint) => state.routes.find((route) =>
-          route.alias === endpoint.alias && route.binding.provider === endpoint.provider &&
-          (endpoint.host === peerHost ? route.registrationMode === "federated_peer" && route.binding.hostId === peerHost &&
-            route.binding.routeHandle === endpoint.routeRef : endpoint.host === localHost &&
-            route.registrationMode !== "federated_peer" && route.binding.hostId === localHost &&
-            peerRouteRef(localHost, route.binding.registrationId) === endpoint.routeRef))) as [GatewayRouteRecord | undefined, GatewayRouteRecord | undefined];
-        if (resolved[0] === undefined || resolved[1] === undefined || edge.ref !== peerEdgeRef(edge.endpoints))
-          throw new BridgeError("INVALID_PEER_CATALOG", "A peer consent edge does not match current endpoint authority.");
-        desiredEdges.push(canonicalConsentEndpoints(resolved[0], resolved[1]));
-      }
-      const removedEdges = state.consentEdges.filter((edge) => peerOwned(edge) &&
-        !desiredEdges.some((candidate) => sameConsent(edge.endpoints, candidate)));
-      for (const edge of removedEdges) settlements.push(...this.terminalizeConsentEdge(state, edge, now));
-      state.consentEdges = state.consentEdges.filter((edge) => !removedEdges.includes(edge));
-      for (const endpoints of desiredEdges) {
-        if (state.consentEdges.some((edge) => sameConsent(edge.endpoints, endpoints))) continue;
-        if (state.consentEdges.length >= this.config.limits.maxConsentEdges)
-          throw new BridgeError("CONSENT_EDGE_CAPACITY_REACHED", "The bounded consent-edge inventory is full.", true);
-        state.consentEdges.push({ endpoints, createdAt: now.toISOString(), updatedAt: now.toISOString(), counters: emptyCounters() });
-      }
       return { settlements, routes: state.routes.filter((route) => route.registrationMode === "federated_peer" &&
         route.binding.hostId === peerHost).map((route) => ({ alias: route.alias, binding: { ...route.binding },
           registrationMode: route.registrationMode, enabled: route.enabled })) };
@@ -1034,9 +822,11 @@ export class GatewayStore {
   async enqueuePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<EnqueueMessageResult> {
     return this.mutate((state, now) => {
       const localHost = this.config.hostId;
+      // A handoff is authorized by the sending host's nodes.json membership
+      // (checked by the service before this call) plus exact alias addressing
+      // to a mirrored source and a local, enabled target.
       if (!this.config.allowedHosts.includes(peerHost) || peerHost === localHost || handoff.source.host !== peerHost ||
-        handoff.target.host !== localHost || handoff.edgeOwnerHost !== [peerHost, localHost].sort()[0] ||
-        handoff.edgeRef !== peerEdgeRef([handoff.source, handoff.target]))
+        handoff.target.host !== localHost)
         throw new BridgeError("INVALID_PEER_HANDOFF", "The peer handoff does not match this configured direct link.");
       const source = state.routes.find((route) => route.registrationMode === "federated_peer" && route.binding.hostId === peerHost &&
         route.alias === handoff.source.alias && route.binding.provider === handoff.source.provider && route.binding.routeHandle === handoff.source.routeRef);
@@ -1044,21 +834,12 @@ export class GatewayStore {
         route.alias === handoff.target.alias && route.binding.provider === handoff.target.provider &&
         peerRouteRef(localHost, route.binding.registrationId) === handoff.target.routeRef && route.enabled);
       if (source === undefined || target === undefined) throw new BridgeError("ROUTE_UNREGISTERED", "The peer handoff endpoint is no longer current.");
-      const endpoints = canonicalConsentEndpoints(source, target);
-      let edge = state.consentEdges.find((candidate) => sameConsent(candidate.endpoints, endpoints));
-      if (edge === undefined && handoff.edgeOwnerHost === peerHost) {
-        if (state.consentEdges.length >= this.config.limits.maxConsentEdges)
-          throw new BridgeError("CONSENT_EDGE_CAPACITY_REACHED", "The bounded consent-edge inventory is full.", true);
-        edge = { endpoints, createdAt: now.toISOString(), updatedAt: now.toISOString(), counters: emptyCounters() };
-        state.consentEdges.push(edge);
-      }
-      if (edge === undefined) throw new BridgeError("SENDER_NOT_PAIRED", "The peer handoff lacks current exact consent.");
       return this.enqueueResolved(state, now, { body: handoff.body, dedupeKey: `${peerHost}:${handoff.originMessageId}`,
         deadlineAt: handoff.deadlineAt, ...(handoff.conversationCorrelation === undefined ? {} :
           { conversationIdSuffix: handoff.conversationCorrelation }), ...(handoff.steer === true ? { steer: true as const } : {}) },
       { sourceAlias: source.alias, targetAlias: target.alias, direction: directionId(source.binding.provider, target.binding.provider),
         sourceRegistrationId: source.binding.registrationId, targetRegistrationId: target.binding.registrationId,
-        consentEdge: edge.endpoints, pair: true, exposeDeliveryToken: false });
+        exposeDeliveryToken: false });
     });
   }
   async registerRoute(input: RegisterRouteInput): Promise<void> {
@@ -1111,12 +892,8 @@ export class GatewayStore {
       if (route.registrationMode === "federated_peer") {
         throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "A federated route is owned by its peer node; only catalog reconciliation may retire it.");
       }
-      if (
-        input.activity !== undefined &&
-        route.binding.provider !== "codex" &&
-        route.binding.provider !== "claude"
-      ) {
-        throw new BridgeError("INVALID_ROUTE_BINDING", "Only exact Codex unregister or Claude unselection has public activity.");
+      if (input.activity !== undefined && route.binding.provider !== "codex") {
+        throw new BridgeError("INVALID_ROUTE_BINDING", "Only exact Codex unregister has public activity.");
       }
       const settlements = this.terminalizeRegistration(
         state,
@@ -1126,12 +903,7 @@ export class GatewayStore {
       this.removeRegistrationMetadata(state, route);
       if (input.activity !== undefined) {
         this.appendRuntimeActivity(state, now, {
-          kind:
-            route.binding.provider === "claude" ? "selection" : "registration",
-          action:
-            route.binding.provider === "claude"
-              ? "claude_unselected"
-              : "codex_unregistered",
+          kind: "registration", action: "codex_unregistered",
           outcome: "accepted", aliases: [route.alias],
           operatorAction: input.activity.operatorAction,
         });
@@ -1211,13 +983,24 @@ export class GatewayStore {
       return { replaced: true, idempotent: false, settlements };
     });
   }
-  async replaceClaudeSelection(
+  /**
+   * Installs the route of a discovered Claude session on its first send, or
+   * brings an existing route up to date with discovery. The (host, session
+   * UUID) pair is the identity: a session already bound keeps its
+   * registration (and its in-flight conversations) and is renamed if its
+   * current name changed; a route whose alias now names a different session
+   * is displaced, its work settled `cancelled/ENDPOINT_RETIRED`. Both
+   * outcomes are journaled so `embassy status` can show them. Installation
+   * never creates a permission: same-UID, same-host addressing already is
+   * the permission, and the service's alias-collision fence has already run.
+   */
+  async installClaudeRoute(
     replacement: RegisterRouteInput,
-  ): Promise<Readonly<{ settlements: readonly TerminalMessageSettlement[] }>> {
+  ): Promise<InstallClaudeRouteResult> {
     return this.mutate((state, now) => {
       this.validateRouteInput(replacement);
       if (replacement.binding.provider !== "claude") {
-        throw new BridgeError("INVALID_ROUTE_BINDING", "Claude selection replacement requires a Claude logical route.");
+        throw new BridgeError("INVALID_ROUTE_BINDING", "Only a Claude logical route installs on first send.");
       }
       const byAlias = state.routes.find(
         (route) => route.alias === replacement.alias,
@@ -1226,133 +1009,60 @@ export class GatewayStore {
         (route) =>
           route.binding.registrationId === replacement.binding.registrationId,
       );
-      const byTarget = state.routes.find(
+      const byIdentity = state.routes.find(
         (route) =>
           route.binding.provider === "claude" &&
           route.binding.hostId === replacement.binding.hostId &&
           route.binding.routeHandle === replacement.binding.routeHandle,
       );
-      if (
-        (byRegistration === undefined) !== (byTarget === undefined) ||
-        (byRegistration !== undefined && byRegistration !== byTarget)
-      ) {
-        throw new BridgeError("ROUTE_IDENTITY_ALREADY_REGISTERED", "The Claude registration ID and native target do not identify one route.");
+      if (byRegistration !== undefined && byRegistration !== byIdentity) {
+        throw new BridgeError("ROUTE_IDENTITY_ALREADY_REGISTERED", "The Claude registration ID and native session do not identify one route.");
       }
-      const byIdentity = byRegistration;
       if (
-        byAlias !== undefined &&
         byIdentity !== undefined &&
-        byAlias !== byIdentity
+        byIdentity.binding.registrationId !== replacement.binding.registrationId
       ) {
-        throw new BridgeError("ROUTE_IDENTITY_ALREADY_REGISTERED", "The Claude alias and logical identity belong to distinct selections.");
+        throw new BridgeError("ROUTE_IDENTITY_ALREADY_REGISTERED", "The native Claude session is already registered under another identity.");
       }
-      const current = byIdentity ?? byAlias;
-      if (current === undefined) {
+      const settlements: TerminalMessageSettlement[] = [];
+      if (byAlias !== undefined && byAlias !== byIdentity) {
+        if (byAlias.binding.provider !== "claude" || byAlias.registrationMode === "federated_peer") {
+          throw new BridgeError("ROUTE_ALIAS_ALREADY_REGISTERED", "The alias belongs to a route that a Claude session cannot displace.");
+        }
+        settlements.push(...this.terminalizeRegistration(
+          state, byAlias.binding.registrationId, now, "ENDPOINT_RETIRED",
+        ));
+        this.removeRegistrationMetadata(state, byAlias);
+        this.appendRuntimeActivity(state, now, {
+          kind: "registration", action: "claude_route_retired",
+          outcome: "accepted", aliases: [byAlias.alias], operatorAction: true,
+        });
+      }
+      if (byIdentity === undefined) {
         if (state.routes.length >= this.config.limits.maxRoutes) {
           throw new BridgeError("ROUTE_CAPACITY_REACHED", "The bounded logical route inventory is full.", true);
         }
         state.routes.push(routeRecord(replacement, now));
-        return { settlements: [] };
+        this.appendRuntimeActivity(state, now, {
+          kind: "registration", action: "claude_route_installed",
+          outcome: "accepted", aliases: [replacement.alias], operatorAction: true,
+        });
+        return { installed: true, settlements };
       }
-      if (
-        current.binding.routeHandle === replacement.binding.routeHandle &&
-        current.binding.registrationId === replacement.binding.registrationId
-      ) {
+      const priorAlias = byIdentity.alias;
+      if (priorAlias !== replacement.alias) {
         this.renameRegistrationCoordinates(
-          state,
-          current.alias,
-          replacement.alias,
-          current.binding.registrationId,
+          state, priorAlias, replacement.alias, byIdentity.binding.registrationId,
         );
-        current.alias = replacement.alias;
-        current.enabled = true;
-        current.updatedAt = now.toISOString();
-        return { settlements: [] };
+        byIdentity.alias = replacement.alias;
+        this.appendRuntimeActivity(state, now, {
+          kind: "registration", action: "claude_route_installed",
+          outcome: "accepted", aliases: [priorAlias, replacement.alias], operatorAction: true,
+        });
       }
-      const settlements = this.terminalizeRegistration(
-        state,
-        current.binding.registrationId,
-        now,
-      );
-      this.removeRegistrationMetadata(state, current);
-      state.routes.push(routeRecord(replacement, now));
-      return { settlements };
-    });
-  }
-  async hasConsentEdge(input: ConsentEdgeInput): Promise<boolean> {
-    return this.read((state) => {
-      const pair = this.resolvePair(
-        state,
-        input.aliases,
-        false,
-        input.expectedRegistrationIds,
-      );
-      return (
-        pair !== undefined &&
-        state.consentEdges.some((edge) =>
-          sameConsent(edge.endpoints, pair.endpoints),
-        )
-      );
-    });
-  }
-  async addConsentEdge(input: ConsentEdgeInput): Promise<void> {
-    await this.mutate((state, now) => {
-      const pair = this.resolvePair(
-        state,
-        input.aliases,
-        true,
-        input.expectedRegistrationIds,
-      )!;
-      if (
-        state.consentEdges.some((edge) =>
-          sameConsent(edge.endpoints, pair.endpoints),
-        )
-      ) {
-        return;
-      }
-      if (state.consentEdges.length >= this.config.limits.maxConsentEdges) {
-        throw new BridgeError("CONSENT_EDGE_CAPACITY_REACHED", "The bounded consent-edge inventory is full.", true);
-      }
-      state.consentEdges.push({
-        endpoints: pair.endpoints, createdAt: now.toISOString(),
-        updatedAt: now.toISOString(), counters: emptyCounters(),
-      });
-    });
-  }
-  async removeConsentEdge(
-    input: ConsentEdgeInput,
-  ): Promise<Readonly<{
-    settlements: readonly TerminalMessageSettlement[];
-    unreferencedAliases: readonly string[];
-  }>> {
-    return this.mutate((state, now) => {
-      const pair = this.resolvePair(
-        state,
-        input.aliases,
-        false,
-        input.expectedRegistrationIds,
-      );
-      if (pair === undefined) {
-        return { settlements: [], unreferencedAliases: [] };
-      }
-      const index = state.consentEdges.findIndex((edge) =>
-        sameConsent(edge.endpoints, pair.endpoints),
-      );
-      if (index < 0) return { settlements: [], unreferencedAliases: [] };
-      const edge = state.consentEdges[index]!;
-      const settlements = this.terminalizeConsentEdge(state, edge, now);
-      state.consentEdges.splice(index, 1);
-      return {
-        settlements,
-        unreferencedAliases: edge.endpoints
-          .map((endpoint) => endpoint.alias)
-          .filter(
-            (alias) =>
-              !state.consentEdges.some((candidate) =>
-                candidate.endpoints.some((endpoint) => endpoint.alias === alias),
-              ),
-          ),
-      };
+      byIdentity.enabled = true;
+      byIdentity.updatedAt = now.toISOString();
+      return { installed: priorAlias !== replacement.alias, settlements };
     });
   }
   async enqueueMessage(
@@ -1378,12 +1088,16 @@ export class GatewayStore {
       ) {
         throw new BridgeError("ROUTE_UNREGISTERED", "The correlated source or target registration is no longer installed.");
       }
-      const edge = this.requireConsent(state, source, target);
+      if (
+        source.binding.provider === target.binding.provider &&
+        source.binding.hostId === target.binding.hostId
+      ) {
+        throw new BridgeError("ROUTE_DIRECTION_MISMATCH", "Messages route only between different providers or between configured hosts.");
+      }
       return this.enqueueResolved(state, now, input, {
         sourceAlias: source.alias, targetAlias: target.alias,
         direction: directionId(source.binding.provider, target.binding.provider),
         sourceRegistrationId: source.binding.registrationId, targetRegistrationId: target.binding.registrationId,
-        consentEdge: edge.endpoints, pair: true,
         exposeDeliveryToken: true,
       });
     });
@@ -1416,104 +1130,25 @@ export class GatewayStore {
       ) {
         throw new BridgeError("INVALID_NATIVE_PEER", "The native Claude sender does not match the target host.");
       }
-      const selected = state.routes.find(
+      // The sender's own route was installed by the service on this send;
+      // the exact binding fences a same-alias replacement that raced it.
+      const source = state.routes.find(
         (route) =>
           route.alias === input.source.alias &&
+          route.enabled &&
           route.binding.provider === "claude" &&
           route.binding.routeHandle === input.source.binding.routeHandle &&
           route.binding.registrationId === input.source.binding.registrationId,
       );
-      const edge =
-        selected === undefined
-          ? undefined
-          : state.consentEdges.find((candidate) =>
-              sameConsent(
-                candidate.endpoints,
-                canonicalConsentEndpoints(selected, target),
-              ),
-            );
-      if ((this.config.inboundMode === "paired" || target.registrationMode === "federated_peer") && edge === undefined) {
-        this.recordRejection(
-          state,
-          {
-            sourceAlias: input.source.alias, targetAlias: target.alias,
-            direction: directionId("claude", target.binding.provider),
-            sourceRegistrationId: selected?.binding.registrationId ?? null, targetRegistrationId: target.binding.registrationId,
-            consentEdge: null,
-          },
-          Buffer.byteLength(input.body, "utf8"),
-          now,
-          "SENDER_NOT_PAIRED",
-          input,
-        );
-        throw new CommitAndThrow(
-          new BridgeError(
-            "SENDER_NOT_PAIRED",
-            "The native Claude sender lacks exact durable consent.",
-          ),
-        );
+      if (source === undefined) {
+        throw new BridgeError("ROUTE_UNREGISTERED", "The native Claude sender's route is no longer current.");
       }
       return this.enqueueResolved(state, now, input, {
-        sourceAlias: input.source.alias, targetAlias: target.alias,
+        sourceAlias: source.alias, targetAlias: target.alias,
         direction: directionId("claude", target.binding.provider),
-        sourceRegistrationId:
-          selected?.binding.registrationId ?? null,
-        targetRegistrationId: target.binding.registrationId, consentEdge: edge?.endpoints ?? null,
-        ...(edge === undefined ? {} : { pair: true as const }),
-        exposeDeliveryToken: false,
-      });
-    });
-  }
-  async enqueueNativeReply(
-    input: EnqueueNativeReplyInput,
-  ): Promise<EnqueueMessageResult> {
-    return this.mutate((state, now) => {
-      if (
-        !ALIAS_PATTERN.test(input.sourceAlias) ||
-        !isPrivateToken(input.expectedSourceRegistrationId)
-      ) {
-        throw new BridgeError("INVALID_ROUTE_BINDING", "The native reply source authority is malformed.");
-      }
-      const source = state.routes.find(
-        (route) => route.alias === input.sourceAlias && route.enabled,
-      );
-      if (
-        source === undefined ||
-        source.binding.registrationId !== input.expectedSourceRegistrationId
-      ) {
-        throw new BridgeError("ROUTE_UNREGISTERED", "The native reply source registration is no longer current.");
-      }
-      if (
-        !isLogicalBinding(input.target.binding) ||
-        input.target.binding.provider !== "claude" ||
-        input.target.binding.hostId !== source.binding.hostId ||
-        !input.target.alias.endsWith(`@${source.binding.hostId}`)
-      ) {
-        throw new BridgeError("INVALID_NATIVE_PEER", "The native Claude reply target does not match the source host.");
-      }
-      const selectedTarget = state.routes.find(
-        (route) =>
-          route.alias === input.target.alias &&
-          route.binding.provider === "claude" &&
-          route.binding.routeHandle === input.target.binding.routeHandle &&
-          route.binding.registrationId === input.target.binding.registrationId,
-      );
-      let edge: GatewayConsentEdgeRecord | undefined;
-      if (input.pair === true) {
-        if (selectedTarget === undefined) {
-          throw new BridgeError("SENDER_NOT_PAIRED", "The reply no longer matches an exact selected Claude route.");
-        }
-        edge = this.requireConsent(state, source, selectedTarget);
-      }
-      return this.enqueueResolved(state, now, input, {
-        sourceAlias: source.alias, targetAlias: input.target.alias,
-        direction: directionId(source.binding.provider, "claude"),
         sourceRegistrationId: source.binding.registrationId,
-        targetRegistrationId:
-          selectedTarget?.binding.registrationId ?? input.target.binding.registrationId,
-        consentEdge: edge?.endpoints ?? null,
-        ...(edge === undefined ? { transientTarget: true as const } : { pair: true as const }),
-        exposeDeliveryToken: input.exposeDeliveryToken === true,
+        targetRegistrationId: target.binding.registrationId,
+        exposeDeliveryToken: false,
       });
     });
   }
@@ -1585,7 +1220,7 @@ export class GatewayStore {
         attemptId,
         attemptCount,
         reservedAt: now.toISOString(), sourceRegistrationId: message.sourceRegistrationId,
-        targetRegistrationId: message.targetRegistrationId, consentEdge: message.consentEdge,
+        targetRegistrationId: message.targetRegistrationId,
       };
       state.accounting.queuedBytes -= message.bytes;
       this.touchMessage(state, message);
@@ -1602,7 +1237,7 @@ export class GatewayStore {
             ? {}
             : { conversationIdSuffix: message.conversationIdSuffix }),
           sourceRegistrationId: message.sourceRegistrationId, targetRegistrationId: message.targetRegistrationId,
-          consentEdge: message.consentEdge, bytes: message.bytes,
+          bytes: message.bytes,
           ...(message.steer === true ? { steer: true as const } : {}),
         },
       };
@@ -1641,34 +1276,24 @@ export class GatewayStore {
       if (
         input.sourceRegistrationId !== message.sourceRegistrationId ||
         input.targetRegistrationId !== message.targetRegistrationId ||
-        (message.transientTarget !== true && target === undefined)
+        target === undefined
       ) {
         return { status: "stale", reason: "registration_changed" };
       }
-      if (message.sourceRegistrationId !== null) {
-        const source = state.routes.find(
-          (route) =>
-            route.alias === message.sourceAlias &&
-            route.binding.registrationId === message.sourceRegistrationId &&
-            route.enabled,
-        );
-        if (source === undefined) {
-          return { status: "stale", reason: "registration_changed" };
-        }
-      }
-      if (
-        message.consentEdge !== null &&
-        !state.consentEdges.some((edge) =>
-          sameConsent(edge.endpoints, message.consentEdge),
-        )
-      ) {
-        return { status: "stale", reason: "consent_removed" };
+      const source = state.routes.find(
+        (route) =>
+          route.alias === message.sourceAlias &&
+          route.binding.registrationId === message.sourceRegistrationId &&
+          route.enabled,
+      );
+      if (source === undefined) {
+        return { status: "stale", reason: "registration_changed" };
       }
       const authority = message.state;
       message.state = {
         phase: "armed", attemptId: authority.attemptId,
         attemptCount: authority.attemptCount, targetRegistrationId: authority.targetRegistrationId,
-        sourceRegistrationId: authority.sourceRegistrationId, consentEdge: authority.consentEdge,
+        sourceRegistrationId: authority.sourceRegistrationId,
         armedAt: now.toISOString(), prepared: { ...input.prepared },
       };
       this.touchMessage(state, message);
@@ -1688,7 +1313,7 @@ export class GatewayStore {
       message.state = {
         phase: "accepted", attemptId: authority.attemptId,
         attemptCount: authority.attemptCount, targetRegistrationId: authority.targetRegistrationId,
-        sourceRegistrationId: authority.sourceRegistrationId, consentEdge: authority.consentEdge,
+        sourceRegistrationId: authority.sourceRegistrationId,
         acceptedAt: now.toISOString(), prepared: authority.prepared,
         lossOutcome: input.lossOutcome,
       };
@@ -1844,20 +1469,6 @@ export class GatewayStore {
           mutable: route.registrationMode !== "federated_peer",
         };
       });
-      const consentEdges: PublicConsentEdgeSnapshot[] = state.consentEdges.map(
-        (edge) => ({
-          endpoints: [
-            {
-              alias: edge.endpoints[0].alias, provider: edge.endpoints[0].provider,
-            },
-            {
-              alias: edge.endpoints[1].alias, provider: edge.endpoints[1].provider,
-            },
-          ],
-          host: edgeOwnerHost(edge.endpoints), counters: { ...edge.counters },
-          mutable: edgeOwnerHost(edge.endpoints) === this.config.hostId,
-        }),
-      );
       const currentEvents = state.messages.map((message) =>
         this.projectMessageEvent(message),
       );
@@ -1894,10 +1505,9 @@ export class GatewayStore {
       }
       return projectGatewayPublicSnapshot({
         schemaVersion: 2, generatedAt: now.toISOString(),
-        inboundMode: this.config.inboundMode, health: "offline",
+        health: "offline",
         connectors: [], availablePeers: [],
         routes,
-        consentEdges,
         activityEvents,
         deadlinePressure: {
           configuredDeadlineMs: this.config.limits.messageDeadlineMs,
@@ -1912,7 +1522,7 @@ export class GatewayStore {
         accounting: { ...state.accounting }, alerts: [],
         truncation: {
           connectors: 0, availablePeers: 0,
-          routes: 0, consentEdges: 0,
+          routes: 0,
           activityEvents: 0,
           messages: Math.max(
             0,
@@ -1998,75 +1608,6 @@ export class GatewayStore {
     }
     return route;
   }
-  private resolvePair(
-    state: GatewayPersistedState,
-    aliases: readonly [string, string],
-    required: boolean,
-    expectedRegistrationIds?: readonly [string, string],
-  ):
-    | Readonly<{
-        left: GatewayRouteRecord;
-        right: GatewayRouteRecord;
-        endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint];
-      }>
-    | undefined {
-    if (
-      aliases.length !== 2 ||
-      aliases[0] === aliases[1] ||
-      !aliases.every((alias) => ALIAS_PATTERN.test(alias))
-    ) {
-      if (required) {
-        throw new BridgeError("INVALID_CONSENT_EDGE", "Consent requires two distinct exact route aliases.");
-      }
-      return undefined;
-    }
-    const left = state.routes.find((route) => route.alias === aliases[0]);
-    const right = state.routes.find((route) => route.alias === aliases[1]);
-    if (
-      expectedRegistrationIds === undefined ||
-      !expectedRegistrationIds.every(isPrivateToken)
-    ) {
-      if (required) {
-        throw new BridgeError("INVALID_CONSENT_EDGE", "Consent requires both exact registration identities.");
-      }
-      return undefined;
-    }
-    if (
-      left?.binding.registrationId !== expectedRegistrationIds[0] ||
-      right?.binding.registrationId !== expectedRegistrationIds[1]
-    ) {
-      throw new BridgeError("ROUTE_UNREGISTERED", "A consent endpoint registration is no longer current.");
-    }
-    if (
-      left === undefined ||
-      right === undefined ||
-      (left.binding.provider === right.binding.provider &&
-        left.binding.hostId === right.binding.hostId)
-    ) {
-      if (required) {
-        throw new BridgeError("INVALID_CONSENT_EDGE", "Consent requires distinct providers or distinct configured hosts.");
-      }
-      return undefined;
-    }
-    return {
-      left,
-      right,
-      endpoints: canonicalConsentEndpoints(left, right),
-    };
-  }
-  private requireConsent(
-    state: GatewayPersistedState, source: GatewayRouteRecord,
-    target: GatewayRouteRecord,
-  ): GatewayConsentEdgeRecord {
-    const endpoints = canonicalConsentEndpoints(source, target);
-    const edge = state.consentEdges.find((candidate) =>
-      sameConsent(candidate.endpoints, endpoints),
-    );
-    if (edge === undefined) {
-      throw new BridgeError("SENDER_NOT_PAIRED", "The exact logical routes do not share consent.");
-    }
-    return edge;
-  }
   private enqueueResolved(
     state: GatewayPersistedState, now: Date,
     input: Omit<EnqueueMessageInput, "sourceAlias" | "targetAlias">,
@@ -2074,11 +1615,8 @@ export class GatewayStore {
       sourceAlias: string;
       targetAlias: string;
       direction: MessageDirection;
-      sourceRegistrationId: string | null;
+      sourceRegistrationId: string;
       targetRegistrationId: string;
-      consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
-      pair?: true;
-      transientTarget?: true;
       exposeDeliveryToken: boolean;
     }>,
   ): EnqueueMessageResult {
@@ -2224,13 +1762,8 @@ export class GatewayStore {
       deadlineAt,
       bytes,
       body: input.body,
-      ...(authority.pair === true ? { pair: true as const } : {}),
-      ...(authority.transientTarget === true
-        ? { transientTarget: true as const }
-        : {}),
       ...(input.steer === true ? { steer: true as const } : {}),
       sourceRegistrationId: authority.sourceRegistrationId, targetRegistrationId: authority.targetRegistrationId,
-      consentEdge: authority.consentEdge,
       state: { phase: "queued", attemptCount: 0 },
     };
     state.messages.push(message);
@@ -2244,14 +1777,6 @@ export class GatewayStore {
       source.counters.accepted += 1;
       source.counters.bytesAccepted += bytes;
     }
-    const edge = state.consentEdges.find((candidate) =>
-      sameConsent(candidate.endpoints, authority.consentEdge),
-    );
-    if (edge !== undefined) {
-      edge.counters.accepted += 1;
-      edge.counters.bytesAccepted += bytes;
-      edge.updatedAt = now.toISOString();
-    }
     state.dedupe.push({
       fingerprint,
       messageIdSuffix,
@@ -2260,7 +1785,6 @@ export class GatewayStore {
         : { conversationIdSuffix: input.conversationIdSuffix }),
       sourceAlias: authority.sourceAlias, targetAlias: authority.targetAlias,
       direction: authority.direction,
-      ...(authority.pair === true ? { pair: true as const } : {}),
       firstSeenAt: now.toISOString(),
       expiresAt: new Date(
         now.getTime() + this.config.limits.dedupeTtlMs,
@@ -2274,23 +1798,10 @@ export class GatewayStore {
       messageId,
       messageIdSuffix,
       ...(deliveryToken === undefined ? {} : { deliveryToken }),
-      ...(authority.pair === true ? { pair: true as const } : {}),
       ...(supersededSettlement === undefined
         ? {}
         : { supersededSettlement }),
     };
-  }
-  private terminalizeConsentEdge(
-    state: GatewayPersistedState, edge: GatewayConsentEdgeRecord, now: Date,
-  ): TerminalMessageSettlement[] {
-    return state.messages.filter((message) => message.state.phase !== "terminal" &&
-      sameConsent(message.consentEdge, edge.endpoints)).map((message) => {
-      const outcome = message.state.phase === "armed" ? "ambiguous" :
-        message.state.phase === "accepted" ? message.state.lossOutcome : "cancelled";
-      return this.finishMessage(state, message, outcome, now, outcome === "ambiguous"
-        ? "DISPATCH_OUTCOME_AMBIGUOUS" : outcome === "unconfirmed"
-          ? "DELIVERY_UNCONFIRMED" : "SENDER_NOT_PAIRED");
-    });
   }
   private allocateDeliveryToken(state: GatewayPersistedState): string {
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -2343,11 +1854,8 @@ export class GatewayStore {
       sourceAlias: string;
       targetAlias: string;
       direction: MessageDirection;
-      sourceRegistrationId: string | null;
+      sourceRegistrationId: string;
       targetRegistrationId: string;
-      consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
-      pair?: true;
-      transientTarget?: true;
     }>,
     bytes: number, now: Date,
     safeErrorCode: string,
@@ -2358,13 +1866,6 @@ export class GatewayStore {
       (route) => route.binding.registrationId === authority.sourceRegistrationId,
     );
     if (source !== undefined) source.counters.rejected += 1;
-    const edge = state.consentEdges.find((candidate) =>
-      sameConsent(candidate.endpoints, authority.consentEdge),
-    );
-    if (edge !== undefined) {
-      edge.counters.rejected += 1;
-      edge.updatedAt = now.toISOString();
-    }
     const suffix = this.randomId().replaceAll("-", "").slice(-8).toLowerCase();
     if (!MESSAGE_SUFFIX_PATTERN.test(suffix)) return;
     state.eventSequence += 1;
@@ -2419,13 +1920,6 @@ export class GatewayStore {
       (route) => route.binding.registrationId === message.targetRegistrationId,
     );
     if (target !== undefined) target.counters[outcome] += 1;
-    const edge = state.consentEdges.find((candidate) =>
-      sameConsent(candidate.endpoints, message.consentEdge),
-    );
-    if (edge !== undefined) {
-      edge.counters[outcome] += 1;
-      edge.updatedAt = now.toISOString();
-    }
     return {
       messageId: message.messageId, state: outcome,
       ...(safeErrorCode === undefined ? {} : { safeErrorCode }),
@@ -2457,7 +1951,7 @@ export class GatewayStore {
   }
   private terminalizeRegistration(
     state: GatewayPersistedState, registrationId: string,
-    now: Date,
+    now: Date, cancelledCode: "ROUTE_UNREGISTERED" | "ENDPOINT_RETIRED" = "ROUTE_UNREGISTERED",
   ): TerminalMessageSettlement[] {
     const settlements: TerminalMessageSettlement[] = [];
     for (const message of state.messages) {
@@ -2481,7 +1975,7 @@ export class GatewayStore {
           outcome,
           now,
           outcome === "cancelled"
-            ? "ROUTE_UNREGISTERED"
+            ? cancelledCode
             : outcome === "ambiguous"
               ? "DISPATCH_OUTCOME_AMBIGUOUS"
               : "DELIVERY_UNCONFIRMED",
@@ -2494,13 +1988,6 @@ export class GatewayStore {
     state: GatewayPersistedState, route: GatewayRouteRecord,
   ): void {
     state.routes = state.routes.filter((candidate) => candidate !== route);
-    state.consentEdges = state.consentEdges.filter(
-      (edge) =>
-        !edge.endpoints.some(
-          (endpoint) =>
-            endpoint.registrationId === route.binding.registrationId,
-        ),
-    );
     state.dedupe = state.dedupe.filter(
       (entry) =>
         entry.sourceAlias !== route.alias && entry.targetAlias !== route.alias,
@@ -2520,45 +2007,12 @@ export class GatewayStore {
     ) {
       throw new BridgeError("ROUTE_ALIAS_ALREADY_REGISTERED", "The replacement alias is invalid or already registered.");
     }
-    for (const edge of state.consentEdges) {
-      const updated = edge.endpoints.map((endpoint) =>
-        endpoint.registrationId === registrationId
-          ? { ...endpoint, alias: newAlias }
-          : endpoint,
-      ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
-      updated.sort(compareConsentEndpoints);
-      edge.endpoints = updated;
-    }
     for (const message of state.messages) {
       if (message.sourceRegistrationId === registrationId) {
         message.sourceAlias = newAlias;
       }
       if (message.targetRegistrationId === registrationId) {
         message.targetAlias = newAlias;
-      }
-      if (message.consentEdge !== null) {
-        const updated = message.consentEdge.map((endpoint) =>
-          endpoint.registrationId === registrationId
-            ? { ...endpoint, alias: newAlias }
-            : endpoint,
-        ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
-        updated.sort(compareConsentEndpoints);
-        message.consentEdge = updated;
-      }
-      if (
-        message.state.phase === "reserved" ||
-        message.state.phase === "armed" ||
-        message.state.phase === "accepted"
-      ) {
-        if (message.state.consentEdge !== null) {
-          const updated = message.state.consentEdge.map((endpoint) =>
-            endpoint.registrationId === registrationId
-              ? { ...endpoint, alias: newAlias }
-              : endpoint,
-          ) as [GatewayConsentEndpoint, GatewayConsentEndpoint];
-          updated.sort(compareConsentEndpoints);
-          message.state.consentEdge = updated;
-        }
       }
     }
     for (const entry of state.dedupe) {
@@ -2625,16 +2079,6 @@ export class GatewayStore {
           Date.parse(message.deadlineAt) <= now.getTime()
             ? "MESSAGE_EXPIRED"
             : "CONTROLLER_RESTARTED",
-        );
-        continue;
-      }
-      if (message.transientTarget === true) {
-        this.finishMessage(
-          state,
-          message,
-          "abandoned",
-          now,
-          "CONTROLLER_RESTARTED",
         );
         continue;
       }
@@ -2711,7 +2155,6 @@ export class GatewayStore {
           !routeModeMatchesHost(route, this.config.hostId),
       ) ||
       state.routes.length > this.config.limits.maxRoutes ||
-      state.consentEdges.length > this.config.limits.maxConsentEdges ||
       active.length > this.config.limits.maxQueueMessages ||
       active.filter(
         (message) =>
@@ -3115,7 +2558,7 @@ export class GatewayStore {
     if (isObject(parsed) && Object.hasOwn(parsed, "schemaVersion") && parsed.schemaVersion !== 5) {
       throw new BridgeError(
         "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
-        "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside — nodes.json, if you use federation, is untouched — then restart and re-register, select, and pair routes.",
+        "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside — nodes.json, if you use federation, is untouched — then restart and re-register Codex tasks.",
       );
     }
     if (!isGatewayPersistedStateV5(parsed)) {

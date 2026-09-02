@@ -10,7 +10,7 @@ import type { GatewayConfig } from "../src/gateway/config.js";
 import { spawnPeerClient, type PeerClient, type PeerSpawn } from "../src/gateway/peer-client.js";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { decodePeerResult, peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
+import { decodePeerResult, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
 import {
   GatewayService,
@@ -191,6 +191,12 @@ class FakeProvider implements GatewayProviderAdapter {
     return { ...input, state: "idle" as const };
   }
 
+  workspaceGuard: (() => Promise<void>) | undefined;
+
+  async assertWorkspaceDisjoint(): Promise<void> {
+    await this.workspaceGuard?.();
+  }
+
   async resolveReplyAddress(): Promise<{ routeHandle: string }> {
     return { routeHandle: this.replyRouteHandle };
   }
@@ -313,7 +319,6 @@ function prepared(input: GatewayAdapterDispatchInput): GatewayPreparedWriteEvide
 function limits(messageDeadlineMs = 10_000): GatewayConfig["limits"] {
   return {
     maxRoutes: 16,
-    maxConsentEdges: 24,
     eventCapacity: 64,
     eventTtlMs: 60_000,
     dedupeCapacity: 64,
@@ -345,7 +350,6 @@ async function fixture(
   adapters: readonly GatewayProviderAdapter[],
   options: Readonly<{
     deadlineMs?: number;
-    inboundMode?: GatewayConfig["inboundMode"];
     hostId?: string;
     peerNodes?: readonly string[];
     spawnPeer?: NonNullable<GatewayServiceOptions["spawnPeer"]>;
@@ -364,7 +368,6 @@ async function fixture(
     hostId: options.hostId ?? "this-mac",
     peerNodes: options.peerNodes ?? [],
     steeringEnabled: true,
-    inboundMode: options.inboundMode ?? "paired",
     stallNoticeMs: 2_500,
     limits: limits(options.deadlineMs),
   };
@@ -411,20 +414,13 @@ function route(
   };
 }
 
-async function paired(
+async function routed(
   store: GatewayStore,
   left: RegisterRouteInput,
   right: RegisterRouteInput,
 ): Promise<void> {
   await store.registerRoute(left);
   await store.registerRoute(right);
-  await store.addConsentEdge({
-    aliases: [left.alias, right.alias],
-    expectedRegistrationIds: [
-      left.binding.registrationId,
-      right.binding.registrationId,
-    ],
-  });
 }
 
 const claude = route("claude", "advisor@this-mac", "claude-session-a", "reg_claude_a");
@@ -498,9 +494,6 @@ test("peer principals send both directions and reply through ordinary conversati
     assert.ok(minted.accepted && "token" in minted);
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
-    await subject.handlers.selectClaude({ alias: claude.alias });
-    await subject.handlers.pair({ aliases: ["peer-shell@this-mac", codex.alias] });
-    await subject.handlers.pair({ aliases: ["peer-shell@this-mac", claude.alias] });
     const toCodex = await subject.handlers.send({ fromAlias: "peer-shell@this-mac",
       peerToken: minted.token, toAlias: codex.alias, text: "STEER: peer stays ordinary", expectsReply: true });
     const toClaude = await subject.handlers.send({ fromAlias: "peer-shell@this-mac",
@@ -523,7 +516,7 @@ test("peer principals send both directions and reply through ordinary conversati
   } finally { await subject.close(); }
 });
 
-test("background Claude discovery supports select, pair, send, and exact reply", async () => {
+test("background Claude discovery installs its route on first send and replies exactly", async () => {
   const backgroundAlias = "bg9a04b5e9@this-mac", backgroundRoute = "claude-session-background";
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   claudeProvider.claudeDiscovery = { alias: backgroundAlias, routeHandle: backgroundRoute,
@@ -535,15 +528,16 @@ test("background Claude discovery supports select, pair, send, and exact reply",
     await subject.handlers.registerCodex({
       alias: codex.alias, threadId: THREAD_A, hostId: "this-mac", busyPolicy: "queue",
     });
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: backgroundAlias }),
-      { accepted: true, code: "ok" });
-    assert.deepEqual(await subject.handlers.pair({ aliases: [backgroundAlias, codex.alias] }),
-      { accepted: true, code: "ok" });
+    // No selection step: the background session's route installs on this send.
+    assert.equal(await subject.store.inspectPrivateRoute(backgroundAlias), undefined);
     const sent = await subject.handlers.send({
       fromAlias: codex.alias, threadId: THREAD_A, toAlias: backgroundAlias,
       text: "background round trip", expectsReply: true,
     });
     assert.equal(sent.accepted, true);
+    const installed = await subject.store.inspectPrivateRoute(backgroundAlias);
+    assert.equal(installed?.registrationMode, "selected_live_peer");
+    assert.equal(installed?.binding.routeHandle, backgroundRoute);
     if (!sent.accepted) assert.fail("background send admission");
     await eventually(() => claudeProvider.dispatches.length === 1);
     const reply = await subject.handlers.reply({
@@ -555,7 +549,7 @@ test("background Claude discovery supports select, pair, send, and exact reply",
   } finally { await subject.close(); }
 });
 
-test("duplicate live Claude aliases are rejected without poisoning the snapshot", async () => {
+test("a colliding Claude alias is refused at send time and stays sticky under a partial scan", async () => {
   const duplicateAlias = "shared-agent@this-mac", uniqueAlias = "unique-bg@this-mac";
   const firstUuid = "00000000-0000-7000-8000-000000000711";
   const secondUuid = "00000000-0000-7000-8000-000000000712";
@@ -575,62 +569,194 @@ test("duplicate live Claude aliases are rejected without poisoning the snapshot"
   };
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider]);
+  const claudeRoutes = async () =>
+    (await subject.store.listLogicalRoutes()).filter((row) => row.binding.provider === "claude");
   try {
     assert.deepEqual((await subject.handlers.listSnapshot()).availablePeers.map((peer) => peer.alias),
       [duplicateAlias, uniqueAlias]);
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
-      { accepted: true, code: "ok" });
+
+    // The alias collides before anyone ever addressed it: the send is refused,
+    // no route is installed under the ambiguous name, and nothing is enqueued.
     colliding = true;
-    assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
+    const refused = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: duplicateAlias, text: "ambiguous target", expectsReply: false });
+    assert.deepEqual(refused, { accepted: false, code: "conflict" });
+    assert.deepEqual(await claudeRoutes(), []);
+    assert.deepEqual((await subject.handlers.listSnapshot()).messages, []);
+    assert.equal(claudeProvider.dispatches.length, 0);
+
+    // The refusal is not retryable by picking a session: addressing either
+    // live UUID behind the ambiguous name is refused the same way.
+    for (const selector of [firstUuid, secondUuid]) {
+      assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+        toAlias: selector, text: "ambiguous by uuid", expectsReply: false }),
       { accepted: false, code: "conflict" });
+    }
+    assert.deepEqual(await claudeRoutes(), []);
+
     const snapshot = await subject.handlers.listSnapshot();
     assert.deepEqual(snapshot.availablePeers.map((peer) => peer.alias), [uniqueAlias]);
     assert.deepEqual(snapshot.connectors.find((row) => row.provider === "claude")?.registry?.rejected,
       [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 3 }]);
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
-      { accepted: false, code: "conflict" });
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: firstUuid }),
-      { accepted: true, code: "ok" });
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: secondUuid }),
-      { accepted: true, code: "ok" });
-    assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
-      { accepted: false, code: "conflict" });
+
+    // An incomplete scan cannot clear a collision: it stays sticky, and the
+    // unaddressable name stays out of availablePeers.
     colliding = false; complete = false;
     await subject.handlers.refreshDiscovery();
     const incomplete = await subject.handlers.listSnapshot();
     assert.equal(incomplete.availablePeers.some((peer) => peer.alias === duplicateAlias), false);
     assert.deepEqual(incomplete.connectors.find((row) => row.provider === "claude")?.registry?.rejected,
       [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 1 }]);
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
-      { accepted: false, code: "conflict" });
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: duplicateAlias, text: "still ambiguous", expectsReply: false }),
+    { accepted: false, code: "conflict" });
+    assert.deepEqual(await claudeRoutes(), []);
+
+    // One complete scan clears it, and the very next send installs the route.
     complete = true;
     await subject.handlers.refreshDiscovery();
     assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
       (peer) => peer.alias === duplicateAlias), true);
-    assert.deepEqual(await subject.handlers.pair({ aliases: [duplicateAlias, codex.alias] }),
-      { accepted: true, code: "ok" });
+    const admitted = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: duplicateAlias, text: "now addressable", expectsReply: false });
+    assert.equal(admitted.accepted, true);
+    const installed = await subject.store.inspectPrivateRoute(duplicateAlias);
+    assert.equal(installed?.registrationMode, "selected_live_peer");
+    assert.equal(installed?.binding.routeHandle, firstUuid);
+    assert.equal((await subject.handlers.listSnapshot()).routes.some(
+      (row) => row.alias === duplicateAlias && row.provider === "claude"), true);
+    await eventually(() => claudeProvider.dispatches.some((row) => row.text === "now addressable"));
+
+    // A repeated identical discovery row is not a collision.
     duplicateRecord = true;
     await subject.handlers.refreshDiscovery();
     const repeated = await subject.handlers.listSnapshot();
     assert.equal(repeated.availablePeers.filter((peer) => peer.alias === duplicateAlias).length, 1);
     assert.equal(repeated.connectors.find((row) => row.provider === "claude")?.registry?.rejected.some(
       (row) => row.safeErrorCode === "PEER_ALIAS_COLLISION"), false);
+
+    // A collision that appears after the route exists refuses the send without
+    // retiring the installed route: the fence never picks first, and never
+    // silently retargets a name.
     duplicateRecord = false; colliding = true;
     await subject.handlers.refreshDiscovery();
     assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
       (peer) => peer.alias === duplicateAlias), false);
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: duplicateAlias }),
-      { accepted: false, code: "conflict" });
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: uniqueAlias }),
-      { accepted: true, code: "ok" });
-    assert.deepEqual(await subject.handlers.pair({ aliases: [uniqueAlias, codex.alias] }),
-      { accepted: true, code: "ok" });
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: duplicateAlias, text: "ambiguous again", expectsReply: false }),
+    { accepted: false, code: "conflict" });
+    assert.equal((await subject.store.inspectPrivateRoute(duplicateAlias))?.binding.routeHandle, firstUuid);
+
     const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: uniqueAlias, text: "unique candidate remains routable", expectsReply: false });
     assert.equal(sent.accepted, true);
-    await eventually(() => claudeProvider.dispatches.length === 1);
+    await eventually(() => claudeProvider.dispatches.some(
+      (row) => row.text === "unique candidate remains routable"));
+  } finally { await subject.close(); }
+});
+
+test("a Claude session's own route installs on its first send and its claimed name is checked", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    assert.equal(await subject.store.inspectPrivateRoute(claude.alias), undefined);
+
+    // The sender is identified by its inherited socket, not by --from; its own
+    // route installs on this first send.
+    const sent = await subject.handlers.send({ fromAlias: claude.alias, toAlias: codex.alias,
+      text: "first outbound", replyAddress: "uds:/test/claude-reply.sock", expectsReply: false });
+    assert.equal(sent.accepted, true);
+    const installed = await subject.store.inspectPrivateRoute(claude.alias);
+    assert.equal(installed?.registrationMode, "selected_live_peer");
+    assert.equal(installed?.binding.routeHandle, claudeProvider.replyRouteHandle);
+    await eventually(() => codexProvider.dispatches.some((row) => row.text === "first outbound"));
+
+    // A --from that names a different session than the socket identifies is a
+    // refusal, never a silent rename of the sending session.
+    assert.deepEqual(await subject.handlers.send({ fromAlias: "impostor@this-mac", toAlias: codex.alias,
+      text: "claimed name mismatch", replyAddress: "uds:/test/claude-reply.sock", expectsReply: false }),
+    { accepted: false, code: "route_mismatch" });
+    assert.equal(await subject.store.inspectPrivateRoute("impostor@this-mac"), undefined);
+    assert.equal((await subject.store.inspectPrivateRoute(claude.alias))?.binding.registrationId,
+      installed?.binding.registrationId);
+    assert.equal(codexProvider.dispatches.filter((row) => row.text === "claimed name mismatch").length, 0);
+  } finally { await subject.close(); }
+});
+
+test("a re-anchored Claude session keeps its registration and its in-flight conversation", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    const opened = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: claude.alias, text: "before the rename", expectsReply: true });
+    assert.equal(opened.accepted, true);
+    if (!opened.accepted) assert.fail("install-on-send admission");
+    const first = await subject.store.inspectPrivateRoute(claude.alias);
+    assert.ok(first);
+
+    // Same host, same session UUID, new display name: the identity is the
+    // (host, UUID) pair, so the registration and the open conversation survive.
+    claudeProvider.claudeDiscovery = { ...claudeProvider.claudeDiscovery, alias: "advisor-renamed@this-mac" };
+    const renamed = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: "advisor-renamed@this-mac", text: "after the rename", expectsReply: false });
+    assert.equal(renamed.accepted, true);
+    assert.equal(await subject.store.inspectPrivateRoute(claude.alias), undefined);
+    const second = await subject.store.inspectPrivateRoute("advisor-renamed@this-mac");
+    assert.equal(second?.binding.registrationId, first.binding.registrationId);
+    assert.equal(second?.binding.routeHandle, first.binding.routeHandle);
+    assert.equal(
+      ((await subject.store.publicSnapshot()).activityEvents ?? []).filter(
+        (event) => event.action === "claude_route_retired").length,
+      0,
+      "a rename is not a displacement",
+    );
+    const reply = await subject.handlers.reply({ conversationId: opened.conversationId,
+      text: "still the same session", caller: { kind: "claude", alias: "advisor-renamed@this-mac",
+        replyAddress: "uds:/test/claude-reply.sock" } });
+    assert.equal(reply.accepted, true);
+    await eventually(() => codexProvider.dispatches.some((row) => row.text === "still the same session"));
+  } finally { await subject.close(); }
+});
+
+test("a deliberately broad Claude workspace is refused before any route is installed", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  claudeProvider.workspaceGuard = async () => {
+    throw new BridgeError("CLAUDE_PEER_WORKSPACE_BROAD", "The Claude workspace contains the gateway state directory.");
+  };
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: claude.alias, text: "must not install", expectsReply: false }),
+    { accepted: false, code: "rejected" });
+    assert.equal(await subject.store.inspectPrivateRoute(claude.alias), undefined);
+    assert.deepEqual((await subject.handlers.listSnapshot()).messages, []);
+    assert.equal(claudeProvider.dispatches.length, 0);
+  } finally { await subject.close(); }
+});
+
+test("a send to an undiscovered Claude alias is an ordinary unknown target", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: "nobody@this-mac", text: "no such session", expectsReply: false }),
+    { accepted: false, code: "not_found" });
+    assert.deepEqual((await subject.handlers.listSnapshot()).messages, []);
+    assert.deepEqual((await subject.store.listLogicalRoutes()).map((row) => row.alias), [codex.alias]);
   } finally { await subject.close(); }
 });
 
@@ -678,14 +804,22 @@ test("Claude alias collision overflow drops unfenced candidates and keeps diagno
       { alias, routeHandle: `overflow-${index}-a`, kind: "interactive" as const, state: "idle" as const },
       { alias, routeHandle: `overflow-${index}-b`, kind: "bg" as const, state: "idle" as const },
     ]), registry: { entriesScanned: 514, parseableRecords: 514, rejected: [] } });
-  const subject = await fixture([claudeProvider]);
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
   try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
     const snapshot = await subject.handlers.listSnapshot();
     assert.deepEqual(snapshot.availablePeers, []);
-    assert.deepEqual(snapshot.connectors[0]?.registry?.rejected,
+    assert.deepEqual(snapshot.connectors.find((row) => row.provider === "claude")?.registry?.rejected,
       [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 257 }]);
-    assert.deepEqual(await subject.handlers.selectClaude({ alias: aliases.at(-1)! }),
-      { accepted: false, code: "not_found" });
+    // The overflow alias is discarded rather than left unfenced, so a send to
+    // it is an ordinary unknown target, never a pick-first delivery.
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: aliases.at(-1)!, text: "overflow target", expectsReply: false }),
+    { accepted: false, code: "not_found" });
+    assert.deepEqual((await subject.store.listLogicalRoutes()).filter(
+      (row) => row.binding.provider === "claude"), []);
   } finally { await subject.close(); }
 });
 
@@ -699,7 +833,6 @@ test("a peer waiter kicks cleanly deferred mail and exact receipt settles it onc
     assert.ok(minted.accepted && "token" in minted);
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
-    await subject.handlers.pair({ aliases: [codex.alias, "peer-shell@this-mac"] });
     const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "peer-shell@this-mac", text: "mailbox payload", expectsReply: true });
     assert.ok(sent.accepted);
@@ -730,7 +863,6 @@ test("native Claude STEER text reaches a peer mailbox only through the ordinary 
   try {
     const minted = await subject.handlers.registerPeer({ alias: "peer-native@this-mac" });
     assert.ok(minted.accepted && "token" in minted);
-    await subject.handlers.pair({ aliases: [claude.alias, "peer-native@this-mac"] });
     const waiting = subject.handlers.awaitPeer({ alias: "peer-native@this-mac", token: minted.token });
     claudeProvider.callbacks?.onClaudeMessage?.({ endpoint: { provider: "claude",
       hostId: "this-mac", routeHandle: claude.binding.routeHandle }, sourceAlias: claude.alias,
@@ -755,7 +887,6 @@ test("queued peer mail resumes once after restart under the same hash-only princ
     assert.ok(minted.accepted && "token" in minted);
     await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
       hostId: "this-mac", busyPolicy: "queue" });
-    await subject.handlers.pair({ aliases: [codex.alias, "peer-restart@this-mac"] });
     const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "peer-restart@this-mac", text: "survive restart", expectsReply: true });
     assert.ok(sent.accepted);
@@ -795,7 +926,7 @@ test("start restores logical observations and helper advertisements without prov
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     assert.deepEqual(codexProvider.observed, [{
@@ -819,7 +950,7 @@ test("record-only register and atomic succeeds never connect during construction
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const registered = await subject.handlers.registerCodex({
@@ -858,7 +989,6 @@ test("federated named routes refuse removal even when the presented binding matc
     // binding both match; only the explicit federated guard can refuse here.
     assert.deepEqual(await subject.handlers.unregisterCodex({ alias: remoteCodex.alias, threadId: remoteCodex.binding.routeHandle }),
       { accepted: false, code: "rejected" });
-    assert.deepEqual(await subject.handlers.unselectClaude({ alias: remoteClaude.alias }), { accepted: false, code: "not_found" });
     assert.equal(await readFile(subject.store.stateFilePath, "utf8"), before);
     assert.equal((await subject.store.inspectPrivateRoute(remoteCodex.alias))?.registrationMode, "federated_peer");
   } finally { await subject.close(); }
@@ -875,7 +1005,6 @@ test("peer handoff preserves every write boundary and never replays uncertainty"
       const remote: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
         binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
       await subject.store.registerRoute(local); await subject.store.registerRoute(remote);
-      await subject.store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
       const peer = { close: () => undefined, prepareHandoff: (params: PeerHandoffParams) => {
         assert.equal(params.source.routeRef, peerRouteRef("studio", local.binding.registrationId));
         assert.notEqual(params.source.routeRef, local.binding.registrationId);
@@ -923,7 +1052,6 @@ test("an unavailable peer requeues once without a hot dispatch loop", async () =
     const remote: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
       binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
     await subject.store.registerRoute(local); await subject.store.registerRoute(remote);
-    await subject.store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
     const reserve = subject.store.reserveMessage.bind(subject.store);
     subject.store.reserveMessage = async (...args) => { reserves += 1; return await reserve(...args); };
     const sent = await subject.handlers.send({ fromAlias: local.alias, toAlias: remote.alias,
@@ -944,7 +1072,6 @@ test("local Claude ingress advertises and hands off a federated Codex route", as
     binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote", registrationId: "reg_mirror" } };
   const subject = await fixture([provider], { hostId: "studio", peerNodes: ["m5dev"], seed: async (store) => {
     await store.registerRoute(local); await store.registerRoute(remote);
-    await store.addConsentEdge({ aliases: [local.alias, remote.alias], expectedRegistrationIds: [local.binding.registrationId, remote.binding.registrationId] });
   } });
   let writes = 0;
   try {
@@ -972,8 +1099,7 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
     routeRef: peerRouteRef("studio", local.binding.registrationId) };
   let current: PeerCatalogResult = { revision: 1, complete: true, truncated: false, generatedAt: "2026-08-16T12:00:00.000Z",
     health: "healthy", connectors: [], routes: [{ ref: remote.routeRef, alias: remote.alias, provider: remote.provider,
-      host: remote.host, enabled: true, state: "idle", queueDepth: 0 }], consentEdges: [{ ref: peerEdgeRef([remote, localEndpoint]),
-      ownerHost: "m5dev", endpoints: [remote, localEndpoint] }], alerts: [] };
+      host: remote.host, enabled: true, state: "idle", queueDepth: 0 }], alerts: [] };
   let catalogCalls = 0, closes = 0, failCatalog = false;
   const peer = { close: () => { closes += 1; }, catalog: async () => {
     catalogCalls += 1; if (failCatalog) throw new Error("synthetic tunnel loss"); return current;
@@ -1013,7 +1139,7 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
     assert.ok(exported); assert.deepEqual(exported.routes.map((route) => route.alias), [local.alias]);
     assert.equal(JSON.stringify(exported).includes(remote.alias), false); assert.equal(JSON.stringify(exported).includes("body"), false);
     const handoff: PeerHandoffParams = { originAttemptId: "attempt_origin", originMessageId: "msg_origin", source: remote,
-      target: localEndpoint, edgeRef: peerEdgeRef([remote, localEndpoint]), edgeOwnerHost: "m5dev",
+      target: localEndpoint,
       deadlineAt: new Date(subject.clock.now().getTime() + 5_000).toISOString(), expectsReply: false, body: "committed remotely" };
     assert.deepEqual(await subject.handlers.peerHandoff?.({ peerHost: "m5dev", handoff }), { accepted: true });
     assert.equal((JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as { messages: { body?: string }[] }).messages.at(-1)?.body,
@@ -1029,7 +1155,7 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
       ?.safeErrorCode === "PEER_TUNNEL_UNAVAILABLE");
     assert.equal((await subject.store.inspectPrivateRoute(remote.alias))?.registrationMode, "federated_peer");
     failCatalog = false;
-    current = { ...current, revision: 2, routes: [], consentEdges: [] };
+    current = { ...current, revision: 2, routes: [] };
     subject.clock.advance(30_000);
     await eventually(() => subject.timers.rows.some((row) => !row.cancelled && row.at <= subject.clock.now().getTime()));
     await subject.timers.runDue();
@@ -1063,8 +1189,6 @@ test("a this-mac mixed-provider catalog is strict, opaque, and excludes local-on
     .map((provider) => new FakeProvider({ provider, hostId: "this-mac" })), {
     hostId: "this-mac", peerNodes: ["m5dev"], seed: async (store) => {
       for (const candidate of routes) await store.registerRoute(candidate);
-      await store.addConsentEdge({ aliases: [routes[0]!.alias, routes[1]!.alias],
-        expectedRegistrationIds: [routes[0]!.binding.registrationId, routes[1]!.binding.registrationId] });
     },
   });
   try {
@@ -1075,7 +1199,7 @@ test("a this-mac mixed-provider catalog is strict, opaque, and excludes local-on
       provider: "codex", host: "this-mac", alias: routes[1]!.alias });
     const catalog = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });
     assert.ok(catalog); assert.deepEqual(decodePeerResult("catalog/get", catalog), catalog);
-    assert.equal(catalog.routes.length, 4); assert.equal(catalog.consentEdges.length, 0);
+    assert.equal(catalog.routes.length, 4);
     assert.deepEqual(catalog.alerts.map((alert) => alert.code), ["LOCAL_TEST_NOTICE"]);
     assert.ok(catalog.routes.every((row) => /^reg_[A-Za-z0-9_-]+$/.test(row.ref)));
     const wire = JSON.stringify(catalog);
@@ -1105,7 +1229,7 @@ test("first peer dial failure is host-visible and the next cadence re-dials", as
   let attempts = 0;
   const peer = { close: () => undefined, catalog: async (): Promise<PeerCatalogResult> => ({ revision: 1,
     complete: true, truncated: false, generatedAt: "2026-08-16T12:00:00.000Z", health: "healthy",
-    connectors: [], routes: [], consentEdges: [], alerts: [] }) } as unknown as PeerClient;
+    connectors: [], routes: [], alerts: [] }) } as unknown as PeerClient;
   const subject = await fixture([], { hostId: "studio", peerNodes: ["m5dev"], spawnPeer: async () => {
     attempts += 1; if (attempts === 1) throw new Error("private ssh failure"); return peer;
   } });
@@ -1170,7 +1294,7 @@ test("one blocked peer does not prevent another peer catalog from reconciling", 
   const healthy: PeerCatalogResult = { revision: 1, complete: true, truncated: false,
     generatedAt: "2026-08-16T12:00:00.000Z", health: "healthy", connectors: [], routes: [{ ref: remote.routeRef,
       alias: remote.alias, provider: remote.provider, host: remote.host, enabled: true, state: "idle", queueDepth: 0 }],
-    consentEdges: [], alerts: [] };
+    alerts: [] };
   const clients = new Map<string, PeerClient>([["m5dev", { close: () => undefined, catalog: () => blocked.promise } as unknown as PeerClient],
     ["zdev", { close: () => undefined, catalog: async () => healthy } as unknown as PeerClient]]);
   const subject = await fixture([], { hostId: "studio", peerNodes: ["m5dev", "zdev"],
@@ -1187,7 +1311,7 @@ test("stale removal and succession controls preserve a same-alias replacement", 
     const subject = await fixture([
       new FakeProvider({ provider: "claude", hostId: "this-mac" }),
       new FakeProvider({ provider: "codex", hostId: "this-mac" }),
-    ], { seed: async (store) => paired(store, claude, codex) });
+    ], { seed: async (store) => routed(store, claude, codex) });
     const entered = deferred<void>();
     const release = deferred<void>();
     const removeOwnedRoute = subject.store.removeOwnedRouteAtomic.bind(subject.store);
@@ -1246,76 +1370,11 @@ test("stale removal and succession controls preserve a same-alias replacement", 
   await run("succeeds");
 });
 
-test("stale pair and unpair controls cannot act on replacement endpoints", async () => {
-  const run = async (operation: "pair" | "unpair"): Promise<void> => {
-    const subject = await fixture([
-      new FakeProvider({ provider: "claude", hostId: "this-mac" }),
-      new FakeProvider({ provider: "codex", hostId: "this-mac" }),
-    ], {
-      seed: async (store) => {
-        await store.registerRoute(claude);
-        await store.registerRoute(codex);
-        if (operation === "unpair") {
-          await store.addConsentEdge({
-            aliases: [claude.alias, codex.alias],
-            expectedRegistrationIds: [
-              claude.binding.registrationId,
-              codex.binding.registrationId,
-            ],
-          });
-        }
-      },
-    });
-    const entered = deferred<void>();
-    const release = deferred<void>();
-    try {
-      const pending = operation === "pair"
-        ? (() => {
-            const original = subject.store.addConsentEdge.bind(subject.store);
-            subject.store.addConsentEdge = async (input) => {
-              entered.resolve();
-              await release.promise;
-              return await original(input);
-            };
-            return subject.handlers.pair({ aliases: [claude.alias, codex.alias] });
-          })()
-        : (() => {
-            const original = subject.store.removeConsentEdge.bind(subject.store);
-            subject.store.removeConsentEdge = async (input) => {
-              entered.resolve();
-              await release.promise;
-              return await original(input);
-            };
-            return subject.handlers.unpair({ aliases: [claude.alias, codex.alias] });
-          })();
-      await entered.promise;
-      await subject.store.removeOwnedRouteAtomic({
-        alias: codex.alias,
-        binding: (await subject.store.inspectPrivateRoute(codex.alias))!.binding,
-      });
-      const replacement = route("codex", codex.alias, THREAD_C, `reg_${operation}_pair`);
-      await subject.store.registerRoute(replacement);
-      release.resolve();
-      assert.deepEqual(await pending, { accepted: false, code: "rejected" });
-      assert.equal(
-        (await subject.store.inspectPrivateRoute(codex.alias))?.binding.registrationId,
-        replacement.binding.registrationId,
-      );
-      assert.equal((await subject.store.publicSnapshot()).consentEdges.length, 0);
-    } finally {
-      release.resolve();
-      await subject.close();
-    }
-  };
-  await run("pair");
-  await run("unpair");
-});
-
-test("confirmed removal atomically terminalizes phase truth and drops consent", async () => {
+test("confirmed removal atomically terminalizes phase truth", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const queued = await subject.store.enqueueMessage({
@@ -1362,7 +1421,6 @@ test("confirmed removal atomically terminalizes phase truth and drops consent", 
     });
     const removed = await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
     assert.deepEqual(removed, { accepted: true, code: "ok" });
-    assert.equal((await subject.store.publicSnapshot()).consentEdges.length, 0);
     const messages = await subject.store.publicSnapshot();
     const byBody = new Map(messages.messages.map((message) => [message.body, message]));
     assert.equal(byBody.get("accepted")?.state, "cancelled");
@@ -1405,14 +1463,6 @@ test("same-target FIFO and different-target parallelism hold at the armed bounda
       await store.registerRoute(source);
       await store.registerRoute(peer);
       await store.registerRoute(advisor);
-      await store.addConsentEdge({
-        aliases: [source.alias, peer.alias],
-        expectedRegistrationIds: [source.binding.registrationId, peer.binding.registrationId],
-      });
-      await store.addConsentEdge({
-        aliases: [source.alias, advisor.alias],
-        expectedRegistrationIds: [source.binding.registrationId, advisor.binding.registrationId],
-      });
       await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "first", dedupeKey: "fifo-1" });
       await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "second", dedupeKey: "fifo-2" });
       await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: advisor.alias, body: "parallel", dedupeKey: "parallel" });
@@ -1455,14 +1505,6 @@ test("90s post-write pause keeps control live, advances observers and refuses a 
       await store.registerRoute(source);
       await store.registerRoute(peer);
       await store.registerRoute(advisor);
-      await store.addConsentEdge({
-        aliases: [source.alias, peer.alias],
-        expectedRegistrationIds: [source.binding.registrationId, peer.binding.registrationId],
-      });
-      await store.addConsentEdge({
-        aliases: [source.alias, advisor.alias],
-        expectedRegistrationIds: [source.binding.registrationId, advisor.binding.registrationId],
-      });
       await store.enqueueMessage({
         sourceAlias: source.alias,
         targetAlias: peer.alias,
@@ -1564,7 +1606,7 @@ test("clean prewrite retry waits 500ms while terminal input failure never retrie
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, retrying], {
     seed: async (store) => {
-      await paired(store, claude, codex);
+      await routed(store, claude, codex);
       await store.enqueueMessage({ sourceAlias: claude.alias, targetAlias: codex.alias, body: "retry", dedupeKey: "retry" });
     },
   });
@@ -1595,7 +1637,7 @@ test("clean prewrite retry waits 500ms while terminal input failure never retrie
   const otherClaude = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const terminal = await fixture([otherClaude, failing], {
     seed: async (store) => {
-      await paired(store, claude, codex);
+      await routed(store, claude, codex);
       await store.enqueueMessage({ sourceAlias: claude.alias, targetAlias: codex.alias, body: "invalid", dedupeKey: "invalid" });
     },
   });
@@ -1624,7 +1666,7 @@ test("clean prewrite retry waits 500ms while terminal input failure never retrie
   const table = await fixture([
     new FakeProvider({ provider: "claude", hostId: "this-mac" }),
     provider,
-  ], { seed: async (store) => paired(store, claude, codex) });
+  ], { seed: async (store) => routed(store, claude, codex) });
   try {
     for (const [index, code] of providerSpecificCodes.entries()) {
       provider.deferredCode = code;
@@ -1656,7 +1698,7 @@ test("Codex correlated acceptance is durable before terminal and removal binds i
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
     seed: async (store) => {
-      await paired(store, claude, codex);
+      await routed(store, claude, codex);
       await store.enqueueMessage({ sourceAlias: claude.alias, targetAlias: codex.alias, body: "accepted", dedupeKey: "accepted" });
     },
   });
@@ -1683,7 +1725,7 @@ test("three STEER writes reach the exact accepted Codex operation while ordinary
   );
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const start = await subject.handlers.send({
@@ -1739,7 +1781,7 @@ test("exact-leading native STEER uses the separate lane while native mail stays 
   );
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   const native = (text: string): void => claudeProvider.callbacks?.onClaudeMessage?.({
     endpoint: {
@@ -1781,7 +1823,7 @@ test("exact-leading native STEER uses the separate lane while native mail stays 
   }
 });
 
-test("unpair after authorization makes the exact armed attempt ambiguous", async () => {
+test("retiring a route after authorization makes the exact armed attempt ambiguous", async () => {
   const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
   const peer = route("peer", "peer-one@this-mac", "peer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reg_peer_one");
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
@@ -1789,13 +1831,13 @@ test("unpair after authorization makes the exact armed attempt ambiguous", async
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider, peerProvider], {
     seed: async (store) => {
-      await paired(store, source, peer);
-      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "armed", dedupeKey: "unpair" });
+      await routed(store, source, peer);
+      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "armed", dedupeKey: "retire" });
     },
   });
   try {
     await peerProvider.pauseEntered.promise;
-    const result = await subject.handlers.unpair({ aliases: [source.alias, peer.alias] });
+    const result = await subject.handlers.unregisterCodex({ alias: source.alias, threadId: THREAD_A });
     assert.deepEqual(result, { accepted: true, code: "ok" });
     assert.equal((await subject.store.publicSnapshot()).messages.at(-1)?.state, "ambiguous");
     peerProvider.pauseRelease.resolve();
@@ -1812,7 +1854,7 @@ test("shutdown closes providers and store without joining a stuck model turn", a
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, stuck], {
     seed: async (store) => {
-      await paired(store, claude, codex);
+      await routed(store, claude, codex);
       await store.enqueueMessage({ sourceAlias: claude.alias, targetAlias: codex.alias, body: "never", dedupeKey: "never" });
     },
   });
@@ -1830,7 +1872,7 @@ test("delivery status and public observations stay native-ID-free", async () => 
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" }, "pause_accepted");
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const send = await subject.handlers.send({
@@ -1895,7 +1937,7 @@ test("TRACK: and DONE: prefixes are ordinary body text and the snapshot carries 
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const opened = await subject.handlers.send({
@@ -1930,7 +1972,7 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
   );
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([retryingClaude, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const first = await subject.handlers.send({
@@ -1988,9 +2030,6 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
       busyPolicy: "queue",
       succeedsAlias: codex.alias,
     }), { accepted: true, code: "ok" });
-    await subject.handlers.pair({
-      aliases: [claude.alias, "codex-next@this-mac"],
-    });
     const fourth = await subject.handlers.send({
       fromAlias: "codex-next@this-mac",
       threadId: THREAD_B,
@@ -2035,7 +2074,10 @@ test("Claude reply correlation buffers fast replies and preserves FIFO across a 
     });
     assert.equal(fifth.accepted, true);
     await eventually(() => retryingClaude.dispatches.length === 6);
-    await subject.handlers.unselectClaude({ alias: claude.alias });
+    // Another session takes the name: the old route is displaced, so the
+    // retired session's late reply has nowhere to land.
+    await subject.store.installClaudeRoute(
+      route("claude", claude.alias, "claude-session-retired", "reg_claude_retired"));
     retryingClaude.callbacks?.onClaudeReply({
       endpoint: {
         provider: "claude",
@@ -2058,7 +2100,7 @@ test("a Claude reply arriving inside the authorized write is released only after
   );
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([fastClaude, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const send = await subject.handlers.send({
@@ -2083,7 +2125,7 @@ test("an ambiguous armed Claude write keeps its FIFO tombstone across source suc
   );
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const first = await subject.handlers.send({
@@ -2102,7 +2144,6 @@ test("an ambiguous armed Claude write keeps its FIFO tombstone across source suc
       busyPolicy: "queue",
       succeedsAlias: codex.alias,
     }), { accepted: true, code: "ok" });
-    await subject.handlers.pair({ aliases: [claude.alias, "codex-next@this-mac"] });
     const second = await subject.handlers.send({
       fromAlias: "codex-next@this-mac",
       threadId: THREAD_B,
@@ -2144,30 +2185,33 @@ test("an ambiguous armed Claude write keeps its FIFO tombstone across source suc
   }
 });
 
-test("an ambiguous armed Claude write consumes one late reply after consent is restored", async () => {
+test("an ambiguous armed Claude write consumes one late reply after the source re-registers", async () => {
   const claudeProvider = new FakeProvider(
     { provider: "claude", hostId: "this-mac" },
     "pause_armed",
   );
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const first = await subject.handlers.send({
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
-      text: "armed before unpair",
+      text: "armed before the source retires",
       expectsReply: true,
     });
     assert.equal(first.accepted, true);
     await claudeProvider.pauseEntered.promise;
-    assert.deepEqual(await subject.handlers.unpair({ aliases: [claude.alias, codex.alias] }), {
+    // Retiring the source makes the armed write ambiguous while the target's
+    // installed route survives; the same task re-registers under its alias.
+    assert.deepEqual(await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: THREAD_A }), {
       accepted: true,
       code: "ok",
     });
-    assert.deepEqual(await subject.handlers.pair({ aliases: [claude.alias, codex.alias] }), {
+    assert.deepEqual(await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" }), {
       accepted: true,
       code: "ok",
     });
@@ -2176,7 +2220,7 @@ test("an ambiguous armed Claude write consumes one late reply after consent is r
       fromAlias: codex.alias,
       threadId: THREAD_A,
       toAlias: claude.alias,
-      text: "after restored consent",
+      text: "after the source re-registers",
       expectsReply: true,
     });
     assert.equal(second.accepted, true);
@@ -2208,7 +2252,7 @@ test("a correlated Claude reply cannot cross a same-alias registration replaceme
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   const entered = deferred<void>();
   const release = deferred<void>();
@@ -2254,10 +2298,6 @@ test("a correlated Claude reply cannot cross a same-alias registration replaceme
       hostId: "this-mac",
       busyPolicy: "queue",
     }), { accepted: true, code: "ok" });
-    assert.deepEqual(await subject.handlers.pair({ aliases: [claude.alias, codex.alias] }), {
-      accepted: true,
-      code: "ok",
-    });
     release.resolve();
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(codexProvider.dispatches.length, 0);
@@ -2277,7 +2317,7 @@ test("an initial send cannot inherit a same-alias caller replacement after attes
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   const entered = deferred<void>();
   const release = deferred<void>();
@@ -2305,7 +2345,6 @@ test("an initial send cannot inherit a same-alias caller replacement after attes
       hostId: "this-mac",
       busyPolicy: "queue",
     });
-    await subject.handlers.pair({ aliases: [claude.alias, codex.alias] });
     release.resolve();
     assert.deepEqual(await sending, { accepted: false, code: "rejected" });
     assert.equal(
@@ -2320,11 +2359,11 @@ test("an initial send cannot inherit a same-alias caller replacement after attes
   }
 });
 
-test("a reply-address send cannot cross a same-alias Claude reselection", async () => {
+test("a reply-address send cannot cross a same-alias Claude route replacement", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   const entered = deferred<void>();
   const release = deferred<void>();
@@ -2345,9 +2384,8 @@ test("a reply-address send cannot cross a same-alias Claude reselection", async 
       expectsReply: false,
     });
     await entered.promise;
-    await subject.handlers.unselectClaude({ alias: claude.alias });
-    await subject.handlers.selectClaude({ alias: claude.alias });
-    await subject.handlers.pair({ aliases: [claude.alias, codex.alias] });
+    await subject.store.installClaudeRoute(
+      route("claude", claude.alias, "claude-session-replacement", "reg_claude_replacement"));
     release.resolve();
     assert.deepEqual(await sending, { accepted: false, code: "rejected" });
     assert.equal(
@@ -2366,7 +2404,7 @@ test("reply attestation and an old conversation token cannot cross same-alias re
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   const entered = deferred<void>();
   const release = deferred<void>();
@@ -2404,7 +2442,6 @@ test("reply attestation and an old conversation token cannot cross same-alias re
       hostId: "this-mac",
       busyPolicy: "queue",
     });
-    await subject.handlers.pair({ aliases: [claude.alias, codex.alias] });
     release.resolve();
     assert.deepEqual(await replying, { accepted: false, code: "rejected" });
     assert.deepEqual(await subject.handlers.reply({
@@ -2429,7 +2466,7 @@ test("selected Claude replies require an exact inherited reply capability", asyn
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const opened = await subject.handlers.send({
@@ -2481,7 +2518,7 @@ test("native receipt settlement precedes teardown and closing ingress cannot per
     "pause_accepted",
   );
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     claudeProvider.effects.length = 0;
@@ -2535,12 +2572,12 @@ test("native receipt settlement precedes teardown and closing ingress cannot per
   }
 });
 
-test("provider replyText reverses an exact native ingress through native_reply authority", async () => {
+test("provider replyText reverses an exact native ingress through the sender's installed route", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   codexProvider.terminalReplyText = "correlated result";
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     claudeProvider.callbacks?.onClaudeMessage?.({
@@ -2556,7 +2593,9 @@ test("provider replyText reverses an exact native ingress through native_reply a
     });
     await eventually(() => claudeProvider.dispatches.length === 1);
     assert.equal(claudeProvider.dispatches[0]?.text, "correlated result");
-    assert.equal(claudeProvider.dispatches[0]?.authorization, "native_reply");
+    // The native sender's route was installed by its own send, so the reverse
+    // leg is an ordinary routed dispatch, not a transient native reply.
+    assert.equal(claudeProvider.dispatches[0]?.authorization, "selected_route");
     assert.equal(
       claudeProvider.dispatches[0]?.binding.registrationId,
       claude.binding.registrationId,
@@ -2621,13 +2660,6 @@ test("provider replyText reverses an exact native ingress through native_reply a
     });
     const replacement = route("codex", codex.alias, THREAD_B, "reg_codex_race");
     await subject.store.registerRoute(replacement);
-    await subject.store.addConsentEdge({
-      aliases: [claude.alias, codex.alias],
-      expectedRegistrationIds: [
-        claude.binding.registrationId,
-        replacement.binding.registrationId,
-      ],
-    });
     receiptRelease.resolve();
     await eventually(() => claudeProvider.effects.includes("release:receipt-native-race"));
     assert.equal(claudeProvider.dispatches.length, 2);
@@ -2636,34 +2668,41 @@ test("provider replyText reverses an exact native ingress through native_reply a
   }
 });
 
-test("an open native conversation accepts an exact Codex explicit reply", async () => {
+test("a never-routed native sender is replied to through its installed route", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  claudeProvider.claudeDiscovery = { alias: "visitor@this-mac", routeHandle: "visitor-session",
+    kind: "interactive", state: "idle" };
   const subject = await fixture([claudeProvider, codexProvider], {
-    inboundMode: "open",
     seed: async (store) => store.registerRoute(codex),
   });
   try {
+    // Nobody ever selected this session; its route installs on its own send.
+    assert.equal(await subject.store.inspectPrivateRoute("visitor@this-mac"), undefined);
     claudeProvider.callbacks?.onClaudeMessage?.({
       endpoint: {
         provider: "claude",
         hostId: "this-mac",
-        routeHandle: "transient-open-session",
+        routeHandle: "visitor-session",
       },
       sourceAlias: "visitor@this-mac",
       targetAlias: codex.alias,
-      text: "open native request",
+      text: "native request from a new session",
     });
     await eventually(() => codexProvider.dispatches.length === 1);
+    const installed = await subject.store.inspectPrivateRoute("visitor@this-mac");
+    assert.equal(installed?.registrationMode, "selected_live_peer");
+    assert.equal(installed?.binding.routeHandle, "visitor-session");
     const reply = await subject.handlers.reply({
       conversationId: codexProvider.dispatches[0]!.conversationId,
-      text: "open native reply",
+      text: "reply to a never-selected session",
       caller: { kind: "codex", alias: codex.alias, threadId: THREAD_A },
     });
     assert.equal(reply.accepted, true);
     await eventually(() => claudeProvider.dispatches.length === 1);
-    assert.equal(claudeProvider.dispatches[0]?.authorization, "native_reply");
-    assert.equal(claudeProvider.dispatches[0]?.text, "open native reply");
+    assert.equal(claudeProvider.dispatches[0]?.authorization, "selected_route");
+    assert.equal(claudeProvider.dispatches[0]?.text, "reply to a never-selected session");
+    assert.equal(claudeProvider.dispatches[0]?.binding.registrationId, installed?.binding.registrationId);
   } finally {
     await subject.close();
   }
@@ -2676,7 +2715,7 @@ test("shutdown cancels a queued native receipt before closing its helper", async
     "pause_accepted",
   );
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   try {
     const blocking = await subject.handlers.send({
@@ -2730,7 +2769,7 @@ test("shutdown fences native ingress that is still crossing the durable enqueue 
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
-    seed: async (store) => paired(store, claude, codex),
+    seed: async (store) => routed(store, claude, codex),
   });
   const entered = deferred<void>();
   const release = deferred<void>();
@@ -2788,7 +2827,7 @@ test("restart composes queued, reserved, armed, and accepted phase truth without
     );
     const firstCodex = new FakeProvider({ provider: "codex", hostId: "this-mac" }, codexMode);
     const subject = await fixture([firstClaude, firstCodex], {
-      seed: async (store) => paired(store, claude, codex),
+      seed: async (store) => routed(store, claude, codex),
     });
     let token: string;
     if (phase === "queued") {

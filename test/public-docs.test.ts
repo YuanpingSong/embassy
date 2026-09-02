@@ -19,8 +19,11 @@ async function readPublicFile(relativePath: string): Promise<string> {
  * dashboards; emb-101 removed the ACP-backed DeepSeek and Grok providers, the
  * offline support matrix, and the `doctor` command; emb-102 removed the zh-CN
  * localization and the `--lang` switch; emb-103 removed progress watches
- * (`TRACK:`/`DONE:`, `--track`, `untrack`, the liveness nudge). Nothing
- * shipped may advertise any of them again. This is the inverse of the contract tests those slices deleted:
+ * (`TRACK:`/`DONE:`, `--track`, `untrack`, the liveness nudge); emb-104 removed
+ * consent edges outright — `pair`/`unpair`, `select-claude`/`unselect-claude`,
+ * `serve --inbound`, and `EMBASSY_MAX_PAIRS` — so a discovered Claude session's
+ * route installs on its first use and the OS boundary is the whole permission.
+ * Nothing shipped may advertise any of them again. This is the inverse of the contract tests those slices deleted:
  * they proved the documented contract was current, this one proves there is
  * no such contract left to document.
  */
@@ -70,6 +73,15 @@ const FORBIDDEN = [
   "mandatory private `nodes.json`",
   "mandatory `nodes.json`",
   "GATEWAY_NODE_INVENTORY_REQUIRED",
+  // emb-104: no consent edges, no selection step, no inbound mode.
+  "select-claude",
+  "unselect-claude",
+  "embassy pair",
+  "unpair",
+  "SENDER_NOT_PAIRED",
+  "consent edge",
+  "--inbound",
+  "EMBASSY_MAX_PAIRS",
 ] as const;
 
 /**
@@ -245,25 +257,20 @@ test("authority docs match the closed control contract", async () => {
     readPublicFile("CHANGELOG.md"),
     readPublicFile("site/index.html"),
   ]);
-  assert.match(architecture, /closed version 3 method family is exactly these nineteen methods/i);
+  assert.match(architecture, /closed version 3 method family is exactly these fifteen methods/i);
+  assert.equal(gatewayControlMethods.length, 15);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
-  assert.match(architecture, /Pair and unpair mutate only the exact two\s+named endpoints/);
-  assert.match(architecture, /Paired mode still rechecks exact edge membership at\s+delivery/);
-  assert.match(architecture, /operating\s+norm, not an additional gateway identity check/);
+  assert.match(architecture, /fourteen implemented commands/);
+  // The permission model in one sentence, in every authority document.
+  assert.match(architecture, /A session already bound under the\s+same \(host, session UUID\) keeps its registration/);
+  assert.match(architecture, /operating norm, not an additional gateway identity\s+check/);
+  assert.match(architecture, /`serve` takes no options/);
   for (const document of [readme, architecture, skill]) {
     assert.match(document, /same-UID.*private control socket/is);
-    assert.match(
-      document,
-      /Remov(?:ing|es?) the selected route,?\s+(?:also\s+)?removes? its incident consent edges,?\s+and settles?/i,
-    );
-    assert.doesNotMatch(
-      document,
-      /select-claude[^\n]*shorthand|pair[^\n]*inherited `CODEX_THREAD_ID`/i,
-    );
+    assert.match(document, /route[^.]{0,60}on its first use/i);
+    assert.match(document, /PEER_ALIAS_COLLISION/);
   }
-  assert.match(skill, /UUID recovery applies only to selection/);
-  assert.match(site, /embassy pair --from codex-embassy@your-host --to claude-main@your-host/);
-  assert.doesNotMatch(site, /embassy pair --from claude-main@your-host --to dsh-main@your-host/);
+  assert.match(site, /embassy status/);
   // The placeholder is grammar-valid, so a literal paste reaches the CLI's
   // host-mismatch hint instead of a flat rejection; every surface that uses
   // it says what to substitute.

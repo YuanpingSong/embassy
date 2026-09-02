@@ -13,19 +13,17 @@ import {
   type GatewayRegisterPeerResult,
   type GatewaySendResult,
   type GatewaySnapshotObservation,
-  type PairParams,
   type PeerPrincipalParams,
   type PeerReceiptParams,
   type RegisterPeerParams,
   type ReplyParams,
-  type SelectClaudeParams,
   type UnregisterCodexParams,
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
 } from "./control.js";
 import { PeerConnectionLostError, spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
-import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
+import { peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import { GatewayStore } from "./store.js";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
@@ -208,8 +206,7 @@ type Candidate = GatewayAdapterDiscovery & {
 type Conversation = {
   id: string; sourceAlias: string; targetAlias: string;
   sourceBinding?: LogicalRouteBinding; targetBinding?: LogicalRouteBinding;
-  expectsReply: boolean; pair?: true;
-  nativeTarget?: Readonly<{ alias: string; binding: LogicalRouteBinding }>;
+  expectsReply: boolean;
   nextSequence: number;
 };
 
@@ -241,14 +238,8 @@ function aliasHost(alias: string): string {
 function safeCode(value: string | undefined, fallback: string): string {
   return value !== undefined && SAFE_CODE.test(value) ? value : fallback;
 }
-class ConsentOwnerError extends BridgeError {
-  constructor(readonly ownerHost: string) {
-    super("CONSENT_OWNER_HOST_REQUIRED", `Run pair or unpair on the edge owner host ${ownerHost}.`);
-  }
-}
 
 function decisionFor(error: unknown, peerPrincipal = false): Extract<GatewayDecision, { accepted: false }> {
-  if (error instanceof ConsentOwnerError) return { accepted: false, code: "conflict", ownerHost: error.ownerHost };
   if (!(error instanceof BridgeError)) return { accepted: false, code: "rejected" };
   if (error.code.includes("NOT_FOUND") || error.code.includes("NOT_AVAILABLE")) {
     return { accepted: false, code: "not_found" };
@@ -311,11 +302,10 @@ function peerCatalogAuthorityChanged(
   prior: PeerCatalogResult | undefined,
   current: PeerCatalogResult,
 ): boolean {
-  const authority = (catalog: PeerCatalogResult) => JSON.stringify([
+  const authority = (catalog: PeerCatalogResult) => JSON.stringify(
     catalog.routes.map(({ state: _state, queueDepth: _depth, lastSeenAt: _seen,
       safeErrorCode: _code, ...route }) => route).sort((a, b) => a.ref.localeCompare(b.ref)),
-    [...catalog.consentEdges].sort((a, b) => a.ref.localeCompare(b.ref)),
-  ]);
+  );
   return prior === undefined || authority(prior) !== authority(current);
 }
 
@@ -324,7 +314,6 @@ function peerCatalogViewChanged(prior: PeerCatalogResult | undefined, current: P
     catalog.health,
     catalog.connectors.map(({ lastSeenAt: _seen, observationAgeMs: _age, ...row }) => row),
     catalog.routes.map(({ lastSeenAt: _seen, ...row }) => row).sort((a, b) => a.ref.localeCompare(b.ref)),
-    [...catalog.consentEdges].sort((a, b) => a.ref.localeCompare(b.ref)),
     catalog.alerts.map(({ timestamp: _timestamp, ...row }) => row),
   ]);
   return prior === undefined || view(prior) !== view(current);
@@ -544,10 +533,6 @@ export class GatewayService {
       awaitPeer: (params) => this.awaitPeer(params),
       peerReceipt: (params) => decide(async () => this.peerReceipt(params), true),
       unregisterCodex: (params) => decide(async () => this.unregisterCodex(params)),
-      selectClaude: (params) => decide(async () => this.selectClaude(params)),
-      unselectClaude: (params) => decide(async () => this.unselectClaude(params)),
-      pair: (params) => decide(async () => this.pair(params)),
-      unpair: (params) => decide(async () => this.unpair(params)),
       listSnapshot: () => this.snapshot(),
       observeSnapshot: () => this.observeSnapshot(),
       deliveryStatus: (params) => this.deliveryStatus(params.token),
@@ -577,38 +562,24 @@ export class GatewayService {
     const localHost = this.config.hostId;
     if (!this.config.peerNodes.includes(peerHost))
       throw new BridgeError("PEER_NOT_CONFIGURED", "The requested peer host is not configured.");
-    const [snapshot, privateRoutes, privateEdges] = await Promise.all([
-      this.snapshot(), this.store.inspectPrivateRoutes(), this.store.inspectPrivateConsentEdges(),
+    const [snapshot, privateRoutes] = await Promise.all([
+      this.snapshot(), this.store.inspectPrivateRoutes(),
     ]);
     const localRoutes = privateRoutes.filter((route) => route.registrationMode !== "federated_peer" && route.binding.hostId === localHost);
     const publicRoutes = new Map(snapshot.routes.map((route) => [route.alias, route]));
-    const routeByAlias = new Map(privateRoutes.map((route) => [route.alias, route]));
     const routes = localRoutes.map((route) => { const row = publicRoutes.get(route.alias)!; return {
       ref: peerRouteRef(localHost, route.binding.registrationId), alias: route.alias, provider: route.binding.provider, host: localHost,
       enabled: route.enabled, state: row?.state ?? (route.enabled ? "stale" as const : "disabled" as const),
       queueDepth: row?.queueDepth ?? 0, ...(row?.lastSeenAt === undefined ? {} : { lastSeenAt: row.lastSeenAt }),
       ...(row?.safeErrorCode === undefined ? {} : { safeErrorCode: row.safeErrorCode }),
     }; });
-    const consentEdges = privateEdges.flatMap((edge) => {
-      if (edge.endpoints.map((endpoint) => aliasHost(endpoint.alias)).sort()[0] !== localHost) return [];
-      const rows = edge.endpoints.map((endpoint) => routeByAlias.get(endpoint.alias)) as
-        [GatewayPrivateRouteInspection | undefined, GatewayPrivateRouteInspection | undefined];
-      if (rows[0] === undefined || rows[1] === undefined ||
-        !rows.some((route) => route?.binding.hostId === peerHost) ||
-        !rows.some((route) => route?.binding.hostId === localHost)) return [];
-      const endpoint = (route: GatewayPrivateRouteInspection) => ({ alias: route.alias, provider: route.binding.provider,
-        host: route.binding.hostId, routeRef: route.registrationMode === "federated_peer"
-          ? route.binding.routeHandle : peerRouteRef(localHost, route.binding.registrationId) });
-      const endpoints: Parameters<typeof peerEdgeRef>[0] = [endpoint(rows[0]), endpoint(rows[1])];
-      return [{ ref: peerEdgeRef(endpoints), ownerHost: localHost, endpoints }];
-    });
     return { revision: this.revision, complete: true, truncated: false, generatedAt: snapshot.generatedAt,
       health: snapshot.health, connectors: snapshot.connectors.filter((row) => row.host === localHost).map((row) => ({
         provider: row.provider, host: row.host, health: row.health, protocol: row.protocol, protocolVersion: row.protocolVersion,
         ...(row.lastSeenAt === undefined ? {} : { lastSeenAt: row.lastSeenAt }),
         ...(row.observationAgeMs === undefined ? {} : { observationAgeMs: row.observationAgeMs }),
         ...(row.safeErrorCode === undefined ? {} : { safeErrorCode: row.safeErrorCode }),
-      })), routes, consentEdges, alerts: snapshot.alerts.filter((alert) =>
+      })), routes, alerts: snapshot.alerts.filter((alert) =>
         (alert.host === undefined || alert.host === localHost) && (alert.alias === undefined || aliasHost(alert.alias) === localHost)), };
   }
 
@@ -623,7 +594,7 @@ export class GatewayService {
       const conversationId = conversationIdForSuffix(handoff.conversationCorrelation);
       this.rememberConversation({ id: conversationId, sourceAlias: source.alias, targetAlias: target.alias,
         sourceBinding: source.binding, targetBinding: target.binding, expectsReply: handoff.expectsReply,
-        pair: true, nextSequence: 1 });
+        nextSequence: 1 });
       this.messageContexts.set(enqueued.messageId, { conversationId, expectsReply: handoff.expectsReply });
       this.kick(target.alias, target.binding.registrationId);
     }
@@ -826,25 +797,17 @@ export class GatewayService {
     );
   }
 
-  private async removeOwnedRoute(
-    route: GatewayPrivateRouteInspection,
-    notFoundCode: "CODEX_REGISTRATION_NOT_FOUND" | "CLAUDE_ROUTE_NOT_FOUND",
-    releaseProviderRoute: boolean,
-  ): Promise<void> {
+  private async removeOwnedRoute(route: GatewayPrivateRouteInspection): Promise<void> {
     this.assertWritable();
     const result = await this.store.removeOwnedRouteAtomic({
       alias: route.alias,
       binding: route.binding,
       activity: { operatorAction: true },
     });
-    if (!result.removed) throw new BridgeError(notFoundCode, "The exact route is absent.");
+    if (!result.removed) throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The exact route is absent.");
     await this.finishSettlements(result.settlements);
     this.forgetRoute(route);
-    if (releaseProviderRoute) {
-      await this.adapterFor(route.binding)?.releaseRoute?.(route.binding.routeHandle);
-    } else {
-      await this.reconcileUnadvertisement(route);
-    }
+    await this.reconcileUnadvertisement(route);
   }
 
   private async recordActivity(
@@ -1008,32 +971,37 @@ export class GatewayService {
     if (route.registrationMode === "federated_peer") {
       throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "A federated route is owned by its peer node and cannot be unregistered here.");
     }
-    await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
+    await this.removeOwnedRoute(route);
   }
 
-  private async selectClaude(params: SelectClaudeParams): Promise<void> {
-    const selected = await this.resolveClaudeSelector(params.alias, true);
-    if (selected === undefined) {
-      throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The Claude session is not currently selectable.");
-    }
-    const adapter = selected.adapter;
+  /**
+   * Installs (or brings up to date) the route of one discovered Claude
+   * session. The adapter pins the session's route handle, the workspace
+   * check keeps deliberately broad workspaces out, and the store reuses the
+   * registration of a session already bound under the same (host, UUID) so a
+   * re-anchored or renamed session keeps its identity and in-flight
+   * conversations. Any Claude route the install displaced is forgotten and
+   * released at the adapter; its work was settled `ENDPOINT_RETIRED` by the
+   * store.
+   */
+  private async installClaudeRoute(candidate: Candidate): Promise<GatewayPrivateRouteInspection> {
+    const adapter = candidate.adapter;
     if (adapter.selectRoute === undefined) {
-      throw new BridgeError("CLAUDE_PROVIDER_UNAVAILABLE", "The Claude provider cannot select routes.");
+      throw new BridgeError("CLAUDE_PROVIDER_UNAVAILABLE", "The Claude provider cannot install routes.");
     }
-    await adapter.assertWorkspaceDisjoint?.(selected.routeHandle, this.store.rootDir);
-    const chosen = await adapter.selectRoute({ alias: selected.alias, routeHandle: selected.routeHandle });
+    await adapter.assertWorkspaceDisjoint?.(candidate.routeHandle, this.store.rootDir);
+    const chosen = await adapter.selectRoute({ alias: candidate.alias, routeHandle: candidate.routeHandle });
     this.assertWritable();
     const before = (await this.store.listLogicalRoutes()).filter(
       (route) => route.binding.provider === "claude",
     );
     const existing = before.find(
       (route) =>
-        route.binding.provider === "claude" &&
         route.binding.hostId === adapter.identity.hostId &&
         route.binding.routeHandle === chosen.routeHandle,
     );
-    const result = await this.store.replaceClaudeSelection({
-      alias: selected.alias,
+    const result = await this.store.installClaudeRoute({
+      alias: candidate.alias,
       binding: {
         provider: "claude",
         hostId: adapter.identity.hostId,
@@ -1047,86 +1015,73 @@ export class GatewayService {
       (route) => route.binding.provider === "claude",
     );
     for (const prior of before) {
-      const retained = after.find((route) => route.alias === prior.alias);
-      if (retained === undefined || !sameBinding(retained.binding, prior.binding)) {
+      const retained = after.find((route) => route.binding.registrationId === prior.binding.registrationId);
+      if (retained === undefined) {
+        // Displaced: the alias now names another session.
         this.forgetRoute(prior);
         void this.adapterFor(prior.binding)?.releaseRoute?.(prior.binding.routeHandle)
           .catch((error) => this.alert("ROUTE_RELEASE_FAILED", prior, error));
+      } else if (retained.alias !== prior.alias) {
+        // Renamed: identity kept, the stale display-only observation goes and
+        // open conversations follow the session to its new name.
+        this.routeObservations.delete(prior.alias);
+        this.renameConversationCoordinates(prior.alias, retained.alias, prior.binding.registrationId);
       }
     }
-    const installed = (await this.store.inspectPrivateRoute(selected.alias))!;
+    const installed = (await this.store.inspectPrivateRoute(candidate.alias))!;
     this.observeRoute(installed);
-    this.routeObservations.set(selected.alias, {
+    this.routeObservations.set(candidate.alias, {
       route: installed.binding,
       state: chosen.state,
       observedAt: this.now().toISOString(),
     });
-    await this.recordActivity("selection", "claude_selected", [selected.alias], true);
-    this.kick(selected.alias);
+    if (result.installed) this.revision += 1;
+    this.kick(candidate.alias);
+    return installed;
   }
 
-  private async unselectClaude(params: SelectClaudeParams): Promise<void> {
-    const route = await this.resolveSelectedClaudeRoute(params.alias);
-    if (route === undefined || route.registrationMode === "federated_peer") throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
-    await this.removeOwnedRoute(route, "CLAUDE_ROUTE_NOT_FOUND", true);
-  }
-
-  private async pair(params: PairParams): Promise<void> {
-    const endpoints = await this.resolvePairEndpoints(params, true);
-    const aliases = endpoints.aliases;
-    const ownerHost = aliases.map(aliasHost).sort()[0]!;
-    if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
-    this.assertWritable();
-    const existed = await this.store.hasConsentEdge(endpoints);
-    await this.store.addConsentEdge(endpoints);
-    if (!existed) await this.recordActivity("pairing", "routes_paired", [...aliases], true);
-  }
-
-  private async unpair(params: PairParams): Promise<void> {
-    const endpoints = await this.resolvePairEndpoints(params, false);
-    const aliases = endpoints.aliases;
-    const ownerHost = aliases.map(aliasHost).sort()[0]!;
-    if (this.config.hostId !== ownerHost) throw new ConsentOwnerError(ownerHost);
-    this.assertWritable();
-    const existed = await this.store.hasConsentEdge(endpoints);
-    const result = await this.store.removeConsentEdge(endpoints);
-    await this.finishSettlements(result.settlements);
-    if (existed) await this.recordActivity("pairing", "routes_unpaired", [...aliases], true);
-    for (const alias of aliases) this.kick(alias);
-  }
-
-  private async resolvePairEndpoints(
-    params: PairParams,
-    maySelect: boolean,
-  ): Promise<Readonly<{
-    aliases: readonly [string, string];
-    expectedRegistrationIds: readonly [string, string];
-  }>> {
-    const raw = params.aliases;
-    const aliases: [string, string] = [raw[0], raw[1]];
-    if (maySelect && aliases.some((alias) => PUBLIC_ALIAS.test(alias)))
-      await this.refreshClaudeDiscovery().catch(() => undefined);
-    for (let index = 0; index < aliases.length; index += 1) {
-      if (maySelect && this.collidingClaudeAliases.has(aliases[index]!))
-        throw new BridgeError("PEER_ALIAS_COLLISION", "The Claude alias is ambiguous.");
-      if (PUBLIC_ALIAS.test(aliases[index]!)) continue;
-      const selected = await this.resolveClaudeSelector(aliases[index]!, maySelect);
-      if (selected === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The Claude selector is unavailable.");
-      if (maySelect) await this.selectClaude({ alias: aliases[index]! });
-      aliases[index] = selected.alias;
+  /**
+   * Resolves a Claude selector (current name or session UUID) to its route,
+   * installing the route on first use.
+   *
+   * THE ALIAS-COLLISION FENCE lives here (emb-94, moved into the send path by
+   * emb-104). Invariant: discovery is refreshed inside every send that
+   * addresses a Claude session, never only on the timer; a name currently
+   * shared by more than one live session is refused with a hard,
+   * non-retryable `PEER_ALIAS_COLLISION` naming that alias, whether the
+   * sender addressed it by name or by UUID and whether or not a route already
+   * exists, so a route is never installed or used under an ambiguous name and
+   * the broker never picks first; collisions stay sticky while a scan is
+   * incomplete (`collidingClaudeAliases` retention in refreshClaudeDiscovery);
+   * and `availablePeers` keeps filtering colliders so `status` never lists an
+   * unaddressable name. In-flight conversations are unaffected: `reply`
+   * resolves by exact binding, not by alias.
+   */
+  private async resolveClaudeRoute(selector: string, hostId?: string): Promise<GatewayPrivateRouteInspection> {
+    await this.refreshClaudeDiscovery().catch(() => undefined);
+    const routed = (await this.store.listLogicalRoutes()).find((route) =>
+      route.binding.provider === "claude" &&
+      (hostId === undefined || route.binding.hostId === hostId) &&
+      (route.alias === selector || route.binding.routeHandle === selector));
+    const candidate = [...this.candidates.values()].find((row) =>
+      (hostId === undefined || row.adapter.identity.hostId === hostId) &&
+      (row.routeHandle === selector || row.alias === selector));
+    for (const alias of new Set([selector, routed?.alias, candidate?.alias])) {
+      if (alias !== undefined && this.collidingClaudeAliases.has(alias)) {
+        throw new BridgeError("PEER_ALIAS_COLLISION", `The Claude alias ${alias} names more than one live session; rename one and retry.`);
+      }
     }
-    const left = await this.store.inspectPrivateRoute(aliases[0]);
-    const right = await this.store.inspectPrivateRoute(aliases[1]);
-    if (left === undefined || right === undefined) {
-      throw new BridgeError("ROUTE_NOT_AVAILABLE", "The pair endpoint is absent.");
+    if (candidate === undefined) {
+      if (routed !== undefined) return routed;
+      throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "No live Claude session matches that name or UUID; run `embassy refresh` and check `embassy status`.");
     }
-    return {
-      aliases,
-      expectedRegistrationIds: [
-        left.binding.registrationId,
-        right.binding.registrationId,
-      ],
-    };
+    if (
+      routed !== undefined &&
+      routed.binding.hostId === candidate.adapter.identity.hostId &&
+      routed.binding.routeHandle === candidate.routeHandle &&
+      routed.alias === candidate.alias
+    ) return routed;
+    return await this.installClaudeRoute(candidate);
   }
 
   private async assertThread(alias: string, threadId: string): Promise<GatewayPrivateRouteInspection> {
@@ -1137,20 +1092,24 @@ export class GatewayService {
     return route;
   }
 
+  /**
+   * Direction follows the inherited principal, not the route table: a Claude
+   * session or its target may have no route yet, because routes install on
+   * first send. A Codex task sends to Claude sessions and shell peers; a
+   * Claude session sends to Codex tasks and shell peers (Claude-to-Claude is
+   * native); a shell peer sends to either.
+   */
   private async send(params: ValidatedSendParams): Promise<GatewaySendResult> {
-    const source = await this.store.inspectPrivateRoute(params.fromAlias);
-    const directTarget = await this.store.inspectPrivateRoute(params.toAlias);
-    const target = directTarget ?? await this.resolveSelectedClaudeRoute(params.toAlias);
-    if (source?.binding.provider === "codex" && (target?.binding.provider === "claude" || target?.binding.provider === "peer") && "threadId" in params) {
-      return this.sendToClaude(params);
+    const target = await this.store.inspectPrivateRoute(params.toAlias);
+    if ("replyAddress" in params && params.replyAddress !== undefined) {
+      const claudeTarget = target?.binding.provider === "claude" ||
+        (target === undefined && [...this.candidates.values()].some((row) => row.alias === params.toAlias));
+      return claudeTarget ? { accepted: false, code: "route_mismatch" } : this.sendToCodex(params);
     }
-    if (source?.binding.provider === "claude" && (target?.binding.provider === "codex" || target?.binding.provider === "peer") && "replyAddress" in params) {
-      return this.sendToCodex(params);
+    if ("threadId" in params && params.threadId !== undefined) {
+      return target?.binding.provider === "codex" ? { accepted: false, code: "route_mismatch" } : this.sendToClaude(params);
     }
-    if (source?.binding.provider === "peer" && "peerToken" in params) {
-      return target?.binding.provider === "claude" ? this.sendToClaude(params) : this.sendToCodex(params);
-    }
-    return { accepted: false, code: "route_mismatch" };
+    return target === undefined || target.binding.provider === "claude" ? this.sendToClaude(params) : this.sendToCodex(params);
   }
 
   private async sendToClaude(params: ValidatedSendParams): Promise<GatewaySendResult> {
@@ -1163,8 +1122,7 @@ export class GatewayService {
           : await this.assertThread(params.fromAlias, params.threadId);
       if (source === undefined) throw new BridgeError("ROUTE_NOT_AVAILABLE", "The source route is absent.");
       const direct = await this.store.inspectPrivateRoute(params.toAlias);
-      const target = direct?.binding.provider === "peer" ? direct : await this.resolveSelectedClaudeRoute(params.toAlias);
-      if (target === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The selected Claude route is absent.");
+      const target = direct?.binding.provider === "peer" ? direct : await this.resolveClaudeRoute(params.toAlias);
       return await this.enqueueConversation({
         sourceAlias: params.fromAlias,
         targetAlias: target.alias,
@@ -1187,11 +1145,16 @@ export class GatewayService {
       } else if (params.replyAddress === undefined) {
         throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The inherited reply capability is required.");
       } else {
+        // The sending session's identity comes from its inherited socket, never
+        // from --from. Its own route installs on this first send; the alias it
+        // claims must be the one discovery shows for that session, or the send
+        // is refused rather than silently renamed.
         const resolved = await this.claudeAdapter(aliasHost(params.fromAlias))?.resolveReplyAddress?.(params.replyAddress);
         if (resolved === undefined) throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The reply capability is stale.");
-        source = (await this.store.listLogicalRoutes()).find((route) => route.binding.provider === "claude" &&
-          route.alias === params.fromAlias && route.binding.routeHandle === resolved.routeHandle);
-        if (source === undefined) throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "The reply route is not selected.");
+        source = await this.resolveClaudeRoute(resolved.routeHandle, aliasHost(params.fromAlias));
+        if (source.alias !== params.fromAlias) {
+          throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The --from alias does not name the sending Claude session.");
+        }
       }
       const target = await this.store.inspectPrivateRoute(params.toAlias);
       if (source === undefined || target === undefined) {
@@ -1229,29 +1192,9 @@ export class GatewayService {
       if (targetBinding === undefined) {
         throw new BridgeError("CONVERSATION_ROUTE_RETIRED", "The conversation endpoint is no longer available.");
       }
-      if (
-        params.caller.kind === "codex" &&
-        conversation.nativeTarget !== undefined &&
-        targetAlias === conversation.nativeTarget.alias
-      ) {
-        const enqueued = await this.enqueueNativeConversationReply({
-          conversation,
-          sourceAlias: callerAlias,
-          sourceBinding: callerBinding,
-          target: conversation.nativeTarget,
-          text: params.text,
-          exposeDeliveryToken: true,
-        });
-        if (enqueued.deliveryToken === undefined) {
-          throw new BridgeError("MESSAGE_NOT_ACCEPTED", "The message was not accepted.");
-        }
-        return {
-          accepted: true,
-          code: "ok",
-          conversationId: conversation.id,
-          deliveryToken: enqueued.deliveryToken,
-        };
-      }
+      // The target's route was installed when it first sent or was first
+      // sent to; a reply never re-resolves it by alias. A retired binding is
+      // a refusal at enqueue, never a silent retarget.
       return await this.enqueueConversation({
         sourceAlias: callerAlias,
         targetAlias,
@@ -1341,7 +1284,6 @@ export class GatewayService {
       ...(sourceBinding === undefined ? {} : { sourceBinding: { ...sourceBinding } }),
       ...(targetBinding === undefined ? {} : { targetBinding: { ...targetBinding } }),
       expectsReply: input.expectsReply,
-      pair: true as const,
       nextSequence: 0,
     };
     const sequence = conversation.nextSequence++;
@@ -1387,6 +1329,26 @@ export class GatewayService {
       conversationId: conversation.id,
       deliveryToken: enqueued.deliveryToken,
     };
+  }
+
+  /**
+   * A renamed Claude session is the same principal under a new display name,
+   * so its open conversations follow it: the registration, not the alias, is
+   * the identity, and a reply under the current name must still resolve.
+   */
+  private renameConversationCoordinates(
+    oldAlias: string, newAlias: string, registrationId: string,
+  ): void {
+    for (const conversation of this.conversations.values()) {
+      if (conversation.sourceAlias === oldAlias &&
+        conversation.sourceBinding?.registrationId === registrationId) {
+        conversation.sourceAlias = newAlias;
+      }
+      if (conversation.targetAlias === oldAlias &&
+        conversation.targetBinding?.registrationId === registrationId) {
+        conversation.targetAlias = newAlias;
+      }
+    }
   }
 
   private rememberConversation(conversation: Conversation): void {
@@ -1459,14 +1421,7 @@ export class GatewayService {
   ): Promise<void> {
     if (!this.running || this.closing) return;
     const route = await this.store.inspectPrivateRoute(targetAlias);
-    const transient = [...this.messageContexts.values()].find(
-      (context) => this.conversations.get(context.conversationId)?.nativeTarget?.alias === targetAlias,
-    );
-    const transientTarget = transient === undefined
-      ? undefined
-      : this.conversations.get(transient.conversationId)?.nativeTarget;
-    const registration = preferredRegistrationId ?? route?.binding.registrationId ??
-      transientTarget?.binding.registrationId;
+    const registration = preferredRegistrationId ?? route?.binding.registrationId;
     if (registration === undefined) return;
     this.startRunner(targetAlias, registration, "any");
   }
@@ -1551,20 +1506,7 @@ export class GatewayService {
       const conversation = messageContext === undefined
         ? undefined
         : this.conversations.get(messageContext.conversationId);
-      const transientTarget = conversation?.nativeTarget?.alias === attempt.targetAlias
-        ? conversation.nativeTarget
-        : undefined;
-      const persistedTarget = await this.store.inspectPrivateRoute(attempt.targetAlias);
-      const target = transientTarget !== undefined
-        ? {
-            alias: transientTarget.alias,
-            binding: transientTarget.binding,
-            registrationMode: "selected_live_peer" as const,
-            enabled: true,
-          }
-        : (persistedTarget === undefined
-          ? undefined
-          : persistedTarget);
+      const target = await this.store.inspectPrivateRoute(attempt.targetAlias);
       const source = await this.store.inspectPrivateRoute(attempt.sourceAlias);
       if (this.closing || !this.running) {
         await this.settleAttemptForShutdown(attempt.messageId, attempt.attemptId);
@@ -1573,14 +1515,14 @@ export class GatewayService {
       if (
         target === undefined ||
         target.binding.registrationId !== attempt.targetRegistrationId ||
-        (attempt.sourceRegistrationId !== null && source?.binding.registrationId !== attempt.sourceRegistrationId)
+        source?.binding.registrationId !== attempt.sourceRegistrationId
       ) {
         await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "ROUTE_UNREGISTERED");
         return false;
       }
       if (target.registrationMode === "federated_peer") {
         const peer = this.peerClients.get(target.binding.hostId);
-        if (peer === undefined || source === undefined || source.registrationMode === "federated_peer") {
+        if (peer === undefined || source.registrationMode === "federated_peer") {
           await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
           return false;
         }
@@ -1591,8 +1533,6 @@ export class GatewayService {
         const params: PeerHandoffParams = {
           originAttemptId: attempt.attemptId, originMessageId: attempt.messageId,
           source: sourceEndpoint, target: targetEndpoint,
-          edgeRef: peerEdgeRef([sourceEndpoint, targetEndpoint]),
-          edgeOwnerHost: [sourceEndpoint.host, targetEndpoint.host].sort()[0]!,
           deadlineAt: attempt.deadlineAt, expectsReply: conversation?.expectsReply ?? true,
           body: attempt.body,
           ...(attempt.steer === true ? { steer: true as const } : {}),
@@ -1672,9 +1612,7 @@ export class GatewayService {
           targetAlias: attempt.targetAlias,
           conversationId,
           binding: target.binding,
-          authorization: transientTarget === undefined
-            ? "selected_route"
-            : "native_reply",
+          authorization: "selected_route",
           messageId: attempt.messageId,
           text: attempt.body,
           expectsReply: conversation?.expectsReply ?? true,
@@ -1703,8 +1641,7 @@ export class GatewayService {
                 armed = true;
                 if (
                   target.binding.provider === "claude" &&
-                  messageContext?.expectsReply === true &&
-                  source !== undefined
+                  messageContext?.expectsReply === true
                 ) {
                   this.installPendingClaudeReply({
                     messageId: attempt.messageId,
@@ -1934,24 +1871,21 @@ export class GatewayService {
       !(target.registrationMode === "federated_peer" && event.endpoint.hostId === localHost))) {
       throw new BridgeError("ROUTE_NOT_AVAILABLE", "The native target is absent.");
     }
-    const selected = (await this.store.listLogicalRoutes()).find(
-      (route) =>
-        route.binding.provider === "claude" &&
-        route.alias === event.sourceAlias &&
-        route.binding.routeHandle === event.endpoint.routeHandle &&
-        route.binding.hostId === event.endpoint.hostId,
-    );
-    const sourceBinding: LogicalRouteBinding = selected?.binding ?? {
-      provider: "claude",
-      hostId: event.endpoint.hostId,
-      routeHandle: event.endpoint.routeHandle,
-      registrationId: `native_${bodyHash(`${event.endpoint.routeHandle}\0${event.sourceAlias}`).slice(0, 32)}`,
-    };
+    // A native SendMessage is this session's send: its route installs here,
+    // from the exact identity the adapter attested, so the Codex task can
+    // reply through the ordinary path. The adapter's name for the sender must
+    // be the name discovery shows for that UUID; a mismatch is a refusal.
+    this.assertWritable();
+    const source = await this.resolveClaudeRoute(event.endpoint.routeHandle, event.endpoint.hostId);
+    if (source.alias !== event.sourceAlias) {
+      throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The native sender's name does not match its discovered session.");
+    }
+    const sourceBinding: LogicalRouteBinding = source.binding;
     const conversationId = createGatewayConversationId();
     const steer = target.binding.provider === "codex" && event.text.startsWith("STEER:") && this.config.steeringEnabled;
     this.assertWritable();
     const enqueued = await this.store.enqueueNativeIngress({
-      source: { alias: event.sourceAlias, binding: sourceBinding },
+      source: { alias: source.alias, binding: sourceBinding },
       targetAlias: event.targetAlias,
       expectedTargetRegistrationId: target.binding.registrationId,
       body: event.text,
@@ -1964,13 +1898,11 @@ export class GatewayService {
     }
     const conversation: Conversation = {
       id: conversationId,
-      sourceAlias: event.sourceAlias,
+      sourceAlias: source.alias,
       targetAlias: event.targetAlias,
       sourceBinding,
       targetBinding: target.binding,
       expectsReply: true,
-      ...(enqueued.pair === true ? { pair: true as const } : {}),
-      nativeTarget: { alias: event.sourceAlias, binding: sourceBinding },
       nextSequence: 1,
     };
     this.rememberConversation(conversation);
@@ -2079,73 +2011,21 @@ export class GatewayService {
     const targetBinding = targetAlias === conversation.targetAlias
       ? conversation.targetBinding
       : conversation.sourceBinding;
+    if (sourceBinding === undefined || targetBinding === undefined) return;
+    const currentSource = await this.store.inspectPrivateRoute(sourceAlias);
     if (
-      conversation.nativeTarget === undefined ||
-      sourceAlias !== conversation.nativeTarget.alias
-    ) {
-      if (sourceBinding === undefined || targetBinding === undefined) return;
-      const currentSource = await this.store.inspectPrivateRoute(sourceAlias);
-      if (
-        currentSource === undefined ||
-        !sameBinding(currentSource.binding, sourceBinding)
-      ) return;
-      await this.enqueueConversation({
-        sourceAlias: targetAlias,
-        targetAlias: sourceAlias,
-        text,
-        expectsReply: true,
-        expectedSourceBinding: targetBinding,
-        expectedTargetBinding: sourceBinding,
-        existingConversation: conversation,
-      });
-      return;
-    }
-    if (targetBinding === undefined) return;
-    await this.enqueueNativeConversationReply({
-      conversation,
+      currentSource === undefined ||
+      !sameBinding(currentSource.binding, sourceBinding)
+    ) return;
+    await this.enqueueConversation({
       sourceAlias: targetAlias,
-      sourceBinding: targetBinding,
-      target: conversation.nativeTarget,
+      targetAlias: sourceAlias,
       text,
-    });
-  }
-
-  private async enqueueNativeConversationReply(input: Readonly<{
-    conversation: Conversation;
-    sourceAlias: string;
-    sourceBinding: LogicalRouteBinding;
-    target: Readonly<{ alias: string; binding: LogicalRouteBinding }>;
-    text: string;
-    exposeDeliveryToken?: true;
-  }>): Promise<Awaited<ReturnType<GatewayStore["enqueueNativeReply"]>>> {
-    const sequence = input.conversation.nextSequence++;
-    let enqueued: Awaited<ReturnType<GatewayStore["enqueueNativeReply"]>>;
-    try {
-      enqueued = await this.store.enqueueNativeReply({
-        sourceAlias: input.sourceAlias,
-        expectedSourceRegistrationId: input.sourceBinding.registrationId,
-        target: input.target,
-        body: input.text,
-        dedupeKey: `${input.conversation.id}:${sequence}`,
-        conversationIdSuffix: input.conversation.id.slice(-8),
-        ...(input.conversation.pair === true ? { pair: true as const } : {}),
-        ...(input.exposeDeliveryToken === true ? { exposeDeliveryToken: true as const } : {}),
-      });
-    } catch (error) {
-      input.conversation.nextSequence -= 1;
-      throw error;
-    }
-    if (!enqueued.accepted || enqueued.messageId === undefined) {
-      input.conversation.nextSequence -= 1;
-      throw new BridgeError("MESSAGE_NOT_ACCEPTED", "The message was not accepted.");
-    }
-    this.messageContexts.set(enqueued.messageId, {
-      conversationId: input.conversation.id,
       expectsReply: true,
+      expectedSourceBinding: targetBinding,
+      expectedTargetBinding: sourceBinding,
+      existingConversation: conversation,
     });
-    this.kick(input.target.alias, input.target.binding.registrationId);
-    this.scheduleWake();
-    return enqueued;
   }
 
   private installPendingClaudeReply(row: PendingClaudeReply): void {
@@ -2436,24 +2316,6 @@ export class GatewayService {
     if (this.closing || !this.running) {
       throw new BridgeError("GATEWAY_CLOSING", "The gateway is not accepting mutations.");
     }
-  }
-
-  private async resolveClaudeSelector(selector: string, refresh: boolean): Promise<Candidate | undefined> {
-    if (refresh) await this.refreshClaudeDiscovery().catch(() => undefined);
-    if (this.collidingClaudeAliases.has(selector))
-      throw new BridgeError("PEER_ALIAS_COLLISION", "The Claude alias is ambiguous.");
-    return [...this.candidates.values()].find(
-      (candidate) => candidate.routeHandle === selector ||
-        candidate.alias === selector,
-    );
-  }
-
-  private async resolveSelectedClaudeRoute(selector: string): Promise<GatewayPrivateRouteInspection | undefined> {
-    return (await this.store.listLogicalRoutes()).find(
-      (route) =>
-        route.binding.provider === "claude" &&
-        (route.alias === selector || route.binding.routeHandle === selector),
-    );
   }
 
   private routeObservationStillCurrent(event: GatewayAdapterRouteObservation): boolean {

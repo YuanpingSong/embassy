@@ -479,20 +479,21 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     }
   }
 
+  /**
+   * Converts an inherited messaging-socket capability into the owning
+   * session's UUID. The session need not hold a route yet: its route installs
+   * on its first send, and the service compares the claimed alias against
+   * discovery for that UUID.
+   */
   async resolveReplyAddress(
     address: string,
   ): Promise<{ routeHandle: string }> {
     this.assertReady();
     const resolved = await this.peer.resolveReplyAddress(address);
-    const selectedAlias = this.selected.get(resolved.targetId)?.alias;
-    if (
-      selectedAlias === undefined ||
-      (resolved.kind !== "interactive" && resolved.kind !== "bg") ||
-      selectedAlias !== `${resolved.alias}@${this.identity.hostId}`
-    ) {
+    if (resolved.kind !== "interactive" && resolved.kind !== "bg") {
       throw new BridgeError(
         "CLAUDE_REPLY_ROUTE_MISMATCH",
-        "The reply capability is not the exact selected Claude generation.",
+        "The reply capability does not belong to a Claude session.",
       );
     }
     return { routeHandle: resolved.targetId };
@@ -620,7 +621,7 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
       };
     }
     try {
-      // Authorization is the consent linearization point. Invoke the exact
+      // Authorization is the write-authorization linearization point. Invoke the exact
       // prepared mailbox write in the same continuation with no intervening
       // await. Claude has no separate acceptance phase: confirmed mailbox
       // completion is terminal delivered.
