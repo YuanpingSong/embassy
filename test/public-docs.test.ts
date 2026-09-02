@@ -122,6 +122,10 @@ async function shippedDocuments(): Promise<string[]> {
   const docs = (await walk("docs")).filter((file) => file.endsWith(".md"));
   const skill = await walk("skills/embassy-peer");
   const site = await walk("site");
+  // Issue templates are shipped guidance too: they tell a stranger which
+  // commands to run, and they sat outside this oracle while they still named
+  // `select-claude` long after it was deleted.
+  const templates = await walk(".github/ISSUE_TEMPLATE");
   return [
     "README.md",
     "SECURITY.md",
@@ -130,6 +134,7 @@ async function shippedDocuments(): Promise<string[]> {
     ...site,
     ...docs,
     ...skill,
+    ...templates,
   ]
     .filter((file) => !isHistory(file))
     .sort();
@@ -142,7 +147,9 @@ test("no shipped document advertises a deleted surface", async () => {
   assert.ok(files.includes("SECURITY.md"));
   assert.ok(files.includes("docs/GATEWAY-ARCHITECTURE.md"));
   assert.ok(files.includes("skills/embassy-peer/SKILL.md"));
-  assert.ok(files.length >= 8, `only ${String(files.length)} documents scanned`);
+  assert.ok(files.includes(".github/ISSUE_TEMPLATE/bug_report.yml"));
+  assert.ok(files.includes(".github/ISSUE_TEMPLATE/setup_help.yml"));
+  assert.ok(files.length >= 10, `only ${String(files.length)} documents scanned`);
   assert.equal(files.some((file) => isHistory(file)), false);
 
   const offenders: string[] = [];
@@ -260,7 +267,7 @@ test("authority docs match the closed control contract", async () => {
   assert.match(architecture, /closed version 3 method family is exactly these fifteen methods/i);
   assert.equal(gatewayControlMethods.length, 15);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
-  assert.match(architecture, /fourteen implemented commands/);
+  assert.match(architecture, /fifteen implemented commands/);
   // The permission model in one sentence, in every authority document.
   assert.match(architecture, /A session already bound under the\s+same \(host, session UUID\) keeps its registration/);
   assert.match(architecture, /operating norm, not an additional gateway identity\s+check/);

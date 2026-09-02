@@ -123,9 +123,17 @@ export type GatewayDecisionCode =
 export type GatewayDecision =
   | { accepted: true; code: "ok" }
   | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
+/**
+ * A refused send or reply carries an optional `reason`: the safe error code
+ * behind the coarse decision. The decision code stays the contract clients
+ * branch on; `reason` exists so the CLI can name the one remedy that fits
+ * (rename a session, move a workspace, fix `--from`, rescan) instead of
+ * printing one generic line for six different failures. It is a safe code:
+ * bounded, allowlisted-shaped, and never a message, path, or identifier.
+ */
 export type GatewaySendResult =
   | { accepted: true; code: "ok"; conversationId: string; deliveryToken: string }
-  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
+  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok">; reason?: string };
 export type GatewayHealthResult = { status: "ok" | "degraded"; revision: number };
 export type GatewayRefreshResult = GatewayDecision & { revision: number };
 export type GatewayDeliveryStatusState =
@@ -446,7 +454,11 @@ function isRegisterPeerResult(value: unknown): value is GatewayRegisterPeerResul
 function isHealthResult(value: unknown): value is GatewayHealthResult {
   return shape(value, { status: oneOf("ok", "degraded"), revision: nonNegative }); }
 function isSendResult(value: unknown): value is GatewaySendResult {
-  if (!isRecord(value) || value.accepted !== true) return isDecision(value);
+  if (!isRecord(value) || value.accepted !== true) {
+    return shape(value, { accepted: oneOf(false), code: oneOf(
+      "not_found", "conflict", "route_mismatch", "busy", "unavailable", "rejected",
+    ) }, { reason: safeCode });
+  }
   return shape(value, { accepted: oneOf(true), code: oneOf("ok"),
     conversationId: (item) => typeof item === "string" && CONVERSATION_ID_PATTERN.test(item),
     deliveryToken: (item) => typeof item === "string" && DELIVERY_TOKEN_PATTERN.test(item) });
@@ -488,7 +500,7 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
 function isAvailablePeerSnapshot(value: unknown): value is PublicAvailablePeerSnapshot {
   return shape(value, { alias, provider: oneOf("claude"), host,
     state: oneOf("idle", "busy", "awaiting_approval", "offline"),
-    validated: (item) => typeof item === "boolean", selected: (item) => typeof item === "boolean" },
+    validated: (item) => typeof item === "boolean", routed: (item) => typeof item === "boolean" },
   { lastSeenAt: iso, safeErrorCode: safeCode }) &&
     (value.alias as string).endsWith(`@${String(value.host)}`); }
 function isNormalizedMessageEvent(value: unknown): value is NormalizedMessageEvent {

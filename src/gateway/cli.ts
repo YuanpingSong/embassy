@@ -168,6 +168,12 @@ const CLI_HINT = {
     "nodes.json was written at {stateDir} but the directory could not be synced; start again and check the volume",
   unknownTarget:
     "no current route answers to that name. A Claude session is addressed by its live name: run embassy refresh, then read embassy status for the name it has now.",
+  aliasCollision:
+    "the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.",
+  workspaceOverlap:
+    "that session's workspace contains the gateway state directory; move one so they no longer overlap, then retry.",
+  callerAliasMismatch:
+    "--from must be the sending session's own alias; read the name embassy status shows for this session.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -586,14 +592,23 @@ function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
 }
 /**
- * A send or reply that names no current route is the one rejection whose
- * remedy the operator cannot guess: a Claude session is addressed by whatever
- * name it carries right now, and its route installs on first use, so the fix
- * is a rescan and a fresh look at status.
+ * A refused send or reply carries a safe `reason` beside its decision code.
+ * Each reason has exactly one remedy, and printing the wrong one is worse than
+ * printing none: the rescan advice belongs to an unrecognized Claude-shaped
+ * target on `send`, never to `reply`, whose not_found means a stale
+ * conversation token that no rescan will revive.
  */
-function isUnknownTargetDecision(command: GatewayCliCommand | undefined, result: unknown): boolean {
-  return (command === "send" || command === "reply") && isRejectedResult(result) &&
-    (result as { code?: unknown }).code === "not_found";
+function refusalHint(
+  request: GatewayControlRequest, result: unknown,
+): CliFaultHint | undefined {
+  if (!isRejectedResult(result)) return undefined;
+  const reason = (result as { reason?: unknown }).reason;
+  if (reason === "PEER_ALIAS_COLLISION") return "aliasCollision";
+  if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return "workspaceOverlap";
+  if (reason === "CLAUDE_ROUTE_MISMATCH") return "callerAliasMismatch";
+  if ((result as { code?: unknown }).code !== "not_found" || request.method !== "send") return undefined;
+  const target = request.params.toAlias;
+  return target.startsWith("codex-") || target.startsWith("peer-") ? undefined : "unknownTarget";
 }
 function responseExitCode(response: GatewayControlResponse): number {
   return !response.ok ? gatewayCliExitCodes.failure
@@ -950,9 +965,8 @@ export async function runGatewayCli(
     const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr("decision"));
-      if (isUnknownTargetDecision(command, response.result)) {
-        stderr.write(`[embassy] ${CLI_HINT.unknownTarget}\n`);
-      }
+      const hint = refusalHint(request, response.result);
+      if (hint !== undefined) stderr.write(`[embassy] ${renderHint(hint)}\n`);
     } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr("failure"));
     return exitCode;
   } catch (error) {

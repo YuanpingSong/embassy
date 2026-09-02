@@ -39,10 +39,12 @@ import {
   type GatewayPrivateRouteInspection,
   type GatewayProvider,
   type GatewayPublicSnapshot,
+  type InstallClaudeRouteResult,
   type LogicalRouteBinding,
   type PublicAvailablePeerSnapshot,
   type PublicConnectorSnapshot,
   type PublicRegistryObservationSnapshot,
+  type RegisterRouteInput,
   type SafeGatewayAlert,
   type TerminalMessageSettlement,
 } from "./types.js";
@@ -127,7 +129,7 @@ export type GatewayAdapterDispatchResult =
 export type GatewayAdapterDispatchInput = Readonly<{
   attemptId: string; sourceAlias: string; sourceProvider: GatewayProvider; targetAlias: string;
   conversationId: string; binding: LogicalRouteBinding;
-  authorization: "selected_route" | "native_reply";
+  authorization: "selected_route";
   messageId: string; text: string; expectsReply: boolean; deadlineAt: string;
   steer?: true; queuedAhead?: number;
   authorizeWrite: (
@@ -203,6 +205,12 @@ type Candidate = GatewayAdapterDiscovery & {
   adapter: GatewayProviderAdapter; observedAt: string;
 };
 
+/** One read-only lookup of a Claude selector: what is routed, what is live. */
+type ClaudeRouteResolution = Readonly<{
+  routed: GatewayPrivateRouteInspection | undefined;
+  candidate: Candidate | undefined;
+}>;
+
 type Conversation = {
   id: string; sourceAlias: string; targetAlias: string;
   sourceBinding?: LogicalRouteBinding; targetBinding?: LogicalRouteBinding;
@@ -257,6 +265,17 @@ function decisionFor(error: unknown, peerPrincipal = false): Extract<GatewayDeci
     return { accepted: false, code: "route_mismatch" };
   }
   return { accepted: false, code: "rejected" };
+}
+
+/**
+ * The refusal a send or reply returns: the coarse decision clients branch on,
+ * plus the safe code behind it so the CLI can name the one remedy that fits.
+ * Only a BridgeError's own code is carried; anything else stays anonymous.
+ */
+function sendRefusal(error: unknown, peerPrincipal = false): Extract<GatewaySendResult, { accepted: false }> {
+  const decision = decisionFor(error, peerPrincipal);
+  const reason = error instanceof BridgeError && SAFE_CODE.test(error.code) ? error.code : undefined;
+  return { accepted: false, code: decision.code, ...(reason === undefined ? {} : { reason }) };
 }
 
 function sameBinding(left: LogicalRouteBinding, right: LogicalRouteBinding): boolean {
@@ -655,7 +674,7 @@ export class GatewayService {
         host: candidate.adapter.identity.hostId,
         state: candidate.state,
         validated: true,
-        selected: routes.some(
+        routed: routes.some(
           (route) => route.provider === "claude" && route.alias === candidate.alias,
         ),
         lastSeenAt: candidate.observedAt,
@@ -1000,7 +1019,7 @@ export class GatewayService {
         route.binding.hostId === adapter.identity.hostId &&
         route.binding.routeHandle === chosen.routeHandle,
     );
-    const result = await this.store.installClaudeRoute({
+    const input: RegisterRouteInput = {
       alias: candidate.alias,
       binding: {
         provider: "claude",
@@ -1009,7 +1028,8 @@ export class GatewayService {
         registrationId: existing?.binding.registrationId ?? registrationId(),
       },
       registrationMode: "selected_live_peer",
-    });
+    };
+    const result = await this.installWithConcurrentFirstSend(input, adapter.identity.hostId, chosen.routeHandle);
     await this.finishSettlements(result.settlements);
     const after = (await this.store.listLogicalRoutes()).filter(
       (route) => route.binding.provider === "claude",
@@ -1041,24 +1061,65 @@ export class GatewayService {
   }
 
   /**
-   * Resolves a Claude selector (current name or session UUID) to its route,
-   * installing the route on first use.
+   * Two first sends to the same never-installed session race: both read no
+   * route and both mint a registration, and the loser's write is refused
+   * because the identity is now bound. That is a race, not a conflict — the
+   * session is exactly the one the loser resolved — so re-read once and adopt
+   * the registration that won instead of failing an honest send.
+   */
+  private async installWithConcurrentFirstSend(
+    input: RegisterRouteInput, hostId: string, routeHandle: string,
+  ): Promise<InstallClaudeRouteResult> {
+    try {
+      return await this.store.installClaudeRoute(input);
+    } catch (error) {
+      if (!(error instanceof BridgeError) || error.code !== "ROUTE_IDENTITY_ALREADY_REGISTERED") throw error;
+      const bound = (await this.store.listLogicalRoutes()).find((route) =>
+        route.binding.provider === "claude" &&
+        route.binding.hostId === hostId &&
+        route.binding.routeHandle === routeHandle);
+      if (bound === undefined) throw error;
+      return await this.store.installClaudeRoute({
+        ...input,
+        binding: { ...input.binding, registrationId: bound.binding.registrationId },
+      });
+    }
+  }
+
+  /**
+   * Looks a Claude selector up without writing anything. Callers that may
+   * still refuse — a `--from` alias that must match the sending session, a
+   * native sender whose adapter-reported name must match discovery — resolve
+   * here first, refuse on the read, and only then materialize.
    *
    * THE ALIAS-COLLISION FENCE lives here (emb-94, moved into the send path by
    * emb-104). Invariant: discovery is refreshed inside every send that
-   * addresses a Claude session, never only on the timer; a name currently
+   * addresses a Claude session, never only on the timer; a NAME currently
    * shared by more than one live session is refused with a hard,
-   * non-retryable `PEER_ALIAS_COLLISION` naming that alias, whether the
-   * sender addressed it by name or by UUID and whether or not a route already
-   * exists, so a route is never installed or used under an ambiguous name and
-   * the broker never picks first; collisions stay sticky while a scan is
-   * incomplete (`collidingClaudeAliases` retention in refreshClaudeDiscovery);
-   * and `availablePeers` keeps filtering colliders so `status` never lists an
-   * unaddressable name. In-flight conversations are unaffected: `reply`
-   * resolves by exact binding, not by alias.
+   * non-retryable `PEER_ALIAS_COLLISION` naming that alias, so the broker
+   * never picks first and never installs a route under an ambiguous name;
+   * collisions stay sticky while a scan is incomplete
+   * (`collidingClaudeAliases` retention in refreshClaudeDiscovery); and
+   * `availablePeers` keeps filtering colliders so `status` never lists an
+   * unaddressable name.
+   *
+   * The fence is a fence on NAMES, not on sessions. A session UUID is
+   * unambiguous by construction, so a UUID selector — an explicit
+   * `send --to <uuid>`, an identity-pinned route addressed by its own handle,
+   * or a sender resolved from its inherited socket — passes the fence even
+   * while its display name collides. That is the emb-94 escape hatch: the
+   * operator can always reach an ambiguously named session, and a collision on
+   * a *sender's* name never silences that sender, whose identity was attested
+   * rather than typed. In-flight conversations are likewise unaffected:
+   * `reply` resolves by exact binding.
    */
-  private async resolveClaudeRoute(selector: string, hostId?: string): Promise<GatewayPrivateRouteInspection> {
+  private async lookUpClaudeRoute(
+    selector: string, hostId?: string,
+  ): Promise<ClaudeRouteResolution> {
     await this.refreshClaudeDiscovery().catch(() => undefined);
+    if (PUBLIC_ALIAS.test(selector) && this.collidingClaudeAliases.has(selector)) {
+      throw new BridgeError("PEER_ALIAS_COLLISION", `The Claude alias ${selector} names more than one live session; rename one, or address the session by UUID.`);
+    }
     const routed = (await this.store.listLogicalRoutes()).find((route) =>
       route.binding.provider === "claude" &&
       (hostId === undefined || route.binding.hostId === hostId) &&
@@ -1066,11 +1127,26 @@ export class GatewayService {
     const candidate = [...this.candidates.values()].find((row) =>
       (hostId === undefined || row.adapter.identity.hostId === hostId) &&
       (row.routeHandle === selector || row.alias === selector));
-    for (const alias of new Set([selector, routed?.alias, candidate?.alias])) {
-      if (alias !== undefined && this.collidingClaudeAliases.has(alias)) {
-        throw new BridgeError("PEER_ALIAS_COLLISION", `The Claude alias ${alias} names more than one live session; rename one and retry.`);
-      }
+    return { routed, candidate };
+  }
+
+  /**
+   * The name discovery currently shows for a looked-up session, which a caller
+   * compares against the alias it claimed before anything is written.
+   */
+  private claimedAlias(resolution: ClaudeRouteResolution): string {
+    const alias = resolution.candidate?.alias ?? resolution.routed?.alias;
+    if (alias === undefined) {
+      throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "No live Claude session matches that name or UUID; run `embassy refresh` and check `embassy status`.");
     }
+    return alias;
+  }
+
+  /** Installs the looked-up session's route if it is not already current. */
+  private async materializeClaudeRoute(
+    resolution: ClaudeRouteResolution,
+  ): Promise<GatewayPrivateRouteInspection> {
+    const { routed, candidate } = resolution;
     if (candidate === undefined) {
       if (routed !== undefined) return routed;
       throw new BridgeError("CLAUDE_ROUTE_NOT_FOUND", "No live Claude session matches that name or UUID; run `embassy refresh` and check `embassy status`.");
@@ -1082,6 +1158,10 @@ export class GatewayService {
       routed.alias === candidate.alias
     ) return routed;
     return await this.installClaudeRoute(candidate);
+  }
+
+  private async resolveClaudeRoute(selector: string, hostId?: string): Promise<GatewayPrivateRouteInspection> {
+    return await this.materializeClaudeRoute(await this.lookUpClaudeRoute(selector, hostId));
   }
 
   private async assertThread(alias: string, threadId: string): Promise<GatewayPrivateRouteInspection> {
@@ -1132,7 +1212,7 @@ export class GatewayService {
         expectedTargetBinding: target.binding,
       });
     } catch (error) {
-      return decisionFor(error, "peerToken" in params);
+      return sendRefusal(error, "peerToken" in params);
     }
   }
 
@@ -1146,15 +1226,16 @@ export class GatewayService {
         throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The inherited reply capability is required.");
       } else {
         // The sending session's identity comes from its inherited socket, never
-        // from --from. Its own route installs on this first send; the alias it
-        // claims must be the one discovery shows for that session, or the send
-        // is refused rather than silently renamed.
+        // from --from. Look the session up read-only first: a send that is
+        // about to be refused must not install, rename, or displace a route,
+        // and must not settle another session's queued work.
         const resolved = await this.claudeAdapter(aliasHost(params.fromAlias))?.resolveReplyAddress?.(params.replyAddress);
         if (resolved === undefined) throw new BridgeError("CLAUDE_REPLY_ADDRESS_INVALID", "The reply capability is stale.");
-        source = await this.resolveClaudeRoute(resolved.routeHandle, aliasHost(params.fromAlias));
-        if (source.alias !== params.fromAlias) {
+        const seen = await this.lookUpClaudeRoute(resolved.routeHandle, aliasHost(params.fromAlias));
+        if (this.claimedAlias(seen) !== params.fromAlias) {
           throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The --from alias does not name the sending Claude session.");
         }
+        source = await this.materializeClaudeRoute(seen);
       }
       const target = await this.store.inspectPrivateRoute(params.toAlias);
       if (source === undefined || target === undefined) {
@@ -1172,7 +1253,7 @@ export class GatewayService {
         expectedTargetBinding: target.binding,
       });
     } catch (error) {
-      return decisionFor(error, "peerToken" in params);
+      return sendRefusal(error, "peerToken" in params);
     }
   }
 
@@ -1205,7 +1286,7 @@ export class GatewayService {
         existingConversation: conversation,
       });
     } catch (error) {
-      return decisionFor(error, params.caller.kind === "peer");
+      return sendRefusal(error, params.caller.kind === "peer");
     }
   }
 
@@ -1506,8 +1587,15 @@ export class GatewayService {
       const conversation = messageContext === undefined
         ? undefined
         : this.conversations.get(messageContext.conversationId);
-      const target = await this.store.inspectPrivateRoute(attempt.targetAlias);
-      const source = await this.store.inspectPrivateRoute(attempt.sourceAlias);
+      // Resolve by registration, not by the alias captured at reserve: a
+      // session renamed between reserve and dispatch is the same route and
+      // must still be delivered to, under whatever name it carries now.
+      const installed = await this.store.listLogicalRoutes();
+      const byRegistration = (registration: string, alias: string) =>
+        installed.find((route) => route.binding.registrationId === registration) ??
+        installed.find((route) => route.alias === alias);
+      const target = byRegistration(attempt.targetRegistrationId, attempt.targetAlias);
+      const source = byRegistration(attempt.sourceRegistrationId, attempt.sourceAlias);
       if (this.closing || !this.running) {
         await this.settleAttemptForShutdown(attempt.messageId, attempt.attemptId);
         return false;
@@ -1874,12 +1962,14 @@ export class GatewayService {
     // A native SendMessage is this session's send: its route installs here,
     // from the exact identity the adapter attested, so the Codex task can
     // reply through the ordinary path. The adapter's name for the sender must
-    // be the name discovery shows for that UUID; a mismatch is a refusal.
+    // be the name discovery shows for that UUID; the check runs on a read-only
+    // lookup so a refusal writes nothing.
     this.assertWritable();
-    const source = await this.resolveClaudeRoute(event.endpoint.routeHandle, event.endpoint.hostId);
-    if (source.alias !== event.sourceAlias) {
+    const seen = await this.lookUpClaudeRoute(event.endpoint.routeHandle, event.endpoint.hostId);
+    if (this.claimedAlias(seen) !== event.sourceAlias) {
       throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The native sender's name does not match its discovered session.");
     }
+    const source = await this.materializeClaudeRoute(seen);
     const sourceBinding: LogicalRouteBinding = source.binding;
     const conversationId = createGatewayConversationId();
     const steer = target.binding.provider === "codex" && event.text.startsWith("STEER:") && this.config.steeringEnabled;

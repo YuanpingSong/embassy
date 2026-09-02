@@ -582,19 +582,24 @@ test("a colliding Claude alias is refused at send time and stays sticky under a 
     colliding = true;
     const refused = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: duplicateAlias, text: "ambiguous target", expectsReply: false });
-    assert.deepEqual(refused, { accepted: false, code: "conflict" });
+    assert.deepEqual(refused, { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" });
     assert.deepEqual(await claudeRoutes(), []);
     assert.deepEqual((await subject.handlers.listSnapshot()).messages, []);
     assert.equal(claudeProvider.dispatches.length, 0);
 
-    // The refusal is not retryable by picking a session: addressing either
-    // live UUID behind the ambiguous name is refused the same way.
-    for (const selector of [firstUuid, secondUuid]) {
-      assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
-        toAlias: selector, text: "ambiguous by uuid", expectsReply: false }),
-      { accepted: false, code: "conflict" });
-    }
-    assert.deepEqual(await claudeRoutes(), []);
+    // The fence is a fence on NAMES. A session UUID is unambiguous, so the
+    // operator can always reach a session whose display name collides.
+    const byUuid = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: firstUuid, text: "addressed by uuid", expectsReply: false });
+    assert.equal(byUuid.accepted, true);
+    assert.equal((await subject.store.inspectPrivateRoute(duplicateAlias))?.binding.routeHandle, firstUuid);
+    await eventually(() => claudeProvider.dispatches.some((row) => row.text === "addressed by uuid"));
+
+    // The escape hatch does not open the name: the same session is still
+    // unaddressable by the ambiguous name, even now that it holds a route.
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: duplicateAlias, text: "still ambiguous by name", expectsReply: false }),
+    { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" });
 
     const snapshot = await subject.handlers.listSnapshot();
     assert.deepEqual(snapshot.availablePeers.map((peer) => peer.alias), [uniqueAlias]);
@@ -611,10 +616,10 @@ test("a colliding Claude alias is refused at send time and stays sticky under a 
       [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 1 }]);
     assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: duplicateAlias, text: "still ambiguous", expectsReply: false }),
-    { accepted: false, code: "conflict" });
-    assert.deepEqual(await claudeRoutes(), []);
+    { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" });
+    assert.equal((await claudeRoutes()).length, 1);
 
-    // One complete scan clears it, and the very next send installs the route.
+    // One complete scan clears the name, and it resolves to the same route.
     complete = true;
     await subject.handlers.refreshDiscovery();
     assert.equal((await subject.handlers.listSnapshot()).availablePeers.some(
@@ -646,7 +651,7 @@ test("a colliding Claude alias is refused at send time and stays sticky under a 
       (peer) => peer.alias === duplicateAlias), false);
     assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: duplicateAlias, text: "ambiguous again", expectsReply: false }),
-    { accepted: false, code: "conflict" });
+    { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" });
     assert.equal((await subject.store.inspectPrivateRoute(duplicateAlias))?.binding.routeHandle, firstUuid);
 
     const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
@@ -680,11 +685,132 @@ test("a Claude session's own route installs on its first send and its claimed na
     // refusal, never a silent rename of the sending session.
     assert.deepEqual(await subject.handlers.send({ fromAlias: "impostor@this-mac", toAlias: codex.alias,
       text: "claimed name mismatch", replyAddress: "uds:/test/claude-reply.sock", expectsReply: false }),
-    { accepted: false, code: "route_mismatch" });
+    { accepted: false, code: "route_mismatch", reason: "CLAUDE_ROUTE_MISMATCH" });
     assert.equal(await subject.store.inspectPrivateRoute("impostor@this-mac"), undefined);
     assert.equal((await subject.store.inspectPrivateRoute(claude.alias))?.binding.registrationId,
       installed?.binding.registrationId);
     assert.equal(codexProvider.dispatches.filter((row) => row.text === "claimed name mismatch").length, 0);
+  } finally { await subject.close(); }
+});
+
+test("a refused send installs nothing and leaves another session's queued work alone", async () => {
+  // The caller claims a name that is not its own while a stale route of the
+  // same name holds queued work. The refusal must be read-only: no install, no
+  // displacement, no ENDPOINT_RETIRED settlement, no journal row.
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" }, "never");
+  const stale = route("claude", claude.alias, "claude-session-stale", "reg_claude_stale");
+  const subject = await fixture([claudeProvider, codexProvider], {
+    seed: async (store) => {
+      await store.registerRoute(stale);
+      await store.registerRoute(codex);
+      await store.enqueueMessage({ sourceAlias: stale.alias, targetAlias: codex.alias,
+        body: "queued under the stale route", dedupeKey: "stale-queued" });
+    },
+  });
+  const durable = async () => {
+    const snapshot = await subject.store.publicSnapshot();
+    return {
+      routes: (await subject.store.listLogicalRoutes())
+        .map((row) => `${row.alias}\u0000${row.binding.registrationId}`).sort(),
+      // Terminal states only: ordinary background dispatch progress is not a
+      // settlement, and this test is about work the refusal must not settle.
+      settled: snapshot.messages.filter((event) => ["cancelled", "ambiguous", "unconfirmed",
+        "failed", "expired", "abandoned", "rejected"].includes(event.state))
+        .map((event) => `${event.body ?? ""}\u0000${event.state}\u0000${event.safeErrorCode ?? ""}`).sort(),
+      installs: (snapshot.activityEvents ?? []).filter(
+        (event) => event.action === "claude_route_installed" ||
+          event.action === "claude_route_retired").length,
+    };
+  };
+  try {
+    // Discovery shows the live session under a different name than the stale
+    // route carries, so a --from naming the stale route is a lie.
+    claudeProvider.claudeDiscovery = { alias: "advisor-live@this-mac",
+      routeHandle: claudeProvider.replyRouteHandle, kind: "interactive", state: "idle" };
+    const before = await durable();
+    assert.deepEqual(before.installs, 0);
+    assert.deepEqual(
+      await subject.handlers.send({ fromAlias: claude.alias, toAlias: codex.alias,
+        text: "claimed under another session's name", replyAddress: "uds:/test/claude-reply.sock",
+        expectsReply: false }),
+      { accepted: false, code: "route_mismatch", reason: "CLAUDE_ROUTE_MISMATCH" },
+    );
+    // The stale route, its queued work, and the journal are all untouched: a
+    // refused send never displaces a session or settles someone else's message.
+    assert.deepEqual(await durable(), before);
+    assert.equal((await subject.store.inspectPrivateRoute(claude.alias))?.binding.registrationId,
+      stale.binding.registrationId);
+    assert.equal(await subject.store.inspectPrivateRoute("advisor-live@this-mac"), undefined);
+  } finally { await subject.close(); }
+});
+
+test("two first sends to the same never-installed session share one route", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    // Both sends read no route and both mint a registration; the loser adopts
+    // the winner's rather than refusing an honest send.
+    const [first, second] = await Promise.all([
+      subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+        toAlias: claude.alias, text: "racing first send", expectsReply: false }),
+      subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+        toAlias: claude.alias, text: "racing second send", expectsReply: false }),
+    ]);
+    assert.equal(first.accepted, true, JSON.stringify(first));
+    assert.equal(second.accepted, true, JSON.stringify(second));
+    const routes = (await subject.store.listLogicalRoutes()).filter(
+      (row) => row.binding.provider === "claude");
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0]?.binding.routeHandle, claudeProvider.claudeDiscovery.routeHandle);
+    await eventually(() => claudeProvider.dispatches.filter(
+      (row) => row.text.startsWith("racing")).length === 2);
+  } finally { await subject.close(); }
+});
+
+test("a session renamed between reserve and dispatch is delivered to under its new name", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider]);
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    const opened = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: claude.alias, text: "installs the route", expectsReply: false });
+    assert.equal(opened.accepted, true);
+    await eventually(() => claudeProvider.dispatches.length === 1);
+    const installed = (await subject.store.inspectPrivateRoute(claude.alias))!;
+
+    // Rename the session in the exact window the runner is exposed to: after
+    // the attempt captured its target alias, before the runner resolves it.
+    const renamedAlias = "advisor-mid-flight@this-mac";
+    const reserve = subject.store.reserveMessage.bind(subject.store);
+    let renamed = false;
+    subject.store.reserveMessage = async (...args) => {
+      const result = await reserve(...args);
+      if (!renamed && result.status === "reserved" && result.attempt.body === "survives a rename") {
+        renamed = true;
+        await subject.store.installClaudeRoute({ ...installed, alias: renamedAlias });
+      }
+      return result;
+    };
+    const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: claude.alias, text: "survives a rename", expectsReply: false });
+    assert.equal(sent.accepted, true);
+    if (!sent.accepted) assert.fail("second send admission");
+    // The route is the same registration under a new name, so the attempt is
+    // delivered rather than settled ROUTE_UNREGISTERED against a stale alias.
+    await eventually(async () => {
+      const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+      return status.found && status.state === "delivered";
+    });
+    assert.equal(await subject.store.inspectPrivateRoute(claude.alias), undefined);
+    assert.equal((await subject.store.inspectPrivateRoute(renamedAlias))?.binding.registrationId,
+      installed.binding.registrationId);
+    assert.equal(claudeProvider.dispatches.at(-1)?.text, "survives a rename");
   } finally { await subject.close(); }
 });
 
@@ -738,7 +864,7 @@ test("a deliberately broad Claude workspace is refused before any route is insta
       hostId: "this-mac", busyPolicy: "queue" });
     assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: claude.alias, text: "must not install", expectsReply: false }),
-    { accepted: false, code: "rejected" });
+    { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_BROAD" });
     assert.equal(await subject.store.inspectPrivateRoute(claude.alias), undefined);
     assert.deepEqual((await subject.handlers.listSnapshot()).messages, []);
     assert.equal(claudeProvider.dispatches.length, 0);
@@ -754,7 +880,7 @@ test("a send to an undiscovered Claude alias is an ordinary unknown target", asy
       hostId: "this-mac", busyPolicy: "queue" });
     assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: "nobody@this-mac", text: "no such session", expectsReply: false }),
-    { accepted: false, code: "not_found" });
+    { accepted: false, code: "not_found", reason: "CLAUDE_ROUTE_NOT_FOUND" });
     assert.deepEqual((await subject.handlers.listSnapshot()).messages, []);
     assert.deepEqual((await subject.store.listLogicalRoutes()).map((row) => row.alias), [codex.alias]);
   } finally { await subject.close(); }
@@ -817,7 +943,7 @@ test("Claude alias collision overflow drops unfenced candidates and keeps diagno
     // it is an ordinary unknown target, never a pick-first delivery.
     assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
       toAlias: aliases.at(-1)!, text: "overflow target", expectsReply: false }),
-    { accepted: false, code: "not_found" });
+    { accepted: false, code: "not_found", reason: "CLAUDE_ROUTE_NOT_FOUND" });
     assert.deepEqual((await subject.store.listLogicalRoutes()).filter(
       (row) => row.binding.provider === "claude"), []);
   } finally { await subject.close(); }
@@ -2346,7 +2472,7 @@ test("an initial send cannot inherit a same-alias caller replacement after attes
       busyPolicy: "queue",
     });
     release.resolve();
-    assert.deepEqual(await sending, { accepted: false, code: "rejected" });
+    assert.deepEqual(await sending, { accepted: false, code: "rejected", reason: "ROUTE_UNREGISTERED" });
     assert.equal(
       (await subject.store.publicSnapshot()).messages.some(
         (message) => message.body === "racing initial send",
@@ -2387,7 +2513,7 @@ test("a reply-address send cannot cross a same-alias Claude route replacement", 
     await subject.store.installClaudeRoute(
       route("claude", claude.alias, "claude-session-replacement", "reg_claude_replacement"));
     release.resolve();
-    assert.deepEqual(await sending, { accepted: false, code: "rejected" });
+    assert.deepEqual(await sending, { accepted: false, code: "rejected", reason: "ROUTE_UNREGISTERED" });
     assert.equal(
       (await subject.store.publicSnapshot()).messages.some(
         (message) => message.body === "racing reply-address send",
@@ -2443,12 +2569,12 @@ test("reply attestation and an old conversation token cannot cross same-alias re
       busyPolicy: "queue",
     });
     release.resolve();
-    assert.deepEqual(await replying, { accepted: false, code: "rejected" });
+    assert.deepEqual(await replying, { accepted: false, code: "rejected", reason: "ROUTE_UNREGISTERED" });
     assert.deepEqual(await subject.handlers.reply({
       conversationId: opened.conversationId,
       text: "reuse retired token",
       caller: { kind: "codex", alias: codex.alias, threadId: THREAD_B },
-    }), { accepted: false, code: "rejected" });
+    }), { accepted: false, code: "rejected", reason: "CONVERSATION_ROUTE_RETIRED" });
     assert.equal(
       (await subject.store.publicSnapshot()).messages.some(
         (message) => message.body === "racing explicit reply" ||
@@ -2481,7 +2607,7 @@ test("selected Claude replies require an exact inherited reply capability", asyn
       conversationId: opened.conversationId,
       text: "alias only",
       caller: { kind: "claude", alias: claude.alias },
-    }), { accepted: false, code: "route_mismatch" });
+    }), { accepted: false, code: "route_mismatch", reason: "CLAUDE_REPLY_ADDRESS_INVALID" });
     claudeProvider.replyRouteHandle = "stale-claude-session";
     assert.deepEqual(await subject.handlers.reply({
       conversationId: opened.conversationId,
@@ -2491,7 +2617,7 @@ test("selected Claude replies require an exact inherited reply capability", asyn
         alias: claude.alias,
         replyAddress: "uds:/test/stale.sock",
       },
-    }), { accepted: false, code: "route_mismatch" });
+    }), { accepted: false, code: "route_mismatch", reason: "CLAUDE_REPLY_ADDRESS_INVALID" });
     claudeProvider.replyRouteHandle = claude.binding.routeHandle;
     const accepted = await subject.handlers.reply({
       conversationId: opened.conversationId,

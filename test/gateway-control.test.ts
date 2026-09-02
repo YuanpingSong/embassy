@@ -131,7 +131,7 @@ function snapshot(): GatewaySnapshot {
         host: "this-mac",
         state: "idle",
         validated: true,
-        selected: false,
+        routed: false,
         lastSeenAt: NOW,
       },
     ],

@@ -63,7 +63,7 @@ export class ClaudeNativeHelperClient implements ClaudeNativeHelperClientLike {
       execArgv: [], serialization: "json", stdio: ["ignore", "ignore", "ignore", "ipc"],
     });
     const client = new ClaudeNativeHelperClient(child, options.registration, options.callbacks);
-    const init: ClaudeNativeHelperInitialization = { protocolVersion: 1, type: "initialize", requestId: id(),
+    const init: ClaudeNativeHelperInitialization = { protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "initialize", requestId: id(),
       runtime: options.runtime, hostId: options.hostId, deliveryNotices: options.deliveryNotices,
       maxPendingMessages: options.maxPendingMessages, registration: options.registration };
     try { const result = await client.#send(init); if (!("generation" in result)) throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
@@ -71,7 +71,7 @@ export class ClaudeNativeHelperClient implements ClaudeNativeHelperClientLike {
     catch (error) { await client.forceClose(); throw error; }
   }
   request(command: ClaudeNativeHelperCommand, timeoutMs = TIMEOUT): Promise<ClaudeNativeHelperResult> {
-    return this.#send({ protocolVersion: 1, type: "request", requestId: id(), command }, timeoutMs);
+    return this.#send({ protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "request", requestId: id(), command }, timeoutMs);
   }
   async close(): Promise<void> {
     if (!this.#closed) { try { await this.request({ method: "close" }, CLOSE_TIMEOUT); } catch { this.child.kill("SIGTERM"); }
@@ -80,7 +80,7 @@ export class ClaudeNativeHelperClient implements ClaudeNativeHelperClientLike {
   async forceClose(): Promise<void> { this.#closed = true; if (!this.#exited) this.child.kill("SIGTERM"); await this.#awaitExit(); }
   async #awaitExit(): Promise<void> { const timer = setTimeout(() => this.child.kill("SIGKILL"), CLOSE_TIMEOUT); timer.unref();
     await this.#exit; clearTimeout(timer); }
-  async #send(message: ClaudeNativeHelperInitialization | Readonly<{ protocolVersion: 1; type: "request"; requestId: string; command: ClaudeNativeHelperCommand }>, timeoutMs = TIMEOUT): Promise<ClaudeNativeHelperResult> {
+  async #send(message: ClaudeNativeHelperInitialization | Readonly<{ protocolVersion: typeof CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION; type: "request"; requestId: string; command: ClaudeNativeHelperCommand }>, timeoutMs = TIMEOUT): Promise<ClaudeNativeHelperResult> {
     if (this.#closed || this.#exited || !this.child.connected || this.child.killed) throw fault("CLAUDE_NATIVE_HELPER_UNAVAILABLE", true);
     if (this.#pending.size >= CLAUDE_NATIVE_HELPER_MAX_REQUESTS) throw fault("CLAUDE_NATIVE_HELPER_REQUEST_CAPACITY", true);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw fault("CLAUDE_NATIVE_HELPER_TIMEOUT_INVALID");
@@ -146,7 +146,7 @@ export class ClaudeNativeHelperSupervisor {
   }
   async prepareDispatch(input: Readonly<{ sourceAlias: string; sourceProvider: GatewayProvider; targetAlias: string;
     conversationId: string; selectedAlias?: string; stateRoot?: string; binding: LogicalRouteBinding;
-    authorization: "selected_route" | "native_reply"; messageId: string; text: string; expectsReply: boolean;
+    authorization: "selected_route"; messageId: string; text: string; expectsReply: boolean;
     deadlineAt: string }>): Promise<ClaudeNativeHelperPreparedDispatch> {
     if (!ALIAS.test(input.sourceAlias) || !ALIAS.test(input.targetAlias) || !CONVERSATION.test(input.conversationId) ||
       !isGatewayProvider(input.sourceProvider)) throw fault("PROVENANCE_ENVELOPE_INVALID");
@@ -154,10 +154,11 @@ export class ClaudeNativeHelperSupervisor {
     const helper = this.#helpers.get(input.sourceAlias);
     if (!helper || helper.closing) throw fault("CLAUDE_NATIVE_HELPER_UNAVAILABLE", true);
     if (helper.sourceProvider !== input.sourceProvider) throw fault("PROVENANCE_ENVELOPE_INVALID");
-    if (input.authorization === "selected_route" && !input.stateRoot)
-      throw fault("CLAUDE_ROUTE_UNAVAILABLE", true);
+    // Every dispatch is a routed dispatch, so the target-workspace assertion
+    // always runs: no `stateRoot`, no preparation.
+    if (!input.stateRoot) throw fault("CLAUDE_ROUTE_UNAVAILABLE", true);
     const result = await helper.client.request({ method: "prepare_dispatch", binding: input.binding,
-      authorization: input.authorization, ...(input.authorization === "selected_route" ? { stateRoot: input.stateRoot! } : {}),
+      authorization: input.authorization, stateRoot: input.stateRoot,
       messageId: input.messageId, sourceAlias: helper.alias, sourceProvider: helper.sourceProvider,
       targetAlias: input.targetAlias, conversationId: input.conversationId, text: input.text,
       expectsReply: input.expectsReply, deadlineAt: input.deadlineAt }, this.#deadline(input.deadlineAt));

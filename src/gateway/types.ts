@@ -173,10 +173,13 @@ export type PublicAvailablePeerState =
  * A transient, metadata-only discovery row. Native provider IDs, process
  * identifiers, registry/socket paths, and generations are deliberately absent.
  * Version 1 uses this for genuine Claude peers; Codex inventory remains the
- * explicit PublicRouteSnapshot list.
+ * explicit PublicRouteSnapshot list. `routed` means the session currently has
+ * an installed logical route — it is a fact about the route table, never a
+ * permission: any discovered session is addressable, and its route installs on
+ * first use.
  */
 export type PublicAvailablePeerSnapshot = {
-  alias: string; provider: GatewayProvider; host: string; state: PublicAvailablePeerState; validated: boolean; selected: boolean; lastSeenAt?: string; safeErrorCode?: string;
+  alias: string; provider: GatewayProvider; host: string; state: PublicAvailablePeerState; validated: boolean; routed: boolean; lastSeenAt?: string; safeErrorCode?: string;
 };
 export const gatewayActivityKinds = [
   "discovery",
@@ -237,7 +240,7 @@ function nonNegative(value: unknown): value is number {
 export function isPublicAvailablePeerSnapshot(value: unknown): value is PublicAvailablePeerSnapshot {
   const candidate = publicRecord(value);
   if (candidate === undefined ||
-    !exactPublicKeys(candidate, ["alias", "provider", "host", "state", "validated", "selected"],
+    !exactPublicKeys(candidate, ["alias", "provider", "host", "state", "validated", "routed"],
       ["lastSeenAt", "safeErrorCode"]) ||
     typeof candidate.alias !== "string" ||
     !PUBLIC_ALIAS_PATTERN.test(candidate.alias) ||
@@ -248,7 +251,7 @@ export function isPublicAvailablePeerSnapshot(value: unknown): value is PublicAv
     typeof candidate.state !== "string" ||
     !(publicAvailablePeerStates as readonly string[]).includes(candidate.state) ||
     typeof candidate.validated !== "boolean" ||
-    typeof candidate.selected !== "boolean") return false;
+    typeof candidate.routed !== "boolean") return false;
   return (candidate.lastSeenAt === undefined || publicTimestamp(candidate.lastSeenAt)) &&
     (candidate.safeErrorCode === undefined ||
       (typeof candidate.safeErrorCode === "string" && PUBLIC_SAFE_CODE_PATTERN.test(candidate.safeErrorCode)));
@@ -416,7 +419,7 @@ export function projectGatewayPublicSnapshot(
     projected.truncation.messages = omissions;
   })) return projected;
   const peers = [...projected.availablePeers].sort((left, right) => {
-    if (left.selected !== right.selected) return left.selected ? -1 : 1;
+    if (left.routed !== right.routed) return left.routed ? -1 : 1;
     const byState = peerPriority(left.state) - peerPriority(right.state);
     if (byState !== 0) return byState;
     const bySeen = (right.lastSeenAt ?? "").localeCompare(left.lastSeenAt ?? "");

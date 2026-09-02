@@ -142,10 +142,19 @@ silently expand Embassy's claimed boundary.
   registration and its in-flight conversations, while a name that currently
   belongs to more than one live session is refused with
   `PEER_ALIAS_COLLISION` at send time and never resolved by picking first.
+  That fence is a fence on names: the session UUID stays addressable, and a
+  sender is never fenced by its own display name, because its identity was
+  attested rather than typed.
 - Every routed body carries the broker-composed provenance envelope naming its
-  verified sender. That envelope is the honest part of the model: the receiving
-  agent always learns who sent a message, even though the boundary that stops
-  anyone else is the operating system's.
+  sender, and what "naming" is worth depends on the hop. On a local hop the
+  sender is verified: the broker read it from the inherited socket capability,
+  the inherited Codex thread id, or a shell peer's minted token, none of which
+  the sender chose. Across a federated hop the sender is named by the sending
+  node, and what the destination authorizes is that node's membership in its
+  own `nodes.json` — the destination trusts the peer broker to have verified
+  its own local sender, exactly as much as it trusts that operator. In both
+  cases the envelope is attribution, not authentication of the body's claims,
+  and the boundary that stops anyone else is the operating system's.
 - Explicitly requested endpoint replacement
   (`register-codex --succeeds`) is one atomic logical-route transaction: it
   settles the outgoing route's work by recorded write phase, removes its

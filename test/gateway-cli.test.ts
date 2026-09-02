@@ -713,7 +713,7 @@ test("the removed --lang option is an argument error and locale environment is i
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
   });
   // Locale-shaped environment (including the removed EMBASSY_LOCALE) never
   // changes stderr and never fails an invocation on its own.
@@ -866,7 +866,7 @@ test("all five stderr categories print fixed one-line summaries without private 
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
   });
   const scenarios = [
     {
@@ -971,7 +971,7 @@ test("genuine control-version mismatches name version skew and client recovery",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: async () => {
@@ -1303,7 +1303,7 @@ test("wait-delivery polls at fixed intervals and emits only the terminal status"
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async (options: {
@@ -1363,7 +1363,7 @@ test("wait-delivery returns a retained terminal result after its deadline window
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => {
@@ -1446,7 +1446,7 @@ test("wait-delivery distinguishes an unknown token from its bounded deadline", a
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
   });
 
   const unknownOut = capture();
@@ -1565,7 +1565,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: async () => {
@@ -1600,7 +1600,7 @@ test("mutation response loss is normalized as ambiguous and is never retried", a
 test("a broker decision rejection has a distinct fixed exit and no diagnostics", async () => {
   const decide = async (
     argv: readonly string[],
-    result: { accepted: false; code: string },
+    result: { accepted: false; code: string; reason?: string },
     env: NodeJS.ProcessEnv,
   ) => {
     const stdout = capture();
@@ -1616,7 +1616,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
         stallNoticeMs: 30_000,
         steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
       }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => ({
@@ -1687,6 +1687,81 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
   assert.equal(refused.stderr, "[embassy] gateway rejected the request.\n");
 });
 
+test("each refusal reason renders exactly the remedy that fits it", async () => {
+  const decide = async (
+    argv: readonly string[],
+    result: { accepted: false; code: string; reason?: string },
+  ) => {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(argv, {
+      env: { CODEX_THREAD_ID: THREAD_ID },
+      stdin: input(SECRET_BODY),
+      stdout,
+      stderr,
+      loadConfig: () => ({
+        stateDir: "/private/fake-state",
+        controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
+        stallNoticeMs: 30_000,
+        steeringEnabled: true,
+        limits: {} as never,
+      }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => ({
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        ok: true,
+        result,
+      })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    });
+    assert.equal(code, gatewayCliExitCodes.rejected, argv.join(" "));
+    return stderr.chunks.join("").split("\n").filter((line) => line.length > 0);
+  };
+  const decision = "[embassy] gateway rejected the request.";
+  const send = ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac"];
+
+  assert.deepEqual(await decide(send, { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" }), [
+    decision,
+    "[embassy] the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.",
+  ]);
+  assert.deepEqual(await decide(send, { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_BROAD" }), [
+    decision,
+    "[embassy] that session's workspace contains the gateway state directory; move one so they no longer overlap, then retry.",
+  ]);
+  assert.deepEqual(await decide(send, { accepted: false, code: "route_mismatch", reason: "CLAUDE_ROUTE_MISMATCH" }), [
+    decision,
+    "[embassy] --from must be the sending session's own alias; read the name embassy status shows for this session.",
+  ]);
+  assert.deepEqual(await decide(send, { accepted: false, code: "not_found", reason: "CLAUDE_ROUTE_NOT_FOUND" }), [
+    decision,
+    "[embassy] no current route answers to that name. A Claude session is addressed by its live name: " +
+      "run embassy refresh, then read embassy status for the name it has now.",
+  ]);
+
+  // A concurrent first send is retried inside the broker, so this reason never
+  // reaches an operator with advice attached.
+  assert.deepEqual(
+    await decide(send, { accepted: false, code: "conflict", reason: "ROUTE_IDENTITY_ALREADY_REGISTERED" }),
+    [decision],
+  );
+  // The rescan advice belongs to a Claude-shaped target only: a codex- or
+  // peer- route is registered explicitly and no rescan will conjure one.
+  for (const target of ["codex-other@this-mac", "peer-shell@this-mac"]) {
+    assert.deepEqual(
+      await decide(["send", "--from", "codex-reviewer@this-mac", "--to", target],
+        { accepted: false, code: "not_found", reason: "ROUTE_NOT_AVAILABLE" }),
+      [decision],
+    );
+  }
+  // And never to `reply`: a not_found there is a stale conversation token,
+  // which no amount of rescanning revives.
+  assert.deepEqual(
+    await decide(["reply", "--conversation", CONVERSATION_ID, "--alias", "codex-reviewer@this-mac"],
+      { accepted: false, code: "not_found", reason: "CONVERSATION_NOT_FOUND" }),
+    [decision],
+  );
+});
+
 test("registration stays record-only and localizes the rejection", async () => {
   const config = {
     stateDir: "/private/fake-state",
@@ -1694,7 +1769,7 @@ test("registration stays record-only and localizes the rejection", async () => {
     allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
     stallNoticeMs: 30_000,
     steeringEnabled: true,
-        limits: {} as never,
+    limits: {} as never,
   };
 
   const expected = "[embassy] gateway rejected the request.\n";
@@ -2899,16 +2974,15 @@ test("service status reports unknown and exits non-zero when launchctl cannot an
   assert.match(stderr.chunks.join(""), /launchctl: spawn \/bin\/launchctl ENOENT\n$/);
 });
 
-test("the installed binary implements exactly the nineteen documented commands", () => {
+test("the installed binary implements exactly the fifteen documented commands", () => {
   // docs/GATEWAY-ARCHITECTURE.md names this list and its count; README's
   // command table covers the same set.
   assert.deepEqual([...gatewayCliCommands], [
     "serve", "service", "health", "status", "delivery-status", "wait-delivery",
-    "refresh", "register-codex", "unregister-codex", "select-claude",
-    "unselect-claude", "pair", "unpair", "send", "reply", "register-peer",
-    "unregister-peer", "await", "peer-stdio",
+    "refresh", "register-codex", "unregister-codex", "send", "reply",
+    "register-peer", "unregister-peer", "await", "peer-stdio",
   ]);
-  assert.equal(gatewayCliCommands.length, 19);
+  assert.equal(gatewayCliCommands.length, 15);
 });
 
 test("the health probe still terminates when the injected clock never advances", async () => {

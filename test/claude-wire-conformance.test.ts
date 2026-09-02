@@ -292,7 +292,7 @@ test("helper IPC keeps one strict prepare, perform, and cancel contract", () => 
     deadlineAt: "2030-01-01T00:00:00.000Z",
   } as const;
   const prepare = {
-    protocolVersion: 1,
+    protocolVersion: 2,
     type: "request",
     requestId,
     command,
@@ -300,7 +300,7 @@ test("helper IPC keeps one strict prepare, perform, and cancel contract", () => 
   assert.equal(isClaudeNativeHelperParentMessage(prepare), true);
   assert.equal(
     JSON.stringify(prepare),
-    '{"protocolVersion":1,"type":"request","requestId":"request_0123456789",' +
+    '{"protocolVersion":2,"type":"request","requestId":"request_0123456789",' +
       '"command":{"method":"prepare_dispatch","binding":{"provider":"claude",' +
       '"hostId":"this-mac","routeHandle":"00000000-0000-7000-8000-000000000111",' +
       '"registrationId":"registration-claude-one"},"authorization":"selected_route",' +
@@ -311,14 +311,15 @@ test("helper IPC keeps one strict prepare, perform, and cancel contract", () => 
       '"deadlineAt":"2030-01-01T00:00:00.000Z"}}',
   );
 
-  const { stateRoot: _stateRoot, ...nativeCommand } = command;
-  assert.equal(isClaudeNativeHelperParentMessage({
-    ...prepare,
-    command: { ...nativeCommand, authorization: "native_reply" },
-  }), true);
+  // Protocol 2 removed the second authorization: `selected_route` is the only
+  // value, and its state root — the input to the target-workspace assertion —
+  // is required rather than optional.
+  const { stateRoot: _stateRoot, ...withoutStateRoot } = command;
   for (const invalidCommand of [
     { ...command, stateRoot: undefined },
-    { ...nativeCommand, authorization: "native_reply", stateRoot: "/forbidden" },
+    withoutStateRoot,
+    { ...command, authorization: "native_reply" },
+    { ...withoutStateRoot, authorization: "native_reply" },
     { ...command, sourceProvider: "unknown" },
     { ...command, privateThreadId: SESSION },
   ]) {
@@ -340,7 +341,7 @@ test("helper IPC keeps one strict prepare, perform, and cancel contract", () => 
   }), false);
 
   const evidence = {
-    protocolVersion: 1,
+    protocolVersion: 2,
     type: "response",
     requestId,
     ok: true,

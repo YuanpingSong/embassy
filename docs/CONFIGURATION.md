@@ -67,6 +67,13 @@ An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
 does not mutate the state file. There is no conversion command or automatic
 recovery path.
 
+A schema-5 file that still carries a key this line removed — `consentEdges`,
+retired along with the permission records it held — refuses with `CORRUPT_GATEWAY_STATE`
+instead, because the loader accepts an exact key set rather than ignoring what
+it does not recognize. On this upgrade that refusal is expected, not damage:
+the file on disk is intact and the same five steps above are the whole
+recovery. The state file is never rewritten in place to make it loadable.
+
 A running broker holds `.gateway-controller.lock` in the state directory,
 recording its pid and the machine name at the time it started. What a later
 start does with a lock it finds depends only on that pid:
@@ -242,9 +249,11 @@ The managed Codex installation is resolved by exact verified path; a `codex` els
 
 ## Addressing
 
-Claude sessions are addressed by their current `name@host` or by a user-supplied native session UUID. The UUID is the stable logical identity; the current name is a live lookup alias. After a rename, the old name stops resolving immediately while a selected UUID-bound route continues to work under the new name. A rename becomes visible at the session's next status transition — typically its next turn boundary — because Claude Code rewrites the session's registry record on those transitions, not at the moment of the rename; Embassy reflects the record, never the rename itself.
+Claude sessions are addressed by their current `name@host` or by a user-supplied native session UUID. The UUID is the stable logical identity; the current name is a live lookup alias. After a rename, the old name stops resolving immediately while an installed UUID-bound route continues to work under the new name. A rename becomes visible at the session's next status transition — typically its next turn boundary — because Claude Code rewrites the session's registry record on those transitions, not at the moment of the rename; Embassy reflects the record, never the rename itself.
 
-Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name.
+Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name: the shared *name* is refused with `PEER_ALIAS_COLLISION`, while each session stays reachable by its own UUID.
+
+Across a federated link, reachability is narrower than it is locally. A peer node addresses only the routes its neighbour published in its catalog, and a Claude session appears there only once it has a local route — that is, once it has sent a message or been sent one on its own host. The destination never installs a route on a handoff: an unmirrored sender or an unrouted target is refused, not created. To make a Claude session addressable from a peer node, use it locally once first.
 
 Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server, Desktop, and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration remains.
 

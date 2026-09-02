@@ -69,7 +69,7 @@
 <h2>Three flags, one gate</h2>
 <p class="lede">Claude Code and Codex keep their native transports, because those deliver into the live session you already have open. Any shell harness that can run the CLI joins as a peer with a pull mailbox. Every one of them routes through the same broker, the same OS boundary, and the same ledger.</p>
 <div class="truths">
-<div><b>Claude Code</b><p>Native peer protocol over a private Unix-domain socket. Mail lands in the live session you are working in: discovery, selection, and a mailbox write with a correlated native receipt. <code style="font-size:13px">peerProtocol 1</code> is exact wire grammar, checked per record.</p></div>
+<div><b>Claude Code</b><p>Native peer protocol over a private Unix-domain socket. Mail lands in the live session you are working in: discovery, route installation on first use, and a mailbox write with a correlated native receipt. <code style="font-size:13px">peerProtocol 1</code> is exact wire grammar, checked per record.</p></div>
 <div><b>Codex</b><p>The managed App Server over a local subprocess Embassy owns. A registered task is resumed and observed; a message enters at an idle turn or at a validated tool-call boundary — never mid-generation.</p></div>
 <div><b>Shell peers</b><p>Any harness that can run the CLI. It registers a <code style="font-size:13px">peer-*</code> route and receives its one-time token once; <code style="font-size:13px">embassy await</code> long-polls the mailbox in bounded 30-second iterations and acknowledges only after the body reached stdout. No PID binding, no token file, no daemon.</p></div>
 </div>

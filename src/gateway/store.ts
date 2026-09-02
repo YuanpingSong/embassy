@@ -201,7 +201,10 @@ function routeModeMatchesHost(
   localHost: string | undefined,
 ): boolean {
   if (route.registrationMode === "federated_peer") {
-    return localHost !== undefined && route.binding.hostId !== localHost;
+    // Without a known local host there is nothing to prove the mirror foreign
+    // against, so the check abstains rather than refusing. The store always
+    // supplies its configured host, so the shipped path always checks.
+    return localHost === undefined || route.binding.hostId !== localHost;
   }
   return route.binding.hostId === localHost && (route.binding.provider === "claude"
     ? route.registrationMode === "selected_live_peer"
@@ -471,7 +474,16 @@ function isMessageActivity(value: unknown): value is GatewayMessageActivity {
     isNormalizedEvent(value.event)
   );
 }
-export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersistedState {
+/**
+ * `configuredHost` is the broker's own host identity, known at construction and
+ * always supplied on the shipped path. Deriving the local host from the routes
+ * alone is not sufficient: a federation node whose only routes are mirrors has
+ * no local route to derive from, and a state file it just wrote would fail its
+ * own validator on the next persist.
+ */
+export function isGatewayPersistedStateV5(
+  value: unknown, configuredHost?: string,
+): value is GatewayPersistedState {
   if (
     !isObject(value) ||
     // Exact keys: a file that still carries the retired `consentEdges` key is
@@ -542,7 +554,10 @@ export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersi
     .filter((route) => route.registrationMode !== "federated_peer")
     .map((route) => route.binding.hostId));
   if (localHosts.size > 1) return false;
-  const localHost = [...localHosts][0];
+  // The configured host is authority; a local route's own hostId is checked
+  // against it in the loop below, so the derived host is only the fallback for
+  // a caller that has no configured identity to offer.
+  const localHost = configuredHost ?? [...localHosts][0];
   for (const route of state.routes) {
     if (
       !route.alias.endsWith(`@${route.binding.hostId}`) ||
@@ -1142,6 +1157,12 @@ export class GatewayStore {
       );
       if (source === undefined) {
         throw new BridgeError("ROUTE_UNREGISTERED", "The native Claude sender's route is no longer current.");
+      }
+      if (
+        source.binding.provider === target.binding.provider &&
+        source.binding.hostId === target.binding.hostId
+      ) {
+        throw new BridgeError("ROUTE_DIRECTION_MISMATCH", "Messages route only between different providers or between configured hosts.");
       }
       return this.enqueueResolved(state, now, input, {
         sourceAlias: source.alias, targetAlias: target.alias,
@@ -2561,8 +2582,13 @@ export class GatewayStore {
         "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside — nodes.json, if you use federation, is untouched — then restart and re-register Codex tasks.",
       );
     }
-    if (!isGatewayPersistedStateV5(parsed)) {
-      throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state failed strict v5 schema validation.");
+    if (!isGatewayPersistedStateV5(parsed, this.config.hostId)) {
+      // A document that is a valid v5 state on its own terms but not under this
+      // broker's host identity is not corrupt: it belongs to another host, and
+      // the operator deserves that sentence rather than "failed validation".
+      throw isGatewayPersistedStateV5(parsed)
+        ? new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway state exceeds its configured bounds or host allowlist.")
+        : new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state failed strict v5 schema validation.");
     }
     this.assertConfiguredBounds(parsed);
     return parsed;

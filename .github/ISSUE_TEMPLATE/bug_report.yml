@@ -29,8 +29,8 @@ body:
       placeholder: |
         1. embassy serve
         2. embassy register-codex --alias codex-reviewer@this-mac
-        3. embassy select-claude --alias advisor@this-mac
-        4. printf '%s\n' '[BODY REDACTED]' | embassy send-to-claude --from codex-reviewer@this-mac --to advisor@this-mac
+        3. embassy status  (to read the Claude session's current name)
+        4. printf '%s\n' '[BODY REDACTED]' | embassy send --from codex-reviewer@this-mac --to advisor@this-mac
     validations:
       required: true
 

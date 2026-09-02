@@ -201,7 +201,7 @@ Four embassy terms name real features:
 - **Registration and provenance** are the permission model: registration is explicit for Codex tasks, because Embassy must record the inherited task identity; every routed body carries the broker-composed envelope naming its verified sender, and the OS boundary — same UID, same host or a configured node — is the permission itself.
 - **The ledger** is the delivery record: a receipt for every settled message, and a status snapshot that includes retained message bodies from the bounded ledger.
 - **The pouch** is transit and the archive: bounded bodies, retained under bounded limits, private to your OS account — sealed against other users, not against you.
-- **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery authority.
+- **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery authority. A peer node can address only what its neighbour published — a Claude session becomes reachable across the link once it has a local route, which its first local send or receipt installs.
 
 ## For agents
 
@@ -229,7 +229,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@your-host --succeeds codex-reviewer@your-host` hands the registration to a different task |
 | `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
-| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message: `--from <alias> --to <alias>`, optional `--expects-reply`; the broker derives direction from the resolved providers, and a discovered Claude session's route installs on its first use |
+| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message: `--from <alias> --to <alias>`, optional `--expects-reply`; direction follows the inherited principal — who is sending — not the route table, and a discovered Claude session's route installs on its first use |
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin |
 
 Version 2.0 accepts only fresh private state. Follow the

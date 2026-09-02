@@ -60,10 +60,10 @@ const prepare = { method: "prepare_dispatch", binding: route, authorization: "se
   messageId: "gateway-message-first", sourceAlias: "codex-first@this-mac", sourceProvider: "codex",
   targetAlias: "claude-first@this-mac", conversationId: "conv_0123456789abcdef", text: "body", expectsReply: false,
   deadlineAt: "2030-01-01T00:00:00.000Z" } as const;
-const envelope = (command: unknown) => ({ protocolVersion: 1, type: "request", requestId: "request_0123456789", command });
+const envelope = (command: unknown) => ({ protocolVersion: 2, type: "request", requestId: "request_0123456789", command });
 
 test("helper IPC strictly binds preparation authority and bounds", () => {
-  const initialization = { protocolVersion: 1, type: "initialize", requestId: "request_0123456789",
+  const initialization = { protocolVersion: 2, type: "initialize", requestId: "request_0123456789",
     runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, hostId: "this-mac",
     deliveryNotices: "merged", maxPendingMessages: 8,
     registration: { alias: "peer-builder@this-mac", sourceProvider: "peer", cwd: "/workspace/peer" } } as const;
@@ -75,8 +75,10 @@ test("helper IPC strictly binds preparation authority and bounds", () => {
     registration: { ...initialization.registration, sourceProvider: "claude" } }), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope(prepare)), true);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, stateRoot: undefined })), false);
-  assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, authorization: "native_reply", stateRoot: undefined })), true);
+  // Protocol 2 has one authorization, and its state root — the input to the
+  // target-workspace assertion — is required, never optional.
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, authorization: "native_reply" })), false);
+  assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, authorization: "native_reply", stateRoot: undefined })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, unexpected: true })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, progressWatchActive: true })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, sourceProvider: "unknown" })), false);
@@ -144,10 +146,17 @@ test("supervisor binds source, namespaces receipts, and consumes preparations on
     assert.deepEqual(await renamed.perform(), { state: "delivered" });
     assert.equal((clients[0]!.commands.at(-2) as Extract<ClaudeNativeHelperCommand, { method: "prepare_dispatch" }>).targetAlias,
       "claude-first@this-mac");
-    const reply = await supervisor.prepareDispatch({ ...input, authorization: "native_reply", stateRoot: "/must-not-cross-ipc" });
-    const replyCommand = clients[0]!.commands.at(-1)!;
-    assert.equal(replyCommand.method, "prepare_dispatch");
-    assert.equal("stateRoot" in replyCommand, false); await reply.cancel();
+    // Protocol 2 has one authorization, so every preparation carries the
+    // stateRoot the target-workspace assertion needs; a caller that omits it
+    // is refused rather than silently preparing an unasserted write.
+    const { stateRoot: _omitted, ...withoutStateRoot } = input;
+    await assert.rejects(supervisor.prepareDispatch(withoutStateRoot),
+      (error: unknown) => error instanceof BridgeError && error.code === "CLAUDE_ROUTE_UNAVAILABLE");
+    const asserted = await supervisor.prepareDispatch({ ...input, stateRoot: "/synthetic/state-root" });
+    const assertedCommand = clients[0]!.commands.at(-1)!;
+    assert.equal(assertedCommand.method, "prepare_dispatch");
+    assert.equal(assertedCommand.method === "prepare_dispatch" && assertedCommand.stateRoot,
+      "/synthetic/state-root"); await asserted.cancel();
     clients[0]!.crash(); assert.equal(supervisor.size, 1); assert.equal(notices.at(-1), "CLAUDE_NATIVE_HELPER_EXITED");
     await supervisor.updateStatus("codex-second@this-mac", "busy"); assert.equal(clients[1]!.commands.at(-1)!.method, "update_status");
   } finally { await supervisor.close(); }
@@ -172,8 +181,8 @@ test("forked fake helper expires and fences capabilities, ambiguity, and receipt
   await writeFile(entryPath, `
     import { appendFileSync } from "node:fs";
     let held; const ttl = 25;
-    const send = (requestId, result) => process.send({protocolVersion:1,type:"response",requestId,ok:true,result});
-    const fail = (requestId, code) => process.send({protocolVersion:1,type:"response",requestId,ok:false,error:{code,recoverable:false}});
+    const send = (requestId, result) => process.send({protocolVersion:2,type:"response",requestId,ok:true,result});
+    const fail = (requestId, code) => process.send({protocolVersion:2,type:"response",requestId,ok:false,error:{code,recoverable:false}});
     process.on("message", (message) => {
       if (message.type === "initialize") return send(message.requestId, {generation:"fake_generation"});
       const command = message.command;
@@ -191,7 +200,7 @@ test("forked fake helper expires and fences capabilities, ambiguity, and receipt
         if (current.messageId === "crash-during-perform") { appendFileSync(${JSON.stringify(marker)}, "perform\\n"); return process.exit(9); }
         return send(message.requestId, {state:"delivered"});
       }
-      if (command.method === "update_status" && command.status === "waiting") process.send({protocolVersion:1,type:"event",value:{event:"claude_message",value:{routeHandle:"00000000-0000-7000-8000-000000000111",sourceAlias:"claude-first@this-mac",targetAlias:"codex-fake@this-mac",text:"inbound",receiptHandle:"child-receipt"}}});
+      if (command.method === "update_status" && command.status === "waiting") process.send({protocolVersion:2,type:"event",value:{event:"claude_message",value:{routeHandle:"00000000-0000-7000-8000-000000000111",sourceAlias:"claude-first@this-mac",targetAlias:"codex-fake@this-mac",text:"inbound",receiptHandle:"child-receipt"}}});
       if (command.method === "release_inbound_receipt") return send(message.requestId, {released:true});
       if (command.method === "close") { send(message.requestId, {ok:true}); return setImmediate(() => process.exit(0)); }
       send(message.requestId, {ok:true});

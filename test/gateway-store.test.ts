@@ -2081,6 +2081,55 @@ test("federated native ingress needs an installed sender route and no edge at al
   await store.close();
 });
 
+test("a federation node whose only routes are mirrors can persist and reload its own state", async () => {
+  // The broker's configured host identity is authority. Deriving it from the
+  // routes alone wedges a fresh federation node: its first peer refresh writes
+  // a mirrors-only file that its own validator would then refuse, leaving the
+  // live broker unable to persist and the documented reset reproducing it.
+  const setup = await fixture();
+  const config = { ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] };
+  const store = new GatewayStore(config, { now: setup.clock.now, randomId: setup.clock.randomId });
+  await store.initialize();
+  const remote = { alias: "codex-worker@m5dev", provider: "codex" as const, host: "m5dev", routeRef: "reg_remote_only" };
+  const catalog = (revision: number): PeerCatalogResult => ({
+    revision, complete: true, truncated: false, generatedAt: setup.clock.now().toISOString(),
+    health: "healthy", connectors: [], routes: [{ ref: remote.routeRef, alias: remote.alias,
+      provider: remote.provider, host: remote.host, enabled: true, state: "idle", queueDepth: 0 }],
+    alerts: [] });
+  // First peer refresh on a node with no local route of its own.
+  await store.reconcilePeerCatalog("m5dev", catalog(1));
+  assert.equal((await store.inspectPrivateRoute(remote.alias))?.registrationMode, "federated_peer");
+  // A second mutation re-reads the file it just wrote: this is where the
+  // derived-host bug turned a live broker into a write-wedged one.
+  await store.reconcilePeerCatalog("m5dev", catalog(2));
+  const raw = JSON.parse(await readFile(store.stateFilePath, "utf8")) as Record<string, unknown>;
+  assert.equal(isGatewayPersistedStateV5(raw, "studio"), true);
+  assert.equal((raw.routes as Array<{ registrationMode: string }>).every(
+    (route) => route.registrationMode === "federated_peer"), true);
+  await store.close();
+
+  const reopened = new GatewayStore(config, { now: setup.clock.now, randomId: setup.clock.randomId });
+  await reopened.initialize();
+  assert.equal((await reopened.inspectPrivateRoute(remote.alias))?.registrationMode, "federated_peer");
+  await reopened.close();
+
+  // The host identity is still checked, not merely borrowed: the same file
+  // under a broker that claims to be the mirror's own host is refused, and a
+  // local route from a foreign host keeps its specific remedy.
+  assert.equal(isGatewayPersistedStateV5(raw, "m5dev"), false);
+  const foreignLocal = new GatewayStore({ ...config, hostId: "lab", allowedHosts: ["lab", "m5dev"] },
+    { now: setup.clock.now, randomId: setup.clock.randomId });
+  await foreignLocal.initialize();
+  await foreignLocal.registerRoute({ alias: "codex-local@lab", registrationMode: "explicit_opt_in",
+    binding: { provider: "codex", hostId: "lab", routeHandle: "thread-lab", registrationId: "reg_lab" } });
+  await foreignLocal.close();
+  await assert.rejects(
+    new GatewayStore({ ...config, hostId: "studio", allowedHosts: ["studio", "lab", "m5dev"] },
+      { now: setup.clock.now, randomId: setup.clock.randomId }).initialize(),
+    /configured bounds or host allowlist/iu,
+  );
+});
+
 test("peer catalog reconciliation and destination enqueue commit one destination-owned copy", async () => {
   const setup = await fixture();
   const store = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] },

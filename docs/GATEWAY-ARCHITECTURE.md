@@ -174,13 +174,13 @@ The status below is intentionally narrower than the target architecture.
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
 | Local provider adapters and Embassy-node federation | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, plus bounded catalog reconciliation and destination-owned handoff over the fixed attach-only SSH transport |
 | Universal shell peer mailbox | **Implemented**, alias-plus-token same-UID attribution, hash-only durable ownership, bounded long polling, stdout-flush receipts, and restart uncertainty tests; no PID binding, token file, Keychain entry, or daemon |
-| Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, bounded public-snapshot projection, and restart attempt-phase tests |
+| Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider route installation/dispatch/reply correlation, bounded public-snapshot projection, and restart attempt-phase tests |
 | Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v5 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
-| Live Codex-to-Claude delivery | **Tested** through selected real Claude 2.1.224–2.1.226 sessions |
+| Live Codex-to-Claude delivery | **Tested** against real Claude 2.1.224–2.1.226 sessions |
 | Claude-initiated Codex turn/reply into Codex | **Tested** with a real busy Codex task: native `busy → waiting`, automatic post-idle turn, terminal delivery status, and exact reply round trip |
 | Remote production connector | **Planned**; only the `build-mac` read-only attach feasibility probe is complete |
 
@@ -203,7 +203,7 @@ claude-advisor@this-mac
 Claude's native `sessionId` UUID is its sole logical identity. Its current
 name is a mutable lookup alias for that UUID; the gateway keeps no historical
 name index. A rename therefore makes the old name stop resolving immediately,
-while the UUID and an already selected UUID-bound route continue to identify
+while the UUID and an already installed UUID-bound route continue to identify
 the same session. PID, registry path, process generation, and socket generation
 are replaceable delivery coordinates, not identity, and are refreshed from the
 live registry before a write. The gateway rejects duplicate current names and
@@ -249,22 +249,26 @@ correlation, accessibility, liveness, and generation checks above without an
 invented additional owner or mode rule. A current name resolves to a UUID but
 never substitutes for it.
 
-A selected Claude UUID remains the durable route identity until explicit
-unselection. Discovery publishes only bounded sanitized candidates and current
-lookup aliases; it never changes the selected UUID. Immediately before a
+An installed Claude route keeps its UUID as durable identity until a
+different session claims its alias and displaces it; there is no operator
+command that retires one (deliberate retirement is emb-107's subject).
+Discovery publishes only bounded sanitized candidates and current
+lookup aliases; it never changes the installed UUID. Immediately before a
 Claude-bound write, Embassy performs a fresh bounded registry scan, resolves
 that byte-identical UUID exactly once, and revalidates its current workspace,
 process, socket, and used-artifact generation. An incomplete scan, duplicate
 UUID, changed UUID, or unsafe current coordinate fails that operation closed.
 A duplicate display name is fenced from listing and from every send that
-addresses it — by name or by UUID — and the fence is re-evaluated inside the
-send path, never only on the discovery timer;
-a pre-bound route retains its identity-pinned binding, and an operator-supplied
-UUID remains the recovery selector. A name alone never restores or retargets a
-durable route.
+addresses it BY NAME, and the fence is re-evaluated inside the
+send path, never only on the discovery timer. The fence is a fence on names:
+a session UUID is unambiguous, so an operator-supplied UUID remains the
+recovery selector and reaches the session even while its name collides, and a
+sender whose own display name collides is never silenced, because its identity
+was attested rather than typed. A pre-bound route retains its identity-pinned
+binding, and a name alone never restores or retargets a durable route.
 
 `embassy status` is the single pane for the human. It shows both sanitized
-available/selected Claude aliases and explicitly registered Codex aliases,
+available and routed Claude aliases and explicitly registered Codex aliases,
 including their host, current state, last-seen age, and queue depth. The same
 pane also carries the bounded ledger's retained message bodies, so its output is
 as sensitive as the messages themselves.
@@ -279,10 +283,10 @@ The thin skill/CLI exposes the same safe alias list to either provider.
    and bounded text.
 2. The gateway checks thread ownership, selector state, rate and size limits,
    deadline, and dedupe state.
-3. It requires the selector to match an explicitly selected live UUID,
-   refreshes the UUID's current process/socket coordinates, and revalidates
-   the selected Claude peer's canonical workspace access and exact generation
-   before every send.
+3. It resolves the selector against a discovery scan run inside this send,
+   installing the session's route if this is its first use, then refreshes the
+   UUID's current process/socket coordinates and revalidates that Claude
+   peer's canonical workspace access and exact generation before every send.
 4. Immediately before the native write, it composes one broker-owned canonical
    `cross-session-message` textual frame with bounded sender attribution and a
    first-child reply hint containing the full conversation token, exact aliases,
@@ -389,7 +393,7 @@ not uniquely re-observed with peer protocol 1, the write fails closed. A termina
 write whose outcome is ambiguous is never replayed; only a proven pre-write
 failure may be retried while the bounded in-memory receipt remains live. The
 receipt correlation does not add the UUID or receipt handle to public output
-or durable state; a separately selected route may already persist that same
+or durable state; a separately installed route may already persist that same
 Claude UUID as its private native route handle.
 
 Delivery callback arrival is timestamped at the service boundary. A terminal
@@ -559,8 +563,9 @@ The closed version 3 method family is exactly these fifteen methods:
   atomic `--succeeds` replacement, and owner unregister;
 - `delivery_status`, a lookup by an opaque correlation handle retained only in
   bounded private v5 state;
-- `send`, whose direction is derived from the resolved endpoint providers and
-  which installs a discovered Claude session's route on its first use;
+- `send`, whose direction follows the inherited principal — who is sending —
+  rather than the route table, and which installs a discovered Claude
+  session's route on its first use;
 - `reply`, the correlated reply operation;
 - `refresh_discovery`, which rescans for Claude sessions;
 - `peer_catalog` and `peer_handoff`, the private federation catalog and
@@ -854,9 +859,10 @@ No grant to `~/.claude/projects`, the rest of
 unrelated temporary files is required. Remote-host access is a later,
 separately reviewed fixed-SSH-alias capability.
 
-Selected Claude workspaces may contain the private controller-state directory. The
-filesystem root and configured temporary roots are still rejected as
-deliberately broad Claude workspaces. The user's home is selectable with the
+A routed Claude session's workspace may contain the private controller-state
+directory. The filesystem root and configured temporary roots are still
+rejected as deliberately broad Claude workspaces, and that refusal happens
+before any route is installed. The user's home is addressable with the
 default controller-state root beneath it. A narrower project directory remains
 the preferred least-context setup, but it is not mandatory.
 
