@@ -162,76 +162,6 @@ function snapshot(): GatewaySnapshot {
       },
     ],
     consentEdges: [],
-    progressWatches: [
-      {
-        conversationIdSuffix: "AbCd_123",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        lastActivityAt: NOW,
-        nextActionAt: NOW,
-        nudgeCount: 0,
-      },
-    ],
-    progressWatchEvents: [
-      {
-        sequence: 1,
-        timestamp: NOW,
-        conversationIdSuffix: "AbCd_123",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "opened",
-        actor: "owner",
-      },
-      {
-        sequence: 2,
-        timestamp: NOW,
-        conversationIdSuffix: "BcDe_234",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "replaced",
-        actor: "unknown",
-      },
-      {
-        sequence: 3,
-        timestamp: NOW,
-        conversationIdSuffix: "CdEf_345",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "settled",
-        actor: "worker",
-        reason: "done",
-      },
-      {
-        sequence: 4,
-        timestamp: NOW,
-        conversationIdSuffix: "CdEf_345",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "settled",
-        actor: "operator",
-        reason: "pair_removed",
-      },
-      {
-        sequence: 5,
-        timestamp: NOW,
-        conversationIdSuffix: "DeFg_456",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "settled",
-        actor: "operator",
-        reason: "endpoint_retired",
-      },
-      {
-        sequence: 6,
-        timestamp: NOW,
-        conversationIdSuffix: "FgHi_678",
-        ownerAlias: "codex-main@this-mac",
-        workerAlias: "claude-one@build-mac",
-        kind: "settled",
-        actor: "owner",
-        reason: "done",
-      },
-    ],
     activityEvents: [
       {
         sequence: 1,
@@ -311,8 +241,6 @@ function snapshot(): GatewaySnapshot {
       availablePeers: 0,
       routes: 0,
       consentEdges: 0,
-      progressWatches: 0,
-      progressWatchEvents: 0,
       activityEvents: 0,
       messages: 0,
       alerts: 0,
@@ -340,7 +268,6 @@ function handlers(
       updatedAt: NOW,
       deadlineAt: DEADLINE,
     }),
-    untrack: () => ({ accepted: true, code: "ok" }),
     send: () => ({
       accepted: true,
       code: "ok",
@@ -461,12 +388,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
         return { accepted: true, code: "ok" };
       },
       send: (params) => {
-        if (params.text === "TRACK: owner conflict") {
-          return {
-            accepted: false as const,
-            code: "watch_owner_conflict" as const,
-          };
-        }
         if ("replyAddress" in params) toCodex = { ...params };
         else toClaude = { ...params };
         return {
@@ -582,27 +503,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       },
     },
   });
-  assert.deepEqual(
-    await sendGatewayControlRequest({
-      socketPath,
-      request: {
-        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-        method: "send",
-        params: {
-          fromAlias: "codex-main@this-mac",
-          threadId: THREAD_ID,
-          toAlias: "claude-one@build-mac",
-          text: "TRACK: owner conflict",
-          expectsReply: false,
-        },
-      },
-    }),
-    {
-      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      ok: true,
-      result: { accepted: false, code: "watch_owner_conflict" },
-    },
-  );
   assert.deepEqual(toClaude, {
     fromAlias: "codex-main@this-mac",
     threadId: THREAD_ID,
@@ -704,8 +604,6 @@ test("serves the two directional routes and emits metadata-only responses", asyn
     availablePeers: 0,
     routes: 0,
     consentEdges: 0,
-    progressWatches: 0,
-    progressWatchEvents: 0,
     activityEvents: 0,
     messages: 0,
     alerts: 0,
@@ -804,7 +702,6 @@ test("only exposes queue-mode lifecycle methods", () => {
     "list_snapshot",
     "observe_snapshot",
     "delivery_status",
-    "untrack",
     "send",
     "reply",
     "refresh_discovery",
@@ -957,6 +854,16 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
 
   const invalidRequests: Array<[string, unknown]> = [
     ["register_codex", { alias: "Bad Alias", threadId: THREAD_ID }],
+    [
+      "send",
+      { fromAlias: "codex-main@this-mac", threadId: THREAD_ID, toAlias: "claude-one@build-mac",
+        text: "hello", expectsReply: false, trackIdleMinutes: 5 },
+    ],
+    [
+      "reply",
+      { conversationId: CONVERSATION_ID, text: "hello",
+        caller: { kind: "codex", alias: "codex-main@this-mac", threadId: THREAD_ID }, trackIdleMinutes: 5 },
+    ],
     [
       "register_codex",
       { alias: "reviewer@this-mac", threadId: THREAD_ID },
@@ -1159,6 +1066,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     "remove_stale_codex_registration",
     "remove_codex_registration",
     "refresh_dashboard",
+    "untrack",
   ]) {
     assertWireError(
       await rawRequest(socketPath, wireRequest(removedMethod, {})),
@@ -1310,27 +1218,10 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   );
   assert.ok(queuedRoute);
   queuedRoute.queueDepth = 0;
-  const invalidWatch = snapshot();
-  const watch = invalidWatch.progressWatches?.[0];
-  assert.ok(watch);
-  watch.conversationIdSuffix = "conv_SECRET";
-  const invalidWatchActor = snapshot();
-  const openedWatchEvent = invalidWatchActor.progressWatchEvents?.[0];
-  assert.ok(openedWatchEvent);
-  openedWatchEvent.actor = "worker";
-  const invalidWatchSettlement = snapshot();
-  const settledWatchEvent = invalidWatchSettlement.progressWatchEvents?.find(
-    (event) => event.kind === "settled",
-  );
-  assert.ok(settledWatchEvent);
-  delete settledWatchEvent.reason;
-  const invalidWatchSettlementActor = snapshot();
-  const pairRemovedWatchEvent =
-    invalidWatchSettlementActor.progressWatchEvents?.find(
-      (event) => event.reason === "pair_removed",
-    );
-  assert.ok(pairRemovedWatchEvent);
-  pairRemovedWatchEvent.actor = "gateway";
+  const staleWatchRows = { ...snapshot(), progressWatches: [] };
+  const staleWatchEvents = { ...snapshot(), progressWatchEvents: [] };
+  const staleWatchTruncation = snapshot();
+  (staleWatchTruncation.truncation as Record<string, number>).progressWatches = 0;
   const invalidActivity = snapshot();
   const activity = invalidActivity.activityEvents?.[0];
   assert.ok(activity);
@@ -1404,10 +1295,9 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     invalidInboundMode,
     invalidCount,
     inconsistentQueueAge,
-    invalidWatch,
-    invalidWatchActor,
-    invalidWatchSettlement,
-    invalidWatchSettlementActor,
+    staleWatchRows,
+    staleWatchEvents,
+    staleWatchTruncation,
     invalidActivity,
     invalidActivityKindAction,
     invalidAutomaticAuthority,

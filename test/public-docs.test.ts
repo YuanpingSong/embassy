@@ -18,8 +18,9 @@ async function readPublicFile(relativePath: string): Promise<string> {
  * Terms that named deleted surfaces. emb-100 removed the static and live
  * dashboards; emb-101 removed the ACP-backed DeepSeek and Grok providers, the
  * offline support matrix, and the `doctor` command; emb-102 removed the zh-CN
- * localization and the `--lang` switch. Nothing shipped may advertise any of
- * them again. This is the inverse of the contract tests those slices deleted:
+ * localization and the `--lang` switch; emb-103 removed progress watches
+ * (`TRACK:`/`DONE:`, `--track`, `untrack`, the liveness nudge). Nothing
+ * shipped may advertise any of them again. This is the inverse of the contract tests those slices deleted:
  * they proved the documented contract was current, this one proves there is
  * no such contract left to document.
  */
@@ -54,6 +55,14 @@ const FORBIDDEN = [
   // emb-102: one language, no locale switch.
   "--lang",
   "zh-CN",
+  // emb-103: no progress watches; TRACK:/DONE: are ordinary body text.
+  "--track",
+  "TRACK:",
+  "DONE:",
+  "untrack",
+  "idle-minutes",
+  "progress watch",
+  "liveness check",
 ] as const;
 
 /**
@@ -174,7 +183,7 @@ test("authority docs match the closed control contract", async () => {
     readPublicFile("CHANGELOG.md"),
     readPublicFile("site/index.html"),
   ]);
-  assert.match(architecture, /closed version 3 method family is exactly these twenty methods/i);
+  assert.match(architecture, /closed version 3 method family is exactly these nineteen methods/i);
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
   assert.match(architecture, /Pair and unpair mutate only the exact two\s+named endpoints/);
   assert.match(architecture, /Paired mode still rechecks exact edge membership at\s+delivery/);
@@ -219,22 +228,6 @@ test("README and delivery docs describe universal shell peer identity and receip
   assert.match(readme, /stdout/);
   assert.match(delivery, /PEER_NOT_AWAITING/);
   assert.match(delivery, /One waiter.*16 globally/);
-});
-
-test("progress-watch docs state disabled and idle-timeout behavior exactly", async () => {
-  const [configuration, architecture, readme] = await Promise.all([
-    readPublicFile("docs/CONFIGURATION.md"),
-    readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
-    readPublicFile("README.md"),
-  ]);
-  assert.match(configuration, /TRACK:` open attempts/);
-  assert.match(configuration, /`DONE:` is inert/);
-  assert.match(configuration, /`untrack` is not specially rejected.*`NOT_FOUND`/);
-  for (const document of [architecture, readme]) {
-    assert.doesNotMatch(document, /watch reports a stall/);
-    assert.match(document, /watch history/);
-    assert.match(document, /no runtime stall alert/);
-  }
 });
 
 test("public docs document provenance framing and recipient continuation", async () => {

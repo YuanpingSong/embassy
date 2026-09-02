@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The static dashboard and the live dashboard, with `embassy refresh-dashboard` and `embassy dashboard --live` (emb-100).
 - The ACP-backed DeepSeek and Grok providers with their `dsh-`/`grok-` routes, the offline provider support matrix, and `embassy doctor` with its Codex Desktop classifier (emb-101). The managed-socket holder check stays: a process outside Embassy holding the managed Codex control socket still degrades the Codex connector with `MANAGED_CODEX_UNAVAILABLE`.
 - zh-CN localization, the `--lang` option, and the copy-table layer (emb-102).
+- Progress watches: `TRACK:`/`DONE:`, `--track`, `--idle-minutes`, `untrack`, the automated liveness nudge, `EMBASSY_TRACKING_ENABLED`, `EMBASSY_MAX_WATCHES` (emb-103). A body beginning `TRACK:` or `DONE:` is now delivered verbatim as an ordinary message. Busy-gating (`ROUTE_BUSY` deferral and requeue), `STEER:`, and the queued-ahead marker are unchanged.
 
 ### Changed
 

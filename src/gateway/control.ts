@@ -22,8 +22,6 @@ import type {
   PublicConnectorSnapshot,
   PublicConsentEdgeSnapshot,
   PublicGatewayActivityEvent,
-  PublicProgressWatchEventSnapshot,
-  PublicProgressWatchSnapshot,
   PublicRouteSnapshot,
   RouteCounters,
   SafeGatewayAlert,
@@ -59,7 +57,7 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z
 export const gatewayControlMethods = [
   "health", "register_codex", "unregister_codex",
   "select_claude", "unselect_claude", "pair", "unpair", "list_snapshot",
-  "observe_snapshot", "delivery_status", "untrack", "send", "reply",
+  "observe_snapshot", "delivery_status", "send", "reply",
   "refresh_discovery", "peer_catalog", "peer_handoff",
   "register_peer", "unregister_peer", "await_peer", "peer_receipt",
 ] as const;
@@ -79,7 +77,7 @@ export type SelectClaudeParams = { alias: string };
 export type PairParams = {
   aliases: readonly [string, string];
 };
-type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean; trackIdleMinutes?: number };
+type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean };
 type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
 export type SendParams = SendBase & (
   | { threadId: string; replyAddress?: never; peerToken?: never }
@@ -97,9 +95,7 @@ export type GatewayReplyCaller =
   | { kind: "peer"; alias: string; token: string };
 export type ReplyParams = {
   conversationId: string; text: string; caller: GatewayReplyCaller;
-  trackIdleMinutes?: number;
 };
-export type UntrackParams = { conversationId: string };
 export type DeliveryStatusParams = { token: string };
 export type PeerCatalogParams = { peerHost: string };
 export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
@@ -113,7 +109,7 @@ type RequestParams = {
   select_claude: SelectClaudeParams; unselect_claude: SelectClaudeParams;
   pair: PairParams; unpair: PairParams; list_snapshot: Record<string, never>;
   observe_snapshot: Record<string, never>; delivery_status: DeliveryStatusParams;
-  untrack: UntrackParams; send: SendParams; reply: ReplyParams;
+  send: SendParams; reply: ReplyParams;
   refresh_discovery: Record<string, never>; peer_catalog: PeerCatalogParams;
   peer_handoff: PeerHandoffControlParams;
   register_peer: RegisterPeerParams; unregister_peer: PeerPrincipalParams;
@@ -131,7 +127,7 @@ type ValidatedGatewayControlRequest = {
 }[GatewayControlMethod];
 
 export type GatewayDecisionCode =
-  | "ok" | "not_found" | "conflict" | "watch_owner_conflict" | "route_mismatch"
+  | "ok" | "not_found" | "conflict" | "route_mismatch"
   | "busy" | "unavailable" | "rejected";
 export type GatewayDecision =
   | { accepted: true; code: "ok" }
@@ -161,7 +157,7 @@ type ResultByMethod = {
   select_claude: GatewayDecision; unselect_claude: GatewayDecision;
   pair: GatewayDecision; unpair: GatewayDecision; list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
-  untrack: GatewayDecision; send: GatewaySendResult; reply: GatewaySendResult;
+  send: GatewaySendResult; reply: GatewaySendResult;
   refresh_discovery: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
   peer_handoff: PeerHandoffResult;
   register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
@@ -179,7 +175,6 @@ export type GatewayControlHandlers = {
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
   deliveryStatus: (params: Readonly<DeliveryStatusParams>) => MaybePromise<GatewayDeliveryStatusResult>;
-  untrack: (params: Readonly<UntrackParams>) => MaybePromise<GatewayDecision>;
   send: (params: Readonly<ValidatedSendParams>) => MaybePromise<GatewaySendResult>;
   reply: (params: Readonly<ReplyParams>) => MaybePromise<GatewaySendResult>;
   refreshDiscovery: () => MaybePromise<GatewayRefreshResult>;
@@ -322,14 +317,6 @@ function isNonNegativeInteger(value: unknown): value is number {
   );
 }
 
-function isTrackIdleMinutes(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 1 &&
-    value <= 24 * 60
-  );
-}
 
 function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string" || !ISO_TIMESTAMP_PATTERN.test(value)) {
@@ -361,7 +348,6 @@ function isMessageText(value: unknown): value is string {
 }
 const exact = hasExactKeys;
 const nonNegative = isNonNegativeInteger;
-const trackMinutes = isTrackIdleMinutes;
 const iso = isIsoTimestamp;
 const uuid = isUuid;
 const alias = isAlias;
@@ -438,20 +424,18 @@ function decodePair(value: unknown): PairParams {
 }
 function decodeSend(value: unknown): ValidatedSendParams {
   if (!isRecord(value) || !exact(value, ["fromAlias", "toAlias", "text"],
-    ["threadId", "replyAddress", "peerToken", "expectsReply", "trackIdleMinutes"]) ||
+    ["threadId", "replyAddress", "peerToken", "expectsReply"]) ||
       !alias(value.fromAlias) || typeof value.toAlias !== "string" || !isClaudeSessionSelector(value.toAlias) ||
       !messageText(value.text) || [value.threadId, value.replyAddress, value.peerToken].filter((item) => item !== undefined).length !== 1 ||
       (value.threadId !== undefined && !uuid(value.threadId)) ||
       (value.replyAddress !== undefined && (typeof value.replyAddress !== "string" || !isGatewayReplyAddress(value.replyAddress))) ||
       (value.peerToken !== undefined && !peerToken(value.peerToken)) ||
-      (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean") ||
-      (value.trackIdleMinutes !== undefined && !trackMinutes(value.trackIdleMinutes))) invalid();
+      (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean")) invalid();
   const authority = value.threadId !== undefined ? { threadId: (value.threadId as string).toLowerCase() }
     : value.replyAddress !== undefined ? { replyAddress: value.replyAddress as string }
     : { peerToken: value.peerToken as string };
   return { fromAlias: value.fromAlias, toAlias: UUID_PATTERN.test(value.toAlias) ? value.toAlias.toLowerCase() : value.toAlias,
-    text: value.text, ...authority, expectsReply: value.expectsReply === true,
-    ...(value.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: value.trackIdleMinutes }) } as ValidatedSendParams;
+    text: value.text, ...authority, expectsReply: value.expectsReply === true } as ValidatedSendParams;
 }
 function normalizeReplyCaller(value: unknown): GatewayReplyCaller {
   if (!isRecord(value)) invalid();
@@ -468,23 +452,18 @@ function normalizeReplyCaller(value: unknown): GatewayReplyCaller {
   return invalid();
 }
 function decodeReply(value: unknown): ReplyParams {
-  if (!isRecord(value) || !exact(value, ["conversationId", "text", "caller"], ["trackIdleMinutes"]) ||
+  if (!isRecord(value) || !exact(value, ["conversationId", "text", "caller"]) ||
       typeof value.conversationId !== "string" || !isGatewayConversationId(value.conversationId) ||
-      !messageText(value.text) ||
-      (value.trackIdleMinutes !== undefined && !trackMinutes(value.trackIdleMinutes))) invalid();
-  return { conversationId: value.conversationId, text: value.text, caller: normalizeReplyCaller(value.caller),
-    ...(value.trackIdleMinutes === undefined ? {} : { trackIdleMinutes: value.trackIdleMinutes }) };
+      !messageText(value.text)) invalid();
+  return { conversationId: value.conversationId, text: value.text, caller: normalizeReplyCaller(value.caller) };
 }
 function decodeDeliveryStatus(value: unknown): DeliveryStatusParams {
   if (!shape(value, { token: (item) => typeof item === "string" && DELIVERY_TOKEN_PATTERN.test(item) })) invalid();
   return { token: value.token as string }; }
-function decodeUntrack(value: unknown): UntrackParams {
-  if (!shape(value, { conversationId: (item) => typeof item === "string" && CONVERSATION_ID_PATTERN.test(item) })) invalid();
-  return { conversationId: value.conversationId as string }; }
 
 function isDecision(value: unknown): value is GatewayDecision {
   return shape(value, { accepted: (item) => typeof item === "boolean", code: oneOf(
-    "ok", "not_found", "conflict", "watch_owner_conflict", "route_mismatch", "busy", "unavailable", "rejected",
+    "ok", "not_found", "conflict", "route_mismatch", "busy", "unavailable", "rejected",
   ) }, { ownerHost: host }) && (value.accepted === true
     ? value.code === "ok" && value.ownerHost === undefined
     : value.code !== "ok" && (value.ownerHost === undefined || value.code === "conflict"));
@@ -502,7 +481,7 @@ function isSendResult(value: unknown): value is GatewaySendResult {
 }
 function isRefreshResult(value: unknown): value is GatewayRefreshResult {
   return shape(value, { accepted: (item) => typeof item === "boolean", code: oneOf(
-    "ok", "not_found", "conflict", "watch_owner_conflict", "route_mismatch", "busy", "unavailable", "rejected",
+    "ok", "not_found", "conflict", "route_mismatch", "busy", "unavailable", "rejected",
   ), revision: nonNegative }) && isDecision({ accepted: value.accepted, code: value.code });
 }
 const TERMINAL = new Set<GatewayDeliveryStatusState>(["delivered", "unconfirmed", "expired", "failed", "ambiguous", "cancelled"]);
@@ -570,36 +549,17 @@ function isAccounting(value: unknown): value is GatewayAccounting {
 function isSafeAlert(value: unknown): value is SafeGatewayAlert {
   return shape(value, { code: safeCode, severity: oneOf("info", "warning", "error"), timestamp: iso },
     { provider: isGatewayProvider, host, alias }); }
-function isProgressWatchSnapshot(value: unknown): value is PublicProgressWatchSnapshot {
-  return shape(value, {
-    conversationIdSuffix: (item) => typeof item === "string" && CONVERSATION_SUFFIX_PATTERN.test(item),
-    ownerAlias: alias, workerAlias: alias, lastActivityAt: iso, nextActionAt: iso,
-    nudgeCount: oneOf(0, 1, 2),
-  }) && value.ownerAlias !== value.workerAlias; }
-function isProgressWatchEventSnapshot(value: unknown): value is PublicProgressWatchEventSnapshot {
-  if (!shape(value, { sequence: nonNegative, timestamp: iso,
-    conversationIdSuffix: (item) => typeof item === "string" && CONVERSATION_SUFFIX_PATTERN.test(item),
-    ownerAlias: alias, workerAlias: alias, kind: oneOf("opened", "replaced", "settled"),
-    actor: oneOf("owner", "worker", "operator", "gateway", "unknown") },
-  { reason: oneOf("done", "untracked", "idle_timeout", "tracking_disabled", "endpoint_retired", "pair_removed") })) return false;
-  if (value.kind === "opened") return value.actor === "owner" && value.reason === undefined;
-  if (value.kind === "replaced") return (value.actor === "owner" || value.actor === "unknown") && value.reason === undefined;
-  return (value.reason === "done" && (value.actor === "owner" || value.actor === "worker")) ||
-    (value.reason === "untracked" && value.actor === "operator") ||
-    ((value.reason === "idle_timeout" || value.reason === "tracking_disabled") && value.actor === "gateway") ||
-    (value.reason === "endpoint_retired" && (value.actor === "gateway" || value.actor === "operator")) ||
-    (value.reason === "pair_removed" && value.actor === "operator"); }
 function isGatewayActivityEvent(value: unknown): value is PublicGatewayActivityEvent {
   if (!shape(value, { sequence: positive, timestamp: iso,
-    kind: oneOf("discovery", "selection", "registration", "pairing", "watch"),
+    kind: oneOf("discovery", "selection", "registration", "pairing"),
     action: oneOf("discovery_refreshed", "claude_selected", "claude_unselected", "codex_registered",
-      "codex_succeeded", "codex_unregistered", "routes_paired", "routes_unpaired", "watch_ended"),
+      "codex_succeeded", "codex_unregistered", "routes_paired", "routes_unpaired"),
     outcome: oneOf("accepted", "rejected"), aliases: (rows) => arrayOf(rows, 2, alias),
     operatorAction: oneOf(true) }, { safeErrorCode: safeCode })) return false;
   const allowed: Record<string, readonly string[]> = {
     discovery: ["discovery_refreshed"], selection: ["claude_selected", "claude_unselected"],
     registration: ["codex_registered", "codex_succeeded", "codex_unregistered"],
-    pairing: ["routes_paired", "routes_unpaired"], watch: ["watch_ended"],
+    pairing: ["routes_paired", "routes_unpaired"],
   };
   return new Set(value.aliases as string[]).size === (value.aliases as string[]).length &&
     (allowed[value.kind as string]?.includes(value.action as string) ?? false); }
@@ -615,7 +575,7 @@ function isDeadlinePressure(value: unknown): value is DeadlinePressureSnapshot {
     rows.reduce<number>((sum, row) => sum + Number((row as JsonRecord).expired), 0) === value.expiredEvents; }
 function isSnapshotTruncation(value: unknown): boolean {
   const required = ["connectors", "availablePeers", "routes", "consentEdges", "messages", "alerts"];
-  const optional = ["progressWatches", "progressWatchEvents", "activityEvents"];
+  const optional = ["activityEvents"];
   return isRecord(value) && exact(value, required, optional) &&
     [...required, ...optional].every((key) => value[key] === undefined || nonNegative(value[key])); }
 export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
@@ -628,9 +588,7 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
     messages: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.messages, isNormalizedMessageEvent),
     accounting: isAccounting, alerts: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.alerts, isSafeAlert),
     truncation: isSnapshotTruncation },
-  { progressWatches: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.progressWatches, isProgressWatchSnapshot),
-    progressWatchEvents: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.progressWatchEvents, isProgressWatchEventSnapshot),
-    activityEvents: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.activityEvents, isGatewayActivityEvent),
+  { activityEvents: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.activityEvents, isGatewayActivityEvent),
     deadlinePressure: isDeadlinePressure })) return false;
   const snapshot = value as unknown as GatewaySnapshot;
   const unique = (rows: readonly string[]) => new Set(rows).size === rows.length;
@@ -663,7 +621,7 @@ const descriptors = {
   select_claude: { handler: "selectClaude", decode: decodeSelection, result: isDecision, mutation: true }, unselect_claude: { handler: "unselectClaude", decode: decodeSelection, result: isDecision, mutation: true },
   pair: { handler: "pair", decode: decodePair, result: isDecision, mutation: true }, unpair: { handler: "unpair", decode: decodePair, result: isDecision, mutation: true },
   list_snapshot: { handler: "listSnapshot", decode: emptyParams, result: isGatewaySnapshot, mutation: false }, observe_snapshot: { handler: "observeSnapshot", decode: emptyParams, result: isSnapshotObservation, mutation: false },
-  delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false }, untrack: { handler: "untrack", decode: decodeUntrack, result: isDecision, mutation: false },
+  delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false },
   send: { handler: "send", decode: decodeSend, result: isSendResult, mutation: true },
   reply: { handler: "reply", decode: decodeReply, result: isSendResult, mutation: true }, refresh_discovery: { handler: "refreshDiscovery", decode: emptyParams, result: isRefreshResult, mutation: false },
   peer_catalog: { handler: "peerCatalog", decode: decodePeerCatalog, result: isPeerCatalog, mutation: false },

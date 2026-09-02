@@ -104,7 +104,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
     }
     const content = composeProvenanceEnvelope({ sourceProvider: command.sourceProvider, recipientProvider: "claude",
       sourceAlias: command.sourceAlias, targetAlias: command.targetAlias, conversationId: command.conversationId,
-      body: command.text, ...(command.progressWatchActive ? { progressWatchActive: true as const } : {}) });
+      body: command.text });
     const prepared = await active.prepareSend(command.binding.routeHandle, content, { deadlineAt, replyListener: opened });
     const id = `prep_${randomBytes(18).toString("base64url")}`;
     const timer = setTimeout(release, Math.max(1, Math.min(CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS, deadlineAt - Date.now()))); timer.unref();

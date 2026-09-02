@@ -26,8 +26,6 @@ Embassy.
 
 - **Bounded by design.** Bodies, queues, rate windows, deduplication tables, deadlines, and transient conversations all have fixed limits.
 
-- **Progress watches are independent evidence.** An opt-in watch may outlive an opener that expired before delivery, so a worker can remain unaware of the original assignment even while thread activity keeps the watch healthy. Owners should check the opener's `delivery-status` separately before assuming the assignment text arrived.
-
 - **Restarts keep clean work only.** Queued and reserved bodies persist under bounded retention and may resume once against the same logical route and consent edge. Armed or accepted work at crash settles ambiguous or unconfirmed and is never replayed. Each retained message keeps its opaque delivery token and status in the private v5 state, so the sender can continue checking that exact attempt after restart. No pending waiter, shell receipt, reply, or conversation capability survives.
 
 Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. `embassy status` distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.

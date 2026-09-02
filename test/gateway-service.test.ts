@@ -1891,176 +1891,36 @@ test("a foreign managed-socket holder degrades Codex with MANAGED_CODEX_UNAVAILA
   }
 });
 
-test("live-only progress watches open, settle, and disappear across every ownership boundary", async () => {
-  const firstClaude = new FakeProvider({ provider: "claude", hostId: "this-mac" });
-  const firstCodex = new FakeProvider({ provider: "codex", hostId: "this-mac" });
-  const subject = await fixture([firstClaude, firstCodex], {
-    seed: async (store) => paired(store, claude, codex),
-  });
-  let replacement: GatewayService | undefined;
-  try {
-    const opened = await subject.handlers.send({
-      fromAlias: codex.alias,
-      threadId: THREAD_A,
-      toAlias: claude.alias,
-      text: "TRACK: compile the release",
-      expectsReply: true,
-    });
-    assert.equal(opened.accepted, true);
-    if (!opened.accepted) assert.fail("track rejected");
-    assert.equal((await subject.service.snapshot()).progressWatches?.length, 1);
-    assert.equal((await subject.handlers.reply({
-      conversationId: opened.conversationId,
-      text: "DONE: complete",
-      caller: {
-        kind: "claude",
-        alias: claude.alias,
-        replyAddress: "uds:/test/claude-reply.sock",
-      },
-    })).accepted, true);
-    let snapshot = await subject.service.snapshot();
-    assert.equal(snapshot.progressWatches?.length, 0);
-    assert.equal(snapshot.progressWatchEvents?.at(-1)?.reason, "done");
-
-    const pairedWatch = await subject.handlers.send({
-      fromAlias: codex.alias,
-      threadId: THREAD_A,
-      toAlias: claude.alias,
-      text: "TRACK: pair-bound",
-      expectsReply: false,
-    });
-    assert.equal(pairedWatch.accepted, true);
-    await subject.handlers.unpair({ aliases: [claude.alias, codex.alias] });
-    snapshot = await subject.service.snapshot();
-    assert.equal(snapshot.progressWatches?.length, 0);
-    assert.equal(snapshot.progressWatchEvents?.at(-1)?.reason, "pair_removed");
-
-    await subject.handlers.pair({ aliases: [claude.alias, codex.alias] });
-    const restartWatch = await subject.handlers.send({
-      fromAlias: codex.alias,
-      threadId: THREAD_A,
-      toAlias: claude.alias,
-      text: "TRACK: memory-only",
-      expectsReply: false,
-    });
-    assert.equal(restartWatch.accepted, true);
-    assert.equal((await subject.service.snapshot()).progressWatches?.length, 1);
-    await subject.service.close();
-
-    const reopenedStore = new GatewayStore(subject.config, {
-      now: subject.clock.now,
-      randomId: subject.clock.randomId,
-    });
-    const reopenedClaude = new FakeProvider({ provider: "claude", hostId: "this-mac" });
-    const reopenedCodex = new FakeProvider({ provider: "codex", hostId: "this-mac" });
-    replacement = new GatewayService({
-      config: subject.config,
-      adapters: [reopenedClaude, reopenedCodex],
-      store: reopenedStore,
-      now: subject.clock.now,
-      timers: subject.timers,
-    });
-    await replacement.start();
-    assert.equal((await replacement.snapshot()).progressWatches?.length, 0);
-    const replacementHandlers = replacement.handlers();
-    const removalWatch = await replacementHandlers.send({
-      fromAlias: codex.alias,
-      threadId: THREAD_A,
-      toAlias: claude.alias,
-      text: "TRACK: removal-bound",
-      expectsReply: false,
-    });
-    assert.equal(removalWatch.accepted, true);
-    assert.deepEqual(
-      await replacementHandlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle }),
-      { accepted: true, code: "ok" },
-    );
-    snapshot = await replacement.snapshot();
-    assert.equal(snapshot.progressWatches?.length, 0);
-    assert.equal(snapshot.progressWatchEvents?.at(-1)?.reason, "endpoint_retired");
-  } finally {
-    await replacement?.close();
-    await subject.service.close();
-    await rm(subject.root, { recursive: true, force: true });
-  }
-});
-
-test("a progress-watch nudge cannot cross an endpoint replacement after its registration check", async () => {
+test("TRACK: and DONE: prefixes are ordinary body text and the snapshot carries no watch keys", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([claudeProvider, codexProvider], {
     seed: async (store) => paired(store, claude, codex),
   });
-  const entered = deferred<void>();
-  const release = deferred<void>();
   try {
     const opened = await subject.handlers.send({
-      fromAlias: codex.alias,
-      threadId: THREAD_A,
-      toAlias: claude.alias,
-      text: "TRACK: race a liveness nudge",
-      expectsReply: false,
-      trackIdleMinutes: 1,
+      fromAlias: codex.alias, threadId: THREAD_A, toAlias: claude.alias,
+      text: "TRACK: compile the release", expectsReply: true,
     });
-    if (!opened.accepted) assert.fail("watch admission");
-    await eventually(async () => {
-      const status = await subject.handlers.deliveryStatus({ token: opened.deliveryToken });
-      return status.found && status.state === "delivered";
+    assert.equal(opened.accepted, true);
+    if (!opened.accepted) assert.fail("send admission");
+    await eventually(() => claudeProvider.dispatches.length === 1);
+    assert.equal(claudeProvider.dispatches[0]?.text, "TRACK: compile the release");
+    assert.equal(Object.hasOwn(claudeProvider.dispatches[0] ?? {}, "progressWatchActive"), false);
+    const done = await subject.handlers.reply({
+      conversationId: opened.conversationId, text: "DONE: complete",
+      caller: { kind: "claude", alias: claude.alias, replyAddress: "uds:/test/claude-reply.sock" },
     });
-    for (const [provider, binding] of [
-      [claudeProvider, claude.binding],
-      [codexProvider, codex.binding],
-    ] as const) {
-      provider.callbacks?.onRouteState({
-        route: binding,
-        state: "idle",
-        observedAt: subject.clock.now().toISOString(),
-      });
+    assert.equal(done.accepted, true);
+    await eventually(() => codexProvider.dispatches.length === 1);
+    assert.equal(codexProvider.dispatches[0]?.text, "DONE: complete");
+    const snapshot = await subject.service.snapshot();
+    for (const key of ["progressWatches", "progressWatchEvents"]) {
+      assert.equal(Object.hasOwn(snapshot, key), false, key);
+      assert.equal(Object.hasOwn(snapshot.truncation, key), false, key);
     }
-    const enqueue = subject.store.enqueueMessage.bind(subject.store);
-    subject.store.enqueueMessage = async (input) => {
-      if (input.body.startsWith("[Embassy automated liveness check")) {
-        entered.resolve();
-        await release.promise;
-      }
-      return await enqueue(input);
-    };
-    subject.clock.advance(60_000);
-    const processing = (subject.service as unknown as {
-      processProgressWatches: () => Promise<void>;
-    }).processProgressWatches();
-    await entered.promise;
-    await subject.store.removeOwnedRouteAtomic({
-      alias: claude.alias,
-      binding: claude.binding,
-      activity: { operatorAction: true },
-    });
-    const replacement = route(
-      "claude",
-      claude.alias,
-      claude.binding.routeHandle,
-      "reg_claude_nudge_replacement",
-    );
-    await subject.store.registerRoute(replacement);
-    await subject.store.addConsentEdge({
-      aliases: [codex.alias, claude.alias],
-      expectedRegistrationIds: [
-        codex.binding.registrationId,
-        replacement.binding.registrationId,
-      ],
-    });
-    release.resolve();
-    await processing;
-    assert.equal(
-      (await subject.store.publicSnapshot()).messages.some(
-        (message) => message.body?.startsWith("[Embassy automated liveness check") === true,
-      ),
-      false,
-    );
-  } finally {
-    release.resolve();
-    await subject.close();
-  }
+    assert.equal(JSON.stringify(snapshot).includes("progressWatch"), false);
+  } finally { await subject.close(); }
 });
 
 test("Claude reply correlation buffers fast replies and preserves FIFO across a clean retry", async () => {

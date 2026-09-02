@@ -26,17 +26,6 @@ import {
 import { PeerConnectionLostError, spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
 import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
-import {
-  PROGRESS_WATCH_DEFAULT_CAPACITY,
-  PROGRESS_WATCH_DEFAULT_IDLE_MS,
-  PROGRESS_WATCH_HARD_CAPACITY,
-  commitProgressWatchNudge,
-  createProgressWatch,
-  deferProgressWatchNudge,
-  inspectProgressWatchDue,
-  recordProgressWatchActivity,
-  type ProgressWatch,
-} from "./progress-watch-machine.js";
 import { GatewayStore } from "./store.js";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
@@ -56,8 +45,6 @@ import {
   type PublicAvailablePeerSnapshot,
   type PublicConnectorSnapshot,
   type PublicRegistryObservationSnapshot,
-  type PublicProgressWatchEventSnapshot,
-  type PublicProgressWatchSnapshot,
   type SafeGatewayAlert,
   type TerminalMessageSettlement,
 } from "./types.js";
@@ -144,7 +131,7 @@ export type GatewayAdapterDispatchInput = Readonly<{
   conversationId: string; binding: LogicalRouteBinding;
   authorization: "selected_route" | "native_reply";
   messageId: string; text: string; expectsReply: boolean; deadlineAt: string;
-  steer?: true; progressWatchActive?: true; queuedAhead?: number;
+  steer?: true; queuedAhead?: number;
   authorizeWrite: (
     evidence: GatewayPreparedWriteEvidence & Readonly<{ attemptId: string }>,
   ) => Promise<boolean>;
@@ -242,11 +229,6 @@ type NativeReceipt = {
   enqueuedAt: number; heldWrite: Promise<void>; heldTimer?: GatewayServiceTimer;
   stallTimer?: GatewayServiceTimer; settled: boolean;
 };
-
-type RuntimeWatch = ProgressWatch & Readonly<{
-  ownerRegistrationId: string;
-  workerRegistrationId: string;
-}>;
 
 function registrationId(): string {
   return `reg_${randomBytes(18).toString("base64url")}`;
@@ -378,8 +360,6 @@ export class GatewayService {
   private readonly peerRefreshOperations = new Set<Promise<void>>();
   private readonly pendingClaudeReplies = new Map<string, PendingClaudeReply[]>();
   private readonly nativeReceipts = new Map<string, NativeReceipt>();
-  private readonly progressWatches = new Map<string, RuntimeWatch>();
-  private readonly progressWatchEvents: PublicProgressWatchEventSnapshot[] = [];
   private readonly dispatchRunners = new Map<string, Promise<void>>();
   private readonly steerRunners = new Map<string, Promise<void>>();
   private readonly startingTargets = new Set<string>();
@@ -571,7 +551,6 @@ export class GatewayService {
       listSnapshot: () => this.snapshot(),
       observeSnapshot: () => this.observeSnapshot(),
       deliveryStatus: (params) => this.deliveryStatus(params.token),
-      untrack: (params) => decide(async () => this.untrack(params.conversationId)),
       send: (params) => this.send(params),
       reply: (params) => this.reply(params),
       refreshDiscovery: async () => {
@@ -710,19 +689,6 @@ export class GatewayService {
         ),
         lastSeenAt: candidate.observedAt,
       }));
-    const progressWatches: PublicProgressWatchSnapshot[] = [...this.progressWatches.values()]
-      .slice(0, gatewayPublicSnapshotLimits.progressWatches)
-      .map((watch) => ({
-        conversationIdSuffix: watch.conversationId.slice(-8),
-        ownerAlias: watch.ownerAlias,
-        workerAlias: watch.workerAlias,
-        lastActivityAt: watch.lastActivityAt,
-        nextActionAt: watch.nextActionAt,
-        nudgeCount: watch.nudgeCount,
-      }));
-    const progressWatchEvents = this.progressWatchEvents.slice(
-      -gatewayPublicSnapshotLimits.progressWatchEvents,
-    );
     return projectGatewayPublicSnapshot(
       {
         ...base,
@@ -735,19 +701,10 @@ export class GatewayService {
         connectors,
         availablePeers,
         routes,
-        progressWatches,
-        progressWatchEvents,
         alerts: [...base.alerts, ...this.runtimeAlerts].slice(
           -gatewayPublicSnapshotLimits.alerts,
         ),
-        truncation: {
-          ...base.truncation,
-          progressWatches: Math.max(0, this.progressWatches.size - progressWatches.length),
-          progressWatchEvents: Math.max(
-            0,
-            this.progressWatchEvents.length - progressWatchEvents.length,
-          ),
-        },
+        truncation: base.truncation,
       },
       GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
     );
@@ -882,7 +839,6 @@ export class GatewayService {
     });
     if (!result.removed) throw new BridgeError(notFoundCode, "The exact route is absent.");
     await this.finishSettlements(result.settlements);
-    this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
     this.forgetRoute(route);
     if (releaseProviderRoute) {
       await this.adapterFor(route.binding)?.releaseRoute?.(route.binding.routeHandle);
@@ -963,7 +919,6 @@ export class GatewayService {
       activity: { operatorAction: true },
     });
     await this.finishSettlements(result.settlements);
-    this.settleWatchesForAlias(previous.alias, "endpoint_retired", "operator");
     if (!result.idempotent) {
       this.forgetRoute(previous);
       this.reconcileUnadvertisement(previous);
@@ -1018,7 +973,7 @@ export class GatewayService {
     try {
       const result = await this.store.removeOwnedRouteAtomic({ alias: route.alias, binding: route.binding });
       if (!result.removed) throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
-      await this.finishSettlements(result.settlements); this.settleWatchesForAlias(route.alias, "endpoint_retired", "operator");
+      await this.finishSettlements(result.settlements);
       this.forgetRoute(route); await this.reconcileUnadvertisement(route);
     } finally { this.peerCleanupAliases.delete(route.alias); }
   }
@@ -1094,7 +1049,6 @@ export class GatewayService {
     for (const prior of before) {
       const retained = after.find((route) => route.alias === prior.alias);
       if (retained === undefined || !sameBinding(retained.binding, prior.binding)) {
-        this.settleWatchesForAlias(prior.alias, "endpoint_retired", "operator");
         this.forgetRoute(prior);
         void this.adapterFor(prior.binding)?.releaseRoute?.(prior.binding.routeHandle)
           .catch((error) => this.alert("ROUTE_RELEASE_FAILED", prior, error));
@@ -1137,7 +1091,6 @@ export class GatewayService {
     const existed = await this.store.hasConsentEdge(endpoints);
     const result = await this.store.removeConsentEdge(endpoints);
     await this.finishSettlements(result.settlements);
-    for (const alias of aliases) this.settleWatchesForAlias(alias, "pair_removed", "operator");
     if (existed) await this.recordActivity("pairing", "routes_unpaired", [...aliases], true);
     for (const alias of aliases) this.kick(alias);
   }
@@ -1219,9 +1172,6 @@ export class GatewayService {
         expectsReply: params.expectsReply,
         expectedSourceBinding: source.binding,
         expectedTargetBinding: target.binding,
-        ...(params.trackIdleMinutes === undefined
-          ? {}
-          : { trackIdleMinutes: params.trackIdleMinutes }),
       });
     } catch (error) {
       return decisionFor(error, "peerToken" in params);
@@ -1257,9 +1207,6 @@ export class GatewayService {
         expectsReply: params.expectsReply,
         expectedSourceBinding: source.binding,
         expectedTargetBinding: target.binding,
-        ...(params.trackIdleMinutes === undefined
-          ? {}
-          : { trackIdleMinutes: params.trackIdleMinutes }),
       });
     } catch (error) {
       return decisionFor(error, "peerToken" in params);
@@ -1312,9 +1259,6 @@ export class GatewayService {
         expectsReply: true,
         expectedSourceBinding: callerBinding,
         expectedTargetBinding: targetBinding,
-        ...(params.trackIdleMinutes === undefined
-          ? {}
-          : { trackIdleMinutes: params.trackIdleMinutes }),
         existingConversation: conversation,
       });
     } catch (error) {
@@ -1362,8 +1306,6 @@ export class GatewayService {
     expectedSourceBinding?: LogicalRouteBinding;
     expectedTargetBinding?: LogicalRouteBinding;
     existingConversation?: Conversation;
-    trackIdleMinutes?: number;
-    skipWatch?: true;
   }>): Promise<Extract<GatewaySendResult, { accepted: true }>> {
     const target = await this.store.inspectPrivateRoute(input.targetAlias);
     const source = await this.store.inspectPrivateRoute(input.sourceAlias);
@@ -1402,16 +1344,6 @@ export class GatewayService {
       pair: true as const,
       nextSequence: 0,
     };
-    const previousWatch = this.progressWatches.get(conversation.id);
-    const previousWatchEvents = this.progressWatchEvents.length;
-    if (input.skipWatch !== true) {
-      await this.updateProgressWatch(
-        conversation,
-        input.sourceAlias,
-        input.text,
-        input.trackIdleMinutes,
-      );
-    }
     const sequence = conversation.nextSequence++;
     let enqueued: Awaited<ReturnType<GatewayStore["enqueueMessage"]>>;
     try {
@@ -1431,20 +1363,10 @@ export class GatewayService {
         ...(steer ? { steer: true as const } : {}),
       });
     } catch (error) {
-      this.restoreProgressWatch(
-        conversation.id,
-        previousWatch,
-        previousWatchEvents,
-      );
       conversation.nextSequence -= 1;
       throw error;
     }
     if (!enqueued.accepted || enqueued.messageId === undefined || enqueued.deliveryToken === undefined) {
-      this.restoreProgressWatch(
-        conversation.id,
-        previousWatch,
-        previousWatchEvents,
-      );
       conversation.nextSequence -= 1;
       throw new BridgeError("MESSAGE_NOT_ACCEPTED", "The message was not accepted.");
     }
@@ -1757,9 +1679,6 @@ export class GatewayService {
           text: attempt.body,
           expectsReply: conversation?.expectsReply ?? true,
           deadlineAt: attempt.deadlineAt,
-          ...(this.progressWatches.has(conversationId)
-            ? { progressWatchActive: true as const }
-            : {}),
           ...(attempt.steer === true ? { steer: true as const, queuedAhead: 0 } : {}),
           authorizeWrite: async (evidence) => {
             if (evidence.attemptId !== attempt.attemptId) return false;
@@ -2294,210 +2213,6 @@ export class GatewayService {
     });
   }
 
-  private async updateProgressWatch(
-    conversation: Conversation,
-    actorAlias: string,
-    text: string,
-    trackIdleMinutes: number | undefined,
-  ): Promise<void> {
-    const existing = this.progressWatches.get(conversation.id);
-    if (this.config.trackingEnabled === false) {
-      if (existing !== undefined) {
-        this.settleProgressWatch(existing, "gateway", "tracking_disabled");
-      }
-      return;
-    }
-    if (text.startsWith("DONE:")) {
-      if (existing !== undefined) {
-        const actor = actorAlias === existing.ownerAlias
-          ? "owner"
-          : actorAlias === existing.workerAlias
-            ? "worker"
-            : undefined;
-        if (actor !== undefined) this.settleProgressWatch(existing, actor, "done");
-      }
-      return;
-    }
-    const explicit = text.startsWith("TRACK:") || trackIdleMinutes !== undefined;
-    if (existing !== undefined && !explicit) {
-      this.progressWatches.set(conversation.id, {
-        ...existing,
-        ...recordProgressWatchActivity(existing, this.now().getTime()),
-      });
-      return;
-    }
-    if (!explicit) return;
-    if (existing !== undefined && actorAlias !== existing.ownerAlias) {
-      throw new BridgeError(
-        "PROGRESS_WATCH_REPLACEMENT_OWNER_REQUIRED",
-        "Only the progress-watch owner may replace its watch.",
-      );
-    }
-    const capacity = Math.min(
-      this.config.limits.maxWatches ?? PROGRESS_WATCH_DEFAULT_CAPACITY,
-      PROGRESS_WATCH_HARD_CAPACITY,
-    );
-    if (existing === undefined && this.progressWatches.size >= capacity) {
-      throw new BridgeError("PROGRESS_WATCH_CAPACITY_REACHED", "Progress-watch capacity is full.");
-    }
-    const owner = await this.store.inspectPrivateRoute(actorAlias);
-    const workerAlias = actorAlias === conversation.sourceAlias
-      ? conversation.targetAlias
-      : conversation.sourceAlias;
-    const worker = await this.store.inspectPrivateRoute(workerAlias);
-    if (owner === undefined || worker === undefined) {
-      throw new BridgeError("PROGRESS_WATCH_ENDPOINT_NOT_FOUND", "A progress-watch endpoint is absent.");
-    }
-    const idleMs = trackIdleMinutes === undefined
-      ? PROGRESS_WATCH_DEFAULT_IDLE_MS
-      : trackIdleMinutes * 60_000;
-    const watch = createProgressWatch({
-      conversationId: conversation.id,
-      ownerAlias: actorAlias,
-      workerAlias,
-      idleMs,
-      at: this.now().getTime(),
-    });
-    this.progressWatches.set(conversation.id, {
-      ...watch,
-      ownerRegistrationId: owner.binding.registrationId,
-      workerRegistrationId: worker.binding.registrationId,
-    });
-    this.recordProgressWatchEvent({
-      watch,
-      kind: existing === undefined ? "opened" : "replaced",
-      actor: "owner",
-    });
-  }
-
-  private restoreProgressWatch(
-    conversationId: string,
-    previous: RuntimeWatch | undefined,
-    eventLength: number,
-  ): void {
-    if (previous === undefined) this.progressWatches.delete(conversationId);
-    else this.progressWatches.set(conversationId, previous);
-    this.progressWatchEvents.length = eventLength;
-  }
-
-  private untrack(conversationId: string): void {
-    const watch = this.progressWatches.get(conversationId);
-    if (watch === undefined) {
-      throw new BridgeError("PROGRESS_WATCH_NOT_FOUND", "The progress watch is absent.");
-    }
-    this.settleProgressWatch(watch, "operator", "untracked");
-  }
-
-  private settleWatchesForAlias(
-    alias: string,
-    reason: "pair_removed" | "endpoint_retired",
-    actor: "operator" | "gateway",
-  ): void {
-    for (const watch of [...this.progressWatches.values()]) {
-      if (watch.ownerAlias === alias || watch.workerAlias === alias) {
-        this.settleProgressWatch(watch, actor, reason);
-      }
-    }
-  }
-
-  private settleProgressWatch(
-    watch: RuntimeWatch,
-    actor: "owner" | "worker" | "operator" | "gateway",
-    reason:
-      | "done"
-      | "untracked"
-      | "idle_timeout"
-      | "pair_removed"
-      | "endpoint_retired"
-      | "tracking_disabled",
-  ): void {
-    if (!this.progressWatches.delete(watch.conversationId)) return;
-    this.recordProgressWatchEvent({ watch, kind: "settled", actor, reason });
-  }
-
-  private recordProgressWatchEvent(input: Readonly<{
-    watch: ProgressWatch;
-    kind: "opened" | "replaced" | "settled";
-    actor: "owner" | "worker" | "operator" | "gateway" | "unknown";
-    reason?: PublicProgressWatchEventSnapshot["reason"];
-  }>): void {
-    this.progressWatchEvents.push({
-      sequence: (this.progressWatchEvents.at(-1)?.sequence ?? 0) + 1,
-      timestamp: this.now().toISOString(),
-      conversationIdSuffix: input.watch.conversationId.slice(-8),
-      ownerAlias: input.watch.ownerAlias,
-      workerAlias: input.watch.workerAlias,
-      kind: input.kind,
-      actor: input.actor,
-      ...(input.reason === undefined ? {} : { reason: input.reason }),
-    });
-    while (this.progressWatchEvents.length > gatewayPublicSnapshotLimits.progressWatchEvents) {
-      this.progressWatchEvents.shift();
-    }
-  }
-
-  private async processProgressWatches(): Promise<void> {
-    const at = this.now().getTime();
-    for (const watch of [...this.progressWatches.values()]) {
-      const owner = await this.store.inspectPrivateRoute(watch.ownerAlias);
-      const worker = await this.store.inspectPrivateRoute(watch.workerAlias);
-      if (
-        owner?.binding.registrationId !== watch.ownerRegistrationId ||
-        worker?.binding.registrationId !== watch.workerRegistrationId
-      ) {
-        this.settleProgressWatch(watch, "gateway", "endpoint_retired");
-        continue;
-      }
-      const ownerObservation = this.routeObservations.get(watch.ownerAlias);
-      const workerObservation = this.routeObservations.get(watch.workerAlias);
-      const due = inspectProgressWatchDue(watch, {
-        at,
-        bothIdle:
-          ownerObservation?.state === "idle" &&
-          workerObservation?.state === "idle" &&
-          this.routeObservationStillCurrent(ownerObservation) &&
-          this.routeObservationStillCurrent(workerObservation),
-      });
-      if (due.kind === "not_due") continue;
-      if (due.kind === "rescheduled") {
-        this.progressWatches.set(watch.conversationId, {
-          ...watch,
-          ...due.watch,
-        });
-        continue;
-      }
-      if (due.kind === "settled") {
-        this.settleProgressWatch(watch, "gateway", "idle_timeout");
-        continue;
-      }
-      const conversation = this.conversations.get(watch.conversationId);
-      if (conversation === undefined) {
-        this.settleProgressWatch(watch, "gateway", "endpoint_retired");
-        continue;
-      }
-      const text = `[Embassy automated liveness check — ${due.nudgeNumber}]\nReply with the result or a status.`;
-      try {
-        await this.enqueueConversation({
-          sourceAlias: watch.ownerAlias,
-          targetAlias: watch.workerAlias,
-          text,
-          expectsReply: false,
-          existingConversation: conversation,
-          skipWatch: true,
-        });
-        this.progressWatches.set(watch.conversationId, {
-          ...watch,
-          ...commitProgressWatchNudge(watch, { at, nudgeNumber: due.nudgeNumber }),
-        });
-      } catch {
-        this.progressWatches.set(watch.conversationId, {
-          ...watch,
-          ...deferProgressWatchNudge(watch, at),
-        });
-      }
-    }
-  }
-
   private async finishSettlements(settlements: readonly TerminalMessageSettlement[]): Promise<void> {
     await Promise.all(settlements.map(async (settlement) => this.finishSettlement(settlement)));
   }
@@ -2557,7 +2272,6 @@ export class GatewayService {
         ...[...this.pendingClaudeReplies.values()].flatMap((rows) =>
           rows.map((row) => Date.parse(row.deadlineAt))
         ),
-        ...[...this.progressWatches.values()].map((watch) => Date.parse(watch.nextActionAt)),
       ].filter(Number.isFinite);
       const delay = Math.max(0, Math.min(...due) - now);
       this.wakeTimer = this.timers.setTimeout(() => {
@@ -2572,7 +2286,6 @@ export class GatewayService {
     const now = this.now();
     await this.finishSettlements(await this.store.expireDueMessages(now));
     this.pruneExpiredPendingClaudeReplies(now.getTime());
-    await this.processProgressWatches();
     if (now.getTime() >= this.nextDiscoveryAt) {
       await this.refreshClaudeDiscovery().catch(() => undefined);
       this.nextDiscoveryAt = now.getTime() + DISCOVERY_INTERVAL_MS;

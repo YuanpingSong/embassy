@@ -580,7 +580,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         ...(input.authorization !== "selected_route" || selected?.stateRoot === undefined
           ? {}
           : { stateRoot: selected.stateRoot }),
-        ...(input.progressWatchActive === true ? { progressWatchActive: true as const } : {}),
       });
     } catch (error) {
       if (
@@ -1113,9 +1112,6 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
         targetAlias: input.targetAlias,
         conversationId: input.conversationId,
         body: input.text,
-        ...(input.progressWatchActive === true
-          ? { progressWatchActive: true as const }
-          : {}),
         ...(input.steer === true && input.queuedAhead !== undefined
           ? { queuedAhead: input.queuedAhead }
           : {}),

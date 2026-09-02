@@ -59,7 +59,7 @@ const route = { provider: "claude", hostId: "this-mac", routeHandle: "00000000-0
 const prepare = { method: "prepare_dispatch", binding: route, authorization: "selected_route", stateRoot: "/state",
   messageId: "gateway-message-first", sourceAlias: "codex-first@this-mac", sourceProvider: "codex",
   targetAlias: "claude-first@this-mac", conversationId: "conv_0123456789abcdef", text: "body", expectsReply: false,
-  deadlineAt: "2030-01-01T00:00:00.000Z", progressWatchActive: true } as const;
+  deadlineAt: "2030-01-01T00:00:00.000Z" } as const;
 const envelope = (command: unknown) => ({ protocolVersion: 1, type: "request", requestId: "request_0123456789", command });
 
 test("helper IPC strictly binds preparation authority and bounds", () => {
@@ -78,6 +78,7 @@ test("helper IPC strictly binds preparation authority and bounds", () => {
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, authorization: "native_reply", stateRoot: undefined })), true);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, authorization: "native_reply" })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, unexpected: true })), false);
+  assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, progressWatchActive: true })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, sourceProvider: "unknown" })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, text: "x".repeat(16 * 1024 + 1) })), false);
   for (const method of ["perform_dispatch", "cancel_dispatch"] as const) {
@@ -127,7 +128,7 @@ test("supervisor binds source, namespaces receipts, and consumes preparations on
     const input = { sourceAlias: "codex-first@this-mac", sourceProvider: "codex", targetAlias: "claude-first@this-mac",
       conversationId: "conv_0123456789abcdef", selectedAlias: "claude-first@this-mac", stateRoot: "/state", binding: route,
       authorization: "selected_route", messageId: "gateway-message-first", text: "outbound", expectsReply: false,
-      deadlineAt: new Date(Date.now() + 30_000).toISOString(), progressWatchActive: true } as const;
+      deadlineAt: new Date(Date.now() + 30_000).toISOString() } as const;
     const prepared = await supervisor.prepareDispatch(input);
     assert.deepEqual(clients[0]!.commands.at(-1), { ...prepare, text: "outbound", deadlineAt: input.deadlineAt });
     assert.deepEqual(await prepared.perform(), { state: "delivered" });

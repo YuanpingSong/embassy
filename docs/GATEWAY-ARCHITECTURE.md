@@ -413,8 +413,8 @@ next-tool-call-boundary rules above.
 
 ### Provenance framing and conversation continuation
 
-The broker classifies `STEER:`, `TRACK:`, and `DONE:`, enforces raw-byte body
-limits, deduplicates, and queues before presentation framing.
+The broker classifies `STEER:`, enforces raw-byte body limits, deduplicates,
+and queues before presentation framing.
 The store therefore retains only the raw unframed body, never the composed
 envelope. A pure composer runs at the final semantic provider-write boundary so
 a clean retry produces the same bytes with exactly one authoritative outer
@@ -550,7 +550,7 @@ controller-owned mode-0700 state directory. The socket and state files are
 mode 0600. Frames are size-bounded and closed against unknown keys, methods,
 versions, and enum values.
 
-The closed version 3 method family is exactly these twenty methods:
+The closed version 3 method family is exactly these nineteen methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
@@ -562,7 +562,6 @@ The closed version 3 method family is exactly these twenty methods:
 - `pair` and `unpair`, the two-endpoint permission edge;
 - `delivery_status`, a lookup by an opaque correlation handle retained only in
   bounded private v5 state;
-- `untrack`, which closes one active progress watch by conversation token;
 - `send`, whose direction is derived from the resolved endpoint providers;
 - `reply`, the correlated reply operation;
 - `refresh_discovery`, which rescans for Claude sessions;
@@ -572,8 +571,8 @@ The closed version 3 method family is exactly these twenty methods:
   shell-peer registration, mailbox, and flush-before-receipt operations.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-nineteen implemented commands are
-`serve`, `health`, `status`, `delivery-status`, `wait-delivery`, `untrack`,
+eighteen implemented commands are
+`serve`, `health`, `status`, `delivery-status`, `wait-delivery`,
 `refresh`, `register-codex`, `unregister-codex`,
 `select-claude`, `unselect-claude`, `pair`, `unpair`, `send`,
 `reply`, `register-peer`, `unregister-peer`, `await`, and
@@ -660,29 +659,6 @@ or raw diagnostic method.
 Same-UID socket access is a local containment boundary, not proof of a trusted
 agent process. Every mutation additionally checks route ownership, exact
 thread/session generation, source alias, bounds, and conversation state.
-
-### Progress watches
-
-`send` and `reply` each accept an opt-in `--track`
-flag that opens one progress watch over the resulting conversation, plus an
-optional `--idle-minutes <n>` that sets how long the watched thread may sit idle
-before each bounded liveness nudge. If the watch ultimately times out, Embassy
-records `settled` / `gateway` / `idle_timeout` only in watch history and emits
-no runtime stall alert. `n` is an integer from 1 through 1440 and defaults to 5;
-supplying it without `--track` is an argument error. A body with
-an exact leading `TRACK:` prefix opens the same watch at the default idle window
-without the flag.
-
-`untrack --conversation conv_<token>` closes an active watch explicitly, and a
-body with an exact leading `DONE:` prefix closes it as completed; one message
-may not both open and complete a watch (`PROGRESS_WATCH_SIGNAL_CONFLICT`). The
-global `EMBASSY_TRACKING_ENABLED` switch is on by default and exact `0` disables
-the surface; `EMBASSY_MAX_WATCHES` bounds concurrent watches at 32 by default
-(hard cap 256).
-
-A watch is independent evidence about thread activity, not delivery evidence. It
-may outlive an opener whose own delivery expired, so check the opener's
-`delivery-status` separately before assuming the assignment text arrived.
 
 ## Codex connectors and remote hosts
 

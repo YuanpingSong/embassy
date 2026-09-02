@@ -46,7 +46,6 @@ const GATEWAY_RUNTIME_MODULES = [
   "control",
   "federation-nodes",
   "instance-lease",
-  "progress-watch-machine",
   "peer-client",
   "peer-mailbox",
   "peer-protocol",

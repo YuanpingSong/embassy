@@ -16,7 +16,6 @@ import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
-import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
 
 const THREAD_ID_PATTERN =
@@ -32,7 +31,7 @@ export const EMBASSY_VERSION = "2.0.1";
 
 export const gatewayCliCommands = [
   "serve", "health", "status", "delivery-status",
-  "wait-delivery", "untrack", "refresh", "register-codex",
+  "wait-delivery", "refresh", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send", "reply",
   "register-peer", "unregister-peer", "await",
@@ -98,7 +97,6 @@ Commands:
   reply                  Reply with a conversation token
   delivery-status        Read a delivery token
   wait-delivery          Wait for terminal delivery status
-  untrack                Close one active progress watch
 
 Options:
   --token-stdin          Read the peer token as the first LF-terminated stdin line
@@ -134,8 +132,6 @@ const CLI_HINT = {
     "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
   nodeInventoryRequired:
     "at {stateDir}, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {\"version\":1,\"host\":\"<host>\",\"nodes\":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.",
-  progressWatchOwnerConflict:
-    "this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.",
   stateResetRequired:
     "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 2.0.x before resetting.",
   callerIdentityConflict:
@@ -212,17 +208,6 @@ function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) fault();
   return selector;
-}
-function trackIdleMinutes(options: ParsedOptions): number | undefined {
-  const tracking = options.track === true;
-  const raw = options["idle-minutes"];
-  if (raw !== undefined && !tracking) fault();
-  if (!tracking) return undefined;
-  if (raw === undefined) return PROGRESS_WATCH_DEFAULT_IDLE_MS / 60_000;
-  if (typeof raw !== "string" || !/^[1-9][0-9]{0,3}$/.test(raw)) fault();
-  const minutes = Number(raw);
-  if (!Number.isSafeInteger(minutes) || minutes > 24 * 60) fault();
-  return minutes;
 }
 function requireDeliveryToken(options: ParsedOptions, name: string): string {
   const token = requireString(options, name);
@@ -343,13 +328,6 @@ async function buildRequest(
       count(options, 1);
       return envelope("delivery_status", { token: requireDeliveryToken(options, "token") });
     }
-    case "untrack": {
-      const options = parseOptions(args, ["conversation"]);
-      count(options, 1);
-      const conversationId = requireString(options, "conversation");
-      if (!isGatewayConversationId(conversationId)) fault();
-      return envelope("untrack", { conversationId });
-    }
     case "register-codex": {
       const options = parseOptions(args, ["alias", "succeeds"]);
       const alias = requireCodexAlias(options, "alias");
@@ -402,16 +380,13 @@ async function buildRequest(
       return envelope(command, { aliases: requirePairAliases(options) });
     }
     case "send": {
-      const options = parseOptions(
-        args, ["from", "to", "idle-minutes"], ["expects-reply", "track", "token-stdin"],
-      );
-      count(options, 2, 6);
+      const options = parseOptions(args, ["from", "to"], ["expects-reply", "token-stdin"]);
+      count(options, 2, 4);
       const source = peerTokenSource(options, env);
       const principals = Number(hasIdentity(env.CODEX_THREAD_ID)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
       if (principals > 1) throw callerIdentityConflictFault(env);
       const fromAlias = requireAlias(options, "from");
       const toAlias = requireClaudeSelector(options, "to");
-      const idleMinutes = trackIdleMinutes(options);
       const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
       const authority = peer === undefined ? hasIdentity(env.CODEX_THREAD_ID)
         ? { threadId: requireExclusiveCodexThreadId(env) }
@@ -420,17 +395,15 @@ async function buildRequest(
       const common = {
         fromAlias, toAlias, text: peer?.text ?? await readMessageBody(stdin),
         expectsReply: options["expects-reply"] === true,
-        ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
       };
       return envelope("send", { ...common, ...authority });
     }
     case "reply": {
-      const options = parseOptions(args, ["conversation", "alias", "idle-minutes"], ["track", "token-stdin"]);
-      count(options, 2, 5);
+      const options = parseOptions(args, ["conversation", "alias"], ["token-stdin"]);
+      count(options, 2, 3);
       const conversationId = requireString(options, "conversation");
       if (!isGatewayConversationId(conversationId)) fault();
       const alias = requireAlias(options, "alias");
-      const idleMinutes = trackIdleMinutes(options);
       const threadId = env.CODEX_THREAD_ID, source = peerTokenSource(options, env);
       const principals = Number(hasIdentity(threadId)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
       if (principals > 1) throw callerIdentityConflictFault(env);
@@ -440,7 +413,6 @@ async function buildRequest(
       const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
       return envelope("reply", {
         conversationId, text: peer?.text ?? await readMessageBody(stdin),
-        ...(idleMinutes === undefined ? {} : { trackIdleMinutes: idleMinutes }),
         caller: peer !== undefined ? { kind: "peer", alias, token: peer.token } : codex
           ? { kind: "codex", alias, threadId: requireCodexThreadId(env) }
           : { kind: "claude", alias, replyAddress: requireClaudeReplyAddress(env) },
@@ -512,9 +484,6 @@ function writeStateResetHint(stderr: Writable, code: string): void {
 }
 function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
-}
-function isProgressWatchOwnerConflict(result: unknown): boolean {
-  return isRejectedResult(result) && (result as { code?: unknown }).code === "watch_owner_conflict";
 }
 function responseExitCode(response: GatewayControlResponse): number {
   return !response.ok ? gatewayCliExitCodes.failure
@@ -706,9 +675,6 @@ export async function runGatewayCli(
     const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr("decision"));
-      if (isProgressWatchOwnerConflict(response.result)) {
-        stderr.write(`[embassy] ${CLI_HINT.progressWatchOwnerConflict}\n`);
-      }
     } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr("failure"));
     return exitCode;
   } catch (error) {

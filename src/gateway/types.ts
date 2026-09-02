@@ -48,8 +48,7 @@ export type BusyPolicy = "queue";
 export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64, registryRejectionCodes: 32,
   availablePeers: 256, routes: 256,
-  consentEdges: 256, progressWatches: 64,
-  progressWatchEvents: 256, activityEvents: 256,
+  consentEdges: 256, activityEvents: 256,
   messages: 1_024, alerts: 256,
 } as const);
 export const GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET = 240 * 1024;
@@ -201,7 +200,6 @@ export const gatewayActivityKinds = [
   "selection",
   "registration",
   "pairing",
-  "watch",
 ] as const;
 export type GatewayActivityKind = (typeof gatewayActivityKinds)[number];
 export const gatewayActivityActions = [
@@ -213,7 +211,6 @@ export const gatewayActivityActions = [
   "codex_unregistered",
   "routes_paired",
   "routes_unpaired",
-  "watch_ended",
 ] as const;
 export type GatewayActivityAction = (typeof gatewayActivityActions)[number];
 export type PublicGatewayActivityEvent = {
@@ -313,29 +310,15 @@ export function isPublicRegistryObservationSnapshot(value: unknown): value is Pu
 export type SafeGatewayAlert = {
   code: string; severity: AlertSeverity; timestamp: string; provider?: GatewayProvider; host?: string; alias?: string;
 };
-export type PublicProgressWatchSnapshot = {
-  conversationIdSuffix: string; ownerAlias: string; workerAlias: string; lastActivityAt: string; nextActionAt: string; nudgeCount: 0 | 1 | 2;
-};
-export type PublicProgressWatchEventSnapshot = {
-  sequence: number; timestamp: string; conversationIdSuffix: string; ownerAlias: string;
-  workerAlias: string; kind: "opened" | "replaced" | "settled"; actor: "owner" | "worker" | "operator" | "gateway" | "unknown";
-  reason?:
-    | "done"
-    | "untracked"
-    | "idle_timeout"
-    | "pair_removed"
-    | "endpoint_retired"
-    | "tracking_disabled";
-};
 export type GatewayPublicSnapshot = {
   schemaVersion: 2; generatedAt: string; inboundMode: GatewayInboundMode; health: ConnectorHealth;
   connectors: PublicConnectorSnapshot[]; availablePeers: PublicAvailablePeerSnapshot[]; routes: PublicRouteSnapshot[]; consentEdges: PublicConsentEdgeSnapshot[];
-  progressWatches?: PublicProgressWatchSnapshot[]; progressWatchEvents?: PublicProgressWatchEventSnapshot[]; activityEvents?: PublicGatewayActivityEvent[]; deadlinePressure?: DeadlinePressureSnapshot;
+  activityEvents?: PublicGatewayActivityEvent[]; deadlinePressure?: DeadlinePressureSnapshot;
   messages: NormalizedMessageEvent[]; accounting: GatewayAccounting; alerts: SafeGatewayAlert[]; truncation: GatewaySnapshotTruncation;
 };
 export type GatewaySnapshotTruncation = {
   connectors: number; availablePeers: number; routes: number; consentEdges: number;
-  progressWatches?: number; progressWatchEvents?: number; activityEvents?: number; messages: number;
+  activityEvents?: number; messages: number;
   alerts: number;
 };
 function severityPriority(severity: AlertSeverity): number {
@@ -388,14 +371,6 @@ export function projectGatewayPublicSnapshot(
     messages: snapshot.truncation.messages + omitted(snapshot.messages.length, gatewayPublicSnapshotLimits.messages),
     alerts: snapshot.truncation.alerts + omitted(snapshot.alerts.length, gatewayPublicSnapshotLimits.alerts),
   };
-  if (snapshot.progressWatches !== undefined) {
-    truncation.progressWatches = (snapshot.truncation.progressWatches ?? 0) +
-      omitted(snapshot.progressWatches.length, gatewayPublicSnapshotLimits.progressWatches);
-  }
-  if (snapshot.progressWatchEvents !== undefined) {
-    truncation.progressWatchEvents = (snapshot.truncation.progressWatchEvents ?? 0) +
-      omitted(snapshot.progressWatchEvents.length, gatewayPublicSnapshotLimits.progressWatchEvents);
-  }
   if (snapshot.activityEvents !== undefined) {
     truncation.activityEvents = (snapshot.truncation.activityEvents ?? 0) +
       omitted(snapshot.activityEvents.length, gatewayPublicSnapshotLimits.activityEvents);
@@ -406,12 +381,6 @@ export function projectGatewayPublicSnapshot(
     availablePeers: snapshot.availablePeers.slice(0, gatewayPublicSnapshotLimits.availablePeers),
     routes: snapshot.routes.slice(0, gatewayPublicSnapshotLimits.routes),
     consentEdges: snapshot.consentEdges.slice(0, gatewayPublicSnapshotLimits.consentEdges),
-    ...(snapshot.progressWatches === undefined ? {} : {
-      progressWatches: snapshot.progressWatches.slice(0, gatewayPublicSnapshotLimits.progressWatches),
-    }),
-    ...(snapshot.progressWatchEvents === undefined ? {} : {
-      progressWatchEvents: snapshot.progressWatchEvents.slice(-gatewayPublicSnapshotLimits.progressWatchEvents),
-    }),
     ...(snapshot.activityEvents === undefined ? {} : {
       activityEvents: snapshot.activityEvents.slice(-gatewayPublicSnapshotLimits.activityEvents),
     }),
@@ -451,14 +420,6 @@ export function projectGatewayPublicSnapshot(
     const retained = count === 0 ? [] : newest ? rows.slice(-count) : rows.slice(0, count);
     apply(retained, priorOmissions + rows.length - count);
   });
-  const watchEvents = projected.progressWatchEvents ?? [];
-  if (
-    watchEvents.length > 0 &&
-    retainRows(watchEvents, projected.truncation.progressWatchEvents ?? 0, true, (rows, omissions) => {
-      projected.progressWatchEvents = rows;
-      projected.truncation.progressWatchEvents = omissions;
-    })
-  ) return projected;
   const activityEvents = projected.activityEvents ?? [];
   if (
     activityEvents.length > 0 &&
@@ -682,7 +643,7 @@ export type TerminalMessageSettlement = {
   messageId: string; state: TerminalDeliveryOutcome; safeErrorCode?: string;
 };
 export type GatewayStoreLimits = {
-  maxRoutes: number; maxConsentEdges: number; maxWatches?: number; eventCapacity: number;
+  maxRoutes: number; maxConsentEdges: number; eventCapacity: number;
   eventTtlMs: number; dedupeCapacity: number; dedupeTtlMs: number; maxQueueMessages: number;
   maxQueueMessagesPerRoute: number; maxInFlightMessages: number; maxQueueBytes: number; maxMessageBytes: number;
   maxRetainedBodyBytes?: number; messageDeadlineMs: number; rateLimitPerRoute: number; rateWindowMs: number;

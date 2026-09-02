@@ -23,7 +23,7 @@ export type ClaudeNativeHelperCommand =
       authorization: "selected_route" | "native_reply"; stateRoot?: string;
       messageId: string; sourceAlias: string; sourceProvider: GatewayProvider;
       targetAlias: string; conversationId: string; text: string;
-      expectsReply: boolean; deadlineAt: string; progressWatchActive?: true }>
+      expectsReply: boolean; deadlineAt: string }>
   | Readonly<{ method: "perform_dispatch" | "cancel_dispatch"; preparationId: string }>
   | Readonly<{ method: "update_inbound_status"; receiptHandle: string;
       status: "held" | "delivered" | "denied" | "expired"; diagnosticCode?: string }>
@@ -82,14 +82,13 @@ function command(v: unknown): v is ClaudeNativeHelperCommand {
   if (v.method === "prepare_dispatch") {
     const selected = v.authorization === "selected_route";
     return exact(v, ["method", "binding", "authorization", "messageId", "sourceAlias", "sourceProvider",
-      "targetAlias", "conversationId", "text", "expectsReply", "deadlineAt"], ["stateRoot", "progressWatchActive"]) &&
+      "targetAlias", "conversationId", "text", "expectsReply", "deadlineAt"], ["stateRoot"]) &&
       route(v.binding) && (selected || v.authorization === "native_reply") && str(v.messageId, 256) &&
       source(v.sourceAlias, v.sourceProvider) &&
       typeof v.targetAlias === "string" && ALIAS.test(v.targetAlias) &&
       typeof v.conversationId === "string" && CONVERSATION.test(v.conversationId) &&
       typeof v.text === "string" && Buffer.byteLength(v.text) <= 16 * 1024 && typeof v.expectsReply === "boolean" &&
       typeof v.deadlineAt === "string" && Number.isFinite(Date.parse(v.deadlineAt)) &&
-      (v.progressWatchActive === undefined || v.progressWatchActive === true) &&
       (selected ? str(v.stateRoot) && v.stateRoot.startsWith("/") : v.stateRoot === undefined);
   }
   if (v.method === "update_inbound_status") return exact(v, ["method", "receiptHandle", "status"], ["diagnosticCode"]) &&

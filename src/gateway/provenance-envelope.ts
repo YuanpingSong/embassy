@@ -10,7 +10,7 @@ const ALIAS_PATTERN =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{16,64}$/;
 const RESERVED_TAG_PATTERN =
-  /<(?=\/?(?:cross-session-message|embassy-reply-hint|embassy-track-active|embassy-queued-ahead)(?:[>\s/]|$))/giu;
+  /<(?=\/?(?:cross-session-message|embassy-reply-hint|embassy-queued-ahead)(?:[>\s/]|$))/giu;
 const CLAUDE_FROM_NAME_MAX_CODEPOINTS = 64;
 const LONG_ALIAS_HASH_HEX_LENGTH = 16;
 
@@ -47,7 +47,6 @@ export type ComposeProvenanceEnvelopeInput = Readonly<{
   targetAlias: string;
   conversationId: string;
   body: string;
-  progressWatchActive?: true;
   /** Older accepted rows on this exact route when a STEER is injected. */
   queuedAhead?: number;
 }>;
@@ -88,8 +87,6 @@ function validateInput(input: ComposeProvenanceEnvelopeInput): void {
     typeof input.conversationId !== "string" ||
     !CONVERSATION_ID_PATTERN.test(input.conversationId) ||
     typeof input.body !== "string" ||
-    (input.progressWatchActive !== undefined &&
-      input.progressWatchActive !== true) ||
     (input.queuedAhead !== undefined &&
       (!PROVENANCE_RECIPIENT_PROFILES[input.recipientProvider]
         .allowQueuedAhead ||
@@ -168,12 +165,6 @@ export function composeProvenanceEnvelope(
     ` from-provider="${input.sourceProvider}">` +
     `Reply by running \`${replyCommand}\` with the reply body on stdin. ` +
     "Caller, conversation, and route policy are rechecked.</embassy-reply-hint>";
-  const trackMarker =
-    input.progressWatchActive === true
-      ? "\n<embassy-track-active>Progress supervision is active for this " +
-        "conversation. Reply with a leading `DONE:` when the assigned work " +
-        "is complete; that completion closes the watch.</embassy-track-active>"
-      : "";
   const queuedAheadMarker =
     input.queuedAhead === undefined
       ? ""
@@ -184,7 +175,7 @@ export function composeProvenanceEnvelope(
   const body = neutralizeReservedTags(input.body);
   const envelope =
     `<cross-session-message from-name="${fromName}"${conversationAttribute}>\n` +
-    `${hint}${trackMarker}${queuedAheadMarker}\n${body}\n</cross-session-message>`;
+    `${hint}${queuedAheadMarker}\n${body}\n</cross-session-message>`;
 
   if (
     Buffer.byteLength(envelope, "utf8") > PROVENANCE_ENVELOPE_MAX_BYTES

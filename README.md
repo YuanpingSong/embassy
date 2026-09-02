@@ -235,24 +235,17 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `refresh` | operator | Rescan for Claude sessions |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |
 | `wait-delivery` | either provider | Wait for that tracker to settle, up to the delivery deadline |
-| `untrack` | either provider | Close one active progress watch: `embassy untrack --conversation conv_<token>` |
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@this-mac --succeeds codex-reviewer@this-mac` hands the registration to a different task |
 | `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
 | `pair` / `unpair` | same-UID control client | Add or remove one user-chosen cross-provider edge by naming both ends: `embassy pair --from advisor@this-mac --to peer-reviewer@this-mac` |
 | `select-claude` / `unselect-claude` | same-UID control client | Select or remove one Claude route using `--alias <name@host>` or `--session <uuid>`; selection creates no permission edge |
-| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message between paired routes: `--from <alias> --to <alias>`, optional `--expects-reply` and `--track [--idle-minutes <n>]`; the broker derives direction from the resolved providers |
-| `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin, optional `--track [--idle-minutes <n>]` |
+| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message between paired routes: `--from <alias> --to <alias>`, optional `--expects-reply`; the broker derives direction from the resolved providers |
+| `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin |
 
 Version 2.0 accepts only fresh private state. Follow the
 [reset-only state runbook](docs/CONFIGURATION.md#private-state-reset) before
 starting it over an older installation.
-
-`--track` opens a progress watch over the conversation; `--idle-minutes <n>`
-sets the idle interval for bounded liveness nudges (1–1440, default 5, rejected
-without `--track`). If the watch ultimately times out, Embassy records it only
-in watch history and emits no runtime stall alert. Close a watch with `untrack`,
-or by replying with a leading `DONE:`. See [Delivery](docs/DELIVERY.md).
 
 ## Safety in one minute
 

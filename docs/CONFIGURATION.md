@@ -15,7 +15,6 @@ below.
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state and control socket; an override must be absolute and does not relocate the fixed host-wide lease |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
-| `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts. Active watches are memory-only and end with the broker process; they are never restored after restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
 
 Before any Embassy client call that talks to the broker, the CLI reads the state
 directory and `nodes.json`, then connects to the control socket; grant a sandboxed
@@ -56,7 +55,6 @@ These variables retain conservative defaults:
 | --- | ---: |
 | `EMBASSY_MAX_ROUTES` | `128` |
 | `EMBASSY_MAX_PAIRS` | `128` |
-| `EMBASSY_MAX_WATCHES` | `32` |
 | `EMBASSY_EVENT_CAPACITY` / `EMBASSY_EVENT_TTL_MS` | `500` / `86400000` |
 | `EMBASSY_DEDUPE_CAPACITY` / `EMBASSY_DEDUPE_TTL_MS` | `2000` / `300000` |
 | `EMBASSY_MAX_QUEUE_MESSAGES` / `EMBASSY_MAX_QUEUE_PER_ROUTE` | `100` / `20` |
@@ -66,8 +64,7 @@ These variables retain conservative defaults:
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
 `EMBASSY_MAX_PAIRS` is the bound behind the README's "128 pairs by default"; its
-range is 1 through 256. `EMBASSY_MAX_WATCHES` bounds concurrent progress watches
-and is capped at 256. `EMBASSY_MAX_ROUTES` accepts 2 through 256. Every value in
+range is 1 through 256. `EMBASSY_MAX_ROUTES` accepts 2 through 256. Every value in
 this table is validated at startup, and an out-of-range or non-integer setting
 fails closed with `INVALID_GATEWAY_CONFIGURATION` rather than being clamped.
 

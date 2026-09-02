@@ -962,8 +962,8 @@ test("terminal retention ranks late settlements by settlement sequence", async (
     "settled",
   );
   await store.recordActivity({
-    kind: "watch",
-    action: "watch_ended",
+    kind: "discovery",
+    action: "discovery_refreshed",
     outcome: "accepted",
     aliases: [],
     operatorAction: false,

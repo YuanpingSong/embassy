@@ -147,7 +147,7 @@ export class ClaudeNativeHelperSupervisor {
   async prepareDispatch(input: Readonly<{ sourceAlias: string; sourceProvider: GatewayProvider; targetAlias: string;
     conversationId: string; selectedAlias?: string; stateRoot?: string; binding: LogicalRouteBinding;
     authorization: "selected_route" | "native_reply"; messageId: string; text: string; expectsReply: boolean;
-    deadlineAt: string; progressWatchActive?: true }>): Promise<ClaudeNativeHelperPreparedDispatch> {
+    deadlineAt: string }>): Promise<ClaudeNativeHelperPreparedDispatch> {
     if (!ALIAS.test(input.sourceAlias) || !ALIAS.test(input.targetAlias) || !CONVERSATION.test(input.conversationId) ||
       !isGatewayProvider(input.sourceProvider)) throw fault("PROVENANCE_ENVELOPE_INVALID");
     if (Buffer.byteLength(input.text) > 16 * 1024) throw fault("PROVENANCE_ENVELOPE_TOO_LARGE");
@@ -160,8 +160,7 @@ export class ClaudeNativeHelperSupervisor {
       authorization: input.authorization, ...(input.authorization === "selected_route" ? { stateRoot: input.stateRoot! } : {}),
       messageId: input.messageId, sourceAlias: helper.alias, sourceProvider: helper.sourceProvider,
       targetAlias: input.targetAlias, conversationId: input.conversationId, text: input.text,
-      expectsReply: input.expectsReply, deadlineAt: input.deadlineAt,
-      ...(input.progressWatchActive ? { progressWatchActive: true as const } : {}) }, this.#deadline(input.deadlineAt));
+      expectsReply: input.expectsReply, deadlineAt: input.deadlineAt }, this.#deadline(input.deadlineAt));
     if (!("preparationId" in result)) throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
     let state: "prepared" | "consumed" = "prepared"; let tracked!: Preparation;
     const cancel = async (): Promise<void> => { if (state !== "prepared") return; state = "consumed"; this.#preparations.delete(tracked);

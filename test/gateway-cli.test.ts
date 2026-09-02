@@ -120,7 +120,7 @@ test("bare invocation and help flags print usage without side effects", async ()
     assert.match(help, current.expected);
     assert.match(help, /^ {2}refresh {2,}\S/m);
     assert.match(help, /wait-delivery/);
-    assert.match(help, /untrack/);
+    assert.doesNotMatch(help, /untrack|--track|--idle-minutes/);
     assert.match(help, /register-peer/);
     assert.match(help, /unregister-peer/);
     assert.match(help, /--token-stdin/);
@@ -133,7 +133,7 @@ test("bare invocation and help flags print usage without side effects", async ()
 });
 
 test("removed compatibility commands fail before configuration or control work", async () => {
-  for (const command of ["compat-check", "compat-certify", "send-to-claude", "send-to-codex"]) {
+  for (const command of ["compat-check", "compat-certify", "send-to-claude", "send-to-codex", "untrack"]) {
     let worked = false;
     const stdout = capture();
     const stderr = capture();
@@ -453,7 +453,6 @@ test("all client commands use one private control socket and expose only normali
   const sendsToCodex: ValidatedSendParams[] = [];
   const replies: ReplyParams[] = [];
   const deliveryStatuses: string[] = [];
-  const untracked: string[] = [];
   const statusSnapshot = emptySnapshot();
   const handlers: GatewayControlHandlers = {
     health: () => ({ status: "ok", revision: 1 }),
@@ -495,10 +494,6 @@ test("all client commands use one private control socket and expose only normali
         updatedAt: NOW,
         deadlineAt: DEADLINE,
       };
-    },
-    untrack: ({ conversationId }) => {
-      untracked.push(conversationId);
-      return { accepted: true, code: "ok" };
     },
     send: (params) => {
       ("replyAddress" in params ? sendsToCodex : sendsToClaude).push({ ...params });
@@ -551,10 +546,6 @@ test("all client commands use one private control socket and expose only normali
     },
     {
       argv: ["wait-delivery", "--token", DELIVERY_TOKEN],
-      env: BOTH_IDENTITIES,
-    },
-    {
-      argv: ["untrack", "--conversation", CONVERSATION_ID],
       env: BOTH_IDENTITIES,
     },
     { argv: ["refresh"], env: BOTH_IDENTITIES },
@@ -659,9 +650,6 @@ test("all client commands use one private control socket and expose only normali
         "advisor@this-mac",
         "--to",
         "codex-reviewer@this-mac",
-        "--track",
-        "--idle-minutes",
-        "7",
       ],
       body: SECRET_BODY,
       env: { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH },
@@ -673,7 +661,6 @@ test("all client commands use one private control socket and expose only normali
         CONVERSATION_ID,
         "--alias",
         "codex-reviewer@this-mac",
-        "--track",
       ],
       body: SECRET_BODY,
       env: { CODEX_THREAD_ID: THREAD_ID },
@@ -759,7 +746,6 @@ test("all client commands use one private control socket and expose only normali
     },
   ]);
   assert.deepEqual(deliveryStatuses, [DELIVERY_TOKEN, DELIVERY_TOKEN]);
-  assert.deepEqual(untracked, [CONVERSATION_ID]);
   assert.deepEqual(sendsToClaude, [
     {
       fromAlias: "codex-reviewer@this-mac",
@@ -783,7 +769,6 @@ test("all client commands use one private control socket and expose only normali
       text: SECRET_BODY,
       replyAddress: REPLY_ADDRESS,
       expectsReply: false,
-      trackIdleMinutes: 7,
     },
   ]);
   assert.deepEqual(replies, [
@@ -795,7 +780,6 @@ test("all client commands use one private control socket and expose only normali
         alias: "codex-reviewer@this-mac",
         threadId: THREAD_ID,
       },
-      trackIdleMinutes: 5,
     },
     {
       conversationId: CONVERSATION_ID,
@@ -881,6 +865,8 @@ test("the removed --lang option is an argument error and locale environment is i
     ["--lang", "en"],
     ["--lang", "zh-CN"],
     ["--lang=en"],
+    ["--track"],
+    ["--idle-minutes", "5"],
   ] as const;
   for (const command of gatewayCliCommands) {
     for (const suffix of removed) {
@@ -1518,55 +1504,6 @@ test("registration stays record-only and localizes the rejection", async () => {
   }
 });
 
-test("watch-owner conflict preserves its code and prints the untrack remedy", async () => {
-  const expectedHint =
-    "[embassy] gateway rejected the request.\n[embassy] this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.\n";
-  {
-    const stdout = capture();
-    const stderr = capture();
-    const code = await runGatewayCli(
-      [
-        "send",
-        "--from",
-        "codex-reviewer@this-mac",
-        "--to",
-        "advisor@this-mac",
-      ],
-      {
-        env: { CODEX_THREAD_ID: THREAD_ID },
-        stdin: input("TRACK: replacement attempt"),
-        stdout,
-        stderr,
-        loadConfig: () => ({
-          stateDir: "/private/fake-state",
-          controlSocketPath: "/private/fake-state/control.sock",
-          allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
-          stallNoticeMs: 30_000,
-          steeringEnabled: true,
-          inboundMode: "paired",
-          limits: {} as never,
-        }),
-        validateControlSocket: async () => undefined,
-        sendRequest: (async () => ({
-          protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-          ok: true,
-          result: {
-            accepted: false,
-            code: "watch_owner_conflict",
-          },
-        })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-      },
-    );
-    assert.equal(code, gatewayCliExitCodes.rejected);
-    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
-      ok: true,
-      command: "send",
-      result: { accepted: false, code: "watch_owner_conflict" },
-    });
-    assert.equal(stderr.chunks.join(""), expectedHint);
-  }
-});
-
 test("identity, stdin, and argument failures happen before any control request", async () => {
   const cases: Array<{
     argv: string[];
@@ -2074,7 +2011,6 @@ test("refresh reports a failed rescan as a decision, not a client-side transport
       listSnapshot: () => emptySnapshot(),
       observeSnapshot: () => ({ snapshotRevision: 0, snapshot: emptySnapshot() }),
       deliveryStatus: () => ({ found: false }),
-      untrack: () => ({ accepted: true, code: "ok" }),
       send: () => ({ accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }),
       reply: () => ({ accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }),
       refreshDiscovery: () => outcome === "ok"
@@ -2131,7 +2067,6 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
         snapshot: emptySnapshot(),
       }),
       deliveryStatus: () => ({ found: false }),
-      untrack: () => ({ accepted: true, code: "ok" }),
       send: () => ({
         accepted: true,
         code: "ok",
