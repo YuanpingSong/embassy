@@ -2530,8 +2530,11 @@ test("the install health probe is bounded by wall clock, not by an attempt count
   // by what is left of the deadline, so one stalled socket cannot stretch the
   // window past the 10 s the message promises.
   assert.equal(timeouts[0], 1_000);
-  assert.equal(timeouts.every((value) => value !== undefined && value > 0 && value <= 1_000), true,
-    JSON.stringify(timeouts));
+  assert.equal(
+    timeouts.every((value) => value !== undefined && Number.isInteger(value) &&
+      value >= 50 && value <= 1_000),
+    true, JSON.stringify(timeouts),
+  );
   assert.equal(timeouts.at(-1), 200);
   assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
     ok: false, command: "service",
@@ -2701,4 +2704,84 @@ test("the installed binary implements exactly the nineteen documented commands",
     "unregister-peer", "await", "peer-stdio",
   ]);
   assert.equal(gatewayCliCommands.length, 19);
+});
+
+test("the health probe still terminates when the injected clock never advances", async () => {
+  const { home, stateDir } = await serviceFixture();
+  let attempts = 0;
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: cliFakeLaunchd().run,
+    validateControlSocket: async () => undefined,
+    sendRequest: async () => {
+      attempts += 1;
+      throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail");
+    },
+    // A deadline alone is not a bound: a clock that never moves would loop.
+    now: () => 0, delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(attempts, 50);
+  assert.match(stderr.chunks.join(""), /did not answer within 0\.0 s; last observed CONTROL_SOCKET_MISSING/);
+});
+
+test("the tail of the health window never fabricates its own last observation", async () => {
+  const { home, stateDir } = await serviceFixture();
+  // A fractional monotonic clock, as performance.now() actually gives.
+  let clock = 0;
+  const observed: string[] = [];
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: cliFakeLaunchd().run,
+    validateControlSocket: async () => undefined,
+    sendRequest: (async ({ timeoutMs }: { timeoutMs?: number }) => {
+      // control.ts's own guard, reproduced: below 50 ms, or non-integer, it
+      // rejects the call as CONTROL_INVALID_RESPONSE — which would then be
+      // reported as the last thing observed, a fault this client invented.
+      if (timeoutMs === undefined || !Number.isInteger(timeoutMs) || timeoutMs < 50) {
+        observed.push("CONTROL_INVALID_RESPONSE");
+        throw new GatewayControlTransportError("CONTROL_INVALID_RESPONSE", "fabricated");
+      }
+      observed.push("CONTROL_SOCKET_MISSING");
+      throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail");
+    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    now: () => clock, delay: async (ms: number) => { clock += ms + 0.37; },
+  });
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(observed.includes("CONTROL_INVALID_RESPONSE"), false);
+  assert.equal(JSON.parse(stdout.chunks.join("")).error.lastObserved, "CONTROL_SOCKET_MISSING");
+  // Elapsed is measured monotonically and clamped: never a negative window.
+  const elapsed = /did not answer within ([\d.]+) s/.exec(stderr.chunks.join(""))?.[1];
+  assert.equal(elapsed !== undefined && Number(elapsed) >= 0, true, stderr.chunks.join(""));
+  assert.doesNotMatch(stderr.chunks.join(""), /within -|fabricated/);
+});
+
+test("a non-errno failure on the service path keeps its own class", async () => {
+  const { home, stateDir } = await serviceFixture();
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    // A string `code` alone is not a filesystem failure: CliFault and the
+    // lease's spawn failures look like this too.
+    runLaunchctl: async () => {
+      throw Object.assign(new Error("not a filesystem failure"), { code: "SOME_OTHER_CODE" });
+    },
+    validateControlSocket: async () => undefined,
+    sendRequest: healthySendRequest,
+    delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: false, command: "service",
+    error: { code: "INTERNAL_ERROR", ambiguous: false, retryable: false },
+  });
+  assert.equal(stderr.chunks.join(""), "[embassy] command failed.\n");
 });

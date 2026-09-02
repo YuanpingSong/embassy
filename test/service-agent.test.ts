@@ -634,6 +634,8 @@ test("a rollback over a previous install restores its plist and re-bootstraps it
     ["bootout", TARGET],
     ["print", TARGET],
     ["bootstrap", DOMAIN, first.plistPath],
+    // The restore is confirmed by `print`, not by bootstrap's exit code.
+    ["print", TARGET],
   ]);
 });
 
@@ -695,4 +697,175 @@ test("launchctl detail is stderr only, and capped", async (t) => {
   assert.equal(quiet.state, "unknown");
   assert.equal(quiet.launchctlStderr, "no stderr output");
   assert.doesNotMatch(`${quiet.note} ${quiet.launchctlStderr}`, /secret/);
+});
+
+test("a rollback never bootstraps a previous plist that was not loaded to begin with", async (t) => {
+  const home = await homeFixture(t);
+  // A plist on disk, but launchd is not running it — the common "installed
+  // then booted out by hand" state.
+  const first = await installServiceAgent(
+    baseDeps(home, { runLaunchctl: fakeLaunchd().run, env: { EMBASSY_MAX_ROUTES: "64" } }),
+  );
+  const original = await readFile(first.plistPath, "utf8");
+
+  const launchd = fakeLaunchd({
+    loaded: false,
+    fail: { bootstrap: { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error\n" } },
+  });
+  await assert.rejects(
+    installServiceAgent(
+      baseDeps(home, { runLaunchctl: launchd.run, env: { EMBASSY_MAX_ROUTES: "999" } }),
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.message ===
+        "launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error — rollback: the previous plist was restored; it was not loaded before this install, so it stays unloaded.",
+  );
+
+  assert.equal(await readFile(first.plistPath, "utf8"), original);
+  // Exactly one bootstrap: the install's own, which failed. Rolling back must
+  // not start a broker the user did not have running — it would take the host
+  // lease behind their back.
+  assert.equal(launchd.calls.filter((call) => call[0] === "bootstrap").length, 1);
+  assert.deepEqual(launchd.calls, [
+    ["print", TARGET],
+    ["bootstrap", DOMAIN, first.plistPath],
+    ["bootout", TARGET],
+    ["print", TARGET],
+  ]);
+});
+
+test("a rollback leaves an unreadable previous plist alone instead of deleting it", async (t) => {
+  const home = await homeFixture(t);
+  const first = await installServiceAgent(baseDeps(home, { runLaunchctl: fakeLaunchd().run }));
+  // Bigger than the bounded read: present, but not something we can put back.
+  await writeFile(first.plistPath, "x".repeat(70 * 1024), { mode: 0o644 });
+
+  const launchd = fakeLaunchd({
+    fail: { bootstrap: { code: 5, stdout: "", stderr: "Bootstrap failed: 5\n" } },
+  });
+  await assert.rejects(
+    installServiceAgent(baseDeps(home, { runLaunchctl: launchd.run })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.message.endsWith(
+        "— rollback: the new agent was unloaded, but the previous plist could not be read, so it was left in place rather than deleted; the plist on disk is the one this install wrote.",
+      ),
+  );
+  // Deleting a plist we merely failed to read would be a silent uninstall.
+  assert.equal((await lstat(first.plistPath)).isFile(), true);
+});
+
+test("every rollback failure branch reports itself honestly", async (t) => {
+  const launchAgentsOf = (home: string): string => path.join(home, "Library", "LaunchAgents");
+
+  // (a) the plist cannot be removed.
+  const noPrevious = await homeFixture(t);
+  t.after(async () => chmod(launchAgentsOf(noPrevious), 0o755).catch(() => undefined));
+  await assert.rejects(
+    installServiceAgent(baseDeps(noPrevious, {
+      runLaunchctl: async (args) => {
+        if (args[0] === "bootstrap") {
+          await chmod(launchAgentsOf(noPrevious), 0o500);
+          return { code: 5, stdout: "", stderr: "Bootstrap failed: 5\n" };
+        }
+        return args[0] === "print"
+          ? { code: 113, stdout: "", stderr: NOT_FOUND_STDERR }
+          : { code: 0, stdout: "", stderr: "" };
+      },
+    })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      /— rollback: the new agent was unloaded, but its plist could not be removed \(EACCES/.test(error.message),
+  );
+  await chmod(launchAgentsOf(noPrevious), 0o755);
+
+  // (b) the previous plist cannot be written back.
+  const unwritable = await homeFixture(t);
+  await installServiceAgent(baseDeps(unwritable, { runLaunchctl: fakeLaunchd().run }));
+  t.after(async () => chmod(launchAgentsOf(unwritable), 0o755).catch(() => undefined));
+  await assert.rejects(
+    installServiceAgent(baseDeps(unwritable, {
+      runLaunchctl: async (args) => {
+        if (args[0] === "bootstrap") {
+          await chmod(launchAgentsOf(unwritable), 0o500);
+          return { code: 5, stdout: "", stderr: "Bootstrap failed: 5\n" };
+        }
+        return args[0] === "print"
+          ? { code: 113, stdout: "", stderr: NOT_FOUND_STDERR }
+          : { code: 0, stdout: "", stderr: "" };
+      },
+    })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      /— rollback: the new agent was unloaded, but the previous plist could not be restored \(EACCES/.test(error.message) &&
+      /so the plist on disk is the one this install wrote\.$/.test(error.message),
+  );
+  await chmod(launchAgentsOf(unwritable), 0o755);
+
+  // (c) the restored plist cannot be bootstrapped again.
+  const stuck = await homeFixture(t);
+  const installed = await installServiceAgent(baseDeps(stuck, { runLaunchctl: fakeLaunchd().run }));
+  await assert.rejects(
+    installServiceAgent(baseDeps(stuck, {
+      runLaunchctl: fakeLaunchd({
+        loaded: true,
+        fail: { bootstrap: { code: 5, stdout: "", stderr: "Bootstrap failed: 5\n" } },
+      }).run,
+    })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.message.endsWith(
+        "— rollback: the previous plist was restored, but re-bootstrapping it failed (launchctl bootstrap exit 5: Bootstrap failed: 5); run `embassy service install` again.",
+      ),
+  );
+  assert.equal((await lstat(installed.plistPath)).isFile(), true);
+
+  // (d) the restore bootstraps, but launchd never confirms it is running.
+  const unconfirmed = await homeFixture(t);
+  await installServiceAgent(baseDeps(unconfirmed, { runLaunchctl: fakeLaunchd().run }));
+  await assert.rejects(
+    installServiceAgent(baseDeps(unconfirmed, {
+      runLaunchctl: fakeLaunchd({
+        loaded: true,
+        printStdout: NOT_RUNNING_PRINT,
+        fail: {
+          bootstrap: { code: 5, stdout: "", stderr: "Bootstrap failed: 5\n" },
+          kickstart: { code: 3, stdout: "", stderr: "Could not kickstart service\n" },
+        },
+        failLimit: { bootstrap: 1 },
+      }).run,
+    })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.message.endsWith(
+        "— rollback: the previous plist was restored and re-bootstrapped, but launchd did not confirm it is running (launchctl kickstart exit 3: Could not kickstart service); run `embassy service status`.",
+      ),
+  );
+});
+
+test("a status note bounds the program paths it names", async (t) => {
+  const home = await homeFixture(t);
+  const long = `/${"a".repeat(400)}`;
+  await installServiceAgent(baseDeps(home, { runLaunchctl: fakeLaunchd().run, execPath: long }));
+
+  const status = await serviceAgentStatus(baseDeps(home, { runLaunchctl: fakeLaunchd().run }));
+  assert.deepEqual(status.programMissing, [long]);
+  // 256 bytes total, the leading slash included, then the marker.
+  assert.match(status.note, /program missing: \/a{255}… \(truncated\) — re-run/);
+  assert.equal(status.note.includes(long), false);
+});
+
+test("status says what it actually quotes, and it is not verbatim output", async (t) => {
+  const home = await homeFixture(t);
+  const broken = fakeLaunchd({
+    fail: { print: { code: 1, stdout: "EMBASSY_STATE_DIR => /secret\n", stderr: "boom" } },
+  });
+  const status = await serviceAgentStatus(baseDeps(home, { runLaunchctl: broken.run }));
+  assert.equal(
+    status.note,
+    "launchctl could not report on the agent (exit 1); its stderr is reported, trimmed and capped at 512 bytes, and its stdout is never quoted. The plist is missing.",
+  );
+  assert.doesNotMatch(status.note, /verbatim/);
+  assert.equal(status.launchctlStderr, "boom");
 });

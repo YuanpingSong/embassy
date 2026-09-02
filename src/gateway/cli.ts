@@ -587,6 +587,18 @@ const SERVICE_HEALTH_POLL_INTERVAL_MS = 200;
  * timeout and a stalled socket stretches the "10 s" window past two minutes.
  */
 const SERVICE_HEALTH_REQUEST_TIMEOUT_MS = 1_000;
+/**
+ * control.ts rejects any timeout below 50 ms with CONTROL_INVALID_RESPONSE.
+ * An attempt squeezed into the tail of the window would therefore fabricate a
+ * fault and become the "last observed" code, so the poll treats less than
+ * this much remaining as the deadline already reached.
+ */
+const SERVICE_HEALTH_MIN_REQUEST_TIMEOUT_MS = 50;
+/** A second, independent bound: a clock that never advances cannot loop forever. */
+const SERVICE_HEALTH_MAX_ATTEMPTS =
+  SERVICE_HEALTH_DEADLINE_MS / SERVICE_HEALTH_POLL_INTERVAL_MS;
+/** Elapsed time is measured monotonically; a wall-clock step must not move it. */
+const monotonicNow = (): number => performance.now();
 
 /**
  * Codes that answer the question rather than postpone it. Polling still runs
@@ -625,19 +637,20 @@ async function pollServiceHealth(
   now: () => number,
 ): Promise<ServiceHealthOutcome> {
   const started = now();
-  const deadline = started + SERVICE_HEALTH_DEADLINE_MS;
+  const elapsed = (): number => Math.max(0, now() - started);
+  const remainingMs = (): number => SERVICE_HEALTH_DEADLINE_MS - elapsed();
   let lastObserved = "SERVICE_HEALTH_NO_RESPONSE";
-  while (true) {
-    const remaining = deadline - now();
-    if (remaining <= 0) return { ok: false, lastObserved, elapsedMs: now() - started };
+  for (let attempt = 0; attempt < SERVICE_HEALTH_MAX_ATTEMPTS; attempt += 1) {
+    const remaining = remainingMs();
+    if (remaining < SERVICE_HEALTH_MIN_REQUEST_TIMEOUT_MS) break;
     try {
       await validateSocket(config.stateDir, config.controlSocketPath);
       const response = await sendRequest({
         socketPath: config.controlSocketPath,
         request: envelope("health", {}) as Extract<GatewayControlRequest, { method: "health" }>,
-        timeoutMs: Math.min(remaining, SERVICE_HEALTH_REQUEST_TIMEOUT_MS),
+        timeoutMs: Math.floor(Math.min(remaining, SERVICE_HEALTH_REQUEST_TIMEOUT_MS)),
       });
-      if (response.ok) return { ok: true, result: response.result, elapsedMs: now() - started };
+      if (response.ok) return { ok: true, result: response.result, elapsedMs: elapsed() };
       lastObserved = response.error.code;
     } catch (error) {
       lastObserved = error instanceof GatewayControlTransportError ? error.code
@@ -645,10 +658,11 @@ async function pollServiceHealth(
         : error instanceof BridgeError ? error.code
         : "SERVICE_HEALTH_NO_RESPONSE";
     }
-    const left = deadline - now();
-    if (left <= 0) return { ok: false, lastObserved, elapsedMs: now() - started };
+    const left = remainingMs();
+    if (left < SERVICE_HEALTH_MIN_REQUEST_TIMEOUT_MS) break;
     await delay(Math.min(SERVICE_HEALTH_POLL_INTERVAL_MS, left));
   }
+  return { ok: false, lastObserved, elapsedMs: elapsed() };
 }
 
 /** Run one command; foreground runners own and release their signal handlers. */
@@ -732,13 +746,13 @@ export async function runGatewayCli(
         runLaunchctl: dependencies.runLaunchctl ?? defaultRunLaunchctl,
         env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
         uid: process.getuid!(),
-        delay: dependencies.delay ?? defaultDelay, now: dependencies.now ?? Date.now,
+        delay: dependencies.delay ?? defaultDelay, now: dependencies.now ?? monotonicNow,
       };
       try {
         if (subcommand === "install") {
           const installed = await installServiceAgent(serviceDeps);
           const health = await pollServiceHealth(config!, sendRequest, validateSocket,
-            dependencies.delay ?? defaultDelay, dependencies.now ?? Date.now);
+            dependencies.delay ?? defaultDelay, dependencies.now ?? monotonicNow);
           if (!health.ok) {
             // The agent stays installed either way: this is a report about
             // the broker, not an install failure, so nothing is rolled back.
@@ -770,11 +784,15 @@ export async function runGatewayCli(
       } catch (error) {
         // launchctl's own stderr and the instance lease's own message are the
         // whole value of these failures; the generic handler below discards
-        // the message and reports only the code. An errno-bearing filesystem
-        // failure on this path (an unreadable plist, an undeletable one) is a
-        // real, recoverable service failure, not an INTERNAL_ERROR.
-        const errno = error !== null && typeof error === "object" && "code" in error &&
-          typeof (error as { code?: unknown }).code === "string";
+        // the message and reports only the code. A genuine filesystem failure
+        // on this path (an unreadable plist, an undeletable one) is a real,
+        // recoverable service failure, not an INTERNAL_ERROR — but only an
+        // errno-shaped one. A string `code` alone would also match CliFault
+        // and the lease's own spawn failures, relabelling faults that already
+        // carry a truer code of their own.
+        const errno = error !== null && typeof error === "object" &&
+          (typeof (error as { errno?: unknown }).errno === "number" ||
+            typeof (error as { syscall?: unknown }).syscall === "string");
         if (!(error instanceof BridgeError) && !(errno && error instanceof Error)) throw error;
         const failure = error instanceof BridgeError ? error : new BridgeError(
           "SERVICE_AGENT_FILESYSTEM_FAILED",

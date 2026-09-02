@@ -80,9 +80,11 @@ agent instead of a foreground process kept alive by hand:
   then waits — polling `launchctl print` every 250 ms for up to 10 seconds —
   until launchctl answers that the label is *not found*; only then does it
   remove the plist. launchd unloads asynchronously, so `bootout` returning 0
-  is not proof. Any other answer — the agent still loaded, or launchctl
-  unable to report at all — fails with launchctl's own stderr and leaves the
-  plist in place.
+  is not proof. Any other answer leaves the plist in place. If launchctl
+  reported an error, its stderr is quoted. If `bootout` returned 0 and the
+  label is still there at the end of the wait, there is nothing of
+  launchctl's to quote — `print` succeeded, and its stdout is never quoted —
+  so the message says how long it waited instead.
 - **Check it**: `embassy service status` reports `loaded`, `not loaded`, or
   `unknown`. `unknown` — launchctl could not run, or printed something this
   version does not recognize — is reported as such with launchctl's *stderr*
@@ -101,7 +103,8 @@ gone, and only then probes the host-wide instance lease. So re-running
 change its configuration.
 
 If the lease still cannot be taken after that, install refuses and quotes the
-lease's own message verbatim. That message is worth reading: `instance-lease`
+lease's own message verbatim (bounded, like every quoted string on this
+path, at 512 bytes). That message is worth reading: `instance-lease`
 reports the same condition for about ten situations, most of which are not
 another broker at all — a symlinked path component under `~/.local/state`, a
 non-empty lease root with no ownership marker, a lock file whose mode or owner
@@ -114,9 +117,17 @@ a `print` that cannot confirm the agent, a failing `kickstart` — is rolled
 back, and the error says exactly what the rollback achieved:
 
 - the new agent is booted out and confirmed gone; then
-- if a plist was already there (a re-install), its previous bytes are written
-  back and re-bootstrapped, so the agent you had keeps running;
+- if a readable plist was already there, its previous bytes are written back,
+  and it is re-bootstrapped **only if that agent was loaded when install
+  started** — the restart is then confirmed by `launchctl print`, not by an
+  exit code. A plist that was merely sitting on disk, unloaded, is restored
+  and left unloaded: a failed install must not start a broker you did not
+  have running, which would take the host lease behind your back;
 - if there was no previous plist, the one this install wrote is removed;
+- if the previous plist could not be read (it was oversized, or unreadable),
+  it is **left in place rather than deleted** — deleting it would be a silent
+  uninstall — and the error says the plist on disk is the one this install
+  wrote;
 - if the new agent cannot be confirmed unloaded, the plist is **left alone**
   and the error says so — a half-installed agent is reported, never hidden.
 

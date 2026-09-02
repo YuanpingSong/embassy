@@ -29,13 +29,18 @@ const MAX_PLIST_BYTES = 64 * 1024;
 /** Bounded read of the lease lock record, matching instance-lease.ts. */
 const MAX_LEASE_RECORD_BYTES = 4 * 1024;
 /**
- * Every byte that can reach stderr from this module passes through
- * boundedDetail. cli.ts holds the invariant that stderr never carries private
- * detail, and `launchctl print` stdout is private detail: it dumps the agent's
- * whole EnvironmentVariables dict, values included. Only launchctl's *stderr*
- * is ever quoted, and only this many bytes of it.
+ * Every byte this module puts into a message a caller may print passes
+ * through boundedServiceDetail or boundedProgramList: launchctl stderr, the
+ * instance lease's own message, an errno string, and the program paths in a
+ * status note. cli.ts holds the invariant that stderr never carries private
+ * detail, and `launchctl print` stdout is private detail — it dumps the
+ * agent's whole EnvironmentVariables dict, values included — so its stdout is
+ * parsed but never quoted.
  */
 const MAX_LAUNCHCTL_DETAIL_BYTES = 512;
+/** A status note names at most this many missing programs, each capped. */
+const MAX_PROGRAM_LIST_ENTRIES = 3;
+const MAX_PROGRAM_PATH_BYTES = 256;
 /**
  * launchd tears a job down asynchronously and `bootout` can return 36
  * ("operation in progress") while it is still going; the broker's own close
@@ -214,7 +219,22 @@ export function boundedServiceDetail(text: string): string {
 }
 const launchctlDetail = (result: RunLaunchctlResult): string =>
   boundedServiceDetail(result.stderr);
-const formatSeconds = (milliseconds: number): string => (milliseconds / 1000).toFixed(1);
+const formatSeconds = (milliseconds: number): string =>
+  (Math.max(0, milliseconds) / 1000).toFixed(1);
+/** Elapsed time is measured monotonically; a wall-clock step must not move it. */
+const monotonicNow = (): number => performance.now();
+
+/** The missing-program list as it appears in a note: bounded in both directions. */
+function boundedProgramList(programs: readonly string[]): string {
+  const shown = programs.slice(0, MAX_PROGRAM_LIST_ENTRIES).map((program) => {
+    const bytes = Buffer.from(program, "utf8");
+    return bytes.length <= MAX_PROGRAM_PATH_BYTES
+      ? program
+      : `${bytes.subarray(0, MAX_PROGRAM_PATH_BYTES).toString("utf8")}… (truncated)`;
+  });
+  const remaining = programs.length - shown.length;
+  return remaining > 0 ? `${shown.join(", ")}, and ${remaining} more` : shown.join(", ");
+}
 /** An errno-bearing filesystem failure, rendered without a stack. */
 const errnoDetail = (error: unknown): string =>
   boundedServiceDetail(error instanceof Error ? error.message : "unknown filesystem failure");
@@ -349,7 +369,9 @@ async function readHeldLeasePid(homeDir: string, uid: number): Promise<number | 
  * `GATEWAY_INSTANCE_IN_USE` is not only contention: instance-lease.ts throws
  * it for roughly ten conditions that have nothing to do with another broker
  * (a symlinked path component, a non-empty unmarked lease root, a mode or
- * owner drift). So the original message is always preserved verbatim, and a
+ * owner drift). So the original message is always preserved — verbatim up
+ * to the same 512-byte bound every other quoted string here carries, which
+ * no instance-lease message approaches — and a
  * pid is named only when the recorded holder is genuinely alive — the lock
  * record keeps the *last* holder, and a successful probe writes its own pid
  * there, so an unchecked pid is routinely stale. Never tell someone to stop
@@ -366,8 +388,8 @@ async function refuseIfAnotherBrokerHoldsLease(homeDir: string, uid: number): Pr
       throw new BridgeError(
         "GATEWAY_INSTANCE_IN_USE",
         alive
-          ? `Another Embassy broker holds the host lease (pid ${pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install. The lease reported: ${error.message}`
-          : `The Embassy host lease could not be acquired, so nothing was installed. The lease reported: ${error.message}`,
+          ? `Another Embassy broker holds the host lease (pid ${pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install. The lease reported: ${boundedServiceDetail(error.message)}`
+          : `The Embassy host lease could not be acquired, so nothing was installed. The lease reported: ${boundedServiceDetail(error.message)}`,
         true,
       );
     }
@@ -463,7 +485,7 @@ async function waitForServiceGone(
   deps: ServiceAgentDependencies,
   target: string,
 ): Promise<BootoutWait> {
-  const now = deps.now ?? Date.now;
+  const now = deps.now ?? monotonicNow;
   const delay = deps.delay ?? defaultDelay;
   const started = now();
   for (let attempt = 0; ; attempt += 1) {
@@ -517,14 +539,48 @@ async function verifiedBootout(
   };
 }
 
-/** The plist currently on disk, when it is one we could safely put back. */
-async function readExistingPlist(plistPath: string): Promise<string | undefined> {
+type PreviousPlist =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "unreadable" }>
+  | Readonly<{ kind: "bytes"; plist: string }>;
+
+/**
+ * The plist currently on disk, as three distinct answers. "Absent" and
+ * "unreadable" must not collapse into one: a rollback deletes on absent, and
+ * deleting a plist we merely failed to read would be a silent uninstall of an
+ * install that already existed.
+ */
+async function readPreviousPlist(plistPath: string): Promise<PreviousPlist> {
   const info = await lstat(plistPath).catch(() => undefined);
-  if (info === undefined || info.isSymbolicLink() || !info.isFile() ||
-      info.size > MAX_PLIST_BYTES) {
-    return undefined;
+  if (info === undefined) return { kind: "absent" };
+  if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_PLIST_BYTES) {
+    return { kind: "unreadable" };
   }
-  return await readFile(plistPath, "utf8").catch(() => undefined);
+  const plist = await readFile(plistPath, "utf8").catch(() => undefined);
+  return plist === undefined ? { kind: "unreadable" } : { kind: "bytes", plist };
+}
+
+type RunConfirmation =
+  | Readonly<{ running: true }>
+  | Readonly<{ running: false; verb: string; result: RunLaunchctlResult }>;
+
+/**
+ * Confirm a bootstrapped agent is actually running, by `print` rather than by
+ * an exit code — the same standard this module applies to a bootout. A job
+ * that loaded but is not running gets one plain `kickstart`, never `-k`.
+ */
+async function confirmRunning(
+  deps: ServiceAgentDependencies,
+  target: string,
+): Promise<RunConfirmation> {
+  const printed = await deps.runLaunchctl(["print", target]);
+  if (printed.code !== 0) return { running: false, verb: "print", result: printed };
+  const parsed = parseLaunchctlPrintOutput(printed.stdout);
+  if (parsed.pid !== undefined || parsed.launchdState === "running") return { running: true };
+  const kickstart = await deps.runLaunchctl(["kickstart", target]);
+  return kickstart.code === 0
+    ? { running: true }
+    : { running: false, verb: "kickstart", result: kickstart };
 }
 
 export type ServiceAgentInstallResult = Readonly<{
@@ -558,6 +614,9 @@ export async function installServiceAgent(
   //    else — probing the host lease first made install refuse over the very
   //    agent it was replacing.
   const before = await deps.runLaunchctl(["print", target]);
+  // Load-bearing for the rollback below: a plist that was on disk but *not*
+  // loaded must never be bootstrapped by a failed install.
+  const wasLoadedBefore = before.code === 0;
   if (before.code === 0) {
     const cleared = await verifiedBootout(deps, target, "the previous agent");
     if (!cleared.gone) {
@@ -578,7 +637,7 @@ export async function installServiceAgent(
   //    re-install overwrites it, and a rollback that merely deleted it would
   //    be a silent uninstall wearing the label of an inert failure.
   await prepareServiceDirectories(homeDir, uid);
-  const previousPlist = await readExistingPlist(plistPath);
+  const previous = await readPreviousPlist(plistPath);
   await writePlistAtomically(
     plistPath,
     renderLaunchAgentPlist({
@@ -589,11 +648,20 @@ export async function installServiceAgent(
     }),
   );
 
-  /** Undo this install as far as it can honestly be undone, and say what happened. */
+  /**
+   * Undo this install as far as it can honestly be undone, and say what
+   * happened. Two rules keep it from doing harm of its own: it never deletes
+   * a plist it could not read, and it re-bootstraps only what was already
+   * loaded when install started — starting a broker the user did not have
+   * running would take the host lease behind their back.
+   */
   const rollback = async (): Promise<string> => {
     const cleared = await verifiedBootout(deps, target, "the new agent");
     if (!cleared.gone) return `${cleared.reason}, so its plist was left in place`;
-    if (previousPlist === undefined) {
+    if (previous.kind === "unreadable") {
+      return "the new agent was unloaded, but the previous plist could not be read, so it was left in place rather than deleted; the plist on disk is the one this install wrote";
+    }
+    if (previous.kind === "absent") {
       try {
         await rm(plistPath, { force: true });
       } catch (error) {
@@ -602,13 +670,20 @@ export async function installServiceAgent(
       return "the new agent was unloaded and its plist removed; there was no previous install";
     }
     try {
-      await writePlistAtomically(plistPath, previousPlist);
+      await writePlistAtomically(plistPath, previous.plist);
     } catch (error) {
       return `the new agent was unloaded, but the previous plist could not be restored (${errnoDetail(error)}), so the plist on disk is the one this install wrote`;
+    }
+    if (!wasLoadedBefore) {
+      return "the previous plist was restored; it was not loaded before this install, so it stays unloaded";
     }
     const restored = await deps.runLaunchctl(["bootstrap", domain, plistPath]);
     if (restored.code !== 0) {
       return `the previous plist was restored, but re-bootstrapping it failed (launchctl bootstrap exit ${restored.code}: ${launchctlDetail(restored)}); run \`embassy service install\` again`;
+    }
+    const confirmed = await confirmRunning(deps, target);
+    if (!confirmed.running) {
+      return `the previous plist was restored and re-bootstrapped, but launchd did not confirm it is running (launchctl ${confirmed.verb} exit ${confirmed.result.code}: ${launchctlDetail(confirmed.result)}); run \`embassy service status\``;
     }
     return "the previous plist was restored and re-bootstrapped";
   };
@@ -622,13 +697,8 @@ export async function installServiceAgent(
   // RunAtLoad starts the agent as part of bootstrap; `kickstart -k` would
   // additionally *kill* a healthy broker, so it is never used. A plain
   // kickstart is the fallback for the loaded-but-not-running case only.
-  const loaded = await deps.runLaunchctl(["print", target]);
-  if (loaded.code !== 0) await failInstall("print", loaded);
-  const printed = parseLaunchctlPrintOutput(loaded.stdout);
-  if (printed.pid === undefined && printed.launchdState !== "running") {
-    const kickstart = await deps.runLaunchctl(["kickstart", target]);
-    if (kickstart.code !== 0) await failInstall("kickstart", kickstart);
-  }
+  const confirmed = await confirmRunning(deps, target);
+  if (!confirmed.running) await failInstall(confirmed.verb, confirmed.result);
   return {
     label: SERVICE_AGENT_LABEL,
     plistPath,
@@ -727,7 +797,7 @@ export type ServiceAgentStatus = Readonly<{
   lastExitStatus?: number;
   /** ProgramArguments[0]/[1] that are no longer on disk (a version manager moved node). */
   programMissing?: readonly string[];
-  /** launchctl's own output, verbatim, whenever it could not answer. */
+  /** launchctl's stderr, trimmed and capped at 512 bytes; its stdout is never quoted. */
   launchctlStderr?: string;
   note: string;
 }>;
@@ -769,7 +839,7 @@ export async function serviceAgentStatus(
   const suffix = `${plistExists ? "" : " The plist is missing."}${
     programMissing.length === 0
       ? ""
-      : ` program missing: ${programMissing.join(", ")} — re-run \`embassy service install\`.`
+      : ` program missing: ${boundedProgramList(programMissing)} — re-run \`embassy service install\`.`
   }`;
   const missing = programMissing.length === 0 ? {} : { programMissing };
 
@@ -783,7 +853,7 @@ export async function serviceAgentStatus(
     return {
       ...base, ...missing, state: "unknown",
       launchctlStderr: launchctlDetail(printed),
-      note: `launchctl could not report on the agent (exit ${printed.code}); its output is quoted verbatim.${suffix}`,
+      note: `launchctl could not report on the agent (exit ${printed.code}); its stderr is reported, trimmed and capped at 512 bytes, and its stdout is never quoted.${suffix}`,
     };
   }
   const parsed = parseLaunchctlPrintOutput(printed.stdout);
