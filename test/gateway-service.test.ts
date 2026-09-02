@@ -778,7 +778,7 @@ test("queued peer mail resumes once after restart under the same hash-only princ
       accepted: true, code: "ok",
     });
     assert.deepEqual(await handlers.registerPeer({ alias: "peer-restart@this-mac",
-      token: `${minted.token.slice(0, -1)}z` }), { accepted: false, code: "route_mismatch" });
+      token: `${minted.token.slice(0, -1)}${minted.token.endsWith("z") ? "a" : "z"}` }), { accepted: false, code: "route_mismatch" });
     const received = await handlers.awaitPeer({ alias: "peer-restart@this-mac", token: minted.token });
     assert.equal(received.state, "message");
     assert.match(received.frame, /survive restart/);
