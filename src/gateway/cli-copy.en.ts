@@ -13,7 +13,6 @@ Commands:
   serve [--inbound open] Run the socket-only broker (paired inbound by default)
   health                 Check broker health
   status                 Read the public status snapshot
-  doctor                 Diagnose Codex Desktop attachment
   refresh                Rescan for Claude sessions
   register-codex         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task

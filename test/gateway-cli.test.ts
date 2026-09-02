@@ -546,7 +546,6 @@ test("all client commands use one private control socket and expose only normali
   }> = [
     { argv: ["health"], env: BOTH_IDENTITIES },
     { argv: ["status"], env: BOTH_IDENTITIES },
-    { argv: ["doctor"], env: BOTH_IDENTITIES },
     {
       argv: ["delivery-status", "--token", DELIVERY_TOKEN],
       env: BOTH_IDENTITIES,
@@ -615,9 +614,9 @@ test("all client commands use one private control socket and expose only normali
       argv: [
         "pair",
         "--from",
-        "grok-builder@this-mac",
+        "peer-builder@this-mac",
         "--to",
-        "dsh-reviewer@this-mac",
+        "codex-builder@this-mac",
       ],
       env: {},
     },
@@ -757,7 +756,7 @@ test("all client commands use one private control socket and expose only normali
       aliases: ["advisor@this-mac", "codex-reviewer@this-mac"],
     },
     {
-      aliases: ["grok-builder@this-mac", "dsh-reviewer@this-mac"],
+      aliases: ["peer-builder@this-mac", "codex-builder@this-mac"],
     },
   ]);
   assert.deepEqual(unpairs, [
@@ -1581,7 +1580,7 @@ test("a broker decision rejection has a distinct fixed exit and no diagnostics",
   );
 });
 
-test("doctor returns normalized conditions while registration stays record-only", async () => {
+test("registration stays record-only and localizes the rejection", async () => {
   const config = {
     stateDir: "/private/fake-state",
     controlSocketPath: "/private/fake-state/control.sock",
@@ -1591,37 +1590,6 @@ test("doctor returns normalized conditions while registration stays record-only"
     inboundMode: "paired" as const,
     limits: {} as never,
   };
-  const snapshot = (condition: "split_brain" | "orphaned") => ({
-    ...emptySnapshot(),
-    connectors: [{
-      provider: "codex" as const,
-      host: "this-mac",
-      health: "degraded" as const,
-      protocol: "codex-app-server",
-      protocolVersion: "0.147.0",
-      codexDoctor: { conditions: [condition] },
-    }],
-  });
-
-  const doctorStdout = capture();
-  assert.equal(await runGatewayCli(["doctor"], {
-    env: {},
-    stdin: input(),
-    stdout: doctorStdout,
-    stderr: capture(),
-    loadConfig: () => config,
-    validateControlSocket: async () => undefined,
-    sendRequest: (async () => ({
-      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
-      ok: true,
-      result: snapshot("split_brain"),
-    })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-  }), gatewayCliExitCodes.ok);
-  assert.deepEqual(JSON.parse(doctorStdout.chunks.join("")), {
-    ok: true,
-    command: "doctor",
-    result: { conditions: ["split_brain"] },
-  });
 
   const expected = {
     en: "[embassy] gateway rejected the request.\n",

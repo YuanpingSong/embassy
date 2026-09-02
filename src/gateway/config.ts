@@ -1,19 +1,16 @@
 import os from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
-import type { AcpLaunchSpec } from "./acp-client.js";
 import type { GatewayNodeInventory } from "./federation-nodes.js";
 import { PROGRESS_WATCH_DEFAULT_CAPACITY, PROGRESS_WATCH_HARD_CAPACITY } from "./progress-watch-machine.js";
 import { gatewayPublicSnapshotLimits, type GatewayInboundMode, type GatewayStoreLimits } from "./types.js";
 
 export const gatewayDeliveryNoticeModes = ["merged", "verbose", "quiet"] as const;
 export type GatewayDeliveryNoticeMode = (typeof gatewayDeliveryNoticeModes)[number];
-export type GatewayAcpProviderConfig = Readonly<{ provider: "deepseek" | "grok"; alias: string;
-  /** Test/operator injection; omitted entries use the reviewed provider default. */ launch?: AcpLaunchSpec }>;
 export type GatewayConfig = { stateDir: string; controlSocketPath: string; allowedHosts: readonly string[];
   hostId: string; peerNodes: readonly string[];
   steeringEnabled: boolean; trackingEnabled?: boolean; inboundMode: GatewayInboundMode; stallNoticeMs: number;
-  deliveryNotices?: GatewayDeliveryNoticeMode; acpProviders?: readonly GatewayAcpProviderConfig[]; limits: GatewayStoreLimits };
+  deliveryNotices?: GatewayDeliveryNoticeMode; limits: GatewayStoreLimits };
 
 const MAX_STATE_BUDGET = 7 * 1024 * 1024;
 const invalid = (message: string): never => { throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", message); };
@@ -80,9 +77,5 @@ export function loadGatewayConfig(
     steeringEnabled: toggle(env, "EMBASSY_STEERING_ENABLED"), trackingEnabled: toggle(env, "EMBASSY_TRACKING_ENABLED"), inboundMode: "paired",
     stallNoticeMs: Math.min(Math.floor(messageDeadlineMs / 2), 120_000),
     deliveryNotices: notices(env.EMBASSY_DELIVERY_NOTICES), limits,
-    acpProviders: Object.freeze([
-      { provider: "deepseek", alias: `dsh-main@${inventory.host}` },
-      { provider: "grok", alias: `grok-main@${inventory.host}` },
-    ]),
   };
 }

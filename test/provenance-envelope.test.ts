@@ -65,40 +65,8 @@ PONG
   );
 });
 
-test("composes the exact DeepSeek-bound verbatim-text profile", () => {
-  assert.equal(
-    compose({
-      sourceProvider: "codex",
-      recipientProvider: "deepseek",
-      sourceAlias: "codex-main@this-mac",
-      targetAlias: "dsh-main@this-mac",
-      body: "PONG",
-    }),
-    `<cross-session-message from-name="codex-main@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="dsh-main@this-mac" from-provider="codex">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias dsh-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
-PONG
-</cross-session-message>`,
-  );
-});
-
-test("composes the exact Grok-bound ACP verbatim-text profile", () => {
-  assert.equal(
-    compose({
-      sourceProvider: "deepseek",
-      recipientProvider: "grok",
-      sourceAlias: "dsh-main@this-mac",
-      targetAlias: "grok-main@this-mac",
-      body: "PONG",
-    }),
-    `<cross-session-message from-name="dsh-main@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="grok-main@this-mac" from-provider="deepseek">Reply by running \`embassy reply --conversation conv_0123456789abcdef --alias grok-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
-PONG
-</cross-session-message>`,
-  );
-});
-
 test("covers every distinct provider pair through its recipient profile", () => {
-  const providers = ["codex", "claude", "deepseek", "grok", "peer"] as const satisfies
+  const providers = ["codex", "claude", "peer"] as const satisfies
     readonly GatewayProvider[];
 
   for (const sourceProvider of providers) {
@@ -124,7 +92,7 @@ test("covers every distinct provider pair through its recipient profile", () => 
         ),
       );
       assert.equal(
-        envelope.match(/ from-provider="(?:codex|claude|deepseek|grok|peer)"/gu)
+        envelope.match(/ from-provider="(?:codex|claude|peer)"/gu)
           ?.length,
         1,
       );
@@ -134,12 +102,12 @@ test("covers every distinct provider pair through its recipient profile", () => 
 
 test("provider attribution is independent of alias spelling", () => {
   const envelope = compose({
-    sourceProvider: "deepseek",
+    sourceProvider: "peer",
     recipientProvider: "codex",
     sourceAlias: "codex-looking@this-mac",
   });
   assert.ok(envelope.includes(' from-name="codex-looking@this-mac"'));
-  assert.ok(envelope.includes(' from-provider="deepseek"'));
+  assert.ok(envelope.includes(' from-provider="peer"'));
   assert.doesNotMatch(envelope, / from-provider="codex"/u);
 });
 
@@ -391,7 +359,7 @@ test("rejects invalid providers, aliases, conversation tokens, and body types", 
       "PROVENANCE_ENVELOPE_INVALID",
     );
   }
-  for (const recipientProvider of ["claude", "deepseek", "grok", "peer"] as const) {
+  for (const recipientProvider of ["claude", "peer"] as const) {
     assertBridgeError(
       () =>
         compose({

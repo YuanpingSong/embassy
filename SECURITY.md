@@ -203,8 +203,7 @@ broker.
   still matches during graceful shutdown.
 - App Server methods are allowlisted. Connectors expose no archive, deletion,
   shell, configuration, authentication, plugin, history, approval-response, or
-  generic RPC method. ACP permission requests are always denied or cancelled;
-  Embassy never turns them into an approval surface.
+  generic RPC method.
 - `turn/steer` is reachable only for an exact leading `STEER:` body in the
   Claude-to-Codex direction, with an exact observed active-turn ID. App Server
   admits it at the next tool-call boundary; Embassy never interrupts or injects
@@ -316,8 +315,7 @@ Broker/provider startup owns bounded validation of configured installations and
 exact OS boundaries. Unsafe Embassy-owned or executed artifacts, callback,
 control, or state paths remain startup-fatal; unsafe UID or mode evidence on
 Claude's external sessions registry root quarantines only that provider.
-Runtime does not import the release-owned support matrix or derive authority
-from version metadata. It reports best-effort connector health, observation
+Runtime derives no authority from version metadata. It reports best-effort connector health, observation
 freshness, and last safe codes while strict record, frame, response, identity,
 current used-artifact generation, correlation, and deadline checks decide each
 operation. Claude registry parsing remains strict for every required and

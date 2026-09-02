@@ -34,8 +34,6 @@ const PUBLIC_PACKAGE_PATHS = [
 ];
 
 const GATEWAY_RUNTIME_MODULES = [
-  "acp-client",
-  "acp-provider",
   "claude-peer",
   "claude-helper",
   "claude-helper-client",
@@ -47,12 +45,11 @@ const GATEWAY_RUNTIME_MODULES = [
   "cli-copy.en",
   "cli-copy.zh-CN",
   "codex-app-server",
-  "codex-doctor",
   "codex-local-transport",
+  "codex-socket-holder",
   "codex-stateless-transport",
   "config",
   "control",
-  "deepseek-detect",
   "federation-nodes",
   "instance-lease",
   "locale",

@@ -13,7 +13,6 @@ export const cliCopyZhCn = {
   serve [--inbound open] 在前台运行仅使用套接字的代理（默认配对入站）
   health                 检查代理健康状态
   status                 读取公开状态快照
-  doctor                 诊断 Codex 桌面应用连接状态
   refresh                重新扫描 Claude 会话
   register-codex         注册或继任 Codex 任务
   unregister-codex       注销当前 Codex 任务

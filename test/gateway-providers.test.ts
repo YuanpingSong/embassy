@@ -635,26 +635,26 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   });
 
   await provider.advertiseNativeSourcePeer({
-    alias: "dsh-misleading@this-mac",
-    sourceProvider: "deepseek",
+    alias: "codex-misleading@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
   await provider.advertiseNativeSourcePeer({
-    alias: "grok-misleading@this-mac",
-    sourceProvider: "grok",
+    alias: "peer-misleading@this-mac",
+    sourceProvider: "peer",
     cwd: SAFE_WORKSPACE,
   });
   assert.deepEqual(
     helpers.map((helper) => helper.registration),
     [
       {
-        alias: "dsh-misleading@this-mac",
-        sourceProvider: "deepseek",
+        alias: "codex-misleading@this-mac",
+        sourceProvider: "codex",
         cwd: SAFE_WORKSPACE,
       },
       {
-        alias: "grok-misleading@this-mac",
-        sourceProvider: "grok",
+        alias: "peer-misleading@this-mac",
+        sourceProvider: "peer",
         cwd: SAFE_WORKSPACE,
       },
     ],
@@ -662,7 +662,7 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
 
   const send = async (
     sourceAlias: string,
-    sourceProvider: "deepseek" | "grok",
+    sourceProvider: "codex" | "peer",
     messageId: string,
   ) => {
     const helper = helpers.find(
@@ -718,37 +718,37 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   };
   assert.deepEqual(
     await send(
-      "dsh-misleading@this-mac",
-      "deepseek",
-      "gateway-deepseek-to-claude",
+      "codex-misleading@this-mac",
+      "codex",
+      "gateway-codex-to-claude",
     ),
     { state: "delivered" },
   );
   assert.deepEqual(
     await send(
-      "grok-misleading@this-mac",
-      "grok",
-      "gateway-grok-to-claude",
+      "peer-misleading@this-mac",
+      "peer",
+      "gateway-peer-to-claude",
     ),
     { state: "delivered" },
   );
-  const deepseekPreparations = helpers[0]!.commands.filter(
+  const codexPreparations = helpers[0]!.commands.filter(
     (command) => command.method === "prepare_dispatch",
   );
-  const grokPreparations = helpers[1]!.commands.filter(
+  const peerPreparations = helpers[1]!.commands.filter(
     (command) => command.method === "prepare_dispatch",
   );
-  assert.equal(deepseekPreparations.length, 1);
-  assert.equal(grokPreparations.length, 1);
-  assert.equal(deepseekPreparations[0]?.sourceProvider, "deepseek");
-  assert.equal(grokPreparations[0]?.sourceProvider, "grok");
-  assert.equal(deepseekPreparations[0]?.stateRoot, "/synthetic/controller-state");
-  assert.equal(grokPreparations[0]?.stateRoot, "/synthetic/controller-state");
+  assert.equal(codexPreparations.length, 1);
+  assert.equal(peerPreparations.length, 1);
+  assert.equal(codexPreparations[0]?.sourceProvider, "codex");
+  assert.equal(peerPreparations[0]?.sourceProvider, "peer");
+  assert.equal(codexPreparations[0]?.stateRoot, "/synthetic/controller-state");
+  assert.equal(peerPreparations[0]?.stateRoot, "/synthetic/controller-state");
 
   assert.deepEqual(
     await provider.dispatch({
-      ...claudeProvenance("dsh-misleading@this-mac"),
-      sourceProvider: "deepseek",
+      ...claudeProvenance("codex-misleading@this-mac"),
+      sourceProvider: "codex",
       authorization: "native_reply",
       binding: binding(provider),
       messageId: "gateway-helper-native-reply",
@@ -776,8 +776,8 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
 
   assert.deepEqual(
     await send(
-      "dsh-misleading@this-mac",
-      "grok",
+      "codex-misleading@this-mac",
+      "peer",
       "gateway-wrong-source-provider",
     ),
     { state: "failed", safeErrorCode: "PROVENANCE_ENVELOPE_INVALID" },
@@ -795,8 +795,8 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   assert.deepEqual(
     await provider.dispatch({
       attemptId: "attempt_helper_denied",
-      sourceAlias: "dsh-misleading@this-mac",
-      sourceProvider: "deepseek",
+      sourceAlias: "codex-misleading@this-mac",
+      sourceProvider: "codex",
       targetAlias: "advisor@this-mac",
       conversationId: SYNTHETIC_CONVERSATION_ID,
       authorization: "selected_route",
@@ -825,8 +825,8 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   };
   assert.deepEqual(
     await send(
-      "dsh-misleading@this-mac",
-      "deepseek",
+      "codex-misleading@this-mac",
+      "codex",
       "gateway-helper-ambiguous",
     ),
     { state: "ambiguous", safeErrorCode: "CLAUDE_PEER_WRITE_AMBIGUOUS" },
@@ -904,8 +904,8 @@ test("Claude clean prewrite conditions retain exact diagnostics without authoriz
   await provider.assertWorkspaceDisjoint("target-selected", "/synthetic/controller-state");
   await provider.selectRoute({ alias: "advisor@this-mac", routeHandle: "target-selected" });
   await provider.advertiseNativeSourcePeer({
-    alias: "dsh-main@this-mac",
-    sourceProvider: "deepseek",
+    alias: "codex-main@this-mac",
+    sourceProvider: "codex",
     cwd: SAFE_WORKSPACE,
   });
 
@@ -921,8 +921,8 @@ test("Claude clean prewrite conditions retain exact diagnostics without authoriz
       (command) => command.method === "perform_dispatch",
     ).length;
     assert.deepEqual(await provider.dispatch({
-      ...claudeProvenance("dsh-main@this-mac"),
-      sourceProvider: "deepseek",
+      ...claudeProvenance("codex-main@this-mac"),
+      sourceProvider: "codex",
       authorization: "selected_route",
       binding: binding(provider),
       messageId: `gateway-${code.toLowerCase()}`,

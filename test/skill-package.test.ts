@@ -77,7 +77,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /old name stops resolving immediately/);
   assert.match(skill, /send never pairs with a Claude session automatically/i);
   assert.match(skill, /crossSessionInbound/);
-  assert.match(skill, /Claude, Codex, DeepSeek, Grok, and shell peers as first-class providers/);
+  assert.match(skill, /Claude, Codex, and shell peers as first-class providers/);
   assert.match(skill, /register-peer --alias peer-reviewer@this-mac/);
   assert.match(skill, /first\s+stdin line is the exact token/);
   assert.match(skill, /never the token/);
@@ -87,7 +87,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /Runtime status is best-effort/);
   assert.match(skill, /observation freshness, connector health, observed metadata, and the last safe code/);
   assert.match(skill, /versions are diagnostic metadata, not routing authority/);
-  assert.match(skill, /release-owned offline support matrix/);
+  assert.match(skill, /tested versions are listed in the CHANGELOG/);
   assert.match(skill, /pair --from .* --to/);
   assert.match(skill, /same-UID control-plane operations authorized by the private control socket/);
   assert.match(skill, /selection is a separate operator control and creates no permission edge/i);

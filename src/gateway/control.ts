@@ -524,12 +524,8 @@ function isConnectorSnapshot(value: unknown): value is PublicConnectorSnapshot {
     protocol: (item) => typeof item === "string" && PROTOCOL_PATTERN.test(item),
     protocolVersion: (item) => typeof item === "string" && PROTOCOL_VERSION_PATTERN.test(item) },
   { lastSeenAt: iso, observationAgeMs: nonNegative, safeErrorCode: safeCode,
-    registry: isPublicRegistryObservationSnapshot, codexDoctor: (item) => shape(item, {
-      conditions: (rows) => Array.isArray(rows) && rows.length > 0 && rows.length <= 2 &&
-        rows.every(oneOf("split_brain", "orphaned", "attached", "observation_stale", "managed_layout_missing", "unknown")),
-    }) })) return false;
-  return (value.codexDoctor === undefined || value.provider === "codex") &&
-    (value.registry === undefined || value.provider === "claude"); }
+    registry: isPublicRegistryObservationSnapshot })) return false;
+  return value.registry === undefined || value.provider === "claude"; }
 function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
   if (!shape(value, { alias, provider: isGatewayProvider, host, enabled: (item) => typeof item === "boolean",
     state: oneOf("stale", "idle", "busy", "awaiting_approval", "offline", "disabled"),

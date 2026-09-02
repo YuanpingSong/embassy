@@ -30,13 +30,13 @@ test("real-PID helpers own independent records and exact cleanup", async () => {
   const runtime = { sessionsDir, socketDir } as const;
   const entryPath = path.join(repoRoot, "dist/src/gateway/claude-helper.js");
   const exits: number[] = [];
-  const start = (alias: string, sourceProvider: "codex" | "deepseek") => ClaudeNativeHelperClient.start({
+  const start = (alias: string, sourceProvider: "codex") => ClaudeNativeHelperClient.start({
     entryPath, runtime, hostId: "this-mac", locale: "en", deliveryNotices: "merged", maxPendingMessages: 8,
     registration: { alias, sourceProvider, cwd: root }, callbacks: { onEvent: () => undefined, onExit: () => exits.push(1) },
   });
   let first: ClaudeNativeHelperClient | undefined, second: ClaudeNativeHelperClient | undefined;
   try {
-    first = await start("codex-first@this-mac", "codex"); second = await start("dsh-second@this-mac", "deepseek");
+    first = await start("codex-first@this-mac", "codex"); second = await start("codex-second@this-mac", "codex");
     assert.notEqual(first.pid, second.pid); assert.notEqual(first.pid, process.pid); assert.notEqual(first.generation, second.generation);
     const owned = (client: ClaudeNativeHelperClient) => ({
       record: path.join(sessionsDir, `${client.pid}.json`), socket: path.join(socketDir, `${client.pid}.sock`),
@@ -44,7 +44,7 @@ test("real-PID helpers own independent records and exact cleanup", async () => {
     const a = owned(first), b = owned(second);
     const [recordA, recordB] = await Promise.all([readFile(a.record, "utf8").then(JSON.parse), readFile(b.record, "utf8").then(JSON.parse)]);
     assert.deepEqual([recordA.pid, recordA.name, recordA.messagingSocketPath], [first.pid, "codex-first", a.socket]);
-    assert.deepEqual([recordB.pid, recordB.name, recordB.messagingSocketPath], [second.pid, "dsh-second", b.socket]);
+    assert.deepEqual([recordB.pid, recordB.name, recordB.messagingSocketPath], [second.pid, "codex-second", b.socket]);
     await first.close(); first = undefined;
     assert.equal(await missing(a.record), true); assert.equal(await missing(a.socket), true);
     assert.equal(await missing(b.record), false); assert.equal(await missing(b.socket), false);
@@ -66,13 +66,13 @@ test("helper IPC strictly binds preparation authority and bounds", () => {
   const initialization = { protocolVersion: 1, type: "initialize", requestId: "request_0123456789",
     runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, hostId: "this-mac", locale: "en",
     deliveryNotices: "merged", maxPendingMessages: 8,
-    registration: { alias: "dsh-builder@this-mac", sourceProvider: "deepseek", cwd: "/workspace/deepseek" } } as const;
+    registration: { alias: "peer-builder@this-mac", sourceProvider: "peer", cwd: "/workspace/peer" } } as const;
   assert.equal(isClaudeNativeHelperParentMessage(initialization), true);
   assert.equal(isClaudeNativeHelperParentMessage({ ...initialization, runtime: { ...initialization.runtime, extra: true } }), false);
   assert.equal(isClaudeNativeHelperParentMessage({ ...initialization,
     registration: { ...initialization.registration, sourceProvider: "unknown" } }), false);
   assert.equal(isClaudeNativeHelperParentMessage({ ...initialization,
-    registration: { ...initialization.registration, sourceProvider: "grok" } }), false);
+    registration: { ...initialization.registration, sourceProvider: "claude" } }), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope(prepare)), true);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, stateRoot: undefined })), false);
   assert.equal(isClaudeNativeHelperParentMessage(envelope({ ...prepare, authorization: "native_reply", stateRoot: undefined })), true);
@@ -136,7 +136,7 @@ test("supervisor binds source, namespaces receipts, and consumes preparations on
     assert.equal(clients[0]!.commands.at(-1)!.method, "cancel_dispatch"); assert.deepEqual(await denied.perform(), {
       state: "failed", safeErrorCode: "CLAUDE_NATIVE_PREPARATION_CONSUMED" });
     const count = clients[0]!.commands.length;
-    await assert.rejects(supervisor.prepareDispatch({ ...input, sourceProvider: "grok" }),
+    await assert.rejects(supervisor.prepareDispatch({ ...input, sourceProvider: "peer" }),
       (error: unknown) => error instanceof BridgeError && error.code === "PROVENANCE_ENVELOPE_INVALID");
     assert.equal(clients[0]!.commands.length, count);
     const renamed = await supervisor.prepareDispatch({ ...input, selectedAlias: "claude-renamed@this-mac" });

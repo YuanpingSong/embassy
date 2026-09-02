@@ -30,14 +30,6 @@ const PROVENANCE_RECIPIENT_PROFILE_VALUES = {
     emitConversationAttribute: true,
     allowQueuedAhead: true,
   }),
-  deepseek: Object.freeze({
-    emitConversationAttribute: true,
-    allowQueuedAhead: false,
-  }),
-  grok: Object.freeze({
-    emitConversationAttribute: true,
-    allowQueuedAhead: false,
-  }),
   peer: Object.freeze({
     emitConversationAttribute: true,
     allowQueuedAhead: false,

@@ -559,12 +559,12 @@ test("serves the two directional routes and emits metadata-only responses", asyn
       protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
       method: "pair",
       params: {
-        aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
+        aliases: ["codex-misleading@this-mac", "peer-misleading@this-mac"],
       },
     },
   });
   assert.deepEqual(paired, {
-    aliases: ["codex-misleading@this-mac", "dsh-misleading@this-mac"],
+    aliases: ["codex-misleading@this-mac", "peer-misleading@this-mac"],
   });
 
   const secretText = "transient body that must not appear in the response";
@@ -1294,13 +1294,11 @@ test("never reflects handler exceptions", async () => {
 });
 
 test("list_snapshot requires bounded projection and explicit omission counts", async () => {
-  for (const [condition, accepted] of [
-    ["managed_layout_missing", true], ["MANAGED_LAYOUT_MISSING", false],
-  ] as const) {
-    const candidate = snapshot();
-    candidate.connectors[0]!.codexDoctor = { conditions: [condition as never] };
-    assert.equal(isGatewaySnapshot(candidate), accepted);
-  }
+  // The connector row carries health plus safeErrorCode only; the retired
+  // Codex condition list is an unknown key and fails the closed shape.
+  const retiredConditions = snapshot();
+  (retiredConditions.connectors[0] as unknown as Record<string, unknown>).codexDoctor = { conditions: ["managed_layout_missing"] };
+  assert.equal(isGatewaySnapshot(retiredConditions), false);
   const { truncation: _omitted, ...withoutTruncation } = snapshot();
   const { inboundMode: _inboundMode, ...withoutInboundMode } = snapshot();
   const invalidInboundMode = { ...snapshot(), inboundMode: "closed" };
@@ -1389,7 +1387,7 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
   assert.ok(sourceRegistry);
   codexConnector.registry = structuredClone(sourceRegistry);
   const nonClaudeAvailablePeer = snapshot();
-  (nonClaudeAvailablePeer.availablePeers[0] as unknown as { provider: string }).provider = "grok";
+  (nonClaudeAvailablePeer.availablePeers[0] as unknown as { provider: string }).provider = "codex";
   const unprojected = snapshot();
   const baseEvent = unprojected.messages[0];
   assert.ok(baseEvent);
@@ -1469,7 +1467,7 @@ test("list_snapshot validates canonical consent endpoints against route bindings
   const reversed = structuredClone(canonical);
   (reversed.consentEdges[0]!.endpoints as unknown as unknown[]).reverse();
   const providerMismatch = structuredClone(canonical);
-  (providerMismatch.consentEdges[0]!.endpoints[0] as unknown as { provider: string }).provider = "grok";
+  (providerMismatch.consentEdges[0]!.endpoints[0] as unknown as { provider: string }).provider = "peer";
   const widenedEndpoint = structuredClone(canonical);
   (widenedEndpoint.consentEdges[0]!.endpoints[0] as unknown as Record<string, unknown>).lease = "private";
   assert.equal(isGatewaySnapshot(canonical), true);

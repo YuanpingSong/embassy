@@ -36,7 +36,7 @@ embassy health
 
 If Embassy is unavailable, follow any accompanying denied-access or unsafe-path guidance first. Only when no access or unsafe-path condition is reported, stop and report that it must be started in a trusted local terminal with `embassy serve`. `GATEWAY_INSTANCE_IN_USE` means an Embassy or recognized legacy lock already owns this login account; stop that foreground process rather than changing `EMBASSY_STATE_DIR`. If no legacy process remains, the operator may remove only the exact stale legacy controller lock and retry. Do not launch a background copy, retry in a loop, discover sockets, or fall back to a provider CLI.
 
-Embassy presents Claude, Codex, DeepSeek, Grok, and shell peers as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; the release-owned offline support matrix is the record of tested artifacts, capabilities, limitations, and test dates. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
+Embassy presents Claude, Codex, and shell peers as first-class providers. Runtime status is best-effort: use observation freshness, connector health, observed metadata, and the last safe code to explain what is available now. Provider versions are diagnostic metadata, not routing authority; tested versions are listed in the CHANGELOG. There is no agent or operator compatibility action. Report a degraded surface and stop rather than sending a test message or trying to override a failed operation.
 
 List the public snapshot:
 

@@ -242,7 +242,6 @@ function isPrepared(value: unknown): value is GatewayPreparedWriteEvidence {
     (value.kind === "claude_mailbox" ||
       value.kind === "codex_turn_start" ||
       value.kind === "codex_turn_steer" ||
-      value.kind === "acp_prompt" ||
       value.kind === "peer_mailbox" ||
       value.kind === "peer_handoff") &&
     isPositiveInteger(value.bodyBytes) &&
@@ -261,11 +260,8 @@ function expectedPreparedKind(
   if (targetMode === "federated_peer") return "peer_handoff";
   const target = parseDirection(message.direction)!.targetProvider;
   if (target === "claude") return "claude_mailbox";
-  if (target === "codex") {
-    return message.steer === true ? "codex_turn_steer" : "codex_turn_start";
-  }
   if (target === "peer") return "peer_mailbox";
-  return "acp_prompt";
+  return message.steer === true ? "codex_turn_steer" : "codex_turn_start";
 }
 function isAttemptAuthority(value: Record<string, unknown>): boolean {
   return (
@@ -524,12 +520,12 @@ function isMessageActivity(value: unknown): value is GatewayMessageActivity {
     isNormalizedEvent(value.event)
   );
 }
-export function isGatewayPersistedStateV4(value: unknown): value is GatewayPersistedState {
+export function isGatewayPersistedStateV5(value: unknown): value is GatewayPersistedState {
   if (
     !isObject(value) ||
     !hasOnlyKeys(value, ["schemaVersion", "commit", "createdAt", "updatedAt", "eventSequence",
       "routes", "consentEdges", "messages", "dedupe", "rateBuckets", "activity", "accounting"]) ||
-    value.schemaVersion !== 4 ||
+    value.schemaVersion !== 5 ||
     !isObject(value.commit) ||
     !hasOnlyKeys(value.commit, ["sequence", "id"]) ||
     !isNonNegativeInteger(value.commit.sequence) ||
@@ -848,7 +844,7 @@ export class GatewayStore {
         const now = this.now();
         const loaded = await this.loadStateFile();
         this.state = loaded ?? {
-          schemaVersion: 4,
+          schemaVersion: 5,
           commit: { sequence: 0, id: this.randomId() },
           createdAt: now.toISOString(), updatedAt: now.toISOString(),
           eventSequence: 0, routes: [],
@@ -1059,6 +1055,9 @@ export class GatewayStore {
       const route = state.routes.find((candidate) => candidate.alias === input.alias);
       if (route === undefined || !sameBinding(route.binding, input.binding)) {
         return { removed: false, settlements: [] };
+      }
+      if (route.registrationMode === "federated_peer") {
+        throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "A federated route is owned by its peer node; only catalog reconciliation may retire it.");
       }
       if (
         input.activity !== undefined &&
@@ -1686,8 +1685,7 @@ export class GatewayStore {
         (message.state.phase === "armed" &&
           (input.state === "expired" ||
             (input.state === "unconfirmed" &&
-              !((input.safeErrorCode === "ACP_OUTCOME_COARSE" && message.state.prepared.kind === "acp_prompt") ||
-                (input.safeErrorCode === "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" && message.state.prepared.kind === "peer_handoff"))))) ||
+              !(input.safeErrorCode === "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" && message.state.prepared.kind === "peer_handoff")))) ||
         (message.state.phase === "accepted" &&
           (input.state === "expired" ||
             (input.state === "unconfirmed" &&
@@ -2992,14 +2990,14 @@ export class GatewayStore {
     } catch {
       throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state is not valid JSON.");
     }
-    if (isObject(parsed) && Object.hasOwn(parsed, "schemaVersion") && parsed.schemaVersion !== 4) {
+    if (isObject(parsed) && Object.hasOwn(parsed, "schemaVersion") && parsed.schemaVersion !== 5) {
       throw new BridgeError(
         "GATEWAY_STATE_SCHEMA_UNSUPPORTED",
         "The gateway state schema is unsupported. Stop Embassy, move gateway-state.json aside, keep nodes.json, then restart and re-register, select, and pair routes.",
       );
     }
-    if (!isGatewayPersistedStateV4(parsed)) {
-      throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state failed strict v4 schema validation.");
+    if (!isGatewayPersistedStateV5(parsed)) {
+      throw new BridgeError("CORRUPT_GATEWAY_STATE", "The gateway controller state failed strict v5 schema validation.");
     }
     this.assertConfiguredBounds(parsed);
     return parsed;

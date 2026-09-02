@@ -7,7 +7,6 @@ import path from "node:path";
 
 import { BridgeError } from "../src/errors.js";
 import type { GatewayConfig } from "../src/gateway/config.js";
-import type { CodexDoctorResult } from "../src/gateway/codex-doctor.js";
 import type { PeerClient } from "../src/gateway/peer-client.js";
 import { decodePeerResult, peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
@@ -298,7 +297,7 @@ function prepared(input: GatewayAdapterDispatchInput): GatewayPreparedWriteEvide
       ? input.steer === true
         ? "codex_turn_steer"
         : "codex_turn_start"
-      : "acp_prompt";
+      : "peer_mailbox";
   const frame = `frame:${input.messageId}:${input.text}`;
   return {
     kind,
@@ -349,7 +348,7 @@ async function fixture(
     peerNodes?: readonly string[];
     spawnPeer?: NonNullable<GatewayServiceOptions["spawnPeer"]>;
     seed?: (store: GatewayStore) => Promise<void>;
-    codexDoctor?: () => Promise<CodexDoctorResult>;
+    managedCodexSocketHeld?: () => Promise<boolean>;
   }> = {},
 ): Promise<Fixture> {
   const temporary = await realpath(os.tmpdir());
@@ -378,7 +377,7 @@ async function fixture(
     store,
     now: clock.now,
     timers,
-    ...(options.codexDoctor === undefined ? {} : { codexDoctor: options.codexDoctor }),
+    ...(options.managedCodexSocketHeld === undefined ? {} : { managedCodexSocketHeld: options.managedCodexSocketHeld }),
     ...(options.spawnPeer === undefined ? {} : { spawnPeer: options.spawnPeer }),
   });
   await service.start();
@@ -840,7 +839,7 @@ test("record-only register and atomic succeeds never connect during construction
   }
 });
 
-test("federated named routes are read-only at the service boundary", async () => {
+test("federated named routes refuse removal even when the presented binding matches", async () => {
   const subject = await fixture([new FakeProvider({ provider: "claude", hostId: "studio" })],
     { hostId: "studio", peerNodes: ["m5dev"] });
   try {
@@ -852,11 +851,13 @@ test("federated named routes are read-only at the service boundary", async () =>
       binding: { provider: "claude", hostId: "studio", routeHandle: "claude-session-a", registrationId: "reg_local" } };
     await subject.store.registerRoute(local); await subject.store.registerRoute(remoteCodex); await subject.store.registerRoute(remoteClaude);
     const before = await readFile(subject.store.stateFilePath, "utf8");
-    // `unregister_codex` is the only Codex-removal method left, and its wire decoder
-    // accepts only a UUID thread id, which a federated route ref can never be.
-    assert.deepEqual(await subject.handlers.unregisterCodex({ alias: remoteCodex.alias, threadId: THREAD_A }), { accepted: false, code: "not_found" });
+    // The handler is called with the federated route's exact handle, so alias and
+    // binding both match; only the explicit federated guard can refuse here.
+    assert.deepEqual(await subject.handlers.unregisterCodex({ alias: remoteCodex.alias, threadId: remoteCodex.binding.routeHandle }),
+      { accepted: false, code: "rejected" });
     assert.deepEqual(await subject.handlers.unselectClaude({ alias: remoteClaude.alias }), { accepted: false, code: "not_found" });
     assert.equal(await readFile(subject.store.stateFilePath, "utf8"), before);
+    assert.equal((await subject.store.inspectPrivateRoute(remoteCodex.alias))?.registrationMode, "federated_peer");
   } finally { await subject.close(); }
 });
 
@@ -963,7 +964,7 @@ test("local Claude ingress advertises and hands off a federated Codex route", as
 test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits inbound handoff before acceptance", async () => {
   const local: RegisterRouteInput = { alias: "codex-local@studio", registrationMode: "explicit_opt_in",
     binding: { provider: "codex", hostId: "studio", routeHandle: THREAD_A, registrationId: "reg_local" } };
-  const remote = { alias: "dsh-worker@m5dev", provider: "deepseek" as const, host: "m5dev", routeRef: "reg_remote_dsh" };
+  const remote = { alias: "codex-worker@m5dev", provider: "codex" as const, host: "m5dev", routeRef: "reg_remote_codex" };
   const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio",
     routeRef: peerRouteRef("studio", local.binding.registrationId) };
   let current: PeerCatalogResult = { revision: 1, complete: true, truncated: false, generatedAt: "2026-08-16T12:00:00.000Z",
@@ -1035,16 +1036,16 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
 });
 
 test("a fresh canonical-host broker exports its startup-owned routes to a configured peer", async () => {
-  const providers = (["deepseek", "grok"] as const).map((provider) => new FakeProvider(
+  const providers = (["codex", "peer"] as const).map((provider) => new FakeProvider(
     { provider, hostId: "m5dev" }, "deliver",
-    { alias: `${provider === "deepseek" ? "dsh-main" : `${provider}-main`}@m5dev`, routeHandle: `${provider}-owned`, state: "idle" },
+    { alias: `${provider}-main@m5dev`, routeHandle: provider === "peer" ? "peer:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" : "codex-owned", state: "idle" },
   ));
   const subject = await fixture(providers, { hostId: "m5dev", peerNodes: ["this-mac"] });
   try {
     assert.equal((await subject.service.snapshot()).routes.length, 2);
     const catalog = await subject.handlers.peerCatalog?.({ peerHost: "this-mac" });
     assert.deepEqual(catalog?.routes.map((route) => route.alias).sort(),
-      ["dsh-main@m5dev", "grok-main@m5dev"]);
+      ["codex-main@m5dev", "peer-main@m5dev"]);
   } finally { await subject.close(); }
 });
 
@@ -1053,10 +1054,9 @@ test("a this-mac mixed-provider catalog is strict, opaque, and excludes local-on
     route("claude", "advisor@this-mac", "00000000-0000-4000-8000-000000000001", "reg_claude"),
     route("codex", "codex-main@this-mac", THREAD_A, "reg_codex_main"),
     route("codex", "codex-review@this-mac", THREAD_B, "reg_codex_review"),
-    route("deepseek", "dsh-main@this-mac", "deepseek-session", "reg_deepseek"),
-    route("grok", "grok-main@this-mac", "grok-session", "reg_grok"),
+    route("peer", "peer-main@this-mac", "peer:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "reg_peer"),
   ];
-  const subject = await fixture((["claude", "codex", "deepseek", "grok"] as const)
+  const subject = await fixture((["claude", "codex", "peer"] as const)
     .map((provider) => new FakeProvider({ provider, hostId: "this-mac" })), {
     hostId: "this-mac", peerNodes: ["m5dev"], seed: async (store) => {
       for (const candidate of routes) await store.registerRoute(candidate);
@@ -1072,7 +1072,7 @@ test("a this-mac mixed-provider catalog is strict, opaque, and excludes local-on
       provider: "codex", host: "this-mac", alias: routes[1]!.alias });
     const catalog = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });
     assert.ok(catalog); assert.deepEqual(decodePeerResult("catalog/get", catalog), catalog);
-    assert.equal(catalog.routes.length, 5); assert.equal(catalog.consentEdges.length, 0);
+    assert.equal(catalog.routes.length, 4); assert.equal(catalog.consentEdges.length, 0);
     assert.deepEqual(catalog.alerts.map((alert) => alert.code), ["LOCAL_TEST_NOTICE"]);
     assert.ok(catalog.routes.every((row) => /^reg_[A-Za-z0-9_-]+$/.test(row.ref)));
     const wire = JSON.stringify(catalog);
@@ -1122,7 +1122,7 @@ test("first peer dial failure is host-visible and the next cadence re-dials", as
 });
 
 test("one blocked peer does not prevent another peer catalog from reconciling", async () => {
-  const blocked = deferred<PeerCatalogResult>(); const remote = { alias: "dsh-worker@zdev", provider: "deepseek" as const,
+  const blocked = deferred<PeerCatalogResult>(); const remote = { alias: "codex-worker@zdev", provider: "codex" as const,
     host: "zdev", routeRef: "reg_remote_zdev" };
   const healthy: PeerCatalogResult = { revision: 1, complete: true, truncated: false,
     generatedAt: "2026-08-16T12:00:00.000Z", health: "healthy", connectors: [], routes: [{ ref: remote.routeRef,
@@ -1349,31 +1349,30 @@ function evidenceFor(
 
 test("same-target FIFO and different-target parallelism hold at the armed boundary", async () => {
   const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
-  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg_dsh_one");
-  const grok = route("grok", "grok-one@this-mac", "acp-two", "reg_grok_one");
-  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const peer = route("peer", "peer-one@this-mac", "peer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reg_peer_one");
+  const advisor = route("claude", "advisor@this-mac", "00000000-0000-4000-8000-000000000001", "reg_advisor_one");
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const paused = new FakeProvider(
-    { provider: "deepseek", hostId: "this-mac" },
+    { provider: "peer", hostId: "this-mac" },
     "pause_armed",
   );
-  const parallel = new FakeProvider({ provider: "grok", hostId: "this-mac" });
-  const subject = await fixture([claudeProvider, codexProvider, paused, parallel], {
+  const parallel = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const subject = await fixture([codexProvider, paused, parallel], {
     seed: async (store) => {
       await store.registerRoute(source);
-      await store.registerRoute(deepseek);
-      await store.registerRoute(grok);
+      await store.registerRoute(peer);
+      await store.registerRoute(advisor);
       await store.addConsentEdge({
-        aliases: [source.alias, deepseek.alias],
-        expectedRegistrationIds: [source.binding.registrationId, deepseek.binding.registrationId],
+        aliases: [source.alias, peer.alias],
+        expectedRegistrationIds: [source.binding.registrationId, peer.binding.registrationId],
       });
       await store.addConsentEdge({
-        aliases: [source.alias, grok.alias],
-        expectedRegistrationIds: [source.binding.registrationId, grok.binding.registrationId],
+        aliases: [source.alias, advisor.alias],
+        expectedRegistrationIds: [source.binding.registrationId, advisor.binding.registrationId],
       });
-      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: deepseek.alias, body: "first", dedupeKey: "fifo-1" });
-      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: deepseek.alias, body: "second", dedupeKey: "fifo-2" });
-      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: grok.alias, body: "parallel", dedupeKey: "parallel" });
+      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "first", dedupeKey: "fifo-1" });
+      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "second", dedupeKey: "fifo-2" });
+      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: advisor.alias, body: "parallel", dedupeKey: "parallel" });
     },
   });
   try {
@@ -1402,42 +1401,41 @@ test("same-target FIFO and different-target parallelism hold at the armed bounda
 
 test("90s post-write pause keeps control live, advances observers and refuses a late overwrite", async () => {
   const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
-  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg_dsh_one");
-  const grok = route("grok", "grok-one@this-mac", "acp-two", "reg_grok_one");
+  const peer = route("peer", "peer-one@this-mac", "peer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reg_peer_one");
+  const advisor = route("claude", "advisor@this-mac", "00000000-0000-4000-8000-000000000001", "reg_advisor_one");
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
-  const paused = new FakeProvider({ provider: "deepseek", hostId: "this-mac" }, "pause_armed");
-  const unrelated = new FakeProvider({ provider: "grok", hostId: "this-mac" });
-  const subject = await fixture([claudeProvider, codexProvider, paused, unrelated], {
+  const paused = new FakeProvider({ provider: "peer", hostId: "this-mac" }, "pause_armed");
+  const subject = await fixture([claudeProvider, codexProvider, paused], {
     deadlineMs: 120_000,
     seed: async (store) => {
       await store.registerRoute(source);
-      await store.registerRoute(deepseek);
-      await store.registerRoute(grok);
+      await store.registerRoute(peer);
+      await store.registerRoute(advisor);
       await store.addConsentEdge({
-        aliases: [source.alias, deepseek.alias],
-        expectedRegistrationIds: [source.binding.registrationId, deepseek.binding.registrationId],
+        aliases: [source.alias, peer.alias],
+        expectedRegistrationIds: [source.binding.registrationId, peer.binding.registrationId],
       });
       await store.addConsentEdge({
-        aliases: [source.alias, grok.alias],
-        expectedRegistrationIds: [source.binding.registrationId, grok.binding.registrationId],
+        aliases: [source.alias, advisor.alias],
+        expectedRegistrationIds: [source.binding.registrationId, advisor.binding.registrationId],
       });
       await store.enqueueMessage({
         sourceAlias: source.alias,
-        targetAlias: deepseek.alias,
+        targetAlias: peer.alias,
         body: "paused-first",
         dedupeKey: "headline-first",
         deadlineAt: "2026-08-16T12:01:00.000Z",
       });
       await store.enqueueMessage({
         sourceAlias: source.alias,
-        targetAlias: deepseek.alias,
+        targetAlias: peer.alias,
         body: "same-target-second",
         dedupeKey: "headline-second",
       });
       await store.enqueueMessage({
         sourceAlias: source.alias,
-        targetAlias: grok.alias,
+        targetAlias: advisor.alias,
         body: "unrelated",
         dedupeKey: "headline-unrelated",
       });
@@ -1445,7 +1443,7 @@ test("90s post-write pause keeps control live, advances observers and refuses a 
   });
   try {
     await paused.pauseEntered.promise;
-    await eventually(() => unrelated.dispatches.length === 1);
+    await eventually(() => claudeProvider.dispatches.length === 1);
     await eventually(async () =>
       (await subject.store.publicSnapshot()).messages.find(
         (message) => message.body === "unrelated",
@@ -1573,9 +1571,6 @@ test("clean prewrite retry waits 500ms while terminal input failure never retrie
     "CLAUDE_PEER_TARGET_STALE",
     "CLAUDE_PEER_TARGET_CHANGED",
     "CLAUDE_PEER_WORKSPACE_UNATTESTED",
-    "ACP_LAUNCH_UNAVAILABLE",
-    "ACP_RESTART_BACKOFF",
-    "ACP_SESSION_BUSY",
     "UNRULED_DEFERRED_CODE",
   ];
   const provider = new FakeProvider(
@@ -1745,26 +1740,26 @@ test("exact-leading native STEER uses the separate lane while native mail stays 
 
 test("unpair after authorization makes the exact armed attempt ambiguous", async () => {
   const source = route("codex", "codex-source@this-mac", THREAD_A, "reg_source");
-  const deepseek = route("deepseek", "dsh-one@this-mac", "acp-one", "reg_dsh_one");
+  const peer = route("peer", "peer-one@this-mac", "peer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reg_peer_one");
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
-  const deepseekProvider = new FakeProvider({ provider: "deepseek", hostId: "this-mac" }, "pause_armed");
+  const peerProvider = new FakeProvider({ provider: "peer", hostId: "this-mac" }, "pause_armed");
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
-  const subject = await fixture([claudeProvider, codexProvider, deepseekProvider], {
+  const subject = await fixture([claudeProvider, codexProvider, peerProvider], {
     seed: async (store) => {
-      await paired(store, source, deepseek);
-      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: deepseek.alias, body: "armed", dedupeKey: "unpair" });
+      await paired(store, source, peer);
+      await store.enqueueMessage({ sourceAlias: source.alias, targetAlias: peer.alias, body: "armed", dedupeKey: "unpair" });
     },
   });
   try {
-    await deepseekProvider.pauseEntered.promise;
-    const result = await subject.handlers.unpair({ aliases: [source.alias, deepseek.alias] });
+    await peerProvider.pauseEntered.promise;
+    const result = await subject.handlers.unpair({ aliases: [source.alias, peer.alias] });
     assert.deepEqual(result, { accepted: true, code: "ok" });
     assert.equal((await subject.store.publicSnapshot()).messages.at(-1)?.state, "ambiguous");
-    deepseekProvider.pauseRelease.resolve();
+    peerProvider.pauseRelease.resolve();
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal((await subject.store.publicSnapshot()).messages.at(-1)?.state, "ambiguous");
   } finally {
-    deepseekProvider.pauseRelease.resolve();
+    peerProvider.pauseRelease.resolve();
     await subject.close();
   }
 });
@@ -1821,13 +1816,11 @@ test("delivery status and public observations stay native-ID-free", async () => 
   }
 });
 
-test("Codex doctor health composes managed-layout and stale observation evidence", async () => {
+test("a foreign managed-socket holder degrades Codex with MANAGED_CODEX_UNAVAILABLE", async () => {
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([codexProvider], {
     seed: async (store) => store.registerRoute(codex),
-    codexDoctor: async () => ({
-      conditions: ["managed_layout_missing"],
-    }) as unknown as CodexDoctorResult,
+    managedCodexSocketHeld: async () => true,
   });
   const connector = async () => (await subject.service.snapshot()).connectors[0]!;
   try {
@@ -1847,11 +1840,9 @@ test("Codex doctor health composes managed-layout and stale observation evidence
     });
     await eventually(async () => (await connector()).safeErrorCode === "MANAGED_CODEX_UNAVAILABLE");
     subject.clock.advance(CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1);
-    assert.deepEqual((await connector()).codexDoctor?.conditions, [
-      "managed_layout_missing",
-      "observation_stale",
-    ]);
+    assert.equal((await connector()).health, "degraded");
     assert.equal((await connector()).safeErrorCode, "CONNECTOR_OBSERVATION_STALE");
+    assert.equal(Object.hasOwn(await connector(), "codexDoctor"), false);
   } finally {
     await subject.close();
   }

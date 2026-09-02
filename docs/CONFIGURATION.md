@@ -13,7 +13,6 @@ below.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `EMBASSY_STATE_DIR` | `$XDG_STATE_HOME/agent-embassy`, or `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset | Private state and control socket; an override must be absolute and does not relocate the fixed host-wide lease |
-| `DSH_HOME` | `$HOME/.dsh` | DeepSeek Harness checkout root; when its owned directory and `package.json` are present, Embassy launches `pnpm --dir <home> run demo:acp` lazily on first dispatch |
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
 | `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts. Active watches are memory-only and end with the broker process; they are never restored after restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
@@ -35,15 +34,15 @@ Removing a peer does not remove its durable mirrors; reset private state before 
 
 ### Private state reset
 
-Version 2.0 accepts only fresh schema-4 private state; it does not convert or
-rewrite older state. Before the reset, use the old running broker's `status`
+Version 3 accepts only fresh schema-5 private state; it does not convert or
+rewrite older state, including the schema-4 state written by the 2.x line. Before the reset, use the old running broker's `status`
 and delivery lookups to verify that no queued, armed, or accepted work remains
 and every delivery has settled. Then:
 
 1. Stop the broker.
 2. Move `gateway-state.json` aside so the old ledger remains recoverable.
 3. Keep `nodes.json` in place.
-4. Start the version-2 broker to create fresh state.
+4. Start the version-3 broker to create fresh state.
 5. Re-register routes, select the Claude route, and pair the intended edges.
 
 An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
@@ -101,7 +100,7 @@ the destination session before suspecting the route.
 
 ## Provider and runtime contract
 
-Embassy routes five providers: Claude over peer protocol 1, Codex over the managed App Server, DeepSeek plus Grok Build over ACP v1, and universal shell peers over the private control socket. The release-owned [support matrix](../support/provider-support-matrix.json) records the exact artifacts, protocols, capabilities, stop fidelity, limitations, and test date exercised offline. Runtime never imports that file. A build or version fact can qualify the release's “tested with” claim, but it never grants or withholds routing authority.
+Embassy routes three providers: Claude over peer protocol 1, Codex over the managed App Server, and universal shell peers over the private control socket. The provider versions each release was tested with are listed in the [CHANGELOG](../CHANGELOG.md). Runtime never reads that record. A build or version fact can qualify the release's “tested with” claim, but it never grants or withholds routing authority.
 
 Runtime is best effort: an explicit consent edge plus the exact owned route/session identity authorizes an attempt. The current per-operation transport, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health and an exact safe code; it does not create a compatibility tier or block unrelated providers.
 
@@ -109,7 +108,7 @@ Only unsafe OS evidence for Embassy-owned or executed artifacts and Embassy call
 
 Runtime parsing remains strict on every known registry field, frame, and response; unknown top-level Claude registry fields are ignored because Embassy never consumes them. The Claude connector row in public status carries optional bounded `registry` observations: `entriesScanned`, `parseableRecords`, monotonic `parseableRecordSeenSinceBoot`, bounded per-safe-code `rejected`, and `rejectedCodesOmitted`. `embassy status` reports the same evidence: if Claude is running but no record with parseable required fields has been observed since broker start, its registry layout may have changed.
 
-The managed Codex installation is resolved by exact verified path; a `codex` elsewhere on `PATH` is neither used nor modified. Claude registry and callback roots are derived from the verified current OS user; no Claude launcher or configuration file is read. DeepSeek uses only the attested checkout root above. Grok Build uses the release-pinned ACP launch. Version strings, when present, are bounded diagnostic metadata only.
+The managed Codex installation is resolved by exact verified path; a `codex` elsewhere on `PATH` is neither used nor modified. Claude registry and callback roots are derived from the verified current OS user; no Claude launcher or configuration file is read. Version strings, when present, are bounded diagnostic metadata only.
 
 ## Addressing
 

@@ -9,7 +9,6 @@ import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js
 import { LocalCodexTransportError, managedCodexControlSocketPath,
   type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
-import { runGatewayCli, gatewayCliExitCodes } from "../src/gateway/cli.js";
 import { loadGatewayConfig as loadGatewayConfigBase } from "../src/gateway/config.js";
 import {
   GATEWAY_CONTROL_PROTOCOL_VERSION,
@@ -185,7 +184,7 @@ function signalHarness(): {
   };
 }
 
-test("foreground assembly keeps an unavailable optional ACP provider local", async () => {
+test("foreground assembly wires the local providers and the managed-socket holder check", async () => {
   const stateDir = "/synthetic/controller-state";
   const env: NodeJS.ProcessEnv = {
     HOME: SYNTHETIC_HOME,
@@ -208,10 +207,9 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   let codexOperationOptions: Record<string, unknown> | undefined;
   let codexProviderOptions: Record<string, unknown> | undefined;
   let codexObservationAttempts = 0;
-  const acpProviderOptions: Record<string, unknown>[] = [];
   let serviceOptions: Record<string, unknown> | undefined;
-  let doctorResolutionError: unknown = new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
-  let doctorInspections = 0;
+  let installationError: unknown = new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
+  let inspections = 0;
 
   await runGatewayServer(
     {
@@ -275,24 +273,13 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
         events.push("create-peer");
         return provider(() => events.push("close-peer"));
       },
-      resolveCodexInstallation: async () => { throw doctorResolutionError; },
-      createCodexDoctorInspector: () => ({ inspect: async (request) => {
-        doctorInspections += 1;
+      resolveCodexInstallation: async () => { throw installationError; },
+      createCodexSocketHolderInspector: () => ({ inspect: async (request) => {
+        inspections += 1;
         assert.equal(request.socketPath, managedCodexControlSocketPath(SYNTHETIC_HOME));
         const holder = process.pid + 1;
-        return { processes: [{ pid: holder, parentPid: 1, executablePath: "/synthetic/stale-codex" }], socketHolderPids: [holder] };
+        return { processes: [{ pid: holder, parentPid: 1 }], socketHolderPids: [holder] };
       } }),
-      resolveDeepSeekAcpLaunch: async (options) => {
-        assert.equal(options.loginHome, SYNTHETIC_HOME);
-        assert.equal(options.env, env);
-        events.push("resolve-deepseek");
-        throw Object.assign(new Error("hostile PATH entry"), { code: "EACCES" });
-      },
-      createAcpProvider: (options) => {
-        events.push(`create-${options.provider}`);
-        acpProviderOptions.push(options as unknown as Record<string, unknown>);
-        return provider(() => undefined);
-      },
       createService: (options) => {
         serviceOptions = options as unknown as Record<string, unknown>;
         return {
@@ -333,30 +320,7 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
   assert.deepEqual(serviceOptions?.config, effectiveConfig);
   assert.equal(
     (serviceOptions?.adapters as readonly unknown[] | undefined)?.length,
-    5,
-  );
-  assert.deepEqual(
-    acpProviderOptions.map(({ provider, alias, launch, unavailableCode }) => ({
-      provider, alias, launch, unavailableCode,
-    })),
-    [
-      {
-        provider: "deepseek",
-        alias: "dsh-main@this-mac",
-        launch: undefined,
-        unavailableCode: "DEEPSEEK_HARNESS_HOME_UNSAFE",
-      },
-      {
-        provider: "grok",
-        alias: "grok-main@this-mac",
-        launch: {
-          kind: "npx",
-          package: "@xai-official/grok@1.0.5",
-          args: ["agent", "stdio"],
-        },
-        unavailableCode: undefined,
-      },
-    ],
+    3,
   );
   assert.deepEqual(ready, [
     {
@@ -374,22 +338,21 @@ test("foreground assembly keeps an unavailable optional ACP provider local", asy
     "create-codex-operation",
     "create-codex",
     "create-peer",
-    "resolve-deepseek",
-    "create-deepseek",
-    "create-grok",
     "start-service",
     "ready",
     "close-service",
     "close-instance",
   ]);
-  assert.deepEqual(await (serviceOptions?.codexDoctor as (() => Promise<unknown>))(), { conditions: ["managed_layout_missing"] });
-  doctorResolutionError = new LocalCodexTransportError("MANAGED_CODEX_INVALID");
-  assert.deepEqual(await (serviceOptions?.codexDoctor as (() => Promise<unknown>))(), { conditions: ["unknown"] });
-  assert.equal(doctorInspections, 1);
+  const socketHeld = serviceOptions?.managedCodexSocketHeld as () => Promise<boolean>;
+  // Missing managed layout plus a non-Embassy holder is the one actionable case.
+  assert.equal(await socketHeld(), true);
+  installationError = new LocalCodexTransportError("MANAGED_CODEX_INVALID");
+  assert.equal(await socketHeld(), false);
+  assert.equal(inspections, 1, "an invalid layout never inspects the socket");
   assert.equal(signals.listenerCount(), 0);
 });
 
-test("a real boot snapshot passes the strict status and doctor clients", async (t) => {
+test("a real boot snapshot passes the strict status client and degrades Codex on a foreign socket holder", async (t) => {
   const home = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-live-snapshot-"));
   await chmod(home, 0o700);
   t.after(async () => rm(home, { recursive: true, force: true }));
@@ -421,38 +384,21 @@ test("a real boot snapshot passes the strict status and doctor clients", async (
         });
         assert.equal(response.ok, true);
         if (!response.ok) assert.fail("status snapshot must be successful");
-        assert.deepEqual(
-          response.result.routes.map(({ alias }) => alias),
-          ["dsh-main@this-mac", "grok-main@this-mac"],
+        assert.deepEqual(response.result.routes, []);
+        // The managed layout is missing and a process outside Embassy holds the
+        // control socket: the Codex connector degrades with the real safe code.
+        const codex = response.result.connectors.find(
+          ({ provider }) => provider === "codex",
         );
-        const deepseek = response.result.connectors.find(
-          ({ provider }) => provider === "deepseek",
-        );
-        assert.equal(deepseek?.health, "degraded");
-        assert.equal(
-          deepseek?.safeErrorCode,
-          "DEEPSEEK_HARNESS_HOME_UNSAFE",
-        );
+        assert.equal(codex?.health, "degraded");
+        assert.equal(codex?.safeErrorCode, "MANAGED_CODEX_UNAVAILABLE");
+        assert.equal(Object.hasOwn(codex ?? {}, "codexDoctor"), false);
         assert.equal(
           response.result.connectors.every(
             ({ observationAgeMs }) => observationAgeMs !== undefined,
           ),
           true,
         );
-
-        const stdout: string[] = [];
-        const stderr: string[] = [];
-        assert.equal(await runGatewayCli(["doctor"], {
-          env,
-          stdout: { write: (chunk) => stdout.push(String(chunk)) },
-          stderr: { write: (chunk) => stderr.push(String(chunk)) },
-        }), gatewayCliExitCodes.ok);
-        assert.deepEqual(JSON.parse(stdout.join("")), {
-          ok: true,
-          command: "doctor",
-          result: { conditions: ["unknown"] },
-        });
-        assert.deepEqual(stderr, []);
         abort.abort();
       },
     },
@@ -469,11 +415,8 @@ test("a real boot snapshot passes the strict status and doctor clients", async (
       resolveCodexInstallation: async () => {
         throw new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
       },
-      createCodexDoctorInspector: () => ({
-        inspect: async () => ({ processes: [], socketHolderPids: [] }),
-      }),
-      resolveDeepSeekAcpLaunch: async () => ({
-        safeErrorCode: "DEEPSEEK_HARNESS_HOME_UNSAFE",
+      createCodexSocketHolderInspector: () => ({
+        inspect: async () => ({ processes: [{ pid: process.pid + 1, parentPid: 1 }], socketHolderPids: [process.pid + 1] }),
       }),
     },
   );

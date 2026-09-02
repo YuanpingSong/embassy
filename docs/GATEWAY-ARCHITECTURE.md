@@ -1,7 +1,7 @@
 # Embassy Gateway Architecture
 
-Status: local bidirectional routing is implemented for Claude, Codex, DeepSeek,
-Grok, and universal shell peers. Configured Embassy nodes federate allowlisted
+Status: local bidirectional routing is implemented for Claude, Codex, and
+universal shell peers. Configured Embassy nodes federate allowlisted
 named routes over a fixed attach-only SSH transport. The published package
 supports macOS, the only platform exercised end to end so far.
 
@@ -33,8 +33,8 @@ either agent runtime.
 Provider versions are best-effort diagnostic metadata, never routing authority.
 An explicit pair plus the exact owned route and session identity authorizes an
 attempt; the current per-operation transport, strict wire, capability, and
-correlated operation facts decide its result. The release-owned offline support matrix is
-the tested-artifact record and is never imported by runtime. Unsafe OS evidence
+correlated operation facts decide its result. The CHANGELOG lists the provider
+versions each release was tested with; runtime never reads that record. Unsafe OS evidence
 for Embassy-owned or executed artifacts and Embassy callback, control, or state
 paths refuses broker startup; unsafe UID or mode evidence on Claude's external
 sessions registry root quarantines only Claude. A Claude session record whose
@@ -172,10 +172,10 @@ The status below is intentionally narrower than the target architecture.
 | Claude current-user runtime roots | **Implemented**; derives the registry and callback roots from the verified OS user without inspecting a launcher or configuration file |
 | Stateless allowlisted Codex App Server transport with bounded busy behavior | **Implemented**; every operation opens and attests its own transport, and the conformance suite covers idle gating, exact `STEER:` behavior, clean retry, and ambiguous no-replay settlement |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
-| Local provider adapters and Embassy-node federation | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, lazy ACP-backed DeepSeek and Grok routes with provider-local degradation and cleanup, plus bounded catalog reconciliation and destination-owned handoff over the fixed attach-only SSH transport |
+| Local provider adapters and Embassy-node federation | **Implemented**, focused synthetic tests cover Claude discovery, exact Codex ownership, plus bounded catalog reconciliation and destination-owned handoff over the fixed attach-only SSH transport |
 | Universal shell peer mailbox | **Implemented**, alias-plus-token same-UID attribution, hash-only durable ownership, bounded long polling, stdout-flush receipts, and restart uncertainty tests; no PID binding, token file, Keychain entry, or daemon |
 | Gateway service composition | **Implemented**, including private control-server startup, synthetic cross-provider selection/dispatch/reply correlation, bounded public-snapshot projection, and restart attempt-phase tests |
-| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v4 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
+| Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v5 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
@@ -562,7 +562,7 @@ The closed version 2 method family is exactly these twenty methods:
   available-peer inventory;
 - `pair` and `unpair`, the two-endpoint permission edge;
 - `delivery_status`, a lookup by an opaque correlation handle retained only in
-  bounded private v4 state;
+  bounded private v5 state;
 - `untrack`, which closes one active progress watch by conversation token;
 - `send`, whose direction is derived from the resolved endpoint providers;
 - `reply`, the correlated reply operation;
@@ -573,8 +573,8 @@ The closed version 2 method family is exactly these twenty methods:
   shell-peer registration, mailbox, and flush-before-receipt operations.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-twenty implemented commands are
-`serve`, `health`, `status`, `doctor`, `delivery-status`, `wait-delivery`, `untrack`,
+nineteen implemented commands are
+`serve`, `health`, `status`, `delivery-status`, `wait-delivery`, `untrack`,
 `refresh`, `register-codex`, `unregister-codex`,
 `select-claude`, `unselect-claude`, `pair`, `unpair`, `send`,
 `reply`, `register-peer`, `unregister-peer`, `await`, and
@@ -797,14 +797,14 @@ not themselves require another Desktop restart. A provider or Desktop major
 upgrade may change an internal interface; strict per-operation checks keep the
 responsible route closed if that interface no longer matches. Other providers
 remain available. If the attachment mode changes, a supporting release may
-require a separately announced controlled restart. The offline support matrix
-records what a release was tested with but never grants runtime authority.
+require a separately announced controlled restart. The CHANGELOG records what
+a release was tested with but never grants runtime authority.
 
 ## Persistence and privacy
 
 The private store may retain:
 
-- schema-4 logical registrations with aliases, registration IDs, and exact
+- schema-5 logical registrations with aliases, registration IDs, and exact
   provider-native route handles inside the closed private binding schema;
 - consent edges tied to exact registration IDs, so alias reuse cannot inherit
   permission;
@@ -828,12 +828,12 @@ may resume once only after their exact registration and consent authority is
 rechecked; armed and accepted work settles without replay. Callback, native
 receipt, conversation, and reply capabilities are not reconstructed.
 
-Private schema 4 is the binary's only native store format; the bounded public
+Private schema 5 is the binary's only native store format; the bounded public
 snapshot deliberately remains schema version 2. The runtime performs no
 migration or best-effort rewrite. An old or unknown private schema refuses with
 `GATEWAY_STATE_SCHEMA_UNSUPPORTED` without mutating the state file; the operator
 must follow the reset-only runbook in `docs/CONFIGURATION.md`. A malformed
-schema-4 document produces the ordinary strict corrupt-state error.
+schema-5 document produces the ordinary strict corrupt-state error.
 
 ## Minimum filesystem and process access
 
@@ -888,8 +888,8 @@ the preferred least-context setup, but it is not mandatory.
 ## Failure and upgrade policy
 
 - Provider versions are best-effort metadata and never grant or remove routing
-  authority. The offline support matrix records tested artifacts, capabilities,
-  limitations, and dates without entering runtime. A session record whose peer
+  authority. The CHANGELOG records the tested provider versions without
+  entering runtime. A session record whose peer
   protocol is not 1 is rejected per record and counted without stopping the
   broker; interface drift degrades only its responsible provider.
 - Unsafe ownership, path, symlink, lease, state, or generation evidence for

@@ -23,7 +23,6 @@ import {
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
 } from "./control.js";
-import type { CodexDoctorResult } from "./codex-doctor.js";
 import { spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
 import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
@@ -55,7 +54,6 @@ import {
   type GatewayPublicSnapshot,
   type LogicalRouteBinding,
   type PublicAvailablePeerSnapshot,
-  type PublicCodexDoctorCondition,
   type PublicConnectorSnapshot,
   type PublicRegistryObservationSnapshot,
   type PublicProgressWatchEventSnapshot,
@@ -70,7 +68,7 @@ const PUBLIC_ALIAS =
   /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const PEER_TOKEN = /^peer_[A-Za-z0-9_-]{32}$/;
 const DISCOVERY_INTERVAL_MS = 30_000;
-const CODEX_DOCTOR_INTERVAL_MS = 30_000;
+const MANAGED_CODEX_SOCKET_CHECK_INTERVAL_MS = 30_000;
 const PEER_REFRESH_INTERVAL_MS = 30_000;
 const CLEAN_RETRY_DELAY_MS = 500;
 const MAX_CONVERSATIONS = 1_024;
@@ -204,7 +202,8 @@ export type GatewayServiceOptions = Readonly<{
   config: GatewayConfig; adapters?: readonly GatewayProviderAdapter[]; store?: GatewayStore;
   now?: () => Date;
   nativePeerCwd?: string; timers?: GatewayServiceTimers;
-  codexDoctor?: () => Promise<CodexDoctorResult>;
+  /** True when a process outside Embassy holds the managed Codex control socket while the managed layout is missing. */
+  managedCodexSocketHeld?: () => Promise<boolean>;
   spawnPeer?: typeof spawnPeerClient;
 }>;
 
@@ -358,7 +357,7 @@ export class GatewayService {
   private readonly now: () => Date;
   private readonly timers: GatewayServiceTimers;
   private readonly nativePeerCwd: string;
-  private readonly codexDoctor: (() => Promise<CodexDoctorResult>) | undefined;
+  private readonly managedCodexSocketHeld: (() => Promise<boolean>) | undefined;
   private readonly spawnPeer: typeof spawnPeerClient;
   private readonly peerClients = new Map<string, PeerClient>();
   private readonly peerCatalogs = new Map<string, PeerCatalogResult>();
@@ -386,9 +385,9 @@ export class GatewayService {
   private control: GatewayControlServer | undefined;
   private wakeTimer: GatewayServiceTimer | undefined;
   private nextDiscoveryAt = 0;
-  private nextDoctorAt = 0;
+  private nextManagedCodexCheckAt = 0;
   private nextPeerRefreshAt = 0;
-  private codexDoctorResult: CodexDoctorResult | undefined;
+  private managedCodexSocketHeldOutside = false;
   private revision = 0;
   private snapshotRevision = 0;
   private snapshotFingerprint: string | undefined;
@@ -405,7 +404,7 @@ export class GatewayService {
     );
     this.now = options.now ?? (() => new Date());
     this.nativePeerCwd = options.nativePeerCwd ?? process.cwd();
-    this.codexDoctor = options.codexDoctor;
+    this.managedCodexSocketHeld = options.managedCodexSocketHeld;
     this.spawnPeer = options.spawnPeer ?? spawnPeerClient;
     this.timers = options.timers ?? {
       setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -452,7 +451,7 @@ export class GatewayService {
         }
       }
       await this.refreshClaudeDiscovery().catch(() => undefined);
-      await this.refreshCodexDoctor().catch(() => undefined);
+      await this.refreshManagedCodexSocket().catch(() => undefined);
       const control = await startGatewayControlServer({
         stateDir: this.store.rootDir,
         socketPath: this.config.controlSocketPath,
@@ -470,7 +469,7 @@ export class GatewayService {
       await this.observeLoadedRoutes();
       const now = this.now().getTime();
       this.nextDiscoveryAt = now + DISCOVERY_INTERVAL_MS;
-      this.nextDoctorAt = now + CODEX_DOCTOR_INTERVAL_MS;
+      this.nextManagedCodexCheckAt = now + MANAGED_CODEX_SOCKET_CHECK_INTERVAL_MS;
       this.nextPeerRefreshAt = this.config.peerNodes.length > 0 ? now : 0;
       for (const target of await this.store.inspectDispatchableTargets()) this.kick(target);
       this.scheduleWake();
@@ -680,25 +679,17 @@ export class GatewayService {
       const age = observedAt === undefined ? undefined : Math.max(0, now.getTime() - Date.parse(observedAt));
       const stale = runtime.health === "healthy" &&
         (age === undefined || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS);
-      const doctor = runtime.adapter.identity.provider === "codex" ? this.codexDoctorResult : undefined;
-      const doctorConditions: PublicCodexDoctorCondition[] = doctor === undefined
-        ? [] : [...new Set(doctor.conditions)];
-      if (doctor !== undefined && stale && !doctorConditions.includes("observation_stale"))
-        doctorConditions.push("observation_stale");
-      const managedLayoutMissing = doctorConditions.includes("managed_layout_missing");
+      const socketHeld = runtime.adapter.identity.provider === "codex" && this.managedCodexSocketHeldOutside;
       const connectorCode = stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode ??
-        (managedLayoutMissing ? "MANAGED_CODEX_UNAVAILABLE" : undefined);
+        (socketHeld ? "MANAGED_CODEX_UNAVAILABLE" : undefined);
       return {
         provider: runtime.adapter.identity.provider,
         host: runtime.adapter.identity.hostId,
-        health: stale || managedLayoutMissing ? "degraded" : runtime.health,
+        health: stale || socketHeld ? "degraded" : runtime.health,
         protocol: runtime.adapter.protocol,
         protocolVersion: runtime.adapter.protocolVersion,
         ...(observedAt === undefined ? {} : { lastSeenAt: observedAt }),
         ...(age === undefined ? {} : { observationAgeMs: age }),
-        ...(doctorConditions.length === 0 ? {} : {
-          codexDoctor: { conditions: doctorConditions.slice(0, 2) },
-        }),
         ...(runtime.registry === undefined ? {} : { registry: runtime.registry }),
         ...(connectorCode === undefined ? {} : { safeErrorCode: connectorCode }),
       };
@@ -1056,6 +1047,9 @@ export class GatewayService {
       route.binding.routeHandle !== params.threadId
     ) {
       throw new BridgeError("CODEX_REGISTRATION_NOT_FOUND", "The exact Codex registration is absent.");
+    }
+    if (route.registrationMode === "federated_peer") {
+      throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "A federated route is owned by its peer node and cannot be unregistered here.");
     }
     await this.removeOwnedRoute(route, "CODEX_REGISTRATION_NOT_FOUND", false);
   }
@@ -2553,7 +2547,7 @@ export class GatewayService {
       const now = this.now().getTime();
       const due = [
         this.nextDiscoveryAt || now + DISCOVERY_INTERVAL_MS,
-        this.nextDoctorAt || now + CODEX_DOCTOR_INTERVAL_MS,
+        this.nextManagedCodexCheckAt || now + MANAGED_CODEX_SOCKET_CHECK_INTERVAL_MS,
         ...(this.config.peerNodes.length > 0
           ? [this.nextPeerRefreshAt || now + PEER_REFRESH_INTERVAL_MS]
           : []),
@@ -2581,9 +2575,9 @@ export class GatewayService {
       await this.refreshClaudeDiscovery().catch(() => undefined);
       this.nextDiscoveryAt = now.getTime() + DISCOVERY_INTERVAL_MS;
     }
-    if (now.getTime() >= this.nextDoctorAt) {
-      await this.refreshCodexDoctor().catch(() => undefined);
-      this.nextDoctorAt = now.getTime() + CODEX_DOCTOR_INTERVAL_MS;
+    if (now.getTime() >= this.nextManagedCodexCheckAt) {
+      await this.refreshManagedCodexSocket().catch(() => undefined);
+      this.nextManagedCodexCheckAt = now.getTime() + MANAGED_CODEX_SOCKET_CHECK_INTERVAL_MS;
     }
     if (this.nextPeerRefreshAt > 0 && now.getTime() >= this.nextPeerRefreshAt) {
       const operation = this.refreshPeers();
@@ -2714,9 +2708,9 @@ export class GatewayService {
       this.collidingClaudeAliases.add(alias);
   }
 
-  private async refreshCodexDoctor(): Promise<void> {
-    if (this.codexDoctor === undefined) return;
-    this.codexDoctorResult = await this.codexDoctor();
+  private async refreshManagedCodexSocket(): Promise<void> {
+    if (this.managedCodexSocketHeld === undefined) return;
+    this.managedCodexSocketHeldOutside = await this.managedCodexSocketHeld();
   }
 
   private assertWritable(): void {

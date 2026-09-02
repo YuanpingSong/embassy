@@ -23,7 +23,7 @@ import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 
 export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({ peerProtocol: 1 });
 const EMBASSY_ADVERTISEMENT_VERSION = 1;
-const EMBASSY_SOURCE_NAME_PATTERN = /^(?:codex-|dsh-|grok-)/;
+const EMBASSY_SOURCE_NAME_PATTERN = /^codex-/;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -54,6 +54,10 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "dist/src/gateway/live-dashboard-app/app.js",
     "dist/src/gateway/codex-registration-succession.js",
     "dist/src/gateway/compatibility.js",
+    "dist/src/gateway/acp-client.js",
+    "dist/src/gateway/acp-provider.js",
+    "dist/src/gateway/deepseek-detect.js",
+    "dist/src/gateway/codex-doctor.js",
   ]) {
     assert.ok(!expected.includes(removedPath), removedPath);
   }

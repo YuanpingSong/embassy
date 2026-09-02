@@ -1,6 +1,6 @@
-export const gatewayProviders = ["claude", "codex", "deepseek", "grok", "peer"] as const;
+export const gatewayProviders = ["claude", "codex", "peer"] as const;
 export type GatewayProvider = (typeof gatewayProviders)[number];
-export const gatewayRegistrationIngressPrefixes = Object.freeze({ claude: undefined, codex: "codex-", deepseek: "dsh-", grok: "grok-", peer: "peer-" } satisfies Readonly<Record<GatewayProvider, string | undefined>>);
+export const gatewayRegistrationIngressPrefixes = Object.freeze({ claude: undefined, codex: "codex-", peer: "peer-" } satisfies Readonly<Record<GatewayProvider, string | undefined>>);
 export const gatewayInboundModes = ["paired", "open"] as const;
 export type GatewayInboundMode = (typeof gatewayInboundModes)[number];
 export const connectorHealthStates = ["offline", "connecting", "healthy", "degraded"] as const;
@@ -110,7 +110,6 @@ export type GatewayPreparedWriteEvidence = {
     | "claude_mailbox"
     | "codex_turn_start"
     | "codex_turn_steer"
-    | "acp_prompt"
     | "peer_mailbox"
     | "peer_handoff";
   bodyBytes: number; bodySha256: string; frameBytes: number; sha256: string;
@@ -156,7 +155,7 @@ export type GatewayStateActivity =
   | GatewayMessageActivity
   | GatewayRuntimeActivity;
 export type GatewayPersistedState = {
-  schemaVersion: 4; commit: { sequence: number; id: string }; createdAt: string; updatedAt: string; eventSequence: number; routes: GatewayRouteRecord[];
+  schemaVersion: 5; commit: { sequence: number; id: string }; createdAt: string; updatedAt: string; eventSequence: number; routes: GatewayRouteRecord[];
   consentEdges: GatewayConsentEdgeRecord[]; messages: GatewayMessageRecord[]; dedupe: DedupeRecord[]; rateBuckets: RateBucket[]; activity: GatewayStateActivity[]; accounting: GatewayAccounting;
 };
 export type PublicRouteSnapshot = {
@@ -168,17 +167,8 @@ export type PublicConsentEdgeSnapshot = {
   endpoints: readonly [PublicConsentEndpointSnapshot, PublicConsentEndpointSnapshot]; host: string; counters: RouteCounters; mutable?: boolean;
 };
 export type PublicConnectorSnapshot = {
-  provider: GatewayProvider; host: string; health: ConnectorHealth; protocol: string; protocolVersion: string; lastSeenAt?: string; observationAgeMs?: number; codexDoctor?: PublicCodexDoctorSnapshot; safeErrorCode?: string; registry?: PublicRegistryObservationSnapshot;
+  provider: GatewayProvider; host: string; health: ConnectorHealth; protocol: string; protocolVersion: string; lastSeenAt?: string; observationAgeMs?: number; safeErrorCode?: string; registry?: PublicRegistryObservationSnapshot;
 };
-export type PublicCodexDoctorCondition =
-  | "split_brain"
-  | "orphaned"
-  | "attached"
-  | "observation_stale"
-  | "managed_layout_missing" | "unknown";
-export type PublicCodexDoctorSnapshot = Readonly<{
-  conditions: readonly PublicCodexDoctorCondition[];
-}>;
 export const CONNECTOR_OBSERVATION_STALE_AFTER_MS = 35_000;
 /**
  * Bounded, native-ID-free evidence attached to one Claude connector. Counts

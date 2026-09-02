@@ -1,8 +1,6 @@
 import { userInfo } from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
-import { createAcpGatewayProvider, type AcpGatewayProviderOptions } from "./acp-provider.js";
-import type { AcpLaunchSpec } from "./acp-client.js";
 import { attestClaudePeerRuntime, type AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import { createLocalCodexTransportFactory, resolveManagedLocalCodexInstallation,
   LocalCodexTransportError, managedCodexControlSocketPath,
@@ -10,11 +8,10 @@ import { createLocalCodexTransportFactory, resolveManagedLocalCodexInstallation,
   type ManagedLocalCodexInstallation } from "./codex-local-transport.js";
 import { createStatelessCodexOperationTransport, type StatelessCodexOperationTransport,
   type StatelessCodexOperationTransportOptions } from "./codex-stateless-transport.js";
-import { createSystemCodexDoctorInspector, diagnoseCodexAttachment,
-  diagnoseMissingManagedCodexLayout, type CodexDoctorInspector } from "./codex-doctor.js";
+import { createSystemCodexSocketHolderInspector, managedCodexSocketHeldOutsideEmbassy,
+  type CodexSocketHolderInspector } from "./codex-socket-holder.js";
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
-import { resolveDeepSeekAcpLaunch, type DeepSeekAcpLaunch, type DeepSeekDetectOptions } from "./deepseek-detect.js";
 import { acquireGatewayInstanceLease, type GatewayInstanceLease } from "./instance-lease.js";
 import type { DashboardLocale } from "./locale.js";
 import { LocalPeerMailboxProvider } from "./peer-mailbox.js";
@@ -24,9 +21,6 @@ import { GatewayService, type GatewayProviderAdapter, type GatewayServiceOptions
 import { GatewayStore } from "./store.js";
 import { gatewayInboundModes, type GatewayInboundMode } from "./types.js";
 
-const GROK_ACP_LAUNCH = Object.freeze({
-  kind: "npx", package: "@xai-official/grok@1.0.5", args: ["agent", "stdio"],
-} satisfies AcpLaunchSpec);
 export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: string; codexMode: "native_messaging" }>;
 export type GatewayServerOptions = { env?: NodeJS.ProcessEnv; inboundMode?: GatewayInboundMode;
   locale?: DashboardLocale; signal?: AbortSignal; onReady: (result: GatewayServerReadyResult) => void | Promise<void> };
@@ -39,8 +33,7 @@ export type GatewayServerDependencies = {
   acquireInstanceLease?: (home: string) => Promise<GatewayInstanceLease>; createStore?: (config: GatewayConfig) => GatewayStore;
   createCodexOperation?: (options: StatelessCodexOperationTransportOptions) => StatelessCodexOperationTransport; createCodexObservationFactory?: (options: LocalCodexTransportFactoryOptions) => Promise<LocalCodexTransportFactory>;
   resolveCodexInstallation?: (home: string) => Promise<ManagedLocalCodexInstallation>; createCodexProvider?: (options: LocalCodexGatewayProviderOptions) => GatewayProviderAdapter;
-  createCodexDoctorInspector?: () => CodexDoctorInspector;
-  resolveDeepSeekAcpLaunch?: (options: DeepSeekDetectOptions) => Promise<DeepSeekAcpLaunch>; createAcpProvider?: (options: AcpGatewayProviderOptions) => GatewayProviderAdapter;
+  createCodexSocketHolderInspector?: () => CodexSocketHolderInspector;
   createPeerProvider?: (hostId: string) => GatewayProviderAdapter;
   createService?: (options: GatewayServiceOptions) => ServerService; addSignalListener?: (signal: Signal, listener: () => void) => void;
   removeSignalListener?: (signal: Signal, listener: () => void) => void;
@@ -107,10 +100,8 @@ export async function runGatewayServer(
     createCodexOperation: dependencies.createCodexOperation ?? createStatelessCodexOperationTransport,
     createCodexObservationFactory: dependencies.createCodexObservationFactory ?? createLocalCodexTransportFactory,
     resolveCodexInstallation: dependencies.resolveCodexInstallation ?? resolveManagedLocalCodexInstallation,
-    createCodexDoctorInspector: dependencies.createCodexDoctorInspector ?? createSystemCodexDoctorInspector,
+    createCodexSocketHolderInspector: dependencies.createCodexSocketHolderInspector ?? createSystemCodexSocketHolderInspector,
     createCodexProvider: dependencies.createCodexProvider ?? createLocalCodexGatewayProvider,
-    resolveDeepSeek: dependencies.resolveDeepSeekAcpLaunch ?? resolveDeepSeekAcpLaunch,
-    createAcpProvider: dependencies.createAcpProvider ?? createAcpGatewayProvider,
     createPeerProvider: dependencies.createPeerProvider ?? ((hostId) => new LocalPeerMailboxProvider({ hostId })),
     createService: dependencies.createService ?? ((input: GatewayServiceOptions) => new GatewayService(input)),
     add: dependencies.addSignalListener ?? ((signal: Signal, listener: () => void) => process.on(signal, listener)),
@@ -187,36 +178,18 @@ export async function runGatewayServer(
       createObservationFactory: () => d.createCodexObservationFactory(factoryOptions),
     }));
     providers.push(d.createPeerProvider(localHost));
-    for (const definition of config.acpProviders ?? []) {
-      let resolved: DeepSeekAcpLaunch = definition.launch === undefined ? {} : { launch: definition.launch };
-      if (definition.launch === undefined && definition.provider === "deepseek") {
-        resolved = await guarded(d.resolveDeepSeek({ env, loginHome: home }).catch(() => ({
-          safeErrorCode: "DEEPSEEK_HARNESS_HOME_UNSAFE",
-        })));
-      } else if (definition.provider === "grok") resolved = { launch: GROK_ACP_LAUNCH };
-      providers.push(d.createAcpProvider({
-        ...definition,
-        hostId: localHost,
-        ...(resolved.launch === undefined ? {} : { launch: resolved.launch }),
-        ...(resolved.safeErrorCode === undefined ? {} : { unavailableCode: resolved.safeErrorCode }),
-      }));
-    }
     service = d.createService({
       config, adapters: providers, store,
-      codexDoctor: async () => {
-        const inspector = d.createCodexDoctorInspector();
+      // Missing managed files are actionable only when the fixed private
+      // socket is still held outside Embassy; every other outcome is silent.
+      managedCodexSocketHeld: async () => {
         try {
-          const installation = await d.resolveCodexInstallation(home);
-          return await diagnoseCodexAttachment({
-            socketPath: installation.controlSocketPath,
-            daemonExecutablePath: installation.binaryPath,
-            embassyPid: process.pid,
-            inspector,
-          });
+          await d.resolveCodexInstallation(home);
+          return false;
         } catch (error) {
-          return error instanceof LocalCodexTransportError && error.code === "MANAGED_CODEX_UNAVAILABLE"
-            ? await diagnoseMissingManagedCodexLayout({ socketPath: managedCodexControlSocketPath(home), embassyPid: process.pid, inspector })
-            : { conditions: ["unknown"] as const };
+          return error instanceof LocalCodexTransportError && error.code === "MANAGED_CODEX_UNAVAILABLE" &&
+            await managedCodexSocketHeldOutsideEmbassy({ socketPath: managedCodexControlSocketPath(home),
+              embassyPid: process.pid, inspector: d.createCodexSocketHolderInspector() });
         }
       },
     });

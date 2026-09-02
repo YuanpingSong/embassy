@@ -148,7 +148,7 @@ MSG" hidden>复制</button></div><p>信封过境 — 正文经 stdin 传入，�
 <div class="wrap">
 <p class="eyebrow">快速开始</p>
 <h2>五分钟内跑起来</h2>
-<p class="req">先说要求：macOS · Node ≥ 20 · 当前 <code>agent-embassy</code> 版本 · 声明 <code>peerProtocol 1</code> 的 Claude Code · 托管 Codex App Server；它们都在同一台机器、同一 OS 用户下。ACP 提供方是可选的，各自另有前提：DeepSeek 需要一份本地 <code>dsh</code> harness 检出目录和它自己的凭据，Grok Build 需要其注册表固定的包可被 <code>npx</code> 解析。不存在的提供方会带着 safe code 显示为降级 — 不会因为版本缺失或出乎意料就拒绝启动。仅单用户、仅同机。Claude 侧不需要任何 Embassy 命令（原生 <code>ListAgents</code>/<code>SendMessage</code>）；只有 <code>conv_</code> 令牌持有者可以 <code>reply</code>。</p>
+<p class="req">先说要求：macOS · Node ≥ 20 · 当前 <code>agent-embassy</code> 版本 · 声明 <code>peerProtocol 1</code> 的 Claude Code · 托管 Codex App Server；它们都在同一台机器、同一 OS 用户下。不存在的提供方会带着 safe code 显示为降级 — 不会因为版本缺失或出乎意料就拒绝启动。仅单用户、仅同机。Claude 侧不需要任何 Embassy 命令（原生 <code>ListAgents</code>/<code>SendMessage</code>）；只有 <code>conv_</code> 令牌持有者可以 <code>reply</code>。</p>
 <div class="qs">
 <span class="p">$</span> npm install -g agent-embassy<br>
 <span class="p">$</span> embassy serve<br>

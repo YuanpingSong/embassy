@@ -314,7 +314,7 @@ function prepared(input: GatewayAdapterDispatchInput): GatewayPreparedWriteEvide
       ? input.steer === true
         ? "codex_turn_steer"
         : "codex_turn_start"
-      : "acp_prompt";
+      : "peer_mailbox";
   const frame = `soak:${input.attemptId}:${input.messageId}:${input.text}`;
   return {
     kind,

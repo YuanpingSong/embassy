@@ -10,11 +10,12 @@ const repoRoot = path.resolve(
 );
 
 /**
- * Terms that named the deleted static and live dashboards. emb-100 removed both
- * surfaces; nothing shipped in English may advertise them again. This is the
- * inverse of the dashboard-contract test emb-100 deleted: that test proved the
- * documented dashboard contract was current, this one proves there is no
- * dashboard contract left to document.
+ * Terms that named deleted surfaces. emb-100 removed the static and live
+ * dashboards; emb-101 removed the ACP-backed DeepSeek and Grok providers, the
+ * offline support matrix, and the `doctor` command. Nothing shipped in English
+ * may advertise any of them again. This is the inverse of the contract tests
+ * those slices deleted: they proved the documented contract was current, this
+ * one proves there is no such contract left to document.
  */
 const FORBIDDEN = [
   "dashboard --live",
@@ -23,6 +24,14 @@ const FORBIDDEN = [
   "41961",
   "X-Embassy-Request",
   "remove_codex_registration",
+  "DeepSeek",
+  "Grok",
+  "dsh-",
+  "grok-",
+  "ACP",
+  "embassy doctor",
+  "provider-support-matrix",
+  "support matrix",
 ] as const;
 
 /**
@@ -67,7 +76,7 @@ async function shippedEnglishDocuments(): Promise<string[]> {
     .sort();
 }
 
-test("no shipped English document advertises the deleted dashboards", async () => {
+test("no shipped English document advertises a deleted surface", async () => {
   const files = await shippedEnglishDocuments();
   // Guard the guard: an empty or truncated file list would pass vacuously.
   assert.ok(files.includes("README.md"));

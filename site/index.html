@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>Embassy — a local embassy for your AI agents</title>
-<meta name="description" content="Embassy routes messages between Claude Code, Codex, DeepSeek, and Grok Build on one Mac — four providers, twelve directions, explicit consent per edge, and receipts that never claim more than they proved.">
+<meta name="description" content="Embassy routes messages between Claude Code, Codex, and shell harnesses on one Mac — three providers, six directions, explicit consent per edge, and receipts that never claim more than they proved.">
 <link rel="canonical" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="en" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="zh-CN" href="https://yuanpingsong.github.io/embassy/zh-CN/">
@@ -29,8 +29,8 @@
 <div class="hero">
 <div class="wrap">
 <h1>A local embassy<br>for your AI agents</h1>
-<p class="sub">Claude Code, Codex, DeepSeek, and Grok Build — four providers on one Mac, twelve routable directions, one neutral broker that records every crossing.</p>
-<p class="qual">LOCAL · SINGLE-USER · UNOFFICIAL — NOT AFFILIATED WITH ANTHROPIC, OPENAI, DEEPSEEK, OR XAI</p>
+<p class="sub">Claude Code, Codex, and shell harnesses — three providers on one Mac, six routable directions, one neutral broker that records every crossing.</p>
+<p class="qual">LOCAL · SINGLE-USER · UNOFFICIAL — NOT AFFILIATED WITH ANTHROPIC OR OPENAI</p>
 <div class="ctas">
 <div class="cmd"><span>npm install -g agent-embassy</span><button type="button" data-copy="npm install -g agent-embassy" hidden>Copy</button></div>
 <a class="gh" href="https://github.com/YuanpingSong/embassy">View on GitHub ↗</a>
@@ -60,22 +60,20 @@
 <div class="cols3">
 <div><span class="k">Mid-flow</span><h3>Your agent has a question</h3><p>Claude hits a decision Codex already made. Instead of you replaying context between two windows, it asks — and keeps working until the reply lands.</p></div>
 <div><span class="k">Away from desk</span><h3>The reply routes without you</h3><p>Codex-bound questions wait honestly for an idle turn boundary. Answers back to Claude enter its mailbox immediately, even while Claude is busy. Nothing needs you watching a terminal.</p></div>
-<div><span class="k">Small footprint</span><h3>Almost nothing to install</h3><p>Claude needs no Embassy commands at all — its native ListAgents and SendMessage discover and message the peers Embassy advertises to it. A Codex task runs one CLI command to register. DeepSeek and Grok Build are declared in config and started by the broker when a message needs them.</p></div>
+<div><span class="k">Small footprint</span><h3>Almost nothing to install</h3><p>Claude needs no Embassy commands at all — its native ListAgents and SendMessage discover and message the peers Embassy advertises to it. A Codex task runs one CLI command to register. A shell harness registers with one command and reads its mailbox with <code style="font-size:13px">embassy await</code>.</p></div>
 </div>
 </div>
 </section>
 <section class="band" id="providers">
 <div class="wrap">
 <p class="eyebrow">Providers</p>
-<h2>Four flags, one gate</h2>
-<p class="lede">Claude Code and Codex keep their native transports, because those deliver into the live session you already have open. DeepSeek and Grok Build arrive over ACP — the open Agent Client Protocol — as sessions Embassy launches and owns. Every one of them routes through the same broker, the same consent edges, and the same ledger.</p>
+<h2>Three flags, one gate</h2>
+<p class="lede">Claude Code and Codex keep their native transports, because those deliver into the live session you already have open. Any shell harness that can run the CLI joins as a peer with a pull mailbox. Every one of them routes through the same broker, the same consent edges, and the same ledger.</p>
 <div class="truths">
 <div><b>Claude Code</b><p>Native peer protocol over a private Unix-domain socket. Mail lands in the live session you are working in: discovery, selection, and a mailbox write with a correlated native receipt. <code style="font-size:13px">peerProtocol 1</code> is exact wire grammar, checked per record.</p></div>
 <div><b>Codex</b><p>The managed App Server over a local subprocess Embassy owns. A registered task is resumed and observed; a message enters at an idle turn or at a validated tool-call boundary — never mid-generation.</p></div>
-<div><b>DeepSeek</b><p>An ACP session launched from your local <code style="font-size:13px">dsh</code> harness checkout (<code style="font-size:13px">DSH_HOME</code>, default <code style="font-size:13px">~/.dsh</code>) — the published adapter is not spawnable. No checkout, no pretending: the route renders degraded with its exact safe code. Its receipts are deliberately coarse; see the protocol section.</p></div>
-<div><b>Grok Build</b><p>An ACP session from the registry's exact pinned artifact — <code style="font-size:13px">npx --yes @xai-official/grok@1.0.5 agent stdio</code>. There is no adapter to package. Capabilities are read from this connection's <code style="font-size:13px">initialize</code> response and honored as read, never assumed in advance.</p></div>
+<div><b>Shell peers</b><p>Any harness that can run the CLI. It registers a <code style="font-size:13px">peer-*</code> route and receives its one-time token once; <code style="font-size:13px">embassy await</code> long-polls the mailbox in bounded 30-second iterations and acknowledges only after the body reached stdout. No PID binding, no token file, no daemon.</p></div>
 </div>
-<p class="req" style="margin:22px 0 0">The cost of the next flag: the ACP client is 562 lines and the shared provider adapter is 212. DeepSeek and Grok Build together landed in under 800 changed lines — a launch spec and an honest receipt mapping each, not a new transport. The honest limit that comes with it: ACP v1 is spawn-only, so an ACP provider talks to Embassy through a session Embassy owns, not through a TUI you have open in another window.</p>
 </div>
 </section>
 <section class="band" id="how">
@@ -84,7 +82,7 @@
 <h2>Six commands to a working route</h2>
 <p class="lede">Each command is exactly what the shipped CLI accepts.</p>
 <div class="steps">
-<div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>Copy</button></div><p>Start the broker. It opens no network listener — everything stays on this machine. Configured ACP providers register their routes at boot (<code style="border:none;background:none;padding:0">dsh-main@this-mac</code> and <code style="border:none;background:none;padding:0">grok-main@this-mac</code> by default); their subprocesses start lazily, on the first message that needs one.</p></div>
+<div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>Copy</button></div><p>Start the broker. It opens no network listener — everything stays on this machine.</p></div>
 <div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@this-mac</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@this-mac" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
 <div><div class="cmd2"><code>embassy select-claude --alias claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy select-claude --alias claude-main@this-mac" hidden>Copy</button></div><p>Select the Claude route. Selection creates no consent edge.</p></div>
 <div><div class="cmd2"><code>embassy pair --from codex-embassy@this-mac --to claude-main@this-mac</code><button type="button" class="cp" data-copy="embassy pair --from codex-embassy@this-mac --to claude-main@this-mac" hidden>Copy</button></div><p>Create the explicit bidirectional consent edge used by the next send. Both endpoints must be registered, live, on the same host, and on different providers.</p></div>
@@ -100,19 +98,19 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <h2>The register doesn't flatter you</h2>
 <p class="lede">Every claim below means exactly what it says — that's the product.</p>
 <div class="truths">
-<div><b>delivered ≠ read</b><p>Toward Codex, delivered means App Server accepted the turn. Toward Claude, it means the native mailbox write completed. Toward an ACP provider, it means that provider's session answered the prompt. None of them implies the body was read, understood, or acted on.</p></div>
-<div><b>direction determines timing</b><p>Codex-bound messages wait for idle or the exact STEER next-tool boundary; a Codex wait may show as held — progress, not success — and Embassy never interrupts mid-generation. Claude-bound messages enter Claude's mailbox immediately, busy or idle. An ACP-bound message is prompted on dispatch, and the agent's answer comes back on the same conversation.</p></div>
-<div><b>tested with, not certified</b><p>A release says what it was tested with — provider, transport, exact artifact, protocol, and the honest limitations of each lane — in one release-owned support matrix. It is a claim about our testing, not a runtime permission system: a test proves the matrix file is never imported by the running broker.</p></div>
+<div><b>delivered ≠ read</b><p>Toward Codex, delivered means App Server accepted the turn. Toward Claude, it means the native mailbox write completed. Toward a shell peer, it means the awaiting harness flushed the body to stdout and acknowledged it. None of them implies the body was read, understood, or acted on.</p></div>
+<div><b>direction determines timing</b><p>Codex-bound messages wait for idle or the exact STEER next-tool boundary; a Codex wait may show as held — progress, not success — and Embassy never interrupts mid-generation. Claude-bound messages enter Claude's mailbox immediately, busy or idle. A peer-bound message waits in its mailbox until the harness asks for it.</p></div>
+<div><b>tested with, not certified</b><p>A release says what it was tested with — provider, transport, and exact version — in its changelog entry. It is a claim about our testing, not a runtime permission system: the running broker never reads it.</p></div>
 <div><b>runtime claims only what it proved</b><p>There are no evidence tiers, no compatibility probes, and no version gate anywhere at runtime. Authority to route is consent plus the exact owned route identity; success is what this connection, this route, and this correlated operation demonstrated. Version numbers are unverified metadata, and no version fact grants or withholds anything.</p></div>
-<div><b>an unconfirmed receipt is the honest one</b><p>The DeepSeek adapter collapses aborted, blocked, and error outcomes into <code style="font-size:13px">end_turn</code>, so an <code style="font-size:13px">end_turn</code> from that lane proves nothing. Embassy settles it <code style="font-size:13px">unconfirmed</code> with <code style="font-size:13px">ACP_OUTCOME_COARSE</code> rather than call it delivered. A genuine cancellation still settles cancelled. The collapse is upstream and unrecoverable from the client side; the receipt stays honest until the adapter does.</p></div>
+<div><b>an unconfirmed receipt is the honest one</b><p>When Embassy cannot prove the boundary was crossed — a federated handoff whose acceptance never came back, a broker crash with the attempt armed — it settles <code style="font-size:13px">unconfirmed</code> or <code style="font-size:13px">ambiguous</code> rather than call it delivered. A genuine cancellation still settles cancelled. The receipt says what was proved, not what would be tidy.</p></div>
 <div><b>restarts stop dropping mail</b><p>Queued mail survives a broker restart and re-sends exactly once when its route returns. In-flight-at-crash settles ambiguous — never silently lost, never double-sent.</p></div>
 <div><b>consent is per edge, and every message says who sent it</b><p>A routed message needs an exact consent edge between its two endpoints — role-neutral records bound to both endpoints' leases — and paired inbound is the default; <code style="font-size:13px">embassy serve --inbound open</code> is the one deliberate way to relax it. Every routed body arrives inside one broker-composed provenance envelope naming the sender, the originating provider, and the reply token: attribution the sender cannot forge.</p></div>
 <div><b>the OS boundary is the perimeter</b><p><code style="font-size:13px">embassy serve</code> binds nothing. Identity is attested at the operating-system boundary — same machine, same user, exact executables, private mode-0600 sockets and state — and never asserted by a name. Embassy binds no TCP port and serves no HTTP.</p></div>
-<div><b>bounded by design</b><p>An accepted message is capped at 16 KiB; an ACP reply is capped at 64 KiB and marked truncated rather than trimmed in silence; queues, conversations, retention, and deadlines are all bounded; a dead agent subprocess backs off on a fixed ladder instead of spinning. Embassy answers every ACP permission request with a refusal — never an approval.</p></div>
+<div><b>bounded by design</b><p>An accepted message is capped at 16 KiB; queues, conversations, retention, and deadlines are all bounded; a lost Codex observation backs off on a fixed ladder instead of spinning. Embassy answers no approval request on any provider's behalf.</p></div>
 <div><b>a routed message is a new input path</b><p>Treat anything that arrives as untrusted input to its receiver — the same discipline you'd apply to any tool result.</p></div>
 </div>
 <div class="states">
-<details class="d"><summary>delivered</summary><p>The direction's provider boundary was crossed: App Server accepted a Codex-bound turn, Claude's native mailbox accepted a Claude-bound write, or an ACP session answered the prompt. None means read.</p></details>
+<details class="d"><summary>delivered</summary><p>The direction's provider boundary was crossed: App Server accepted a Codex-bound turn, Claude's native mailbox accepted a Claude-bound write, or a shell peer acknowledged the body after flushing it to stdout. None means read.</p></details>
 <details class="u"><summary>unconfirmed</summary><p>Embassy could not confirm the direction's delivery boundary — including the case where the provider's own adapter destroys the evidence. Not a failure; not a success. It stays unconfirmed rather than guessing.</p></details>
 <details class="a"><summary>ambiguous</summary><p>Conflicting signals about settlement, or a subprocess that died with the outcome outstanding. Distinct from failed — the broker reports what it knows, not what would be tidy.</p></details>
 <details class="e"><summary>expired</summary><p>The message deadline elapsed before settlement. Terminal, and visible in the ledger with the deadline that killed it.</p></details>
@@ -121,7 +119,7 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 </section>
 <section class="band" id="new">
 <div class="wrap">
-<div class="release"><span class="v">v1.7.0</span><span>Four providers over ACP, all-to-all routing, and the certification machinery removed.</span><a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">Changelog ↗</a></div>
+<div class="release"><span class="v">v2.0.1</span><span>One provider-neutral send, background Claude sessions as peers, and control protocol 2.</span><a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">Changelog ↗</a></div>
 </div>
 </section>
 <section class="band" id="vocabulary">
@@ -129,10 +127,10 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <p class="eyebrow">The vocabulary</p>
 <h2>Words that mean things</h2>
 <div class="vocab">
-<div><h3>Registration &amp; consent edges</h3><p>The permission model. A Codex task registers itself; a Claude session is paired to it; ACP routes are declared and boot-registered. An edge is the deliberate act that lets two of them talk, and only the paired may talk — unless you deliberately open inbound.</p></div>
+<div><h3>Registration &amp; consent edges</h3><p>The permission model. A Codex task registers itself; a Claude session is paired to it; a shell peer registers with its one-time token. An edge is the deliberate act that lets two of them talk, and only the paired may talk — unless you deliberately open inbound.</p></div>
 <div><h3>The ledger</h3><p>Receipts for every delivery, with states that never overclaim. The register of record when you ask "where is my message?"</p></div>
 <div><h3>The pouch</h3><p>Transit. Sealed en route: the broker moves messages, it does not read them.</p></div>
-<div><h3>Consulates</h3><p>Four flags fly today. Because new providers arrive over an open standard, the next one is a launch spec and a receipt mapping — same embassy, same consent rules, one more flag.</p></div>
+<div><h3>Consulates</h3><p>Three flags fly today: Claude Code, Codex, and any shell harness that can run the CLI — same embassy, same consent rules for each.</p></div>
 </div>
 </div>
 </section>
@@ -148,7 +146,7 @@ MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never
 <div class="wrap">
 <p class="eyebrow">Quickstart</p>
 <h2>Running in five minutes</h2>
-<p class="req">Requirements first: macOS · Node ≥ 20 · the current <code>agent-embassy</code> release · Claude Code with <code>peerProtocol 1</code> · the managed Codex App Server, all on the same machine and OS user. The ACP providers are optional and bring their own preconditions: DeepSeek needs a local <code>dsh</code> harness checkout and its own credentials, Grok Build needs its registry-pinned package to be resolvable by <code>npx</code>. A provider that isn't there renders degraded with its safe code — nothing refuses to boot over a missing or unexpected version. Single-user, same-machine only. The Claude side needs no Embassy commands (native <code>ListAgents</code>/<code>SendMessage</code>); only the <code>conv_</code> token-holder can <code>reply</code>.</p>
+<p class="req">Requirements first: macOS · Node ≥ 20 · the current <code>agent-embassy</code> release · Claude Code with <code>peerProtocol 1</code> · the managed Codex App Server, all on the same machine and OS user. A provider that isn't there renders degraded with its safe code — nothing refuses to boot over a missing or unexpected version. Single-user, same-machine only. The Claude side needs no Embassy commands (native <code>ListAgents</code>/<code>SendMessage</code>); only the <code>conv_</code> token-holder can <code>reply</code>.</p>
 <div class="qs">
 <span class="p">$</span> npm install -g agent-embassy<br>
 <span class="p">$</span> embassy serve<br>
@@ -175,7 +173,7 @@ MSG
 <a href="https://github.com/YuanpingSong/embassy">GitHub</a>
 <a href="zh-CN/" lang="zh-CN">中文</a>
 </div>
-<p>MIT licensed. An unofficial, independent project — not affiliated with or endorsed by Anthropic, OpenAI, DeepSeek, or xAI. Claude, Codex, DeepSeek, and Grok are trademarks of their respective owners, used here only to name the tools this gateway connects.</p>
+<p>MIT licensed. An unofficial, independent project — not affiliated with or endorsed by Anthropic or OpenAI. Claude and Codex are trademarks of their respective owners, used here only to name the tools this gateway connects.</p>
 <p>This site is a static page: it loads no external assets, sets no cookies, and collects nothing.</p>
 </div>
 </footer>

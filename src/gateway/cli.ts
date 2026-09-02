@@ -36,7 +36,7 @@ export const EMBASSY_VERSION = "2.0.1";
 const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
-  "serve", "health", "status", "doctor", "delivery-status",
+  "serve", "health", "status", "delivery-status",
   "wait-delivery", "untrack", "refresh", "register-codex",
   "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
   "send", "reply",
@@ -286,7 +286,7 @@ async function buildRequest(
   loadLocalHost: () => Promise<string>,
 ): Promise<GatewayControlRequest> {
   const simple: Partial<Record<GatewayCliCommand, GatewayControlMethod>> = {
-    health: "health", status: "list_snapshot", doctor: "list_snapshot",
+    health: "health", status: "list_snapshot",
     refresh: "refresh_discovery",
   };
   const simpleMethod = simple[command];
@@ -295,7 +295,7 @@ async function buildRequest(
     case "serve":
     case "peer-stdio":
       return fault();
-    case "health": case "status": case "doctor": case "refresh": return fault();
+    case "health": case "status": case "refresh": return fault();
     case "delivery-status":
     case "wait-delivery": {
       const options = parseOptions(args, ["token"]);
@@ -480,19 +480,6 @@ function responseExitCode(response: GatewayControlResponse): number {
   return !response.ok ? gatewayCliExitCodes.failure
     : isRejectedResult(response.result) ? gatewayCliExitCodes.rejected : gatewayCliExitCodes.ok;
 }
-function codexDoctorConditions(result: unknown): readonly string[] {
-  const connectors = result !== null && typeof result === "object"
-    ? (result as { connectors?: unknown }).connectors : undefined;
-  const connector = Array.isArray(connectors) ? connectors.find((row) =>
-    row !== null && typeof row === "object" && (row as { provider?: unknown }).provider === "codex") : undefined;
-  const doctor = connector !== null && typeof connector === "object"
-    ? (connector as { codexDoctor?: unknown }).codexDoctor : undefined;
-  const conditions = doctor !== null && typeof doctor === "object"
-    ? (doctor as { conditions?: unknown }).conditions : undefined;
-  return Array.isArray(conditions)
-    ? conditions.filter((value): value is string => typeof value === "string") : ["unknown"];
-}
-
 function waitDeliveryExitCode(
   response: GatewayControlResponse<"delivery_status">,
 ): number {
@@ -677,7 +664,7 @@ export async function runGatewayCli(
       stdout.write(`export EMBASSY_PEER_TOKEN='${response.result.token}'\n`);
       return gatewayCliExitCodes.ok;
     }
-    success(command === "doctor" ? { conditions: codexDoctorConditions(response.result) } : response.result);
+    success(response.result);
     const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr(locale, "decision"));

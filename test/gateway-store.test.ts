@@ -16,7 +16,7 @@ import type { GatewayConfig } from "../src/gateway/config.js";
 import { peerEdgeRef, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import {
   GatewayStore,
-  isGatewayPersistedStateV4,
+  isGatewayPersistedStateV5,
 } from "../src/gateway/store.js";
 import type {
   GatewayMessageRecord,
@@ -205,7 +205,7 @@ async function authorize(store: GatewayStore, attempt: Awaited<ReturnType<typeof
   });
 }
 
-test("new stores are strict native v4 and public projection redacts private IDs", async () => {
+test("new stores are strict native v5 and public projection redacts private IDs", async () => {
   const { store } = await fixture();
   await store.initialize();
   await paired(store);
@@ -216,7 +216,7 @@ test("new stores are strict native v4 and public projection redacts private IDs"
 
   const body = await readFile(store.stateFilePath, "utf8");
   const state = JSON.parse(body) as Record<string, unknown>;
-  assert.equal(state.schemaVersion, 4);
+  assert.equal(state.schemaVersion, 5);
   assert.deepEqual(Object.keys(state), [
     "schemaVersion",
     "commit",
@@ -231,7 +231,7 @@ test("new stores are strict native v4 and public projection redacts private IDs"
     "activity",
     "accounting",
   ]);
-  assert.equal(isGatewayPersistedStateV4(state), true);
+  assert.equal(isGatewayPersistedStateV5(state), true);
   assert.equal(body.includes("endpointGeneration"), false);
   assert.equal(body.includes("ownerLease"), false);
   assert.equal(body.includes("connectors"), false);
@@ -313,9 +313,11 @@ test("runtime refuses unsupported schemas without mutating state", async () => {
   const first = await fixture();
   await first.store.initialize();
   await first.store.close();
+  assert.match(await readFile(first.store.stateFilePath, "utf8"), /"schemaVersion": 5,/u);
+  // A schema-4 file from the 2.x line is refused outright: reset-only, no migration.
   await writeFile(
     first.store.stateFilePath,
-    `${JSON.stringify({ schemaVersion: 3, arbitrary: "not validated" })}\n`,
+    `${JSON.stringify({ schemaVersion: 4, arbitrary: "not validated" })}\n`,
     { mode: 0o600 },
   );
   await assert.rejects(
@@ -327,9 +329,9 @@ test("runtime refuses unsupported schemas without mutating state", async () => {
       /move gateway-state\.json aside.*keep nodes\.json/iu.test(error.message),
   );
   const unchanged = await readFile(first.store.stateFilePath, "utf8");
-  assert.match(unchanged, /"schemaVersion":3/u);
+  assert.match(unchanged, /"schemaVersion":4/u);
 
-  const corruptCurrent = `${JSON.stringify({ schemaVersion: 4 })}\n`;
+  const corruptCurrent = `${JSON.stringify({ schemaVersion: 5 })}\n`;
   await writeFile(first.store.stateFilePath, corruptCurrent, { mode: 0o600 });
   await assert.rejects(
     new GatewayStore(first.config).initialize(),
@@ -677,7 +679,7 @@ test("peer targets require peer mailbox prepared evidence", async () => {
   const hostile = JSON.parse(await readFile(store.stateFilePath, "utf8"));
   hostile.routes.find((candidate: { alias: string }) => candidate.alias === peer.alias)
     .binding.routeHandle = `peer_${"a".repeat(32)}`;
-  assert.equal(isGatewayPersistedStateV4(hostile), false);
+  assert.equal(isGatewayPersistedStateV5(hostile), false);
   await store.addConsentEdge(consentInput(codex, peer));
   await store.enqueueMessage({ sourceAlias: codex.alias, targetAlias: peer.alias,
     body: "peer body", dedupeKey: "peer-prepared" });
@@ -722,53 +724,6 @@ test("route registration refuses legacy identifiers before persistence", async (
     false,
   );
   await reopened.close();
-});
-
-test("armed ACP coarse terminal is the sole pre-acceptance unconfirmed arm", async () => {
-  const { store } = await fixture();
-  await store.initialize();
-  const deepseek = route(
-    "deepseek",
-    "dsh-worker@this-mac",
-    "reg_deepseek_worker",
-    "deepseek-config-worker",
-  );
-  await store.registerRoute(claude);
-  await store.registerRoute(deepseek);
-  await store.addConsentEdge(consentInput(claude, deepseek));
-  await store.enqueueMessage({
-    sourceAlias: claude.alias,
-    targetAlias: deepseek.alias,
-    body: "coarse terminal",
-    dedupeKey: "acp-coarse",
-  });
-  const attempt = await reserve(store, deepseek.alias);
-  assert.deepEqual(await store.authorizeMessage({
-    messageId: attempt.messageId,
-    attemptId: attempt.attemptId,
-    sourceRegistrationId: attempt.sourceRegistrationId,
-    targetRegistrationId: attempt.targetRegistrationId,
-    prepared: { ...preparedFor(attempt.body), kind: "acp_prompt" },
-  }), { status: "authorized" });
-  await assert.rejects(store.settleAttempt({
-    messageId: attempt.messageId,
-    attemptId: attempt.attemptId,
-    state: "unconfirmed",
-  }), /INVALID_ATTEMPT_SETTLEMENT_PHASE/u);
-  assert.deepEqual(await store.settleAttempt({
-    messageId: attempt.messageId,
-    attemptId: attempt.attemptId,
-    state: "unconfirmed",
-    safeErrorCode: "ACP_OUTCOME_COARSE",
-  }), {
-    status: "settled",
-    settlement: {
-      messageId: attempt.messageId,
-      state: "unconfirmed",
-      safeErrorCode: "ACP_OUTCOME_COARSE",
-    },
-  });
-  await store.close();
 });
 
 test("restart applies phase truth before an elapsed deadline", async () => {
@@ -1323,6 +1278,29 @@ test("authorization uses the store clock for the final deadline fence", async ()
   await store.close();
 });
 
+test("federated routes refuse exact-owned removal at the store even with a matching binding", async () => {
+  const setup = await fixture();
+  const store = new GatewayStore({ ...setup.config, hostId: "studio", allowedHosts: ["studio", "m5dev"] },
+    { now: setup.clock.now, randomId: setup.clock.randomId });
+  await store.initialize();
+  await store.registerRoute({ alias: "codex-local@studio", registrationMode: "explicit_opt_in",
+    binding: { provider: "codex", hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } });
+  const mirror: RegisterRouteInput = { alias: "codex-main@m5dev", registrationMode: "federated_peer",
+    binding: { provider: "codex", hostId: "m5dev", routeHandle: "reg_remote_codex", registrationId: "reg_mirror_codex" } };
+  await store.registerRoute(mirror);
+  const before = await readFile(store.stateFilePath, "utf8");
+  for (const activity of [undefined, { operatorAction: true }] as const) {
+    await assert.rejects(
+      store.removeOwnedRouteAtomic({ alias: mirror.alias, binding: { ...mirror.binding },
+        ...(activity === undefined ? {} : { activity }) }),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "FEDERATED_ROUTE_READ_ONLY",
+    );
+  }
+  assert.equal(await readFile(store.stateFilePath, "utf8"), before);
+  assert.equal((await store.inspectPrivateRoute(mirror.alias))?.registrationMode, "federated_peer");
+  await store.close();
+});
+
 test("late exact-owner cleanup cannot remove an alias replacement", async () => {
   const { store } = await fixture();
   await store.initialize();
@@ -1414,12 +1392,12 @@ test("native replies reject a non-Claude or cross-host transient authority", asy
       sourceAlias: codex.alias,
       expectedSourceRegistrationId: codex.binding.registrationId,
       target: {
-        alias: "dsh-target@this-mac",
+        alias: "peer-target@this-mac",
         binding: {
-          provider: "deepseek",
+          provider: "peer",
           hostId: "this-mac",
-          routeHandle: "deepseek-target",
-          registrationId: "reg_deepseek_target",
+          routeHandle: "peer-target",
+          registrationId: "reg_peer_target",
         },
       },
       body: "reply",
@@ -1538,27 +1516,27 @@ test("interleaved message and runtime activity share one strict sequence", async
   await store.close();
 });
 
-test("strict v4 rejects corrupted authority and disclosure-bearing activity", async () => {
+test("strict v5 rejects corrupted authority and disclosure-bearing activity", async () => {
   const { store } = await fixture();
   await store.initialize();
   await paired(store);
   await enqueue(store, "strict-graph", "strict");
   const raw = JSON.parse(await readFile(store.stateFilePath, "utf8"));
   const wrongDirection = structuredClone(raw);
-  wrongDirection.messages[0].direction = "deepseek_to_codex";
-  assert.equal(isGatewayPersistedStateV4(wrongDirection), false);
+  wrongDirection.messages[0].direction = "shell_to_codex";
+  assert.equal(isGatewayPersistedStateV5(wrongDirection), false);
   const wrongConsent = structuredClone(raw);
   wrongConsent.messages[0].consentEdge[0].registrationId = "wrong-registration";
-  assert.equal(isGatewayPersistedStateV4(wrongConsent), false);
+  assert.equal(isGatewayPersistedStateV5(wrongConsent), false);
   const legacyRegistration = structuredClone(raw);
   legacyRegistration.routes[0].binding.registrationId = "lease_legacy";
-  assert.equal(isGatewayPersistedStateV4(legacyRegistration), false);
+  assert.equal(isGatewayPersistedStateV5(legacyRegistration), false);
   const legacyBusyPolicy = structuredClone(raw);
   legacyBusyPolicy.routes[0].busyPolicy = "refuse";
-  assert.equal(isGatewayPersistedStateV4(legacyBusyPolicy), false);
+  assert.equal(isGatewayPersistedStateV5(legacyBusyPolicy), false);
   const legacyDeliveryToken = structuredClone(raw);
   legacyDeliveryToken.messages[0].deliveryToken += "x";
-  assert.equal(isGatewayPersistedStateV4(legacyDeliveryToken), false);
+  assert.equal(isGatewayPersistedStateV5(legacyDeliveryToken), false);
   const injectedActivity = structuredClone(raw);
   injectedActivity.activity.push({
     type: "activity",
@@ -1574,7 +1552,7 @@ test("strict v4 rejects corrupted authority and disclosure-bearing activity", as
     },
   });
   injectedActivity.eventSequence += 1;
-  assert.equal(isGatewayPersistedStateV4(injectedActivity), false);
+  assert.equal(isGatewayPersistedStateV5(injectedActivity), false);
   await store.close();
 });
 
@@ -1616,17 +1594,17 @@ test("strict v4 binds open and transient native aliases to the exact route host"
   });
   assert.match(explicitReply.deliveryToken ?? "", /^dlv_/u);
   const raw = JSON.parse(await readFile(store.stateFilePath, "utf8"));
-  assert.equal(isGatewayPersistedStateV4(raw), true);
+  assert.equal(isGatewayPersistedStateV5(raw), true);
   const badIngress = structuredClone(raw);
   badIngress.messages.find(
     (message: { direction: string }) => message.direction === "claude_to_codex",
   ).sourceAlias = "native@other-host";
-  assert.equal(isGatewayPersistedStateV4(badIngress), false);
+  assert.equal(isGatewayPersistedStateV5(badIngress), false);
   const badReply = structuredClone(raw);
   badReply.messages.find(
     (message: { direction: string }) => message.direction === "codex_to_claude",
   ).targetAlias = "native@other-host";
-  assert.equal(isGatewayPersistedStateV4(badReply), false);
+  assert.equal(isGatewayPersistedStateV5(badReply), false);
   await store.close();
 });
 
@@ -1765,7 +1743,7 @@ test("peer catalog reconciliation and destination enqueue commit one destination
   const local = { alias: "codex-local@studio", registrationMode: "explicit_opt_in" as const,
     binding: { provider: "codex" as const, hostId: "studio", routeHandle: "thread-local", registrationId: "reg_local" } };
   await store.registerRoute(local);
-  const remoteEndpoint = { alias: "dsh-worker@m5dev", provider: "deepseek" as const, host: "m5dev", routeRef: "reg_remote_dsh" };
+  const remoteEndpoint = { alias: "codex-worker@m5dev", provider: "codex" as const, host: "m5dev", routeRef: "reg_remote_codex" };
   const localEndpoint = { alias: local.alias, provider: local.binding.provider, host: "studio",
     routeRef: peerRouteRef("studio", local.binding.registrationId) };
   const edgeRef = peerEdgeRef([remoteEndpoint, localEndpoint]);
@@ -1786,7 +1764,7 @@ test("peer catalog reconciliation and destination enqueue commit one destination
   assert.deepEqual(await store.enqueuePeerHandoff("m5dev", handoff), { accepted: false, duplicate: true,
     messageIdSuffix: admitted.messageIdSuffix });
   assert.equal((JSON.parse(await readFile(store.stateFilePath, "utf8")) as { messages: { body?: string }[] }).messages[0]?.body, "destination copy");
-  const renamed = "dsh-renamed@m5dev"; await store.reconcilePeerCatalog("m5dev", catalog(2, renamed));
+  const renamed = "codex-renamed@m5dev"; await store.reconcilePeerCatalog("m5dev", catalog(2, renamed));
   assert.equal((await store.inspectPrivateRoutes()).find((route) => route.registrationMode === "federated_peer")?.alias, renamed);
   const mirror = (await store.inspectPrivateRoute(renamed))!;
   assert.match(mirror.binding.registrationId, /^reg_[A-Za-z0-9_-]+$/u);
@@ -1825,7 +1803,7 @@ test("peer catalog reconciliation and destination enqueue commit one destination
   await ownerStore.initialize();
   const ownerLocal = { alias: "codex-local@lab", registrationMode: "explicit_opt_in" as const,
     binding: { provider: "codex" as const, hostId: "lab", routeHandle: "thread-owner", registrationId: "reg_owner_local" } };
-  const ownerRemote = { alias: "dsh-worker@zdev", provider: "deepseek" as const, host: "zdev", routeRef: "reg_owner_remote" };
+  const ownerRemote = { alias: "codex-worker@zdev", provider: "codex" as const, host: "zdev", routeRef: "reg_owner_remote" };
   const ownerTarget = { alias: ownerLocal.alias, provider: ownerLocal.binding.provider, host: "lab",
     routeRef: peerRouteRef("lab", ownerLocal.binding.registrationId) };
   await ownerStore.registerRoute(ownerLocal);
