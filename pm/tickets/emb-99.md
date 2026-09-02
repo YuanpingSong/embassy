@@ -212,3 +212,12 @@ no support-matrix ceremony, no site work beyond the stub.
   4d00fc4). Fix-forward on main for test-only flakes is allowed under
   the light gate; engineers on the lane rebase onto main before
   pushing.
+- 2026-09-02 Founder asked for parallelism. Plan: emb-104 (consent,
+  Opus) is the critical path; emb-106 (nodes.json) and emb-108
+  (launchd) are code-independent and run now on their own branches
+  (Sonnet), rebased onto main after 104 lands and gated with an
+  adversarial read each; emb-105 (reply fold) and emb-107
+  (observability, needs the post-104 snapshot shape and a consent-
+  free `check`) follow 104 sequentially; emb-109 last. Gate reviews
+  for 104 (adversarial + taste) run concurrently. Shared rate limits
+  are the real bottleneck, so no more than three engineers at once.
