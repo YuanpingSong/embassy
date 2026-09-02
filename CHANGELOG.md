@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - zh-CN localization, the `--lang` option, and the copy-table layer (emb-102).
 - Progress watches: `TRACK:`/`DONE:`, `--track`, `--idle-minutes`, `untrack`, the automated liveness nudge, `EMBASSY_TRACKING_ENABLED`, `EMBASSY_MAX_WATCHES` (emb-103). A body beginning `TRACK:` or `DONE:` is now delivered verbatim as an ordinary message. Busy-gating (`ROUTE_BUSY` deferral and requeue), `STEER:`, and the queued-ahead marker are unchanged.
 - `GATEWAY_NODE_INVENTORY_REQUIRED` (emb-106).
+- Consent edges, with `embassy pair` / `embassy unpair`, `embassy select-claude` / `embassy unselect-claude`, `embassy serve --inbound`, and `EMBASSY_MAX_PAIRS` (emb-104). The `pair`, `unpair`, `select_claude`, and `unselect_claude` control methods, the four safe codes `SENDER_NOT_PAIRED`, `CONSENT_OWNER_HOST_REQUIRED`, `INVALID_CONSENT_EDGE`, and `CONSENT_EDGE_CAPACITY_REACHED`, the `consentEdges` inventory in private state and in the public snapshot, the consent rows on the federation catalog and handoff wire, and the `native_reply` dispatch authorization (the one branch that skipped the target-workspace assertion) are all gone.
 
 ### Changed
 
@@ -30,6 +31,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Private control protocol is 3; a client and broker on different lines report `CONTROL_VERSION_MISMATCH`.
 - `unregister-codex` against a federated (read-only) route now returns `rejected` with `FEDERATED_ROUTE_READ_ONLY` instead of `not_found` (emb-101).
 - The stall and diagnostic notices written into a Claude session now say ``Run `embassy status` for details`` (emb-102).
+- `send` and `reply` install a discovered Claude session's route on first use; the permission to message is same UID + same host (or a configured node) + alias; the provenance envelope names the sender; a colliding alias is refused with `PEER_ALIAS_COLLISION` at send time (emb-104).
+- Private state keeps schema 5 with a shape change: the retired `consentEdges` key makes an existing file fail the exact-key check, so an older schema-5 state file is refused with `CORRUPT_GATEWAY_STATE` and the documented [private state reset](docs/CONFIGURATION.md#private-state-reset) applies (emb-104). A message's `sourceRegistrationId` is narrowed from nullable to always present, since every sender now holds a route.
+- Two safe codes are added (emb-104): `ROUTE_DIRECTION_MISMATCH`, when admission is asked to route between two endpoints with no direction between them, and `ENDPOINT_RETIRED`, the settlement reason for the work of a route displaced by another session claiming its alias. Two activity actions replace the four retired ones: `claude_route_installed` and `claude_route_retired`.
+- A refused `send` or `reply` control result may carry an optional `reason` — the safe code behind the coarse decision — and the CLI renders one remedy per reason instead of one generic line (emb-104).
+- `availablePeers[].selected` is renamed to `routed` in the public snapshot: it means the session has an installed route, never a permission (emb-104).
+- The native Claude helper IPC protocol is version 2: `selected_route` is the only dispatch authorization and its `stateRoot` is required, so every preparation runs the target-workspace assertion (emb-104).
+- A federation node whose only routes are peer mirrors can persist and reload its state: the loader takes the local host identity from the broker's configuration instead of deriving it from local routes, which previously left a fresh node unable to write after its first peer refresh (emb-104).
 
 ## [2.0.1] - 2026-09-01
 

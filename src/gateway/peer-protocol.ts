@@ -14,8 +14,13 @@ export type PeerEndpoint = Readonly<{ alias: string; provider: GatewayProvider; 
 export type PeerInitializeParams = Readonly<{ protocolVersion: typeof PEER_PROTOCOL_VERSION; host: string }>;
 export type PeerInitializeResult = Readonly<{ protocolVersion: typeof PEER_PROTOCOL_VERSION; host: string; capabilities: typeof peerCapabilities;
   limits: Readonly<{ requestBytes: number; catalogBytes: number; bodyBytes: number }> }>;
+/**
+ * A federated handoff is authorized by the sending host's membership in the
+ * destination's nodes.json plus exact alias addressing; the wire carries no
+ * permission record beyond the two endpoints.
+ */
 export type PeerHandoffParams = Readonly<{ originAttemptId: string; originMessageId: string;
-  source: PeerEndpoint; target: PeerEndpoint; edgeRef: string; edgeOwnerHost: string; deadlineAt: string;
+  source: PeerEndpoint; target: PeerEndpoint; deadlineAt: string;
   expectsReply: boolean; body: string; steer?: true; conversationCorrelation?: string }>;
 export type PeerHandoffResult = Readonly<{ accepted: true }>;
 export type PeerCatalogResult = Readonly<{ revision: number; complete: boolean; truncated: boolean;
@@ -24,8 +29,6 @@ export type PeerCatalogResult = Readonly<{ revision: number; complete: boolean; 
     protocol: string; protocolVersion: string; lastSeenAt?: string; observationAgeMs?: number; safeErrorCode?: string }>[];
   routes: readonly Readonly<{ ref: string; alias: string; provider: GatewayProvider; host: string;
     enabled: boolean; state: RouteState; queueDepth: number; lastSeenAt?: string; safeErrorCode?: string }>[];
-  consentEdges: readonly Readonly<{ ref: string; ownerHost: string;
-    endpoints: readonly [PeerEndpoint, PeerEndpoint] }>[];
   alerts: readonly Readonly<{ code: string; severity: "info" | "warning" | "error"; timestamp: string;
     provider?: GatewayProvider; host?: string; alias?: string }>[] }>;
 export type PeerMethodParams = { initialize: PeerInitializeParams; "catalog/get": Readonly<Record<string, never>>; handoff: PeerHandoffParams };
@@ -58,15 +61,12 @@ export function peerRouteRef(hostId: string, registrationId: string): string {
     throw new PeerProtocolError("INVALID_ROUTE_AUTHORITY");
   return `reg_${createHash("sha256").update(`${hostId}\0${registrationId}`).digest("base64url")}`;
 }
-export function peerEdgeRef(endpoints: readonly [PeerEndpoint, PeerEndpoint]): string { if (!endpoints.every(endpoint)) throw new PeerProtocolError("INVALID_ENDPOINT");
-  const canonical = endpoints.map(({ host, alias, routeRef }) => `${host}\0${alias}\0${routeRef}`).sort().join("\0");
-  return `edge_${createHash("sha256").update(canonical).digest("base64url")}`; }
 export function peerInitializeResult(localHost: string): PeerInitializeResult { return { protocolVersion: PEER_PROTOCOL_VERSION, host: localHost,
   capabilities: peerCapabilities, limits: { requestBytes: PEER_MAX_REQUEST_BYTES, catalogBytes: PEER_MAX_CATALOG_BYTES, bodyBytes: PEER_MAX_BODY_BYTES } }; }
 export function decodePeerParams<M extends PeerMethod>(method: M, value: unknown): PeerMethodParams[M] {
   const valid = method === "initialize" ? exact(value, { protocolVersion: (v) => v === PEER_PROTOCOL_VERSION, host }) : method === "catalog/get" ? exact(value, {}) :
     exact(value, { originAttemptId: token("attempt_"), originMessageId: token("msg_"), source: endpoint, target: endpoint,
-      edgeRef: token("edge_"), edgeOwnerHost: host, deadlineAt: date, expectsReply: bool,
+      deadlineAt: date, expectsReply: bool,
       body: (v) => typeof v === "string" && Buffer.byteLength(v, "utf8") > 0 && Buffer.byteLength(v, "utf8") <= PEER_MAX_BODY_BYTES,
       steer: optional((v) => v === true), conversationCorrelation: optional((v) => typeof v === "string" && /^[A-Za-z0-9_-]{8}$/.test(v)) });
   if (!valid) throw new PeerProtocolError("INVALID_PARAMS"); return value as PeerMethodParams[M];
@@ -78,7 +78,6 @@ export function decodePeerResult<M extends PeerMethod>(method: M, value: unknown
     method === "handoff" ? exact(value, { accepted: (v) => v === true }) : exact(value, { revision: natural, complete: bool, truncated: bool, generatedAt: date, health: member(health),
       connectors: list((v) => exact(v, { provider: member(providers), host, health: member(health), protocol: atom, protocolVersion: atom, lastSeenAt: optional(date), observationAgeMs: optional(natural), safeErrorCode: optional(code) }), 64),
       routes: list((v) => exact(v, { ref: token("reg_"), alias, provider: member(providers), host, enabled: bool, state: member(states), queueDepth: natural, lastSeenAt: optional(date), safeErrorCode: optional(code) }) && coordinate(v as Obj), 256),
-      consentEdges: list((v) => exact(v, { ref: token("edge_"), ownerHost: host, endpoints: (x) => Array.isArray(x) && x.length === 2 && x.every(endpoint) }), 256),
       alerts: list((v) => exact(v, { code, severity: member(new Set(["info", "warning", "error"])), timestamp: date, provider: optional(member(providers)), host: optional(host), alias: optional(alias) }), 256) });
   if (!valid) throw new PeerProtocolError("INVALID_RESULT"); return value as PeerMethodResult[M];
 }

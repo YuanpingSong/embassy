@@ -4,19 +4,19 @@ import { PassThrough, type Writable } from "node:stream";
 import { setImmediate as immediate } from "node:timers/promises";
 import test from "node:test";
 import { PeerConnectionLostError, spawnPeerClient, type PeerSpawn } from "../src/gateway/peer-client.js";
-import { decodePeerParams, decodePeerResult, peerEdgeRef, peerRouteRef, PEER_MAX_BODY_BYTES, PEER_METHOD_NOT_FOUND, PEER_PROTOCOL_VERSION,
+import { decodePeerParams, decodePeerResult, peerRouteRef, PEER_MAX_BODY_BYTES, PEER_METHOD_NOT_FOUND, PEER_PROTOCOL_VERSION,
   type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { PeerHandlerError, runPeerStdio } from "../src/gateway/peer-stdio.js";
 
 type Rpc = Record<string, unknown>;
 const now = "2026-08-17T12:00:00.000Z";
 const endpoint = (alias = "codex-main@studio", routeRef = "reg_local") => ({ alias, provider: "codex" as const, host: alias.split("@")[1] as string, routeRef });
-const catalog = (): PeerCatalogResult => { const endpoints = [endpoint("codex-main@m5dev", "reg_remote"), endpoint()] as const; return ({ revision: 3, complete: true, truncated: false, generatedAt: now, health: "healthy",
+const catalog = (): PeerCatalogResult => ({ revision: 3, complete: true, truncated: false, generatedAt: now, health: "healthy",
   connectors: [{ provider: "codex", host: "m5dev", health: "healthy", protocol: "app-server", protocolVersion: "1", observationAgeMs: 10 }],
   routes: [{ ref: "reg_remote", alias: "codex-main@m5dev", provider: "codex", host: "m5dev", enabled: true, state: "idle", queueDepth: 0 }],
-  consentEdges: [{ ref: peerEdgeRef(endpoints), ownerHost: "m5dev", endpoints }], alerts: [] }); };
+  alerts: [] });
 const handoff = (body = "hello"): PeerHandoffParams => { const source = endpoint(), target = endpoint("codex-main@m5dev", "reg_remote"); return ({ originAttemptId: "attempt_origin", originMessageId: "msg_origin",
-  source, target, edgeRef: peerEdgeRef([source, target]), edgeOwnerHost: "m5dev",
+  source, target,
   deadlineAt: now, expectsReply: true, conversationCorrelation: "a1b2c3d4", body }); };
 
 test("peer codecs require exact body-free catalog and bounded opaque handoff fields", () => {
@@ -31,8 +31,9 @@ test("peer codecs require exact body-free catalog and bounded opaque handoff fie
   assert.throws(() => decodePeerParams("handoff", { ...handoff(), deadlineAt: "2026-02-30T12:00:00.000Z" }), /INVALID_PARAMS/);
   assert.throws(() => decodePeerResult("catalog/get", { ...catalog(), alerts: [{ code: "A".repeat(65), severity: "error", timestamp: now }] }), /INVALID_RESULT/);
   assert.throws(() => decodePeerResult("catalog/get", { ...catalog(), alerts: [{ code: "SAFE", severity: "error", timestamp: now, alias: "/private/secret@m5dev" }] }), /INVALID_RESULT/);
-  const left = endpoint(), right = endpoint("codex-main@m5dev", "reg_remote");
-  assert.match(peerEdgeRef([left, right]), /^edge_[A-Za-z0-9_-]{43}$/); assert.equal(peerEdgeRef([left, right]), peerEdgeRef([right, left]));
+  // A handoff carries no permission record: the two endpoints, the origin ids, and the body are the whole wire.
+  assert.throws(() => decodePeerParams("handoff", { ...handoff(), edgeRef: "edge_x", edgeOwnerHost: "m5dev" }), /INVALID_PARAMS/);
+  assert.throws(() => decodePeerResult("catalog/get", { ...catalog(), consentEdges: [] }), /INVALID_RESULT/);
   assert.match(peerRouteRef("studio", "lease_private"), /^reg_[A-Za-z0-9_-]{43}$/);
   assert.equal(peerRouteRef("studio", "lease_private"), peerRouteRef("studio", "lease_private"));
   assert.notEqual(peerRouteRef("studio", "lease_private"), peerRouteRef("m5dev", "lease_private"));
@@ -128,11 +129,37 @@ test("peer client rejects host drift, unknown inbound requests, uncorrelated rep
 
 test("peer client rejects recursive, noncanonical, and duplicate catalog authority", async () => {
   const peer = initializedPeer((message, remote) => { if (message.method === "catalog/get") {
-    const bad = catalog(), endpoints = [bad.consentEdges[0]!.endpoints[0], endpoint("codex-main@third", "reg_third")] as const;
-    remote.result(message, { ...bad, consentEdges: [{ ref: peerEdgeRef(endpoints), ownerHost: "m5dev", endpoints }] });
+    const bad = catalog();
+    remote.result(message, { ...bad, routes: [...bad.routes,
+      { ref: "reg_third", alias: "codex-main@third", provider: "codex", host: "third", enabled: true, state: "idle", queueDepth: 0 }] });
   } });
   const client = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(peer) });
   await assert.rejects(client.catalog(), /canonical projection/); assert.equal(peer.child.killed, true);
+
+  const duplicate = initializedPeer((message, remote) => { if (message.method === "catalog/get") {
+    const bad = catalog();
+    remote.result(message, { ...bad, routes: [...bad.routes, { ...bad.routes[0]!, alias: "codex-other@m5dev" }] });
+  } });
+  const duplicateClient = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(duplicate) });
+  await assert.rejects(duplicateClient.catalog(), /canonical projection/); assert.equal(duplicate.child.killed, true);
+});
+
+test("a result this build cannot decode is a protocol mismatch, not a tunnel fault", async () => {
+  // A pre-emb-104 node still answers `catalog/get` with `consentEdges`. It is
+  // reachable and honest; this build simply cannot read it. The operator must
+  // be told to upgrade the node, not to debug SSH.
+  const stale = initializedPeer((message, remote) => { if (message.method === "catalog/get")
+    remote.result(message, { ...catalog(), consentEdges: [] }); });
+  const client = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(stale) });
+  await assert.rejects(client.catalog(),
+    (error: unknown) => error instanceof PeerConnectionLostError && error.failureClass === "protocol");
+  assert.equal(stale.child.killed, true);
+
+  const staleHandoff = initializedPeer((message, remote) => { if (message.method === "handoff")
+    remote.result(message, { accepted: true, edgeRef: "edge_x" }); });
+  const handoffClient = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn: spawnFrom(staleHandoff) });
+  await assert.rejects(handoffClient.prepareHandoff(handoff()).perform(),
+    (error: unknown) => error instanceof PeerConnectionLostError && error.failureClass === "protocol");
 });
 
 class FakeTimers {

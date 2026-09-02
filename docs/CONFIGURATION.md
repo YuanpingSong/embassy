@@ -35,8 +35,8 @@ object shape is
 omits `host`, and keeps the federation at 32 total hosts or fewer. Each listed
 node is the fixed SSH destination for `embassy peer-stdio`. To adopt
 federation later, edit the existing file and add peers to `nodes` — keep
-`host` exactly as it already reads; every durable record (routes, consent
-edges, retained bodies) is keyed by that value, so renaming `host` requires
+`host` exactly as it already reads; every durable record (routes and
+retained bodies) is keyed by that value, so renaming `host` requires
 the [private state reset](#private-state-reset) below, the same as any other
 identity change.
 Removing a peer does not remove its durable mirrors; reset private state before restarting with that peer absent.
@@ -61,11 +61,18 @@ and every delivery has settled. Then:
 2. Move `gateway-state.json` aside so the old ledger remains recoverable.
 3. `nodes.json`, if you use federation, is untouched.
 4. Start the version-3 broker to create fresh state.
-5. Re-register routes, select the Claude route, and pair the intended edges.
+5. Re-register Codex tasks. Claude routes reinstall themselves on first use.
 
 An old or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and
 does not mutate the state file. There is no conversion command or automatic
 recovery path.
+
+A schema-5 file that still carries a key this line removed — `consentEdges`,
+retired along with the permission records it held — refuses with `CORRUPT_GATEWAY_STATE`
+instead, because the loader accepts an exact key set rather than ignoring what
+it does not recognize. On this upgrade that refusal is expected, not damage:
+the file on disk is intact and the same five steps above are the whole
+recovery. The state file is never rewritten in place to make it loadable.
 
 A running broker holds `.gateway-controller.lock` in the state directory,
 recording its pid and the machine name at the time it started. What a later
@@ -191,7 +198,6 @@ These variables retain conservative defaults:
 | Variable | Default |
 | --- | ---: |
 | `EMBASSY_MAX_ROUTES` | `128` |
-| `EMBASSY_MAX_PAIRS` | `128` |
 | `EMBASSY_EVENT_CAPACITY` / `EMBASSY_EVENT_TTL_MS` | `500` / `86400000` |
 | `EMBASSY_DEDUPE_CAPACITY` / `EMBASSY_DEDUPE_TTL_MS` | `2000` / `300000` |
 | `EMBASSY_MAX_QUEUE_MESSAGES` / `EMBASSY_MAX_QUEUE_PER_ROUTE` | `100` / `20` |
@@ -200,8 +206,7 @@ These variables retain conservative defaults:
 | `EMBASSY_MESSAGE_DEADLINE_MS` | `14400000` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
-`EMBASSY_MAX_PAIRS` is the bound behind the README's "128 pairs by default"; its
-range is 1 through 256. `EMBASSY_MAX_ROUTES` accepts 2 through 256. Every value in
+`EMBASSY_MAX_ROUTES` accepts 2 through 256. Every value in
 this table is validated at startup, and an out-of-range or non-integer setting
 fails closed with `INVALID_GATEWAY_CONFIGURATION` rather than being clamped.
 
@@ -218,24 +223,23 @@ The public launcher remains host-local. Under allowlisted SSH federation, each b
 
 `crossSessionInbound` is Claude Code's native setting for cross-session
 messaging: it decides whether a Claude session accepts, holds, or refuses
-messages arriving from another session. Embassy needs it enabled on the
-session you select as a Codex-to-Claude destination, and it cannot override
+messages arriving from another session. Embassy needs it enabled on any
+session used as a Codex-to-Claude destination, and it cannot override
 that decision. Configure it in Claude Code, not in Embassy.
 
 This is the one prerequisite you must actively toggle, and it is the most
-common first-run failure — because it fails *late*. Quickstart step 3
-(`select-claude`) prints `"accepted":true` whether or not the setting is
-enabled: selection creates no permission edge and never consults Claude's
-native inbound policy. Create an explicit edge with `pair`; the refusal appears
-when the send reaches the Claude end. If registration, selection, and pairing succeeded
-but your first `send` does not arrive, check `crossSessionInbound` on
-the destination session before suspecting the route.
+common first-run failure — because it fails *late*. A send to a discovered
+session is accepted and installs its route without consulting Claude's native
+inbound policy; the refusal appears only when the delivery reaches the Claude
+end. If the session appears in `embassy status` and the send was accepted but
+nothing arrives, check `crossSessionInbound` on the destination session before
+suspecting the route.
 
 ## Provider and runtime contract
 
 Embassy routes three providers: Claude over peer protocol 1, Codex over the managed App Server, and universal shell peers over the private control socket. A build or version fact never grants or withholds routing authority.
 
-Runtime is best effort: an explicit consent edge plus the exact owned route/session identity authorizes an attempt. The current per-operation transport, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health and an exact safe code; it does not create a compatibility tier or block unrelated providers.
+Runtime is best effort: the OS boundary plus the exact owned route/session identity authorizes an attempt. The current per-operation transport, strict consumed wire fields, and correlated operation determine the result. Interface drift or a missing optional provider becomes provider-local degraded/offline health and an exact safe code; it does not create a compatibility tier or block unrelated providers.
 
 Only unsafe OS evidence for Embassy-owned or executed artifacts and Embassy callback, control, or state paths—such as an unsafe lease or state, swapped binary, ownership/path/symlink mismatch, or invalid generation—refuses broker startup. The Claude-owned external sessions registry root is read-side identity evidence: an unsafe UID or mode degrades only Claude with a loud observation while the broker and other providers remain available. Claude still requires native `peerProtocol: 1` per session record: a record that declares any other value is rejected in isolation and included in bounded rejection evidence without stopping the broker or hiding other usable sessions.
 
@@ -245,11 +249,13 @@ The managed Codex installation is resolved by exact verified path; a `codex` els
 
 ## Addressing
 
-Claude sessions are addressed by their current `name@host` or by a user-supplied native session UUID. The UUID is the stable logical identity; the current name is a live lookup alias. After a rename, the old name stops resolving immediately while a selected UUID-bound route continues to work under the new name. A rename becomes visible at the session's next status transition — typically its next turn boundary — because Claude Code rewrites the session's registry record on those transitions, not at the moment of the rename; Embassy reflects the record, never the rename itself.
+Claude sessions are addressed by their current `name@host` or by a user-supplied native session UUID. The UUID is the stable logical identity; the current name is a live lookup alias. After a rename, the old name stops resolving immediately while an installed UUID-bound route continues to work under the new name. A rename becomes visible at the session's next status transition — typically its next turn boundary — because Claude Code rewrites the session's registry record on those transitions, not at the moment of the rename; Embassy reflects the record, never the rename itself.
 
-Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name.
+Names, old names, PIDs, registry paths, process generations, and socket generations never become alternate identity keys. Embassy refuses to guess when two live sessions share a current name: the shared *name* is refused with `PEER_ALIAS_COLLISION`, while each session stays reachable by its own UUID.
 
-Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server, Desktop, and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration and consent edge remain.
+Across a federated link, reachability is narrower than it is locally. A peer node addresses only the routes its neighbour published in its catalog, and a Claude session appears there only once it has a local route — that is, once it has sent a message or been sent one on its own host. The destination never installs a route on a handoff: an unmirrored sender or an unrouted target is refused, not created. To make a Claude session addressable from a peer node, use it locally once first.
+
+Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server, Desktop, and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration remains.
 
 Shell routes use `peer-*` aliases and a `peer_` token minted at registration.
 The broker persists only its UID/alias/token hash route handle, never the raw

@@ -18,10 +18,9 @@ import { createLocalClaudeGatewayProvider, createLocalCodexGatewayProvider,
   type LocalClaudeGatewayProviderOptions, type LocalCodexGatewayProviderOptions } from "./providers.js";
 import { GatewayService, type GatewayProviderAdapter, type GatewayServiceOptions } from "./service.js";
 import { GatewayStore } from "./store.js";
-import { gatewayInboundModes, type GatewayInboundMode } from "./types.js";
 
 export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: string; codexMode: "native_messaging" }>;
-export type GatewayServerOptions = { env?: NodeJS.ProcessEnv; inboundMode?: GatewayInboundMode;
+export type GatewayServerOptions = { env?: NodeJS.ProcessEnv;
   signal?: AbortSignal; onReady: (result: GatewayServerReadyResult) => void | Promise<void> };
 type ServerService = Readonly<{ start: (signal?: AbortSignal) => Promise<void>; close: () => Promise<void> }>;
 type Signal = "SIGINT" | "SIGTERM";
@@ -121,13 +120,8 @@ export async function runGatewayServer(
   });
   try {
     let inventory = await d.loadNodeInventory(path.resolve(defaultGatewayStateDir(env)));
-    const loaded = d.loadConfig(env, inventory);
-    const inboundMode = options.inboundMode ?? loaded.inboundMode;
-    if (!(gatewayInboundModes as readonly string[]).includes(inboundMode)) {
-      throw serverError("INVALID_GATEWAY_CONFIGURATION", "The gateway inbound mode must be paired or open.");
-    }
-    const localHost = loaded.hostId;
-    const config = { ...loaded, inboundMode };
+    const config = d.loadConfig(env, inventory);
+    const localHost = config.hostId;
     const home = d.loginHome();
     const acquiring = d.acquireInstanceLease(home).then(
       (value) => ({ kind: "lease", value }) as const,

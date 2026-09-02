@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { decodePeerParams, decodePeerResult, encodePeerFrame, peerEdgeRef, PEER_MAX_CATALOG_BYTES, PEER_MAX_REQUEST_BYTES,
+import { decodePeerParams, decodePeerResult, encodePeerFrame, PEER_MAX_CATALOG_BYTES, PEER_MAX_REQUEST_BYTES,
   PEER_METHOD_NOT_FOUND, PEER_PROTOCOL_VERSION, PEER_REQUEST_TIMEOUT_MS, PeerProtocolError, type PeerCatalogResult, type PeerHandoffParams, type PeerHandoffResult,
   type PeerMethod, type PeerMethodParams, type PeerMethodResult, type PeerRpcError, type PeerRpcId } from "./peer-protocol.js";
 
@@ -39,15 +39,9 @@ export class PeerClient {
   async catalog(): Promise<PeerCatalogResult> { const result = await this.request("catalog/get", {});
     const routeIds = result.routes.flatMap((row) => [row.alias, row.ref]), connectorIds = result.connectors.map((row) => row.provider);
     const invalid = (result.complete && result.truncated) || new Set(routeIds).size !== routeIds.length || new Set(connectorIds).size !== connectorIds.length ||
-      [...result.routes, ...result.connectors].some((row) => row.host !== this.remoteHost) || result.consentEdges.some((edge) => {
-        const hosts = edge.endpoints.map((endpoint) => endpoint.host).sort();
-        return hosts[0] !== [this.localHost, this.remoteHost].sort()[0] || hosts[1] !== [this.localHost, this.remoteHost].sort()[1] ||
-          edge.ownerHost !== hosts[0] || edge.ownerHost !== this.remoteHost || edge.ref !== peerEdgeRef(edge.endpoints);
-      }) || new Set(result.consentEdges.map((edge) => edge.ref)).size !== result.consentEdges.length ||
+      [...result.routes, ...result.connectors].some((row) => row.host !== this.remoteHost) ||
       result.alerts.some((alert) => (alert.host !== undefined && alert.host !== this.remoteHost) ||
-        (alert.alias !== undefined && !alert.alias.endsWith(`@${this.remoteHost}`))) || result.consentEdges.some((edge) => edge.endpoints
-          .filter((endpoint) => endpoint.host === this.remoteHost).some((endpoint) => !result.routes.some((route) =>
-            route.alias === endpoint.alias && route.provider === endpoint.provider && route.ref === endpoint.routeRef)));
+        (alert.alias !== undefined && !alert.alias.endsWith(`@${this.remoteHost}`)));
     if (invalid) { const error = new Error("Peer catalog is not a local, canonical projection"); this.fail(error); throw error; } return result; }
   prepareHandoff(params: PeerHandoffParams): PeerPreparedHandoff {
     decodePeerParams("handoff", params); if (this.closed) throw new PeerConnectionLostError();
@@ -82,7 +76,17 @@ export class PeerClient {
       if (Object.hasOwn(message, "error")) { const detail = error(message.error); if (detail === undefined) { const fault = new Error("Peer returned an invalid error response"); pending.reject(fault); this.fail(fault); } else pending.reject(new PeerRequestError(detail)); } else try {
         if (pending.method === "initialize" && object(message.result) && typeof message.result.protocolVersion === "number" && message.result.protocolVersion !== PEER_PROTOCOL_VERSION) throw new PeerProtocolError("PROTOCOL_MISMATCH");
         pending.resolve(decodePeerResult(pending.method, message.result)); }
-      catch (fault) { const error = fault instanceof Error ? fault : new Error("Invalid peer result"); pending.reject(error); this.fail(error); }
+      catch (fault) {
+        // A result this build cannot decode is a disagreement about the wire,
+        // not a broken tunnel: the shapes of `catalog/get` and `handoff`
+        // changed within this protocol version's own line, so a lagging node
+        // answers honestly and is still unreadable here. Naming it as a
+        // protocol mismatch sends the operator to upgrade the node instead of
+        // to debug SSH.
+        const error = fault instanceof PeerProtocolError && fault.code === "INVALID_RESULT"
+          ? new PeerConnectionLostError(`Peer ${pending.method} result is not readable by this build`, "protocol")
+          : fault instanceof Error ? fault : new Error("Invalid peer result");
+        pending.reject(error); this.fail(error); }
     } }
   private fail(error: Error): void { if (this.closed) return; this.closed = true; for (const pending of this.pending.values()) { this.timers.clearTimeout(pending.timer); pending.reject(error); } this.pending.clear(); this.child.kill(); }
 }

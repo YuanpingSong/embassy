@@ -7,7 +7,6 @@ import { TextDecoder } from "node:util";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
-  gatewayProviders,
   gatewayPublicSnapshotLimits,
   isGatewayProvider,
   isMessageDirection,
@@ -20,7 +19,6 @@ import type {
   NormalizedMessageEvent,
   PublicAvailablePeerSnapshot,
   PublicConnectorSnapshot,
-  PublicConsentEdgeSnapshot,
   PublicGatewayActivityEvent,
   PublicRouteSnapshot,
   RouteCounters,
@@ -55,8 +53,7 @@ const CONVERSATION_SUFFIX_PATTERN = /^[A-Za-z0-9_-]{8}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 export const gatewayControlMethods = [
-  "health", "register_codex", "unregister_codex",
-  "select_claude", "unselect_claude", "pair", "unpair", "list_snapshot",
+  "health", "register_codex", "unregister_codex", "list_snapshot",
   "observe_snapshot", "delivery_status", "send", "reply",
   "refresh_discovery", "peer_catalog", "peer_handoff",
   "register_peer", "unregister_peer", "await_peer", "peer_receipt",
@@ -73,10 +70,6 @@ export type ValidatedRegisterCodexParams = {
   succeedsAlias?: string;
 };
 export type UnregisterCodexParams = { alias: string; threadId: string };
-export type SelectClaudeParams = { alias: string };
-export type PairParams = {
-  aliases: readonly [string, string];
-};
 type SendBase = { fromAlias: string; toAlias: string; text: string; expectsReply?: boolean };
 type ValidatedSendBase = Omit<SendBase, "expectsReply"> & { expectsReply: boolean };
 export type SendParams = SendBase & (
@@ -105,9 +98,7 @@ export type PeerReceiptParams = PeerPrincipalParams & { receipt: string };
 
 type RequestParams = {
   health: Record<string, never>; register_codex: RegisterCodexParams;
-  unregister_codex: UnregisterCodexParams;
-  select_claude: SelectClaudeParams; unselect_claude: SelectClaudeParams;
-  pair: PairParams; unpair: PairParams; list_snapshot: Record<string, never>;
+  unregister_codex: UnregisterCodexParams; list_snapshot: Record<string, never>;
   observe_snapshot: Record<string, never>; delivery_status: DeliveryStatusParams;
   send: SendParams; reply: ReplyParams;
   refresh_discovery: Record<string, never>; peer_catalog: PeerCatalogParams;
@@ -131,10 +122,18 @@ export type GatewayDecisionCode =
   | "busy" | "unavailable" | "rejected";
 export type GatewayDecision =
   | { accepted: true; code: "ok" }
-  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok">; ownerHost?: string };
+  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
+/**
+ * A refused send or reply carries an optional `reason`: the safe error code
+ * behind the coarse decision. The decision code stays the contract clients
+ * branch on; `reason` exists so the CLI can name the one remedy that fits
+ * (rename a session, move a workspace, fix `--from`, rescan) instead of
+ * printing one generic line for six different failures. It is a safe code:
+ * bounded, allowlisted-shaped, and never a message, path, or identifier.
+ */
 export type GatewaySendResult =
   | { accepted: true; code: "ok"; conversationId: string; deliveryToken: string }
-  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok"> };
+  | { accepted: false; code: Exclude<GatewayDecisionCode, "ok">; reason?: string };
 export type GatewayHealthResult = { status: "ok" | "degraded"; revision: number };
 export type GatewayRefreshResult = GatewayDecision & { revision: number };
 export type GatewayDeliveryStatusState =
@@ -153,9 +152,7 @@ export type GatewayRegisterPeerResult = GatewayDecision | { accepted: true; code
 
 type ResultByMethod = {
   health: GatewayHealthResult; register_codex: GatewayDecision;
-  unregister_codex: GatewayDecision;
-  select_claude: GatewayDecision; unselect_claude: GatewayDecision;
-  pair: GatewayDecision; unpair: GatewayDecision; list_snapshot: GatewaySnapshot;
+  unregister_codex: GatewayDecision; list_snapshot: GatewaySnapshot;
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
   send: GatewaySendResult; reply: GatewaySendResult;
   refresh_discovery: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
@@ -168,10 +165,6 @@ export type GatewayControlHandlers = {
   health: () => MaybePromise<GatewayHealthResult>;
   registerCodex: (params: Readonly<ValidatedRegisterCodexParams>) => MaybePromise<GatewayDecision>;
   unregisterCodex: (params: Readonly<UnregisterCodexParams>) => MaybePromise<GatewayDecision>;
-  selectClaude: (params: Readonly<SelectClaudeParams>) => MaybePromise<GatewayDecision>;
-  unselectClaude: (params: Readonly<SelectClaudeParams>) => MaybePromise<GatewayDecision>;
-  pair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
-  unpair: (params: Readonly<PairParams>) => MaybePromise<GatewayDecision>;
   listSnapshot: () => MaybePromise<GatewaySnapshot>;
   observeSnapshot: () => MaybePromise<GatewaySnapshotObservation>;
   deliveryStatus: (params: Readonly<DeliveryStatusParams>) => MaybePromise<GatewayDeliveryStatusResult>;
@@ -411,17 +404,6 @@ function decodeRegister(value: unknown): ValidatedRegisterCodexParams {
 function decodeUnregister(value: unknown): UnregisterCodexParams {
   if (!shape(value, { alias, threadId: uuid }) || !(value.alias as string).startsWith("codex-")) invalid();
   return { alias: value.alias as string, threadId: (value.threadId as string).toLowerCase() }; }
-function decodeSelection(value: unknown): SelectClaudeParams {
-  if (!isRecord(value) || !exact(value, ["alias"]) ||
-      typeof value.alias !== "string" || !isClaudeSessionSelector(value.alias)) invalid();
-  return { alias: UUID_PATTERN.test(value.alias) ? value.alias.toLowerCase() : value.alias };
-}
-function decodePair(value: unknown): PairParams {
-  if (!isRecord(value) || !exact(value, ["aliases"]) || !Array.isArray(value.aliases) ||
-      value.aliases.length !== 2 || !alias(value.aliases[0]) || !alias(value.aliases[1]) ||
-      value.aliases[0] === value.aliases[1]) invalid();
-  return { aliases: [value.aliases[0], value.aliases[1]] };
-}
 function decodeSend(value: unknown): ValidatedSendParams {
   if (!isRecord(value) || !exact(value, ["fromAlias", "toAlias", "text"],
     ["threadId", "replyAddress", "peerToken", "expectsReply"]) ||
@@ -464,9 +446,7 @@ function decodeDeliveryStatus(value: unknown): DeliveryStatusParams {
 function isDecision(value: unknown): value is GatewayDecision {
   return shape(value, { accepted: (item) => typeof item === "boolean", code: oneOf(
     "ok", "not_found", "conflict", "route_mismatch", "busy", "unavailable", "rejected",
-  ) }, { ownerHost: host }) && (value.accepted === true
-    ? value.code === "ok" && value.ownerHost === undefined
-    : value.code !== "ok" && (value.ownerHost === undefined || value.code === "conflict"));
+  ) }) && (value.accepted === true ? value.code === "ok" : value.code !== "ok");
 }
 function isRegisterPeerResult(value: unknown): value is GatewayRegisterPeerResult {
   return isDecision(value) || shape(value, { accepted: oneOf(true), code: oneOf("ok"), token: peerToken });
@@ -474,7 +454,11 @@ function isRegisterPeerResult(value: unknown): value is GatewayRegisterPeerResul
 function isHealthResult(value: unknown): value is GatewayHealthResult {
   return shape(value, { status: oneOf("ok", "degraded"), revision: nonNegative }); }
 function isSendResult(value: unknown): value is GatewaySendResult {
-  if (!isRecord(value) || value.accepted !== true) return isDecision(value);
+  if (!isRecord(value) || value.accepted !== true) {
+    return shape(value, { accepted: oneOf(false), code: oneOf(
+      "not_found", "conflict", "route_mismatch", "busy", "unavailable", "rejected",
+    ) }, { reason: safeCode });
+  }
   return shape(value, { accepted: oneOf(true), code: oneOf("ok"),
     conversationId: (item) => typeof item === "string" && CONVERSATION_ID_PATTERN.test(item),
     deliveryToken: (item) => typeof item === "string" && DELIVERY_TOKEN_PATTERN.test(item) });
@@ -513,22 +497,10 @@ function isRouteSnapshot(value: unknown): value is PublicRouteSnapshot {
   const row = value as unknown as PublicRouteSnapshot;
   return row.alias.endsWith(`@${row.host}`) &&
     (row.oldestQueuedAt === undefined ? row.queueDepth === 0 : row.queueDepth > 0); }
-function compareConsentEndpoints(left: { alias: string; provider: string }, right: { alias: string; provider: string }): number {
-  return gatewayProviders.indexOf(left.provider as (typeof gatewayProviders)[number]) -
-    gatewayProviders.indexOf(right.provider as (typeof gatewayProviders)[number]) || left.alias.localeCompare(right.alias); }
-function isConsentEdgeSnapshot(value: unknown): value is PublicConsentEdgeSnapshot {
-  const endpoint = (item: unknown): item is { alias: string; provider: (typeof gatewayProviders)[number] } =>
-    shape(item, { alias, provider: isGatewayProvider });
-  if (!shape(value, { endpoints: (rows) => Array.isArray(rows) && rows.length === 2 && rows.every(endpoint),
-    host, counters: isRouteCounters }, { mutable: (item) => typeof item === "boolean" })) return false;
-  const [left, right] = value.endpoints as [{ alias: string; provider: string }, { alias: string; provider: string }];
-  const hosts = [left.alias.slice(left.alias.lastIndexOf("@") + 1), right.alias.slice(right.alias.lastIndexOf("@") + 1)];
-  return left.alias !== right.alias && compareConsentEndpoints(left, right) < 0 &&
-    (left.provider !== right.provider || hosts[0] !== hosts[1]) && value.host === [...hosts].sort()[0]; }
 function isAvailablePeerSnapshot(value: unknown): value is PublicAvailablePeerSnapshot {
   return shape(value, { alias, provider: oneOf("claude"), host,
     state: oneOf("idle", "busy", "awaiting_approval", "offline"),
-    validated: (item) => typeof item === "boolean", selected: (item) => typeof item === "boolean" },
+    validated: (item) => typeof item === "boolean", routed: (item) => typeof item === "boolean" },
   { lastSeenAt: iso, safeErrorCode: safeCode }) &&
     (value.alias as string).endsWith(`@${String(value.host)}`); }
 function isNormalizedMessageEvent(value: unknown): value is NormalizedMessageEvent {
@@ -551,15 +523,15 @@ function isSafeAlert(value: unknown): value is SafeGatewayAlert {
     { provider: isGatewayProvider, host, alias }); }
 function isGatewayActivityEvent(value: unknown): value is PublicGatewayActivityEvent {
   if (!shape(value, { sequence: positive, timestamp: iso,
-    kind: oneOf("discovery", "selection", "registration", "pairing"),
-    action: oneOf("discovery_refreshed", "claude_selected", "claude_unselected", "codex_registered",
-      "codex_succeeded", "codex_unregistered", "routes_paired", "routes_unpaired"),
+    kind: oneOf("discovery", "registration"),
+    action: oneOf("discovery_refreshed", "codex_registered", "codex_succeeded", "codex_unregistered",
+      "claude_route_installed", "claude_route_retired"),
     outcome: oneOf("accepted", "rejected"), aliases: (rows) => arrayOf(rows, 2, alias),
     operatorAction: oneOf(true) }, { safeErrorCode: safeCode })) return false;
   const allowed: Record<string, readonly string[]> = {
-    discovery: ["discovery_refreshed"], selection: ["claude_selected", "claude_unselected"],
-    registration: ["codex_registered", "codex_succeeded", "codex_unregistered"],
-    pairing: ["routes_paired", "routes_unpaired"],
+    discovery: ["discovery_refreshed"],
+    registration: ["codex_registered", "codex_succeeded", "codex_unregistered",
+      "claude_route_installed", "claude_route_retired"],
   };
   return new Set(value.aliases as string[]).size === (value.aliases as string[]).length &&
     (allowed[value.kind as string]?.includes(value.action as string) ?? false); }
@@ -574,17 +546,16 @@ function isDeadlinePressure(value: unknown): value is DeadlinePressureSnapshot {
   return rows.reduce<number>((sum, row) => sum + Number((row as JsonRecord).settled), 0) === value.terminalEvents &&
     rows.reduce<number>((sum, row) => sum + Number((row as JsonRecord).expired), 0) === value.expiredEvents; }
 function isSnapshotTruncation(value: unknown): boolean {
-  const required = ["connectors", "availablePeers", "routes", "consentEdges", "messages", "alerts"];
+  const required = ["connectors", "availablePeers", "routes", "messages", "alerts"];
   const optional = ["activityEvents"];
   return isRecord(value) && exact(value, required, optional) &&
     [...required, ...optional].every((key) => value[key] === undefined || nonNegative(value[key])); }
 export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
-  if (!shape(value, { schemaVersion: oneOf(2), generatedAt: iso, inboundMode: oneOf("paired", "open"),
+  if (!shape(value, { schemaVersion: oneOf(2), generatedAt: iso,
     health: isConnectorHealth,
     connectors: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.connectors, isConnectorSnapshot),
     availablePeers: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.availablePeers, isAvailablePeerSnapshot),
     routes: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.routes, isRouteSnapshot),
-    consentEdges: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.consentEdges, isConsentEdgeSnapshot),
     messages: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.messages, isNormalizedMessageEvent),
     accounting: isAccounting, alerts: (rows) => arrayOf(rows, gatewayPublicSnapshotLimits.alerts, isSafeAlert),
     truncation: isSnapshotTruncation },
@@ -596,17 +567,13 @@ export function isGatewaySnapshot(value: unknown): value is GatewaySnapshot {
   const connectorKeys = snapshot.connectors.map((row) => `${row.provider}@${row.host}`);
   const aliases = snapshot.routes.map((row) => row.alias);
   const peers = snapshot.availablePeers.map((row) => row.alias);
-  const edgeKeys = snapshot.consentEdges.map((row) => `${row.endpoints[0].alias}\0${row.endpoints[1].alias}`);
-  const routeByAlias = new Map(snapshot.routes.map((row) => [row.alias, row]));
   const honest = snapshot.connectors.every((row) => {
     const seen = row.lastSeenAt === undefined ? undefined : Date.parse(row.lastSeenAt);
     const age = seen === undefined ? undefined : Math.min(MAX_REVISION, Math.max(0, generated - seen));
     return (row.observationAgeMs === undefined || row.observationAgeMs === age) &&
       (row.health !== "healthy" || (age !== undefined && age <= CONNECTOR_OBSERVATION_STALE_AFTER_MS));
   });
-  return honest && unique(connectorKeys) && unique(aliases) && unique(peers) && unique(edgeKeys) &&
-    snapshot.consentEdges.every((edge) => edge.endpoints.every((endpoint) =>
-      routeByAlias.get(endpoint.alias)?.provider === endpoint.provider)) &&
+  return honest && unique(connectorKeys) && unique(aliases) && unique(peers) &&
     Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET;
 }
 function isSnapshotObservation(value: unknown): value is GatewaySnapshotObservation {
@@ -618,8 +585,6 @@ type Descriptor = { handler: keyof GatewayControlHandlers; decode: Decoder; resu
 const descriptors = {
   health: { handler: "health", decode: emptyParams, result: isHealthResult, mutation: false }, register_codex: { handler: "registerCodex", decode: decodeRegister, result: isDecision, mutation: true },
   unregister_codex: { handler: "unregisterCodex", decode: decodeUnregister, result: isDecision, mutation: true },
-  select_claude: { handler: "selectClaude", decode: decodeSelection, result: isDecision, mutation: true }, unselect_claude: { handler: "unselectClaude", decode: decodeSelection, result: isDecision, mutation: true },
-  pair: { handler: "pair", decode: decodePair, result: isDecision, mutation: true }, unpair: { handler: "unpair", decode: decodePair, result: isDecision, mutation: true },
   list_snapshot: { handler: "listSnapshot", decode: emptyParams, result: isGatewaySnapshot, mutation: false }, observe_snapshot: { handler: "observeSnapshot", decode: emptyParams, result: isSnapshotObservation, mutation: false },
   delivery_status: { handler: "deliveryStatus", decode: decodeDeliveryStatus, result: isDeliveryStatusResult, mutation: false },
   send: { handler: "send", decode: decodeSend, result: isSendResult, mutation: true },

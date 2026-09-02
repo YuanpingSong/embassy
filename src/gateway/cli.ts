@@ -37,7 +37,7 @@ export const EMBASSY_VERSION = "2.0.1";
 export const gatewayCliCommands = [
   "serve", "service", "health", "status", "delivery-status",
   "wait-delivery", "refresh", "register-codex",
-  "unregister-codex", "select-claude", "unselect-claude", "pair", "unpair",
+  "unregister-codex",
   "send", "reply",
   "register-peer", "unregister-peer", "await",
   "peer-stdio",
@@ -84,7 +84,7 @@ Usage:
   embassy <command> [options]
 
 Commands:
-  serve [--inbound open] Run the socket-only broker (paired inbound by default)
+  serve                  Run the socket-only broker
   service install|uninstall|status
                          Run the broker as a macOS launchd agent
   health                 Check broker health
@@ -99,11 +99,8 @@ Commands:
   await --alias <peer-alias> [--token-stdin]
                          Wait for one peer message and acknowledge stdout
   peer-stdio             Serve the bounded federation protocol on stdin/stdout
-  select-claude          Select a discovered Claude session
-  unselect-claude        Clear the Claude selection
-  pair [--from <alias> --to <alias>] Add one cross-provider consent edge
-  unpair [--from <alias> --to <alias>] Remove one cross-provider consent edge
-  send                   Send stdin between paired provider routes
+  send                   Send stdin to a route; a discovered Claude session's
+                         route installs on its first send
   reply                  Reply with a conversation token
   delivery-status        Read a delivery token
   wait-delivery          Wait for terminal delivery status
@@ -169,6 +166,16 @@ const CLI_HINT = {
     "nodes.json could not be written at {stateDir} (disk full, read-only, or quota?)",
   stateSyncFailed:
     "nodes.json was written at {stateDir} but the directory could not be synced; start again and check the volume",
+  unknownTarget:
+    "no current route answers to that name. A Claude session is addressed by its live name: run embassy refresh, then read embassy status for the name it has now.",
+  aliasCollision:
+    "the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.",
+  workspaceOverlap:
+    "that session's workspace contains the gateway state directory; move one so they no longer overlap, then retry.",
+  callerAliasMismatch:
+    "--from must be the sending session's own alias; read the name embassy status shows for this session.",
+  targetChanged:
+    "the session you addressed renamed or exited while the send was being set up; run embassy refresh and address it by its current name.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -274,12 +281,7 @@ function aliasHostFault(local: LocalHostIdentity, given: string): CliFault {
     local.defaulted ? "aliasHostDefaulted" : "aliasHostMismatch", undefined,
     { localHost: local.host, given, stateDir: local.stateDir });
 }
-function requirePairAliases(options: ParsedOptions): readonly [string, string] {
-  const from = requireAlias(options, "from");
-  const to = requireAlias(options, "to");
-  if (from === to) fault();
-  return [from, to];
-}
+
 function requireClaudeSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) fault();
@@ -371,13 +373,6 @@ async function readPeerInput(stdin: AsyncIterable<unknown>, source: string | "st
   return { token, text };
 }
 const emptyParams = (args: readonly string[]): Record<string, never> => args.length === 0 ? {} : fault();
-function parseServeInboundMode(args: readonly string[]): "paired" | "open" {
-  const options = parseOptions(args, ["inbound"]);
-  if (Object.keys(options).length === 0) return "paired";
-  count(options, 1);
-  if (options.inbound !== "open") fault();
-  return "open";
-}
 const envelope = (method: GatewayControlMethod, params: unknown): GatewayControlRequest =>
   ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params }) as GatewayControlRequest;
 async function buildRequest(
@@ -452,19 +447,6 @@ async function buildRequest(
       const { token } = await readPeerInput(stdin, source, false);
       await requireLocalAlias();
       return envelope(command === "register-peer" ? "register_peer" : command === "unregister-peer" ? "unregister_peer" : "await_peer", { alias, token });
-    }
-    case "select-claude":
-    case "unselect-claude": {
-      const options = parseOptions(args, ["alias", "session"]);
-      count(options, 1);
-      const selector = requireClaudeSelector(options, options.alias === undefined ? "session" : "alias");
-      return envelope(command === "select-claude" ? "select_claude" : "unselect_claude", { alias: selector });
-    }
-    case "pair":
-    case "unpair": {
-      const options = parseOptions(args, ["from", "to"]);
-      count(options, 2);
-      return envelope(command, { aliases: requirePairAliases(options) });
     }
     case "send": {
       const options = parseOptions(args, ["from", "to"], ["expects-reply", "token-stdin"]);
@@ -610,6 +592,26 @@ function writeBridgeErrorHint(stderr: Writable, error: BridgeError, env: NodeJS.
 }
 function isRejectedResult(result: unknown): boolean {
   return result !== null && typeof result === "object" && (result as { accepted?: unknown }).accepted === false;
+}
+/**
+ * A refused send or reply carries a safe `reason` beside its decision code.
+ * Each reason has exactly one remedy, and printing the wrong one is worse than
+ * printing none: the rescan advice belongs to an unrecognized Claude-shaped
+ * target on `send`, never to `reply`, whose not_found means a stale
+ * conversation token that no rescan will revive.
+ */
+function refusalHint(
+  request: GatewayControlRequest, result: unknown,
+): CliFaultHint | undefined {
+  if (!isRejectedResult(result)) return undefined;
+  const reason = (result as { reason?: unknown }).reason;
+  if (reason === "PEER_ALIAS_COLLISION") return "aliasCollision";
+  if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return "workspaceOverlap";
+  if (reason === "CLAUDE_ROUTE_MISMATCH") return "callerAliasMismatch";
+  if (reason === "CLAUDE_TARGET_CHANGED") return "targetChanged";
+  if ((result as { code?: unknown }).code !== "not_found" || request.method !== "send") return undefined;
+  const target = request.params.toAlias;
+  return target.startsWith("codex-") || target.startsWith("peer-") ? undefined : "unknownTarget";
 }
 function responseExitCode(response: GatewayControlResponse): number {
   return !response.ok ? gatewayCliExitCodes.failure
@@ -898,8 +900,9 @@ export async function runGatewayCli(
       }
     }
     if (command === "serve") {
+      emptyParams(args);
       await (dependencies.runServer ?? runGatewayServer)({
-        env, inboundMode: parseServeInboundMode(args),
+        env,
         ...(dependencies.serverSignal === undefined ? {} : { signal: dependencies.serverSignal }),
         onReady: async (result) => {
           if (serverReady) fault("SERVER_READY_ALREADY_EMITTED");
@@ -965,6 +968,8 @@ export async function runGatewayCli(
     const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr("decision"));
+      const hint = refusalHint(request, response.result);
+      if (hint !== undefined) stderr.write(`[embassy] ${renderHint(hint)}\n`);
     } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr("failure"));
     return exitCode;
   } catch (error) {

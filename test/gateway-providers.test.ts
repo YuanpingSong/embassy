@@ -13,7 +13,11 @@ import path from "node:path";
 import { setImmediate as delayImmediate } from "node:timers/promises";
 import { after, test } from "node:test";
 
+import net, { type Server } from "node:net";
+import { chmod } from "node:fs/promises";
+import { once } from "node:events";
 import { BridgeError } from "../src/errors.js";
+import { ClaudePeerAdapter } from "../src/gateway/claude-peer.js";
 import type {
   ClaudePeerDescriptor,
   ClaudePeerInboundMessage,
@@ -745,20 +749,23 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
     await provider.dispatch({
       ...claudeProvenance("codex-misleading@this-mac"),
       sourceProvider: "codex",
-      authorization: "native_reply",
+      authorization: "selected_route",
       binding: binding(provider),
-      messageId: "gateway-helper-native-reply",
-      text: "reply through the selected UUID",
+      messageId: "gateway-helper-routed-reply",
+      text: "reply through the installed route",
       expectsReply: false,
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     }),
     { state: "delivered" },
   );
-  const nativeReply = helpers[0]!.commands.filter(
+  // Every dispatch is a routed dispatch now, so every preparation carries the
+  // state root the target-workspace assertion needs.
+  const routedReply = helpers[0]!.commands.filter(
     (command) => command.method === "prepare_dispatch",
   ).at(-1);
-  assert.equal(nativeReply?.authorization, "native_reply");
-  assert.equal(Object.hasOwn(nativeReply ?? {}, "stateRoot"), false);
+  assert.equal(routedReply?.authorization, "selected_route");
+  assert.equal(routedReply?.method === "prepare_dispatch" && routedReply.stateRoot,
+    "/synthetic/controller-state");
   assert.equal(
     helpers[0]!.commands.filter((command) => command.method === "perform_dispatch")
       .length,
@@ -835,7 +842,7 @@ test("supervised Claude helpers preserve prepared-write evidence and provider bi
   await provider.close();
 });
 
-test("service restart restores selected Claude authority into per-operation preparation", async () => {
+test("service restart restores an installed Claude route's authority into per-operation preparation", async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "embassy-claude-restart-")));
   const config = loadGatewayConfig({ EMBASSY_STATE_DIR: path.join(root, "state") }, { host: "this-mac", nodes: [] });
   const storedClaude = {
@@ -851,8 +858,6 @@ test("service restart restores selected Claude authority into per-operation prep
   const seed = new GatewayStore(config);
   await seed.initialize();
   await seed.registerRoute(storedClaude); await seed.registerRoute(storedCodex);
-  await seed.addConsentEdge({ aliases: [storedClaude.alias, storedCodex.alias],
-    expectedRegistrationIds: [storedClaude.binding.registrationId, storedCodex.binding.registrationId] });
   await seed.close();
 
   const peer = new FakeClaudePeer(), helpers: CapturingNativeHelper[] = [];
@@ -1608,3 +1613,99 @@ test("Codex registration is zero-I/O and its observer reconnects without semanti
 // Type-only guard: the fake observer never acquires a live provider capability.
 const _transportTypeGuard: CodexAppServerTransport | undefined = undefined;
 void _transportTypeGuard;
+
+test("a real registry scan of two same-named sessions collides by name and stays reachable by UUID", async () => {
+  // The only collision test driven by real files: two session records under a
+  // test-owned sessions directory share a display name and differ by session
+  // UUID, and the fence is computed from that scan rather than from a stubbed
+  // discovery snapshot.
+  // Short root: Darwin's Unix-socket pathname limit is tight and os.tmpdir()
+  // can be a long per-user path. This never touches ~/.claude or /tmp/cc-socks.
+  const root = await realpath(await mkdtemp(path.join("/tmp", "embassy-registry-collision-")));
+  const sessionsDir = path.join(root, "sessions");
+  const socketDir = path.join(root, "sockets");
+  const home = path.join(root, "home");
+  const workspace = path.join(home, "workspace");
+  const systemTemp = path.join(root, "system-temp");
+  const stateDir = path.join(root, "state");
+  await Promise.all([
+    mkdir(sessionsDir, { recursive: true, mode: 0o700 }),
+    mkdir(socketDir, { recursive: true, mode: 0o700 }),
+    mkdir(workspace, { recursive: true, mode: 0o700 }),
+    mkdir(systemTemp, { recursive: true, mode: 0o700 }),
+  ]);
+  await chmod(home, 0o700);
+  const firstUuid = "00000000-0000-7000-8000-0000000009a1";
+  const secondUuid = "00000000-0000-7000-8000-0000000009a2";
+  const sharedName = "twin";
+  const servers: Server[] = [];
+  const processes = new Map<number, { uid: number; generation: string }>();
+  const addSession = async (pid: number, sessionId: string): Promise<void> => {
+    const socketPath = path.join(socketDir, `${pid}.sock`);
+    const server = net.createServer(() => undefined);
+    server.listen(socketPath);
+    await once(server, "listening");
+    await chmod(socketPath, 0o600);
+    servers.push(server);
+    processes.set(pid, { uid: process.getuid!(), generation: `process-generation-${pid}` });
+    await writeFile(path.join(sessionsDir, `${pid}.json`), JSON.stringify({
+      pid, sessionId, cwd: workspace, startedAt: 1_786_148_832_556,
+      procStart: "Sat Aug  8 00:27:11 2026", version: "2.0.0", peerProtocol: 1,
+      kind: "interactive", entrypoint: "cli", messagingSocketPath: socketPath,
+      name: sharedName, status: "idle",
+      updatedAt: 1_786_149_062_112, statusUpdatedAt: 1_786_149_062_112,
+    }), { mode: 0o600 });
+  };
+  await addSession(910_001, firstUuid);
+  await addSession(910_002, secondUuid);
+
+  const config = loadGatewayConfig({ EMBASSY_STATE_DIR: stateDir }, { host: "this-mac", nodes: [] });
+  const store = new GatewayStore(config);
+  await store.initialize();
+  const provider = createLocalClaudeGatewayProvider({
+    runtime: { sessionsDir, socketDir },
+    stateRoot: config.stateDir,
+    discoveryPollMs: 30_000,
+    peerFactory: (runtime) => new ClaudePeerAdapter(
+      { sessionsDir: runtime.sessionsDir, socketDir: runtime.socketDir,
+        connectTimeoutMs: 500, connectionIdleMs: 500 },
+      { processInspector: async (pid) => processes.get(pid), userHome: home, tempRoots: [systemTemp] },
+    ) as never,
+  });
+  const service = new GatewayService({ config, adapters: [provider, new RegistrationOnlyCodexProvider()],
+    store, nativePeerCwd: workspace });
+  try {
+    await service.start();
+    const handlers = service.handlers();
+    await handlers.registerCodex({ alias: "codex-main@this-mac", threadId: THREAD_ID,
+      hostId: "this-mac", busyPolicy: "queue" });
+    await waitFor(async () => (await handlers.refreshDiscovery()).accepted);
+
+    // Both sessions were scanned, so the shared name is unaddressable and the
+    // status snapshot never offers it.
+    assert.equal((await handlers.listSnapshot()).availablePeers.some(
+      (peer) => peer.alias === `${sharedName}@this-mac`), false);
+    assert.deepEqual(
+      await handlers.send({ fromAlias: "codex-main@this-mac", threadId: THREAD_ID,
+        toAlias: `${sharedName}@this-mac`, text: "by ambiguous name", expectsReply: false }),
+      { accepted: false, code: "conflict", reason: "PEER_ALIAS_COLLISION" },
+    );
+    assert.deepEqual((await store.listLogicalRoutes()).filter(
+      (route) => route.binding.provider === "claude"), []);
+
+    // The UUID reaches exactly one of them, and its route installs.
+    const byUuid = await handlers.send({ fromAlias: "codex-main@this-mac", threadId: THREAD_ID,
+      toAlias: secondUuid, text: "by exact uuid", expectsReply: false });
+    assert.equal(byUuid.accepted, true);
+    const installed = (await store.listLogicalRoutes()).filter(
+      (route) => route.binding.provider === "claude");
+    assert.equal(installed.length, 1);
+    assert.equal(installed[0]?.binding.routeHandle, secondUuid);
+    assert.equal(installed[0]?.alias, `${sharedName}@this-mac`);
+  } finally {
+    await service.close().catch(() => undefined);
+    await Promise.all(servers.map(async (server) =>
+      await new Promise<void>((resolve) => server.close(() => resolve()))));
+    await rm(root, { recursive: true, force: true });
+  }
+});

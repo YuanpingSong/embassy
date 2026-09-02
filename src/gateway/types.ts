@@ -1,8 +1,6 @@
 export const gatewayProviders = ["claude", "codex", "peer"] as const;
 export type GatewayProvider = (typeof gatewayProviders)[number];
 export const gatewayRegistrationIngressPrefixes = Object.freeze({ claude: undefined, codex: "codex-", peer: "peer-" } satisfies Readonly<Record<GatewayProvider, string | undefined>>);
-export const gatewayInboundModes = ["paired", "open"] as const;
-export type GatewayInboundMode = (typeof gatewayInboundModes)[number];
 export const connectorHealthStates = ["offline", "connecting", "healthy", "degraded"] as const;
 export type ConnectorHealth = (typeof connectorHealthStates)[number];
 export const routeStates = ["stale", "idle", "busy", "awaiting_approval", "offline", "disabled"] as const;
@@ -48,7 +46,7 @@ export type BusyPolicy = "queue";
 export const gatewayPublicSnapshotLimits = Object.freeze({
   connectors: 64, registryRejectionCodes: 32,
   availablePeers: 256, routes: 256,
-  consentEdges: 256, activityEvents: 256,
+  activityEvents: 256,
   messages: 1_024, alerts: 256,
 } as const);
 export const GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET = 240 * 1024;
@@ -67,17 +65,6 @@ export type GatewayRouteRecord = {
   alias: string; binding: LogicalRouteBinding; registrationMode: RouteRegistrationMode; enabled: boolean; busyPolicy: BusyPolicy; registeredAt: string; updatedAt: string; counters: RouteCounters;
 };
 /**
- * Durable bidirectional consent between two exact route owners. Aliases are
- * display coordinates; the private registration identities prevent an alias from silently
- * retargeting an existing permission edge.
- */
-export type GatewayConsentEndpoint = Readonly<{
-  alias: string; provider: GatewayProvider; registrationId: string;
-}>;
-export type GatewayConsentEdgeRecord = {
-  endpoints: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint]; createdAt: string; updatedAt: string; counters: RouteCounters;
-};
-/**
  * Controller-internal route view used to prove ownership across a restart.
  * This type must never cross the control protocol or enter a public snapshot.
  */
@@ -86,11 +73,11 @@ export type GatewayPrivateRouteInspection = {
 };
 export type QueuedMessageMetadata = {
   messageId: string; messageIdSuffix: string; conversationIdSuffix?: string; direction: MessageDirection; sourceAlias: string; targetAlias: string; enqueuedAt: string; deadlineAt: string;
-  bytes: number; body?: string; pair?: true; transientTarget?: true;
+  bytes: number; body?: string;
   steer?: true;
 };
 export type DedupeRecord = {
-  fingerprint: string; messageIdSuffix: string; conversationIdSuffix?: string; sourceAlias: string; targetAlias: string; direction: MessageDirection; pair?: true; firstSeenAt: string;
+  fingerprint: string; messageIdSuffix: string; conversationIdSuffix?: string; sourceAlias: string; targetAlias: string; direction: MessageDirection; firstSeenAt: string;
   expiresAt: string;
 };
 export type RateBucket = {
@@ -114,7 +101,7 @@ export type GatewayPreparedWriteEvidence = {
   bodyBytes: number; bodySha256: string; frameBytes: number; sha256: string;
 };
 export type GatewayMessageAttemptAuthority = {
-  attemptId: string; attemptCount: number; targetRegistrationId: string; sourceRegistrationId: string | null; consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+  attemptId: string; attemptCount: number; targetRegistrationId: string; sourceRegistrationId: string;
 };
 export type GatewayMessageState =
   | { phase: "queued"; attemptCount: number }
@@ -141,7 +128,7 @@ export type GatewayMessageState =
       latencyMs: number;
     };
 export type GatewayMessageRecord = QueuedMessageMetadata & {
-  sequence: number; deliveryToken?: string; sourceRegistrationId: string | null; targetRegistrationId: string | null; consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+  sequence: number; deliveryToken?: string; sourceRegistrationId: string; targetRegistrationId: string | null;
   state: GatewayMessageState;
 };
 export type GatewayMessageActivity = {
@@ -155,15 +142,11 @@ export type GatewayStateActivity =
   | GatewayRuntimeActivity;
 export type GatewayPersistedState = {
   schemaVersion: 5; commit: { sequence: number; id: string }; createdAt: string; updatedAt: string; eventSequence: number; routes: GatewayRouteRecord[];
-  consentEdges: GatewayConsentEdgeRecord[]; messages: GatewayMessageRecord[]; dedupe: DedupeRecord[]; rateBuckets: RateBucket[]; activity: GatewayStateActivity[]; accounting: GatewayAccounting;
+  messages: GatewayMessageRecord[]; dedupe: DedupeRecord[]; rateBuckets: RateBucket[]; activity: GatewayStateActivity[]; accounting: GatewayAccounting;
 };
 export type PublicRouteSnapshot = {
   alias: string; provider: GatewayProvider; host: string; enabled: boolean; state: RouteState; busyPolicy: BusyPolicy; lastSeenAt?: string; queueDepth: number;
   oldestQueuedAt?: string; counters: RouteCounters; safeErrorCode?: string; mutable?: boolean;
-};
-export type PublicConsentEndpointSnapshot = Readonly<{ alias: string; provider: GatewayProvider }>;
-export type PublicConsentEdgeSnapshot = {
-  endpoints: readonly [PublicConsentEndpointSnapshot, PublicConsentEndpointSnapshot]; host: string; counters: RouteCounters; mutable?: boolean;
 };
 export type PublicConnectorSnapshot = {
   provider: GatewayProvider; host: string; health: ConnectorHealth; protocol: string; protocolVersion: string; lastSeenAt?: string; observationAgeMs?: number; safeErrorCode?: string; registry?: PublicRegistryObservationSnapshot;
@@ -190,27 +173,31 @@ export type PublicAvailablePeerState =
  * A transient, metadata-only discovery row. Native provider IDs, process
  * identifiers, registry/socket paths, and generations are deliberately absent.
  * Version 1 uses this for genuine Claude peers; Codex inventory remains the
- * explicit PublicRouteSnapshot list.
+ * explicit PublicRouteSnapshot list. `routed` means the session currently has
+ * an installed logical route — it is a fact about the route table, never a
+ * permission: any discovered session is addressable, and its route installs on
+ * first use.
  */
 export type PublicAvailablePeerSnapshot = {
-  alias: string; provider: GatewayProvider; host: string; state: PublicAvailablePeerState; validated: boolean; selected: boolean; lastSeenAt?: string; safeErrorCode?: string;
+  alias: string; provider: GatewayProvider; host: string; state: PublicAvailablePeerState; validated: boolean; routed: boolean; lastSeenAt?: string; safeErrorCode?: string;
 };
 export const gatewayActivityKinds = [
   "discovery",
-  "selection",
   "registration",
-  "pairing",
 ] as const;
 export type GatewayActivityKind = (typeof gatewayActivityKinds)[number];
+/**
+ * `claude_route_installed` and `claude_route_retired` are journaled by the
+ * store when a send installs, renames, or displaces a discovered Claude
+ * session's route; there is no explicit Claude registration command.
+ */
 export const gatewayActivityActions = [
   "discovery_refreshed",
-  "claude_selected",
-  "claude_unselected",
   "codex_registered",
   "codex_succeeded",
   "codex_unregistered",
-  "routes_paired",
-  "routes_unpaired",
+  "claude_route_installed",
+  "claude_route_retired",
 ] as const;
 export type GatewayActivityAction = (typeof gatewayActivityActions)[number];
 export type PublicGatewayActivityEvent = {
@@ -253,7 +240,7 @@ function nonNegative(value: unknown): value is number {
 export function isPublicAvailablePeerSnapshot(value: unknown): value is PublicAvailablePeerSnapshot {
   const candidate = publicRecord(value);
   if (candidate === undefined ||
-    !exactPublicKeys(candidate, ["alias", "provider", "host", "state", "validated", "selected"],
+    !exactPublicKeys(candidate, ["alias", "provider", "host", "state", "validated", "routed"],
       ["lastSeenAt", "safeErrorCode"]) ||
     typeof candidate.alias !== "string" ||
     !PUBLIC_ALIAS_PATTERN.test(candidate.alias) ||
@@ -264,7 +251,7 @@ export function isPublicAvailablePeerSnapshot(value: unknown): value is PublicAv
     typeof candidate.state !== "string" ||
     !(publicAvailablePeerStates as readonly string[]).includes(candidate.state) ||
     typeof candidate.validated !== "boolean" ||
-    typeof candidate.selected !== "boolean") return false;
+    typeof candidate.routed !== "boolean") return false;
   return (candidate.lastSeenAt === undefined || publicTimestamp(candidate.lastSeenAt)) &&
     (candidate.safeErrorCode === undefined ||
       (typeof candidate.safeErrorCode === "string" && PUBLIC_SAFE_CODE_PATTERN.test(candidate.safeErrorCode)));
@@ -311,13 +298,13 @@ export type SafeGatewayAlert = {
   code: string; severity: AlertSeverity; timestamp: string; provider?: GatewayProvider; host?: string; alias?: string;
 };
 export type GatewayPublicSnapshot = {
-  schemaVersion: 2; generatedAt: string; inboundMode: GatewayInboundMode; health: ConnectorHealth;
-  connectors: PublicConnectorSnapshot[]; availablePeers: PublicAvailablePeerSnapshot[]; routes: PublicRouteSnapshot[]; consentEdges: PublicConsentEdgeSnapshot[];
+  schemaVersion: 2; generatedAt: string; health: ConnectorHealth;
+  connectors: PublicConnectorSnapshot[]; availablePeers: PublicAvailablePeerSnapshot[]; routes: PublicRouteSnapshot[];
   activityEvents?: PublicGatewayActivityEvent[]; deadlinePressure?: DeadlinePressureSnapshot;
   messages: NormalizedMessageEvent[]; accounting: GatewayAccounting; alerts: SafeGatewayAlert[]; truncation: GatewaySnapshotTruncation;
 };
 export type GatewaySnapshotTruncation = {
-  connectors: number; availablePeers: number; routes: number; consentEdges: number;
+  connectors: number; availablePeers: number; routes: number;
   activityEvents?: number; messages: number;
   alerts: number;
 };
@@ -350,7 +337,7 @@ function snapshotBytes(snapshot: GatewayPublicSnapshot): number {
  * Deterministically projects a canonical snapshot under the local control
  * byte budget. Content is never shortened: complete metadata rows are either
  * retained or counted as omitted. Registry rejection-code detail is shed
- * before consent edges or selected routes; connector inventory remains last.
+ * before routes; connector inventory remains last.
  */
 export function projectGatewayPublicSnapshot(
   snapshot: GatewayPublicSnapshot, maximumBytes: number = GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
@@ -367,7 +354,6 @@ export function projectGatewayPublicSnapshot(
     connectors: snapshot.truncation.connectors + omitted(snapshot.connectors.length, gatewayPublicSnapshotLimits.connectors),
     availablePeers: snapshot.truncation.availablePeers + omitted(snapshot.availablePeers.length, gatewayPublicSnapshotLimits.availablePeers),
     routes: snapshot.truncation.routes + omitted(snapshot.routes.length, gatewayPublicSnapshotLimits.routes),
-    consentEdges: snapshot.truncation.consentEdges + omitted(snapshot.consentEdges.length, gatewayPublicSnapshotLimits.consentEdges),
     messages: snapshot.truncation.messages + omitted(snapshot.messages.length, gatewayPublicSnapshotLimits.messages),
     alerts: snapshot.truncation.alerts + omitted(snapshot.alerts.length, gatewayPublicSnapshotLimits.alerts),
   };
@@ -380,7 +366,6 @@ export function projectGatewayPublicSnapshot(
     connectors: structuredClone(snapshot.connectors.slice(0, gatewayPublicSnapshotLimits.connectors)),
     availablePeers: snapshot.availablePeers.slice(0, gatewayPublicSnapshotLimits.availablePeers),
     routes: snapshot.routes.slice(0, gatewayPublicSnapshotLimits.routes),
-    consentEdges: snapshot.consentEdges.slice(0, gatewayPublicSnapshotLimits.consentEdges),
     ...(snapshot.activityEvents === undefined ? {} : {
       activityEvents: snapshot.activityEvents.slice(-gatewayPublicSnapshotLimits.activityEvents),
     }),
@@ -434,7 +419,7 @@ export function projectGatewayPublicSnapshot(
     projected.truncation.messages = omissions;
   })) return projected;
   const peers = [...projected.availablePeers].sort((left, right) => {
-    if (left.selected !== right.selected) return left.selected ? -1 : 1;
+    if (left.routed !== right.routed) return left.routed ? -1 : 1;
     const byState = peerPriority(left.state) - peerPriority(right.state);
     if (byState !== 0) return byState;
     const bySeen = (right.lastSeenAt ?? "").localeCompare(left.lastSeenAt ?? "");
@@ -491,20 +476,6 @@ export function projectGatewayPublicSnapshot(
     if (byState !== 0) return byState;
     return left.alias.localeCompare(right.alias);
   });
-  const consentEdges = [...projected.consentEdges].sort((left, right) =>
-    left.endpoints
-      .map((endpoint) => `${endpoint.provider}\0${endpoint.alias}`)
-      .join("\0")
-      .localeCompare(
-        right.endpoints
-          .map((endpoint) => `${endpoint.provider}\0${endpoint.alias}`)
-          .join("\0"),
-      ),
-  );
-  if (retainRows(consentEdges, projected.truncation.consentEdges, false, (rows, omissions) => {
-    projected.consentEdges = rows;
-    projected.truncation.consentEdges = omissions;
-  })) return projected;
   if (retainRows(routes, projected.truncation.routes, false, (rows, omissions) => {
     projected.routes = rows;
     projected.truncation.routes = omissions;
@@ -542,7 +513,7 @@ export type RegisterRouteInput = {
 export type GatewayReservedAttempt = Readonly<{
   messageId: string; attemptId: string; attemptCount: number; body: string;
   deadlineAt: string; direction: MessageDirection; sourceAlias: string; targetAlias: string;
-  conversationIdSuffix?: string; sourceRegistrationId: string | null; targetRegistrationId: string; consentEdge: readonly [GatewayConsentEndpoint, GatewayConsentEndpoint] | null;
+  conversationIdSuffix?: string; sourceRegistrationId: string; targetRegistrationId: string;
   bytes: number; steer?: true;
 }>;
 export type ReserveMessageResult =
@@ -553,11 +524,11 @@ type AttemptInput = Readonly<{ messageId: string; attemptId: string }>;
 type StaleAttemptResult = Readonly<{ status: "stale" }>;
 type SettledAttemptResult = Readonly<{ status: "settled"; settlement: TerminalMessageSettlement }>;
 export type AuthorizeMessageInput = AttemptInput & Readonly<{
-  sourceRegistrationId: string | null; targetRegistrationId: string; prepared: GatewayPreparedWriteEvidence;
+  sourceRegistrationId: string; targetRegistrationId: string; prepared: GatewayPreparedWriteEvidence;
 }>;
 export type AuthorizeMessageResult =
   | Readonly<{ status: "authorized" }>
-  | Readonly<{ status: "stale"; reason: "not_reserved" | "attempt_mismatch" | "registration_changed" | "consent_removed" }>
+  | Readonly<{ status: "stale"; reason: "not_reserved" | "attempt_mismatch" | "registration_changed" }>
   | Readonly<{ status: "terminal"; reason: "expired" | "fenced"; settlement: TerminalMessageSettlement }>;
 export type AcceptMessageInput = AttemptInput & Readonly<{
   lossOutcome: "unconfirmed" | "ambiguous";
@@ -596,17 +567,24 @@ export type ReplaceCodexRegistrationAtomicInput = Readonly<{
 export type ReplaceCodexRegistrationAtomicResult = Readonly<{
   replaced: boolean; idempotent: boolean; settlements: readonly TerminalMessageSettlement[];
 }>;
+/**
+ * Result of installing a discovered Claude session's route on first send.
+ * `settlements` carries the work of any route the install displaced.
+ */
+export type InstallClaudeRouteResult = Readonly<{
+  installed: boolean; settlements: readonly TerminalMessageSettlement[];
+}>;
 export type EnqueueMessageInput = {
   sourceAlias: string; targetAlias: string; expectedSourceRegistrationId?: string; expectedTargetRegistrationId?: string;
   body: string; dedupeKey: string; conversationIdSuffix?: string; deadlineAt?: string;
   steer?: true;
 };
 /**
- * Controller-internal proof of one currently observed native Claude peer.
- * The binding may contain a native session identifier and must remain an
- * in-memory call argument. Store metadata retains only the public alias.
+ * The native Claude sender of one inbound message: its installed route's
+ * alias and exact binding. The binding carries a native session identifier
+ * and must remain an in-memory call argument.
  */
-export type TransientNativeClaudePeer = {
+export type NativeClaudeSender = {
   alias: string; binding: LogicalRouteBinding;
 };
 export type EnqueueNativeIngressInput = Omit<
@@ -616,22 +594,11 @@ export type EnqueueNativeIngressInput = Omit<
   | "expectedSourceRegistrationId"
   | "expectedTargetRegistrationId"
 > & {
-  source: TransientNativeClaudePeer; targetAlias: string; expectedTargetRegistrationId: string;
-  authorizedPairTeardownReply?: true;
-};
-export type EnqueueNativeReplyInput = Omit<
-  EnqueueMessageInput,
-  | "sourceAlias"
-  | "targetAlias"
-  | "expectedSourceRegistrationId"
-  | "expectedTargetRegistrationId"
-> & {
-  sourceAlias: string; expectedSourceRegistrationId: string; target: TransientNativeClaudePeer;
-  pair?: true; exposeDeliveryToken?: true;
+  source: NativeClaudeSender; targetAlias: string; expectedTargetRegistrationId: string;
 };
 export type EnqueueMessageResult = {
   accepted: boolean; duplicate: boolean; messageId?: string; messageIdSuffix: string;
-  deliveryToken?: string; pair?: true;
+  deliveryToken?: string;
   supersededSettlement?: TerminalMessageSettlement;
 };
 /**
@@ -643,7 +610,7 @@ export type TerminalMessageSettlement = {
   messageId: string; state: TerminalDeliveryOutcome; safeErrorCode?: string;
 };
 export type GatewayStoreLimits = {
-  maxRoutes: number; maxConsentEdges: number; eventCapacity: number;
+  maxRoutes: number; eventCapacity: number;
   eventTtlMs: number; dedupeCapacity: number; dedupeTtlMs: number; maxQueueMessages: number;
   maxQueueMessagesPerRoute: number; maxInFlightMessages: number; maxQueueBytes: number; maxMessageBytes: number;
   maxRetainedBodyBytes?: number; messageDeadlineMs: number; rateLimitPerRoute: number; rateWindowMs: number;

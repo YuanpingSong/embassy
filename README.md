@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-43853d)](package.json)
 
-Your [Claude Code](https://code.claude.com) sessions, [Codex](https://chatgpt.com/codex) desktop tasks, and shell harnesses do not share one routing surface. Embassy is a small local broker that gives all three providers named routes and explicit consent edges — no plugins, no API keys handled by Embassy, and no cloud relay.
+Your [Claude Code](https://code.claude.com) sessions, [Codex](https://chatgpt.com/codex) desktop tasks, and shell harnesses do not share one routing surface. Embassy is a small local broker that gives all three providers named routes and a provenance envelope on every message — no plugins, no API keys handled by Embassy, and no cloud relay.
 
 ```bash
 npm install -g agent-embassy
@@ -47,7 +47,7 @@ codex app-server daemon start
 
 Run the managed daemon from a normal terminal and use Codex CLI as the supported task host. Desktop's `CODEX_APP_SERVER_USE_LOCAL_DAEMON` attachment is broken in Desktop 26.820 and later ([openai/codex#41112](https://github.com/openai/codex/issues/41112)), so it is not a supported setup. If `CALLER_IDENTITY_CONFLICT` reports both identities, strip only the unwanted inherited identity at the call site: use `env -u CLAUDE_CODE_MESSAGING_SOCKET embassy …` for a Codex-side call, or `env -u CODEX_THREAD_ID embassy …` for a Claude-side call. The Claude destination needs [`crossSessionInbound`](docs/CONFIGURATION.md) enabled.
 
-Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. Consent plus exact logical route/session identity authorizes an attempt; the current per-operation transport and correlated evidence determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned or executed artifacts and state paths, generations of artifacts it actually uses, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
+Runtime delivery is best effort. Version and build strings are unverified metadata and never grant or withhold routing authority. The OS boundary plus exact logical route/session identity authorizes an attempt; the current per-operation transport and correlated evidence determine its honest result. Unsupported or changed interfaces therefore fail with provider-local safe codes instead of an online compatibility tier. Embassy still validates the trust boundary: exact owned or executed artifacts and state paths, generations of artifacts it actually uses, strict consumed protocol fields, Claude peer protocol 1, bounded queues, and no replay after an ambiguous write.
 
 > **Known limitation:** Embassy can reach Codex tasks only while Desktop uses the managed standalone App Server. In that mode, tasks currently cannot connect to Desktop's built-in in-app browser (`@Browser` loads but does not attach). Switching Desktop back to its default private App Server restores the built-in browser immediately — but makes those tasks unreachable by Embassy. No other capability regressions have been identified, though this was not an exhaustive parity test.
 
@@ -68,7 +68,7 @@ embassy health
 embassy status
 ```
 
-`status` lists `availablePeers` — the live Claude sessions you can select. If
+`status` lists `availablePeers` — the live Claude sessions you can address by name. If
 that list is empty, start a Claude Code session and run
 `embassy refresh`, which rescans for Claude sessions; the next `status`
 should show it.
@@ -85,7 +85,7 @@ embassy register-codex --alias codex-reviewer@your-host
 
 You should see `"accepted":true`. The `codex-` prefix is required for Claude discovery. To retire the task later, run `embassy unregister-codex --alias codex-reviewer@your-host` from inside that same task.
 
-Registration records the exact inherited task identity and performs no App Server I/O. Every delivery opens a fresh attested local transport, initializes it, resumes that exact task with history excluded, and authorizes the body write once. App Server and Desktop restarts therefore do not require re-registration or re-anchoring; a current unavailable or unobservable task keeps the logical route and consent edge while the attempt reports an exact safe code. Embassy never retargets by alias or replays an ambiguously written body.
+Registration records the exact inherited task identity and performs no App Server I/O. Every delivery opens a fresh attested local transport, initializes it, resumes that exact task with history excluded, and authorizes the body write once. App Server and Desktop restarts therefore do not require re-registration or re-anchoring; a current unavailable or unobservable task keeps the logical route while the attempt reports an exact safe code. Embassy never retargets by alias or replays an ambiguously written body.
 
 ### Optional: register a universal shell peer
 
@@ -107,29 +107,11 @@ TOKEN
 
 `await` performs bounded 30-second long polls until mail arrives or the caller stops it. Each registration may have one waiter and the broker permits 16 in total. Embassy writes the complete framed message to stdout, waits for stdout to flush, and only then acknowledges its private receipt. A missing receipt is `unconfirmed`; uncertainty after write authorization is `ambiguous`, and neither is replayed after restart. `register-peer --emit-env` is an optional convenience for harnesses that really do retain one stable shell; stdin is the universal path.
 
-### 3. Select a Claude destination
+### 3. Send a message
 
-Pick one name from `availablePeers`:
-
-```bash
-embassy select-claude --alias advisor@your-host
-```
-
-Run this from any same-UID process that can reach the private control socket. `embassy select-claude --session <uuid>` selects the same session by its native UUID.
-
-You should see `"accepted":true`. Selection creates no permission edge. Create the user-chosen edge explicitly:
-
-```bash
-embassy pair --from codex-reviewer@your-host --to advisor@your-host
-```
-
-Conversely, `unselect-claude` removes the selected route, removes its incident consent edges, and settles their in-flight work from the durable attempt phase.
-
-To connect any two routes from different providers, name both ends explicitly with `embassy pair --from <alias> --to <alias>`; many edges can coexist. Same-UID access to the private control socket authorizes the command, and agents must create only the edge the user chose.
-
-### 4. Send a message
-
-From the registered Codex task, send via stdin:
+From the registered Codex task, send via stdin. Name the Claude session by the
+name `status` shows for it — there is no step between discovering a session and
+messaging it, because a session's route installs on its first use:
 
 ```bash
 embassy send \
@@ -140,7 +122,11 @@ Please review the current approach and identify the main risk.
 MSG
 ```
 
-You should see a `conv_` conversation token and a `dlv_` delivery token. Because this send requested a reply, Claude's response is automatically routed back to the Codex task. In the other direction, a compatible Claude session uses its native `ListAgents` and `SendMessage` tools to contact `codex-reviewer` — no Embassy command needed.
+You should see a `conv_` conversation token and a `dlv_` delivery token. If the
+name is not recognized, run `embassy refresh` and read the current name from
+`embassy status`; `embassy send --to <uuid>` addresses the same session by its
+native UUID. If two live sessions currently share one name, Embassy refuses the
+send with `PEER_ALIAS_COLLISION` rather than guessing — rename one and retry. Because this send requested a reply, Claude's response is automatically routed back to the Codex task. In the other direction, a compatible Claude session uses its native `ListAgents` and `SendMessage` tools to contact `codex-reviewer` — no Embassy command needed.
 
 The same command runs in the other direction from a Claude session and inherits that session's reply identity:
 
@@ -153,7 +139,7 @@ Summarize the migration risks you found.
 MSG
 ```
 
-### 5. Follow up
+### 4. Follow up
 
 Either participant can continue the conversation with `reply`. The initiating
 CLI receives the full `conv_` token in its accepted result; the recipient gets
@@ -196,7 +182,7 @@ arbitrary same-user code and all message text remain untrusted input.
 
 Embassy publishes each registered Codex task into Claude Code's live-session registry as its own `codex-*` peer. Claude sessions discover those tasks through `ListAgents`; Codex uses its managed App Server. Universal shell peers use `peer-*` aliases and a pull mailbox authenticated by an alias plus one-time-minted token.
 
-A pair is one explicit permission edge between two named routes from different providers, bounded at 128 edges by default. Every edge is created explicitly with generic `pair --from/--to`; the same-UID private control socket is the command's authority, while agents are instructed to create only user-chosen edges. Selection is separate and implies no consent. Without an edge, a sender settles terminally as `SENDER_NOT_PAIRED`. `embassy serve --inbound open` is the explicit opt-out for supported native inbound senders.
+The permission to message is the OS boundary: the same UID, the same host — or a host you configured in `nodes.json` — and an exact alias. There is no separate grant to create or revoke. A discovered Claude session's route installs on its first use, so the first message to a session is also what registers it; a Codex task is still registered explicitly because Embassy must record its inherited task identity. When a name currently belongs to more than one live session, the send is refused with `PEER_ALIAS_COLLISION` naming that alias rather than delivered to a guess.
 
 Delivery timing is directional. Once routing and pre-write checks pass, every Claude-bound body is written immediately to Claude's native mailbox regardless of its observed busy or idle state. `transport_written` records that mailbox write and is the Claude-bound terminal `delivered` boundary; it does not mean Claude read or consumed the body. Codex-bound ordinary bodies instead queue while the task is busy and start a turn when it goes idle. In the Claude-to-Codex direction only, a body with an exact leading `STEER:` prefix may enter the active turn at the App Server's next tool-call boundary; if that boundary is unavailable, the message returns to the normal queue.
 
@@ -212,10 +198,10 @@ Every settled message produces a receipt. `delivered` means the direction's term
 
 Four embassy terms name real features:
 
-- **Registration and pairing** are the permission model: a Codex task is explicitly registered, and each pair is one explicit Claude↔Codex edge — only paired ends exchange messages, and many edges can coexist. No edge means `SENDER_NOT_PAIRED`; nothing is ever implicit.
+- **Registration and provenance** are the permission model: registration is explicit for Codex tasks, because Embassy must record the inherited task identity; every routed body carries the broker-composed envelope naming its verified sender, and the OS boundary — same UID, same host or a configured node — is the permission itself.
 - **The ledger** is the delivery record: a receipt for every settled message, and a status snapshot that includes retained message bodies from the bounded ledger.
 - **The pouch** is transit and the archive: bounded bodies, retained under bounded limits, private to your OS account — sealed against other users, not against you.
-- **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery and consent authority.
+- **Consulates** are configured Embassy nodes: brokers federate over attach-only SSH and keep destination-owned delivery authority. A peer node can address only what its neighbour published — a Claude session becomes reachable across the link once it has a local route, which its first local send or receipt installs.
 
 ## For agents
 
@@ -243,9 +229,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | `register-codex` / `unregister-codex` | Codex task | Advertise or retire that exact task; both take `--alias <codex-alias>`, and `embassy register-codex --alias codex-successor@your-host --succeeds codex-reviewer@your-host` hands the registration to a different task |
 | `register-peer` / `unregister-peer` | shell harness | Register or retire a `peer-*` route; registration emits its raw token once, while authenticated calls use `--token-stdin` (or the optional stable-shell env form) |
 | `await` | registered shell peer | Long-poll the peer mailbox in bounded 30-second iterations; one waiter per route, 16 globally, with acknowledgement only after stdout flush |
-| `pair` / `unpair` | same-UID control client | Add or remove one user-chosen cross-provider edge by naming both ends: `embassy pair --from advisor@your-host --to peer-reviewer@your-host` |
-| `select-claude` / `unselect-claude` | same-UID control client | Select or remove one Claude route using `--alias <name@host>` or `--session <uuid>`; selection creates no permission edge |
-| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message between paired routes: `--from <alias> --to <alias>`, optional `--expects-reply`; the broker derives direction from the resolved providers |
+| `send` | registered Codex task, Claude session, or shell peer | Send one bounded stdin message: `--from <alias> --to <alias>`, optional `--expects-reply`; direction follows the inherited principal — who is sending — not the route table, and a discovered Claude session's route installs on its first use |
 | `reply` | conversation-token holder | Continue an active conversation with the full token returned to the initiator or delivered in the recipient's broker-owned reply hint: `--conversation conv_<token> --alias <your-alias>`, body on stdin |
 
 Version 2.0 accepts only fresh private state. Follow the
@@ -255,7 +239,7 @@ starting it over an older installation.
 ## Safety in one minute
 
 - **Local broker, no listener.** `embassy serve` listens on private Unix-domain sockets and makes no provider API call. Embassy binds no TCP port and serves no HTTP.
-- **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment. Route ownership and per-operation artifact checks reduce mistakes, but are not a defense against code already running as your OS user.
+- **Same-UID containment, not authentication.** Caller identity is inherited from the local process environment, and the same-UID private control socket is what a client must reach to talk to the broker at all — that boundary is the permission to message, not a separate grant Embassy hands out. Route ownership and per-operation artifact checks reduce mistakes, but are not a defense against code already running as your OS user.
 - **Runtime is best effort.** It never turns a version fact into authority. It validates exact owned boundaries and protocol facts, attempts the current operation, and reports provider-local health and safe codes without replaying uncertainty.
 - **Native permissions stay native.** Embassy sends no Codex approval or sandbox overrides and answers no approval request. `crossSessionInbound` remains Claude's own control; Embassy cannot override it.
 - **Provenance is marked, not authenticated.** Routed bodies carry one broker-owned cross-session marker with the verified sender alias; it distinguishes the transport path for the receiving model but cannot make untrusted text safe or authenticate against code already running as your OS user.
@@ -274,7 +258,7 @@ See [SECURITY.md](SECURITY.md) for the full boundary and vulnerability-reporting
 
 | Document | What it covers |
 | --- | --- |
-| [Architecture](docs/GATEWAY-ARCHITECTURE.md) | The full design: topology, adapters, control plane, threat model, and the paired-consent inbound model |
+| [Architecture](docs/GATEWAY-ARCHITECTURE.md) | The full design: topology, adapters, control plane, threat model, and the OS-boundary permission model |
 | [Delivery](docs/DELIVERY.md) | Delivery semantics, tokens, settlement states, and retry rules |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables, provider contracts, and addressing rules |
 | [Security policy](SECURITY.md) | How to report a vulnerability, and the boundary in depth |

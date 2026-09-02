@@ -335,11 +335,10 @@ function soakConfig(stateDir: string): GatewayConfig {
       EMBASSY_MAX_IN_FLIGHT: "16",
       EMBASSY_RATE_LIMIT: "10000",
     }, { host: "this-mac", nodes: [] }),
-    inboundMode: "open",
   };
 }
 
-async function registerAndSelect(
+async function registerCodexTask(
   handlers: GatewayControlHandlers,
 ): Promise<void> {
   const refreshed = await handlers.refreshDiscovery();
@@ -351,14 +350,6 @@ async function registerAndSelect(
     busyPolicy: "queue",
   });
   assert.deepEqual(registered, { accepted: true, code: "ok" }, "registerCodex");
-  const selected = await handlers.selectClaude({
-    alias: "claude-one@this-mac",
-  });
-  assert.deepEqual(selected, { accepted: true, code: "ok" }, "selectClaude");
-  const paired = await handlers.pair({
-    aliases: ["claude-one@this-mac", "codex-main@this-mac"],
-  });
-  assert.deepEqual(paired, { accepted: true, code: "ok" }, "pair");
 }
 
 test("soak: randomized churn settles every accepted message exactly once", async (t) => {
@@ -387,7 +378,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
   });
   await service.start();
   let handlers = service.handlers();
-  await registerAndSelect(handlers);
+  await registerCodexTask(handlers);
 
   type LedgerEntry = {
     token: string;
@@ -459,7 +450,7 @@ test("soak: randomized churn settles every accepted message exactly once", async
       });
       await service.start();
       handlers = service.handlers();
-      await registerAndSelect(handlers);
+      await registerCodexTask(handlers);
       await settleLedger();
       epoch += 1;
       tallies.restarts += 1;

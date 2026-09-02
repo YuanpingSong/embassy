@@ -37,11 +37,11 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
   const queue = (message: ClaudeNativeHelperChildMessage): Promise<void> => {
     const operation = sends.then(() => send(message)); sends = operation.catch(() => undefined); return operation;
   };
-  const event = (value: ClaudeNativeHelperEvent): void => { void queue({ protocolVersion: 1, type: "event", value }).catch(shutdown); };
+  const event = (value: ClaudeNativeHelperEvent): void => { void queue({ protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "event", value }).catch(shutdown); };
   const respond = (requestId: string, result: ClaudeNativeHelperResult): Promise<void> =>
-    queue({ protocolVersion: 1, type: "response", requestId, ok: true, result });
+    queue({ protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "response", requestId, ok: true, result });
   const reject = (requestId: string, error: unknown): Promise<void> =>
-    queue({ protocolVersion: 1, type: "response", requestId, ok: false, error: safe(error) });
+    queue({ protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "response", requestId, ok: false, error: safe(error) });
   const release = (): void => { const held = preparation; preparation = undefined; if (held) { clearTimeout(held.timer); held.prepared.cancel(); } };
   const take = (id: string): ClaudePeerPreparedSend => {
     const held = preparation;

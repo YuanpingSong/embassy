@@ -4,7 +4,7 @@ import type { GatewayDeliveryNoticeMode } from "./config.js";
 import type { GatewayAdapterDispatchResult } from "./service.js";
 import { gatewayRegistrationIngressPrefixes, isGatewayProvider, type GatewayProvider, type LogicalRouteBinding } from "./types.js";
 
-export const CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION = 1 as const;
+export const CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION = 2 as const;
 export const CLAUDE_NATIVE_HELPER_MAX_IPC_BYTES = 128 * 1024;
 export const CLAUDE_NATIVE_HELPER_MAX_REQUESTS = 64;
 export const CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS = 5_000;
@@ -13,14 +13,14 @@ export type ClaudeNativeHelperRegistration = Readonly<{
   alias: string; sourceProvider: GatewayProvider; cwd: string;
 }>;
 export type ClaudeNativeHelperInitialization = Readonly<{
-  protocolVersion: 1; type: "initialize"; requestId: string;
+  protocolVersion: 2; type: "initialize"; requestId: string;
   runtime: AttestedClaudePeerRuntime; hostId: string;
   deliveryNotices: GatewayDeliveryNoticeMode;
   maxPendingMessages: number; registration: ClaudeNativeHelperRegistration;
 }>;
 export type ClaudeNativeHelperCommand =
   | Readonly<{ method: "prepare_dispatch"; binding: LogicalRouteBinding;
-      authorization: "selected_route" | "native_reply"; stateRoot?: string;
+      authorization: "selected_route"; stateRoot: string;
       messageId: string; sourceAlias: string; sourceProvider: GatewayProvider;
       targetAlias: string; conversationId: string; text: string;
       expectsReply: boolean; deadlineAt: string }>
@@ -34,7 +34,7 @@ export type ClaudeNativeHelperCommand =
   | Readonly<{ method: "unadvertise"; alias: string }>
   | Readonly<{ method: "close" }>;
 export type ClaudeNativeHelperParentMessage = ClaudeNativeHelperInitialization | Readonly<{
-  protocolVersion: 1; type: "request"; requestId: string; command: ClaudeNativeHelperCommand;
+  protocolVersion: 2; type: "request"; requestId: string; command: ClaudeNativeHelperCommand;
 }>;
 export type ClaudeNativeHelperEvent =
   | Readonly<{ event: "claude_message"; value: Readonly<{ routeHandle: string;
@@ -45,11 +45,11 @@ export type ClaudeNativeHelperResult =
   | Readonly<{ preparationId: string; frameBytes: number; sha256: string }>
   | GatewayAdapterDispatchResult | Readonly<{ released: boolean }> | Readonly<{ ok: true }>;
 export type ClaudeNativeHelperChildMessage =
-  | Readonly<{ protocolVersion: 1; type: "response"; requestId: string; ok: true;
+  | Readonly<{ protocolVersion: 2; type: "response"; requestId: string; ok: true;
       result: ClaudeNativeHelperResult }>
-  | Readonly<{ protocolVersion: 1; type: "response"; requestId: string; ok: false;
+  | Readonly<{ protocolVersion: 2; type: "response"; requestId: string; ok: false;
       error: Readonly<{ code: string; recoverable: boolean }> }>
-  | Readonly<{ protocolVersion: 1; type: "event"; value: ClaudeNativeHelperEvent }>;
+  | Readonly<{ protocolVersion: 2; type: "event"; value: ClaudeNativeHelperEvent }>;
 
 const SAFE = /^[A-Z][A-Z0-9_]{0,95}$/;
 const ID = /^[A-Za-z0-9_-]{16,64}$/;
@@ -80,16 +80,18 @@ function command(v: unknown): v is ClaudeNativeHelperCommand {
   if (v.method === "perform_dispatch" || v.method === "cancel_dispatch")
     return exact(v, ["method", "preparationId"]) && typeof v.preparationId === "string" && PREPARATION.test(v.preparationId);
   if (v.method === "prepare_dispatch") {
-    const selected = v.authorization === "selected_route";
-    return exact(v, ["method", "binding", "authorization", "messageId", "sourceAlias", "sourceProvider",
-      "targetAlias", "conversationId", "text", "expectsReply", "deadlineAt"], ["stateRoot"]) &&
-      route(v.binding) && (selected || v.authorization === "native_reply") && str(v.messageId, 256) &&
+    // Protocol 2: `selected_route` is the only authorization, so `stateRoot` is
+    // always required. Protocol 1's second arm omitted it and therefore skipped
+    // the target-workspace assertion; that arm is gone.
+    return exact(v, ["method", "binding", "authorization", "stateRoot", "messageId", "sourceAlias",
+      "sourceProvider", "targetAlias", "conversationId", "text", "expectsReply", "deadlineAt"]) &&
+      route(v.binding) && v.authorization === "selected_route" && str(v.messageId, 256) &&
       source(v.sourceAlias, v.sourceProvider) &&
       typeof v.targetAlias === "string" && ALIAS.test(v.targetAlias) &&
       typeof v.conversationId === "string" && CONVERSATION.test(v.conversationId) &&
       typeof v.text === "string" && Buffer.byteLength(v.text) <= 16 * 1024 && typeof v.expectsReply === "boolean" &&
       typeof v.deadlineAt === "string" && Number.isFinite(Date.parse(v.deadlineAt)) &&
-      (selected ? str(v.stateRoot) && v.stateRoot.startsWith("/") : v.stateRoot === undefined);
+      str(v.stateRoot) && v.stateRoot.startsWith("/");
   }
   if (v.method === "update_inbound_status") return exact(v, ["method", "receiptHandle", "status"], ["diagnosticCode"]) &&
     str(v.receiptHandle, 256) && ["held", "delivered", "denied", "expired"].includes(String(v.status)) &&
@@ -104,7 +106,7 @@ function command(v: unknown): v is ClaudeNativeHelperCommand {
   return v.method === "unadvertise" && exact(v, ["method", "alias"]) && typeof v.alias === "string" && ALIAS.test(v.alias);
 }
 export function isClaudeNativeHelperParentMessage(v: unknown): v is ClaudeNativeHelperParentMessage {
-  if (!rec(v) || v.protocolVersion !== 1 || typeof v.requestId !== "string" || !ID.test(v.requestId)) return false;
+  if (!rec(v) || v.protocolVersion !== 2 || typeof v.requestId !== "string" || !ID.test(v.requestId)) return false;
   if (v.type === "request") return exact(v, ["protocolVersion", "type", "requestId", "command"]) && command(v.command);
   if (v.type !== "initialize" || !exact(v, ["protocolVersion", "type", "requestId", "runtime", "hostId",
     "deliveryNotices", "maxPendingMessages", "registration"]) || !rec(v.runtime) || !rec(v.registration)) return false;
@@ -128,7 +130,7 @@ function result(v: unknown): v is ClaudeNativeHelperResult {
     (v.replyText === undefined || typeof v.replyText === "string" && Buffer.byteLength(v.replyText) <= 64 * 1024);
 }
 export function isClaudeNativeHelperChildMessage(v: unknown): v is ClaudeNativeHelperChildMessage {
-  if (!rec(v) || v.protocolVersion !== 1) return false;
+  if (!rec(v) || v.protocolVersion !== 2) return false;
   if (v.type === "response") return typeof v.requestId === "string" && ID.test(v.requestId) && typeof v.ok === "boolean" &&
     (v.ok ? exact(v, ["protocolVersion", "type", "requestId", "ok", "result"]) && result(v.result) :
       exact(v, ["protocolVersion", "type", "requestId", "ok", "error"]) && rec(v.error) &&
