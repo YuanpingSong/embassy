@@ -226,3 +226,9 @@ no support-matrix ceremony, no site work beyond the stub.
   default; identity is never transient past first boot. Lesson: a
   default must be stable, not merely right — emb-89's "no default"
   was wrong about the remedy, not about the hazard.
+- 2026-09-02 Tier lesson: both Sonnet-tier parallel lanes came back
+  HOLD with design-level findings (emb-106 ambient identity; emb-108
+  four blockers). Sonnet is fine for pure deletions and copy; anything
+  touching OS-boundary semantics (identity, locks, launchd, sockets)
+  goes to Opus even when the brief looks complete. The adversarial
+  read remains mandatory per slice regardless of tier.
