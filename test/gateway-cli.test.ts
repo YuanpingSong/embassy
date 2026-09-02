@@ -1077,25 +1077,50 @@ test("connect denial and invalid responses print their distinct honest remedies"
   }
 });
 
-test("a missing control socket points at embassy service install", async () => {
-  const stdout = capture(), stderr = capture();
-  const code = await runGatewayCli(["status"], {
-    env: {}, stdout, stderr,
+test("every no-broker transport code points at embassy service install and names the state directory", async () => {
+  for (const code of ["CONTROL_SOCKET_MISSING", "CONTROL_LISTENER_UNAVAILABLE"] as const) {
+    const stdout = capture(), stderr = capture();
+    const exitCode = await runGatewayCli(["status"], {
+      env: { EMBASSY_STATE_DIR: "/private/fake-state" }, stdout, stderr,
     loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
       allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
       steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
-    validateControlSocket: async () => undefined,
-    sendRequest: async () => {
-      throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail");
-    },
-  });
-  assert.equal(code, gatewayCliExitCodes.unavailable);
-  assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "CONTROL_SOCKET_MISSING");
-  assert.equal(
-    stderr.chunks.join(""),
-    "[embassy] gateway unavailable.\n[embassy] No broker is running. Run `embassy service install` once, or `embassy serve` in a terminal.\n",
-  );
-  assert.doesNotMatch(stderr.chunks.join(""), /private detail/);
+      validateControlSocket: async () => undefined,
+      sendRequest: async () => {
+        throw new GatewayControlTransportError(code, "private detail");
+      },
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.unavailable, code);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, code);
+    assert.equal(
+      stderr.chunks.join(""),
+      "[embassy] gateway unavailable.\n[embassy] No broker is running (state dir /private/fake-state). Run `embassy service install` once, or `embassy serve` in a terminal.\n",
+    );
+    assert.doesNotMatch(stderr.chunks.join(""), /private detail/);
+  }
+});
+
+test("a state directory with no socket prints the same hint through the real socket check", async () => {
+  // No validateControlSocket stub. This is the path a real caller takes: the
+  // socket check maps a missing socket to CONTROL_SOCKET_UNAVAILABLE before
+  // any transport runs, so CONTROL_SOCKET_MISSING alone would never fire.
+  const stateDir = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-no-broker-"));
+  roots.add(stateDir);
+  await chmod(stateDir, 0o700);
+  for (const command of ["status", "health"] as const) {
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCli([command], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+      sendRequest: async () => { throw new Error("must not reach the transport"); },
+    });
+    assert.equal(code, gatewayCliExitCodes.unavailable, command);
+    assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "CONTROL_SOCKET_UNAVAILABLE", command);
+    assert.equal(
+      stderr.chunks.join(""),
+      `[embassy] gateway unavailable.\n[embassy] No broker is running (state dir ${stateDir}). Run \`embassy service install\` once, or \`embassy serve\` in a terminal.\n`,
+      command,
+    );
+  }
 });
 
 test("wait-delivery polls at fixed intervals and emits only the terminal status", async () => {
@@ -2304,55 +2329,236 @@ test("service without a subcommand is an argument error, before any control-sock
   }
 });
 
-test("service install writes a real plist under a temp home, drives the fake launchctl runner, and reports health", async () => {
+/**
+ * A fake launchd for the CLI-level service tests: enough state that `print`
+ * answers honestly after `bootout` and `bootstrap`, so the ordering install
+ * depends on is exercised rather than assumed.
+ */
+function cliFakeLaunchd(
+  script: { loaded?: boolean; fail?: Record<string, { code: number; stdout: string; stderr: string }> } = {},
+): { run: NonNullable<GatewayCliDependencies["runLaunchctl"]>; calls: string[][] } {
+  const calls: string[][] = [];
+  let loaded = script.loaded ?? false;
+  const label = SERVICE_AGENT_LABEL;
+  const run: NonNullable<GatewayCliDependencies["runLaunchctl"]> = async (args) => {
+    calls.push([...args]);
+    const verb = args[0] ?? "";
+    const forced = script.fail?.[verb];
+    if (forced !== undefined) return forced;
+    switch (verb) {
+      case "print":
+        return loaded
+          ? { code: 0, stdout: `state = running\n\tpid = 4242\n`, stderr: "" }
+          : { code: 113, stdout: "", stderr: `Could not find service "${label}" in domain for login\n` };
+      case "bootout": loaded = false; return { code: 0, stdout: "", stderr: "" };
+      case "bootstrap": loaded = true; return { code: 0, stdout: "", stderr: "" };
+      default: return { code: 0, stdout: "", stderr: "" };
+    }
+  };
+  return { run, calls };
+}
+
+async function serviceFixture(): Promise<{ home: string; stateDir: string; plistPath: string }> {
   const temporary = await realpath(os.tmpdir());
   const home = await mkdtemp(path.join(temporary, "embassy-cli-service-"));
   await chmod(home, 0o700);
   roots.add(home);
-
-  const uid = process.getuid!();
-  const target = `gui/${uid}/${SERVICE_AGENT_LABEL}`;
-  const launchctlCalls: string[][] = [];
   const stateDir = await mkdtemp(path.join(temporary, "embassy-cli-service-state-"));
   roots.add(stateDir);
+  return {
+    home, stateDir,
+    plistPath: path.join(home, "Library", "LaunchAgents", `${SERVICE_AGENT_LABEL}.plist`),
+  };
+}
+
+const healthySendRequest = (async ({ request }: { request: { method: string } }) => {
+  assert.equal(request.method, "health");
+  return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { status: "ok" } };
+}) as NonNullable<GatewayCliDependencies["sendRequest"]>;
+
+test("service install writes a real plist under a temp home, drives the fake launchctl runner, and reports health", async () => {
+  const { home, stateDir, plistPath } = await serviceFixture();
+  const uid = process.getuid!();
+  const target = `gui/${uid}/${SERVICE_AGENT_LABEL}`;
+  const launchd = cliFakeLaunchd();
 
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
-    env: { EMBASSY_STATE_DIR: stateDir },
+    env: { EMBASSY_STATE_DIR: stateDir, OPENAI_API_KEY: "sk-never" },
     stdout, stderr,
     serviceHomeDir: () => home,
-    runLaunchctl: async (args) => {
-      launchctlCalls.push([...args]);
-      return { code: 0, stdout: "", stderr: "" };
-    },
+    runLaunchctl: launchd.run,
     validateControlSocket: async () => undefined,
-    sendRequest: (async ({ request }: { request: { method: string } }) => {
-      assert.equal(request.method, "health");
-      return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { status: "ok" } };
-    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    sendRequest: healthySendRequest,
     delay: async () => {},
   });
 
   assert.equal(code, gatewayCliExitCodes.ok);
-  assert.deepEqual(launchctlCalls, [
-    ["bootout", target],
-    ["bootstrap", `gui/${uid}`, path.join(home, "Library", "LaunchAgents", `${SERVICE_AGENT_LABEL}.plist`)],
-    ["kickstart", "-k", target],
+  assert.deepEqual(launchd.calls, [
+    ["print", target],
+    ["bootstrap", `gui/${uid}`, plistPath],
+    ["print", target],
   ]);
   const parsed = JSON.parse(stdout.chunks.join("")) as {
     ok: boolean; command: string;
-    result: { subcommand: string; label: string; plistPath: string; logPath: string; health: { ok: boolean } };
+    result: {
+      subcommand: string; label: string; plistPath: string; logPath: string;
+      capturedEnv: string[]; health: { ok: boolean };
+    };
   };
   assert.equal(parsed.ok, true);
   assert.equal(parsed.command, "service");
   assert.equal(parsed.result.subcommand, "install");
   assert.equal(parsed.result.label, SERVICE_AGENT_LABEL);
-  assert.equal(parsed.result.plistPath, path.join(home, "Library", "LaunchAgents", `${SERVICE_AGENT_LABEL}.plist`));
+  assert.equal(parsed.result.plistPath, plistPath);
+  assert.deepEqual(parsed.result.capturedEnv, ["EMBASSY_STATE_DIR"]);
   assert.equal(parsed.result.health.ok, true);
   assert.equal(stderr.chunks.join(""), "");
 
-  const plistStat = await lstat(parsed.result.plistPath);
+  const plistStat = await lstat(plistPath);
   assert.equal(plistStat.mode & 0o777, 0o644);
-  const plistContent = await readFile(parsed.result.plistPath, "utf8");
+  const plistContent = await readFile(plistPath, "utf8");
   assert.match(plistContent, /<string>serve<\/string>/);
+  assert.match(plistContent, /<key>KeepAlive<\/key>\n    <dict>\n        <key>Crashed<\/key>\n        <true\/>\n    <\/dict>/);
+  assert.doesNotMatch(plistContent, /sk-never|OPENAI_API_KEY/);
+});
+
+test("service install over its own loaded agent boots it out and re-installs", async () => {
+  const { home, stateDir, plistPath } = await serviceFixture();
+  const uid = process.getuid!();
+  const target = `gui/${uid}/${SERVICE_AGENT_LABEL}`;
+  const launchd = cliFakeLaunchd({ loaded: true });
+
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: launchd.run,
+    validateControlSocket: async () => undefined,
+    sendRequest: healthySendRequest,
+    delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.ok);
+  assert.deepEqual(launchd.calls, [
+    ["print", target],
+    ["bootout", target],
+    ["print", target],
+    ["bootstrap", `gui/${uid}`, plistPath],
+    ["print", target],
+  ]);
+  assert.equal(stderr.chunks.join(""), "");
+});
+
+test("service install stops before launchd when the node inventory is missing", async () => {
+  const { home, stateDir, plistPath } = await serviceFixture();
+  const launchd = cliFakeLaunchd();
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: launchd.run,
+    loadNodeInventory: async () => {
+      throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail", false);
+    },
+    validateControlSocket: async () => { throw new Error("must not check the socket"); },
+    sendRequest: async () => { throw new Error("must not contact the gateway"); },
+  });
+
+  assert.equal(code, gatewayCliExitCodes.invalidInput);
+  assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_NODE_INVENTORY_REQUIRED");
+  assert.deepEqual(launchd.calls, []);
+  await assert.rejects(lstat(plistPath));
+  await assert.rejects(lstat(path.join(home, "Library")));
+});
+
+test("a failing launchctl bootstrap exits non-zero and prints launchctl's own stderr", async () => {
+  const { home, stateDir, plistPath } = await serviceFixture();
+  const launchd = cliFakeLaunchd({
+    fail: { bootstrap: { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error\n" } },
+  });
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: launchd.run,
+    validateControlSocket: async () => undefined,
+    sendRequest: healthySendRequest,
+    delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: false, command: "service",
+    error: { code: "SERVICE_AGENT_COMMAND_FAILED", ambiguous: false, retryable: true },
+  });
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] gateway unavailable.\n[embassy] launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error The install was rolled back: the agent was booted out and the plist removed.\n",
+  );
+  await assert.rejects(lstat(plistPath));
+});
+
+test("service install exits non-zero when the installed broker never answers", async () => {
+  const { home, stateDir } = await serviceFixture();
+  const launchd = cliFakeLaunchd();
+  let attempts = 0;
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: launchd.run,
+    validateControlSocket: async () => undefined,
+    sendRequest: async () => {
+      attempts += 1;
+      throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail");
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(attempts, 50);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: false, command: "service",
+    error: { code: "SERVICE_HEALTH_UNAVAILABLE", ambiguous: false, retryable: true },
+  });
+  assert.equal(
+    stderr.chunks.join(""),
+    `[embassy] gateway unavailable.\n[embassy] Installed, but the broker did not answer within 10 s. Run \`embassy service status\`; log: ${path.join(home, "Library", "Logs", "agent-embassy", "broker.log")}.\n`,
+  );
+  assert.doesNotMatch(stderr.chunks.join(""), /private detail/);
+});
+
+test("service status reports unknown and exits non-zero when launchctl cannot answer", async () => {
+  const { home } = await serviceFixture();
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "status"], {
+    env: {}, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: async () => ({ code: 1, stdout: "", stderr: "spawn /bin/launchctl ENOENT" }),
+    loadConfig: () => { throw new Error("status must not load configuration"); },
+    sendRequest: async () => { throw new Error("status must not contact the gateway"); },
+  });
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  const parsed = JSON.parse(stdout.chunks.join("")) as {
+    ok: boolean; result: { state: string; plistExists: boolean; launchctlStderr: string };
+  };
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.result.state, "unknown");
+  assert.equal(parsed.result.plistExists, false);
+  assert.equal(parsed.result.launchctlStderr, "spawn /bin/launchctl ENOENT");
+  assert.match(stderr.chunks.join(""), /launchctl: spawn \/bin\/launchctl ENOENT\n$/);
+});
+
+test("the installed binary implements exactly the nineteen documented commands", () => {
+  // docs/GATEWAY-ARCHITECTURE.md names this list and its count; README's
+  // command table covers the same set.
+  assert.deepEqual([...gatewayCliCommands], [
+    "serve", "service", "health", "status", "delivery-status", "wait-delivery",
+    "refresh", "register-codex", "unregister-codex", "select-claude",
+    "unselect-claude", "pair", "unpair", "send", "reply", "register-peer",
+    "unregister-peer", "await", "peer-stdio",
+  ]);
+  assert.equal(gatewayCliCommands.length, 19);
 });

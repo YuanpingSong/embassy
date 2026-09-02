@@ -1,13 +1,21 @@
 /**
  * Run the broker as a macOS launchd agent. This module renders the plist,
  * drives `launchctl` through an injected runner (real callers spawn the
- * system binary; tests inject a fake), and refuses to install over a
- * foreground broker that already holds the host-wide instance lease
+ * system binary; tests inject a fake), and refuses to install while another
+ * Embassy broker holds the host-wide instance lease
  * (src/gateway/instance-lease.ts). It never touches the real ~/Library
  * itself — every path is derived from an injected `homeDir`.
+ *
+ * Install order is load-bearing. Our own agent is booted out *first* (that
+ * is what re-install means), and only then is the host lease probed: probing
+ * first made `install` refuse over the very agent it was replacing. Every
+ * input is validated before the first side effect, and any failure after
+ * `bootstrap` is rolled back, so a rejected install never leaves a
+ * half-registered agent behind.
  */
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { BridgeError } from "../errors.js";
@@ -15,12 +23,17 @@ import { acquireGatewayInstanceLease } from "./instance-lease.js";
 
 export const SERVICE_AGENT_LABEL = "com.agent-embassy.broker";
 
-// The host-wide advisory lease lives at this fixed path under the login
-// home, independent of EMBASSY_STATE_DIR (see instance-lease.ts). The path
-// components are not exported by that module (they are load-bearing only
-// for its own lock file), so they are named again here — the same
-// duplication test/gateway-instance-lease.test.ts already carries — solely
-// to read the current holder's pid for a friendlier refusal message.
+/** Bounded read of our own rendered plist when `status` inspects it. */
+const MAX_PLIST_BYTES = 64 * 1024;
+
+/**
+ * The host-wide advisory lease lives at this fixed path under the login
+ * home, independent of EMBASSY_STATE_DIR (see instance-lease.ts). The path
+ * components are not exported by that module (they are load-bearing only
+ * for its own lock file), so they are named again here — the same
+ * duplication test/gateway-instance-lease.test.ts already carries — solely
+ * to read the current holder's pid for a friendlier refusal message.
+ */
 const HOST_LEASE_LOCK_RELATIVE_PATH = path.join(
   ".local",
   "state",
@@ -28,15 +41,31 @@ const HOST_LEASE_LOCK_RELATIVE_PATH = path.join(
   ".gateway-host.lock",
 );
 
+/**
+ * `launchctl print` on a label that is not loaded. Every other non-zero
+ * result is a launchctl problem, not an answer about the agent, and is
+ * reported as such rather than rendered as "not loaded".
+ */
+const SERVICE_NOT_FOUND_PATTERN =
+  /could not find (?:the )?(?:specified )?service|no such process/i;
+
+const isServiceNotFound = (result: RunLaunchctlResult): boolean =>
+  SERVICE_NOT_FOUND_PATTERN.test(`${result.stderr}\n${result.stdout}`);
+
 export type LaunchAgentPlistOptions = Readonly<{
   label: string;
   programArguments: readonly string[];
   logPath: string;
-  env: NodeJS.ProcessEnv;
+  /** Already-captured, already-validated agent environment (see captureAgentEnvironment). */
+  environment: Readonly<Record<string, string>>;
 }>;
 
 function xmlEscape(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function xmlUnescape(value: string): string {
+  return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 
 function stringElement(value: string): string {
@@ -44,29 +73,41 @@ function stringElement(value: string): string {
 }
 
 /**
- * Render the launchd agent plist. EnvironmentVariables carries only
- * EMBASSY_STATE_DIR, and only when the installing process's env sets it —
- * PATH is not needed (every child process this broker spawns — the codex
- * standalone binary, /bin/ps, /usr/bin/lockf, /bin/cat — is invoked by an
- * absolute path already; see codex-local-transport.ts, claude-peer.ts, and
- * instance-lease.ts). No other key ever leaks, secrets included.
+ * Render the launchd agent plist.
+ *
+ * `KeepAlive` is `{ Crashed: true }`, never plain `true`: the broker refuses
+ * to boot on purpose in several cases (an unsupported state schema, another
+ * instance already holding the lease), and those are clean non-zero exits.
+ * Under plain `KeepAlive` launchd would relaunch each refusal forever,
+ * throttled to once every 5 seconds, into one log file that nothing rotates.
+ * With `Crashed` the agent comes back only after a signal death; a refusal
+ * at boot exits once and stays down, where `embassy service status` and the
+ * log can explain it. ThrottleInterval still bounds a genuine crash loop.
+ *
+ * EnvironmentVariables carries exactly the captured configuration keys and
+ * nothing else — see captureAgentEnvironment for the rule. PATH is not
+ * needed (every child process this broker spawns — the codex standalone
+ * binary, /bin/ps, /usr/bin/lockf, /bin/cat — is invoked by an absolute path
+ * already; see codex-local-transport.ts, claude-peer.ts, and
+ * instance-lease.ts).
  */
 export function renderLaunchAgentPlist(options: LaunchAgentPlistOptions): string {
-  const stateDir = options.env.EMBASSY_STATE_DIR;
-  const hasStateDir = typeof stateDir === "string" && stateDir.length > 0;
   const argumentsXml = options.programArguments
     .map((argument) => `        ${stringElement(argument)}`)
     .join("\n");
-  const environmentXml = hasStateDir
-    ? [
+  const environmentEntries = Object.entries(options.environment);
+  const environmentXml = environmentEntries.length === 0
+    ? ""
+    : [
         "    <key>EnvironmentVariables</key>",
         "    <dict>",
-        "        <key>EMBASSY_STATE_DIR</key>",
-        `        ${stringElement(stateDir)}`,
+        ...environmentEntries.flatMap(([key, value]) => [
+          `        <key>${xmlEscape(key)}</key>`,
+          `        ${stringElement(value)}`,
+        ]),
         "    </dict>",
         "",
-      ].join("\n")
-    : "";
+      ].join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -80,7 +121,10 @@ ${argumentsXml}
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>5</integer>
     <key>StandardOutPath</key>
@@ -97,15 +141,6 @@ export type RunLaunchctl = (
   args: readonly string[],
 ) => RunLaunchctlResult | Promise<RunLaunchctlResult>;
 
-export type ServiceAgentFsDependencies = Readonly<{
-  mkdir: (target: string, options: { recursive: boolean; mode: number }) => Promise<unknown>;
-  writeFile: (target: string, data: string, options: { mode: number }) => Promise<void>;
-  chmod: (target: string, mode: number) => Promise<void>;
-  rm: (target: string, options: { force: boolean }) => Promise<void>;
-}>;
-
-const defaultFs: ServiceAgentFsDependencies = { mkdir, writeFile, chmod, rm };
-
 export type ServiceAgentDependencies = Readonly<{
   homeDir: string;
   runLaunchctl: RunLaunchctl;
@@ -113,7 +148,6 @@ export type ServiceAgentDependencies = Readonly<{
   execPath: string;
   cliPath: string;
   uid: number;
-  fs?: ServiceAgentFsDependencies;
 }>;
 
 export type ServiceAgentPaths = Readonly<{
@@ -137,6 +171,89 @@ export function serviceAgentPaths(homeDir: string): ServiceAgentPaths {
 const launchctlDomain = (uid: number): string => `gui/${uid}`;
 const launchctlTarget = (uid: number): string => `gui/${uid}/${SERVICE_AGENT_LABEL}`;
 
+const launchctlDetail = (result: RunLaunchctlResult): string =>
+  result.stderr.trim() || result.stdout.trim() || "no output";
+
+/**
+ * launchctl failures are transient by class: the binary was unavailable, the
+ * gui domain was not up, another tool held the label. The CLI reports them
+ * as unavailable and prints this message, which carries launchctl's own
+ * stderr, rather than discarding it behind a generic input rejection.
+ */
+function launchctlFailure(
+  verb: string,
+  result: RunLaunchctlResult,
+  suffix = "",
+): BridgeError {
+  return new BridgeError(
+    "SERVICE_AGENT_COMMAND_FAILED",
+    `launchctl ${verb} failed (exit ${result.code}): ${launchctlDetail(result)}${suffix}`,
+    true,
+  );
+}
+
+const rejectInput = (message: string): never => {
+  throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", message, false);
+};
+
+function requireAbsolutePath(value: string, description: string): string {
+  if (value.length === 0 || value.includes("\0") || !path.isAbsolute(value) ||
+      path.resolve(value) !== value) {
+    rejectInput(`${description} must be an absolute, already-resolved path.`);
+  }
+  return value;
+}
+
+function requireUid(uid: number): number {
+  if (!Number.isSafeInteger(uid) || uid < 0) {
+    rejectInput("The launchd agent needs this process's numeric uid.");
+  }
+  return uid;
+}
+
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+
+/**
+ * The environment the installed agent runs with. launchd agents inherit
+ * almost nothing, so Embassy's own configuration has to be copied into the
+ * plist: every `EMBASSY_*` variable (EMBASSY_STATE_DIR included) plus
+ * XDG_STATE_HOME, which decides the state root when EMBASSY_STATE_DIR is
+ * unset. These are configuration, not secrets — but nothing else is copied,
+ * so an inherited API key or token cannot reach the plist.
+ *
+ * Both state roots must be absolute here, before capture: a relative value
+ * resolves against the installing shell's working directory, and the agent
+ * would silently resolve it somewhere else.
+ */
+export function captureAgentEnvironment(
+  env: NodeJS.ProcessEnv,
+): Readonly<Record<string, string>> {
+  const captured: Record<string, string> = {};
+  for (const key of Object.keys(env).sort()) {
+    if (key !== "XDG_STATE_HOME" && !key.startsWith("EMBASSY_")) continue;
+    const value = env[key];
+    if (value === undefined || value.length === 0) continue;
+    if (CONTROL_CHARACTER_PATTERN.test(value)) {
+      rejectInput(`${key} contains a control character and cannot be captured into the launchd agent.`);
+    }
+    if (key === "EMBASSY_STATE_DIR" || key === "XDG_STATE_HOME") {
+      requireAbsolutePath(value, key);
+    }
+    captured[key] = value;
+  }
+  return captured;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 async function readHeldLeasePid(homeDir: string): Promise<number | undefined> {
   try {
     const raw = await readFile(path.join(homeDir, HOST_LEASE_LOCK_RELATIVE_PATH), "utf8");
@@ -152,26 +269,34 @@ async function readHeldLeasePid(homeDir: string): Promise<number | undefined> {
 }
 
 /**
- * Refuse to install over a foreground broker. This reuses the exact
- * detection the broker itself relies on for single-instance correctness: a
- * non-blocking probe of the host-wide advisory lease
+ * Refuse to install while the host lease cannot be taken. This reuses the
+ * exact detection the broker itself relies on for single-instance
+ * correctness: a non-blocking probe of the host-wide advisory lease
  * (acquireGatewayInstanceLease, unmodified). If nobody holds it, the probe
- * itself briefly acquires it and is released immediately. If it is held,
- * the current holder's pid is read (best effort, for the message only) from
- * the same lock file the lease already writes.
+ * briefly acquires it and releases it immediately.
+ *
+ * `GATEWAY_INSTANCE_IN_USE` is not only contention: instance-lease.ts throws
+ * it for roughly ten conditions that have nothing to do with another broker
+ * (a symlinked path component, a non-empty unmarked lease root, a mode or
+ * owner drift). So the original message is always preserved verbatim, and a
+ * pid is named only when the recorded holder is genuinely alive — the lock
+ * record keeps the *last* holder, and a successful probe writes its own pid
+ * there, so an unchecked pid is routinely stale. Never tell someone to stop
+ * a dead process.
  */
-async function refuseIfForegroundBrokerHoldsLease(homeDir: string): Promise<void> {
+async function refuseIfAnotherBrokerHoldsLease(homeDir: string): Promise<void> {
   let lease;
   try {
     lease = await acquireGatewayInstanceLease(homeDir);
   } catch (error) {
     if (error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE") {
       const pid = await readHeldLeasePid(homeDir);
+      const alive = pid !== undefined && isProcessAlive(pid);
       throw new BridgeError(
         "GATEWAY_INSTANCE_IN_USE",
-        pid === undefined
-          ? "A foreground Embassy broker already holds the host lease. Stop it, then run `embassy service install` again."
-          : `A foreground Embassy broker (pid ${pid}) already holds the host lease. Stop it, then run \`embassy service install\` again.`,
+        alive
+          ? `Another Embassy broker holds the host lease (pid ${pid}, alive) — stop it (\`embassy service uninstall\` if it is the launchd agent, otherwise the \`embassy serve\` terminal), then re-run install. The lease reported: ${error.message}`
+          : `The Embassy host lease could not be acquired, so nothing was installed. The lease reported: ${error.message}`,
         true,
       );
     }
@@ -180,51 +305,178 @@ async function refuseIfForegroundBrokerHoldsLease(homeDir: string): Promise<void
   await lease.close();
 }
 
+/**
+ * Create one path component if it is absent, then verify it. Nothing that
+ * already exists is ever chmod-ed: a login home may deliberately keep
+ * ~/Library or ~/Library/LaunchAgents tighter than the default, and an
+ * installer has no business loosening it. This mirrors the discipline
+ * prepareHostLeaseDirectory already applies in instance-lease.ts.
+ */
+async function ensureOwnedDirectory(
+  target: string,
+  mode: number,
+  uid: number,
+): Promise<void> {
+  let created = false;
+  try {
+    await mkdir(target, { mode });
+    created = true;
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+  }
+  const info = await lstat(target);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new BridgeError(
+      "SERVICE_AGENT_PATH_UNSAFE",
+      `${target} is not a real directory; refusing to install the launchd agent through it.`,
+      false,
+    );
+  }
+  if (info.uid !== uid) {
+    throw new BridgeError(
+      "SERVICE_AGENT_PATH_UNSAFE",
+      `${target} is not owned by this user; refusing to install the launchd agent there.`,
+      false,
+    );
+  }
+  // mkdir's mode is masked by the process umask, so the requested mode is
+  // applied explicitly — but only to a directory this call just created.
+  if (created) await chmod(target, mode);
+}
+
+async function prepareServiceDirectories(homeDir: string, uid: number): Promise<void> {
+  await ensureOwnedDirectory(path.join(homeDir, "Library"), 0o755, uid);
+  await ensureOwnedDirectory(path.join(homeDir, "Library", "LaunchAgents"), 0o755, uid);
+  await ensureOwnedDirectory(path.join(homeDir, "Library", "Logs"), 0o755, uid);
+  await ensureOwnedDirectory(path.join(homeDir, "Library", "Logs", "agent-embassy"), 0o700, uid);
+}
+
+/**
+ * Write the plist through a fresh O_EXCL temp file and one rename, so a
+ * reader never sees a half-written plist and a pre-planted symlink at the
+ * destination is replaced rather than written through.
+ */
+async function writePlistAtomically(plistPath: string, plist: string): Promise<void> {
+  const existing = await lstat(plistPath).catch(() => undefined);
+  if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile())) {
+    throw new BridgeError(
+      "SERVICE_AGENT_PATH_UNSAFE",
+      `${plistPath} is not a regular file; refusing to replace it.`,
+      false,
+    );
+  }
+  const temporaryPath = `${plistPath}.tmp-${randomUUID()}`;
+  const handle = await open(temporaryPath, "wx", 0o644);
+  try {
+    await handle.writeFile(plist, "utf8");
+    await handle.chmod(0o644);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(temporaryPath, plistPath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+}
+
 export type ServiceAgentInstallResult = Readonly<{
   label: string;
   plistPath: string;
   logPath: string;
+  /** Names only: the configuration keys copied into the plist at install time. */
+  capturedEnv: readonly string[];
 }>;
 
-/** Idempotent: safe to call again over a prior install (its own launchd agent). */
+/**
+ * Register the broker as this user's launchd agent. Re-running it over a
+ * prior install — including one that is loaded and running right now — is
+ * the supported way to change what the agent runs with.
+ */
 export async function installServiceAgent(
   deps: ServiceAgentDependencies,
 ): Promise<ServiceAgentInstallResult> {
-  await refuseIfForegroundBrokerHoldsLease(deps.homeDir);
-  const fs = deps.fs ?? defaultFs;
-  const { launchAgentsDir, logsDir, plistPath, logPath } = serviceAgentPaths(deps.homeDir);
-  await fs.mkdir(launchAgentsDir, { recursive: true, mode: 0o755 });
-  await fs.chmod(launchAgentsDir, 0o755);
-  await fs.mkdir(logsDir, { recursive: true, mode: 0o700 });
-  await fs.chmod(logsDir, 0o700);
-  const plist = renderLaunchAgentPlist({
-    label: SERVICE_AGENT_LABEL,
-    programArguments: [deps.execPath, deps.cliPath, "serve"],
-    logPath,
-    env: deps.env,
-  });
-  await fs.writeFile(plistPath, plist, { mode: 0o644 });
-  await fs.chmod(plistPath, 0o644);
-  const target = launchctlTarget(deps.uid);
-  // Ignore bootout's result: "not currently loaded" is the expected,
-  // ignorable common case (first install, or re-install after a crash), and
-  // any genuine problem still surfaces from the bootstrap call right after.
-  await deps.runLaunchctl(["bootout", target]);
-  const bootstrap = await deps.runLaunchctl(["bootstrap", launchctlDomain(deps.uid), plistPath]);
+  // 1. Everything that can be rejected, rejected before the first side effect.
+  const uid = requireUid(deps.uid);
+  const homeDir = requireAbsolutePath(deps.homeDir, "The login home");
+  requireAbsolutePath(deps.execPath, "The Node executable path");
+  requireAbsolutePath(deps.cliPath, "The Embassy CLI path");
+  const environment = captureAgentEnvironment(deps.env);
+  const { plistPath, logPath } = serviceAgentPaths(homeDir);
+  const target = launchctlTarget(uid);
+  const domain = launchctlDomain(uid);
+
+  // 2. Our own agent first. Re-install means replace, so a loaded copy of
+  //    this exact label is booted out and confirmed gone before anything
+  //    else — probing the host lease first made install refuse over the very
+  //    agent it was replacing.
+  const before = await deps.runLaunchctl(["print", target]);
+  if (before.code === 0) {
+    const bootout = await deps.runLaunchctl(["bootout", target]);
+    const after = await deps.runLaunchctl(["print", target]);
+    if (after.code === 0) {
+      throw launchctlFailure(
+        "bootout",
+        bootout.code === 0 ? after : bootout,
+        " — the previous agent is still loaded, so nothing was changed.",
+      );
+    }
+  } else if (!isServiceNotFound(before)) {
+    throw launchctlFailure("print", before, " — install stopped before changing anything.");
+  }
+
+  // 3. Only now can a held lease mean somebody else's broker.
+  await refuseIfAnotherBrokerHoldsLease(homeDir);
+
+  // 4. Side effects begin here.
+  await prepareServiceDirectories(homeDir, uid);
+  await writePlistAtomically(
+    plistPath,
+    renderLaunchAgentPlist({
+      label: SERVICE_AGENT_LABEL,
+      programArguments: [deps.execPath, deps.cliPath, "serve"],
+      logPath,
+      environment,
+    }),
+  );
+
+  const rollback = async (): Promise<void> => {
+    await Promise.resolve(deps.runLaunchctl(["bootout", target])).catch(() => undefined);
+    await rm(plistPath, { force: true }).catch(() => undefined);
+  };
+  const ROLLED_BACK =
+    " The install was rolled back: the agent was booted out and the plist removed.";
+
+  const bootstrap = await deps.runLaunchctl(["bootstrap", domain, plistPath]);
   if (bootstrap.code !== 0) {
-    throw new BridgeError(
-      "SERVICE_AGENT_COMMAND_FAILED",
-      `launchctl bootstrap failed (exit ${bootstrap.code}): ${bootstrap.stderr.trim() || bootstrap.stdout.trim() || "no output"}`,
-    );
+    await rollback();
+    throw launchctlFailure("bootstrap", bootstrap, ROLLED_BACK);
   }
-  const kickstart = await deps.runLaunchctl(["kickstart", "-k", target]);
-  if (kickstart.code !== 0) {
-    throw new BridgeError(
-      "SERVICE_AGENT_COMMAND_FAILED",
-      `launchctl kickstart failed (exit ${kickstart.code}): ${kickstart.stderr.trim() || kickstart.stdout.trim() || "no output"}`,
-    );
+
+  // RunAtLoad starts the agent as part of bootstrap; `kickstart -k` would
+  // additionally *kill* a healthy broker, so it is never used. A plain
+  // kickstart is the fallback for the loaded-but-not-running case only.
+  const loaded = await deps.runLaunchctl(["print", target]);
+  if (loaded.code !== 0) {
+    await rollback();
+    throw launchctlFailure("print", loaded, ROLLED_BACK);
   }
-  return { label: SERVICE_AGENT_LABEL, plistPath, logPath };
+  const printed = parseLaunchctlPrintOutput(loaded.stdout);
+  if (printed.pid === undefined && printed.launchdState !== "running") {
+    const kickstart = await deps.runLaunchctl(["kickstart", target]);
+    if (kickstart.code !== 0) {
+      await rollback();
+      throw launchctlFailure("kickstart", kickstart, ROLLED_BACK);
+    }
+  }
+  return {
+    label: SERVICE_AGENT_LABEL,
+    plistPath,
+    logPath,
+    capturedEnv: Object.keys(environment),
+  };
 }
 
 export type ServiceAgentUninstallResult = Readonly<{
@@ -233,49 +485,160 @@ export type ServiceAgentUninstallResult = Readonly<{
   logPath: string;
 }>;
 
-/** Bootout, then unlink the plist. Logs are left in place. */
+/**
+ * Boot the agent out, confirm with `print` that it is gone, and only then
+ * unlink the plist. An unverified bootout could leave a running agent with
+ * no plist behind it — invisible to `install`, unstoppable by `uninstall`.
+ * Logs are left in place.
+ */
 export async function uninstallServiceAgent(
   deps: ServiceAgentDependencies,
 ): Promise<ServiceAgentUninstallResult> {
-  const fs = deps.fs ?? defaultFs;
-  const { plistPath, logPath } = serviceAgentPaths(deps.homeDir);
-  await deps.runLaunchctl(["bootout", launchctlTarget(deps.uid)]);
-  await fs.rm(plistPath, { force: true });
+  const uid = requireUid(deps.uid);
+  const homeDir = requireAbsolutePath(deps.homeDir, "The login home");
+  const { plistPath, logPath } = serviceAgentPaths(homeDir);
+  const target = launchctlTarget(uid);
+  const bootout = await deps.runLaunchctl(["bootout", target]);
+  const after = await deps.runLaunchctl(["print", target]);
+  if (after.code === 0) {
+    throw launchctlFailure(
+      "bootout",
+      bootout.code === 0 ? after : bootout,
+      " — the agent is still loaded, so its plist was left in place.",
+    );
+  }
+  const existing = await lstat(plistPath).catch(() => undefined);
+  if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile())) {
+    throw new BridgeError(
+      "SERVICE_AGENT_PATH_UNSAFE",
+      `${plistPath} is not a regular file; refusing to remove it.`,
+      false,
+    );
+  }
+  await rm(plistPath, { force: true });
   return { label: SERVICE_AGENT_LABEL, plistPath, logPath };
 }
 
+/**
+ * Tolerant reader for `launchctl print`. The sample below is synthetic — it
+ * is the shape this parser is written against, not a captured transcript —
+ * and the exit-status line is accepted under both spellings macOS has
+ * shipped (`last exit code` and `last exit status`):
+ *
+ *     gui/501/com.agent-embassy.broker = {
+ *             active count = 1
+ *             state = running
+ *             pid = 4242
+ *             last exit code = 0
+ *     }
+ *
+ * Anything this cannot recognize is reported as unknown, never as a loaded
+ * agent with blank fields.
+ */
 function parseLaunchctlPrintOutput(
   stdout: string,
-): Readonly<{ pid?: number; state?: string; lastExitStatus?: number }> {
-  const result: { pid?: number; state?: string; lastExitStatus?: number } = {};
+): Readonly<{ pid?: number; launchdState?: string; lastExitStatus?: number }> {
+  const result: { pid?: number; launchdState?: string; lastExitStatus?: number } = {};
   const pid = /^\s*pid\s*=\s*(\d+)\s*$/m.exec(stdout)?.[1];
   if (pid !== undefined) result.pid = Number(pid);
   const state = /^\s*state\s*=\s*(.+?)\s*$/m.exec(stdout)?.[1];
-  if (state !== undefined) result.state = state;
-  const lastExitStatus = /^\s*last exit code\s*=\s*(-?\d+)\s*$/m.exec(stdout)?.[1];
+  if (state !== undefined) result.launchdState = state;
+  const lastExitStatus = /^\s*last exit (?:code|status)\s*=\s*(-?\d+)\s*$/m.exec(stdout)?.[1];
   if (lastExitStatus !== undefined) result.lastExitStatus = Number(lastExitStatus);
   return result;
 }
+
+/** The leading ProgramArguments entries of our own rendered plist, if recognizable. */
+function parseProgramArguments(plist: string): readonly string[] {
+  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1];
+  if (block === undefined) return [];
+  return [...block.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => xmlUnescape(match[1] ?? ""));
+}
+
+export type ServiceAgentStatusState = "loaded" | "not loaded" | "unknown";
 
 export type ServiceAgentStatus = Readonly<{
   label: string;
   plistPath: string;
   logPath: string;
-  loaded: boolean;
+  plistExists: boolean;
+  state: ServiceAgentStatusState;
   pid?: number;
-  state?: string;
+  launchdState?: string;
   lastExitStatus?: number;
-  note?: string;
+  /** ProgramArguments[0]/[1] that are no longer on disk (a version manager moved node). */
+  programMissing?: readonly string[];
+  /** launchctl's own output, verbatim, whenever it could not answer. */
+  launchctlStderr?: string;
+  note: string;
 }>;
 
-export async function serviceAgentStatus(deps: ServiceAgentDependencies): Promise<ServiceAgentStatus> {
-  const { plistPath, logPath } = serviceAgentPaths(deps.homeDir);
-  const printed = await deps.runLaunchctl(["print", launchctlTarget(deps.uid)]);
-  const base = { label: SERVICE_AGENT_LABEL, plistPath, logPath };
-  if (printed.code !== 0) {
-    return { ...base, loaded: false, note: "The broker is not loaded as a launchd agent." };
+/**
+ * Report what is actually knowable. A launchctl that cannot run, or output
+ * this version does not recognize, is `unknown` with the reason quoted — not
+ * "not loaded", and not "loaded" with blank fields. The plist's own
+ * ProgramArguments are checked against the filesystem too: a node binary
+ * under a version manager can be removed out from under an installed agent,
+ * which launchd otherwise reports only as a repeated spawn failure.
+ */
+export async function serviceAgentStatus(
+  deps: ServiceAgentDependencies,
+): Promise<ServiceAgentStatus> {
+  const uid = requireUid(deps.uid);
+  const homeDir = requireAbsolutePath(deps.homeDir, "The login home");
+  const { plistPath, logPath } = serviceAgentPaths(homeDir);
+
+  let plistExists = false;
+  const programMissing: string[] = [];
+  const plistInfo = await lstat(plistPath).catch(() => undefined);
+  if (plistInfo !== undefined && plistInfo.isFile()) {
+    plistExists = true;
+    if (plistInfo.size <= MAX_PLIST_BYTES) {
+      const plist = await readFile(plistPath, "utf8").catch(() => undefined);
+      if (plist !== undefined) {
+        for (const program of parseProgramArguments(plist).slice(0, 2)) {
+          if (program.length === 0) continue;
+          const reachable = await stat(program).then(() => true, () => false);
+          if (!reachable) programMissing.push(program);
+        }
+      }
+    }
   }
-  return { ...base, loaded: true, ...parseLaunchctlPrintOutput(printed.stdout) };
+
+  const printed = await deps.runLaunchctl(["print", launchctlTarget(uid)]);
+  const base = { label: SERVICE_AGENT_LABEL, plistPath, logPath, plistExists };
+  const suffix = `${plistExists ? "" : " The plist is missing."}${
+    programMissing.length === 0
+      ? ""
+      : ` program missing: ${programMissing.join(", ")} — re-run \`embassy service install\`.`
+  }`;
+  const missing = programMissing.length === 0 ? {} : { programMissing };
+
+  if (printed.code !== 0) {
+    if (isServiceNotFound(printed)) {
+      return {
+        ...base, ...missing, state: "not loaded",
+        note: `The broker is not loaded as a launchd agent.${suffix}`,
+      };
+    }
+    return {
+      ...base, ...missing, state: "unknown",
+      launchctlStderr: launchctlDetail(printed),
+      note: `launchctl could not report on the agent (exit ${printed.code}); its output is quoted verbatim.${suffix}`,
+    };
+  }
+  const parsed = parseLaunchctlPrintOutput(printed.stdout);
+  if (parsed.pid === undefined && parsed.launchdState === undefined &&
+      parsed.lastExitStatus === undefined) {
+    return {
+      ...base, ...missing, state: "unknown",
+      note: `launchctl answered, but this version does not recognize its output.${suffix}`,
+    };
+  }
+  return {
+    ...base, ...missing, ...parsed, state: "loaded",
+    note: `The broker is loaded as a launchd agent.${suffix}`,
+  };
 }
 
 function execFileResult(
@@ -295,7 +658,9 @@ function execFileResult(
         const code = typeof (error as NodeJS.ErrnoException).code === "number"
           ? ((error as unknown) as { code: number }).code
           : 1;
-        resolve({ code, stdout, stderr });
+        // A launchctl that never ran (missing binary, timeout kill) reports
+        // nothing on stderr; keep the spawn failure rather than an empty quote.
+        resolve({ code, stdout, stderr: stderr.length > 0 ? stderr : error.message });
       },
     );
   });

@@ -571,8 +571,8 @@ The closed version 3 method family is exactly these nineteen methods:
   shell-peer registration, mailbox, and flush-before-receipt operations.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-eighteen implemented commands are
-`serve`, `health`, `status`, `delivery-status`, `wait-delivery`,
+nineteen implemented commands are
+`serve`, `service`, `health`, `status`, `delivery-status`, `wait-delivery`,
 `refresh`, `register-codex`, `unregister-codex`,
 `select-claude`, `unselect-claude`, `pair`, `unpair`, `send`,
 `reply`, `register-peer`, `unregister-peer`, `await`, and
@@ -580,8 +580,11 @@ eighteen implemented commands are
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line and
 never returns a thread ID, provider-native ID, path, address, or message body.
-These commands require the foreground broker, except that `serve` starts it in
-the current terminal. The launcher never daemonizes itself.
+Every command but `serve` and `service` requires a running broker: `serve`
+starts one in the current terminal, and `service install|uninstall|status`
+manages the macOS launchd agent that runs one, contacting no broker itself
+apart from the bounded health check `install` reports at the end. The launcher
+never daemonizes itself.
 
 `register-codex --alias <new> --succeeds <current>` is one atomic logical-route
 transaction. It verifies the inherited identity of the replacement task,

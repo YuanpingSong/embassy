@@ -54,26 +54,49 @@ agent instead of a foreground process kept alive by hand:
 
 - **Agent**: label `com.agent-embassy.broker`, written to
   `~/Library/LaunchAgents/com.agent-embassy.broker.plist` (mode 0644).
-  `RunAtLoad` and `KeepAlive` are both set, so the broker starts at login and
-  launchd restarts it after a crash, throttled to at most once every 5
-  seconds.
+  `RunAtLoad` starts it at login. `KeepAlive` is `{ Crashed: true }`, so
+  launchd restarts it after a crash — a signal death — throttled to at most
+  once every 5 seconds, and a *refusal* at boot (an unsupported state schema,
+  another instance holding the lease) exits once and stays down. That is
+  deliberate: run `embassy service status` and read the log rather than
+  waiting for a relaunch that will not come.
 - **Logs**: stdout and stderr are both captured to
   `~/Library/Logs/agent-embassy/broker.log` (the log directory is created
-  mode 0700). Uninstalling leaves this file in place.
-- **State**: `EMBASSY_STATE_DIR` is read from the installing process's
-  environment and captured into the plist at install time; changing it later
-  in your shell has no effect on the installed agent until you run
-  `embassy service install` again. No other environment variable — secrets
-  included — is copied into the plist.
-- **Stop it**: `embassy service uninstall` boots the agent out of launchd and
-  removes the plist.
-- **Check it**: `embassy service status` reports whether the agent is
-  loaded, its pid and launchd state while running, and its last exit status
-  otherwise.
+  mode 0700). **There is no rotation** — Embassy never truncates or rolls this
+  file, so a long-lived agent's log is yours to prune. Uninstalling leaves it
+  in place.
+- **Environment**: every `EMBASSY_*` variable set in the installing shell,
+  plus `XDG_STATE_HOME`, is captured into the plist at install time, and the
+  install prints the captured key names. These are configuration, not
+  secrets; nothing else — no API key, no token, no `PATH` — is copied.
+  `EMBASSY_STATE_DIR` and `XDG_STATE_HOME` must be absolute. The agent runs
+  with exactly those captured values for its whole life: changing them in
+  your shell afterwards has no effect, and the only way to change what the
+  agent runs with is to run `embassy service install` again.
+- **Stop it**: `embassy service uninstall` boots the agent out of launchd,
+  confirms with `launchctl print` that the label is gone, and only then
+  removes the plist. If the agent is still loaded it fails with launchctl's
+  own stderr and leaves the plist alone.
+- **Check it**: `embassy service status` reports `loaded`, `not loaded`, or
+  `unknown`. `unknown` — launchctl could not run, or printed something this
+  version does not recognize — is reported as such with launchctl's output
+  quoted, and exits non-zero; it is never rendered as "not loaded". Status
+  also reports whether the plist exists and whether the program the plist
+  points at is still on disk (a Node binary under a version manager can be
+  removed out from under an installed agent).
 
-Installing refuses if a foreground `embassy serve` currently holds the
-host-wide instance lease, naming that process's pid; stop it first, then
-install. Re-running `embassy service install` over a prior install is safe.
+Install replaces its own loaded agent: it boots the existing
+`com.agent-embassy.broker` out, confirms it is gone, and only then checks the
+host-wide instance lease. So re-running `embassy service install` over a
+running launchd agent is the supported way to change its configuration. If the
+lease is still held after that, some *other* broker owns this login account
+and install refuses, naming that process's pid only when it is verifiably
+alive and quoting the lease's own reason. Nothing is written before that
+check, and any failure after `launchctl bootstrap` is rolled back — the agent
+is booted out and the plist removed.
+
+Install then waits up to 10 seconds for the agent to answer a health check. If
+it never answers, the command exits non-zero and names the log file.
 
 ## Advanced bounds
 

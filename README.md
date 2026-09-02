@@ -53,13 +53,13 @@ Runtime delivery is best effort. Version and build strings are unverified metada
 
 ### 1. Start Embassy
 
-After creating the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md), install the broker as a launchd agent under the same OS account as Claude Code and Codex, so it survives logout and restarts on crash:
+After creating the mandatory private `nodes.json` described in [Configuration](docs/CONFIGURATION.md), install the broker as a launchd agent under the same OS account as Claude Code and Codex, so it starts at login and restarts after a crash:
 
 ```bash
 embassy service install
 ```
 
-The install prints a bounded health check once the agent comes up. Prefer a foreground process you start and stop by hand instead? Run `embassy serve` in its own terminal and leave it running — skip `service install` in that case.
+The install waits up to 10 seconds for the agent to answer a health check and exits non-zero if it never does. A Mac with no logged-in user — an SSH-only federation peer, say — has no `gui` domain and cannot run a launchd agent at all: run `embassy serve` under your own supervisor there. Prefer a foreground process you start and stop by hand? Run `embassy serve` in its own terminal and leave it running — skip `service install` in that case.
 
 In another terminal:
 
@@ -233,6 +233,7 @@ Codex tasks can then be prompted with `$embassy-peer`; Claude Code discovers it 
 | Command | Run by | Purpose |
 | --- | --- | --- |
 | `serve` | operator | Start the foreground broker |
+| `service install` / `service uninstall` / `service status` | operator | Register the broker as this user's macOS launchd agent, remove it, or report what launchd knows about it |
 | `health` / `status` | operator | Check liveness and inspect the sanitized snapshot |
 | `refresh` | operator | Rescan for Claude sessions |
 | `delivery-status` | either provider | Read one delivery tracker with `embassy delivery-status --token dlv_<token>` |

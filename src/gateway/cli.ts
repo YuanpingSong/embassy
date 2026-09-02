@@ -19,7 +19,7 @@ import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federatio
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
 import { defaultRunLaunchctl, installServiceAgent, serviceAgentStatus, uninstallServiceAgent,
-  type RunLaunchctl, type ServiceAgentDependencies, type ServiceAgentInstallResult } from "./service-agent.js";
+  type RunLaunchctl, type ServiceAgentDependencies } from "./service-agent.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -128,7 +128,7 @@ const CLI_STDERR = {
 /** Exact next-step remedies appended after the summary for the faults that have one. */
 const CLI_HINT = {
   noBrokerRunning:
-    "No broker is running. Run `embassy service install` once, or `embassy serve` in a terminal.",
+    "No broker is running (state dir {stateDir}). Run `embassy service install` once, or `embassy serve` in a terminal.",
   controlConnectDenied:
     "the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
   controlInvalidResponse:
@@ -148,6 +148,24 @@ const CLI_HINT = {
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
+/**
+ * The three connect-stage codes that all mean the same thing to the person
+ * reading them: nothing is serving this state directory. A missing socket
+ * never reaches the transport (validatePrivateGatewayControlSocket maps it to
+ * CONTROL_SOCKET_UNAVAILABLE first), and a broker that died leaving its socket
+ * behind reports CONTROL_LISTENER_UNAVAILABLE — so the hint has to cover all
+ * three or it is unreachable in practice.
+ */
+const isNoBrokerCode = (code: string): boolean =>
+  code === "CONTROL_SOCKET_UNAVAILABLE" || code === "CONTROL_SOCKET_MISSING" ||
+  code === "CONTROL_LISTENER_UNAVAILABLE";
+/** Best effort, and never throws: a hint must not replace the fault it explains. */
+function resolvedStateDirForHint(env: NodeJS.ProcessEnv): string {
+  try { return path.resolve(defaultGatewayStateDir(env)); }
+  catch { return env.EMBASSY_STATE_DIR ?? env.XDG_STATE_HOME ?? "unresolvable"; }
+}
+const hintLine = (hint: CliFaultHint, env: NodeJS.ProcessEnv): string =>
+  `[embassy] ${CLI_HINT[hint].replace("{stateDir}", resolvedStateDirForHint(env))}\n`;
 
 type ParsedOptions = Readonly<Record<string, string | true>>;
 class CliFault extends Error {
@@ -553,14 +571,18 @@ async function waitForDelivery(
   }
 }
 
-const SERVICE_HEALTH_POLL_ATTEMPTS = 5;
+const SERVICE_HEALTH_POLL_ATTEMPTS = 50;
 const SERVICE_HEALTH_POLL_INTERVAL_MS = 200;
+const SERVICE_HEALTH_POLL_TIMEOUT_SECONDS =
+  (SERVICE_HEALTH_POLL_ATTEMPTS * SERVICE_HEALTH_POLL_INTERVAL_MS) / 1000;
 
 /**
- * The install command's own bounded probe: a freshly kickstarted launchd
- * agent needs a moment to publish its control socket. This never throws —
- * install already succeeded by the time this runs, so an unhealthy broker
- * is reported, not treated as an install failure.
+ * The install command's own bounded probe: a freshly bootstrapped launchd
+ * agent has to load the state file and publish its control socket, which on
+ * a cold cache is seconds rather than milliseconds. This never throws, but a
+ * silence at the end of the window is not success — `install` reports it and
+ * exits non-zero, because an agent that never answered is exactly the case
+ * the operator has to hear about.
  */
 async function pollServiceHealth(
   config: GatewayConfig,
@@ -660,35 +682,51 @@ export async function runGatewayCli(
       const subcommand = args[0];
       if (args.length !== 1) fault();
       if (subcommand !== "install" && subcommand !== "uninstall" && subcommand !== "status") fault();
+      // Identity and the state directory are validated before the first
+      // launchd side effect. Loading them afterwards meant a missing
+      // inventory or an unusable state root exited 2 "request rejected"
+      // while the agent was already bootstrapped and looping.
+      const config = subcommand === "install" ? (await loadIdentity()).config : undefined;
       const serviceDeps: ServiceAgentDependencies = {
         homeDir: (dependencies.serviceHomeDir ?? (() => userInfo().homedir))(),
         runLaunchctl: dependencies.runLaunchctl ?? defaultRunLaunchctl,
         env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
         uid: process.getuid!(),
       };
-      if (subcommand === "install") {
-        let installed: ServiceAgentInstallResult;
-        try {
-          installed = await installServiceAgent(serviceDeps);
-        } catch (error) {
-          if (error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE") {
-            writeFailure(stdout, stderr, command, error.code, { retryable: true, kind: "unavailable" });
-            stderr.write(`[embassy] ${error.message}\n`);
+      try {
+        if (subcommand === "install") {
+          const installed = await installServiceAgent(serviceDeps);
+          const health = await pollServiceHealth(config!, sendRequest, validateSocket,
+            dependencies.delay ?? defaultDelay);
+          if (!health.ok) {
+            writeFailure(stdout, stderr, command, "SERVICE_HEALTH_UNAVAILABLE", { retryable: true, kind: "unavailable" });
+            stderr.write(`[embassy] Installed, but the broker did not answer within ${SERVICE_HEALTH_POLL_TIMEOUT_SECONDS} s. Run \`embassy service status\`; log: ${installed.logPath}.\n`);
             return gatewayCliExitCodes.unavailable;
           }
-          throw error;
+          success({ subcommand, ...installed, health });
+          return gatewayCliExitCodes.ok;
         }
-        const { config } = await loadIdentity();
-        const health = await pollServiceHealth(config, sendRequest, validateSocket, dependencies.delay ?? defaultDelay);
-        success({ subcommand, ...installed, health });
-        return gatewayCliExitCodes.ok;
+        if (subcommand === "uninstall") {
+          success({ subcommand, ...(await uninstallServiceAgent(serviceDeps)) });
+          return gatewayCliExitCodes.ok;
+        }
+        const status = await serviceAgentStatus(serviceDeps);
+        success({ subcommand, ...status });
+        if (status.state !== "unknown") return gatewayCliExitCodes.ok;
+        stderr.write(fixedStderr("unavailable"));
+        stderr.write(`[embassy] ${status.note}${status.launchctlStderr === undefined ? "" : ` launchctl: ${status.launchctlStderr}`}\n`);
+        return gatewayCliExitCodes.unavailable;
+      } catch (error) {
+        // launchctl's own stderr and the instance lease's own message are
+        // the whole value of these failures; the generic handler below
+        // discards the message and reports only the code.
+        if (!(error instanceof BridgeError)) throw error;
+        writeFailure(stdout, stderr, command, error.code, {
+          retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
+        });
+        stderr.write(`[embassy] ${error.message}\n`);
+        return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
       }
-      if (subcommand === "uninstall") {
-        success({ subcommand, ...(await uninstallServiceAgent(serviceDeps)) });
-        return gatewayCliExitCodes.ok;
-      }
-      success({ subcommand, ...(await serviceAgentStatus(serviceDeps)) });
-      return gatewayCliExitCodes.ok;
     }
     if (command === "serve") {
       await (dependencies.runServer ?? runGatewayServer)({
@@ -775,15 +813,15 @@ export async function runGatewayCli(
       }
       if (error.code === "CONTROL_CONNECT_DENIED")
         stderr.write(`[embassy] ${CLI_HINT.controlConnectDenied}\n`);
-      if (error.code === "CONTROL_SOCKET_MISSING")
-        stderr.write(`[embassy] ${CLI_HINT.noBrokerRunning}\n`);
+      if (isNoBrokerCode(error.code)) stderr.write(hintLine("noBrokerRunning", env));
       return ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable;
     }
     if (error instanceof CliFault) {
       writeFailure(stdout, stderr, command, error.code, {
         retryable: error.retryable, kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
-      if (error.hint !== undefined) stderr.write(`[embassy] ${CLI_HINT[error.hint]}\n`);
+      if (error.hint !== undefined) stderr.write(hintLine(error.hint, env));
+      if (isNoBrokerCode(error.code)) stderr.write(hintLine("noBrokerRunning", env));
       return error.retryable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
     if (error instanceof BridgeError) {

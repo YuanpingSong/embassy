@@ -8,7 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- `embassy service install|uninstall|status` runs the broker as a launchd agent (macOS); `send`/`status` without a broker now point at it (emb-108).
+- `embassy service install|uninstall|status` runs the broker as a per-user macOS launchd agent, restarting it after a crash but never after a deliberate boot refusal (emb-108).
+- The three connect-stage codes that mean nothing is serving the state directory — `CONTROL_SOCKET_UNAVAILABLE`, `CONTROL_SOCKET_MISSING`, and `CONTROL_LISTENER_UNAVAILABLE` — now carry one hint that names the resolved state directory and points at `embassy service install` or `embassy serve` (emb-108).
 
 ### Removed
 
