@@ -18,8 +18,8 @@ import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from ".
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
-import { defaultRunLaunchctl, installServiceAgent, serviceAgentStatus, uninstallServiceAgent,
-  type RunLaunchctl, type ServiceAgentDependencies } from "./service-agent.js";
+import { boundedServiceDetail, defaultRunLaunchctl, installServiceAgent, serviceAgentStatus,
+  uninstallServiceAgent, type RunLaunchctl, type ServiceAgentDependencies } from "./service-agent.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -111,7 +111,14 @@ Options:
   --version, -v          Print the version
   --help, -h             Show this help
 `;
-/** Fixed one-line stderr summaries; stdout carries the protocol and stderr never carries private detail. */
+/**
+ * Fixed one-line stderr summaries; stdout carries the protocol and stderr
+ * never carries private detail. The `service` subtree is the one deliberate
+ * exception, and only for its own local files: it reports the plist path, the
+ * log path, a missing program path, and launchctl's bounded stderr, because
+ * managing those files is the whole command. launchctl's *stdout* is never
+ * quoted — a `print` dump carries the agent's environment values.
+ */
 const CLI_STDERR = {
   input: "request rejected.",
   decision: "gateway rejected the request.",
@@ -498,10 +505,12 @@ function writeFailure(
   stderr: Writable,
   command: GatewayCliCommand | undefined,
   code: string,
-  options: { ambiguous?: boolean; retryable?: boolean; kind: CliStderrKind },
+  options: { ambiguous?: boolean; retryable?: boolean; kind: CliStderrKind;
+    detail?: Readonly<Record<string, string>> },
 ): void {
   stdout.write(serializedOutput({ ok: false, command: command ?? "unknown", error: {
     code, ambiguous: options.ambiguous ?? false, retryable: options.retryable ?? false,
+    ...(options.detail ?? {}),
   } }));
   stderr.write(fixedStderr(options.kind));
 }
@@ -571,44 +580,75 @@ async function waitForDelivery(
   }
 }
 
-const SERVICE_HEALTH_POLL_ATTEMPTS = 50;
+const SERVICE_HEALTH_DEADLINE_MS = 10_000;
 const SERVICE_HEALTH_POLL_INTERVAL_MS = 200;
-const SERVICE_HEALTH_POLL_TIMEOUT_SECONDS =
-  (SERVICE_HEALTH_POLL_ATTEMPTS * SERVICE_HEALTH_POLL_INTERVAL_MS) / 1000;
+/**
+ * Per-attempt cap. Without one, each attempt inherits the 3-second control
+ * timeout and a stalled socket stretches the "10 s" window past two minutes.
+ */
+const SERVICE_HEALTH_REQUEST_TIMEOUT_MS = 1_000;
 
 /**
- * The install command's own bounded probe: a freshly bootstrapped launchd
- * agent has to load the state file and publish its control socket, which on
- * a cold cache is seconds rather than milliseconds. This never throws, but a
- * silence at the end of the window is not success — `install` reports it and
- * exits non-zero, because an agent that never answered is exactly the case
- * the operator has to hear about.
+ * Codes that answer the question rather than postpone it. Polling still runs
+ * to the deadline — a mode or ownership check can be momentarily unlucky
+ * while the broker is publishing its socket — but if the *last* thing
+ * observed was one of these refusals rather than silence, install reports it
+ * with that code's own class and points at `embassy health`, the command that
+ * explains it, instead of a retryable timeout.
+ */
+const SERVICE_HEALTH_DECISIVE = new Map<string, {
+  kind: CliStderrKind; hint?: CliFaultHint; retryable: boolean; exitCode: number;
+}>([
+  ["CONTROL_STATE_UNSAFE", { kind: "unsafe", retryable: false, exitCode: gatewayCliExitCodes.invalidInput }],
+  ["CONTROL_SOCKET_UNSAFE", { kind: "unsafe", retryable: false, exitCode: gatewayCliExitCodes.invalidInput }],
+  ["CONTROL_CONNECT_DENIED", { kind: "unavailable", hint: "controlConnectDenied", retryable: true, exitCode: gatewayCliExitCodes.unavailable }],
+  ["CONTROL_VERSION_MISMATCH", { kind: "unavailable", hint: "controlVersionMismatch", retryable: true, exitCode: gatewayCliExitCodes.unavailable }],
+]);
+
+type ServiceHealthOutcome =
+  | { ok: true; result: unknown; elapsedMs: number }
+  | { ok: false; lastObserved: string; elapsedMs: number };
+
+/**
+ * The install command's own probe, bounded by wall clock rather than by an
+ * attempt count: a freshly bootstrapped launchd agent has to load its state
+ * and publish a control socket, which on a cold cache is seconds. This never
+ * throws, but silence at the deadline is not success — install reports the
+ * last code it observed and exits non-zero, because an agent that never
+ * answered is exactly the case the operator has to hear about.
  */
 async function pollServiceHealth(
   config: GatewayConfig,
   sendRequest: GatewayControlSender,
   validateSocket: (stateDir: string, socketPath: string) => Promise<void>,
   delay: (milliseconds: number) => Promise<void>,
-): Promise<{ ok: true; result: unknown } | { ok: false; code: string }> {
-  let lastCode = "SERVICE_HEALTH_UNAVAILABLE";
-  for (let attempt = 0; attempt < SERVICE_HEALTH_POLL_ATTEMPTS; attempt += 1) {
+  now: () => number,
+): Promise<ServiceHealthOutcome> {
+  const started = now();
+  const deadline = started + SERVICE_HEALTH_DEADLINE_MS;
+  let lastObserved = "SERVICE_HEALTH_NO_RESPONSE";
+  while (true) {
+    const remaining = deadline - now();
+    if (remaining <= 0) return { ok: false, lastObserved, elapsedMs: now() - started };
     try {
       await validateSocket(config.stateDir, config.controlSocketPath);
       const response = await sendRequest({
         socketPath: config.controlSocketPath,
         request: envelope("health", {}) as Extract<GatewayControlRequest, { method: "health" }>,
+        timeoutMs: Math.min(remaining, SERVICE_HEALTH_REQUEST_TIMEOUT_MS),
       });
-      if (response.ok) return { ok: true, result: response.result };
-      lastCode = response.error.code;
+      if (response.ok) return { ok: true, result: response.result, elapsedMs: now() - started };
+      lastObserved = response.error.code;
     } catch (error) {
-      lastCode = error instanceof GatewayControlTransportError ? error.code
+      lastObserved = error instanceof GatewayControlTransportError ? error.code
         : error instanceof CliFault ? error.code
         : error instanceof BridgeError ? error.code
-        : "SERVICE_HEALTH_UNAVAILABLE";
+        : "SERVICE_HEALTH_NO_RESPONSE";
     }
-    if (attempt < SERVICE_HEALTH_POLL_ATTEMPTS - 1) await delay(SERVICE_HEALTH_POLL_INTERVAL_MS);
+    const left = deadline - now();
+    if (left <= 0) return { ok: false, lastObserved, elapsedMs: now() - started };
+    await delay(Math.min(SERVICE_HEALTH_POLL_INTERVAL_MS, left));
   }
-  return { ok: false, code: lastCode };
 }
 
 /** Run one command; foreground runners own and release their signal handlers. */
@@ -692,16 +732,27 @@ export async function runGatewayCli(
         runLaunchctl: dependencies.runLaunchctl ?? defaultRunLaunchctl,
         env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
         uid: process.getuid!(),
+        delay: dependencies.delay ?? defaultDelay, now: dependencies.now ?? Date.now,
       };
       try {
         if (subcommand === "install") {
           const installed = await installServiceAgent(serviceDeps);
           const health = await pollServiceHealth(config!, sendRequest, validateSocket,
-            dependencies.delay ?? defaultDelay);
+            dependencies.delay ?? defaultDelay, dependencies.now ?? Date.now);
           if (!health.ok) {
-            writeFailure(stdout, stderr, command, "SERVICE_HEALTH_UNAVAILABLE", { retryable: true, kind: "unavailable" });
-            stderr.write(`[embassy] Installed, but the broker did not answer within ${SERVICE_HEALTH_POLL_TIMEOUT_SECONDS} s. Run \`embassy service status\`; log: ${installed.logPath}.\n`);
-            return gatewayCliExitCodes.unavailable;
+            // The agent stays installed either way: this is a report about
+            // the broker, not an install failure, so nothing is rolled back.
+            const elapsed = (health.elapsedMs / 1000).toFixed(1);
+            const decisive = SERVICE_HEALTH_DECISIVE.get(health.lastObserved);
+            writeFailure(stdout, stderr, command, "SERVICE_HEALTH_UNAVAILABLE", {
+              retryable: decisive?.retryable ?? true, kind: decisive?.kind ?? "unavailable",
+              detail: { lastObserved: health.lastObserved },
+            });
+            stderr.write(decisive === undefined
+              ? `[embassy] Installed, but the broker did not answer within ${elapsed} s; last observed ${health.lastObserved}. Run \`embassy service status\` or \`embassy health\`; log: ${installed.logPath}.\n`
+              : `[embassy] Installed, but the broker answered ${health.lastObserved} after ${elapsed} s. Run \`embassy health\` to diagnose it; log: ${installed.logPath}.\n`);
+            if (decisive?.hint !== undefined) stderr.write(hintLine(decisive.hint, env));
+            return decisive?.exitCode ?? gatewayCliExitCodes.unavailable;
           }
           success({ subcommand, ...installed, health });
           return gatewayCliExitCodes.ok;
@@ -717,15 +768,25 @@ export async function runGatewayCli(
         stderr.write(`[embassy] ${status.note}${status.launchctlStderr === undefined ? "" : ` launchctl: ${status.launchctlStderr}`}\n`);
         return gatewayCliExitCodes.unavailable;
       } catch (error) {
-        // launchctl's own stderr and the instance lease's own message are
-        // the whole value of these failures; the generic handler below
-        // discards the message and reports only the code.
-        if (!(error instanceof BridgeError)) throw error;
-        writeFailure(stdout, stderr, command, error.code, {
-          retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
+        // launchctl's own stderr and the instance lease's own message are the
+        // whole value of these failures; the generic handler below discards
+        // the message and reports only the code. An errno-bearing filesystem
+        // failure on this path (an unreadable plist, an undeletable one) is a
+        // real, recoverable service failure, not an INTERNAL_ERROR.
+        const errno = error !== null && typeof error === "object" && "code" in error &&
+          typeof (error as { code?: unknown }).code === "string";
+        if (!(error instanceof BridgeError) && !(errno && error instanceof Error)) throw error;
+        const failure = error instanceof BridgeError ? error : new BridgeError(
+          "SERVICE_AGENT_FILESYSTEM_FAILED",
+          `The service command could not complete: ${boundedServiceDetail((error as Error).message)}`,
+          true);
+        writeFailure(stdout, stderr, command, failure.code, {
+          retryable: failure.recoverable,
+          kind: failure.code === "SERVICE_AGENT_PATH_UNSAFE" ? "unsafe"
+            : failure.recoverable ? "unavailable" : "input",
         });
-        stderr.write(`[embassy] ${error.message}\n`);
-        return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
+        stderr.write(`[embassy] ${failure.message}\n`);
+        return failure.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
       }
     }
     if (command === "serve") {

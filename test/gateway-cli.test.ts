@@ -2371,6 +2371,12 @@ async function serviceFixture(): Promise<{ home: string; stateDir: string; plist
   };
 }
 
+/** Wall clock that only moves when the code under test sleeps. */
+function sleepDrivenClock(): { now: () => number; delay: (ms: number) => Promise<void> } {
+  let clock = 0;
+  return { now: () => clock, delay: async (ms: number) => { clock += ms; } };
+}
+
 const healthySendRequest = (async ({ request }: { request: { method: string } }) => {
   assert.equal(request.method, "health");
   return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { status: "ok" } };
@@ -2494,39 +2500,173 @@ test("a failing launchctl bootstrap exits non-zero and prints launchctl's own st
   });
   assert.equal(
     stderr.chunks.join(""),
-    "[embassy] gateway unavailable.\n[embassy] launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error The install was rolled back: the agent was booted out and the plist removed.\n",
+    "[embassy] gateway unavailable.\n[embassy] launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error — rollback: the new agent was unloaded and its plist removed; there was no previous install.\n",
   );
   await assert.rejects(lstat(plistPath));
 });
 
-test("service install exits non-zero when the installed broker never answers", async () => {
+test("the install health probe is bounded by wall clock, not by an attempt count", async () => {
   const { home, stateDir } = await serviceFixture();
   const launchd = cliFakeLaunchd();
-  let attempts = 0;
+  const clock = sleepDrivenClock();
+  const timeouts: (number | undefined)[] = [];
   const stdout = capture(), stderr = capture();
   const code = await runGatewayCli(["service", "install"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
     serviceHomeDir: () => home,
     runLaunchctl: launchd.run,
     validateControlSocket: async () => undefined,
-    sendRequest: async () => {
-      attempts += 1;
+    sendRequest: (async ({ timeoutMs }: { timeoutMs?: number }) => {
+      timeouts.push(timeoutMs);
       throw new GatewayControlTransportError("CONTROL_SOCKET_MISSING", "private detail");
-    },
-    delay: async () => {},
+    }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    delay: clock.delay, now: clock.now,
   });
 
   assert.equal(code, gatewayCliExitCodes.unavailable);
-  assert.equal(attempts, 50);
+  // The deadline, not the attempt count, ends it: 10 s of injected clock.
+  assert.equal(clock.now(), 10_000);
+  // Every attempt is capped at 1 s, and the tail attempts are capped tighter
+  // by what is left of the deadline, so one stalled socket cannot stretch the
+  // window past the 10 s the message promises.
+  assert.equal(timeouts[0], 1_000);
+  assert.equal(timeouts.every((value) => value !== undefined && value > 0 && value <= 1_000), true,
+    JSON.stringify(timeouts));
+  assert.equal(timeouts.at(-1), 200);
   assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
     ok: false, command: "service",
-    error: { code: "SERVICE_HEALTH_UNAVAILABLE", ambiguous: false, retryable: true },
+    error: {
+      code: "SERVICE_HEALTH_UNAVAILABLE", ambiguous: false, retryable: true,
+      lastObserved: "CONTROL_SOCKET_MISSING",
+    },
   });
   assert.equal(
     stderr.chunks.join(""),
-    `[embassy] gateway unavailable.\n[embassy] Installed, but the broker did not answer within 10 s. Run \`embassy service status\`; log: ${path.join(home, "Library", "Logs", "agent-embassy", "broker.log")}.\n`,
+    `[embassy] gateway unavailable.\n[embassy] Installed, but the broker did not answer within 10.0 s; last observed CONTROL_SOCKET_MISSING. Run \`embassy service status\` or \`embassy health\`; log: ${path.join(home, "Library", "Logs", "agent-embassy", "broker.log")}.\n`,
   );
   assert.doesNotMatch(stderr.chunks.join(""), /private detail/);
+});
+
+test("a decisive last observed code exits with that code's own class, not a retryable timeout", async () => {
+  const cases = [
+    {
+      thrown: () => new GatewayControlTransportError("CONTROL_VERSION_MISMATCH", "private skew"),
+      code: "CONTROL_VERSION_MISMATCH", exit: gatewayCliExitCodes.unavailable,
+      summary: "[embassy] gateway unavailable.\n", retryable: true,
+      hint: "[embassy] rebuild or repoint this client to the broker's Embassy installation, then retry.\n",
+    },
+    {
+      thrown: () => new BridgeError("CONTROL_STATE_UNSAFE", "private modes", false),
+      code: "CONTROL_STATE_UNSAFE", exit: gatewayCliExitCodes.invalidInput,
+      summary: "[embassy] gateway state directory or socket has unexpected permissions or ownership. Verify the exact path, owner, and modes before retrying.\n",
+      retryable: false, hint: "",
+    },
+  ] as const;
+  for (const scenario of cases) {
+    const { home, stateDir } = await serviceFixture();
+    const clock = sleepDrivenClock();
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCli(["service", "install"], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+      serviceHomeDir: () => home,
+      runLaunchctl: cliFakeLaunchd().run,
+      validateControlSocket: async () => undefined,
+      sendRequest: async () => { throw scenario.thrown(); },
+      delay: clock.delay, now: clock.now,
+    });
+
+    assert.equal(code, scenario.exit, scenario.code);
+    const parsed = JSON.parse(stdout.chunks.join("")) as { error: Record<string, unknown> };
+    assert.deepEqual(parsed.error, {
+      code: "SERVICE_HEALTH_UNAVAILABLE", ambiguous: false,
+      retryable: scenario.retryable, lastObserved: scenario.code,
+    });
+    assert.equal(
+      stderr.chunks.join(""),
+      `${scenario.summary}[embassy] Installed, but the broker answered ${scenario.code} after 10.0 s. Run \`embassy health\` to diagnose it; log: ${path.join(home, "Library", "Logs", "agent-embassy", "broker.log")}.\n${scenario.hint}`,
+    );
+    assert.doesNotMatch(stderr.chunks.join(""), /private skew|private modes/);
+  }
+});
+
+test("launchctl print stdout never reaches stderr, however the service command fails", async () => {
+  const { home, stateDir, plistPath } = await serviceFixture();
+  const dump = `state = running\n\tpid = 4242\n\tenvironment = {\n\t\tEMBASSY_STATE_DIR => /secret/state\n\t}\n`;
+  const clock = sleepDrivenClock();
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    // Loaded, and bootout never actually clears it.
+    runLaunchctl: async (args) => args[0] === "print"
+      ? { code: 0, stdout: dump, stderr: "" }
+      : { code: 0, stdout: "", stderr: "" },
+    validateControlSocket: async () => { throw new Error("must not reach the health probe"); },
+    sendRequest: async () => { throw new Error("must not contact the gateway"); },
+    delay: clock.delay, now: clock.now,
+  });
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.equal(
+    stderr.chunks.join(""),
+    "[embassy] gateway unavailable.\n[embassy] Could not replace the loaded launchd agent: the previous agent is still unloading after 10.0 s, although launchctl bootout returned 0. Nothing was changed.\n",
+  );
+  assert.doesNotMatch(`${stdout.chunks.join("")} ${stderr.chunks.join("")}`, /secret|4242/);
+  await assert.rejects(lstat(plistPath));
+});
+
+test("an errno filesystem failure on the service path is a service failure, not an internal error", async () => {
+  const { home, stateDir } = await serviceFixture();
+  await mkdir(path.join(home, "Library"), { mode: 0o755 });
+  // Read-only: creating LaunchAgents underneath fails with a raw EACCES.
+  await chmod(path.join(home, "Library"), 0o500);
+
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: cliFakeLaunchd().run,
+    validateControlSocket: async () => undefined,
+    sendRequest: healthySendRequest,
+    delay: async () => {},
+  });
+  await chmod(path.join(home, "Library"), 0o755);
+
+  assert.equal(code, gatewayCliExitCodes.unavailable);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: false, command: "service",
+    error: { code: "SERVICE_AGENT_FILESYSTEM_FAILED", ambiguous: false, retryable: true },
+  });
+  assert.match(stderr.chunks.join(""), /^\[embassy\] gateway unavailable\.\n\[embassy\] The service command could not complete: EACCES/);
+});
+
+test("an unsafe service path reports the unsafe class, not a plain input rejection", async () => {
+  const { home, stateDir } = await serviceFixture();
+  const elsewhere = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-cli-service-agents-"));
+  roots.add(elsewhere);
+  await mkdir(path.join(home, "Library"), { mode: 0o755 });
+  await symlink(elsewhere, path.join(home, "Library", "LaunchAgents"));
+
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["service", "install"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+    serviceHomeDir: () => home,
+    runLaunchctl: cliFakeLaunchd().run,
+    validateControlSocket: async () => undefined,
+    sendRequest: healthySendRequest,
+    delay: async () => {},
+  });
+
+  assert.equal(code, gatewayCliExitCodes.invalidInput);
+  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+    ok: false, command: "service",
+    error: { code: "SERVICE_AGENT_PATH_UNSAFE", ambiguous: false, retryable: false },
+  });
+  assert.match(
+    stderr.chunks.join(""),
+    /^\[embassy\] gateway state directory or socket has unexpected permissions or ownership\./,
+  );
+  await assert.rejects(lstat(path.join(elsewhere, `${SERVICE_AGENT_LABEL}.plist`)));
 });
 
 test("service status reports unknown and exits non-zero when launchctl cannot answer", async () => {

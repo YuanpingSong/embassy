@@ -58,6 +58,8 @@ type LaunchdScript = Readonly<{
   printStdout?: string;
   /** Force one verb to fail, without applying its effect. */
   fail?: Readonly<Record<string, RunLaunchctlResult>>;
+  /** How many times each forced failure applies (default: every time). */
+  failLimit?: Readonly<Record<string, number>>;
 }>;
 
 /**
@@ -71,13 +73,19 @@ function fakeLaunchd(script: LaunchdScript = {}): {
   isLoaded: () => boolean;
 } {
   const calls: string[][] = [];
+  const forcedSoFar: Record<string, number> = {};
   let loaded = script.loaded ?? false;
   const printStdout = script.printStdout ?? RUNNING_PRINT;
   const run: RunLaunchctl = async (args) => {
     calls.push([...args]);
     const verb = args[0] ?? "";
     const forced = script.fail?.[verb];
-    if (forced !== undefined) return forced;
+    const limit = script.failLimit?.[verb];
+    const used = forcedSoFar[verb] ?? 0;
+    if (forced !== undefined && (limit === undefined || used < limit)) {
+      forcedSoFar[verb] = used + 1;
+      return forced;
+    }
     switch (verb) {
       case "print":
         return loaded
@@ -98,10 +106,26 @@ function fakeLaunchd(script: LaunchdScript = {}): {
   return { run, calls, isLoaded: () => loaded };
 }
 
+/**
+ * A clock that only moves when the code under test sleeps, so every bounded
+ * wait in this file is exercised at full length in microseconds and reports a
+ * deterministic elapsed time.
+ */
+function sleepDrivenClock(): { now: () => number; delay: (ms: number) => Promise<void> } {
+  let clock = 0;
+  return {
+    now: () => clock,
+    delay: async (milliseconds: number) => {
+      clock += milliseconds;
+    },
+  };
+}
+
 function baseDeps(
   homeDir: string,
   overrides: Partial<ServiceAgentDependencies> = {},
 ): ServiceAgentDependencies {
+  const clock = sleepDrivenClock();
   return {
     homeDir,
     runLaunchctl: fakeLaunchd().run,
@@ -109,6 +133,8 @@ function baseDeps(
     execPath: EXEC_PATH,
     cliPath: CLI_PATH,
     uid: UID,
+    now: clock.now,
+    delay: clock.delay,
     ...overrides,
   };
 }
@@ -350,12 +376,13 @@ test("a failing bootstrap rolls the install back and carries launchctl's stderr"
       error.code === "SERVICE_AGENT_COMMAND_FAILED" &&
       error.recoverable &&
       error.message ===
-        "launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error The install was rolled back: the agent was booted out and the plist removed.",
+        "launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error — rollback: the new agent was unloaded and its plist removed; there was no previous install.",
   );
   assert.deepEqual(launchd.calls, [
     ["print", TARGET],
     ["bootstrap", DOMAIN, plistPathIn(home)],
     ["bootout", TARGET],
+    ["print", TARGET],
   ]);
   await assert.rejects(lstat(plistPathIn(home)));
 });
@@ -371,7 +398,7 @@ test("a failing kickstart rolls the install back too", async (t) => {
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "SERVICE_AGENT_COMMAND_FAILED" &&
-      /Could not kickstart service The install was rolled back/.test(error.message),
+      /Could not kickstart service — rollback: the new agent was unloaded and its plist removed/.test(error.message),
   );
   await assert.rejects(lstat(plistPathIn(home)));
 });
@@ -444,7 +471,7 @@ test("uninstall keeps the plist when bootout fails, and reports launchctl's stde
       error.code === "SERVICE_AGENT_COMMAND_FAILED" &&
       error.recoverable &&
       error.message ===
-        "launchctl bootout failed (exit 9): Boot-out failed: 5: Input/output error — the agent is still loaded, so its plist was left in place.",
+        "Could not unload the launchd agent: launchctl bootout failed (exit 9): Boot-out failed: 5: Input/output error. Its plist was left in place.",
   );
   assert.equal((await lstat(installed.plistPath)).isFile(), true);
 });
@@ -524,4 +551,148 @@ test("status reports a program the plist points at that is no longer on disk", a
     status.note,
     `The broker is loaded as a launchd agent. program missing: ${gone} — re-run \`embassy service install\`.`,
   );
+});
+
+test("uninstall keeps the plist when launchctl cannot confirm the unload at all", async (t) => {
+  const home = await homeFixture(t);
+  const installed = await installServiceAgent(baseDeps(home, { runLaunchctl: fakeLaunchd().run }));
+
+  // launchctl itself is unusable. "Not found" is the only answer that means
+  // gone; every other failure must leave the plist where it is.
+  const launchd = fakeLaunchd({
+    loaded: true,
+    fail: { print: { code: 1, stdout: "", stderr: "spawn /bin/launchctl ENOENT" } },
+  });
+  await assert.rejects(
+    uninstallServiceAgent(baseDeps(home, { runLaunchctl: launchd.run })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "SERVICE_AGENT_COMMAND_FAILED" &&
+      error.recoverable &&
+      error.message ===
+        "Could not unload the launchd agent: launchctl print could not confirm the unload (exit 1): spawn /bin/launchctl ENOENT. Its plist was left in place.",
+  );
+  assert.deepEqual(launchd.calls, [["bootout", TARGET], ["print", TARGET]]);
+  assert.equal((await lstat(installed.plistPath)).isFile(), true);
+});
+
+test("install waits out an unloading agent and never quotes launchctl print's stdout", async (t) => {
+  const home = await homeFixture(t);
+  // `print` dumps the agent's whole EnvironmentVariables dict, values and all.
+  const secret = `${TARGET} = {\n\tstate = running\n\tpid = 4242\n\tenvironment = {\n\t\tEMBASSY_STATE_DIR => /secret/state\n\t}\n}\n`;
+  const launchd = fakeLaunchd({
+    loaded: true,
+    printStdout: secret,
+    // bootout "succeeds" but launchd never finishes tearing the job down.
+    fail: { bootout: { code: 0, stdout: "", stderr: "" } },
+  });
+  await assert.rejects(
+    installServiceAgent(baseDeps(home, { runLaunchctl: launchd.run })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "SERVICE_AGENT_COMMAND_FAILED" &&
+      error.recoverable &&
+      error.message ===
+        "Could not replace the loaded launchd agent: the previous agent is still unloading after 10.0 s, although launchctl bootout returned 0. Nothing was changed." &&
+      !/secret|EMBASSY_STATE_DIR|pid 4242/.test(error.message),
+  );
+  // One `print` to discover it, then the full bounded poll: 250 ms × 40.
+  assert.equal(launchd.calls.filter((call) => call[0] === "print").length, 42);
+  await assert.rejects(lstat(plistPathIn(home)));
+});
+
+test("a rollback over a previous install restores its plist and re-bootstraps it", async (t) => {
+  const home = await homeFixture(t);
+  const first = await installServiceAgent(
+    baseDeps(home, { runLaunchctl: fakeLaunchd().run, env: { EMBASSY_MAX_ROUTES: "64" } }),
+  );
+  const original = await readFile(first.plistPath, "utf8");
+
+  const launchd = fakeLaunchd({
+    loaded: true,
+    fail: { bootstrap: { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error\n" } },
+    failLimit: { bootstrap: 1 },
+  });
+  await assert.rejects(
+    installServiceAgent(
+      baseDeps(home, { runLaunchctl: launchd.run, env: { EMBASSY_MAX_ROUTES: "999" } }),
+    ),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.message ===
+        "launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error — rollback: the previous plist was restored and re-bootstrapped.",
+  );
+
+  // A rollback that merely deleted the plist would be a silent uninstall.
+  assert.equal(await readFile(first.plistPath, "utf8"), original);
+  assert.match(original, /<key>EMBASSY_MAX_ROUTES<\/key>\n        <string>64<\/string>/);
+  assert.deepEqual(launchd.calls, [
+    ["print", TARGET],
+    ["bootout", TARGET],
+    ["print", TARGET],
+    ["bootstrap", DOMAIN, first.plistPath],
+    ["bootout", TARGET],
+    ["print", TARGET],
+    ["bootstrap", DOMAIN, first.plistPath],
+  ]);
+});
+
+test("a rollback that cannot confirm the unload leaves the plist in place and says so", async (t) => {
+  const home = await homeFixture(t);
+  let bootstrapped = false;
+  const run: RunLaunchctl = async (args) => {
+    const verb = args[0] ?? "";
+    if (verb === "bootstrap") {
+      bootstrapped = true;
+      return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error\n" };
+    }
+    if (verb === "print") {
+      return bootstrapped
+        ? { code: 0, stdout: RUNNING_PRINT, stderr: "" }
+        : { code: 113, stdout: "", stderr: NOT_FOUND_STDERR };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await assert.rejects(
+    installServiceAgent(baseDeps(home, { runLaunchctl: run })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.message ===
+        "launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error — rollback: the new agent is still unloading after 10.0 s, although launchctl bootout returned 0, so its plist was left in place.",
+  );
+  // Half-installed is reported, never hidden by deleting the evidence.
+  assert.equal((await lstat(plistPathIn(home))).isFile(), true);
+});
+
+test("the lease record is only trusted when this user owns it", async (t) => {
+  const home = await homeFixture(t);
+  const lease = await acquireGatewayInstanceLease(home);
+  t.after(async () => {
+    await lease.close();
+  });
+  // The lock file belongs to UID; installing as a different uid must not read
+  // a pid out of it, let alone tell anyone to stop that process.
+  await assert.rejects(
+    installServiceAgent(baseDeps(home, { runLaunchctl: fakeLaunchd().run, uid: UID + 1 })),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "GATEWAY_INSTANCE_IN_USE" &&
+      error.message.startsWith("The Embassy host lease could not be acquired") &&
+      !/pid/.test(error.message),
+  );
+});
+
+test("launchctl detail is stderr only, and capped", async (t) => {
+  const home = await homeFixture(t);
+  const flood = fakeLaunchd({ fail: { print: { code: 1, stdout: "", stderr: "x".repeat(2_000) } } });
+  const flooded = await serviceAgentStatus(baseDeps(home, { runLaunchctl: flood.run }));
+  assert.equal(flooded.launchctlStderr, `${"x".repeat(512)}… (truncated)`);
+
+  const stdoutOnly = fakeLaunchd({
+    fail: { print: { code: 1, stdout: "EMBASSY_STATE_DIR => /secret/state\n", stderr: "" } },
+  });
+  const quiet = await serviceAgentStatus(baseDeps(home, { runLaunchctl: stdoutOnly.run }));
+  assert.equal(quiet.state, "unknown");
+  assert.equal(quiet.launchctlStderr, "no stderr output");
+  assert.doesNotMatch(`${quiet.note} ${quiet.launchctlStderr}`, /secret/);
 });

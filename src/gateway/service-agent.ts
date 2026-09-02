@@ -15,6 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -23,8 +24,27 @@ import { acquireGatewayInstanceLease } from "./instance-lease.js";
 
 export const SERVICE_AGENT_LABEL = "com.agent-embassy.broker";
 
-/** Bounded read of our own rendered plist when `status` inspects it. */
+/** Bounded read of our own rendered plist when `status` inspects it or a rollback restores it. */
 const MAX_PLIST_BYTES = 64 * 1024;
+/** Bounded read of the lease lock record, matching instance-lease.ts. */
+const MAX_LEASE_RECORD_BYTES = 4 * 1024;
+/**
+ * Every byte that can reach stderr from this module passes through
+ * boundedDetail. cli.ts holds the invariant that stderr never carries private
+ * detail, and `launchctl print` stdout is private detail: it dumps the agent's
+ * whole EnvironmentVariables dict, values included. Only launchctl's *stderr*
+ * is ever quoted, and only this many bytes of it.
+ */
+const MAX_LAUNCHCTL_DETAIL_BYTES = 512;
+/**
+ * launchd tears a job down asynchronously and `bootout` can return 36
+ * ("operation in progress") while it is still going; the broker's own close
+ * awaits its providers, its store, and the lease helper, up to 5 s. So a
+ * bootout is confirmed by polling `print` for not-found, not by one shot.
+ */
+const BOOTOUT_POLL_INTERVAL_MS = 250;
+const BOOTOUT_WAIT_TIMEOUT_MS = 10_000;
+const BOOTOUT_MAX_ATTEMPTS = BOOTOUT_WAIT_TIMEOUT_MS / BOOTOUT_POLL_INTERVAL_MS;
 
 /**
  * The host-wide advisory lease lives at this fixed path under the login
@@ -75,14 +95,16 @@ function stringElement(value: string): string {
 /**
  * Render the launchd agent plist.
  *
- * `KeepAlive` is `{ Crashed: true }`, never plain `true`: the broker refuses
- * to boot on purpose in several cases (an unsupported state schema, another
- * instance already holding the lease), and those are clean non-zero exits.
- * Under plain `KeepAlive` launchd would relaunch each refusal forever,
+ * `KeepAlive` is `{ Crashed: true }`, never plain `true`. Per launchd.plist(5)
+ * `Crashed` relaunches the job only when it died from a signal typically
+ * associated with a crash — SIGSEGV, SIGBUS, SIGILL, SIGABRT. Nothing else
+ * brings it back: not a clean exit, not a non-zero exit, not a plain `kill`
+ * (SIGTERM), and not one of the broker's deliberate boot refusals (an
+ * unsupported state schema, another instance already holding the lease).
+ * Under plain `KeepAlive` every one of those refusals would relaunch forever,
  * throttled to once every 5 seconds, into one log file that nothing rotates.
- * With `Crashed` the agent comes back only after a signal death; a refusal
- * at boot exits once and stays down, where `embassy service status` and the
- * log can explain it. ThrottleInterval still bounds a genuine crash loop.
+ * A refusal now exits once and stays down, where `embassy service status` and
+ * the log can explain it. ThrottleInterval still bounds a genuine crash loop.
  *
  * EnvironmentVariables carries exactly the captured configuration keys and
  * nothing else — see captureAgentEnvironment for the rule. PATH is not
@@ -148,7 +170,13 @@ export type ServiceAgentDependencies = Readonly<{
   execPath: string;
   cliPath: string;
   uid: number;
+  /** Bounded waits for launchd to finish unloading; injected by tests. */
+  delay?: (milliseconds: number) => Promise<void>;
+  now?: () => number;
 }>;
+
+const defaultDelay = async (milliseconds: number): Promise<void> =>
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
 export type ServiceAgentPaths = Readonly<{
   launchAgentsDir: string;
@@ -171,8 +199,25 @@ export function serviceAgentPaths(homeDir: string): ServiceAgentPaths {
 const launchctlDomain = (uid: number): string => `gui/${uid}`;
 const launchctlTarget = (uid: number): string => `gui/${uid}/${SERVICE_AGENT_LABEL}`;
 
+/**
+ * stderr only, trimmed, and capped — never launchctl's stdout. Everything the
+ * service path puts on the CLI's stderr goes through this, including the
+ * errno text of a filesystem failure the CLI itself renders.
+ */
+export function boundedServiceDetail(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return "no stderr output";
+  const bytes = Buffer.from(trimmed, "utf8");
+  return bytes.length <= MAX_LAUNCHCTL_DETAIL_BYTES
+    ? trimmed
+    : `${bytes.subarray(0, MAX_LAUNCHCTL_DETAIL_BYTES).toString("utf8")}… (truncated)`;
+}
 const launchctlDetail = (result: RunLaunchctlResult): string =>
-  result.stderr.trim() || result.stdout.trim() || "no output";
+  boundedServiceDetail(result.stderr);
+const formatSeconds = (milliseconds: number): string => (milliseconds / 1000).toFixed(1);
+/** An errno-bearing filesystem failure, rendered without a stack. */
+const errnoDetail = (error: unknown): string =>
+  boundedServiceDetail(error instanceof Error ? error.message : "unknown filesystem failure");
 
 /**
  * launchctl failures are transient by class: the binary was unavailable, the
@@ -254,9 +299,35 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function readHeldLeasePid(homeDir: string): Promise<number | undefined> {
+/**
+ * Read the lease holder's pid under the same discipline instance-lease.ts
+ * applies in readPrivateFile: lstat first, regular file only, this user's
+ * own, size-bounded, opened O_NOFOLLOW and re-verified against the same
+ * inode. This value only decorates a refusal message, but it is read out of
+ * a file another process writes, so it gets the same care.
+ */
+async function readHeldLeasePid(homeDir: string, uid: number): Promise<number | undefined> {
+  const lockPath = path.join(homeDir, HOST_LEASE_LOCK_RELATIVE_PATH);
   try {
-    const raw = await readFile(path.join(homeDir, HOST_LEASE_LOCK_RELATIVE_PATH), "utf8");
+    const info = await lstat(lockPath);
+    if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_LEASE_RECORD_BYTES ||
+        info.uid !== uid) {
+      return undefined;
+    }
+    const handle = await open(lockPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let raw: string;
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino ||
+          opened.size > MAX_LEASE_RECORD_BYTES || opened.uid !== uid) {
+        return undefined;
+      }
+      const buffer = Buffer.alloc(MAX_LEASE_RECORD_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      raw = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
     const record: unknown = JSON.parse(raw.trim());
     const pid =
       record !== null && typeof record === "object" && "pid" in record
@@ -284,13 +355,13 @@ async function readHeldLeasePid(homeDir: string): Promise<number | undefined> {
  * there, so an unchecked pid is routinely stale. Never tell someone to stop
  * a dead process.
  */
-async function refuseIfAnotherBrokerHoldsLease(homeDir: string): Promise<void> {
+async function refuseIfAnotherBrokerHoldsLease(homeDir: string, uid: number): Promise<void> {
   let lease;
   try {
     lease = await acquireGatewayInstanceLease(homeDir);
   } catch (error) {
     if (error instanceof BridgeError && error.code === "GATEWAY_INSTANCE_IN_USE") {
-      const pid = await readHeldLeasePid(homeDir);
+      const pid = await readHeldLeasePid(homeDir, uid);
       const alive = pid !== undefined && isProcessAlive(pid);
       throw new BridgeError(
         "GATEWAY_INSTANCE_IN_USE",
@@ -382,6 +453,80 @@ async function writePlistAtomically(plistPath: string, plist: string): Promise<v
   }
 }
 
+type BootoutWait =
+  | Readonly<{ kind: "gone"; elapsedMs: number }>
+  | Readonly<{ kind: "still-loaded"; elapsedMs: number }>
+  | Readonly<{ kind: "print-failed"; result: RunLaunchctlResult; elapsedMs: number }>;
+
+/** Poll `print` until launchctl says the label is not found, or the bound expires. */
+async function waitForServiceGone(
+  deps: ServiceAgentDependencies,
+  target: string,
+): Promise<BootoutWait> {
+  const now = deps.now ?? Date.now;
+  const delay = deps.delay ?? defaultDelay;
+  const started = now();
+  for (let attempt = 0; ; attempt += 1) {
+    const printed = await deps.runLaunchctl(["print", target]);
+    const elapsedMs = now() - started;
+    if (printed.code !== 0) {
+      return isServiceNotFound(printed)
+        ? { kind: "gone", elapsedMs }
+        : { kind: "print-failed", result: printed, elapsedMs };
+    }
+    if (elapsedMs >= BOOTOUT_WAIT_TIMEOUT_MS || attempt >= BOOTOUT_MAX_ATTEMPTS) {
+      return { kind: "still-loaded", elapsedMs };
+    }
+    await delay(BOOTOUT_POLL_INTERVAL_MS);
+  }
+}
+
+type BootoutOutcome = Readonly<{ gone: true }> | Readonly<{ gone: false; reason: string }>;
+
+/**
+ * Boot the label out and confirm it. `bootout`'s own exit code is not the
+ * answer — it returns 0 while launchd is still tearing the job down, and it
+ * returns non-zero for a job that was never loaded — so the confirmation is
+ * always `print` reporting not-found. The reason strings quote launchctl's
+ * stderr only; `print` stdout carries the agent's environment values and
+ * never leaves this module.
+ */
+async function verifiedBootout(
+  deps: ServiceAgentDependencies,
+  target: string,
+  subject: string,
+): Promise<BootoutOutcome> {
+  const bootout = await deps.runLaunchctl(["bootout", target]);
+  const wait = await waitForServiceGone(deps, target);
+  if (wait.kind === "gone") return { gone: true };
+  if (wait.kind === "print-failed") {
+    return {
+      gone: false,
+      reason: `launchctl print could not confirm the unload (exit ${wait.result.code}): ${launchctlDetail(wait.result)}`,
+    };
+  }
+  if (bootout.code !== 0) {
+    return {
+      gone: false,
+      reason: `launchctl bootout failed (exit ${bootout.code}): ${launchctlDetail(bootout)}`,
+    };
+  }
+  return {
+    gone: false,
+    reason: `${subject} is still unloading after ${formatSeconds(wait.elapsedMs)} s, although launchctl bootout returned 0`,
+  };
+}
+
+/** The plist currently on disk, when it is one we could safely put back. */
+async function readExistingPlist(plistPath: string): Promise<string | undefined> {
+  const info = await lstat(plistPath).catch(() => undefined);
+  if (info === undefined || info.isSymbolicLink() || !info.isFile() ||
+      info.size > MAX_PLIST_BYTES) {
+    return undefined;
+  }
+  return await readFile(plistPath, "utf8").catch(() => undefined);
+}
+
 export type ServiceAgentInstallResult = Readonly<{
   label: string;
   plistPath: string;
@@ -414,13 +559,12 @@ export async function installServiceAgent(
   //    agent it was replacing.
   const before = await deps.runLaunchctl(["print", target]);
   if (before.code === 0) {
-    const bootout = await deps.runLaunchctl(["bootout", target]);
-    const after = await deps.runLaunchctl(["print", target]);
-    if (after.code === 0) {
-      throw launchctlFailure(
-        "bootout",
-        bootout.code === 0 ? after : bootout,
-        " — the previous agent is still loaded, so nothing was changed.",
+    const cleared = await verifiedBootout(deps, target, "the previous agent");
+    if (!cleared.gone) {
+      throw new BridgeError(
+        "SERVICE_AGENT_COMMAND_FAILED",
+        `Could not replace the loaded launchd agent: ${cleared.reason}. Nothing was changed.`,
+        true,
       );
     }
   } else if (!isServiceNotFound(before)) {
@@ -428,10 +572,13 @@ export async function installServiceAgent(
   }
 
   // 3. Only now can a held lease mean somebody else's broker.
-  await refuseIfAnotherBrokerHoldsLease(homeDir);
+  await refuseIfAnotherBrokerHoldsLease(homeDir, uid);
 
-  // 4. Side effects begin here.
+  // 4. Side effects begin here. The plist already on disk is read first: a
+  //    re-install overwrites it, and a rollback that merely deleted it would
+  //    be a silent uninstall wearing the label of an inert failure.
   await prepareServiceDirectories(homeDir, uid);
+  const previousPlist = await readExistingPlist(plistPath);
   await writePlistAtomically(
     plistPath,
     renderLaunchAgentPlist({
@@ -442,34 +589,45 @@ export async function installServiceAgent(
     }),
   );
 
-  const rollback = async (): Promise<void> => {
-    await Promise.resolve(deps.runLaunchctl(["bootout", target])).catch(() => undefined);
-    await rm(plistPath, { force: true }).catch(() => undefined);
+  /** Undo this install as far as it can honestly be undone, and say what happened. */
+  const rollback = async (): Promise<string> => {
+    const cleared = await verifiedBootout(deps, target, "the new agent");
+    if (!cleared.gone) return `${cleared.reason}, so its plist was left in place`;
+    if (previousPlist === undefined) {
+      try {
+        await rm(plistPath, { force: true });
+      } catch (error) {
+        return `the new agent was unloaded, but its plist could not be removed (${errnoDetail(error)})`;
+      }
+      return "the new agent was unloaded and its plist removed; there was no previous install";
+    }
+    try {
+      await writePlistAtomically(plistPath, previousPlist);
+    } catch (error) {
+      return `the new agent was unloaded, but the previous plist could not be restored (${errnoDetail(error)}), so the plist on disk is the one this install wrote`;
+    }
+    const restored = await deps.runLaunchctl(["bootstrap", domain, plistPath]);
+    if (restored.code !== 0) {
+      return `the previous plist was restored, but re-bootstrapping it failed (launchctl bootstrap exit ${restored.code}: ${launchctlDetail(restored)}); run \`embassy service install\` again`;
+    }
+    return "the previous plist was restored and re-bootstrapped";
   };
-  const ROLLED_BACK =
-    " The install was rolled back: the agent was booted out and the plist removed.";
+  const failInstall = async (verb: string, result: RunLaunchctlResult): Promise<never> => {
+    throw launchctlFailure(verb, result, ` — rollback: ${await rollback()}.`);
+  };
 
   const bootstrap = await deps.runLaunchctl(["bootstrap", domain, plistPath]);
-  if (bootstrap.code !== 0) {
-    await rollback();
-    throw launchctlFailure("bootstrap", bootstrap, ROLLED_BACK);
-  }
+  if (bootstrap.code !== 0) await failInstall("bootstrap", bootstrap);
 
   // RunAtLoad starts the agent as part of bootstrap; `kickstart -k` would
   // additionally *kill* a healthy broker, so it is never used. A plain
   // kickstart is the fallback for the loaded-but-not-running case only.
   const loaded = await deps.runLaunchctl(["print", target]);
-  if (loaded.code !== 0) {
-    await rollback();
-    throw launchctlFailure("print", loaded, ROLLED_BACK);
-  }
+  if (loaded.code !== 0) await failInstall("print", loaded);
   const printed = parseLaunchctlPrintOutput(loaded.stdout);
   if (printed.pid === undefined && printed.launchdState !== "running") {
     const kickstart = await deps.runLaunchctl(["kickstart", target]);
-    if (kickstart.code !== 0) {
-      await rollback();
-      throw launchctlFailure("kickstart", kickstart, ROLLED_BACK);
-    }
+    if (kickstart.code !== 0) await failInstall("kickstart", kickstart);
   }
   return {
     label: SERVICE_AGENT_LABEL,
@@ -486,10 +644,12 @@ export type ServiceAgentUninstallResult = Readonly<{
 }>;
 
 /**
- * Boot the agent out, confirm with `print` that it is gone, and only then
- * unlink the plist. An unverified bootout could leave a running agent with
- * no plist behind it — invisible to `install`, unstoppable by `uninstall`.
- * Logs are left in place.
+ * Boot the agent out, confirm that launchctl reports the label as *not
+ * found*, and only then unlink the plist. The confirmation must be that exact
+ * answer: treating any launchctl error (a missing binary, a gui domain that
+ * is not up, a timeout) as "gone" would unlink the plist while the agent is
+ * still loaded — invisible to `install`, unstoppable by `uninstall`. Logs are
+ * left in place.
  */
 export async function uninstallServiceAgent(
   deps: ServiceAgentDependencies,
@@ -498,13 +658,12 @@ export async function uninstallServiceAgent(
   const homeDir = requireAbsolutePath(deps.homeDir, "The login home");
   const { plistPath, logPath } = serviceAgentPaths(homeDir);
   const target = launchctlTarget(uid);
-  const bootout = await deps.runLaunchctl(["bootout", target]);
-  const after = await deps.runLaunchctl(["print", target]);
-  if (after.code === 0) {
-    throw launchctlFailure(
-      "bootout",
-      bootout.code === 0 ? after : bootout,
-      " — the agent is still loaded, so its plist was left in place.",
+  const cleared = await verifiedBootout(deps, target, "the agent");
+  if (!cleared.gone) {
+    throw new BridgeError(
+      "SERVICE_AGENT_COMMAND_FAILED",
+      `Could not unload the launchd agent: ${cleared.reason}. Its plist was left in place.`,
+      true,
     );
   }
   const existing = await lstat(plistPath).catch(() => undefined);
