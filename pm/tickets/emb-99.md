@@ -245,3 +245,7 @@ no support-matrix ceremony, no site work beyond the stub.
   message listing the lane's commits; main stays linear; lanes are
   never force-pushed. Verified tree identity is the gate, not the
   lane's commit graph.
+- 2026-09-02 Norm (emb-106 F1): a merged lane's tree is not landable
+  on the strength of a green check — a conflict-marker sweep is part
+  of the gate; the oracle (`^(<<<<<<<|=======|>>>>>>>)( |$)` over
+  every shipped file incl. CHANGELOG) lands with emb-106 and stays.
