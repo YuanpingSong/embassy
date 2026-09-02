@@ -16,7 +16,6 @@ below.
 | `EMBASSY_STEERING_ENABLED` | `1` | Global Claude-to-Codex `STEER:` kill switch; set exactly `0` to treat every Claude-to-Codex body as an ordinary Codex-bound queued message; Claude-bound mailbox timing is unchanged |
 | `EMBASSY_DELIVERY_NOTICES` | `merged` | Claude sender notice policy: `merged` keeps stalls and folds terminal diagnostics into native status; `verbose` emits both; `quiet` emits no gateway user-frame notices |
 | `EMBASSY_TRACKING_ENABLED` | `1` | Global progress-watch kill switch; set exactly `0` to reject `--track`, `--idle-minutes`, and `TRACK:` open attempts. Active watches are memory-only and end with the broker process; they are never restored after restart. With no active watch, `DONE:` is inert and `untrack` is not specially rejected—it returns `NOT_FOUND`. Any value other than `1` or `0` is a configuration error |
-| `EMBASSY_LOCALE` | `en` | CLI output language, exactly `en` or `zh-CN`. The `--lang` flag overrides it for the invocation that carries it; an unset or empty value means `en`, and any other value is an argument error |
 
 Before any Embassy client call that talks to the broker, the CLI reads the state
 directory and `nodes.json`, then connects to the control socket; grant a sandboxed

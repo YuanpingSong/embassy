@@ -1692,7 +1692,6 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   const originalPayloads: string[] = [];
   const replacementPayloads: string[] = [];
   const current = await fixture(t, {
-    locale: "zh-CN",
     now: () => now,
     maxFrameBytes: 512,
   });
@@ -1779,8 +1778,15 @@ test("one bounded native stall frame follows UUID rotation without consuming its
   assert.match(progressContent, /terminal="false"/);
   assert.match(progressContent, /reason="AWAITING_EXTERNAL_APPROVAL"/);
   assert.match(progressContent, /queued-for-ms="3600000"/);
-  assert.match(progressContent, /本地网关仍在等待投递前一条消息/);
-  assert.match(progressContent, /embassy status/);
+  // Wire contract: the framing tag and its attributes are byte-exact; the
+  // sentence points at `embassy status` and never at a dashboard.
+  assert.equal(progressContent, [
+    '<gateway-delivery-stall terminal="false" reason="AWAITING_EXTERNAL_APPROVAL" queued-for-ms="3600000">',
+    "The local gateway is still waiting to deliver the preceding message. Run `embassy status` for details. Queued mail reaches a busy recipient when its turn ends.",
+    "</gateway-delivery-stall>",
+  ].join("\n"));
+  assert.match(progressContent, /Run `embassy status`/);
+  assert.doesNotMatch(progressContent, /dashboard/i);
   assert.equal(progressContent.includes("peer_message_status"), false);
 
   await assert.rejects(
@@ -2232,11 +2238,10 @@ test("capacity clean-write retries release on exhaustion and stop on listener cl
   assert.equal(messages.length, 1);
 });
 
-test("verbose notices preserve the localized expired diagnostic frame", async (t) => {
+test("verbose notices preserve the expired diagnostic frame", async (t) => {
   let receiptHandle: string | undefined;
   const frames: Array<Record<string, unknown>> = [];
   const current = await fixture(t, {
-    locale: "zh-CN",
     deliveryNotices: "verbose",
   });
   const peer = await addPeer(current, {
@@ -2285,9 +2290,13 @@ test("verbose notices preserve the localized expired diagnostic frame", async (t
     diagnosticContent,
     /gateway-delivery-diagnostic status="expired" code="ROUTE_UNAVAILABLE"/,
   );
-  assert.match(diagnosticContent, /本地网关无法投递前一条消息/);
-  assert.match(diagnosticContent, /embassy status/);
-  assert.match(diagnosticContent, /排队邮件会在忙碌接收方的当前轮次结束后到达/);
+  assert.equal(diagnosticContent, [
+    '<gateway-delivery-diagnostic status="expired" code="ROUTE_UNAVAILABLE">',
+    "The local gateway could not deliver the preceding message. Run `embassy status` for details. Queued mail reaches a busy recipient when its turn ends.",
+    "</gateway-delivery-diagnostic>",
+  ].join("\n"));
+  assert.match(diagnosticContent, /Run `embassy status`/);
+  assert.doesNotMatch(diagnosticContent, /dashboard/i);
   assert.equal(frames[1]?.from, undefined);
 });
 

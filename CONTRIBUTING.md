@@ -167,8 +167,7 @@ lease spawns macOS's `/usr/bin/lockf`); macOS runs the full suite.
 
 ## Design honesty rules
 
-These outlive any visual era and bind every surface — CLI copy, site, docs,
-in both languages:
+These outlive any visual era and bind every surface — CLI copy, site, docs:
 
 - Progress is never green. Only a terminal success state may look like one.
 - `delivered` means the write completed; `released` is not read; nothing may

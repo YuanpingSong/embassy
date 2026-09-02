@@ -6,9 +6,6 @@ import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
-import { getCliCopy, type CliCopyKey, type CliStderrKind } from "./cli-copy.js";
-import { callerIdentityConflictHintEn } from "./cli-copy.en.js";
-import { callerIdentityConflictHintZhCn } from "./cli-copy.zh-CN.js";
 import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   GATEWAY_CONTROL_MAX_RESPONSE_BYTES, GATEWAY_CONTROL_PROTOCOL_VERSION,
   GatewayControlTransportError, isClaudeSessionSelector, isGatewayAlias,
@@ -18,7 +15,6 @@ import { GATEWAY_CONTROL_DEFAULT_TIMEOUT_MS, GATEWAY_CONTROL_MAX_MESSAGE_BYTES,
   type SendGatewayControlRequestOptions } from "./control.js";
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
-import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PROGRESS_WATCH_DEFAULT_IDLE_MS } from "./progress-watch-machine.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
@@ -33,7 +29,6 @@ export const EMBASSY_VERSION = "2.0.1";
 // RELEASE VERSION SWEEP — every place the version lives: package.json,
 // npm-shrinkwrap.json (x2), this constant,
 // test/gateway-cli.test.ts package-metadata assertion.
-const DEFAULT_CLI_LOCALE: DashboardLocale = "en";
 
 export const gatewayCliCommands = [
   "serve", "health", "status", "delivery-status",
@@ -76,8 +71,80 @@ export type GatewayCliDependencies = {
   delay?: (milliseconds: number) => Promise<void>;
 };
 
+const HELP_USAGE = `Embassy — local messaging for Claude Code and Codex
+
+Usage:
+  embassy <command> [options]
+
+Commands:
+  serve [--inbound open] Run the socket-only broker (paired inbound by default)
+  health                 Check broker health
+  status                 Read the public status snapshot
+  refresh                Rescan for Claude sessions
+  register-codex         Register or succeed a Codex task
+  unregister-codex       Unregister the current Codex task
+  register-peer --alias <peer-alias> [--token-stdin|--emit-env]
+                         Register a universal shell peer
+  unregister-peer --alias <peer-alias> [--token-stdin]
+                         Unregister a universal shell peer
+  await --alias <peer-alias> [--token-stdin]
+                         Wait for one peer message and acknowledge stdout
+  peer-stdio             Serve the bounded federation protocol on stdin/stdout
+  select-claude          Select a discovered Claude session
+  unselect-claude        Clear the Claude selection
+  pair [--from <alias> --to <alias>] Add one cross-provider consent edge
+  unpair [--from <alias> --to <alias>] Remove one cross-provider consent edge
+  send                   Send stdin between paired provider routes
+  reply                  Reply with a conversation token
+  delivery-status        Read a delivery token
+  wait-delivery          Wait for terminal delivery status
+  untrack                Close one active progress watch
+
+Options:
+  --token-stdin          Read the peer token as the first LF-terminated stdin line
+  --emit-env             Print the first registration token as an export command
+  --version, -v          Print the version
+  --help, -h             Show this help
+`;
+/** Fixed one-line stderr summaries; stdout carries the protocol and stderr never carries private detail. */
+const CLI_STDERR = {
+  input: "request rejected.",
+  decision: "gateway rejected the request.",
+  unavailable: "gateway unavailable.",
+  ambiguous: "outcome ambiguous; do not retry automatically.",
+  failure: "command failed.",
+  unsafe:
+    "gateway state directory or socket has unexpected permissions or ownership. Verify the exact path, owner, and modes before retrying.",
+  tokenUnknown:
+    "delivery token not recognized; it may have expired or left bounded retention.",
+  deliveryTimeout:
+    "the delivery has not settled yet; the gateway is still running. Check again later with embassy delivery-status.",
+} as const;
+/** Exact next-step remedies appended after the summary for the faults that have one. */
+const CLI_HINT = {
+  controlConnectDenied:
+    "the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
+  controlInvalidResponse:
+    "if either Embassy installation changed recently, rebuild or repoint this client to the broker's installation; otherwise restart the broker, then retry.",
+  controlVersionMismatch:
+    "rebuild or repoint this client to the broker's Embassy installation, then retry.",
+  stateAccessDenied:
+    "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.",
+  messageTooLarge:
+    "message exceeds the 16 KiB acceptance cap; shorten or split it. For long prose, pipe the body from a file.",
+  nodeInventoryRequired:
+    "at {stateDir}, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {\"version\":1,\"host\":\"<host>\",\"nodes\":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.",
+  progressWatchOwnerConflict:
+    "this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.",
+  stateResetRequired:
+    "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 2.0.x before resetting.",
+  callerIdentityConflict:
+    "both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID",
+} as const;
+type CliStderrKind = keyof typeof CLI_STDERR;
+type CliFaultHint = keyof typeof CLI_HINT;
+
 type ParsedOptions = Readonly<Record<string, string | true>>;
-type CliFaultHint = CliCopyKey | "callerIdentityConflict";
 class CliFault extends Error {
   constructor(
     readonly code: string,
@@ -114,33 +181,7 @@ function parseOptions(
   }
   return parsed;
 }
-function commonOptions(args: readonly string[], env: NodeJS.ProcessEnv) {
-  const stripped: string[] = [];
-  let locale: DashboardLocale | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index];
-    if (token !== "--lang") { if (token !== undefined) stripped.push(token); continue; }
-    if (locale !== undefined) fault();
-    const value = args[index + 1];
-    if (!isDashboardLocale(value)) fault();
-    locale = value;
-    index += 1;
-  }
-  const inherited = env.EMBASSY_LOCALE;
-  if (locale === undefined && inherited !== undefined && inherited.length > 0 && !isDashboardLocale(inherited)) fault();
-  return {
-    args: stripped,
-    locale: locale ?? (isDashboardLocale(inherited) ? inherited : DEFAULT_CLI_LOCALE),
-  };
-}
-function fallbackCliLocale(args: readonly string[], env: NodeJS.ProcessEnv): DashboardLocale {
-  const indices = args.flatMap((value, index) => value === "--lang" ? [index] : []);
-  const flagged = indices.length === 1 ? args[indices[0]! + 1] : undefined;
-  return isDashboardLocale(flagged) ? flagged
-    : isDashboardLocale(env.EMBASSY_LOCALE) ? env.EMBASSY_LOCALE : DEFAULT_CLI_LOCALE;
-}
-const fixedStderr = (locale: DashboardLocale, kind: CliStderrKind): string =>
-  `[embassy] ${getCliCopy(locale)[`error.${kind}`]}\n`;
+const fixedStderr = (kind: CliStderrKind): string => `[embassy] ${CLI_STDERR[kind]}\n`;
 function requireString(options: ParsedOptions, name: string): string {
   const value = options[name];
   if (typeof value !== "string") fault();
@@ -240,7 +281,7 @@ async function readMessageBody(stdin: AsyncIterable<unknown>): Promise<string> {
     if (typeof chunk !== "string" && !Buffer.isBuffer(chunk)) fault("INVALID_MESSAGE_INPUT");
     const buffer = Buffer.from(chunk);
     length += buffer.length;
-    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES) throw new CliFault("MESSAGE_TOO_LARGE", false, "hint.messageTooLarge");
+    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES) throw new CliFault("MESSAGE_TOO_LARGE", false, "messageTooLarge");
     chunks.push(buffer);
   }
   let text: string;
@@ -255,7 +296,7 @@ async function readPeerInput(stdin: AsyncIterable<unknown>, source: string | "st
   for await (const chunk of stdin) {
     if (typeof chunk !== "string" && !Buffer.isBuffer(chunk)) fault("INVALID_MESSAGE_INPUT");
     const buffer = Buffer.from(chunk); length += buffer.length;
-    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES + 38) throw new CliFault("MESSAGE_TOO_LARGE", false, "hint.messageTooLarge");
+    if (length > GATEWAY_CONTROL_MAX_MESSAGE_BYTES + 38) throw new CliFault("MESSAGE_TOO_LARGE", false, "messageTooLarge");
     chunks.push(buffer);
   }
   const value = Buffer.concat(chunks, length), newline = value.indexOf(0x0a);
@@ -420,7 +461,7 @@ export async function validatePrivateGatewayControlSocket(
     const code = error !== null && typeof error === "object" && "code" in error
       ? (error as { code?: unknown }).code : undefined;
     if (code === "EPERM" || code === "EACCES")
-      throw new CliFault("CONTROL_CONNECT_DENIED", true, "hint.controlConnectDenied");
+      throw new CliFault("CONTROL_CONNECT_DENIED", true, "controlConnectDenied");
     throw new CliFault("CONTROL_SOCKET_UNAVAILABLE", true);
   }
   const uid = process.getuid?.();
@@ -455,7 +496,6 @@ async function writeComplete(output: Writable, frame: string): Promise<void> {
 function writeFailure(
   stdout: Writable,
   stderr: Writable,
-  locale: DashboardLocale,
   command: GatewayCliCommand | undefined,
   code: string,
   options: { ambiguous?: boolean; retryable?: boolean; kind: CliStderrKind },
@@ -463,11 +503,11 @@ function writeFailure(
   stdout.write(serializedOutput({ ok: false, command: command ?? "unknown", error: {
     code, ambiguous: options.ambiguous ?? false, retryable: options.retryable ?? false,
   } }));
-  stderr.write(fixedStderr(locale, options.kind));
+  stderr.write(fixedStderr(options.kind));
 }
-function writeStateResetHint(stderr: Writable, locale: DashboardLocale, code: string): void {
+function writeStateResetHint(stderr: Writable, code: string): void {
   if (code === "GATEWAY_STATE_SCHEMA_UNSUPPORTED" || code === "CORRUPT_GATEWAY_STATE") {
-    stderr.write(`[embassy] ${getCliCopy(locale)["hint.stateResetRequired"]}\n`);
+    stderr.write(`[embassy] ${CLI_HINT.stateResetRequired}\n`);
   }
 }
 function isRejectedResult(result: unknown): boolean {
@@ -549,7 +589,7 @@ export async function runGatewayCli(
     return gatewayCliExitCodes.ok;
   }
   const command = isCommand(argv[0]) ? argv[0] : undefined;
-  let locale = fallbackCliLocale(argv.slice(1), env);
+  const args = argv.slice(1);
   let serverReady = false;
   let identity: Promise<{ inventory: GatewayNodeInventory; config: GatewayConfig }> | undefined;
   const loadIdentity = () => identity ??= (async () => {
@@ -560,16 +600,14 @@ export async function runGatewayCli(
     stdout.write(serializedOutput({ ok: true, command: command!, result }));
   };
   try {
-    const common = commonOptions(argv.slice(1), env);
-    locale = common.locale;
     if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
-      emptyParams(common.args);
-      stdout.write(getCliCopy(locale)["help.usage"]);
+      emptyParams(args);
+      stdout.write(HELP_USAGE);
       return gatewayCliExitCodes.ok;
     }
     if (command === undefined) fault("UNKNOWN_COMMAND");
     if (command === "peer-stdio") {
-      emptyParams(common.args);
+      emptyParams(args);
       try {
         const { config, inventory } = await loadIdentity();
         await validateSocket(config.stateDir, config.controlSocketPath);
@@ -605,7 +643,7 @@ export async function runGatewayCli(
     }
     if (command === "serve") {
       await (dependencies.runServer ?? runGatewayServer)({
-        env, locale, inboundMode: parseServeInboundMode(common.args),
+        env, inboundMode: parseServeInboundMode(args),
         ...(dependencies.serverSignal === undefined ? {} : { signal: dependencies.serverSignal }),
         onReady: async (result) => {
           if (serverReady) fault("SERVER_READY_ALREADY_EMITTED");
@@ -615,7 +653,7 @@ export async function runGatewayCli(
       if (!serverReady) fault("SERVER_NOT_READY");
       return gatewayCliExitCodes.ok;
     }
-    const request = await buildRequest(command, common.args, env, stdin, async () => (await loadIdentity()).config.hostId);
+    const request = await buildRequest(command, args, env, stdin, async () => (await loadIdentity()).config.hostId);
     const { config } = await loadIdentity();
     await validateSocket(config.stateDir, config.controlSocketPath);
     let response: GatewayControlResponse;
@@ -627,16 +665,16 @@ export async function runGatewayCli(
         if (!current.ok) { response = current; break; }
         if (current.result.state === "timeout") continue;
         try { await writeComplete(stdout, current.result.frame); }
-        catch { stderr.write(fixedStderr(locale, "failure")); return gatewayCliExitCodes.failure; }
+        catch { stderr.write(fixedStderr("failure")); return gatewayCliExitCodes.failure; }
         try {
           const receipt = await sendRequest({ socketPath: config.controlSocketPath,
             request: envelope("peer_receipt", { alias: request.params.alias, token: request.params.token, receipt: current.result.receipt }) as Extract<GatewayControlRequest, { method: "peer_receipt" }> });
-          if (!receipt.ok) { stderr.write(fixedStderr(locale, "failure")); return gatewayCliExitCodes.failure; }
-          if (isRejectedResult(receipt.result)) { stderr.write(fixedStderr(locale, "decision")); return gatewayCliExitCodes.rejected; }
+          if (!receipt.ok) { stderr.write(fixedStderr("failure")); return gatewayCliExitCodes.failure; }
+          if (isRejectedResult(receipt.result)) { stderr.write(fixedStderr("decision")); return gatewayCliExitCodes.rejected; }
           return gatewayCliExitCodes.ok;
         } catch (error) {
           const transport = error instanceof GatewayControlTransportError;
-          stderr.write(fixedStderr(locale, transport ? error.ambiguous ? "ambiguous" : "unavailable" : "failure"));
+          stderr.write(fixedStderr(transport ? error.ambiguous ? "ambiguous" : "unavailable" : "failure"));
           return transport ? error.ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable : gatewayCliExitCodes.failure;
         }
       }
@@ -645,11 +683,11 @@ export async function runGatewayCli(
       const outcome = await waitForDelivery(config.controlSocketPath, request, sendRequest,
         dependencies.now ?? Date.now, dependencies.delay ?? defaultDelay);
       if (outcome.kind === "unknown") {
-        writeFailure(stdout, stderr, locale, command, "DELIVERY_TOKEN_UNKNOWN", { kind: "tokenUnknown" });
+        writeFailure(stdout, stderr, command, "DELIVERY_TOKEN_UNKNOWN", { kind: "tokenUnknown" });
         return gatewayCliExitCodes.rejected;
       }
       if (outcome.kind === "timeout") {
-        writeFailure(stdout, stderr, locale, command, "DELIVERY_WAIT_TIMEOUT", { retryable: true, kind: "deliveryTimeout" });
+        writeFailure(stdout, stderr, command, "DELIVERY_WAIT_TIMEOUT", { retryable: true, kind: "deliveryTimeout" });
         return gatewayCliExitCodes.unavailable;
       }
       waited = outcome.response; response = waited;
@@ -657,72 +695,67 @@ export async function runGatewayCli(
       response = await sendRequest({ socketPath: config.controlSocketPath, request });
     }
     if (!response.ok) {
-      writeFailure(stdout, stderr, locale, command, response.error.code, { kind: "failure" });
+      writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
       return gatewayCliExitCodes.failure;
     }
-    if (command === "register-peer" && common.args.includes("--emit-env") && "token" in response.result) {
+    if (command === "register-peer" && args.includes("--emit-env") && "token" in response.result) {
       stdout.write(`export EMBASSY_PEER_TOKEN='${response.result.token}'\n`);
       return gatewayCliExitCodes.ok;
     }
     success(response.result);
     const exitCode = waited === undefined ? responseExitCode(response) : waitDeliveryExitCode(waited);
     if (exitCode === gatewayCliExitCodes.rejected) {
-      stderr.write(fixedStderr(locale, "decision"));
+      stderr.write(fixedStderr("decision"));
       if (isProgressWatchOwnerConflict(response.result)) {
-        stderr.write(`[embassy] ${getCliCopy(locale)["hint.progressWatchOwnerConflict"]}\n`);
+        stderr.write(`[embassy] ${CLI_HINT.progressWatchOwnerConflict}\n`);
       }
-    } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr(locale, "failure"));
+    } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr("failure"));
     return exitCode;
   } catch (error) {
     if (command === "serve" && serverReady) {
-      stderr.write(fixedStderr(locale, "failure"));
+      stderr.write(fixedStderr("failure"));
       return gatewayCliExitCodes.failure;
     }
     if (error instanceof GatewayControlTransportError) {
       const ambiguous = error.ambiguous;
-      writeFailure(stdout, stderr, locale, command, error.code, {
+      writeFailure(stdout, stderr, command, error.code, {
         ambiguous, retryable: ambiguous ? false : error.recoverable,
         kind: ambiguous ? "ambiguous" : "unavailable",
       });
       if (error.code === "CONTROL_VERSION_MISMATCH") {
-        stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlVersionMismatch"]}\n`);
+        stderr.write(`[embassy] ${CLI_HINT.controlVersionMismatch}\n`);
       } else if (error.code === "CONTROL_INVALID_RESPONSE") {
-        stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlInvalidResponse"]}\n`);
+        stderr.write(`[embassy] ${CLI_HINT.controlInvalidResponse}\n`);
       }
       if (error.code === "CONTROL_CONNECT_DENIED")
-        stderr.write(`[embassy] ${getCliCopy(locale)["hint.controlConnectDenied"]}\n`);
+        stderr.write(`[embassy] ${CLI_HINT.controlConnectDenied}\n`);
       return ambiguous ? gatewayCliExitCodes.ambiguous : gatewayCliExitCodes.unavailable;
     }
     if (error instanceof CliFault) {
-      writeFailure(stdout, stderr, locale, command, error.code, {
+      writeFailure(stdout, stderr, command, error.code, {
         retryable: error.retryable, kind: error.kind ?? (error.retryable ? "unavailable" : "input"),
       });
-      if (error.hint !== undefined) {
-        const hint = error.hint === "callerIdentityConflict"
-          ? locale === "zh-CN" ? callerIdentityConflictHintZhCn : callerIdentityConflictHintEn
-          : getCliCopy(locale)[error.hint];
-        stderr.write(`[embassy] ${hint}\n`);
-      }
+      if (error.hint !== undefined) stderr.write(`[embassy] ${CLI_HINT[error.hint]}\n`);
       return error.retryable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
     if (error instanceof BridgeError) {
       if (error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN") {
-        writeFailure(stdout, stderr, locale, command, error.code, { ambiguous: true, kind: "ambiguous" });
+        writeFailure(stdout, stderr, command, error.code, { ambiguous: true, kind: "ambiguous" });
         return gatewayCliExitCodes.ambiguous;
       }
-      writeFailure(stdout, stderr, locale, command, error.code, {
+      writeFailure(stdout, stderr, command, error.code, {
         retryable: error.recoverable, kind: error.recoverable ? "unavailable" : "input",
       });
-      writeStateResetHint(stderr, locale, error.code);
-      if (error.code === "CONTROL_CONNECT_DENIED") stderr.write(`[embassy] ${getCliCopy(locale)[
-        command === "serve" ? "hint.stateAccessDenied" : "hint.controlConnectDenied"]}\n`);
+      writeStateResetHint(stderr, error.code);
+      if (error.code === "CONTROL_CONNECT_DENIED") stderr.write(`[embassy] ${
+        CLI_HINT[command === "serve" ? "stateAccessDenied" : "controlConnectDenied"]}\n`);
       if (error.code === "GATEWAY_NODE_INVENTORY_REQUIRED") {
         const stateDir = env.EMBASSY_STATE_DIR ?? (env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, "agent-embassy") : "~/.local/state/agent-embassy");
-        stderr.write(`[embassy] ${getCliCopy(locale)["hint.nodeInventoryRequired"].replace("{stateDir}", stateDir)}\n`);
+        stderr.write(`[embassy] ${CLI_HINT.nodeInventoryRequired.replace("{stateDir}", stateDir)}\n`);
       }
       return error.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
     }
-    writeFailure(stdout, stderr, locale, command, "INTERNAL_ERROR", { kind: "failure" });
+    writeFailure(stdout, stderr, command, "INTERNAL_ERROR", { kind: "failure" });
     return gatewayCliExitCodes.failure;
   }
 }
@@ -746,12 +779,7 @@ if (isDirectExecution()) {
       process.exitCode = exitCode;
     },
     () => {
-      process.stderr.write(
-        fixedStderr(
-          fallbackCliLocale(process.argv.slice(3), process.env),
-          "failure",
-        ),
-      );
+      process.stderr.write(fixedStderr("failure"));
       process.exitCode = gatewayCliExitCodes.failure;
     },
   );

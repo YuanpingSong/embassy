@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - The static dashboard and the live dashboard, with `embassy refresh-dashboard` and `embassy dashboard --live` (emb-100).
 - The ACP-backed DeepSeek and Grok providers with their `dsh-`/`grok-` routes, the offline provider support matrix, and `embassy doctor` with its Codex Desktop classifier (emb-101). The managed-socket holder check stays: a process outside Embassy holding the managed Codex control socket still degrades the Codex connector with `MANAGED_CODEX_UNAVAILABLE`.
+- zh-CN localization, the `--lang` option, and the copy-table layer (emb-102).
 
 ### Changed
 
@@ -17,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Private state schema is 5, reset-only: 2.x state is refused with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and never rewritten; follow the [private state reset](docs/CONFIGURATION.md#private-state-reset).
 - Federation peer protocol is 2; a node answering `initialize` with another version surfaces `PEER_PROTOCOL_MISMATCH` on its mirrored routes and in `embassy status` instead of a tunnel fault.
 - Private control protocol is 3; a client and broker on different lines report `CONTROL_VERSION_MISMATCH`.
+- `unregister-codex` against a federated (read-only) route now returns `rejected` with `FEDERATED_ROUTE_READ_ONLY` instead of `not_found` (emb-101).
+- The stall and diagnostic notices written into a Claude session now say ``Run `embassy status` for details`` (emb-102).
 
 ## [2.0.1] - 2026-09-01
 

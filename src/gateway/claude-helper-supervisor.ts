@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
-import type { DashboardLocale } from "./locale.js";
 import type { GatewayAdapterCallbacks, GatewayAdapterDispatchResult } from "./service.js";
 import { gatewayRegistrationIngressPrefixes, isGatewayProvider, type GatewayProvider, type LogicalRouteBinding } from "./types.js";
 import {
@@ -32,7 +31,7 @@ export type ClaudeNativeHelperClientCallbacks = Readonly<{
 }>;
 export type ClaudeNativeHelperClientStartOptions = Readonly<{
   entryPath?: string; runtime: AttestedClaudePeerRuntime; hostId: string;
-  locale: DashboardLocale; deliveryNotices: GatewayDeliveryNoticeMode;
+  deliveryNotices: GatewayDeliveryNoticeMode;
   maxPendingMessages: number; registration: ClaudeNativeHelperRegistration;
   callbacks: ClaudeNativeHelperClientCallbacks;
 }>;
@@ -65,7 +64,7 @@ export class ClaudeNativeHelperClient implements ClaudeNativeHelperClientLike {
     });
     const client = new ClaudeNativeHelperClient(child, options.registration, options.callbacks);
     const init: ClaudeNativeHelperInitialization = { protocolVersion: 1, type: "initialize", requestId: id(),
-      runtime: options.runtime, hostId: options.hostId, locale: options.locale, deliveryNotices: options.deliveryNotices,
+      runtime: options.runtime, hostId: options.hostId, deliveryNotices: options.deliveryNotices,
       maxPendingMessages: options.maxPendingMessages, registration: options.registration };
     try { const result = await client.#send(init); if (!("generation" in result)) throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
       client.generation = result.generation; return client; }
@@ -113,7 +112,7 @@ export type ClaudeNativeHelperPreparedDispatch = Readonly<{ frameBytes: number; 
   perform: () => Promise<GatewayAdapterDispatchResult>; cancel: () => Promise<void> }>;
 export type ClaudeNativeHelperSupervisorOptions = Readonly<{
   identity: Pick<LogicalRouteBinding, "provider" | "hostId">; runtime: AttestedClaudePeerRuntime;
-  locale: DashboardLocale; deliveryNotices: GatewayDeliveryNoticeMode; maxPendingMessages: number;
+  deliveryNotices: GatewayDeliveryNoticeMode; maxPendingMessages: number;
   maxHelpers: number; callbacks: () => GatewayAdapterCallbacks | undefined; factory?: ClaudeNativeHelperFactory;
 }>;
 
@@ -129,7 +128,7 @@ export class ClaudeNativeHelperSupervisor {
     const old = this.#helpers.get(input.alias); if (old) { if (old.sourceProvider !== input.sourceProvider) throw fault("PROVENANCE_ENVELOPE_INVALID"); return; }
     if (this.#helpers.size >= this.options.maxHelpers) throw fault("CLAUDE_NATIVE_HELPER_CAPACITY", true);
     let helper: Helper | undefined, earlyExit = false; const buffered: ClaudeNativeHelperEvent[] = [];
-    const client = await this.#factory({ runtime: this.options.runtime, hostId: this.options.identity.hostId, locale: this.options.locale,
+    const client = await this.#factory({ runtime: this.options.runtime, hostId: this.options.identity.hostId,
       deliveryNotices: this.options.deliveryNotices, maxPendingMessages: this.options.maxPendingMessages, registration: input,
       callbacks: { onEvent: (event) => helper ? this.#event(helper, event) : buffered.push(event),
         onExit: () => helper ? this.#exit(helper) : earlyExit = true } });

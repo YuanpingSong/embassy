@@ -534,20 +534,16 @@ function binding(
 
 test("local Claude provider forwards the exact delivery notice policy", () => {
   const fake = new FakeClaudePeer();
-  let receivedLocale: unknown;
   let receivedDeliveryNotices: unknown;
   createLocalClaudeGatewayProvider({
     runtime: claudeRuntime(),
     stateRoot: "/synthetic/controller-state",
-    locale: "zh-CN",
     deliveryNotices: "quiet",
-    peerFactory: (_runtime, locale, deliveryNotices) => {
-      receivedLocale = locale;
+    peerFactory: (_runtime, deliveryNotices) => {
       receivedDeliveryNotices = deliveryNotices;
       return fake as never;
     },
   });
-  assert.equal(receivedLocale, "zh-CN");
   assert.equal(receivedDeliveryNotices, "quiet");
 });
 

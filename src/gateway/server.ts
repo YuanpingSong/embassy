@@ -13,7 +13,6 @@ import { createSystemCodexSocketHolderInspector, managedCodexSocketHeldOutsideEm
 import { defaultGatewayStateDir, loadGatewayConfig, type GatewayConfig } from "./config.js";
 import { loadGatewayNodeInventory, type GatewayNodeInventory } from "./federation-nodes.js";
 import { acquireGatewayInstanceLease, type GatewayInstanceLease } from "./instance-lease.js";
-import type { DashboardLocale } from "./locale.js";
 import { LocalPeerMailboxProvider } from "./peer-mailbox.js";
 import { createLocalClaudeGatewayProvider, createLocalCodexGatewayProvider,
   type LocalClaudeGatewayProviderOptions, type LocalCodexGatewayProviderOptions } from "./providers.js";
@@ -23,7 +22,7 @@ import { gatewayInboundModes, type GatewayInboundMode } from "./types.js";
 
 export type GatewayServerReadyResult = Readonly<{ status: "ready"; hostId: string; codexMode: "native_messaging" }>;
 export type GatewayServerOptions = { env?: NodeJS.ProcessEnv; inboundMode?: GatewayInboundMode;
-  locale?: DashboardLocale; signal?: AbortSignal; onReady: (result: GatewayServerReadyResult) => void | Promise<void> };
+  signal?: AbortSignal; onReady: (result: GatewayServerReadyResult) => void | Promise<void> };
 type ServerService = Readonly<{ start: (signal?: AbortSignal) => Promise<void>; close: () => Promise<void> }>;
 type Signal = "SIGINT" | "SIGTERM";
 export type GatewayServerDependencies = {
@@ -166,7 +165,6 @@ export async function runGatewayServer(
       stateRoot: config.stateDir,
       hostId: localHost,
       nodeInventory: inventory,
-      locale: options.locale ?? "en",
       nativeHelpers: { maxHelpers: config.limits.maxRoutes },
       ...(config.deliveryNotices === undefined ? {} : { deliveryNotices: config.deliveryNotices }),
     }));

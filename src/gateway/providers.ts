@@ -26,7 +26,6 @@ import {
   ClaudeNativeHelperSupervisor,
 } from "./claude-helper-supervisor.js";
 import type { ClaudeNativeHelperFactory } from "./claude-helper-client.js";
-import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 import { composeProvenanceEnvelope } from "./provenance-envelope.js";
 import type {
   GatewayAdapterCallbacks,
@@ -145,7 +144,6 @@ async function cancelPreparedClaude(
 
 type ClaudePeerFactory = (
   runtime: AttestedClaudePeerRuntime,
-  locale: DashboardLocale,
   deliveryNotices: GatewayDeliveryNoticeMode,
 ) => ClaudePeerAdapter;
 
@@ -156,8 +154,6 @@ export type LocalClaudeGatewayProviderOptions = {
   stateRoot: string;
   hostId: string;
   nodeInventory: GatewayNodeInventory;
-  /** Locale for bounded notices written into native Claude sessions. */
-  locale?: DashboardLocale;
   /** Gateway-authored user-frame policy; native receipt status is unchanged. */
   deliveryNotices?: GatewayDeliveryNoticeMode;
   discoveryPollMs?: number;
@@ -328,12 +324,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         "The Claude provider state root must be an absolute path.",
       );
     }
-    if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
-      throw new BridgeError(
-        "DASHBOARD_LOCALE_UNSUPPORTED",
-        "The Claude provider notice locale is unsupported.",
-      );
-    }
     const hostId = exactLocalHost(options.hostId, options.nodeInventory);
     this.identity = {
       provider: "claude",
@@ -353,15 +343,13 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
     this.now = options.now ?? Date.now;
     const protocolRuntime = options.runtime;
     this.peer = (options.peerFactory ??
-      ((runtime, locale, deliveryNotices) =>
+      ((runtime, deliveryNotices) =>
         new ClaudePeerAdapter({
           sessionsDir: runtime.sessionsDir,
           socketDir: runtime.socketDir,
-          locale,
           deliveryNotices,
         })))(
       protocolRuntime,
-      options.locale ?? "en",
       options.deliveryNotices ?? "merged",
     );
     this.nativeHelpers =
@@ -370,7 +358,6 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
         : new ClaudeNativeHelperSupervisor({
             identity: this.identity,
             runtime: protocolRuntime,
-            locale: options.locale ?? "en",
             deliveryNotices: options.deliveryNotices ?? "merged",
             maxPendingMessages: this.maxPending,
             maxHelpers: positiveBounded(

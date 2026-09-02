@@ -1,5 +1,3 @@
-[English](README.md) · [简体中文](README.zh-CN.md)
-
 <p align="center">
   <img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/social-preview.png" alt="Embassy — a local gateway for bidirectional messaging between Claude Code sessions and Codex desktop tasks" width="720">
 </p>

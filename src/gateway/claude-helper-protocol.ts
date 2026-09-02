@@ -1,7 +1,6 @@
 import type { ClaudePeerInboundProgress } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
-import type { DashboardLocale } from "./locale.js";
 import type { GatewayAdapterDispatchResult } from "./service.js";
 import { gatewayRegistrationIngressPrefixes, isGatewayProvider, type GatewayProvider, type LogicalRouteBinding } from "./types.js";
 
@@ -16,7 +15,7 @@ export type ClaudeNativeHelperRegistration = Readonly<{
 export type ClaudeNativeHelperInitialization = Readonly<{
   protocolVersion: 1; type: "initialize"; requestId: string;
   runtime: AttestedClaudePeerRuntime; hostId: string;
-  locale: DashboardLocale; deliveryNotices: GatewayDeliveryNoticeMode;
+  deliveryNotices: GatewayDeliveryNoticeMode;
   maxPendingMessages: number; registration: ClaudeNativeHelperRegistration;
 }>;
 export type ClaudeNativeHelperCommand =
@@ -108,11 +107,11 @@ function command(v: unknown): v is ClaudeNativeHelperCommand {
 export function isClaudeNativeHelperParentMessage(v: unknown): v is ClaudeNativeHelperParentMessage {
   if (!rec(v) || v.protocolVersion !== 1 || typeof v.requestId !== "string" || !ID.test(v.requestId)) return false;
   if (v.type === "request") return exact(v, ["protocolVersion", "type", "requestId", "command"]) && command(v.command);
-  if (v.type !== "initialize" || !exact(v, ["protocolVersion", "type", "requestId", "runtime", "hostId", "locale",
+  if (v.type !== "initialize" || !exact(v, ["protocolVersion", "type", "requestId", "runtime", "hostId",
     "deliveryNotices", "maxPendingMessages", "registration"]) || !rec(v.runtime) || !rec(v.registration)) return false;
   return exact(v.runtime, ["sessionsDir", "socketDir"]) && str(v.runtime.sessionsDir) && v.runtime.sessionsDir.startsWith("/") &&
     str(v.runtime.socketDir) && v.runtime.socketDir.startsWith("/") && typeof v.hostId === "string" && HOST.test(v.hostId) &&
-    (v.locale === "en" || v.locale === "zh-CN") && ["merged", "verbose", "quiet"].includes(String(v.deliveryNotices)) &&
+    ["merged", "verbose", "quiet"].includes(String(v.deliveryNotices)) &&
     Number.isSafeInteger(v.maxPendingMessages) && Number(v.maxPendingMessages) >= 1 && Number(v.maxPendingMessages) <= 4_096 &&
     exact(v.registration, ["alias", "sourceProvider", "cwd"]) && source(v.registration.alias, v.registration.sourceProvider) &&
     str(v.registration.cwd) && v.registration.cwd.startsWith("/");

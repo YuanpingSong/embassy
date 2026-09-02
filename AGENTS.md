@@ -60,7 +60,7 @@ hundred wrong lines of copy:
 
 | Rating | Meaning | Verification |
 |---|---|---|
-| R1 | Cosmetic: copy, docs, site. Wrong = someone reads a bad sentence. | Proofread + en/zh parity; gate compiles. |
+| R1 | Cosmetic: copy, docs, site. Wrong = someone reads a bad sentence. | Proofread; gate compiles. |
 | R2 | Misleading but harmless: view derivations, CLI hints. Wrong = user misinformed until next release; nothing lost. | Targeted tests + gate. |
 | R3 | Recoverable behavior: dispatch scheduling, discovery, fencing, transports, boot, control plane. Wrong = delay or misroute; settlement stays honest; a restart recovers. | Full gate + soak + one adversarial review. |
 | R4 | Trust and data: store settlement/persistence/migrations, provenance envelope, instance lease, runtime attestation, release pipeline. Wrong = silent loss or false green. | Multi-round adversarial review + live proof. |

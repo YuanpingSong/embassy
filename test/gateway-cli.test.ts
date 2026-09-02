@@ -47,10 +47,8 @@ const BOTH_IDENTITIES = {
   CODEX_THREAD_ID: THREAD_ID,
   CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
 } as const;
-const CALLER_IDENTITY_CONFLICT_HINT_EN =
+const CALLER_IDENTITY_CONFLICT_HINT =
   "[embassy] both agent identities were inherited; rerun this Codex-side call with env -u CLAUDE_CODE_MESSAGING_SOCKET, or this Claude-side call with env -u CODEX_THREAD_ID\n";
-const CALLER_IDENTITY_CONFLICT_HINT_ZH_CN =
-  "[embassy] 同时继承了两种代理身份；Codex 侧调用请使用 env -u CLAUDE_CODE_MESSAGING_SOCKET 重试，Claude 侧调用请使用 env -u CODEX_THREAD_ID 重试\n";
 const roots = new Set<string>();
 
 const execFileAsync = promisify(execFile);
@@ -70,7 +68,6 @@ test("version flags are deterministic and never contact the gateway", async () =
     const stderr = capture();
     const exitCode = await runGatewayCli([flag], {
       env: {
-        EMBASSY_LOCALE: "zh-CN",
         LANG: "zh_CN.UTF-8",
         LC_ALL: "zh_CN.UTF-8",
         LANGUAGE: "zh_CN:zh",
@@ -90,14 +87,15 @@ test("version flags are deterministic and never contact the gateway", async () =
   }
 });
 
-test("bare invocation and help flags print localized usage without side effects", async () => {
+test("bare invocation and help flags print usage without side effects", async () => {
   const cases = [
     { argv: [] as string[], env: {}, expected: /Usage:/ },
     { argv: ["-h"], env: {}, expected: /Rescan for Claude sessions/ },
+    // There is no locale switch; inherited locale environment is inert.
     {
-      argv: ["--help", "--lang", "zh-CN"],
-      env: { EMBASSY_LOCALE: "unsupported" },
-      expected: /用法：/,
+      argv: ["--help"],
+      env: { EMBASSY_LOCALE: "zh-CN", LANG: "zh_CN.UTF-8" },
+      expected: /^ {2}embassy <command> \[options\]$/m,
     },
   ];
   for (const current of cases) {
@@ -129,6 +127,7 @@ test("bare invocation and help flags print localized usage without side effects"
     assert.match(help, /pair \[--from <[^>]+> --to <[^>]+>\]/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.doesNotMatch(help, /dashboard/i);
+    assert.doesNotMatch(help, /--lang|zh-CN/);
     assert.equal(stderr.chunks.join(""), "");
   }
 });
@@ -693,18 +692,10 @@ test("all client commands use one private control socket and expose only normali
   ];
 
   for (const current of cases) {
-    const result = await invoke(
-      state.stateDir,
-      [...current.argv, "--lang", "zh-CN"],
-      {
-        ...current,
-        env: {
-          ...current.env,
-          // A valid explicit option must override an invalid environment.
-          EMBASSY_LOCALE: "unsupported",
-        },
-      },
-    );
+    const result = await invoke(state.stateDir, current.argv, {
+      ...current,
+      env: { ...current.env },
+    });
     assert.equal(result.code, gatewayCliExitCodes.ok, current.argv.join(" "));
     assert.equal(result.stderr, "");
     const parsed = JSON.parse(result.stdout) as {
@@ -818,62 +809,43 @@ test("all client commands use one private control socket and expose only normali
   ]);
 });
 
-test("common locale precedence is exact and malformed locale input fails before all command work", async () => {
-  const precedenceCases = [
-    {
-      argv: ["health", "--unexpected"],
-      env: {},
-      stderr: "[embassy] request rejected.\n",
-    },
-    {
-      argv: ["health", "--unexpected"],
-      env: { EMBASSY_LOCALE: "" },
-      stderr: "[embassy] request rejected.\n",
-    },
-    {
-      argv: ["health", "--unexpected"],
-      env: {
-        LANG: "zh_CN.UTF-8",
-        LC_ALL: "zh_CN.UTF-8",
-        LANGUAGE: "zh_CN:zh",
-      },
-      stderr: "[embassy] request rejected.\n",
-    },
-    {
-      argv: ["health", "--unexpected"],
-      env: { EMBASSY_LOCALE: "zh-CN" },
-      stderr: "[embassy] 请求被拒绝。\n",
-    },
-    {
-      argv: ["health", "--unexpected", "--lang", "en"],
-      env: { EMBASSY_LOCALE: "zh-CN" },
-      stderr: "[embassy] request rejected.\n",
-    },
-    {
-      argv: ["health", "--unexpected", "--lang", "zh-CN"],
-      env: { EMBASSY_LOCALE: "not-a-locale" },
-      stderr: "[embassy] 请求被拒绝。\n",
-    },
+test("the removed --lang option is an argument error and locale environment is inert", async () => {
+  const fakeConfig = () => ({
+    stateDir: "/private/fake-state",
+    controlSocketPath: "/private/fake-state/control.sock",
+    allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [],
+    stallNoticeMs: 30_000,
+    steeringEnabled: true,
+    inboundMode: "paired" as const,
+    limits: {} as never,
+  });
+  // Locale-shaped environment (including the removed EMBASSY_LOCALE) never
+  // changes stderr and never fails an invocation on its own.
+  const inertEnvironments = [
+    {},
+    { EMBASSY_LOCALE: "" },
+    { EMBASSY_LOCALE: "zh-CN" },
+    { EMBASSY_LOCALE: "unsupported" },
+    { LANG: "zh_CN.UTF-8", LC_ALL: "zh_CN.UTF-8", LANGUAGE: "zh_CN:zh" },
   ] as const;
-
-  for (const current of precedenceCases) {
+  for (const env of inertEnvironments) {
     const stdout = capture();
     const stderr = capture();
-    const code = await runGatewayCli(current.argv, {
-      env: current.env,
+    const code = await runGatewayCli(["health", "--unexpected"], {
+      env,
       stdout,
       stderr,
       loadConfig: () => {
-        throw new Error("locale/argument failure must precede configuration");
+        throw new Error("argument failure must precede configuration");
       },
       validateControlSocket: async () => {
-        throw new Error("locale/argument failure must precede socket work");
+        throw new Error("argument failure must precede socket work");
       },
       sendRequest: async () => {
-        throw new Error("locale/argument failure must precede a request");
+        throw new Error("argument failure must precede a request");
       },
     });
-    assert.equal(code, gatewayCliExitCodes.invalidInput);
+    assert.equal(code, gatewayCliExitCodes.invalidInput, JSON.stringify(env));
     assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
       ok: false,
       command: "health",
@@ -883,18 +855,35 @@ test("common locale precedence is exact and malformed locale input fails before 
         retryable: false,
       },
     });
-    assert.equal(stderr.chunks.join(""), current.stderr);
+    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
+  }
+  for (const env of inertEnvironments) {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli(["health"], {
+      env,
+      stdout,
+      stderr,
+      loadConfig: fakeConfig,
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => ({
+        protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,
+        ok: true,
+        result: { status: "ok" },
+      })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    });
+    assert.equal(code, gatewayCliExitCodes.ok, JSON.stringify(env));
+    assert.equal(stderr.chunks.join(""), "");
   }
 
-  const malformed = [
+  const removed = [
     ["--lang"],
-    ["--lang", "zh"],
-    ["--lang", "EN"],
-    ["--lang=zh-CN"],
-    ["--lang", "en", "--lang", "zh-CN"],
+    ["--lang", "en"],
+    ["--lang", "zh-CN"],
+    ["--lang=en"],
   ] as const;
   for (const command of gatewayCliCommands) {
-    for (const suffix of malformed) {
+    for (const suffix of removed) {
       const stdout = capture();
       const stderr = capture();
       let worked = false;
@@ -937,71 +926,9 @@ test("common locale precedence is exact and malformed locale input fails before 
       assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
     }
   }
-
-  for (const command of gatewayCliCommands) {
-    let worked = false;
-    const stdout = capture();
-    const stderr = capture();
-    const code = await runGatewayCli([command], {
-      env: { EMBASSY_LOCALE: "unsupported" },
-      stdin: {
-        async *[Symbol.asyncIterator]() {
-          worked = true;
-          yield SECRET_BODY;
-        },
-      },
-      stdout,
-      stderr,
-      loadConfig: () => {
-        worked = true;
-        throw new Error("must not load configuration");
-      },
-      validateControlSocket: async () => {
-        worked = true;
-      },
-      sendRequest: async () => {
-        worked = true;
-        throw new Error("must not send");
-      },
-      runServer: async () => {
-        worked = true;
-      },
-    });
-    assert.equal(code, gatewayCliExitCodes.invalidInput, command);
-    assert.equal(worked, false, command);
-    assert.equal(
-      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error
-        .code,
-      "INVALID_ARGUMENTS",
-    );
-    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
-  }
-
-  for (const invalidEnvironment of ["zh", "EN", " zh-CN", "zh-CN "]) {
-    let worked = false;
-    const stdout = capture();
-    const stderr = capture();
-    const code = await runGatewayCli(["health"], {
-      env: { EMBASSY_LOCALE: invalidEnvironment },
-      stdout,
-      stderr,
-      loadConfig: () => {
-        worked = true;
-        throw new Error("must not load configuration");
-      },
-    });
-    assert.equal(code, gatewayCliExitCodes.invalidInput);
-    assert.equal(worked, false);
-    assert.equal(
-      (JSON.parse(stdout.chunks.join("")) as { error: { code: string } }).error
-        .code,
-      "INVALID_ARGUMENTS",
-    );
-    assert.equal(stderr.chunks.join(""), "[embassy] request rejected.\n");
-  }
 });
 
-test("all five stderr categories localize without changing stdout protocol", async () => {
+test("all five stderr categories print fixed one-line summaries without private detail", async () => {
   const fakeConfig = () => ({
     stateDir: "/private/fake-state",
     controlSocketPath: "/private/fake-state/control.sock",
@@ -1068,67 +995,43 @@ test("all five stderr categories localize without changing stdout protocol", asy
     },
   ] as const;
   const expected = {
-    en: {
-      input: "[embassy] request rejected.\n",
-      decision: "[embassy] gateway rejected the request.\n",
-      unavailable: "[embassy] gateway unavailable.\n",
-      ambiguous:
-        "[embassy] outcome ambiguous; do not retry automatically.\n",
-      failure: "[embassy] command failed.\n",
-    },
-    "zh-CN": {
-      input: "[embassy] 请求被拒绝。\n",
-      decision: "[embassy] 网关拒绝了该请求。\n",
-      unavailable: "[embassy] 网关不可用。\n",
-      ambiguous: "[embassy] 结果不确定；请勿自动重试。\n",
-      failure: "[embassy] 命令失败。\n",
-    },
+    input: "[embassy] request rejected.\n",
+    decision: "[embassy] gateway rejected the request.\n",
+    unavailable: "[embassy] gateway unavailable.\n",
+    ambiguous:
+      "[embassy] outcome ambiguous; do not retry automatically.\n",
+    failure: "[embassy] command failed.\n",
   } as const;
 
   for (const scenario of scenarios) {
-    let englishStdout: string | undefined;
-    for (const locale of ["en", "zh-CN"] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      const code = await runGatewayCli(
-        [...scenario.argv, "--lang", locale],
-        {
-          env: {},
-          stdin: input(),
-          stdout,
-          stderr,
-          loadConfig: fakeConfig,
-          validateControlSocket: async () => undefined,
-          sendRequest:
-            scenario.sendRequest as NonNullable<
-              GatewayCliDependencies["sendRequest"]
-            >,
-        },
-      );
-      assert.equal(code, scenario.code, scenario.kind);
-      assert.equal(stderr.chunks.join(""), expected[locale][scenario.kind]);
-      assert.doesNotMatch(stdout.chunks.join(""), /private|zh-CN|\u8bf7求|\u7f51关/);
-      if (englishStdout === undefined) {
-        englishStdout = stdout.chunks.join("");
-      } else {
-        assert.equal(stdout.chunks.join(""), englishStdout, scenario.kind);
-      }
-    }
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runGatewayCli([...scenario.argv], {
+      env: {},
+      stdin: input(),
+      stdout,
+      stderr,
+      loadConfig: fakeConfig,
+      validateControlSocket: async () => undefined,
+      sendRequest:
+        scenario.sendRequest as NonNullable<
+          GatewayCliDependencies["sendRequest"]
+        >,
+    });
+    assert.equal(code, scenario.code, scenario.kind);
+    assert.equal(stderr.chunks.join(""), expected[scenario.kind]);
+    assert.doesNotMatch(stdout.chunks.join(""), /private/);
   }
 });
 
 test("genuine control-version mismatches name version skew and client recovery", async () => {
-  const expected = {
-    en:
-      "[embassy] gateway unavailable.\n[embassy] rebuild or repoint this client to the broker's Embassy installation, then retry.\n",
-    "zh-CN":
-      "[embassy] 网关不可用。\n[embassy] 请重新构建客户端，或将其重新指向网关进程所使用的 Embassy 安装，然后重试。\n",
-  } as const;
+  const expected =
+    "[embassy] gateway unavailable.\n[embassy] rebuild or repoint this client to the broker's Embassy installation, then retry.\n";
 
-  for (const locale of ["en", "zh-CN"] as const) {
+  {
     const stdout = capture();
     const stderr = capture();
-    const code = await runGatewayCli(["health", "--lang", locale], {
+    const code = await runGatewayCli(["health"], {
       env: {},
       stdout,
       stderr,
@@ -1160,7 +1063,7 @@ test("genuine control-version mismatches name version skew and client recovery",
         retryable: true,
       },
     });
-    assert.equal(stderr.chunks.join(""), expected[locale]);
+    assert.equal(stderr.chunks.join(""), expected);
     assert.doesNotMatch(
       `${stdout.chunks.join("")} ${stderr.chunks.join("")}`,
       /private skew detail/,
@@ -1170,26 +1073,19 @@ test("genuine control-version mismatches name version skew and client recovery",
 
 test("connect denial and invalid responses print their distinct honest remedies", async () => {
   const hints = {
-    en: {
-      CONTROL_CONNECT_DENIED: "[embassy] the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.\n",
-      CONTROL_INVALID_RESPONSE: "[embassy] if either Embassy installation changed recently, rebuild or repoint this client to the broker's installation; otherwise restart the broker, then retry.\n",
-    },
-    "zh-CN": {
-      CONTROL_CONNECT_DENIED: "[embassy] 网关进程可能仍在运行，但当前进程无权连接；请授予此任务对网关状态目录的写入权限，然后重试。请勿启动第二个网关进程。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。\n",
-      CONTROL_INVALID_RESPONSE: "[embassy] 如果任一 Embassy 安装近期发生变化，请重新构建客户端或将其重新指向网关进程所用的安装；否则请重启网关进程，然后重试。\n",
-    },
+    CONTROL_CONNECT_DENIED: "[embassy] the broker may be running, but this process cannot connect; grant this task write access to the gateway state directory, then retry. Do not start a second broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.\n",
+    CONTROL_INVALID_RESPONSE: "[embassy] if either Embassy installation changed recently, rebuild or repoint this client to the broker's installation; otherwise restart the broker, then retry.\n",
   } as const;
-  for (const locale of ["en", "zh-CN"] as const) for (const code of
-    ["CONTROL_CONNECT_DENIED", "CONTROL_INVALID_RESPONSE"] as const) {
+  for (const code of ["CONTROL_CONNECT_DENIED", "CONTROL_INVALID_RESPONSE"] as const) {
     const stdout = capture(), stderr = capture();
-    await runGatewayCli(["health", "--lang", locale], { env: {}, stdout, stderr,
+    await runGatewayCli(["health"], { env: {}, stdout, stderr,
       loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
         steeringEnabled: true, inboundMode: "paired", limits: {} as never }),
       validateControlSocket: async () => undefined,
       sendRequest: async () => { throw new GatewayControlTransportError(code, "private detail"); } });
     assert.equal(JSON.parse(stdout.chunks.join("")).error.code, code);
-    assert.match(stderr.chunks.join(""), new RegExp(hints[locale][code].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(stderr.chunks.join(""), new RegExp(hints[code].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     if (code === "CONTROL_CONNECT_DENIED") assert.doesNotMatch(stderr.chunks.join(""), /embassy serve/);
   }
 });
@@ -1591,19 +1487,14 @@ test("registration stays record-only and localizes the rejection", async () => {
     limits: {} as never,
   };
 
-  const expected = {
-    en: "[embassy] gateway rejected the request.\n",
-    "zh-CN": "[embassy] 网关拒绝了该请求。\n",
-  } as const;
-  for (const locale of ["en", "zh-CN"] as const) {
+  const expected = "[embassy] gateway rejected the request.\n";
+  {
     let calls = 0;
     const stderr = capture();
     const code = await runGatewayCli([
       "register-codex",
       "--alias",
       "codex-reviewer@this-mac",
-      "--lang",
-      locale,
     ], {
       env: { CODEX_THREAD_ID: THREAD_ID },
       stdin: input(),
@@ -1622,20 +1513,15 @@ test("registration stays record-only and localizes the rejection", async () => {
     });
     assert.equal(code, gatewayCliExitCodes.rejected);
     assert.equal(calls, 1);
-    assert.equal(stderr.chunks.join(""), expected[locale]);
+    assert.equal(stderr.chunks.join(""), expected);
     assert.doesNotMatch(stderr.chunks.join(""), /App Server|\/usr\/bin\/open/u);
   }
 });
 
-test("watch-owner conflict preserves its code and localizes the untrack remedy", async () => {
-  const expectedHint = {
-    en:
-      "[embassy] gateway rejected the request.\n[embassy] this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.\n",
-    "zh-CN":
-      "[embassy] 网关拒绝了该请求。\n[embassy] 此配对已有由另一参与方拥有的监视；请先让该所有者运行 `embassy untrack --conversation <conversation-token>`。\n",
-  } as const;
-  let englishStdout: string | undefined;
-  for (const locale of ["en", "zh-CN"] as const) {
+test("watch-owner conflict preserves its code and prints the untrack remedy", async () => {
+  const expectedHint =
+    "[embassy] gateway rejected the request.\n[embassy] this pair already has a watch owned by the other participant; ask that owner to run `embassy untrack --conversation <conversation-token>` first.\n";
+  {
     const stdout = capture();
     const stderr = capture();
     const code = await runGatewayCli(
@@ -1645,8 +1531,6 @@ test("watch-owner conflict preserves its code and localizes the untrack remedy",
         "codex-reviewer@this-mac",
         "--to",
         "advisor@this-mac",
-        "--lang",
-        locale,
       ],
       {
         env: { CODEX_THREAD_ID: THREAD_ID },
@@ -1679,9 +1563,7 @@ test("watch-owner conflict preserves its code and localizes the untrack remedy",
       command: "send",
       result: { accepted: false, code: "watch_owner_conflict" },
     });
-    assert.equal(stderr.chunks.join(""), expectedHint[locale]);
-    if (englishStdout === undefined) englishStdout = stdout.chunks.join("");
-    else assert.equal(stdout.chunks.join(""), englishStdout);
+    assert.equal(stderr.chunks.join(""), expectedHint);
   }
 });
 
@@ -1845,17 +1727,6 @@ test("identity, stdin, and argument failures happen before any control request",
       code: "CALLER_IDENTITY_CONFLICT",
     },
     {
-      argv: [
-        "register-codex",
-        "--alias",
-        "codex-reviewer@this-mac",
-        "--lang",
-        "zh-CN",
-      ],
-      env: { ...BOTH_IDENTITIES },
-      code: "CALLER_IDENTITY_CONFLICT",
-    },
-    {
       argv: ["register-codex", "--alias", "codex-reviewer@this-mac"],
       env: { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH },
       code: "CALLER_IDENTITY_CONFLICT",
@@ -1940,16 +1811,11 @@ test("identity, stdin, and argument failures happen before any control request",
       current.env.CODEX_THREAD_ID.length > 0 &&
       typeof current.env.CLAUDE_CODE_MESSAGING_SOCKET === "string" &&
       current.env.CLAUDE_CODE_MESSAGING_SOCKET.length > 0;
-    const isZhCn = current.argv.includes("zh-CN");
     assert.equal(
       stderr.chunks.join(""),
-      isZhCn
-        ? `[embassy] 请求被拒绝。\n${
-            hasBothIdentities ? CALLER_IDENTITY_CONFLICT_HINT_ZH_CN : ""
-          }`
-        : `[embassy] request rejected.\n${
-            hasBothIdentities ? CALLER_IDENTITY_CONFLICT_HINT_EN : ""
-          }`,
+      `[embassy] request rejected.\n${
+        hasBothIdentities ? CALLER_IDENTITY_CONFLICT_HINT : ""
+      }`,
     );
     const rendered = `${stdout.chunks.join("")}${stderr.chunks.join("")}`;
     assert.equal(rendered.includes(SECRET_BODY), false);
@@ -2040,13 +1906,12 @@ test("serve emits one normalized ready result without using the client socket or
   const stdout = capture();
   const stderr = capture();
   const env = {
-    EMBASSY_LOCALE: "unsupported",
     CODEX_THREAD_ID: THREAD_ID,
     CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH,
     SECRET_SENTINEL: SECRET_BODY,
   };
   let calls = 0;
-  const exitCode = await runGatewayCli(["serve", "--lang", "zh-CN"], {
+  const exitCode = await runGatewayCli(["serve"], {
     env,
     stdin: {
       async *[Symbol.asyncIterator]() {
@@ -2067,7 +1932,6 @@ test("serve emits one normalized ready result without using the client socket or
     runServer: async (options) => {
       calls += 1;
       assert.equal(options.env, env);
-      assert.equal(options.locale, "zh-CN");
       assert.equal(options.inboundMode, "paired");
       await options.onReady({
         status: "ready",
@@ -2335,17 +2199,17 @@ test("the unwrapped CLI reports an inaccessible inventory path as denied", async
     assert.match(result.stderr, /grant this task write access/);
     assert.match(result.stderr, /EMBASSY_STATE_DIR/);
     assert.doesNotMatch(result.stderr, /embassy serve/);
-    for (const [locale, hint] of [["en", "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory."],
-      ["zh-CN", "本地策略拒绝访问网关状态目录；请授予此进程访问权限，然后重新尝试启动网关。如果本应已有访问权限，请确认 EMBASSY_STATE_DIR 指向此用户自己的状态目录。"]] as const) {
-      const serve = await actual(["serve", "--lang", locale]);
+    {
+      const hint = "local policy denied access to the gateway state directory; grant this process access, then retry starting the broker. If access should already work, verify EMBASSY_STATE_DIR names this user's own state directory.";
+      const serve = await actual(["serve"]);
       assert.equal(serve.code, gatewayCliExitCodes.unavailable);
       assert.match(serve.stderr, new RegExp(hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-      assert.doesNotMatch(serve.stderr, /broker may be running|网关进程可能仍在运行|second broker|第二个网关/);
+      assert.doesNotMatch(serve.stderr, /broker may be running|second broker/);
     }
   } finally { await chmod(state.root, 0o700); }
 });
 
-test("oversized stdin renders its localized hint while generic input rejection does not", async () => {
+test("oversized stdin renders its hint while generic input rejection does not", async () => {
   const cases = [
     {
       body: Buffer.alloc(16 * 1024 + 1, 0x61),
@@ -2359,13 +2223,6 @@ test("oversized stdin renders its localized hint while generic input rejection d
       expected: "INVALID_MESSAGE_INPUT",
       env: { CODEX_THREAD_ID: THREAD_ID },
       stderr: "[embassy] request rejected.\n",
-    },
-    {
-      body: Buffer.alloc(16 * 1024 + 1, 0x61),
-      expected: "MESSAGE_TOO_LARGE",
-      env: { CODEX_THREAD_ID: THREAD_ID, EMBASSY_LOCALE: "zh-CN" },
-      stderr:
-        "[embassy] 请求被拒绝。\n[embassy] 消息超过 16 KiB 接收上限；请缩短消息或将其拆分。对于长篇内容，请通过管道从文件传入正文。\n",
     },
   ];
 
@@ -2403,60 +2260,43 @@ test("oversized stdin renders its localized hint while generic input rejection d
   }
 });
 
-test("unsupported and corrupt private state print the localized reset instruction", async () => {
+test("unsupported and corrupt private state print the reset instruction", async () => {
   const codes = ["GATEWAY_STATE_SCHEMA_UNSUPPORTED", "CORRUPT_GATEWAY_STATE"] as const;
-  const locales = [
-    {
-      env: {},
-      rejection: "request rejected.",
-      hint:
-        "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 1.9.x before resetting.",
-    },
-    {
-      env: { EMBASSY_LOCALE: "zh-CN" },
-      rejection: "请求被拒绝。",
-      hint:
-        "必须重置状态；请按照 docs/CONFIGURATION.zh-CN.md#私有状态重置 操作。重置会放弃所有未结算工作。升级后如需检查未结算工作，请在重置前暂时使用 Embassy 1.9.x。",
-    },
-  ] as const;
+  // 2.0.x is the last line that reads pre-schema-5 state.
+  const hint =
+    "state reset required; follow docs/CONFIGURATION.md#private-state-reset. Resetting abandons unsettled work. To check for unsettled work after upgrading, temporarily use Embassy 2.0.x before resetting.";
   for (const code of codes) {
-    for (const locale of locales) {
-      const stdout = capture();
-      const stderr = capture();
-      const exitCode = await runGatewayCli(["serve"], {
-        env: locale.env,
-        stdout,
-        stderr,
-        runServer: async () => {
-          throw new BridgeError(code, "private loader detail must not render");
-        },
-      });
-      assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
-      assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
-        ok: false,
-        command: "serve",
-        error: { code, ambiguous: false, retryable: false },
-      });
-      assert.equal(
-        stderr.chunks.join(""),
-        `[embassy] ${locale.rejection}\n[embassy] ${locale.hint}\n`,
-      );
-      assert.doesNotMatch(stderr.chunks.join(""), /private loader detail/u);
-    }
+    const stdout = capture();
+    const stderr = capture();
+    const exitCode = await runGatewayCli(["serve"], {
+      env: {},
+      stdout,
+      stderr,
+      runServer: async () => {
+        throw new BridgeError(code, "private loader detail must not render");
+      },
+    });
+    assert.equal(exitCode, gatewayCliExitCodes.invalidInput);
+    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+      ok: false,
+      command: "serve",
+      error: { code, ambiguous: false, retryable: false },
+    });
+    assert.equal(
+      stderr.chunks.join(""),
+      `[embassy] request rejected.\n[embassy] ${hint}\n`,
+    );
+    assert.doesNotMatch(stderr.chunks.join(""), /private loader detail|1\.9\.x/u);
   }
 });
 
-test("missing mandatory inventory prints its exact one-line fix in both locales", async () => {
-  const locales = [["en", "request rejected.", 'at ~/.local/state/agent-embassy, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {"version":1,"host":"<host>","nodes":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.'],
-    ["zh-CN", "请求被拒绝。", '请在 ~/.local/state/agent-embassy 将该目录创建为 mode-0700，把 {"version":1,"host":"<host>","nodes":[]} 中的 <host> 替换为所选的小写主机名，并在该目录中保存为 mode-0600 的 nodes.json，然后再次运行 embassy serve。'],
-  ] as const;
-  for (const [locale, rejection, hint] of locales) {
-    const stdout = capture(), stderr = capture();
-    const code = await runGatewayCli(["serve", "--lang", locale], { stdout, stderr,
-      runServer: async () => { throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail"); } });
-    assert.equal(code, gatewayCliExitCodes.invalidInput); assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_NODE_INVENTORY_REQUIRED");
-    assert.equal(stderr.chunks.join(""), `[embassy] ${rejection}\n[embassy] ${hint}\n`);
-  }
+test("missing mandatory inventory prints its exact one-line fix", async () => {
+  const hint = 'at ~/.local/state/agent-embassy, create the directory as mode-0700, replace <host> with your chosen lowercase host in exactly {"version":1,"host":"<host>","nodes":[]}, save it there as mode-0600 nodes.json, then run embassy serve again.';
+  const stdout = capture(), stderr = capture();
+  const code = await runGatewayCli(["serve"], { stdout, stderr,
+    runServer: async () => { throw new BridgeError("GATEWAY_NODE_INVENTORY_REQUIRED", "private detail"); } });
+  assert.equal(code, gatewayCliExitCodes.invalidInput); assert.equal(JSON.parse(stdout.chunks.join("")).error.code, "GATEWAY_NODE_INVENTORY_REQUIRED");
+  assert.equal(stderr.chunks.join(""), `[embassy] request rejected.\n[embassy] ${hint}\n`);
 });
 
 test("package metadata publishes the client and its runtime dependency", async () => {

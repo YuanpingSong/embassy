@@ -1,4 +1,4 @@
-/* Embassy marketing site — shared stylesheet (en + zh-CN) */
+/* Embassy marketing site — stylesheet */
 :root{--ink:#1a1a1e;--ink2:#44444e;--mut:#6d6d78;--amber:#f4a259;--coral:#e07a5f;--cinn:#c96442;--cream:#eef1f5;--page:#ffffff;--rule:#e9e9ee;--night:#131316;--night2:#20202658;--ok:#3e7a4e;--okbg:#e4f0e6;
 --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;--serif:'Iowan Old Style','Palatino Linotype',Palatino,'Songti SC',Georgia,serif;--sans:-apple-system,BlinkMacSystemFont,'Helvetica Neue','PingFang SC',Arial,sans-serif}
 *{box-sizing:border-box}

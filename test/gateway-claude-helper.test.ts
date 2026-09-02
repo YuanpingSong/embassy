@@ -31,7 +31,7 @@ test("real-PID helpers own independent records and exact cleanup", async () => {
   const entryPath = path.join(repoRoot, "dist/src/gateway/claude-helper.js");
   const exits: number[] = [];
   const start = (alias: string, sourceProvider: "codex" | "peer") => ClaudeNativeHelperClient.start({
-    entryPath, runtime, hostId: "this-mac", locale: "en", deliveryNotices: "merged", maxPendingMessages: 8,
+    entryPath, runtime, hostId: "this-mac", deliveryNotices: "merged", maxPendingMessages: 8,
     registration: { alias, sourceProvider, cwd: root }, callbacks: { onEvent: () => undefined, onExit: () => exits.push(1) },
   });
   let first: ClaudeNativeHelperClient | undefined, second: ClaudeNativeHelperClient | undefined;
@@ -64,7 +64,7 @@ const envelope = (command: unknown) => ({ protocolVersion: 1, type: "request", r
 
 test("helper IPC strictly binds preparation authority and bounds", () => {
   const initialization = { protocolVersion: 1, type: "initialize", requestId: "request_0123456789",
-    runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, hostId: "this-mac", locale: "en",
+    runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, hostId: "this-mac",
     deliveryNotices: "merged", maxPendingMessages: 8,
     registration: { alias: "peer-builder@this-mac", sourceProvider: "peer", cwd: "/workspace/peer" } } as const;
   assert.equal(isClaudeNativeHelperParentMessage(initialization), true);
@@ -111,7 +111,7 @@ test("supervisor binds source, namespaces receipts, and consumes preparations on
   const callbacks: GatewayAdapterCallbacks = { onRouteState: () => undefined, onClaudeReply: () => undefined,
     onClaudeMessage: (message) => messages.push(message), onProtocolNotice: (notice) => notices.push(notice.code) };
   const supervisor = new ClaudeNativeHelperSupervisor({ identity: { provider: "claude", hostId: "this-mac" },
-    runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, locale: "en", deliveryNotices: "merged",
+    runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, deliveryNotices: "merged",
     maxPendingMessages: 8, maxHelpers: 2, callbacks: () => callbacks,
     factory: async (options) => { const client = new FakeClient(options, clients.length + 1); clients.push(client); return client; } });
   try {
@@ -155,7 +155,7 @@ test("supervisor binds source, namespaces receipts, and consumes preparations on
 test("unadvertise destroys only the exact helper", async () => {
   const clients: FakeClient[] = [];
   const supervisor = new ClaudeNativeHelperSupervisor({ identity: { provider: "claude", hostId: "this-mac" },
-    runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, locale: "en", deliveryNotices: "merged",
+    runtime: { sessionsDir: "/tmp/sessions", socketDir: "/tmp/sockets" }, deliveryNotices: "merged",
     maxPendingMessages: 8, maxHelpers: 1, callbacks: () => undefined,
     factory: async (options) => { const client = new FakeClient(options, clients.length + 1); clients.push(client); return client; } });
   await supervisor.advertise({ alias: "codex-old@this-mac", sourceProvider: "codex", cwd: "/old" });
@@ -199,7 +199,7 @@ test("forked fake helper expires and fences capabilities, ambiguity, and receipt
   const messages: Parameters<NonNullable<GatewayAdapterCallbacks["onClaudeMessage"]>>[0][] = [];
   let client: ClaudeNativeHelperClient | undefined;
   const supervisor = new ClaudeNativeHelperSupervisor({ identity: { provider: "claude", hostId: "this-mac" },
-    runtime: { sessionsDir: "/unused", socketDir: "/unused" }, locale: "en", deliveryNotices: "merged",
+    runtime: { sessionsDir: "/unused", socketDir: "/unused" }, deliveryNotices: "merged",
     maxPendingMessages: 4, maxHelpers: 1,
     callbacks: () => ({ onRouteState: () => undefined, onClaudeReply: () => undefined, onClaudeMessage: (value) => messages.push(value) }),
     factory: async (options) => client = await ClaudeNativeHelperClient.start({ ...options, entryPath }) });
@@ -268,7 +268,7 @@ test("production helper child owns TTL and non-consuming foreign preparation fen
     targetAlias: "claude-fake@studio", stateRoot, deadlineAt: new Date(Date.now() + 30_000).toISOString() } as const;
   try {
     helper = await ClaudeNativeHelperClient.start({ entryPath: path.join(repoRoot, "dist/src/gateway/claude-helper.js"),
-      runtime: { sessionsDir, socketDir }, hostId: "studio", locale: "en", deliveryNotices: "merged", maxPendingMessages: 8,
+      runtime: { sessionsDir, socketDir }, hostId: "studio", deliveryNotices: "merged", maxPendingMessages: 8,
       registration: { alias: command.sourceAlias, sourceProvider: "codex", cwd: workspace },
       callbacks: { onEvent: (event) => { if (JSON.stringify(event).includes('"sourceAlias":"claude-fake@studio"')) resolveInbound(); }, onExit: () => undefined } });
     const helperRecord = JSON.parse(await readFile(path.join(sessionsDir, `${helper.pid}.json`), "utf8")) as { messagingSocketPath: string }; await new Promise<void>((resolve, reject) => { const socket = connect(helperRecord.messagingSocketPath, () => socket.end(JSON.stringify({

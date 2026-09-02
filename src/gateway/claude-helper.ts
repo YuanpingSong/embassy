@@ -73,7 +73,7 @@ export async function runClaudeNativeHelperProcess(): Promise<void> {
   const initialize = async (message: ClaudeNativeHelperInitialization): Promise<ClaudeNativeHelperResult> => {
     if (adapter || listener || registration) throw new BridgeError("CLAUDE_NATIVE_HELPER_ALREADY_INITIALIZED", "The helper accepts one initialization.");
     const created = new ClaudePeerAdapter({ sessionsDir: message.runtime.sessionsDir, socketDir: message.runtime.socketDir,
-      locale: message.locale, deliveryNotices: message.deliveryNotices, maxPendingReceipts: message.maxPendingMessages });
+      deliveryNotices: message.deliveryNotices, maxPendingReceipts: message.maxPendingMessages });
     let opened: ClaudePeerListener | undefined;
     try { opened = await created.listen({ onMessage: inbound,
         onProtocolNotice: (notice) => event({ event: "protocol_notice", value: { code: notice.code } }) });

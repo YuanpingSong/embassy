@@ -214,7 +214,6 @@ test("foreground assembly wires the local providers and the managed-socket holde
   await runGatewayServer(
     {
       env,
-      locale: "zh-CN",
       inboundMode: "open",
       signal: abort.signal,
       onReady: (result) => {
@@ -245,7 +244,6 @@ test("foreground assembly wires the local providers and the managed-socket holde
       createClaudeProvider: (options) => {
         events.push("create-claude");
         assert.deepEqual(options.runtime, runtime());
-        assert.equal(options.locale, "zh-CN");
         assert.equal(options.deliveryNotices, "quiet");
         return provider(() => events.push("close-claude"));
       },

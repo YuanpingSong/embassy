@@ -19,7 +19,6 @@ import { TextDecoder } from "node:util";
 import { BridgeError } from "../errors.js";
 import { KeyedMutex } from "../mutex.js";
 import type { GatewayDeliveryNoticeMode } from "./config.js";
-import { isDashboardLocale, type DashboardLocale } from "./locale.js";
 
 export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({ peerProtocol: 1 });
 const EMBASSY_ADVERTISEMENT_VERSION = 1;
@@ -30,22 +29,13 @@ const UUID_PATTERN =
 const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const PRIVATE_ARTIFACT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+/** Bounded notices the gateway writes into a live Claude session; the framing tags around them are the wire contract. */
 const CLAUDE_PEER_NOTICE_COPY = {
-  en: {
-    stall:
-      "The local gateway is still waiting to deliver the preceding message. Run `embassy status` or inspect the dashboard for details. Queued mail reaches a busy recipient when its turn ends.",
-    diagnostic:
-      "The local gateway could not deliver the preceding message. Run `embassy status` or inspect the dashboard for details. Queued mail reaches a busy recipient when its turn ends.",
-  },
-  "zh-CN": {
-    stall:
-      "本地网关仍在等待投递前一条消息。运行 `embassy status` 或查看仪表盘了解详情。排队邮件会在忙碌接收方的当前轮次结束后到达。",
-    diagnostic:
-      "本地网关无法投递前一条消息。运行 `embassy status` 或查看仪表盘了解详情。排队邮件会在忙碌接收方的当前轮次结束后到达。",
-  },
-} as const satisfies Readonly<
-  Record<DashboardLocale, Readonly<Record<"stall" | "diagnostic", string>>>
->;
+  stall:
+    "The local gateway is still waiting to deliver the preceding message. Run `embassy status` for details. Queued mail reaches a busy recipient when its turn ends.",
+  diagnostic:
+    "The local gateway could not deliver the preceding message. Run `embassy status` for details. Queued mail reaches a busy recipient when its turn ends.",
+} as const;
 const REGISTRY_FILE_PATTERN = /^([1-9][0-9]{0,9})\.json$/;
 const SOCKET_FILE_PATTERN = /^([1-9][0-9]{0,9})\.sock$/;
 const MAX_PID = 2_147_483_647;
@@ -125,7 +115,7 @@ export type ClaudeProcessInspector = (
 ) => Promise<ClaudeProcessIdentity | undefined>;
 export type ClaudePeerConnect = (socketPath: string) => Socket;
 export type ClaudePeerAdapterOptions = {
-  sessionsDir: string; socketDir: string; locale?: DashboardLocale;
+  sessionsDir: string; socketDir: string;
   deliveryNotices?: GatewayDeliveryNoticeMode;
   maxRegistryEntries?: number; maxRegistryBytes?: number;
   maxFrameBytes?: number; connectTimeoutMs?: number;
@@ -701,7 +691,6 @@ export class ClaudePeerAdapter {
   readonly #now: () => number;
   readonly #createId: () => string;
   readonly #createArtifactToken: () => string;
-  readonly #locale: DashboardLocale;
   readonly #deliveryNotices: GatewayDeliveryNoticeMode;
   readonly #registryRename: (
     source: string,
@@ -729,13 +718,6 @@ export class ClaudePeerAdapter {
         "Claude peer sockets are supported only on macOS and Linux.",
       );
     }
-    if (options.locale !== undefined && !isDashboardLocale(options.locale)) {
-      throw new BridgeError(
-        "DASHBOARD_LOCALE_UNSUPPORTED",
-        "The Claude peer notice locale is unsupported.",
-      );
-    }
-    this.#locale = options.locale ?? "en";
     if (
       options.deliveryNotices !== undefined &&
       !["merged", "verbose", "quiet"].includes(options.deliveryNotices)
@@ -1223,7 +1205,6 @@ export class ClaudePeerAdapter {
       limits: this.#limits,
       createId: this.#createId,
       connect: this.#connect,
-      locale: this.#locale,
       deliveryNotices: this.#deliveryNotices,
       resolveReplyAddress: async (address) =>
         await this.#resolveReplyAddress(address),
@@ -1450,7 +1431,6 @@ type ListenerCreateOptions = {
   limits: AdapterLimits;
   createId: () => string;
   connect: ClaudePeerConnect;
-  locale: DashboardLocale;
   deliveryNotices: GatewayDeliveryNoticeMode;
   resolveReplyAddress: (address: string) => Promise<TargetBinding>;
   resolveSessionBinding: (sessionId: string) => Promise<TargetBinding>;
@@ -2052,7 +2032,7 @@ export class ClaudePeerListener {
       `queued-for-ms="${queuedForMs}">`;
     const detailedContent = [
       openingTag,
-      CLAUDE_PEER_NOTICE_COPY[this.#context.locale].stall,
+      CLAUDE_PEER_NOTICE_COPY.stall,
       "</gateway-delivery-stall>",
     ].join("\n");
     const messageId = this.#context.createId();
@@ -2142,7 +2122,7 @@ export class ClaudePeerListener {
             messageId: this.#context.createId(),
             content: [
               `<gateway-delivery-diagnostic status="expired" code="${diagnostic.code}">`,
-              CLAUDE_PEER_NOTICE_COPY[this.#context.locale].diagnostic,
+              CLAUDE_PEER_NOTICE_COPY.diagnostic,
               "</gateway-delivery-diagnostic>",
             ].join("\n"),
             maxFrameBytes: this.#context.limits.maxFrameBytes,

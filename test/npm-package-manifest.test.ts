@@ -40,10 +40,7 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "docs/GATEWAY-ARCHITECTURE.md",
     // Every doc the published README links must ship in the tarball.
     "docs/CONFIGURATION.md",
-    "docs/CONFIGURATION.zh-CN.md",
     "docs/DELIVERY.md",
-    "docs/DELIVERY.zh-CN.md",
-    "README.zh-CN.md",
   ]) {
     assert.ok(expected.includes(packagePath), packagePath);
   }
@@ -58,6 +55,14 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "dist/src/gateway/acp-provider.js",
     "dist/src/gateway/deepseek-detect.js",
     "dist/src/gateway/codex-doctor.js",
+    // emb-102: the copy-table layer and every zh-CN document left the package.
+    "dist/src/gateway/locale.js",
+    "dist/src/gateway/cli-copy.js",
+    "dist/src/gateway/cli-copy.en.js",
+    "dist/src/gateway/cli-copy.zh-CN.js",
+    "README.zh-CN.md",
+    "docs/CONFIGURATION.zh-CN.md",
+    "docs/DELIVERY.zh-CN.md",
   ]) {
     assert.ok(!expected.includes(removedPath), removedPath);
   }

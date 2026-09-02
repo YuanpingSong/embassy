@@ -2475,7 +2475,7 @@ export class GatewayService {
         this.settleProgressWatch(watch, "gateway", "endpoint_retired");
         continue;
       }
-      const text = `[Embassy automated liveness check — ${due.nudgeNumber} / Embassy 自动活跃检查 — ${due.nudgeNumber}]\nReply with the result or a status. / 请回复结果或状态。`;
+      const text = `[Embassy automated liveness check — ${due.nudgeNumber}]\nReply with the result or a status.`;
       try {
         await this.enqueueConversation({
           sourceAlias: watch.ownerAlias,
