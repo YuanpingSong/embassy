@@ -297,6 +297,7 @@ function checkResponder(overrides: {
   reply?: "echo" | "silent" | "other" | "uncorrelated"; delivery?: string;
   sendRefusal?: { code: string; reason?: string };
   registerRefusal?: boolean | { code: string; reason?: string }; unregisterRefusal?: boolean;
+  receiptRefusal?: boolean;
   routes?: GatewayPublicSnapshot["routes"];
 } = {}, advance: (milliseconds: number) => void = () => undefined) {
   const seen: GatewayControlRequest[] = [];
@@ -344,6 +345,9 @@ function checkResponder(overrides: {
         };
         return { state: "message", receipt: PEER_RECEIPT, frame: `${JSON.stringify({ ok: true, command: "await", result })}\n` };
       }
+      case "peer_receipt":
+        return overrides.receiptRefusal === true
+          ? { accepted: false, code: "route_mismatch" } : { accepted: true, code: "ok" };
       default:
         return { accepted: true, code: "ok" };
     }
@@ -432,6 +436,11 @@ test("each check hop fails with its own code, and the identity is always release
     { name: "reply", overrides: { reply: "silent" as const },
       expected: gatewayCliExitCodes.failure,
       line: /^ {2}FAIL {2}reply {6}no reply within 60 s — the peer received the message but did not answer/m },
+    // A message the broker would not let the mailbox acknowledge is a failed
+    // reply hop with the broker's code, never a passed round trip.
+    { name: "reply", overrides: { receiptRefusal: true },
+      expected: gatewayCliExitCodes.failure,
+      line: /^ {2}FAIL {2}reply {6}receipt refused \(route_mismatch\)/m },
   ];
   for (const current of cases) {
     const clock = checkClock();
@@ -533,25 +542,32 @@ test("check prefers a Codex task the broker has observed, and refuses when every
   const clock = checkClock();
   const stale = new Date(clock.now() - 11 * 60_000).toISOString();
   const fresh = new Date(clock.now() - 20_000).toISOString();
+  const fresher = new Date(clock.now() - 5_000).toISOString();
   const template = SNAPSHOT.routes[0]!;
+  // A route the broker has never observed carries no `lastSeenAt` at all.
+  const neverObserved = { ...template, alias: `codex-delta@${HOST}` } as Record<string, unknown>;
+  delete neverObserved.lastSeenAt;
   const routes = [
     { ...template, alias: `codex-alpha@${HOST}`, state: "stale" as const, lastSeenAt: stale },
     { ...template, alias: `codex-beta@${HOST}`, lastSeenAt: fresh },
+    { ...template, alias: `codex-gamma@${HOST}`, lastSeenAt: fresher },
+    neverObserved as typeof template,
   ];
-  // Alphabetical order would pick alpha; observation wins.
+  // Alphabetical order would pick alpha and beta is fresh too: the most
+  // recently observed task wins, and a never-observed task is not eligible.
   const { respond, seen } = checkResponder({ routes });
   const stdout = capture(true);
   assert.equal(await runGatewayCli(["check"], dependencies(stdout, respond, {
     ...clock, env: { NO_COLOR: "1" } })), gatewayCliExitCodes.ok);
   assert.equal((seen.find((request) => request.method === "send")!.params as { toAlias: string }).toAlias,
-    `codex-beta@${HOST}`);
+    `codex-gamma@${HOST}`);
 
-  // Every task stale: name them, send nothing, exit non-zero.
-  const allStale = checkResponder({ routes: [routes[0]!, { ...routes[1]!, lastSeenAt: stale }] });
+  // Every task stale or never observed: name them, send nothing, exit non-zero.
+  const allStale = checkResponder({ routes: [routes[0]!, { ...routes[1]!, lastSeenAt: stale }, routes[3]!] });
   const out = capture(true), stderr = capture();
   const code = await runGatewayCli(["check"], dependencies(out, allStale.respond, { ...clock, stderr }));
   assert.equal(code, gatewayCliExitCodes.invalidInput);
-  assert.match(text(stderr), /every registered Codex task has been unobserved for more than ten minutes \(codex-alpha@this-mac, codex-beta@this-mac\), so nothing was sent\. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`\./);
+  assert.match(text(stderr), /every registered Codex task is unobserved or was last observed more than ten minutes ago \(codex-alpha@this-mac, codex-beta@this-mac, codex-delta@this-mac\), so nothing was sent\. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`\./);
   assert.deepEqual(allStale.seen.map((request) => request.method), ["list_snapshot"]);
 });
 

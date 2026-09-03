@@ -102,7 +102,9 @@ function snapshot(overrides: Overrides<GatewayPublicSnapshot> = {}): GatewayPubl
   });
 }
 
-const options = { stateDir: "/private/state/agent-embassy", version: "2.0.1", recent: 10, color: false, now };
+const options = { stateDir: "/private/state/agent-embassy", version: EMBASSY_VERSION, recent: 10, color: false, now };
+/** The version as it appears in a header, escaped for the regexes below, so a release bump touches no literal here. */
+const VERSION = EMBASSY_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const COUNTERS: RouteCounters = { ...ZERO_COUNTERS, accepted: 3, delivered: 3, bytesAccepted: 240 };
 const EXAMPLE_MESSAGES: NormalizedMessageEvent[] = [
@@ -160,7 +162,7 @@ test("the README's two status examples are exactly what the renderer prints", as
 
 test("a healthy snapshot renders one broker line, connectors, sessions, routes, and bodies", () => {
   const rendered = renderStatus(HEALTHY_FIXTURE, { ...options, pid: 41213 });
-  assert.match(rendered, /^embassy 2\.0\.1 {2}broker ok · pid 41213 · snapshot just now\n/);
+  assert.match(rendered, new RegExp(`^embassy ${VERSION} {2}broker ok · pid 41213 · snapshot just now\n`));
   assert.match(rendered, /^state dir \/private\/state\/agent-embassy$/m);
   assert.match(rendered, /^sessions scanned 3s ago$/m);
   assert.match(rendered, /^ {2}claude {2}ok$/m);
@@ -210,7 +212,7 @@ test("the sessions block shows what can be addressed, routed or not", () => {
 
 test("a degraded Codex connector names its code, both causes, and sets the overall word", () => {
   const rendered = renderStatus(DEGRADED_FIXTURE, options);
-  assert.match(rendered, /^embassy 2\.0\.1 {2}broker degraded · snapshot just now$/m);
+  assert.match(rendered, new RegExp(`^embassy ${VERSION} {2}broker degraded · snapshot just now$`, "m"));
   assert.match(rendered, /^ {2}codex {3}degraded {2}MANAGED_CODEX_UNAVAILABLE$/m);
   assert.ok(rendered.includes(STATUS_REMEDY.MANAGED_CODEX_UNAVAILABLE!));
   assert.match(rendered, /holds the managed Codex control socket/);
@@ -245,7 +247,7 @@ test("a stale shell-peer mailbox is reported without degrading the overall word"
   assert.match(rendered, /^ {2}peer-reviewer@this-mac stale \(token or await loop gone\)$/m);
   assert.match(rendered, /3 message\(s\) waiting: run `embassy await --alias peer-reviewer@this-mac --token-stdin`/);
   assert.equal(overallWord(waiting), "ok");
-  assert.match(rendered, /^embassy 2\.0\.1 {2}broker ok/m);
+  assert.match(rendered, new RegExp(`^embassy ${VERSION} {2}broker ok`, "m"));
 
   const quiet = snapshot({ routes: [route(`peer-reviewer@${HOST}`, "peer", { lastSeenAt: undefined })] });
   assert.match(renderStatus(quiet, options), /^ {2}peer-reviewer@this-mac ok$/m);

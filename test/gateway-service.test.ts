@@ -517,6 +517,14 @@ test("peer principals send both directions and reply through ordinary conversati
       { accepted: false, code: "route_mismatch" });
     assert.deepEqual(await subject.handlers.send({ fromAlias: claude.alias, threadId: THREAD_A, toAlias: codex.alias, text: "wrong principal", expectsReply: false }),
       { accepted: false, code: "route_mismatch" });
+    // A Codex alias with no registration at all is "unregistered", never a
+    // thread mismatch: that is the state every Codex task is in after a
+    // private state reset, and its remedy is to register.
+    assert.deepEqual(await subject.handlers.send({ fromAlias: "codex-fresh@this-mac", threadId: THREAD_B, toAlias: claude.alias, text: "not yet registered", expectsReply: false }),
+      { accepted: false, code: "rejected", reason: "ROUTE_UNREGISTERED" });
+    // A registration that exists under another task is the genuine mismatch.
+    assert.deepEqual(await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_B, toAlias: claude.alias, text: "someone else's registration", expectsReply: false }),
+      { accepted: false, code: "route_mismatch", reason: "CODEX_THREAD_MISMATCH" });
     await eventually(() => codexProvider.dispatches.length === 1 && claudeProvider.dispatches.length === 1);
     assert.equal(codexProvider.dispatches[0]?.sourceProvider, "peer");
     assert.equal(codexProvider.dispatches[0]?.steer, undefined);

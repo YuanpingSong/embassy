@@ -232,7 +232,7 @@ broker.
   retains at most three steers per route. The environment kill switch defaults
   on and can disable this classification globally. Embassy never issues
   `turn/interrupt`.
-- The tested App Server 0.147.0 initialization enables `experimentalApi: true`
+- The App Server 0.147.0 initialization this adapter targets enables `experimentalApi: true`
   solely for `thread/resume.excludeTurns: true`. It adds no general
   experimental method or authority. Missing, malformed, or nonempty returned
   turns fail closed and are never retained.

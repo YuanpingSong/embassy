@@ -1307,7 +1307,11 @@ export class GatewayService {
 
   private async assertThread(alias: string, threadId: string): Promise<GatewayPrivateRouteInspection> {
     const route = await this.store.inspectPrivateRoute(alias);
-    if (route?.binding.provider !== "codex" || route.binding.routeHandle !== threadId) {
+    // No registration at all is its own condition — the state every Codex
+    // task is in after a private state reset — and is never dressed up as a
+    // thread mismatch, which would send the operator hunting a wrong id.
+    if (route === undefined) throw new BridgeError("ROUTE_UNREGISTERED", "The route is not registered.");
+    if (route.binding.provider !== "codex" || route.binding.routeHandle !== threadId) {
       throw new BridgeError("CODEX_THREAD_MISMATCH", "The task attestation does not match the route.");
     }
     return route;

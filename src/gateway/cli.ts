@@ -34,10 +34,12 @@ const DELIVERY_POLL_INTERVAL_MS = 250;
 const DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS = 50;
 const PEER_AWAIT_REQUEST_TIMEOUT_MS = 35_000;
 export const EMBASSY_VERSION = "2.0.1";
-// RELEASE VERSION SWEEP — every place the version lives: package.json,
-// npm-shrinkwrap.json (x2), this constant,
-// test/gateway-cli.test.ts package-metadata assertion, and README.md's two
-// `embassy status` examples (test/status-view.test.ts pins them to this constant).
+// RELEASE VERSION SWEEP — every place the version lives, seven sites:
+// package.json; npm-shrinkwrap.json (two: the root and packages[""]); this
+// constant; test/gateway-cli.test.ts's literal package-version assertion; and
+// README.md's two `embassy status` renders. test/status-view.test.ts pins
+// those renders to this constant and derives its own fixture and regexes from
+// it, so it is not a sweep site.
 
 export const gatewayCliCommands = [
   "serve", "service", "health", "status", "watch", "check", "delivery-status",
@@ -194,7 +196,17 @@ const CLI_HINT = {
   checkNoTarget:
     "no Codex task is registered, so there is nothing to check. Run `embassy register-codex --alias codex-<name>@{localHost}` from inside the task, or name any current route with `embassy check --to <alias>`.",
   checkAllStale:
-    "every registered Codex task has been unobserved for more than ten minutes ({aliases}), so nothing was sent. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`.",
+    "every registered Codex task is unobserved or was last observed more than ten minutes ago ({aliases}), so nothing was sent. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`.",
+  peerAliasRequired:
+    "a peer token is present (EMBASSY_PEER_TOKEN or --token-stdin) but --from is not a peer-* alias; unset the token or name the peer route.",
+  codexCallerRequired:
+    "--from names a Codex task ({alias}) but no CODEX_THREAD_ID was inherited; run this inside that Codex task, as a shell step of its current turn.",
+  peerCallerRequired:
+    "--from names a shell peer ({alias}) but no peer token was given; pass the peer_ token on the first stdin line with --token-stdin (or EMBASSY_PEER_TOKEN from a stable shell).",
+  codexRouteUnregistered:
+    "no registration for {alias} on this broker; run `embassy register-codex --alias {alias}` from inside the Codex task (after a private state reset, every Codex task registers again).",
+  codexThreadMismatch:
+    "{alias} is not registered to this task's inherited CODEX_THREAD_ID; --from must name the alias this task registered (read it from `embassy status`), or register this task with `embassy register-codex`.",
   callerIdentityRequired:
     "no caller credential was inherited, and a conversation names no route to infer one from: run this inside the Codex task (CODEX_THREAD_ID), inside the Claude Code session (CLAUDE_CODE_MESSAGING_SOCKET), or as a registered shell peer with --token-stdin and the peer_ token on the first stdin line.",
   unknownMethod:
@@ -504,8 +516,15 @@ async function buildRequest(
       // credential it could present; a route send keeps its Claude-shaped
       // default. A peer credential authenticates a peer-* alias and nothing
       // else, in either addressing form.
-      if (conversationId !== undefined && principals === 0) throw new CliFault("CALLER_IDENTITY_REQUIRED", false, "callerIdentityRequired");
-      if (source !== undefined && !fromAlias.startsWith("peer-")) fault();
+      if (principals === 0) {
+        if (conversationId !== undefined) throw new CliFault("CALLER_IDENTITY_REQUIRED", false, "callerIdentityRequired");
+        // A route send names its sender's shape, so the hint can name the
+        // one credential that shape needs; only a Claude-shaped alias keeps
+        // the Claude-specific code.
+        if (fromAlias.startsWith("codex-")) throw new CliFault("CALLER_IDENTITY_REQUIRED", false, "codexCallerRequired", undefined, { alias: fromAlias });
+        if (fromAlias.startsWith("peer-")) throw new CliFault("CALLER_IDENTITY_REQUIRED", false, "peerCallerRequired", undefined, { alias: fromAlias });
+      }
+      if (source !== undefined && !fromAlias.startsWith("peer-")) throw new CliFault("INVALID_ARGUMENTS", false, "peerAliasRequired");
       const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
       const authority = peer === undefined ? hasIdentity(env.CODEX_THREAD_ID)
         ? { threadId: requireExclusiveCodexThreadId(env) }
@@ -631,22 +650,33 @@ function isRejectedResult(result: unknown): boolean {
  * never to a `--conversation` send, whose not_found means a stale conversation
  * token that no rescan will revive.
  */
+type RefusalHint = Readonly<{ hint: CliFaultHint; vars?: Readonly<Record<string, string>> }>;
 function refusalHint(
   request: GatewayControlRequest, result: unknown,
-): CliFaultHint | undefined {
+): RefusalHint | undefined {
   if (!isRejectedResult(result)) return undefined;
   const reason = (result as { reason?: unknown }).reason;
-  if (reason === "PEER_ALIAS_COLLISION") return "aliasCollision";
-  if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return "workspaceOverlap";
-  // The same remedy covers a conversation answered from the wrong end: the
-  // alias in --from is claimed, the credential beside it is what is verified.
-  if (reason === "CLAUDE_ROUTE_MISMATCH" || reason === "CONVERSATION_CALLER_MISMATCH" ||
-    reason === "CODEX_THREAD_MISMATCH") return "callerAliasMismatch";
-  if (reason === "CLAUDE_TARGET_CHANGED") return "targetChanged";
+  const from = request.method === "send" ? request.params.fromAlias : undefined;
+  if (reason === "PEER_ALIAS_COLLISION") return { hint: "aliasCollision" };
+  if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return { hint: "workspaceOverlap" };
+  // A Codex task with no registration under its alias — every task, after a
+  // private state reset — is told to register; a registration held by another
+  // task is a genuine mismatch with its own remedy; a conversation answered
+  // from the wrong end gets the own-alias remedy.
+  if (reason === "ROUTE_UNREGISTERED" && from !== undefined && from.startsWith("codex-")) {
+    return { hint: "codexRouteUnregistered", vars: { alias: from } };
+  }
+  if (reason === "CODEX_THREAD_MISMATCH" && from !== undefined) return { hint: "codexThreadMismatch", vars: { alias: from } };
+  if (reason === "CLAUDE_ROUTE_MISMATCH" || reason === "CONVERSATION_CALLER_MISMATCH") return { hint: "callerAliasMismatch" };
+  if (reason === "CLAUDE_TARGET_CHANGED") return { hint: "targetChanged" };
   if ((result as { code?: unknown }).code !== "not_found" || request.method !== "send") return undefined;
   const target = request.params.toAlias;
   if (target === undefined) return undefined;
-  return target.startsWith("codex-") || target.startsWith("peer-") ? undefined : "unknownTarget";
+  return target.startsWith("codex-") || target.startsWith("peer-") ? undefined : { hint: "unknownTarget" };
+}
+/** UNKNOWN_METHOD is build skew, not an argument error: say which side to move. */
+function writeUnknownMethodHint(stderr: Writable, code: string): void {
+  if (code === "UNKNOWN_METHOD") stderr.write(`[embassy] ${CLI_HINT.unknownMethod}\n`);
 }
 function responseExitCode(response: GatewayControlResponse): number {
   return !response.ok ? gatewayCliExitCodes.failure
@@ -872,7 +902,7 @@ type CheckHop = Readonly<{
 }>;
 type GatewayCheckOptions = Readonly<{
   socketPath: string; hostId: string; target: string; timeoutMs: number;
-  sendRequest: GatewayControlSender; stdout: Writable; interrupt: AbortSignal;
+  sendRequest: GatewayControlSender; stdout: Writable; stderr: Writable; interrupt: AbortSignal;
   now: () => number; delay: (milliseconds: number) => Promise<void>; color: boolean;
 }>;
 /**
@@ -900,14 +930,18 @@ let interruptedCheckExit = false;
  * echoed id is confirmation printed beside it, never a second identity.
  */
 async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
-  const { sendRequest, socketPath, stdout } = options;
+  const { sendRequest, socketPath, stdout, stderr } = options;
   const paint = terminalPainter(options.color);
   const call = async <M extends GatewayControlMethod>(
     method: M, params: unknown, timeoutMs?: number,
-  ): Promise<GatewayControlResponse<M>> => await sendRequest({
-    socketPath, request: envelope(method, params) as Extract<GatewayControlRequest, { method: M }>,
-    ...(timeoutMs === undefined ? {} : { timeoutMs }),
-  });
+  ): Promise<GatewayControlResponse<M>> => {
+    const response = await sendRequest({
+      socketPath, request: envelope(method, params) as Extract<GatewayControlRequest, { method: M }>,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+    if (!response.ok) writeUnknownMethodHint(stderr, response.error.code);
+    return response;
+  };
   const hops: CheckHop[] = [];
   const emit = (hop: CheckHop): CheckHop => {
     hops.push(hop);
@@ -1031,7 +1065,15 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
         return gatewayCliExitCodes.failure;
       }
       if (waited.result.state === "timeout") continue;
-      await call("peer_receipt", { alias, token, receipt: waited.result.receipt });
+      // The receipt is part of the round trip: a message the broker would not
+      // let this mailbox acknowledge is a failed reply hop, not a passed one.
+      const receipt = await call("peer_receipt", { alias, token, receipt: waited.result.receipt });
+      if (!receipt.ok || !receipt.result.accepted) {
+        emit({ ok: false, name: "reply", detail: !receipt.ok ? receipt.error.code
+          : `receipt refused (${receipt.result.code}${"reason" in receipt.result && receipt.result.reason !== undefined
+            ? ` ${String(receipt.result.reason)}` : ""})`, elapsedMs: lap() });
+        return gatewayCliExitCodes.failure;
+      }
       const frame = JSON.parse(waited.result.frame) as {
         result: { conversationId: string; fromAlias: string; text: string };
       };
@@ -1248,6 +1290,7 @@ export async function runGatewayCli(
         const response = await ask("list_snapshot", {});
         if (!response.ok) {
           writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
+          writeUnknownMethodHint(stderr, response.error.code);
           return gatewayCliExitCodes.failure;
         }
         if (options.json === true || !isTerminal(stdout)) {
@@ -1275,6 +1318,7 @@ export async function runGatewayCli(
             const observed = await ask("observe_snapshot", {});
             if (!observed.ok) {
               writeFailure(stdout, stderr, command, observed.error.code, { kind: "failure" });
+              writeUnknownMethodHint(stderr, observed.error.code);
               return gatewayCliExitCodes.failure;
             }
             if (observed.result.snapshotRevision !== revision) {
@@ -1305,6 +1349,7 @@ export async function runGatewayCli(
         const snapshot = await ask("list_snapshot", {});
         if (!snapshot.ok) {
           writeFailure(stdout, stderr, command, snapshot.error.code, { kind: "failure" });
+          writeUnknownMethodHint(stderr, snapshot.error.code);
           return gatewayCliExitCodes.failure;
         }
         const candidates = snapshot.result.routes
@@ -1314,25 +1359,31 @@ export async function runGatewayCli(
           throw new CliFault("INVALID_ARGUMENTS", false, "checkNoTarget", undefined,
             { localHost: config.hostId });
         }
-        // Sending into a task nothing has observed for ten minutes proves
-        // nothing about upstream drift — it just times out. Say so instead,
-        // and name the aliases so the operator can read their remedies.
-        const observable = candidates.filter((route) => {
-          const observed = route.lastSeenAt === undefined ? undefined : Date.parse(route.lastSeenAt);
-          return observed === undefined || !Number.isFinite(observed) ||
-            clock() - observed <= STATUS_ROUTE_STALE_AFTER_MS;
-        });
-        if (observable.length === 0) {
+        // Eligibility is observation. A task nothing has observed — ever, or
+        // within ten minutes — proves nothing about upstream drift; a send
+        // into it just times out. The most recently observed eligible task is
+        // the target, and when none qualifies every alias is named so the
+        // operator can read its remedy.
+        const observedAt = (route: { lastSeenAt?: string }): number | undefined => {
+          const at = route.lastSeenAt === undefined ? Number.NaN : Date.parse(route.lastSeenAt);
+          return Number.isFinite(at) ? at : undefined;
+        };
+        const eligible = candidates
+          .map((route) => ({ route, observed: observedAt(route) }))
+          .filter((row): row is { route: (typeof candidates)[number]; observed: number } =>
+            row.observed !== undefined && clock() - row.observed <= STATUS_ROUTE_STALE_AFTER_MS)
+          .sort((left, right) => right.observed - left.observed || left.route.alias.localeCompare(right.route.alias));
+        if (eligible.length === 0) {
           throw new CliFault("INVALID_ARGUMENTS", false, "checkAllStale", undefined,
             { aliases: candidates.map((route) => route.alias).join(", ") });
         }
-        chosen = observable[0]!.alias;
+        chosen = eligible[0]!.route.alias;
       }
       const checkInterrupt = interruptSignal(dependencies.watchSignal);
       try {
         return await runGatewayCheck({
           socketPath: config.controlSocketPath, hostId: config.hostId, target: chosen,
-          timeoutMs: timeoutSeconds * 1_000, sendRequest, stdout,
+          timeoutMs: timeoutSeconds * 1_000, sendRequest, stdout, stderr,
           interrupt: checkInterrupt.signal, now: clock,
           delay: dependencies.delay ?? defaultDelay, color: useColor(stdout, env),
         });
@@ -1402,10 +1453,7 @@ export async function runGatewayCli(
     }
     if (!response.ok) {
       writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
-      // A method this broker does not know is skew between two builds, not
-      // an argument error: a retired verb such as `reply` on the wire, or a
-      // client newer than the broker. Say which side to move.
-      if (response.error.code === "UNKNOWN_METHOD") stderr.write(`[embassy] ${CLI_HINT.unknownMethod}\n`);
+      writeUnknownMethodHint(stderr, response.error.code);
       return gatewayCliExitCodes.failure;
     }
     if (command === "register-peer" && args.includes("--emit-env") && "token" in response.result) {
@@ -1417,7 +1465,7 @@ export async function runGatewayCli(
     if (exitCode === gatewayCliExitCodes.rejected) {
       stderr.write(fixedStderr("decision"));
       const hint = refusalHint(request, response.result);
-      if (hint !== undefined) stderr.write(`[embassy] ${renderHint(hint)}\n`);
+      if (hint !== undefined) stderr.write(`[embassy] ${renderHint(hint.hint, hint.vars)}\n`);
     } else if (command === "wait-delivery" && exitCode === gatewayCliExitCodes.failure) stderr.write(fixedStderr("failure"));
     return exitCode;
   } catch (error) {

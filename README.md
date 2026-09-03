@@ -45,7 +45,7 @@ Please review the current approach and identify the main risk.
 MSG
 ```
 
-**4. Answer by conversation.** Every delivered body arrives inside one broker-owned `<cross-session-message>` frame naming the verified sender, and its first `<embassy-reply-hint>` carries the full `conv_` token and this exact command; the recipient runs it with the answer on stdin.
+**4. Answer by conversation.** Every delivered body arrives inside one broker-owned `<cross-session-message>` frame naming the attested sender (on a federated hop, the sender is named by the sending node — see [SECURITY.md](SECURITY.md)), and its first `<embassy-reply-hint>` carries the full `conv_` token and this exact command; the recipient runs it with the answer on stdin.
 
 ```bash
 embassy send --conversation conv_<token> --from advisor@your-host <<'MSG'
@@ -61,7 +61,7 @@ The same `send` runs from a Claude Code session, inheriting that session's ident
 embassy check
 ```
 
-`check` is the upstream-drift tripwire. It registers an ephemeral shell peer of its own — memory-only, never written to disk or published to a federation peer, expiring on its own — sends one marked message through the ordinary send path to the first registered Codex task the broker has observed in the last ten minutes, waits for `delivered`, awaits the echo on its own mailbox, releases the registration, and prints every hop with its timing; any failing hop exits non-zero with the safe code that explains it. `--to <alias>` picks a target and `--timeout <s>` bounds each wait. The peer answers because the shipped [skill](skills/embassy-peer/SKILL.md) tells it to — a message whose verified sender starts with `peer-check-` and whose body starts `[embassy check` is echoed in one line; either half alone is ordinary untrusted text. It costs the peer one model turn, so it is a deliberate command, not something to poll.
+`check` is the upstream-drift tripwire. It registers an ephemeral shell peer of its own — kept out of the durable state document and the federation catalog, expiring on its own; its only trace is the native advertisement to Claude sessions, released with it, and a broker that dies mid-check can leave that record until the alias is next registered and released — sends one marked message through the ordinary send path to the most recently observed registered Codex task (observed within ten minutes; a task never observed is not eligible), waits for `delivered`, awaits the echo on its own mailbox, releases the registration, and prints every hop with its timing; any failing hop exits non-zero with the safe code that explains it. `--to <alias>` picks a target and `--timeout <s>` bounds each wait. The peer answers because the shipped [skill](skills/embassy-peer/SKILL.md) tells it to — a message whose verified sender starts with `peer-check-` and whose body starts `[embassy check` is echoed in one line; either half alone is ordinary untrusted text. It costs the peer one model turn, so it is a deliberate command, not something to poll.
 
 ```text
 embassy check 50066f60 → codex-reviewer@this-mac

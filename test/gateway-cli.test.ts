@@ -56,6 +56,18 @@ const CALLER_IDENTITY_REQUIRED_HINT =
   "[embassy] no caller credential was inherited, and a conversation names no route to infer one from: run this inside the Codex task (CODEX_THREAD_ID), inside the Claude Code session (CLAUDE_CODE_MESSAGING_SOCKET), or as a registered shell peer with --token-stdin and the peer_ token on the first stdin line.\n";
 const OWN_ALIAS_HINT =
   "[embassy] --from must be the sending session's own alias; read the name embassy status shows for this session.\n";
+const PEER_ALIAS_REQUIRED_HINT =
+  "[embassy] a peer token is present (EMBASSY_PEER_TOKEN or --token-stdin) but --from is not a peer-* alias; unset the token or name the peer route.\n";
+const codexCallerRequiredHint = (alias: string): string =>
+  `[embassy] --from names a Codex task (${alias}) but no CODEX_THREAD_ID was inherited; run this inside that Codex task, as a shell step of its current turn.\n`;
+const peerCallerRequiredHint = (alias: string): string =>
+  `[embassy] --from names a shell peer (${alias}) but no peer token was given; pass the peer_ token on the first stdin line with --token-stdin (or EMBASSY_PEER_TOKEN from a stable shell).\n`;
+const codexRouteUnregisteredHint = (alias: string): string =>
+  `[embassy] no registration for ${alias} on this broker; run \`embassy register-codex --alias ${alias}\` from inside the Codex task (after a private state reset, every Codex task registers again).\n`;
+const codexThreadMismatchHint = (alias: string): string =>
+  `[embassy] ${alias} is not registered to this task's inherited CODEX_THREAD_ID; --from must name the alias this task registered (read it from \`embassy status\`), or register this task with \`embassy register-codex\`.\n`;
+const UNKNOWN_METHOD_HINT =
+  "[embassy] the broker does not implement that control method, so this client and the broker are from different Embassy builds; rebuild or update this client to the broker's Embassy installation, then retry.\n";
 const roots = new Set<string>();
 
 const execFileAsync = promisify(execFile);
@@ -1980,24 +1992,45 @@ test("identity, stdin, and argument failures happen before any control request",
       hint: CALLER_IDENTITY_REQUIRED_HINT,
     },
     // A peer credential authenticates a peer-* alias and nothing else, by
-    // conversation or by route, on stdin or from the environment.
+    // conversation or by route, on stdin or from the environment — and the
+    // refusal says so rather than leaving a bare argument fault.
     {
       argv: ["send", "--from", "advisor@this-mac", "--conversation", CONVERSATION_ID, "--token-stdin"],
       env: {},
       body: `${PEER_TOKEN}\n${SECRET_BODY}`,
       code: "INVALID_ARGUMENTS",
+      hint: PEER_ALIAS_REQUIRED_HINT,
     },
     {
       argv: ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac", "--token-stdin"],
       env: {},
       body: `${PEER_TOKEN}\n${SECRET_BODY}`,
       code: "INVALID_ARGUMENTS",
+      hint: PEER_ALIAS_REQUIRED_HINT,
     },
     {
       argv: ["reply", "--conversation", CONVERSATION_ID, "--alias", "codex-reviewer@this-mac"],
       env: { EMBASSY_PEER_TOKEN: PEER_TOKEN },
       body: SECRET_BODY,
       code: "INVALID_ARGUMENTS",
+      hint: PEER_ALIAS_REQUIRED_HINT,
+    },
+    // A route send with nothing inherited names its sender's shape, so the
+    // code is the provider-neutral one and the hint names the one credential
+    // that shape needs; only a Claude-shaped --from keeps the Claude code.
+    {
+      argv: ["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac"],
+      env: {},
+      body: SECRET_BODY,
+      code: "CALLER_IDENTITY_REQUIRED",
+      hint: codexCallerRequiredHint("codex-reviewer@this-mac"),
+    },
+    {
+      argv: ["send", "--from", "peer-shell@this-mac", "--to", "advisor@this-mac"],
+      env: {},
+      body: SECRET_BODY,
+      code: "CALLER_IDENTITY_REQUIRED",
+      hint: peerCallerRequiredHint("peer-shell@this-mac"),
     },
     {
       argv: [
@@ -3137,12 +3170,13 @@ test("a non-errno failure on the service path keeps its own class", async () => 
   assert.equal(stderr.chunks.join(""), "[embassy] command failed.\n");
 });
 
-test("a conversation answered from the wrong end renders the own-alias remedy", async () => {
+test("a conversation answered from the wrong end, or by an unregistered task, renders the remedy that fits", async () => {
   // The broker refuses an end-owner who names the OTHER end in --from with
-  // its own credential (gateway-service.test.ts proves the refusal itself);
-  // the client's job is to render that refusal as the one remedy that fits,
-  // with the broker's reason on stdout and nothing of the body anywhere.
-  const decide = async (argv: readonly string[], reason: string, env: NodeJS.ProcessEnv) => {
+  // its own credential, and a Codex task with no registration under its alias
+  // (gateway-service.test.ts proves both refusals); the client's job is to
+  // render each as the one remedy that fits, with the broker's reason on
+  // stdout and nothing of the body anywhere.
+  const decide = async (argv: readonly string[], result: { code: string; reason: string }, env: NodeJS.ProcessEnv) => {
     const stdout = capture(), stderr = capture();
     const code = await runGatewayCli(argv, {
       env, stdin: input(SECRET_BODY), stdout, stderr,
@@ -3151,43 +3185,89 @@ test("a conversation answered from the wrong end renders the own-alias remedy", 
         steeringEnabled: true, limits: {} as never }),
       validateControlSocket: async () => undefined,
       sendRequest: (async () => ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true,
-        result: { accepted: false, code: "route_mismatch", reason } })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+        result: { accepted: false, ...result } })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
     });
     return { code, stdout: stdout.chunks.join(""), stderr: stderr.chunks.join("") };
   };
-  for (const [argv, reason, env] of [
-    [["send", "--from", "advisor@this-mac", "--conversation", CONVERSATION_ID], "CODEX_THREAD_MISMATCH", { CODEX_THREAD_ID: THREAD_ID }],
-    [["send", "--from", "visitor@this-mac", "--conversation", CONVERSATION_ID], "CONVERSATION_CALLER_MISMATCH", { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH }],
-    [["reply", "--conversation", CONVERSATION_ID, "--alias", "advisor@this-mac"], "CODEX_THREAD_MISMATCH", { CODEX_THREAD_ID: THREAD_ID }],
-  ] as const) {
-    const inverted = await decide(argv, reason, env);
-    assert.equal(inverted.code, gatewayCliExitCodes.rejected, argv.join(" "));
-    assert.deepEqual(JSON.parse(inverted.stdout), {
-      ok: true, command: argv[0], result: { accepted: false, code: "route_mismatch", reason },
+  const mismatch = { code: "route_mismatch", reason: "CODEX_THREAD_MISMATCH" };
+  const unregistered = { code: "rejected", reason: "ROUTE_UNREGISTERED" };
+  const cases: Array<[readonly string[], { code: string; reason: string }, NodeJS.ProcessEnv, string]> = [
+    // Wrong end: the Codex task naming the Claude end of its conversation.
+    [["send", "--from", "advisor@this-mac", "--conversation", CONVERSATION_ID], mismatch,
+      { CODEX_THREAD_ID: THREAD_ID }, codexThreadMismatchHint("advisor@this-mac")],
+    [["reply", "--conversation", CONVERSATION_ID, "--alias", "advisor@this-mac"], mismatch,
+      { CODEX_THREAD_ID: THREAD_ID }, codexThreadMismatchHint("advisor@this-mac")],
+    // Neither end.
+    [["send", "--from", "visitor@this-mac", "--conversation", CONVERSATION_ID],
+      { code: "route_mismatch", reason: "CONVERSATION_CALLER_MISMATCH" },
+      { CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH }, OWN_ALIAS_HINT],
+    // The release's most likely first failure: a task sending before it has
+    // re-registered after the private state reset is told to register, not
+    // to hunt a wrong thread id.
+    [["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac"], unregistered,
+      { CODEX_THREAD_ID: THREAD_ID }, codexRouteUnregisteredHint("codex-reviewer@this-mac")],
+    // A registration that exists under another task is the genuine mismatch.
+    [["send", "--from", "codex-reviewer@this-mac", "--to", "advisor@this-mac"], mismatch,
+      { CODEX_THREAD_ID: THREAD_ID }, codexThreadMismatchHint("codex-reviewer@this-mac")],
+    // A peer whose binding no longer matches gets no Codex advice.
+    [["send", "--from", "peer-shell@this-mac", "--to", "advisor@this-mac", "--token-stdin"],
+      { code: "route_mismatch", reason: "ROUTE_UNREGISTERED" }, {}, ""],
+  ];
+  for (const [argv, result, env, hint] of cases) {
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCli(argv, {
+      env, stdin: input(argv.includes("--token-stdin") ? `${PEER_TOKEN}\n${SECRET_BODY}` : SECRET_BODY), stdout, stderr,
+      loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+        steeringEnabled: true, limits: {} as never }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true,
+        result: { accepted: false, ...result } })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
     });
-    assert.equal(inverted.stderr, `[embassy] gateway rejected the request.\n${OWN_ALIAS_HINT}`);
-    assert.equal(`${inverted.stdout}${inverted.stderr}`.includes(SECRET_BODY), false);
+    const label = `${argv.join(" ")} ← ${result.reason}`;
+    assert.equal(code, gatewayCliExitCodes.rejected, label);
+    assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
+      ok: true, command: argv[0], result: { accepted: false, ...result },
+    }, label);
+    assert.equal(stderr.chunks.join(""), `[embassy] gateway rejected the request.\n${hint}`, label);
+    assert.equal(`${stdout.chunks.join("")}${stderr.chunks.join("")}`.includes(SECRET_BODY), false, label);
   }
+  void decide;
 });
 
-test("a broker that does not implement the requested method says which side to move", async () => {
-  // UNKNOWN_METHOD is build skew, not an argument error: a retired verb on
-  // the wire, or a client newer than its broker. The failure keeps its exit
-  // and its fixed line, and gains the one hint that names the remedy.
-  const stdout = capture(), stderr = capture();
-  const code = await runGatewayCli(["health"], {
-    env: {}, stdout, stderr,
-    loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
-      allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
-      steeringEnabled: true, limits: {} as never }),
-    validateControlSocket: async () => undefined,
-    sendRequest: (async () => ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false,
-      error: { code: "UNKNOWN_METHOD", message: "The control method is unsupported." } })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
-  });
-  assert.equal(code, gatewayCliExitCodes.failure);
-  assert.deepEqual(JSON.parse(stdout.chunks.join("")), {
-    ok: false, command: "health", error: { code: "UNKNOWN_METHOD", ambiguous: false, retryable: false },
-  });
-  assert.equal(stderr.chunks.join(""),
-    "[embassy] command failed.\n[embassy] the broker does not implement that control method, so this client and the broker are from different Embassy builds; rebuild or update this client to the broker's Embassy installation, then retry.\n");
+test("a broker that does not implement the requested method says which side to move, on every path", async () => {
+  // UNKNOWN_METHOD is build skew, not an argument error: a client newer than
+  // its broker on the same protocol line. Every path that surfaces a wire
+  // error — the plain command path, status, watch, and each check hop — keeps
+  // its exit and its fixed line, and adds the one hint that names the remedy.
+  const unknown = { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false as const,
+    error: { code: "UNKNOWN_METHOD" as const, message: "The control method is unsupported." } };
+  const run = async (argv: readonly string[]) => {
+    const stdout = capture(), stderr = capture();
+    const code = await runGatewayCli(argv, {
+      env: {}, stdout, stderr,
+      loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+        steeringEnabled: true, limits: {} as never }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async () => unknown) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      watchSignal: new AbortController().signal,
+    });
+    return { code, stdout: stdout.chunks.join(""), stderr: stderr.chunks.join("") };
+  };
+  for (const argv of [["health"], ["status"], ["watch"]] as const) {
+    const outcome = await run(argv);
+    assert.equal(outcome.code, gatewayCliExitCodes.failure, argv.join(" "));
+    assert.deepEqual(JSON.parse(outcome.stdout), {
+      ok: false, command: argv[0], error: { code: "UNKNOWN_METHOD", ambiguous: false, retryable: false },
+    }, argv.join(" "));
+    assert.equal(outcome.stderr, `[embassy] command failed.\n${UNKNOWN_METHOD_HINT}`, argv.join(" "));
+  }
+  // `check --to` skips discovery, so its first hop is the one that meets the
+  // skew; the hop line names the code and stderr carries the hint once.
+  const check = await run(["check", "--to", "codex-reviewer@this-mac"]);
+  assert.equal(check.code, gatewayCliExitCodes.failure);
+  assert.match(check.stdout, /^ {2}FAIL {2}register {3}UNKNOWN_METHOD/m);
+  assert.match(check.stdout, /^check failed at the register hop$/m);
+  assert.equal(check.stderr, UNKNOWN_METHOD_HINT);
 });

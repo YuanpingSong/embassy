@@ -490,8 +490,8 @@ failures; they can never become ambiguous writes or replay authorizations.
 
 The gateway exposes `turn/steer` only through an exact leading `STEER:` body in
 the Claude-to-Codex direction. The global `EMBASSY_STEERING_ENABLED` switch is
-on by default and exact `0` disables classification. The tested 0.147.0 schema
-requires `expectedTurnId`, rejects a nonmatching active turn, reports a clean
+on by default and exact `0` disables classification. The 0.147.0 schema this
+adapter targets requires `expectedTurnId`, rejects a nonmatching active turn, reports a clean
 `activeTurnNotSteerable` condition, and returns the accepted turn ID. Embassy
 validates all of those temporal correlations before settlement. `turn/interrupt`
 is never called or exposed, and there is no generic App Server RPC escape
@@ -618,7 +618,8 @@ delivered in older envelopes have aged out. Message bodies are non-empty
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line, and
 for every broker-protocol command it never returns a thread ID,
-provider-native ID, path, address, or message body. There are three deliberate
+provider-native ID, path, or address, and only `status` and `watch` return
+message bodies — the snapshot's own. There are three deliberate
 exceptions, each of them about something the operator alone is looking at.
 `service` reports its own plist path, its log path, and any program path in
 the plist that is no longer on disk, because managing local files is what it
@@ -730,7 +731,7 @@ unsubscribe, interrupt, archive,
 delete, history, shell, configuration, authentication, plugin,
 approval-response, and generic RPC methods remain excluded everywhere.
 
-The App Server capability first tested with 0.147.0 gates the privacy-preserving
+The App Server 0.147.0 schema this adapter targets gates the privacy-preserving
 `thread/resume.excludeTurns` field behind initialization capability
 `experimentalApi: true`. The transport therefore hard-codes that one
 non-configurable capability solely to suppress history retrieval. The attempt's
@@ -750,8 +751,8 @@ working-directory or policy fields, and a transport failure cannot discard the
 registration or its accepted queue.
 
 Embassy never changes or independently classifies a Codex task's approval or
-sandbox policy. Offline `TurnStartParams` schema evidence from tested App
-Server 0.147.0 shows that
+sandbox policy. Offline `TurnStartParams` schema evidence from the App
+Server 0.147.0 schema this adapter targets shows that
 policy overrides persist for the current and subsequent turns, so using them
 as per-message restrictions would silently mutate the native task. Embassy
 therefore starts the turn without overrides and leaves approval, sandbox, and

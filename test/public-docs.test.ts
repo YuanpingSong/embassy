@@ -3,7 +3,11 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { gatewayCliCommands } from "../src/gateway/cli.js";
 import { gatewayControlMethods, isGatewayAlias } from "../src/gateway/control.js";
+
+/** The counts the docs spell out in words; grows when the surfaces do. */
+const NUMBER_WORDS: Readonly<Record<number, string>> = { 14: "fourteen", 17: "seventeen" };
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -111,6 +115,11 @@ const FORBIDDEN_PATTERNS: readonly RegExp[] = [
   /The file is mandatory/i,
   /mandatory[\s\S]{0,60}nodes\.json/i,
   /nodes\.json[\s\S]{0,60}mandatory/i,
+  // emb-109: no "tested" claim about an App Server build before the drill;
+  // the schema the adapter targets is a design fact, a test is a record.
+  // Word-anchored, because every "attested App Server transport" is fine.
+  /\btested App Server/i,
+  /\btested (?:with )?0\.147/i,
 ];
 
 /**
@@ -192,6 +201,12 @@ test("no shipped document advertises a deleted surface", async () => {
       if (pattern.test(raw) || pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
     }
   }
+  // The registry listing is shipped text too: its description and keywords
+  // are the first sentence most people read.
+  const pkg = JSON.parse(await readPublicFile("package.json")) as { description: string; keywords: string[] };
+  for (const [label, field] of [["package.json description", pkg.description], ["package.json keywords", pkg.keywords.join(" ")]] as const) {
+    for (const term of FORBIDDEN) if (field.includes(term)) offenders.push(`${label}: ${term}`);
+  }
   assert.deepEqual(offenders, []);
 });
 
@@ -271,9 +286,20 @@ test("public docs disclose that the status snapshot carries retained bodies", as
     readFile(path.join(repoRoot, "docs", "GATEWAY-ARCHITECTURE.md"), "utf8"),
   ]);
   // `embassy status` prints the public snapshot, and store.ts projects `body`
-  // onto every message event, so no shipped doc may call that output
-  // metadata-only.
-  assert.doesNotMatch(readme, /metadata-only status snapshot/i);
+  // onto every message event, so no shipped text — the issue templates that
+  // tell a stranger what is safe to paste included — may call that output
+  // metadata-only or say it excludes bodies.
+  const denials: readonly RegExp[] = [
+    /metadata-only (?:status|snapshot)/i,
+    /(?:status|snapshot)[^.\n]{0,120}\bexcludes?\b[^.\n]{0,60}\bbod(?:y|ies)\b/i,
+    /\b(?:excludes|omits|without) (?:message )?bod(?:y|ies)\b/i,
+  ];
+  const offenders: string[] = [];
+  for (const file of await shippedDocuments()) {
+    const text = await readFile(path.join(repoRoot, file), "utf8");
+    for (const pattern of denials) if (pattern.test(text)) offenders.push(`${file}: ${pattern.source}`);
+  }
+  assert.deepEqual(offenders, []);
   assert.match(readme, /status snapshot that includes retained message bodies/);
   assert.match(
     readme,
@@ -287,17 +313,28 @@ test("public docs disclose that the status snapshot carries retained bodies", as
 // second language.
 
 test("authority docs match the closed control contract", async () => {
-  const [readme, architecture, skill, changelog, site] = await Promise.all([
+  const [readme, architecture, skill, changelog, site, agent] = await Promise.all([
     readPublicFile("README.md"),
     readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
     readPublicFile("skills/embassy-peer/SKILL.md"),
     readPublicFile("CHANGELOG.md"),
     readPublicFile("site/index.html"),
+    readPublicFile(".claude/agents/content-writer.md"),
   ]);
-  assert.match(architecture, /closed version 3 method family is exactly these fourteen methods/i);
+  // Both counts are pinned here and spelled out in the docs; the words are
+  // derived from the arrays, so a surface that grows or shrinks fails here
+  // until every sentence that states the count is corrected.
   assert.equal(gatewayControlMethods.length, 14);
+  assert.equal(gatewayCliCommands.length, 17);
+  const methodsWord = NUMBER_WORDS[gatewayControlMethods.length];
+  const commandsWord = NUMBER_WORDS[gatewayCliCommands.length];
+  assert.ok(methodsWord !== undefined && commandsWord !== undefined, "add the new count to NUMBER_WORDS");
+  assert.match(architecture, new RegExp(`closed version 3 method family is exactly these ${methodsWord} methods`, "i"));
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
-  assert.match(architecture, /seventeen implemented commands/);
+  assert.match(architecture, new RegExp(`${commandsWord} implemented commands`));
+  assert.match(readme, new RegExp(`lists all ${commandsWord} commands`));
+  assert.match(agent, new RegExp(`exactly these\\s+${commandsWord}:`));
+  for (const command of gatewayCliCommands) assert.match(agent, new RegExp(`\\b${command}\\b`), command);
   // The permission model in one sentence, in every authority document.
   assert.match(architecture, /A session already bound under the\s+same \(host, session UUID\) keeps its registration/);
   assert.match(architecture, /operating norm, not an additional gateway identity\s+check/);

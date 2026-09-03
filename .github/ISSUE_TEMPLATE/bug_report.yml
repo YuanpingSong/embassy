@@ -10,8 +10,8 @@ body:
         between Claude Code sessions and a Codex CLI task — please do
         not paste message bodies, prompts, replies, credentials, OAuth
         material, or raw provider output into this form. `embassy status`
-        excludes bodies and native identifiers, but its aliases, hosts, and
-        timestamps may still be personal; review and redact it before pasting.
+        output may contain message bodies, aliases, and hosts — redact it
+        before pasting.
 
   - type: textarea
     id: description
@@ -97,9 +97,10 @@ body:
     attributes:
       label: "`embassy status` output"
       description: >-
-        This output excludes message bodies, credentials, and raw provider
-        identifiers. It still includes aliases, hosts, states, and timestamps;
-        review it and redact personal metadata before pasting.
+        `embassy status` shows retained message bodies as well as aliases,
+        hosts, states, and timestamps; redact the bodies and any personal
+        metadata before pasting. Credentials and raw provider identifiers
+        never appear in it.
       render: text
 
   - type: dropdown
