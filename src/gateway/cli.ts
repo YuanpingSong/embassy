@@ -3,7 +3,7 @@
 /** Foreground broker plus bounded metadata-only control client. */
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,10 +21,11 @@ import { isDefaultedGatewayNodeInventory, loadGatewayNodeInventory,
 import { runGatewayServer, type GatewayServerOptions } from "./server.js";
 import { PeerHandlerError, runPeerStdio, type PeerStdioSession } from "./peer-stdio.js";
 import { boundedServiceDetail, defaultProbeHostLease, defaultRunLaunchctl, installServiceAgent,
-  serviceAgentStatus, uninstallServiceAgent, type ProbeHostLease, type RunLaunchctl,
-  type ServiceAgentDependencies } from "./service-agent.js";
-import { diffWatch, emptyWatchState, renderStatus, renderWatchEvent, STATUS_RECENT_DEFAULT,
-  STATUS_RECENT_MAX, STATUS_RECENT_MIN, terminalPainter, type WatchState } from "./status-view.js";
+  readOwnedSmallFile, recordedPid, serviceAgentStatus, uninstallServiceAgent,
+  type ProbeHostLease, type RunLaunchctl, type ServiceAgentDependencies } from "./service-agent.js";
+import { GATEWAY_CONTROLLER_LOCK_FILE } from "./store.js";
+import { diffWatch, emptyWatchState, renderStatus, renderWatchEvent, STATUS_RECENT,
+  STATUS_ROUTE_STALE_AFTER_MS, terminalPainter, type WatchState } from "./status-view.js";
 
 const THREAD_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -191,6 +192,8 @@ const CLI_HINT = {
     "the session you addressed renamed or exited while the send was being set up; run embassy refresh and address it by its current name.",
   checkNoTarget:
     "no Codex task is registered, so there is nothing to check. Run `embassy register-codex --alias codex-<name>@{localHost}` from inside the task, or name any current route with `embassy check --to <alias>`.",
+  checkAllStale:
+    "every registered Codex task has been unobserved for more than ten minutes ({aliases}), so nothing was sent. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -644,7 +647,8 @@ type DeliveryStatusRequest = Extract<GatewayControlRequest, { method: "delivery_
 type WaitDeliveryOutcome =
   | { kind: "response"; response: GatewayControlResponse<"delivery_status"> }
   | { kind: "unknown" }
-  | { kind: "timeout" };
+  | { kind: "timeout" }
+  | { kind: "interrupted" };
 const defaultDelay = async (milliseconds: number): Promise<void> =>
   await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
@@ -657,9 +661,13 @@ async function waitForDelivery(
   // `check` bounds this wait by its own budget; `wait-delivery` keeps waiting
   // to the broker's delivery deadline, which is hours by default.
   maximumWaitMs?: number,
+  // `check` also passes its Ctrl-C signal, so an operator who gives up during
+  // this wait reaches the cleanup hop within one poll instead of one budget.
+  signal?: AbortSignal,
 ): Promise<WaitDeliveryOutcome> {
   let deadline: number | undefined = maximumWaitMs === undefined ? undefined : now() + maximumWaitMs;
   while (true) {
+    if (signal?.aborted === true) return { kind: "interrupted" };
     const remaining = deadline === undefined ? undefined : deadline - now();
     if (remaining !== undefined && remaining <= 0) return { kind: "timeout" };
     if (remaining !== undefined && remaining < DELIVERY_POLL_MIN_REQUEST_TIMEOUT_MS) {
@@ -788,7 +796,6 @@ const CONTROL_MIN_REQUEST_TIMEOUT_MS = 50;
  * instantly therefore cannot spin the loop even if the clock never moves.
  */
 const CHECK_REPLY_ATTEMPT_MS = 1_000;
-const CONTROLLER_LOCK_FILE = ".gateway-controller.lock";
 const MAX_CONTROLLER_LOCK_BYTES = 4_096;
 
 /**
@@ -820,21 +827,19 @@ function boundedOption(
  * discloses nothing new.
  */
 export async function readGatewayControllerPid(stateDir: string): Promise<number | undefined> {
-  try {
-    const lockPath = path.join(stateDir, CONTROLLER_LOCK_FILE);
-    const info = await lstat(lockPath);
-    if (!info.isFile() || info.size > MAX_CONTROLLER_LOCK_BYTES) return undefined;
-    const owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
-    return Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0 ? Number(owner.pid) : undefined;
-  } catch { return undefined; }
+  return recordedPid(await readOwnedSmallFile(
+    path.join(stateDir, GATEWAY_CONTROLLER_LOCK_FILE),
+    process.getuid?.(), MAX_CONTROLLER_LOCK_BYTES));
 }
 
 /**
- * `watch` runs until the operator stops it. Tests inject the signal; a real
- * terminal gets SIGINT/SIGTERM handlers that are removed again on the way out,
- * so Ctrl-C ends the tail cleanly instead of killing node with 130.
+ * `watch` and `check` both run until the operator stops them, and `check` has
+ * a temporary registration to take back down when that happens. Tests inject
+ * the signal; a real terminal gets SIGINT/SIGTERM handlers that are removed
+ * again on the way out, so Ctrl-C runs the cleanup path instead of killing
+ * node with 130 and leaving the registration to its own expiry.
  */
-function watchInterrupt(signal: AbortSignal | undefined): {
+function interruptSignal(signal: AbortSignal | undefined): {
   signal: AbortSignal; dispose: () => void;
 } {
   if (signal !== undefined) return { signal, dispose: () => undefined };
@@ -847,12 +852,21 @@ function watchInterrupt(signal: AbortSignal | undefined): {
   } };
 }
 
-type CheckHop = Readonly<{ ok: boolean; name: string; detail: string; elapsedMs?: number }>;
+type CheckHop = Readonly<{
+  ok: boolean; name: string; detail: string; elapsedMs?: number; code?: string;
+}>;
 type GatewayCheckOptions = Readonly<{
   socketPath: string; hostId: string; target: string; timeoutMs: number;
-  sendRequest: GatewayControlSender; stdout: Writable;
+  sendRequest: GatewayControlSender; stdout: Writable; interrupt: AbortSignal;
   now: () => number; delay: (milliseconds: number) => Promise<void>; color: boolean;
 }>;
+/**
+ * How long the throwaway registration is allowed to outlive the check: the
+ * whole budget plus a minute, so a broker that is merely slow still finds a
+ * live mailbox, and an operator who kills the process at the worst possible
+ * moment waits at most that long for the broker to reclaim it.
+ */
+const CHECK_IDENTITY_GRACE_MS = 60_000;
 
 /**
  * The round-trip self-test. It mints its own principal — a throwaway `peer-*`
@@ -891,21 +905,35 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
     stage = at;
     return elapsed;
   };
+  const ttlMs = options.timeoutMs + CHECK_IDENTITY_GRACE_MS;
+  // Ctrl-C. The signal is raced against the two long waits below, so the
+  // cleanup hop runs the moment the operator gives up, not when the broker's
+  // long-poll happens to return.
+  let interrupted = false;
+  const interruption = new Promise<"interrupted">((resolve) => {
+    if (options.interrupt.aborted) { resolve("interrupted"); return; }
+    options.interrupt.addEventListener("abort", () => resolve("interrupted"), { once: true });
+  });
   const summarize = (exitCode: number): number => {
     const failed = hops.find((hop) => !hop.ok && hop.name !== "cleanup");
-    stdout.write(`\n${failed === undefined ? "check passed"
-      : `check failed at the ${failed.name} hop`}\n`);
-    return exitCode;
+    const cleanup = hops.find((hop) => !hop.ok && hop.name === "cleanup");
+    stdout.write(`\n${failed !== undefined
+      ? `check ${interrupted ? "interrupted" : "failed"} at the ${failed.name} hop`
+      : cleanup === undefined ? "check passed"
+      : `check passed; cleanup failed (${cleanup.code ?? "no safe code"})`}\n`);
+    return failed === undefined && cleanup !== undefined ? gatewayCliExitCodes.failure : exitCode;
   };
-  const registered = await call("register_peer", { alias });
+  const registered = await call("register_peer", { alias, ephemeral: true, ttlMs });
   if (!registered.ok || !("token" in registered.result)) {
-    emit({ ok: false, name: "register", detail: registered.ok
-      ? `the broker refused a temporary check identity (${registered.result.code})`
-      : registered.error.code, elapsedMs: lap() });
+    const refusal = !registered.ok ? registered.error.code
+      : `the broker refused a temporary check identity (${registered.result.code}${
+        "reason" in registered.result && registered.result.reason !== undefined
+          ? ` ${registered.result.reason}` : ""})`;
+    emit({ ok: false, name: "register", detail: refusal, elapsedMs: lap() });
     return summarize(gatewayCliExitCodes.failure);
   }
   const token = registered.result.token;
-  emit({ ok: true, name: "register", detail: alias, elapsedMs: lap() });
+  emit({ ok: true, name: "register", detail: `${alias} (ephemeral, ${String(Math.round(ttlMs / 60_000))} min)`, elapsedMs: lap() });
 
   // Every later hop runs inside this closure so that one `finally` releases
   // the temporary identity and the summary line is printed exactly once,
@@ -931,7 +959,12 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
 
     const delivery = await waitForDelivery(socketPath,
       envelope("delivery_status", { token: deliveryToken }) as DeliveryStatusRequest,
-      sendRequest, options.now, options.delay, options.timeoutMs);
+      sendRequest, options.now, options.delay, options.timeoutMs, options.interrupt);
+    if (delivery.kind === "interrupted") {
+      interrupted = true;
+      emit({ ok: false, name: "delivered", detail: "interrupted before it settled", elapsedMs: lap() });
+      return gatewayCliExitCodes.failure;
+    }
     if (delivery.kind !== "response" || !delivery.response.ok || !delivery.response.result.found ||
         delivery.response.result.state !== "delivered") {
       const detail = delivery.kind === "timeout"
@@ -953,11 +986,23 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
     const replyDeadline = options.now() + options.timeoutMs;
     const attempts = Math.ceil(options.timeoutMs / CHECK_REPLY_ATTEMPT_MS) + 1;
     let answered = false;
+    let uncorrelated = 0;
     for (let attempt = 0; attempt < attempts && !answered; attempt += 1) {
       const remaining = replyDeadline - options.now();
       if (remaining < CONTROL_MIN_REQUEST_TIMEOUT_MS) break;
-      const waited = await call("await_peer", { alias, token },
-        Math.min(PEER_AWAIT_REQUEST_TIMEOUT_MS, Math.floor(remaining)));
+      // The long-poll is raced against Ctrl-C rather than merely checked
+      // between polls: the broker holds `await_peer` open for up to 35 s, and
+      // the cleanup below must not wait for that. The abandoned request ends
+      // on its own once the cleanup retires the mailbox it was waiting on.
+      const waited = options.interrupt.aborted ? "interrupted" : await Promise.race([
+        call("await_peer", { alias, token }, Math.min(PEER_AWAIT_REQUEST_TIMEOUT_MS, Math.floor(remaining))),
+        interruption,
+      ]);
+      if (waited === "interrupted") {
+        interrupted = true;
+        emit({ ok: false, name: "reply", detail: "interrupted before a reply arrived", elapsedMs: lap() });
+        return gatewayCliExitCodes.failure;
+      }
       if (!waited.ok) {
         if (waited.error.code === "REQUEST_TIMEOUT") continue;
         emit({ ok: false, name: "reply", detail: waited.error.code, elapsedMs: lap() });
@@ -968,7 +1013,15 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
       const frame = JSON.parse(waited.result.frame) as {
         result: { conversationId: string; fromAlias: string; text: string };
       };
-      if (frame.result.conversationId !== conversationId) continue;
+      if (frame.result.conversationId !== conversationId) {
+        // Consumed, because this mailbox has exactly one waiter and the
+        // message would otherwise sit unacknowledged — but never silently:
+        // an answer that opened its own conversation is the single most
+        // likely way a peer's reply rule has drifted.
+        uncorrelated += 1;
+        stdout.write(paint(`  note  received an uncorrelated message from ${frame.result.fromAlias} (new conversation) — replies must use \`embassy send --conversation <token>\`\n`, "yellow"));
+        continue;
+      }
       emit({ ok: true, name: "reply", detail: `${frame.result.fromAlias}${
         frame.result.text.includes(id) ? ` echoed ${id}` : ` answered without repeating ${id}`}`,
         elapsedMs: lap() });
@@ -976,7 +1029,8 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
     }
     if (!answered) {
       emit({ ok: false, name: "reply", detail:
-        `no reply within ${String(Math.round(options.timeoutMs / 1_000))} s — the peer received the message but did not answer`,
+        `no reply within ${String(Math.round(options.timeoutMs / 1_000))} s — the peer received the message but did not answer${
+          uncorrelated === 0 ? "" : ` (${String(uncorrelated)} uncorrelated message(s) received)`}`,
         elapsedMs: lap() });
       return gatewayCliExitCodes.failure;
     }
@@ -987,9 +1041,13 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
     exitCode = await roundTrip();
   } finally {
     const released = await call("unregister_peer", { alias, token }).catch(() => undefined);
-    emit({ ok: released?.ok === true, name: "cleanup",
-      detail: released?.ok === true ? "temporary check identity removed"
-        : "the temporary check identity could not be removed; it expires with the broker" });
+    const failure = released === undefined ? "CONTROL_REQUEST_FAILED"
+      : !released.ok ? released.error.code
+      : released.result.accepted ? undefined : released.result.code;
+    emit({ ok: failure === undefined, name: "cleanup",
+      ...(failure === undefined ? {} : { code: failure }),
+      detail: failure === undefined ? "temporary check identity removed"
+        : `the temporary check identity could not be removed; it expires on its own within ${String(Math.round(ttlMs / 60_000))} min` });
   }
   return summarize(exitCode);
 }
@@ -1144,8 +1202,8 @@ export async function runGatewayCli(
         : command === "watch" ? parseOptions(args, [], ["json"])
         : parseOptions(args, ["to", "timeout"]);
       count(options, 0, 2);
-      const recent = boundedOption(options, "recent", STATUS_RECENT_DEFAULT,
-        STATUS_RECENT_MIN, STATUS_RECENT_MAX);
+      const recent = boundedOption(options, "recent", STATUS_RECENT.default,
+        STATUS_RECENT.minimum, STATUS_RECENT.maximum);
       const timeoutSeconds = boundedOption(options, "timeout", CHECK_TIMEOUT_DEFAULT_SECONDS,
         1, CHECK_TIMEOUT_MAX_SECONDS);
       const target = options.to === undefined ? undefined : requireClaudeSelector(options, "to");
@@ -1159,12 +1217,12 @@ export async function runGatewayCli(
       });
 
       if (command === "status") {
-        // The rescan runs first so the names on screen are the ones a send
-        // would resolve. A rescan that refuses is reported in the header
-        // rather than failing the command: a stale list still beats none.
-        const rescan = await ask("refresh_discovery", {});
-        const refreshFailure = !rescan.ok ? rescan.error.code
-          : rescan.result.accepted ? undefined : rescan.result.code;
+        // `status` is read-only. It deliberately does NOT rescan: a rescan
+        // performs the passive-discovery scan SECURITY.md reserves for an
+        // explicit request, and journals a `discovery_refreshed` row into the
+        // same bounded activity ring this pane exists to show — 256 status
+        // calls would evict every route retirement it was meant to surface.
+        // The header reports how old the scan is and offers `embassy refresh`.
         const response = await ask("list_snapshot", {});
         if (!response.ok) {
           writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
@@ -1177,9 +1235,8 @@ export async function runGatewayCli(
         const pid = await (dependencies.readControllerPid ?? readGatewayControllerPid)(config.stateDir);
         stdout.write(renderStatus(response.result, {
           stateDir: config.stateDir, version: EMBASSY_VERSION, recent,
-          color: useColor(stdout, env),
+          color: useColor(stdout, env), now: (dependencies.now ?? Date.now)(),
           ...(pid === undefined ? {} : { pid }),
-          ...(refreshFailure === undefined ? {} : { refreshFailure }),
         }));
         return gatewayCliExitCodes.ok;
       }
@@ -1187,7 +1244,7 @@ export async function runGatewayCli(
       if (command === "watch") {
         const json = options.json === true;
         const color = !json && useColor(stdout, env);
-        const interrupt = watchInterrupt(dependencies.watchSignal);
+        const interrupt = interruptSignal(dependencies.watchSignal);
         const delay = dependencies.delay ?? defaultDelay;
         let state: WatchState | undefined;
         let revision: number | undefined;
@@ -1220,6 +1277,7 @@ export async function runGatewayCli(
         return gatewayCliExitCodes.ok;
       }
 
+      const clock = dependencies.now ?? Date.now;
       let chosen = target;
       if (chosen === undefined) {
         const snapshot = await ask("list_snapshot", {});
@@ -1227,20 +1285,38 @@ export async function runGatewayCli(
           writeFailure(stdout, stderr, command, snapshot.error.code, { kind: "failure" });
           return gatewayCliExitCodes.failure;
         }
-        chosen = snapshot.result.routes
+        const candidates = snapshot.result.routes
           .filter((route) => route.provider === "codex" && route.enabled)
-          .map((route) => route.alias).sort()[0];
+          .sort((left, right) => left.alias.localeCompare(right.alias));
+        if (candidates.length === 0) {
+          throw new CliFault("INVALID_ARGUMENTS", false, "checkNoTarget", undefined,
+            { localHost: config.hostId });
+        }
+        // Sending into a task nothing has observed for ten minutes proves
+        // nothing about upstream drift — it just times out. Say so instead,
+        // and name the aliases so the operator can read their remedies.
+        const observable = candidates.filter((route) => {
+          const observed = route.lastSeenAt === undefined ? undefined : Date.parse(route.lastSeenAt);
+          return observed === undefined || !Number.isFinite(observed) ||
+            clock() - observed <= STATUS_ROUTE_STALE_AFTER_MS;
+        });
+        if (observable.length === 0) {
+          throw new CliFault("INVALID_ARGUMENTS", false, "checkAllStale", undefined,
+            { aliases: candidates.map((route) => route.alias).join(", ") });
+        }
+        chosen = observable[0]!.alias;
       }
-      if (chosen === undefined) {
-        throw new CliFault("INVALID_ARGUMENTS", false, "checkNoTarget", undefined,
-          { localHost: config.hostId });
+      const checkInterrupt = interruptSignal(dependencies.watchSignal);
+      try {
+        return await runGatewayCheck({
+          socketPath: config.controlSocketPath, hostId: config.hostId, target: chosen,
+          timeoutMs: timeoutSeconds * 1_000, sendRequest, stdout,
+          interrupt: checkInterrupt.signal, now: clock,
+          delay: dependencies.delay ?? defaultDelay, color: useColor(stdout, env),
+        });
+      } finally {
+        checkInterrupt.dispose();
       }
-      return await runGatewayCheck({
-        socketPath: config.controlSocketPath, hostId: config.hostId, target: chosen,
-        timeoutMs: timeoutSeconds * 1_000, sendRequest, stdout,
-        now: dependencies.now ?? Date.now, delay: dependencies.delay ?? defaultDelay,
-        color: useColor(stdout, env),
-      });
     }
     if (command === "serve") {
       emptyParams(args);
@@ -1291,7 +1367,9 @@ export async function runGatewayCli(
         writeFailure(stdout, stderr, command, "DELIVERY_TOKEN_UNKNOWN", { kind: "tokenUnknown" });
         return gatewayCliExitCodes.rejected;
       }
-      if (outcome.kind === "timeout") {
+      // `timeout` is the only other outcome here: an interrupt needs a signal,
+      // and `wait-delivery` passes none.
+      if (outcome.kind !== "response") {
         writeFailure(stdout, stderr, command, "DELIVERY_WAIT_TIMEOUT", { retryable: true, kind: "deliveryTimeout" });
         return gatewayCliExitCodes.unavailable;
       }

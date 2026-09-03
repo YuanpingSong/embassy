@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -122,17 +122,29 @@ test("status renders for a terminal and stays byte-identical JSON everywhere els
   assert.equal(text(forced), expectedJson);
 });
 
-test("status rescans before it reads, and a refused rescan is reported rather than fatal", async () => {
-  const methods: string[] = [];
-  const stdout = capture(true);
-  const code = await runGatewayCli(["status"], dependencies(stdout, (request) => {
-    methods.push(request.method);
-    return request.method === "refresh_discovery"
-      ? { accepted: false, code: "unavailable", revision: 2 } : SNAPSHOT;
-  }));
-  assert.deepEqual(methods, ["refresh_discovery", "list_snapshot"]);
-  assert.equal(code, gatewayCliExitCodes.ok);
-  assert.match(text(stdout), /the rescan for Claude sessions did not run \(unavailable\)/);
+test("status is read-only: it reads the snapshot and nothing else", async () => {
+  // A rescan journals a `discovery_refreshed` row into the same bounded
+  // activity ring this pane exists to show, and performs the passive
+  // discovery scan SECURITY.md reserves for an explicit request. `status`
+  // must therefore make exactly one call, whichever form it prints in.
+  for (const argv of [["status"], ["status", "--json"]]) {
+    const methods: string[] = [];
+    const stdout = capture(argv.length === 1);
+    const code = await runGatewayCli(argv, dependencies(stdout, (request) => {
+      methods.push(request.method);
+      return SNAPSHOT;
+    }));
+    assert.deepEqual(methods, ["list_snapshot"], argv.join(" "));
+    assert.equal(code, gatewayCliExitCodes.ok, argv.join(" "));
+  }
+  // Instead it says how old the scan is, and offers the command.
+  const stale = capture(true);
+  await runGatewayCli(["status"], dependencies(stale, () => ({
+    ...SNAPSHOT,
+    connectors: [{ ...SNAPSHOT.connectors[0]!, lastSeenAt: "2026-09-02T17:00:00.000Z" },
+      SNAPSHOT.connectors[1]!],
+  }), { now: () => Date.parse("2026-09-02T18:04:11.000Z") }));
+  assert.match(text(stale), /^sessions scanned 1h ago {2}— run `embassy refresh` to rescan$/m);
 });
 
 test("status exits 0 whenever the broker answered, whatever the overall word says", async () => {
@@ -191,6 +203,14 @@ test("the broker pid comes from the controller lock, and a missing or odd lock i
   assert.equal(await readGatewayControllerPid(stateDir), undefined);
   await writeFile(lock, JSON.stringify({ pid: 0 }), { mode: 0o600 });
   assert.equal(await readGatewayControllerPid(stateDir), undefined);
+  // The same discipline as the host lease: a symlink is refused even when its
+  // target parses, and so is a record over the byte bound.
+  await writeFile(path.join(stateDir, "elsewhere.lock"), JSON.stringify({ pid: 41213 }), { mode: 0o600 });
+  await rm(lock); await symlink(path.join(stateDir, "elsewhere.lock"), lock);
+  assert.equal(await readGatewayControllerPid(stateDir), undefined);
+  await rm(lock);
+  await writeFile(lock, JSON.stringify({ pid: 41213, pad: "x".repeat(4_096) }), { mode: 0o600 });
+  assert.equal(await readGatewayControllerPid(stateDir), undefined);
 
   const stdout = capture(true);
   await runGatewayCli(["status"], dependencies(stdout, snapshotResponder, {
@@ -210,10 +230,12 @@ function watchResponder(): Responder {
         { ...SNAPSHOT.messages[0]!, sequence: 4, state: "queued", latencyMs: undefined, body: undefined },
       ] } };
     }
+    // The settled row comes back under a NEW sequence — the store re-stamps
+    // it — which is exactly why identity is the message id.
     return { snapshotRevision: 2, snapshot: { ...SNAPSHOT,
       messages: [
-        { ...SNAPSHOT.messages[0]!, sequence: 4, state: "delivered", latencyMs: 61 },
-        { ...SNAPSHOT.messages[0]!, sequence: 5, state: "queued", bytes: 12, body: "second" },
+        { ...SNAPSHOT.messages[0]!, sequence: 6, state: "delivered", latencyMs: 61 },
+        { ...SNAPSHOT.messages[0]!, sequence: 7, messageIdSuffix: "1b2c3d4e", state: "queued", bytes: 12, body: "second" },
       ],
       activityEvents: [{
         sequence: 9, timestamp: NOW, kind: "registration" as const, action: "claude_route_installed" as const,
@@ -238,11 +260,12 @@ test("watch tails new rows and settlements once each, then exits 0 on interrupt"
 
   assert.equal(code, gatewayCliExitCodes.ok);
   const lines = text(stdout).trimEnd().split("\n");
+  const clock = new Date(Date.parse(NOW)).toTimeString().slice(0, 8);
   // The first poll only seeds the baseline; nothing from it is replayed.
   assert.deepEqual(lines, [
-    "#4  queued → delivered (61 ms)",
-    `#5  advisor@${HOST} → codex-reviewer@${HOST}  queued  12 B  second`,
-    `   claude_route_installed  advisor@${HOST}  accepted`,
+    `${clock}  0a1b2c3d  queued → delivered (61 ms)`,
+    `${clock}  1b2c3d4e  advisor@${HOST} → codex-reviewer@${HOST}  queued  12 B  second`,
+    `${clock}  claude_route_installed  advisor@${HOST}  accepted`,
   ]);
 });
 const watchState = watchResponder();
@@ -264,44 +287,59 @@ test("watch --json streams the same events as JSONL", async () => {
   assert.deepEqual(rows.map((row) => row.type), ["transition", "message", "activity"]);
   assert.equal(text(stdout).includes("\u001b["), false);
   assert.deepEqual(rows[0], {
-    type: "transition", sequence: 4, from: "queued", to: "delivered",
+    type: "transition", message: "0a1b2c3d", timestamp: NOW, from: "queued", to: "delivered",
     sourceAlias: `advisor@${HOST}`, targetAlias: `codex-reviewer@${HOST}`, latencyMs: 61,
   });
 });
 
 /** A scripted broker for `check`; `reply` decides what the peer mailbox returns. */
 function checkResponder(overrides: {
-  reply?: "echo" | "silent" | "other"; delivery?: string; sendRefusal?: { code: string; reason?: string };
-  registerRefusal?: boolean; routes?: GatewayPublicSnapshot["routes"];
+  reply?: "echo" | "silent" | "other" | "uncorrelated"; delivery?: string;
+  sendRefusal?: { code: string; reason?: string };
+  registerRefusal?: boolean | { code: string; reason?: string }; unregisterRefusal?: boolean;
+  routes?: GatewayPublicSnapshot["routes"];
 } = {}, advance: (milliseconds: number) => void = () => undefined) {
   const seen: GatewayControlRequest[] = [];
+  let awaits = 0;
   const respond: Responder = (request) => {
     seen.push(request);
     switch (request.method) {
       case "list_snapshot":
         return { ...SNAPSHOT, routes: overrides.routes ?? SNAPSHOT.routes };
       case "register_peer":
-        return overrides.registerRefusal === true
-          ? { accepted: false, code: "conflict" } : { accepted: true, code: "ok", token: PEER_TOKEN };
+        return overrides.registerRefusal === undefined || overrides.registerRefusal === false
+          ? { accepted: true, code: "ok", token: PEER_TOKEN }
+          : overrides.registerRefusal === true ? { accepted: false, code: "conflict" }
+          : { accepted: false, ...overrides.registerRefusal };
+      case "unregister_peer":
+        return overrides.unregisterRefusal === true
+          ? { accepted: false, code: "route_mismatch" } : { accepted: true, code: "ok" };
       case "send":
         return overrides.sendRefusal === undefined
           ? { accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN }
           : { accepted: false, ...overrides.sendRefusal };
       case "delivery_status":
-        return { found: true, state: overrides.delivery ?? "delivered", terminal: true,
+        return { found: true, state: overrides.delivery ?? "delivered",
+          terminal: overrides.delivery !== "queued",
           updatedAt: NOW, deadlineAt: "2099-01-01T00:00:00.000Z",
-          ...(overrides.delivery === undefined || overrides.delivery === "delivered"
+          ...(overrides.delivery === undefined || overrides.delivery === "delivered" || overrides.delivery === "queued"
             ? {} : { safeErrorCode: "DELIVERY_UNCONFIRMED" }) };
       case "await_peer": {
         // A real broker holds this open for 30 s before answering `timeout`;
         // the fake moves the injected clock the same way so the reply budget
         // is spent by the wall clock, not only by the attempt bound.
-        if (overrides.reply === "silent") { advance(30_000); return { state: "timeout" }; }
+        awaits += 1;
+        if (overrides.reply === "silent" || (overrides.reply === "uncorrelated" && awaits > 1)) {
+          advance(30_000); return { state: "timeout" };
+        }
         const id = /\[embassy check ([0-9a-f]{8})\]/.exec(
           (seen.find((row) => row.method === "send")?.params as { text: string }).text)?.[1] ?? "";
         const result = {
           fromAlias: `codex-reviewer@${HOST}`, toAlias: (request.params as { alias: string }).alias,
-          conversationId: CONVERSATION_ID, expectsReply: false,
+          // An answer that opened its own conversation instead of replying
+          // into the check's: the drifted-skill shape.
+          conversationId: overrides.reply === "uncorrelated" ? "conv_fedcba9876543210" : CONVERSATION_ID,
+          expectsReply: false,
           text: overrides.reply === "other" ? "unrelated answer" : `check ${id} received`,
         };
         return { state: "message", receipt: PEER_RECEIPT, frame: `${JSON.stringify({ ok: true, command: "await", result })}\n` };
@@ -331,7 +369,7 @@ test("check runs the whole round trip and reports every hop", async () => {
   assert.equal(code, gatewayCliExitCodes.ok);
   const output = text(stdout);
   assert.match(output, new RegExp(`^embassy check [0-9a-f]{8} → codex-reviewer@${HOST}\n`));
-  assert.match(output, /^ {2}ok {4}register {3}peer-check-[0-9a-f]{8}@this-mac {2}0 ms$/m);
+  assert.match(output, /^ {2}ok {4}register {3}peer-check-[0-9a-f]{8}@this-mac \(ephemeral, 2 min\) {2}0 ms$/m);
   assert.match(output, /^ {2}ok {4}send {7}accepted, conversation …89abcdef {2}0 ms$/m);
   assert.match(output, /^ {2}ok {4}delivered {2}the peer's transport accepted it/m);
   assert.match(output, new RegExp(`^ {2}ok {4}reply {6}codex-reviewer@${HOST} echoed [0-9a-f]{8}`, "m"));
@@ -342,6 +380,11 @@ test("check runs the whole round trip and reports every hop", async () => {
   // takes the temporary registration back down again.
   assert.deepEqual(seen.map((request) => request.method),
     ["list_snapshot", "register_peer", "send", "delivery_status", "await_peer", "peer_receipt", "unregister_peer"]);
+  const registration = seen.find((request) => request.method === "register_peer")!.params as {
+    alias: string; ephemeral?: true; ttlMs?: number;
+  };
+  assert.equal(registration.ephemeral, true);
+  assert.equal(registration.ttlMs, 120_000);
   const sent = seen.find((request) => request.method === "send")!.params as {
     fromAlias: string; toAlias: string; peerToken: string; expectsReply: boolean; text: string;
   };
@@ -377,6 +420,9 @@ test("each check hop fails with its own code, and the identity is always release
     { name: "register", overrides: { registerRefusal: true },
       expected: gatewayCliExitCodes.failure,
       line: /^ {2}FAIL {2}register {3}the broker refused a temporary check identity \(conflict\)/m },
+    { name: "register", overrides: { registerRefusal: { code: "rejected", reason: "ROUTE_CAPACITY_REACHED" } },
+      expected: gatewayCliExitCodes.failure,
+      line: /^ {2}FAIL {2}register {3}the broker refused a temporary check identity \(rejected ROUTE_CAPACITY_REACHED\)/m },
     { name: "send", overrides: { sendRefusal: { code: "not_found", reason: "CLAUDE_TARGET_CHANGED" } },
       expected: gatewayCliExitCodes.rejected,
       line: /^ {2}FAIL {2}send {7}not_found CLAUDE_TARGET_CHANGED/m },
@@ -402,16 +448,111 @@ test("each check hop fails with its own code, and the identity is always release
   }
 });
 
-test("check answers that do not correlate are consumed and waited past, not reported", async () => {
-  // A reply in the check's own conversation counts even when it does not
-  // repeat the id; the conversation token is the correlation, the echo is
-  // confirmation printed beside it.
+test("a reply in the check's own conversation counts even without the echo", async () => {
+  // The conversation token is the correlation; the echoed id is confirmation
+  // printed beside it, never a second identity.
   const { respond } = checkResponder({ reply: "other" });
   const stdout = capture(true);
   const code = await runGatewayCli(["check"], dependencies(stdout, respond, {
     ...checkClock(), env: { NO_COLOR: "1" } }));
   assert.equal(code, gatewayCliExitCodes.ok);
   assert.match(text(stdout), /answered without repeating [0-9a-f]{8}/);
+});
+
+test("an uncorrelated answer is reported and counted, never mistaken for the reply", async () => {
+  // A peer whose reply rule drifted answers with a fresh `send --to` instead
+  // of `send --conversation`. That frame lands in the check's mailbox with a
+  // different conversation: it is consumed, said out loud, and counted in the
+  // timeout summary, because it is the single most likely drift to catch.
+  const clock = checkClock();
+  const { respond } = checkResponder({ reply: "uncorrelated" }, clock.advance);
+  const stdout = capture(true);
+  const code = await runGatewayCli(["check"], dependencies(stdout, respond, {
+    now: clock.now, delay: clock.delay }));
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.match(text(stdout), new RegExp(`^ {2}note {2}received an uncorrelated message from codex-reviewer@${HOST} \\(new conversation\\) — replies must use \`embassy send --conversation <token>\`$`, "m"));
+  assert.match(text(stdout), /^ {2}FAIL {2}reply {6}no reply within 60 s — the peer received the message but did not answer \(1 uncorrelated message\(s\) received\)/m);
+  assert.match(text(stdout), /^check failed at the reply hop$/m);
+});
+
+test("a refused cleanup fails the check with its safe code, even after every hop passed", async () => {
+  const { respond } = checkResponder({ unregisterRefusal: true });
+  const stdout = capture(true);
+  const code = await runGatewayCli(["check"], dependencies(stdout, respond, {
+    ...checkClock(), env: { NO_COLOR: "1" } }));
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.match(text(stdout), /^ {2}FAIL {2}cleanup {4}the temporary check identity could not be removed; it expires on its own within 2 min$/m);
+  assert.match(text(stdout), /^check passed; cleanup failed \(route_mismatch\)$/m);
+});
+
+/** `respond`, wrapped so that seeing `method` presses Ctrl-C mid-request. */
+function interruptedAt(
+  method: GatewayControlRequest["method"], respond: Responder, seen: GatewayControlRequest[],
+): { deps: Partial<GatewayCliDependencies>; controller: AbortController } {
+  const controller = new AbortController();
+  const inner = dependencies(capture(), respond).sendRequest!;
+  const sendRequest = (async (options: { request: GatewayControlRequest }) => {
+    if (options.request.method !== method || controller.signal.aborted) return await inner(options as never);
+    controller.abort();
+    if (method !== "await_peer") return await inner(options as never);
+    // The broker is holding the long-poll open; nothing answers it.
+    seen.push(options.request);
+    return await new Promise<never>(() => undefined);
+  }) as NonNullable<GatewayCliDependencies["sendRequest"]>;
+  return { deps: { sendRequest, watchSignal: controller.signal }, controller };
+}
+
+test("Ctrl-C during the reply wait runs the cleanup hop at once", async () => {
+  const { respond, seen } = checkResponder();
+  const { deps } = interruptedAt("await_peer", respond, seen);
+  const stdout = capture(true);
+  const code = await runGatewayCli(["check"], dependencies(stdout, respond, {
+    ...checkClock(), env: { NO_COLOR: "1" }, ...deps }));
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.match(text(stdout), /^ {2}FAIL {2}reply {6}interrupted before a reply arrived/m);
+  assert.match(text(stdout), /^ {2}ok {4}cleanup {4}temporary check identity removed$/m);
+  assert.match(text(stdout), /^check interrupted at the reply hop$/m);
+  // The long-poll was not waited out: cleanup followed the interrupt directly.
+  assert.deepEqual(seen.map((request) => request.method).slice(-2), ["await_peer", "unregister_peer"]);
+});
+
+test("Ctrl-C during the delivered wait reaches cleanup within one poll", async () => {
+  const { respond, seen } = checkResponder({ delivery: "queued" });
+  const { deps } = interruptedAt("delivery_status", respond, seen);
+  const stdout = capture(true);
+  const code = await runGatewayCli(["check"], dependencies(stdout, respond, {
+    ...checkClock(), env: { NO_COLOR: "1" }, ...deps }));
+  assert.equal(code, gatewayCliExitCodes.failure);
+  assert.match(text(stdout), /^ {2}FAIL {2}delivered {2}interrupted before it settled/m);
+  assert.match(text(stdout), /^check interrupted at the delivered hop$/m);
+  assert.equal(seen.filter((request) => request.method === "delivery_status").length, 1);
+  assert.equal(seen.at(-1)?.method, "unregister_peer");
+});
+
+test("check prefers a Codex task the broker has observed, and refuses when every one is stale", async () => {
+  const clock = checkClock();
+  const stale = new Date(clock.now() - 11 * 60_000).toISOString();
+  const fresh = new Date(clock.now() - 20_000).toISOString();
+  const template = SNAPSHOT.routes[0]!;
+  const routes = [
+    { ...template, alias: `codex-alpha@${HOST}`, state: "stale" as const, lastSeenAt: stale },
+    { ...template, alias: `codex-beta@${HOST}`, lastSeenAt: fresh },
+  ];
+  // Alphabetical order would pick alpha; observation wins.
+  const { respond, seen } = checkResponder({ routes });
+  const stdout = capture(true);
+  assert.equal(await runGatewayCli(["check"], dependencies(stdout, respond, {
+    ...clock, env: { NO_COLOR: "1" } })), gatewayCliExitCodes.ok);
+  assert.equal((seen.find((request) => request.method === "send")!.params as { toAlias: string }).toAlias,
+    `codex-beta@${HOST}`);
+
+  // Every task stale: name them, send nothing, exit non-zero.
+  const allStale = checkResponder({ routes: [routes[0]!, { ...routes[1]!, lastSeenAt: stale }] });
+  const out = capture(true), stderr = capture();
+  const code = await runGatewayCli(["check"], dependencies(out, allStale.respond, { ...clock, stderr }));
+  assert.equal(code, gatewayCliExitCodes.invalidInput);
+  assert.match(text(stderr), /every registered Codex task has been unobserved for more than ten minutes \(codex-alpha@this-mac, codex-beta@this-mac\), so nothing was sent\. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`\./);
+  assert.deepEqual(allStale.seen.map((request) => request.method), ["list_snapshot"]);
 });
 
 test("--timeout is bounded and shapes the reply wait", async () => {
@@ -469,12 +610,19 @@ test("check and status hold up against the real control server", async (t) => {
   let awaited = 0;
   let peerAlias = "";
   let released = false;
+  let ephemeralRequested = false;
+  let requestedTtlMs: number | undefined;
+  let rescanned = false;
+  // This test runs on the wall clock, and `check` refuses a Codex task nobody
+  // has observed for ten minutes; the fixture's route must be seen just now.
+  const fresh: GatewayPublicSnapshot = { ...SNAPSHOT,
+    routes: [{ ...SNAPSHOT.routes[0]!, lastSeenAt: new Date().toISOString() }] };
   const handlers: GatewayControlHandlers = {
     health: () => ({ status: "ok", revision: 1 }),
     registerCodex: () => ({ accepted: true, code: "ok" }),
     unregisterCodex: () => ({ accepted: true, code: "ok" }),
-    listSnapshot: () => SNAPSHOT,
-    observeSnapshot: () => ({ snapshotRevision: 1, snapshot: SNAPSHOT }),
+    listSnapshot: () => fresh,
+    observeSnapshot: () => ({ snapshotRevision: 1, snapshot: fresh }),
     deliveryStatus: () => ({
       found: true, state: "delivered", terminal: true,
       updatedAt: NOW, deadlineAt: "2099-01-01T00:00:00.000Z",
@@ -483,9 +631,11 @@ test("check and status hold up against the real control server", async (t) => {
       sends.push({ ...params });
       return { accepted: true, code: "ok", conversationId: CONVERSATION_ID, deliveryToken: DELIVERY_TOKEN };
     },
-    refreshDiscovery: () => ({ accepted: true, code: "ok", revision: 2 }),
-    registerPeer: ({ alias }) => {
-      peerAlias = alias;
+    refreshDiscovery: () => { rescanned = true; return { accepted: true, code: "ok", revision: 2 }; },
+    registerPeer: (params) => {
+      peerAlias = params.alias;
+      ephemeralRequested = params.ephemeral === true;
+      requestedTtlMs = params.ttlMs;
       return { accepted: true, code: "ok", token: PEER_TOKEN };
     },
     unregisterPeer: () => { released = true; return { accepted: true, code: "ok" }; },
@@ -513,16 +663,21 @@ test("check and status hold up against the real control server", async (t) => {
   assert.equal(awaited, 1);
   assert.equal(released, true);
   assert.match(peerAlias, /^peer-check-[0-9a-f]{8}@this-mac$/);
+  // The whole request survived the real decoder, ephemeral option included.
+  assert.equal(ephemeralRequested, true);
+  assert.equal(requestedTtlMs, 120_000);
   assert.equal(sends.length, 1);
   assert.equal(sends[0]?.fromAlias, peerAlias);
   assert.equal(sends[0]?.toAlias, `codex-reviewer@${HOST}`);
   assert.equal(sends[0]?.expectsReply, true);
   assert.equal(sends[0]?.peerToken, PEER_TOKEN);
 
-  // And the same server proves the snapshot both views read is the validated one.
+  // And the same server proves the snapshot both views read is the validated
+  // one, reached without a rescan.
   const piped = capture();
   assert.equal(await runGatewayCliBase(["status"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout: piped, stderr: capture(),
   }), gatewayCliExitCodes.ok);
-  assert.deepEqual((JSON.parse(text(piped)) as { result: unknown }).result, SNAPSHOT);
+  assert.deepEqual((JSON.parse(text(piped)) as { result: unknown }).result, fresh);
+  assert.equal(rescanned, false);
 });

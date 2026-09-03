@@ -267,29 +267,52 @@ sender whose own display name collides is never silenced, because its identity
 was attested rather than typed. A pre-bound route retains its identity-pinned
 binding, and a name alone never restores or retargets a durable route.
 
-`embassy status` is the single pane for the human. It shows both sanitized
-available and routed Claude aliases and explicitly registered Codex aliases,
-including their host, current state, last-seen age, and queue depth. The same
-pane also carries the bounded ledger's retained message bodies, so its output is
-as sensitive as the messages themselves.
+`embassy status` is the single pane for the human, and it is read-only: it
+makes exactly one call, `list_snapshot`, and never `refresh_discovery`, so the
+scan it reports is the broker's own and a status loop cannot journal anything.
+Its `sessions` block is the sanitized `availablePeers` inventory — every live
+Claude session the last scan found, by current name, marked `routed` once a
+route exists for it — and its header says how old that scan is, offering
+`embassy refresh` when it is older than a minute. Below the sessions come the
+routes: routed Claude aliases and explicitly registered Codex aliases, with
+provider, current state, queue depth, and last-seen age. The same
+pane also carries the bounded ledger's retained message bodies, so its output
+is as sensitive as the messages themselves.
 The thin skill/CLI exposes the same safe alias list to either provider.
 
 That pane has two forms of the same snapshot. Piped, or with `--json`, it is
 the snapshot verbatim — the form every script and the skill read. On a
-terminal it is rendered by `status-view.ts`, a pure function of the snapshot:
-it derives one plain word per connector (`ok`, `stale`, `degraded`), pairs
-every word that is not `ok` with its safe code and a one-line remedy, marks a
-route whose last observation is older than ten minutes `stale` whatever the
-broker called it, and reports a registered Codex task nobody can observe with
-the succession remedy. A connector that merely has nothing to observe is
-`stale`, never `degraded`, and a shell peer with unclaimed mail never moves
-the overall word at all: silence in a pull mailbox is a fact about the
-operator's other terminal. `embassy watch` tails the same snapshot through
-`observe_snapshot`, printing each new message row once and each settlement
-once. `embassy check` proves the whole path end to end — it registers a
-throwaway `peer-*` principal of its own, sends one marked body through the
+terminal it is rendered by `status-view.ts`, a pure function of the snapshot
+and the reader's clock: it derives one of four plain words per connector
+(`ok`, `stale`, `degraded`, `offline`) and pairs every word that is not `ok`
+with its safe code and a one-line remedy. Two clocks govern staleness, and
+they are deliberately far apart. The broker's own connector window is 35
+seconds (`CONNECTOR_OBSERVATION_STALE_AFTER_MS`), and it is crossed routinely
+and innocently — the Codex observer polls one route at a time every 15
+seconds, and Claude routes are not polled at all: their evidence is
+edge-triggered, written when a discovery scan or a delivery observes the
+session, so a quiet Claude session's `lastSeenAt` stops advancing while the
+session is perfectly alive. The view therefore keeps the broker's word until
+a route has gone unobserved for ten minutes, and only then calls it `stale`;
+past that backstop a Codex route earns the succession remedy only when it
+also carries a code that says the task itself is gone (`THREAD_NOT_OBSERVED`)
+— bare silence says the task may be busy or the app-server slow. A Claude
+route whose alias the latest scan still lists is never `stale`: the scan is
+fresher evidence than the route's own observation, so the discovered state is
+shown with `discovered <age>` as its last-seen cell, and a Claude route past
+the backstop that the scan no longer lists says the session exited or renamed.
+A connector that merely has nothing to observe is `stale`, never `degraded`,
+and a shell peer with unclaimed mail never moves the overall word at all:
+silence in a pull mailbox is a fact about the operator's other terminal.
+`embassy watch` tails the same snapshot through `observe_snapshot` once a
+second, printing each new message row and each settlement at most once — a
+transition passed through entirely between two polls is never seen, and rows
+evicted from the retained window before the tail read them are announced as
+a note. `embassy check` proves the whole path end to end — it registers an
+ephemeral `peer-*` principal of its own, sends one marked body through the
 ordinary send path, waits for `delivered`, then awaits the correlated reply on
-its own mailbox, and releases the registration again.
+its own mailbox, and releases the registration again; the broker retires the
+registration itself if the check never gets to.
 
 ## Message flows
 
@@ -591,7 +614,13 @@ The closed version 3 method family is exactly these fourteen methods:
 - `peer_catalog` and `peer_handoff`, the private federation catalog and
   destination-owned handoff operations; and
 - `register_peer`, `unregister_peer`, `await_peer`, and `peer_receipt`, the
-  shell-peer registration, mailbox, and flush-before-receipt operations.
+  shell-peer registration, mailbox, and flush-before-receipt operations. A
+  first registration may ask to be `ephemeral` with a bounded `ttlMs`
+  (default five minutes): the route is real in memory — it routes, queues,
+  and settles like any other — but it is projected out of the durable state
+  document together with its own messages, excluded from the federation
+  catalog, and retired by the broker's own clock, so it cannot survive a
+  restart or be restored on another node. `embassy check` uses one.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
 seventeen implemented commands are

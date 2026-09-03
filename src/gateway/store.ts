@@ -52,7 +52,9 @@ function staleLockRecoveredAt(name: string): number | undefined {
   const found = STALE_LOCK_PATTERN.exec(name);
   return found === null ? undefined : Number(found[1]);
 }
-const CONTROLLER_LOCK = ".gateway-controller.lock";
+/** The controller lock's file name; the CLI reads the same file for a pid. */
+export const GATEWAY_CONTROLLER_LOCK_FILE = ".gateway-controller.lock";
+const CONTROLLER_LOCK = GATEWAY_CONTROLLER_LOCK_FILE;
 const MAX_MARKER_FILE_BYTES = 128;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
 export const GATEWAY_MAX_STATE_FILE_BYTES = 8 * 1024 * 1024;
@@ -702,6 +704,14 @@ export class GatewayStore {
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly hostname: () => string;
   private persistenceDeferred = false;
+  /**
+   * Registration ids that must never reach the durable state document. They
+   * are ordinary rows in the in-memory state — admission, dispatch, queueing
+   * and settlement all see them — and are projected out at the one place that
+   * serializes, together with any message row that names one. Nothing here is
+   * written down, so a restart reclaims them by construction.
+   */
+  private readonly ephemeralRegistrations = new Set<string>();
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
     this.config = config;
     this.rootDir = path.resolve(config.stateDir);
@@ -887,7 +897,46 @@ export class GatewayStore {
         throw new BridgeError("ROUTE_CAPACITY_REACHED", "The bounded logical route inventory is full.", true);
       }
       state.routes.push(routeRecord(input, now));
+      if (input.ephemeral === true) this.ephemeralRegistrations.add(input.binding.registrationId);
     });
+  }
+  /** Whether this registration is memory-only; false for every durable route. */
+  isEphemeralRegistration(registrationId: string): boolean {
+    return this.ephemeralRegistrations.has(registrationId);
+  }
+  /**
+   * The document actually written. An ephemeral registration is dropped along
+   * with every message, dedupe fingerprint and rate bucket that names it, and
+   * the queued-bytes total is reduced by what those messages held, so the
+   * written state stays internally consistent under the strict loader — which
+   * refuses a state whose active message points at a route it cannot find, or
+   * whose queued total disagrees with its queued rows. Both refusals are
+   * exactly right, and neither must ever be reachable by a document we wrote.
+   */
+  private persistedProjection(state: GatewayPersistedState): GatewayPersistedState {
+    if (this.ephemeralRegistrations.size === 0) return state;
+    const dropped = state.routes.filter((route) =>
+      this.ephemeralRegistrations.has(route.binding.registrationId));
+    if (dropped.length === 0) return state;
+    const aliases = new Set(dropped.map((route) => route.alias));
+    const ids = new Set(dropped.map((route) => route.binding.registrationId));
+    const names = (row: Readonly<{ sourceAlias: string; targetAlias: string }>): boolean =>
+      aliases.has(row.sourceAlias) || aliases.has(row.targetAlias);
+    const kept = (message: GatewayMessageRecord): boolean =>
+      !ids.has(message.sourceRegistrationId) &&
+      (message.targetRegistrationId === null || !ids.has(message.targetRegistrationId));
+    const droppedQueuedBytes = state.messages
+      .filter((message) => !kept(message) && message.state.phase === "queued")
+      .reduce((total, message) => total + message.bytes, 0);
+    return {
+      ...state,
+      routes: state.routes.filter((route) => !ids.has(route.binding.registrationId)),
+      messages: state.messages.filter(kept),
+      dedupe: state.dedupe.filter((row) => !names(row)),
+      rateBuckets: state.rateBuckets.filter((row) => !aliases.has(row.sourceAlias)),
+      accounting: { ...state.accounting,
+        queuedBytes: state.accounting.queuedBytes - droppedQueuedBytes },
+    };
   }
   async removeOwnedRouteAtomic(
     input: Readonly<{
@@ -2074,6 +2123,7 @@ export class GatewayStore {
     state: GatewayPersistedState, route: GatewayRouteRecord,
   ): void {
     state.routes = state.routes.filter((candidate) => candidate !== route);
+    this.ephemeralRegistrations.delete(route.binding.registrationId);
     state.dedupe = state.dedupe.filter(
       (entry) =>
         entry.sourceAlias !== route.alias && entry.targetAlias !== route.alias,
@@ -2660,7 +2710,7 @@ export class GatewayStore {
   }
   private async persist(force = false): Promise<void> {
     if (this.persistenceDeferred && !force) return;
-    const state = this.requireState();
+    const state = this.persistedProjection(this.requireState());
     const temporary = path.join(
       this.rootDir,
       `.gateway-state-${randomUUID()}.tmp`,

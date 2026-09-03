@@ -659,6 +659,12 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
   assert.deepEqual((await sendGatewayControlRequest({ socketPath, request: {
     protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params: { alias, token: PEER_TOKEN },
   } })).ok, true);
+  // An ephemeral registration: memory-only, with an optional bounded lifetime.
+  for (const params of [{ alias, ephemeral: true as const }, { alias, ephemeral: true as const, ttlMs: 120_000 }]) {
+    assert.deepEqual((await sendGatewayControlRequest({ socketPath, request: {
+      protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "register_peer", params,
+    } })).ok, true);
+  }
   for (const [method, params] of [
     ["unregister_peer", { alias, token: PEER_TOKEN }],
     ["await_peer", { alias, token: PEER_TOKEN }],
@@ -667,8 +673,8 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
     protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method, params,
   } as never })).ok, true);
   assert.deepEqual(calls, [
-    { alias }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN },
-    { alias, token: PEER_TOKEN, receipt: PEER_RECEIPT },
+    { alias }, { alias, token: PEER_TOKEN }, { alias, ephemeral: true }, { alias, ephemeral: true, ttlMs: 120_000 },
+    { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN }, { alias, token: PEER_TOKEN, receipt: PEER_RECEIPT },
   ]);
   for (const request of [
     { method: "send", params: { fromAlias: alias, peerToken: PEER_TOKEN,
@@ -683,6 +689,14 @@ test("strictly serves peer registration, long-poll, and receipt controls", async
   for (const [method, params] of [
     ["register_peer", { alias: "codex-main@this-mac" }],
     ["register_peer", { alias, ownerPid: 123 }],
+    // `ephemeral` is only ever `true`, only on a first registration, and a
+    // lifetime without it names nothing; the lifetime itself is bounded.
+    ["register_peer", { alias, ephemeral: false }],
+    ["register_peer", { alias, ttlMs: 120_000 }],
+    ["register_peer", { alias, token: PEER_TOKEN, ephemeral: true }],
+    ["register_peer", { alias, ephemeral: true, ttlMs: 999 }],
+    ["register_peer", { alias, ephemeral: true, ttlMs: 3_600_001 }],
+    ["register_peer", { alias, ephemeral: true, ttlMs: 60_000.5 }],
     ["unregister_peer", { alias, token: `${PEER_TOKEN}x` }],
     ["await_peer", { alias, token: PEER_TOKEN, extra: true }],
     ["peer_receipt", { alias, token: PEER_TOKEN, receipt: `${PEER_RECEIPT}x` }],

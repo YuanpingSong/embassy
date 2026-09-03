@@ -1,25 +1,29 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
-  connectorWord,
-  overallWord,
-  previewBody,
-  relativeAge,
-  renderStatus,
-  renderWatchEvent,
-  routeWord,
   diffWatch,
   emptyWatchState,
+  renderStatus,
+  renderWatchEvent,
+  STATUS_CAPS,
   STATUS_REMEDY,
   STATUS_ROUTE_STALE_AFTER_MS,
+  __test,
 } from "../src/gateway/status-view.js";
+import { EMBASSY_VERSION } from "../src/gateway/cli.js";
 import type {
   GatewayPublicSnapshot,
   NormalizedMessageEvent,
+  PublicAvailablePeerSnapshot,
   PublicConnectorSnapshot,
   PublicRouteSnapshot,
   RouteCounters,
 } from "../src/gateway/types.js";
+
+const { connectorWord, overallWord, previewBody, relativeAge, routeView } = __test;
 
 // Every fixture is a literal snapshot: the renderer is pure, so no broker, no
 // state directory, and no clock is involved anywhere in this file. That makes
@@ -63,6 +67,15 @@ function route(
   });
 }
 
+function session(
+  alias: string, overrides: Overrides<PublicAvailablePeerSnapshot> = {},
+): PublicAvailablePeerSnapshot {
+  return prune({
+    alias, provider: "claude" as const, host: HOST, state: "idle" as const,
+    validated: true, routed: true, lastSeenAt: at(4_000), ...overrides,
+  });
+}
+
 let sequence = 0;
 function message(overrides: Overrides<NormalizedMessageEvent> = {}): NormalizedMessageEvent {
   sequence += 1;
@@ -91,47 +104,115 @@ function snapshot(overrides: Overrides<GatewayPublicSnapshot> = {}): GatewayPubl
 
 const options = { stateDir: "/private/state/agent-embassy", version: "2.0.1", recent: 10, color: false, now };
 
-/** The fixture the README's "See it" example is captured from. */
+const COUNTERS: RouteCounters = { ...ZERO_COUNTERS, accepted: 3, delivered: 3, bytesAccepted: 240 };
+const EXAMPLE_MESSAGES: NormalizedMessageEvent[] = [
+  { sequence: 11, timestamp: at(300_000), messageIdSuffix: "0a1b2c3d", direction: "claude_to_codex",
+    sourceAlias: `advisor@${HOST}`, targetAlias: `codex-reviewer@${HOST}`, state: "delivered",
+    bytes: 51, body: "Please review the migration risk before the freeze.", latencyMs: 61 },
+  { sequence: 12, timestamp: at(90_000), messageIdSuffix: "1b2c3d4e", direction: "codex_to_claude",
+    sourceAlias: `codex-reviewer@${HOST}`, targetAlias: `advisor@${HOST}`, state: "delivered",
+    bytes: 62, body: "The risk is the double-write window; I would gate it behind a flag.", latencyMs: 210 },
+  { sequence: 13, timestamp: at(12_000), messageIdSuffix: "2c3d4e5f", direction: "claude_to_codex",
+    sourceAlias: `advisor@${HOST}`, targetAlias: `codex-reviewer@${HOST}`, state: "queued", bytes: 34 },
+];
+
+/** The exact snapshot the README's first `status` block is rendered from. */
 export const HEALTHY_FIXTURE = snapshot({
+  availablePeers: [session(`advisor@${HOST}`, { state: "busy", lastSeenAt: at(3_000) })],
   routes: [
-    route(`advisor@${HOST}`, "claude", { state: "busy", queueDepth: 2, lastSeenAt: at(3_000) }),
-    route(`codex-reviewer@${HOST}`, "codex", { lastSeenAt: at(12_000) }),
+    route(`advisor@${HOST}`, "claude", { state: "busy", queueDepth: 2, oldestQueuedAt: at(40_000), lastSeenAt: at(3_000) }),
+    route(`codex-reviewer@${HOST}`, "codex", { lastSeenAt: at(12_000), counters: COUNTERS }),
   ],
-  messages: [
-    message({ state: "delivered", timestamp: at(300_000), body: "Please review the migration risk before the freeze." }),
-    message({ state: "queued", timestamp: at(60_000), latencyMs: undefined, body: "Working on it." }),
-  ],
+  messages: EXAMPLE_MESSAGES,
 });
 
-test("a healthy snapshot renders one broker line, both connectors, routes, and recent bodies", () => {
+/** …and the second. */
+export const DEGRADED_FIXTURE = snapshot({
+  health: "degraded",
+  connectors: [connector("claude"), connector("codex", {
+    health: "degraded", safeErrorCode: "MANAGED_CODEX_UNAVAILABLE" })],
+  availablePeers: [session(`advisor@${HOST}`, { state: "busy", lastSeenAt: at(3_000) })],
+  routes: [
+    route(`advisor@${HOST}`, "claude", { state: "busy", queueDepth: 2, oldestQueuedAt: at(40_000), lastSeenAt: at(3_000) }),
+    route(`codex-reviewer@${HOST}`, "codex", { state: "stale", safeErrorCode: "THREAD_NOT_OBSERVED",
+      queueDepth: 1, oldestQueuedAt: at(60_000), lastSeenAt: at(1_800_000), counters: COUNTERS }),
+    route(`peer-release@${HOST}`, "peer", { queueDepth: 2, oldestQueuedAt: at(120_000), lastSeenAt: undefined }),
+  ],
+  messages: EXAMPLE_MESSAGES,
+  alerts: [{ code: "PEER_TUNNEL_UNAVAILABLE", severity: "warning", timestamp: at(45_000), host: "studio" }],
+});
+
+/** Exported with the fixtures so the README blocks can be regenerated from them. */
+export const README_OPTIONS = {
+  stateDir: "/Users/you/.local/state/agent-embassy", version: EMBASSY_VERSION,
+  recent: 3, color: false, now, pid: 41213,
+};
+
+test("the README's two status examples are exactly what the renderer prints", async () => {
+  const readme = await readFile(path.join(
+    path.dirname(fileURLToPath(import.meta.url)), "..", "README.md"), "utf8");
+  const fenced = [...readme.matchAll(/```text\n(embassy [^\n]*broker [\s\S]*?)```/g)]
+    .map((found) => found[1]!);
+  assert.equal(fenced.length, 2, "README must carry exactly the two captured status examples");
+  assert.equal(fenced[0], renderStatus(HEALTHY_FIXTURE, README_OPTIONS));
+  assert.equal(fenced[1], renderStatus(DEGRADED_FIXTURE, README_OPTIONS));
+});
+
+test("a healthy snapshot renders one broker line, connectors, sessions, routes, and bodies", () => {
   const rendered = renderStatus(HEALTHY_FIXTURE, { ...options, pid: 41213 });
   assert.match(rendered, /^embassy 2\.0\.1 {2}broker ok · pid 41213 · snapshot just now\n/);
   assert.match(rendered, /^state dir \/private\/state\/agent-embassy$/m);
+  assert.match(rendered, /^sessions scanned 4s ago$/m);
   assert.match(rendered, /^ {2}claude {2}ok$/m);
   assert.match(rendered, /^ {2}codex {3}ok$/m);
-  assert.match(rendered, /^ {2}alias {2,} +provider {2}state {2}queue {2}last seen$/m);
-  assert.match(rendered, /^ {2}advisor@this-mac {2,}claude {2,}busy {2,}2 {2,}3s ago$/m);
+  assert.match(rendered, /^ {2}session {2,}state {2,}route {2,}last seen$/m);
+  assert.match(rendered, /^ {2}advisor@this-mac {2,}busy {2,}routed {2,}3s ago$/m);
+  assert.match(rendered, /^ {2}advisor@this-mac {2,}claude {2,}busy {2,}2 {2,}discovered 3s$/m);
   assert.match(rendered, /^ {2}codex-reviewer@this-mac {2,}codex {2,}idle {2,}0 {2,}12s ago$/m);
-  assert.match(rendered, /^recent \(2 of 2\)$/m);
-  assert.match(rendered, /^ {2}5m ago {4} +advisor@this-mac → codex-reviewer@this-mac {2}delivered {2}61 ms$/m);
+  assert.match(rendered, /^recent \(3 of 3\)$/m);
   assert.match(rendered, /Please review the migration risk before the freeze\./);
-  // No remedy prose anywhere: nothing is wrong.
-  assert.doesNotMatch(rendered, /alerts/);
+  assert.doesNotMatch(rendered, /^alerts$/m);
   assert.equal(rendered.includes("\u001b"), false);
 });
 
-test("a degraded Codex connector names its code and its remedy, and sets the overall word", () => {
-  const degraded = snapshot({
-    health: "degraded",
-    connectors: [connector("claude"), connector("codex", {
-      health: "degraded", safeErrorCode: "MANAGED_CODEX_UNAVAILABLE" })],
-    routes: [route(`codex-reviewer@${HOST}`, "codex")],
-  });
-  const rendered = renderStatus(degraded, options);
+test("the header offers a rescan when the scan is old, and never rescans itself", () => {
+  const fresh = renderStatus(snapshot({ connectors: [connector("claude", { lastSeenAt: at(30_000) })] }), options);
+  assert.match(fresh, /^sessions scanned 30s ago$/m);
+  assert.doesNotMatch(fresh, /embassy refresh` to rescan/);
+
+  const old = renderStatus(snapshot({ connectors: [connector("claude", { lastSeenAt: at(300_000) })] }), options);
+  assert.match(old, /^sessions scanned 5m ago {2}— run `embassy refresh` to rescan$/m);
+
+  // A connector that has never been observed offers the same rescan.
+  const never = renderStatus(snapshot({ connectors: [connector("claude", { lastSeenAt: undefined })] }), options);
+  assert.match(never, /^sessions scanned never {2}— run `embassy refresh` to rescan$/m);
+});
+
+test("the sessions block shows what can be addressed, routed or not", () => {
+  const rendered = renderStatus(snapshot({
+    availablePeers: [
+      session(`advisor@${HOST}`),
+      session(`scribe@${HOST}`, { routed: false, state: "awaiting_approval", lastSeenAt: at(20_000) }),
+    ],
+  }), options);
+  assert.match(rendered, /^ {2}advisor@this-mac {2,}idle {2,}routed {2,}4s ago$/m);
+  assert.match(rendered, /^ {2}scribe@this-mac {2,}awaiting {2,}no route yet {2,}20s ago$/m);
+
+  const empty = renderStatus(snapshot(), options);
+  assert.match(empty, /^ {2}none discovered — start a Claude Code session, then run `embassy refresh`$/m);
+});
+
+test("a degraded Codex connector names its code, both causes, and sets the overall word", () => {
+  const rendered = renderStatus(DEGRADED_FIXTURE, options);
   assert.match(rendered, /^embassy 2\.0\.1 {2}broker degraded · snapshot just now$/m);
   assert.match(rendered, /^ {2}codex {3}degraded {2}MANAGED_CODEX_UNAVAILABLE$/m);
   assert.ok(rendered.includes(STATUS_REMEDY.MANAGED_CODEX_UNAVAILABLE!));
-  assert.equal(overallWord(degraded), "degraded");
+  assert.match(rendered, /holds the managed Codex control socket/);
+  // The second cause points at the README's install line, not at `daemon start`.
+  assert.match(rendered, /the managed App Server standalone layout is missing/);
+  assert.match(rendered, /follow the Codex prerequisite in the README/);
+  assert.doesNotMatch(rendered, /run `codex app-server daemon start`/);
+  assert.equal(overallWord(DEGRADED_FIXTURE), "degraded");
 });
 
 test("an unobserved connector is stale, not degraded, and says which stale it is", () => {
@@ -144,7 +225,6 @@ test("an unobserved connector is stale, not degraded, and says which stale it is
   assert.match(rendered, /No Codex task is registered\. Run `embassy register-codex/);
   assert.equal(overallWord(noCodexTask), "stale");
 
-  // The same code with a task registered is a different sentence.
   const registered = snapshot({
     connectors: noCodexTask.connectors, routes: [route(`codex-reviewer@${HOST}`, "codex")],
   });
@@ -161,35 +241,68 @@ test("a stale shell-peer mailbox is reported without degrading the overall word"
   assert.equal(overallWord(waiting), "ok");
   assert.match(rendered, /^embassy 2\.0\.1 {2}broker ok/m);
 
-  // A shell peer with an empty mailbox is simply ok.
   const quiet = snapshot({ routes: [route(`peer-reviewer@${HOST}`, "peer", { lastSeenAt: undefined })] });
   assert.match(renderStatus(quiet, options), /^ {2}peer-reviewer@this-mac ok$/m);
 });
 
-test("an orphaned Codex registration carries the succession remedy the dashboard used to", () => {
-  const orphaned = snapshot({
-    routes: [route(`codex-reviewer@${HOST}`, "codex", {
-      state: "stale", safeErrorCode: "THREAD_NOT_OBSERVED", lastSeenAt: at(40_000) })],
-  });
-  const rendered = renderStatus(orphaned, options);
-  assert.match(rendered, /^ {2}codex-reviewer@this-mac {2,}codex {2,}stale/m);
-  assert.match(rendered, /^ {4}codex-reviewer@this-mac: That Codex task is gone\. Run `embassy register-codex --alias <new-alias> --succeeds <this alias>`/m);
+test("the succession remedy needs both the backstop and a code that says the task is gone", () => {
+  const beyond = at(STATUS_ROUTE_STALE_AFTER_MS + 60_000);
+  // Silence alone — the broker calls a route stale after 35 s, which the
+  // Codex observer's single slot crosses routinely. Never tell an operator to
+  // retire a task on that evidence.
+  const quiet = renderStatus(snapshot({ routes: [
+    route(`codex-reviewer@${HOST}`, "codex", { state: "stale", lastSeenAt: beyond })] }), options);
+  assert.match(quiet, /not observed for 11m; the task may be busy or the app-server slow — run `embassy check --to codex-reviewer@this-mac` to settle it/);
+  assert.doesNotMatch(quiet, /--succeeds/);
+
+  // The endpoint-gone code, past the backstop: now it is earned.
+  const gone = renderStatus(snapshot({ routes: [
+    route(`codex-reviewer@${HOST}`, "codex", { state: "stale", safeErrorCode: "THREAD_NOT_OBSERVED", lastSeenAt: beyond })] }), options);
+  assert.match(gone, /^ {4}codex-reviewer@this-mac: That Codex task is gone\. Run `embassy register-codex --alias <new-alias> --succeeds <this alias>`/m);
+
+  // The same code inside the backstop is a broker word, not a verdict.
+  const recent = renderStatus(snapshot({ routes: [
+    route(`codex-reviewer@${HOST}`, "codex", { state: "stale", safeErrorCode: "THREAD_NOT_OBSERVED", lastSeenAt: at(40_000) })] }), options);
+  assert.doesNotMatch(recent, /--succeeds/);
+  assert.match(recent, /^ {2}codex-reviewer@this-mac {2,}codex {2,}stale/m);
+});
+
+test("a Claude route the latest scan still lists is never stale", () => {
+  const alias = `advisor@${HOST}`;
+  const stale = route(alias, "claude", { state: "stale", lastSeenAt: at(STATUS_ROUTE_STALE_AFTER_MS + 60_000) });
+  const seen = renderStatus(snapshot({
+    availablePeers: [session(alias, { state: "busy", lastSeenAt: at(2_000) })], routes: [stale],
+  }), options);
+  assert.match(seen, /^ {2}advisor@this-mac {2,}claude {2,}busy {2,}0 {2,}discovered 2s$/m);
+  assert.doesNotMatch(seen, /exited or renamed/);
+
+  // The same route with the session gone from the scan earns the honest line.
+  const unseen = renderStatus(snapshot({ routes: [stale] }), options);
+  assert.match(unseen, /^ {2}advisor@this-mac {2,}claude {2,}stale/m);
+  assert.match(unseen, /^ {4}advisor@this-mac: that session has exited or renamed; run `embassy refresh`$/m);
+  assert.equal(routeView(stale, undefined, now).word, "stale");
+  assert.equal(routeView(stale, session(alias), now).word, "idle");
+});
+
+test("an awaiting route says where the approval prompt is", () => {
+  const rendered = renderStatus(snapshot({ routes: [
+    route(`codex-reviewer@${HOST}`, "codex", { state: "awaiting_approval" })] }), options);
+  assert.match(rendered, /^ {2}codex-reviewer@this-mac {2,}codex {2,}awaiting/m);
+  assert.match(rendered, /waiting on an approval prompt in that Codex task's own terminal$/m);
 });
 
 test("a route unobservable for more than ten minutes is stale whatever the broker called it", () => {
   const fresh = route(`codex-reviewer@${HOST}`, "codex", { lastSeenAt: at(STATUS_ROUTE_STALE_AFTER_MS - 1_000) });
   const old = route(`codex-reviewer@${HOST}`, "codex", { lastSeenAt: at(STATUS_ROUTE_STALE_AFTER_MS + 1_000) });
-  assert.equal(routeWord(fresh, now), "idle");
-  assert.equal(routeWord(old, now), "stale");
-  // A route that was never observed keeps the broker's word: absence of an
-  // observation is not evidence of an age.
-  assert.equal(routeWord(route(`peer-x@${HOST}`, "peer", { lastSeenAt: undefined }), now), "idle");
-  assert.equal(routeWord(route(`peer-x@${HOST}`, "peer", { enabled: false }), now), "disabled");
-  // The ten-minute backstop reaches the orphan remedy on its own.
-  assert.match(renderStatus(snapshot({ routes: [old] }), options), /That Codex task is gone\./);
+  assert.equal(routeView(fresh, undefined, now).word, "idle");
+  assert.equal(routeView(old, undefined, now).word, "stale");
+  // A route never observed keeps the broker's word: absence of an observation
+  // is not evidence of an age.
+  assert.equal(routeView(route(`peer-x@${HOST}`, "peer", { lastSeenAt: undefined }), undefined, now).word, "idle");
+  assert.equal(routeView(route(`peer-x@${HOST}`, "peer", { enabled: false }), undefined, now).word, "disabled");
 });
 
-test("a filtered alias collision is reported as a count, because the name is not in the snapshot", () => {
+test("a filtered alias collision is reported as a count with the CLI's own remedy", () => {
   const colliding = snapshot({
     connectors: [
       connector("claude", { registry: {
@@ -197,15 +310,34 @@ test("a filtered alias collision is reported as a count, because the name is not
         rejected: [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 2 }], rejectedCodesOmitted: 0 } }),
       connector("codex"),
     ],
+    availablePeers: [session(`advisor-1a2b3c4d@${HOST}`)],
     routes: [route(`advisor-1a2b3c4d@${HOST}`, "claude")],
   });
   const rendered = renderStatus(colliding, options);
-  assert.match(rendered, /^ {4}2 discovered Claude name\(s\) are shared by more than one live session and are hidden from this list; address those sessions by UUID\./m);
+  assert.match(rendered, /^ {4}2 discovered Claude name\(s\) are shared by more than one live session and are hidden from this list; the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>\.$/m);
   // The disambiguated alias is shown exactly as the broker minted it.
   assert.match(rendered, /^ {2}advisor-1a2b3c4d@this-mac/m);
 });
 
-test("only alerts with a remedy are shown, deduplicated, and the rest are counted", () => {
+test("registry drift is named the moment nothing parses", () => {
+  const drifted = snapshot({
+    connectors: [connector("claude", { registry: {
+      entriesScanned: 3, parseableRecords: 0, parseableRecordSeenSinceBoot: false,
+      rejected: [], rejectedCodesOmitted: 0 } }), connector("codex")],
+  });
+  assert.match(renderStatus(drifted, options),
+    /no parseable session record since broker start — Claude Code's registry layout may have changed; run `embassy check`/);
+
+  // An empty registry is not drift: nothing was scanned, so nothing failed.
+  const emptyRegistry = snapshot({
+    connectors: [connector("claude", { registry: {
+      entriesScanned: 0, parseableRecords: 0, parseableRecordSeenSinceBoot: false,
+      rejected: [], rejectedCodesOmitted: 0 } }), connector("codex")],
+  });
+  assert.doesNotMatch(renderStatus(emptyRegistry, options), /registry layout may have changed/);
+});
+
+test("only alerts with a remedy are shown, deduplicated, and every cap says what it hid", () => {
   const noisy = snapshot({
     alerts: [
       { code: "PEER_TUNNEL_UNAVAILABLE", severity: "warning", timestamp: at(300_000), host: "peer2" },
@@ -218,7 +350,34 @@ test("only alerts with a remedy are shown, deduplicated, and the rest are counte
   assert.match(rendered, /^ {2}PEER_TUNNEL_UNAVAILABLE {2}peer2 {2}30s ago$/m);
   assert.ok(rendered.includes(STATUS_REMEDY.PEER_TUNNEL_UNAVAILABLE!));
   assert.doesNotMatch(rendered, /SOMETHING_WE_HAVE_NO_REMEDY_FOR/);
-  assert.match(rendered, /1 alert\(s\) with no known remedy/);
+  assert.match(rendered, /^ {2}1 alert\(s\) with no known remedy/m);
+
+  // Over the cap, the count is printed rather than the rows silently dropped.
+  const codes = ["PEER_TUNNEL_UNAVAILABLE", "PEER_DIAL_FAILED", "PEER_PROTOCOL_MISMATCH",
+    "ROUTE_UNOBSERVED", "GATEWAY_WAKE_FAILED", "DISPATCH_RUNNER_FAILED",
+    "CLAUDE_INGRESS_REJECTED", "CLAUDE_REPLY_REJECTED"] as const;
+  const many = renderStatus(snapshot({ alerts: codes.map((code, index) => ({
+    code, severity: "warning" as const, timestamp: at(1_000 * (index + 1)), host: `node${String(index)}` })) }), options);
+  assert.equal(many.match(/^ {2}[A-Z_]+ {2}node/gm)?.length, STATUS_CAPS.alerts);
+  assert.match(many, new RegExp(`^ {2}${String(codes.length - STATUS_CAPS.alerts)} more alert\\(s\\) not shown$`, "m"));
+});
+
+test("the shell-peer cap hides only quiet peers, and says how many", () => {
+  const peers = Array.from({ length: STATUS_CAPS.shellPeers + 2 }, (_, index) =>
+    route(`peer-${String(index)}x@${HOST}`, "peer",
+      { lastSeenAt: undefined, ...(index === STATUS_CAPS.shellPeers + 1
+        ? { queueDepth: 4, oldestQueuedAt: at(30_000) } : {}) }));
+  const rendered = renderStatus(snapshot({ routes: peers }), options);
+  // The one stuck peer sorts to the front and survives the cap.
+  assert.match(rendered, new RegExp(`^ {2}peer-${String(STATUS_CAPS.shellPeers + 1)}x@this-mac stale \\(token or await loop gone\\)$`, "m"));
+  assert.match(rendered, /^ {2}2 more shell peer\(s\) with empty mailboxes$/m);
+});
+
+test("the session cap says how many it hid", () => {
+  const sessions = Array.from({ length: STATUS_CAPS.sessions + 3 }, (_, index) =>
+    session(`s${String(index)}@${HOST}`));
+  const rendered = renderStatus(snapshot({ availablePeers: sessions }), options);
+  assert.match(rendered, /^ {4}3 more discovered session\(s\) — read `embassy status --json`$/m);
 });
 
 test("a truncated snapshot says what it dropped", () => {
@@ -236,14 +395,10 @@ test("an empty broker explains what to do instead of showing an empty frame", ()
   assert.match(rendered, /no messages retained/);
 });
 
-test("a refused rescan is reported in the header rather than failing the view", () => {
-  const rendered = renderStatus(snapshot(), { ...options, refreshFailure: "unavailable" });
-  assert.match(rendered, /^the rescan for Claude sessions did not run \(unavailable\); names below may be out of date$/m);
-});
-
 test("--recent selects the newest rows, newest first", () => {
   const many = snapshot({
-    messages: [1, 2, 3, 4, 5].map((index) => message({ sequence: index, bytes: index, body: `body ${String(index)}` })),
+    messages: [1, 2, 3, 4, 5].map((index) => message({
+      sequence: index, bytes: index, messageIdSuffix: `0000000${String(index)}`, body: `body ${String(index)}` })),
   });
   const rendered = renderStatus(many, { ...options, recent: 2 });
   assert.match(rendered, /^recent \(2 of 5\)$/m);
@@ -251,29 +406,48 @@ test("--recent selects the newest rows, newest first", () => {
   assert.deepEqual(bodies, ["5", "4"]);
 });
 
-test("a body preview is one line, control-free, and bounded", () => {
-  const hostile = `alert\u0007\u001b[31mred\u001b[0m\nsecond line\t${"x".repeat(200)}`;
+test("a body preview is one line, free of control and formatting characters, and bounded", () => {
+  const hostile = `alert\u0007\u001b[31mred\u001b[0m\u202ereversed\u200b\u200d\nsecond line\t${"x".repeat(200)}`;
   const preview = previewBody(hostile);
   assert.equal(preview.includes("\u001b"), false);
+  assert.equal(/\p{Cf}/u.test(preview), false);
   assert.equal(preview.includes("\n"), false);
   assert.equal([...preview].length, 60);
   assert.ok(preview.endsWith("…"));
   const rendered = renderStatus(snapshot({ messages: [message({ body: hostile })] }), options);
   assert.equal(rendered.includes("\u001b"), false);
+  assert.equal(/\p{Cf}/u.test(rendered), false);
 });
 
-test("colour is opt-in, carries no meaning alone, and is absent by default", () => {
-  const degraded = snapshot({
-    connectors: [connector("claude"), connector("codex", {
-      health: "degraded", safeErrorCode: "MANAGED_CODEX_UNAVAILABLE" })],
-  });
-  const plain = renderStatus(degraded, options);
-  const painted = renderStatus(degraded, { ...options, color: true });
+test("colour is opt-in, carries no meaning alone, and keeps the table aligned", () => {
+  const plain = renderStatus(DEGRADED_FIXTURE, options);
+  const painted = renderStatus(DEGRADED_FIXTURE, { ...options, color: true });
   assert.equal(plain.includes("\u001b"), false);
   assert.ok(painted.includes("\u001b[31mdegraded\u001b[0m"));
   // Stripping every escape from the coloured render reproduces the plain one:
-  // colour adds emphasis, never information.
+  // colour adds emphasis, never information — and never width.
   assert.equal(painted.replaceAll(/\u001b\[\d+m/g, ""), plain);
+});
+
+test("every remedy the renderer can reach is reachable, and the shared one cannot drift", async () => {
+  // The comment on STATUS_REMEDY claims this pin exists; here it is.
+  const cli = await readFile(path.join(
+    path.dirname(fileURLToPath(import.meta.url)), "..", "src", "gateway", "cli.ts"), "utf8");
+  const hint = /aliasCollision:\n\s*"([^"]+)",/.exec(cli)?.[1];
+  assert.equal(hint, STATUS_REMEDY.PEER_ALIAS_COLLISION);
+
+  // No entry in the table is unreachable: each is rendered by a connector, a
+  // route, an alert, or the collision line.
+  const reachable = new Set<string>(["MANAGED_CODEX_UNAVAILABLE", "PEER_ALIAS_COLLISION",
+    "THREAD_NOT_OBSERVED"]);
+  for (const code of Object.keys(STATUS_REMEDY)) {
+    if (reachable.has(code)) continue;
+    const asAlert = renderStatus(snapshot({
+      alerts: [{ code, severity: "warning", timestamp: at(1_000) }] }), options);
+    const asConnector = renderStatus(snapshot({
+      connectors: [connector("codex", { health: "degraded", safeErrorCode: code })] }), options);
+    assert.ok(asAlert.includes(STATUS_REMEDY[code]!) || asConnector.includes(STATUS_REMEDY[code]!), code);
+  }
 });
 
 test("connector and relative-age vocabulary stays closed", () => {
@@ -292,40 +466,75 @@ test("connector and relative-age vocabulary stays closed", () => {
   assert.equal(relativeAge(at(-60_000), now), "just now");
 });
 
-test("watch emits each new row once and each settlement once, from a bounded state", () => {
-  const first = snapshot({ messages: [message({ sequence: 7, state: "queued", latencyMs: undefined })] });
-  const seed = diffWatch(emptyWatchState, first);
-  assert.equal(seed.state.lastMessageSequence, 7);
+test("watch identifies a message by its id, not by a sequence the store re-stamps", () => {
+  // The store advances `eventSequence` on every state change and re-stamps the
+  // message with it, so the same message arrives under a new sequence when it
+  // settles. Keyed by sequence, that read as a brand-new row.
+  const queued = message({ sequence: 7, messageIdSuffix: "aaaa1111", state: "queued", latencyMs: undefined });
+  const first = diffWatch(emptyWatchState, snapshot({ messages: [queued] }));
+  assert.equal(first.state.lastSequence, 7);
 
-  const second = snapshot({
+  const second = diffWatch(first.state, snapshot({
     messages: [
-      message({ sequence: 7, state: "delivered", latencyMs: 61 }),
-      message({ sequence: 8, state: "queued", latencyMs: undefined, bytes: 12 }),
+      { ...queued, sequence: 9, state: "delivered", latencyMs: 61 },
+      message({ sequence: 10, messageIdSuffix: "bbbb2222", state: "queued", latencyMs: undefined, bytes: 12 }),
     ],
     activityEvents: [{
-      sequence: 3, timestamp: at(1_000), kind: "registration", action: "claude_route_installed",
+      sequence: 11, timestamp: at(1_000), kind: "registration", action: "claude_route_installed",
       outcome: "accepted", aliases: [`advisor@${HOST}`], operatorAction: true,
     }],
-  });
-  const step = diffWatch(seed.state, second);
-  assert.deepEqual(step.events.map((event) => event.type), ["transition", "message", "activity"]);
-  const lines = step.events.map((event) => renderWatchEvent(event, false));
-  assert.equal(lines[0], "#7  queued → delivered (61 ms)");
-  assert.match(lines[1]!, /^#8 {2}advisor@this-mac → codex-reviewer@this-mac {2}queued {2}12 B$/);
-  assert.equal(lines[2], "   claude_route_installed  advisor@this-mac  accepted");
+  }));
+  assert.deepEqual(second.events.map((event) => event.type), ["transition", "message", "activity"]);
+  const lines = second.events.map((event) => renderWatchEvent(event, false));
+  const clock = new Date(now - 120_000).toTimeString().slice(0, 8);
+  assert.equal(lines[0], `${clock}  aaaa1111  queued → delivered (61 ms)`);
+  assert.match(lines[1]!, /^\d\d:\d\d:\d\d {2}bbbb2222 {2}advisor@this-mac → codex-reviewer@this-mac {2}queued {2}12 B$/);
+  assert.match(lines[2]!, /^\d\d:\d\d:\d\d {2}claude_route_installed {2}advisor@this-mac {2}accepted$/);
 
   // Re-polling an unchanged snapshot emits nothing, and the tracked state
   // never grows past the rows the snapshot itself carries.
-  const repeat = diffWatch(step.state, second);
+  const repeat = diffWatch(second.state, snapshot({
+    messages: [{ ...queued, sequence: 9, state: "delivered", latencyMs: 61 }] }));
   assert.deepEqual(repeat.events, []);
-  assert.equal(repeat.state.messageStates.size, second.messages.length);
+  assert.equal(repeat.state.messageStates.size, 1);
+});
+
+test("a message that appears twice in one snapshot settles to its latest row", () => {
+  // A snapshot merges journaled activity with the live row, so the same
+  // message can be present twice; the higher sequence is the current state.
+  const base = message({ messageIdSuffix: "cccc3333", state: "queued", latencyMs: undefined });
+  const diff = diffWatch(emptyWatchState, snapshot({ messages: [
+    { ...base, sequence: 4 }, { ...base, sequence: 5, state: "delivered", latencyMs: 30 }] }));
+  assert.deepEqual(diff.events.map((event) => event.type), ["message", "transition"]);
+  assert.equal(diff.state.messageStates.get("cccc3333"), "delivered");
+});
+
+test("watch reports what it could not see rather than skipping it", () => {
+  const seeded = diffWatch(emptyWatchState, snapshot({
+    messages: [message({ sequence: 3, messageIdSuffix: "dddd4444", state: "queued", latencyMs: undefined })] }));
+  const jumped = diffWatch(seeded.state, snapshot({
+    messages: [message({ sequence: 40_000, messageIdSuffix: "eeee5555" })],
+    truncation: { connectors: 0, availablePeers: 0, routes: 0, activityEvents: 0, messages: 7, alerts: 0 },
+  }));
+  const notices = jumped.events.filter((event) => event.type === "notice");
+  assert.equal(notices.length, 2);
+  assert.equal(renderWatchEvent(notices[0]!, false),
+    "   note  the retained window advanced past 39996 event(s) before this tail saw them");
+  assert.equal(renderWatchEvent(notices[1]!, false),
+    "   note  7 message row(s) omitted from this snapshot by the size budget");
+  // The same truncation on the next poll is not re-announced.
+  assert.deepEqual(diffWatch(jumped.state, snapshot({
+    messages: [message({ sequence: 40_000, messageIdSuffix: "eeee5555" })],
+    truncation: { connectors: 0, availablePeers: 0, routes: 0, activityEvents: 0, messages: 7, alerts: 0 },
+  })).events, []);
 });
 
 test("a settlement that went badly is named, with its safe code", () => {
-  const before = diffWatch(emptyWatchState, snapshot({
-    messages: [message({ sequence: 4, state: "queued", latencyMs: undefined })] }));
-  const after = diffWatch(before.state, snapshot({
-    messages: [message({ sequence: 4, state: "unconfirmed", latencyMs: 900, safeErrorCode: "DELIVERY_UNCONFIRMED" })] }));
+  const queued = message({ sequence: 4, messageIdSuffix: "ffff6666", state: "queued", latencyMs: undefined });
+  const before = diffWatch(emptyWatchState, snapshot({ messages: [queued] }));
+  const after = diffWatch(before.state, snapshot({ messages: [
+    { ...queued, sequence: 5, state: "unconfirmed", latencyMs: 900, safeErrorCode: "DELIVERY_UNCONFIRMED" }] }));
+  const clock = new Date(now - 120_000).toTimeString().slice(0, 8);
   assert.equal(renderWatchEvent(after.events[0]!, false),
-    "#4  queued → unconfirmed (900 ms)  DELIVERY_UNCONFIRMED");
+    `${clock}  ffff6666  queued → unconfirmed (900 ms)  DELIVERY_UNCONFIRMED`);
 });

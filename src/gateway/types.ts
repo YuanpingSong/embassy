@@ -509,6 +509,14 @@ export function projectGatewayPublicSnapshot(
 }
 export type RegisterRouteInput = {
   alias: string; binding: LogicalRouteBinding; registrationMode: RouteRegistrationMode;
+  /**
+   * An ephemeral registration is real in memory — it routes, queues, and
+   * settles exactly like any other — but it is projected out of the durable
+   * state document along with its own messages, so it cannot survive a
+   * restart and cannot be published to a federation peer. `embassy check`
+   * uses one so a self-test leaves nothing behind.
+   */
+  ephemeral?: true;
 };
 export type GatewayReservedAttempt = Readonly<{
   messageId: string; attemptId: string; attemptCount: number; body: string;

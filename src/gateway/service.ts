@@ -7,6 +7,7 @@ import {
   startGatewayControlServer,
   type GatewayControlHandlers,
   type GatewayControlServer,
+  GATEWAY_EPHEMERAL_PEER_TTL_DEFAULT_MS,
   type GatewayDecision,
   type GatewayDeliveryStatusResult,
   type GatewayRegisterPeerResult,
@@ -405,6 +406,13 @@ export class GatewayService {
   private readonly steerRunners = new Map<string, Promise<void>>();
   private readonly startingTargets = new Set<string>();
   private readonly runtimeAlerts: SafeGatewayAlert[] = [];
+  /**
+   * Ephemeral peer registrations and the wall-clock instant each one dies.
+   * Nothing durable records them, so this map is the whole lifetime: it is
+   * swept on the ordinary maintenance tick, and a restart simply never sees
+   * the routes at all.
+   */
+  private readonly ephemeralPeerExpiries = new Map<string, number>();
   private control: GatewayControlServer | undefined;
   private wakeTimer: GatewayServiceTimer | undefined;
   private nextDiscoveryAt = 0;
@@ -616,7 +624,11 @@ export class GatewayService {
     const [snapshot, privateRoutes] = await Promise.all([
       this.snapshot(), this.store.inspectPrivateRoutes(),
     ]);
-    const localRoutes = privateRoutes.filter((route) => route.registrationMode !== "federated_peer" && route.binding.hostId === localHost);
+    // An ephemeral registration is never published: a peer node that mirrored
+    // one would hold a route this broker will delete on a timer and can never
+    // restore, and a self-test must not leave a trace on another machine.
+    const localRoutes = privateRoutes.filter((route) => route.registrationMode !== "federated_peer" &&
+      route.binding.hostId === localHost && !this.store.isEphemeralRegistration(route.binding.registrationId));
     const publicRoutes = new Map(snapshot.routes.map((route) => [route.alias, route]));
     const routes = localRoutes.map((route) => { const row = publicRoutes.get(route.alias)!; return {
       ref: peerRouteRef(localHost, route.binding.registrationId), alias: route.alias, provider: route.binding.provider, host: localHost,
@@ -962,8 +974,14 @@ export class GatewayService {
     await this.store.registerRoute({ alias: params.alias, binding: {
       provider: "peer", hostId: this.config.hostId,
       routeHandle: peerHandle(process.getuid!(), params.alias, token), registrationId: registrationId(),
-    }, registrationMode: "explicit_opt_in" });
+    }, registrationMode: "explicit_opt_in",
+      ...(params.ephemeral === true ? { ephemeral: true as const } : {}) });
     const installed = (await this.store.inspectPrivateRoute(params.alias))!;
+    if (params.ephemeral === true) {
+      this.ephemeralPeerExpiries.set(installed.alias,
+        this.now().getTime() + (params.ttlMs ?? GATEWAY_EPHEMERAL_PEER_TTL_DEFAULT_MS));
+      this.scheduleWake();
+    }
     this.observeRoute(installed); this.reconcileAdvertisement(installed);
     return token;
   }
@@ -989,7 +1007,33 @@ export class GatewayService {
       if (!result.removed) throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
       await this.finishSettlements(result.settlements);
       this.forgetRoute(route); await this.reconcileUnadvertisement(route);
+      this.ephemeralPeerExpiries.delete(route.alias);
     } finally { this.peerCleanupAliases.delete(route.alias); }
+  }
+
+  /**
+   * Retires every ephemeral peer registration whose lifetime has run out. It
+   * is the same removal an explicit `unregister-peer` performs — queued work
+   * is settled, not abandoned — minus the token check, because the authority
+   * here is the clock the broker set itself.
+   */
+  private async expireEphemeralPeers(now: number): Promise<void> {
+    for (const [alias, expiresAt] of [...this.ephemeralPeerExpiries]) {
+      if (expiresAt > now) continue;
+      this.ephemeralPeerExpiries.delete(alias);
+      if (this.peerCleanupAliases.has(alias)) continue;
+      const route = await this.store.inspectPrivateRoute(alias);
+      if (route === undefined) continue;
+      this.peerCleanupAliases.add(alias);
+      try {
+        const result = await this.store.removeOwnedRouteAtomic({ alias, binding: route.binding });
+        if (!result.removed) continue;
+        await this.finishSettlements(result.settlements);
+        this.forgetRoute(route); await this.reconcileUnadvertisement(route);
+      } catch (error) {
+        this.alert("EPHEMERAL_ROUTE_EXPIRY_FAILED", route, error);
+      } finally { this.peerCleanupAliases.delete(alias); }
+    }
   }
 
   private async awaitPeer(params: PeerPrincipalParams): Promise<PeerMailboxAwaitResult> {
@@ -2328,6 +2372,7 @@ export class GatewayService {
         ...(this.config.peerNodes.length > 0
           ? [this.nextPeerRefreshAt || now + PEER_REFRESH_INTERVAL_MS]
           : []),
+        ...this.ephemeralPeerExpiries.values(),
         ...(deadlineAt === undefined ? [] : [Date.parse(deadlineAt)]),
         ...[...this.pendingClaudeReplies.values()].flatMap((rows) =>
           rows.map((row) => Date.parse(row.deadlineAt))
@@ -2346,6 +2391,7 @@ export class GatewayService {
     const now = this.now();
     await this.finishSettlements(await this.store.expireDueMessages(now));
     this.pruneExpiredPendingClaudeReplies(now.getTime());
+    await this.expireEphemeralPeers(now.getTime());
     if (now.getTime() >= this.nextDiscoveryAt) {
       await this.refreshClaudeDiscovery().catch(() => undefined);
       this.nextDiscoveryAt = now.getTime() + DISCOVERY_INTERVAL_MS;

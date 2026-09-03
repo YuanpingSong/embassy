@@ -91,7 +91,13 @@ export type ValidatedSendParams =
 export type DeliveryStatusParams = { token: string };
 export type PeerCatalogParams = { peerHost: string };
 export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
-export type RegisterPeerParams = { alias: string; token?: string };
+export type RegisterPeerParams = {
+  alias: string; token?: string; ephemeral?: true; ttlMs?: number;
+};
+/** Bounds on an ephemeral peer registration's lifetime, in milliseconds. */
+export const GATEWAY_EPHEMERAL_PEER_TTL_DEFAULT_MS = 300_000;
+export const GATEWAY_EPHEMERAL_PEER_TTL_MIN_MS = 1_000;
+export const GATEWAY_EPHEMERAL_PEER_TTL_MAX_MS = 3_600_000;
 export type PeerPrincipalParams = { alias: string; token: string };
 export type PeerReceiptParams = PeerPrincipalParams & { receipt: string };
 
@@ -370,8 +376,19 @@ function decodePeerHandoff(value: unknown): PeerHandoffControlParams {
   catch { return invalid(); }
 }
 function decodeRegisterPeer(value: unknown): RegisterPeerParams {
-  if (!shape(value, { alias: peerAlias }, { token: peerToken })) invalid();
-  return { alias: value.alias as string, ...(value.token === undefined ? {} : { token: value.token as string }) };
+  // `ephemeral` belongs only to a first registration: re-presenting a token
+  // proves an existing route, and an existing route's lifetime is already
+  // fixed. `ttlMs` without `ephemeral` would name a lifetime nothing honours.
+  if (!shape(value, { alias: peerAlias }, { token: peerToken, ephemeral: oneOf(true),
+      ttlMs: (item) => Number.isSafeInteger(item) &&
+        Number(item) >= GATEWAY_EPHEMERAL_PEER_TTL_MIN_MS &&
+        Number(item) <= GATEWAY_EPHEMERAL_PEER_TTL_MAX_MS }) ||
+      (value.ephemeral !== undefined && value.token !== undefined) ||
+      (value.ttlMs !== undefined && value.ephemeral === undefined)) invalid();
+  return { alias: value.alias as string,
+    ...(value.token === undefined ? {} : { token: value.token as string }),
+    ...(value.ephemeral === undefined ? {} : { ephemeral: true as const }),
+    ...(value.ttlMs === undefined ? {} : { ttlMs: value.ttlMs as number }) };
 }
 function decodePeerPrincipal(value: unknown): PeerPrincipalParams {
   if (!shape(value, { alias: peerAlias, token: peerToken })) invalid();

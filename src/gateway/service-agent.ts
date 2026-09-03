@@ -331,37 +331,57 @@ function isProcessAlive(pid: number): boolean {
  * inode. This value only decorates a refusal message, but it is read out of
  * a file another process writes, so it gets the same care.
  */
-async function readHeldLeasePid(homeDir: string, uid: number): Promise<number | undefined> {
-  const lockPath = path.join(homeDir, HOST_LEASE_LOCK_RELATIVE_PATH);
+/**
+ * Read a small private record this user owns, or nothing at all. Never
+ * throws, and never follows anything: the path is lstat'd, refused unless it
+ * is a regular file this uid owns within the byte bound, opened O_NOFOLLOW,
+ * and re-verified through the open handle by (dev, ino, uid, size) so the
+ * file that was checked is the file that was read. A uid of `undefined` — a
+ * platform with no `getuid` — skips only the ownership half.
+ *
+ * Both readers of a private record go through here: the host lease's pid
+ * below, and `readGatewayControllerPid` in cli.ts.
+ */
+export async function readOwnedSmallFile(
+  filePath: string, uid: number | undefined, maximumBytes: number,
+): Promise<string | undefined> {
   try {
-    const info = await lstat(lockPath);
-    if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_LEASE_RECORD_BYTES ||
-        info.uid !== uid) {
+    const info = await lstat(filePath);
+    if (info.isSymbolicLink() || !info.isFile() || info.size > maximumBytes ||
+        (uid !== undefined && info.uid !== uid)) {
       return undefined;
     }
-    const handle = await open(lockPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    let raw: string;
+    const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
       const opened = await handle.stat();
       if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino ||
-          opened.size > MAX_LEASE_RECORD_BYTES || opened.uid !== uid) {
+          opened.size > maximumBytes || (uid !== undefined && opened.uid !== uid)) {
         return undefined;
       }
-      const buffer = Buffer.alloc(MAX_LEASE_RECORD_BYTES);
+      const buffer = Buffer.alloc(maximumBytes);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      raw = buffer.subarray(0, bytesRead).toString("utf8");
+      return buffer.subarray(0, bytesRead).toString("utf8");
     } finally {
       await handle.close();
     }
-    const record: unknown = JSON.parse(raw.trim());
-    const pid =
-      record !== null && typeof record === "object" && "pid" in record
-        ? (record as { pid?: unknown }).pid
-        : undefined;
-    return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The pid recorded in a JSON record, or nothing when it names none. */
+export function recordedPid(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  let record: unknown;
+  try { record = JSON.parse(raw.trim()); } catch { return undefined; }
+  const pid = record !== null && typeof record === "object" && "pid" in record
+    ? (record as { pid?: unknown }).pid : undefined;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+async function readHeldLeasePid(homeDir: string, uid: number): Promise<number | undefined> {
+  return recordedPid(await readOwnedSmallFile(
+    path.join(homeDir, HOST_LEASE_LOCK_RELATIVE_PATH), uid, MAX_LEASE_RECORD_BYTES));
 }
 
 /**

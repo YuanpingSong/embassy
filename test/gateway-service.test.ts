@@ -3148,3 +3148,103 @@ test("restart composes queued, reserved, armed, and accepted phase truth without
   await runCase("armed", "ambiguous");
   await runCase("accepted", "unconfirmed");
 });
+
+// --- ephemeral peer registrations (`embassy check`) -------------------------
+//
+// An ephemeral registration is a real route in memory and nothing at all on
+// disk: it routes, queues and settles like any other, is projected out of the
+// durable document together with its own messages, is never published to a
+// federation peer, and is retired by the broker's own clock. These three
+// tests are the whole contract; nothing here touches a real state directory.
+
+const ephemeralProviders = (): GatewayProviderAdapter[] => (["claude", "codex", "peer"] as const)
+  .map((provider) => new FakeProvider({ provider, hostId: "this-mac" }));
+
+test("an ephemeral peer registration routes in memory but is never written down, published, or restored", async () => {
+  const subject = await fixture(ephemeralProviders(), {
+    peerNodes: ["m5dev"], managedCodexSocketHeld: async () => false,
+  });
+  let replacement: GatewayService | undefined;
+  try {
+    const alias = "peer-check-0a1b2c3d@this-mac";
+    const minted = await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 60_000 });
+    assert.ok(minted.accepted && "token" in minted);
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+
+    // Real in memory: it is in the snapshot, and it can send.
+    assert.ok((await subject.service.snapshot()).routes.some((route) => route.alias === alias));
+    const sent = await subject.handlers.send({ fromAlias: alias, peerToken: minted.token,
+      toAlias: codex.alias, text: "[embassy check 0a1b2c3d] round trip", expectsReply: true });
+    assert.ok(sent.accepted);
+    await eventually(async () => {
+      const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+      return status.found && status.terminal;
+    });
+
+    // Never on disk: neither the route nor the message it carried, so the
+    // written document stays loadable and the check leaves no trace.
+    const raw = await readFile(subject.store.stateFilePath, "utf8");
+    const written = JSON.parse(raw) as { routes: { alias: string }[]; messages: { sourceAlias: string }[] };
+    assert.deepEqual(written.routes.map((route) => route.alias), [codex.alias]);
+    assert.equal(written.messages.some((message) => message.sourceAlias === alias), false);
+    assert.equal(raw.includes(alias), false);
+    assert.equal(raw.includes("round trip"), false);
+
+    // Never published to a federation peer.
+    const catalog = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });
+    assert.deepEqual(catalog?.routes.map((route) => route.alias), [codex.alias]);
+
+    // Never restored: a restart simply does not see it.
+    await subject.service.close();
+    const store = new GatewayStore(subject.config, { now: subject.clock.now, randomId: subject.clock.randomId });
+    replacement = new GatewayService({ config: subject.config, store, adapters: ephemeralProviders(),
+      now: subject.clock.now, timers: new TestTimers(subject.clock), managedCodexSocketHeld: async () => false });
+    await replacement.start();
+    assert.equal(await store.inspectPrivateRoute(alias), undefined);
+    assert.deepEqual((await replacement.snapshot()).routes.map((route) => route.alias), [codex.alias]);
+  } finally { await replacement?.close(); await subject.close(); }
+});
+
+test("an ephemeral peer registration expires on its own at its ttl, and by default after five minutes", async () => {
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false });
+  try {
+    const alias = "peer-check-1b2c3d4e@this-mac";
+    const minted = await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 5_000 });
+    assert.ok(minted.accepted && "token" in minted);
+    subject.clock.advance(4_999); await subject.timers.runDue();
+    assert.notEqual(await subject.store.inspectPrivateRoute(alias), undefined);
+    subject.clock.advance(1); await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(alias)) === undefined,
+      "the registration outlived its ttl");
+    assert.equal((await subject.service.snapshot()).routes.some((route) => route.alias === alias), false);
+
+    // The alias is free again; without a ttl the lifetime is five minutes.
+    const again = await subject.handlers.registerPeer({ alias, ephemeral: true });
+    assert.ok(again.accepted && "token" in again);
+    subject.clock.advance(299_999); await subject.timers.runDue();
+    assert.notEqual(await subject.store.inspectPrivateRoute(alias), undefined);
+    subject.clock.advance(1); await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(alias)) === undefined,
+      "the default lifetime did not end at five minutes");
+    // A clean expiry is not a fault.
+    assert.equal((await subject.service.snapshot()).alerts.some((alert) =>
+      alert.code === "EPHEMERAL_ROUTE_EXPIRY_FAILED"), false);
+  } finally { await subject.close(); }
+});
+
+test("a refused unregister leaves an ephemeral registration to its own expiry", async () => {
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false });
+  try {
+    const alias = "peer-check-2c3d4e5f@this-mac";
+    const minted = await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 5_000 });
+    assert.ok(minted.accepted && "token" in minted);
+    const foreign = `${minted.token.slice(0, -1)}${minted.token.endsWith("x") ? "y" : "x"}`;
+    assert.deepEqual(await subject.handlers.unregisterPeer({ alias, token: foreign }),
+      { accepted: false, code: "route_mismatch" });
+    assert.notEqual(await subject.store.inspectPrivateRoute(alias), undefined);
+    subject.clock.advance(5_000); await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(alias)) === undefined,
+      "the refused unregister should not have pinned the registration");
+  } finally { await subject.close(); }
+});
