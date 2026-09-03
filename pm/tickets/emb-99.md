@@ -255,3 +255,14 @@ no support-matrix ceremony, no site work beyond the stub.
   was reversed. Throwaway principals minted by a command are
   ephemeral by construction (never persisted), not cleaned up by
   hope.
+- 2026-09-03 v3.0.0 RELEASED and cut over on both machines. Post-
+  release backlog from the drill (for founder pricing): (1) a
+  destination-side handoff refusal (no mirrored source, or protocol
+  mismatch on the reverse dial) surfaces to the sender as
+  `ambiguous`/PEER_HANDOFF_OUTCOME_UNKNOWN — it should be a clean
+  refusal code naming the cause; (2) no token-free operator removal
+  for stranded peer routes (and none for Claude routes — emb-107
+  taste note); (3) m5dev hygiene: two global installs (pnpm + npm)
+  — remove one; document that the peer dial runs under sshd's PATH;
+  (4) the reply hint in the envelope says `send --conversation` but a
+  2.x-era skill still says `reply` — skills are reinstalled, OK.
