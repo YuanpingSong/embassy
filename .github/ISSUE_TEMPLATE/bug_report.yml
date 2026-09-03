@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Thanks for filing a bug. Embassy is a local, single-user gateway
-        between Claude Code sessions and a Codex desktop task — please do
+        between Claude Code sessions and a Codex CLI task — please do
         not paste message bodies, prompts, replies, credentials, OAuth
         material, or raw provider output into this form. `embassy status`
         excludes bodies and native identifiers, but its aliases, hosts, and
@@ -27,10 +27,10 @@ body:
       label: Reproduction steps
       description: Exact commands run, and the order they were run in.
       placeholder: |
-        1. embassy serve
-        2. embassy register-codex --alias codex-reviewer@this-mac
+        1. embassy service install
+        2. embassy register-codex --alias codex-reviewer@your-host
         3. embassy status  (to read the Claude session's current name)
-        4. printf '%s\n' '[BODY REDACTED]' | embassy send --from codex-reviewer@this-mac --to advisor@this-mac
+        4. printf '%s\n' '[BODY REDACTED]' | embassy send --from codex-reviewer@your-host --to advisor@your-host
     validations:
       required: true
 
@@ -61,21 +61,18 @@ body:
     attributes:
       label: Claude Code version
       description: >-
-        Embassy v1 is pinned to Claude Code 2.1.227 (2.1.224-2.1.226 sessions
-        already running stay discoverable). Note if you are on a different
-        version.
-      placeholder: "2.1.227"
+        The version `claude --version` reports. Note if it changed recently,
+        and whether `embassy check` passes after the change.
     validations:
       required: true
 
   - type: input
     id: codex-version
     attributes:
-      label: Codex App Server version
+      label: Codex CLI version
       description: >-
-        Embassy v1 is pinned to the Codex App Server 0.147.0 schema. Note
-        if you are on a different version.
-      placeholder: "0.147.0"
+        The version `codex --version` reports. Note if it changed recently,
+        and whether `embassy check` passes after the change.
     validations:
       required: true
 
@@ -83,7 +80,7 @@ body:
     id: macos-version
     attributes:
       label: macOS version
-      description: Embassy v1 supports macOS only.
+      description: Embassy supports macOS only.
     validations:
       required: true
 

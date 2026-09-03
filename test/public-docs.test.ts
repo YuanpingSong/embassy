@@ -22,8 +22,9 @@ async function readPublicFile(relativePath: string): Promise<string> {
  * (`TRACK:`/`DONE:`, `--track`, `untrack`, the liveness nudge); emb-104 removed
  * consent edges outright — `pair`/`unpair`, `select-claude`/`unselect-claude`,
  * `serve --inbound`, and `EMBASSY_MAX_PAIRS` — so a discovered Claude session's
- * route installs on its first use and the OS boundary is the whole permission.
- * Nothing shipped may advertise any of them again. This is the inverse of the contract tests those slices deleted:
+ * route installs on its first use and the OS boundary is the whole permission;
+ * emb-109 retired Codex Desktop as a documented host and reduced the site to a
+ * stub. Nothing shipped may advertise any of them again. This is the inverse of the contract tests those slices deleted:
  * they proved the documented contract was current, this one proves there is
  * no such contract left to document.
  */
@@ -82,6 +83,22 @@ const FORBIDDEN = [
   "consent edge",
   "--inbound",
   "EMBASSY_MAX_PAIRS",
+  // emb-109: Codex Desktop is not a documented host; the broken attachment
+  // flag, the build it broke in, and the upstream issue go with it.
+  "Desktop",
+  "desktop task",
+  "CODEX_APP_SERVER_USE_LOCAL_DAEMON",
+  "26.820",
+  "codex#41112",
+  // emb-109: not even a bare mention of the deleted surfaces, the glob that
+  // named the deleted copy tables, the second language, or the deleted site
+  // stylesheet.
+  "dashboard",
+  "Dashboard",
+  "*copy*.ts",
+  "bilingual",
+  "en/zh",
+  "style.css",
 ] as const;
 
 /**
@@ -126,15 +143,21 @@ async function shippedDocuments(): Promise<string[]> {
   // commands to run, and they sat outside this oracle while they still named
   // `select-claude` long after it was deleted.
   const templates = await walk(".github/ISSUE_TEMPLATE");
+  // The PR template and the repo's agent definitions are guidance too: the
+  // agent file taught a 2.0-era verb list and a second language for a whole
+  // slice after both were deleted.
+  const agents = await walk(".claude/agents");
   return [
     "README.md",
     "SECURITY.md",
     "CONTRIBUTING.md",
     "AGENTS.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
     ...site,
     ...docs,
     ...skill,
     ...templates,
+    ...agents,
   ]
     .filter((file) => !isHistory(file))
     .sort();
@@ -149,6 +172,9 @@ test("no shipped document advertises a deleted surface", async () => {
   assert.ok(files.includes("skills/embassy-peer/SKILL.md"));
   assert.ok(files.includes(".github/ISSUE_TEMPLATE/bug_report.yml"));
   assert.ok(files.includes(".github/ISSUE_TEMPLATE/setup_help.yml"));
+  assert.ok(files.includes(".github/PULL_REQUEST_TEMPLATE.md"));
+  assert.ok(files.includes(".claude/agents/content-writer.md"));
+  assert.ok(files.includes("site/zh-CN/index.html"));
   assert.ok(files.length >= 10, `only ${String(files.length)} documents scanned`);
   assert.equal(files.some((file) => isHistory(file)), false);
 

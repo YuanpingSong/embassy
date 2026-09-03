@@ -1,7 +1,7 @@
 # Repository guidance
 
 This repository contains Embassy, a personal, same-user gateway between live
-Claude Code sessions and Codex desktop tasks. Treat process control, state
+Claude Code sessions and Codex CLI tasks. Treat process control, state
 ownership, permission behavior, native protocol parsing, provider adapters,
 routing, and delivery settlement as security-sensitive boundaries.
 
@@ -75,7 +75,7 @@ hundred wrong lines of copy:
   `codex-app-server.ts`, `codex-local-transport.ts`, `server.ts` boot,
   `control.ts`, `config.ts`.
 - R2: CLI argument surfaces.
-- R1: `*copy*.ts`, `docs/`, README, site, help text.
+- R1: `docs/`, README, site, help text.
 
 ### Hard rules (no judgment required)
 
@@ -110,7 +110,7 @@ deliverability beats ceremony. Never auto-retry a delivery the recipient's
 user denied: that is consent, not transport.
 
 For long messages, write the body to a file and pipe it
-(`embassy reply ... < body.md`); never inline `printf` for prose.
+(`embassy send --conversation ... < body.md`); never inline `printf` for prose.
 
 ## Product invariants
 
@@ -120,7 +120,7 @@ Every new audit check must cite the doctrine sentence it enforces. If no current
 sentence supports it, escalate an explicit doctrine-change proposal rather than
 silently expanding the boundary through a test or hardening patch.
 
-- Keep the shipped v1 launcher macOS-only, foreground, same-machine, and
+- Keep the shipped launcher macOS-only, foreground, same-machine, and
   local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP,
   and Embassy creates no network listener at all.
 - Keep the control plane on one private Unix-domain socket inside the

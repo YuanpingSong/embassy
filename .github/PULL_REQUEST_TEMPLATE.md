@@ -14,20 +14,24 @@
 ## Security-invariant checklist
 
 - [ ] `embassy serve` adds no TCP, HTTP, public API, or outbound provider
-      connection; any live-dashboard change preserves its sole documented
-      authenticated `127.0.0.1:0`, read-only, foreground exception
+      connection; Embassy creates no network listener at all
 - [ ] No new credential, Keychain, OAuth, or transcript access
-- [ ] No message body, prompt, reply, raw provider frame, or socket path is
-      persisted (bodies stay memory-only; only closed route-binding metadata
-      may persist)
-- [ ] No version pin widened or made configurable (Claude Code 2.1.227 / peer
-      protocol 1, Codex App Server 0.147.0) without explicit security review
-- [ ] Codex-to-Claude sends still require explicit Claude selection; inbound
-      Claude reachability never creates an outbound selection
+- [ ] No raw provider frame, callback address, socket path, or credential is
+      persisted; message bodies and delivery status live only in the bounded
+      mode-0600 private state
+- [ ] No provider version fact becomes routing authority, and no protocol or
+      schema number (state schema 5, control protocol 3, peer protocol 2,
+      helper protocol 2, Claude peer protocol 1) changes without explicit
+      review
+- [ ] The permission model is unchanged: the OS boundary plus an exact alias
+      is the permission, a Claude route installs on its first use, a colliding
+      name is refused, and every routed body carries the provenance envelope
+      naming its sender
 - [ ] No Codex approval or sandbox policy is changed or overridden, and no
       approval request is answered by Embassy
 - [ ] Docs updated (README, `docs/GATEWAY-ARCHITECTURE.md`, `SECURITY.md`, or
-      `AGENTS.md` as applicable)
+      `AGENTS.md` as applicable), and no shipped doc promises a record that
+      does not exist
 
 ## Notes for reviewers
 

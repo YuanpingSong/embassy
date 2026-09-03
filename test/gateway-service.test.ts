@@ -2699,6 +2699,18 @@ test("a conversation-addressed send threads the same conversation the other way"
       conversationId: opened.conversationId, text: "not my conversation",
       fromAlias: "visitor@this-mac", replyAddress: "uds:/test/claude-reply.sock",
     }), { accepted: false, code: "route_mismatch", reason: "CONVERSATION_CALLER_MISMATCH" });
+    // Owning one end does not let a caller speak as the other. The alias in
+    // --from is claimed; the credential beside it is what is verified, so the
+    // Codex task naming the Claude end is refused on its thread, and the
+    // Claude session naming the Codex end is refused on its reply address.
+    assert.deepEqual(await subject.handlers.send({
+      conversationId: opened.conversationId, text: "codex credential, claude alias",
+      fromAlias: claude.alias, threadId: THREAD_A,
+    }), { accepted: false, code: "route_mismatch", reason: "CODEX_THREAD_MISMATCH" });
+    assert.deepEqual(await subject.handlers.send({
+      conversationId: opened.conversationId, text: "claude credential, codex alias",
+      fromAlias: codex.alias, replyAddress: "uds:/test/claude-reply.sock",
+    }), { accepted: false, code: "route_mismatch", reason: "CLAUDE_REPLY_ADDRESS_INVALID" });
     const answered = await subject.handlers.send({
       conversationId: opened.conversationId, text: "the answer",
       fromAlias: claude.alias, replyAddress: "uds:/test/claude-reply.sock",

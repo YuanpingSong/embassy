@@ -36,7 +36,8 @@ const PEER_AWAIT_REQUEST_TIMEOUT_MS = 35_000;
 export const EMBASSY_VERSION = "2.0.1";
 // RELEASE VERSION SWEEP — every place the version lives: package.json,
 // npm-shrinkwrap.json (x2), this constant,
-// test/gateway-cli.test.ts package-metadata assertion.
+// test/gateway-cli.test.ts package-metadata assertion, and README.md's two
+// `embassy status` examples (test/status-view.test.ts pins them to this constant).
 
 export const gatewayCliCommands = [
   "serve", "service", "health", "status", "watch", "check", "delivery-status",
@@ -194,6 +195,10 @@ const CLI_HINT = {
     "no Codex task is registered, so there is nothing to check. Run `embassy register-codex --alias codex-<name>@{localHost}` from inside the task, or name any current route with `embassy check --to <alias>`.",
   checkAllStale:
     "every registered Codex task has been unobserved for more than ten minutes ({aliases}), so nothing was sent. Read `embassy status` for each one's remedy, or check one anyway with `embassy check --to <alias>`.",
+  callerIdentityRequired:
+    "no caller credential was inherited, and a conversation names no route to infer one from: run this inside the Codex task (CODEX_THREAD_ID), inside the Claude Code session (CLAUDE_CODE_MESSAGING_SOCKET), or as a registered shell peer with --token-stdin and the peer_ token on the first stdin line.",
+  unknownMethod:
+    "the broker does not implement that control method, so this client and the broker are from different Embassy builds; rebuild or update this client to the broker's Embassy installation, then retry.",
 } as const;
 type CliStderrKind = keyof typeof CLI_STDERR;
 type CliFaultHint = keyof typeof CLI_HINT;
@@ -494,6 +499,13 @@ async function buildRequest(
       const source = peerTokenSource(options, env);
       const principals = Number(hasIdentity(env.CODEX_THREAD_ID)) + Number(hasIdentity(env.CLAUDE_CODE_MESSAGING_SOCKET)) + Number(source !== undefined);
       if (principals > 1) throw callerIdentityConflictFault(env);
+      // A conversation names no route to infer a provider from, so a caller
+      // with nothing inherited gets the provider-neutral code and every
+      // credential it could present; a route send keeps its Claude-shaped
+      // default. A peer credential authenticates a peer-* alias and nothing
+      // else, in either addressing form.
+      if (conversationId !== undefined && principals === 0) throw new CliFault("CALLER_IDENTITY_REQUIRED", false, "callerIdentityRequired");
+      if (source !== undefined && !fromAlias.startsWith("peer-")) fault();
       const peer = source === undefined ? undefined : await readPeerInput(stdin, source, true);
       const authority = peer === undefined ? hasIdentity(env.CODEX_THREAD_ID)
         ? { threadId: requireExclusiveCodexThreadId(env) }
@@ -626,7 +638,10 @@ function refusalHint(
   const reason = (result as { reason?: unknown }).reason;
   if (reason === "PEER_ALIAS_COLLISION") return "aliasCollision";
   if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return "workspaceOverlap";
-  if (reason === "CLAUDE_ROUTE_MISMATCH") return "callerAliasMismatch";
+  // The same remedy covers a conversation answered from the wrong end: the
+  // alias in --from is claimed, the credential beside it is what is verified.
+  if (reason === "CLAUDE_ROUTE_MISMATCH" || reason === "CONVERSATION_CALLER_MISMATCH" ||
+    reason === "CODEX_THREAD_MISMATCH") return "callerAliasMismatch";
   if (reason === "CLAUDE_TARGET_CHANGED") return "targetChanged";
   if ((result as { code?: unknown }).code !== "not_found" || request.method !== "send") return undefined;
   const target = request.params.toAlias;
@@ -1387,6 +1402,10 @@ export async function runGatewayCli(
     }
     if (!response.ok) {
       writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
+      // A method this broker does not know is skew between two builds, not
+      // an argument error: a retired verb such as `reply` on the wire, or a
+      // client newer than the broker. Say which side to move.
+      if (response.error.code === "UNKNOWN_METHOD") stderr.write(`[embassy] ${CLI_HINT.unknownMethod}\n`);
       return gatewayCliExitCodes.failure;
     }
     if (command === "register-peer" && args.includes("--emit-env") && "token" in response.result) {

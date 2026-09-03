@@ -29,10 +29,9 @@ body:
     attributes:
       label: Scope acknowledgment
       description: >-
-        Embassy is deliberately scoped. See the README's "What Embassy is
-        not" section and the Consulates entry in "The vocabulary" (remote
-        hosts over attach-only SSH are on the roadmap but deliberately
-        disabled in v1).
+        Embassy is deliberately scoped: local, single-user, non-hosted, and
+        no wider than the daily path. See the README's "Safety in one
+        minute".
       options:
         - label: >-
             This request keeps Embassy local-only, single-user, and

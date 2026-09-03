@@ -18,11 +18,11 @@ body:
     attributes:
       label: Which quickstart step failed?
       options:
-        - "embassy serve (starting the broker)"
+        - "embassy service install / embassy serve (starting the broker)"
         - "embassy health / embassy status"
         - "embassy register-codex"
         - "embassy send (to a Claude session)"
-        - "embassy reply"
+        - "embassy send --conversation (answering)"
         - "Claude session messaging the codex-* peer"
         - "Install (npm install -g / build from source)"
         - Other
@@ -54,17 +54,15 @@ body:
     id: claude-version
     attributes:
       label: Claude Code version
-      description: Embassy v1 is pinned to Claude Code 2.1.227.
-      placeholder: "2.1.227"
+      description: "The version `claude --version` reports."
     validations:
       required: true
 
   - type: input
     id: codex-version
     attributes:
-      label: Codex App Server version
-      description: Embassy v1 is pinned to the Codex App Server 0.147.0 schema.
-      placeholder: "0.147.0"
+      label: Codex CLI version
+      description: "The version `codex --version` reports."
     validations:
       required: true
 

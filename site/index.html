@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
 <title>Embassy — a local embassy for your AI agents</title>
-<meta name="description" content="Embassy routes messages between Claude Code, Codex, and shell harnesses on one Mac — three providers, six directions, every message says who sent it, and receipts that never claim more than they proved.">
+<meta name="description" content="Embassy is a local broker that lets a Claude Code session and a Codex CLI task on one Mac message each other by name, with a receipt for every delivery.">
 <link rel="canonical" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="en" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="x-default" href="https://yuanpingsong.github.io/embassy/">
@@ -14,166 +14,36 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/social-preview.png">
 <link rel="icon" type="image/svg+xml" href="assets/mark-badge.svg">
-<link rel="stylesheet" href="style.css">
+<style>
+body{max-width:44rem;margin:3rem auto;padding:0 1.25rem;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;color:#1a1a1e;background:#fff}
+h1{font-weight:400;font-size:2rem;margin:0 0 .25rem}h1 img{width:28px;height:28px;vertical-align:-4px;margin-right:.4rem}
+h2{font-weight:400;font-size:1.35rem;margin:2rem 0 .5rem}
+pre{background:#131316;color:#eef1f5;padding:1rem 1.25rem;border-radius:8px;overflow-x:auto;font-size:14px;line-height:1.7}
+code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}p code{font-size:14px}
+.c{color:#8a8a96}footer{color:#6d6d78;font-size:14px;margin-top:2.5rem}a{color:#c96442}
+</style>
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
-<header class="site">
-<nav class="top" aria-label="Site">
-<a class="nm" href="#"><img src="assets/mark.svg" alt="">Embassy</a>
-<div class="links"><a href="#why">Why</a><a href="#providers">Providers</a><a href="#how">How it works</a><a href="#protocol">Protocol</a><a href="#quickstart">Quickstart</a><a href="https://github.com/YuanpingSong/embassy">GitHub ↗</a></div>
-</nav>
-</header>
-<main id="main">
-<div class="hero">
-<div class="wrap">
-<h1>A local embassy<br>for your AI agents</h1>
-<p class="sub">Claude Code, Codex, and shell harnesses — three providers on one Mac, six routable directions, one neutral broker that records every crossing.</p>
-<p class="qual">LOCAL · SINGLE-USER · UNOFFICIAL — NOT AFFILIATED WITH ANTHROPIC OR OPENAI</p>
-<div class="ctas">
-<div class="cmd"><span>npm install -g agent-embassy</span><button type="button" data-copy="npm install -g agent-embassy" hidden>Copy</button></div>
-<a class="gh" href="https://github.com/YuanpingSong/embassy">View on GitHub ↗</a>
-</div>
-<div class="gate" aria-label="An animated exchange: an envelope crosses the embassy gate from claude-main to codex-embassy; the receipt settles from queued to delivered; a reply returns.">
-<div class="archglow"></div>
-<span class="spark" style="left:14%;top:60px;width:3px;height:3px"></span>
-<span class="spark" style="left:26%;top:130px;width:2px;height:2px"></span>
-<span class="spark" style="left:72%;top:80px;width:3px;height:3px"></span>
-<span class="spark" style="left:85%;top:150px;width:2px;height:2px"></span>
-<div class="who l"><b>claude-main</b>asks a question mid-flow</div>
-<div class="who r"><b>codex-embassy</b>turn-boundary start; reply → Claude mailbox</div>
-<div class="arch"><div class="flag"></div></div>
-<div class="env ask"></div>
-<div class="env reply"></div>
-<div class="receipt"><span class="tok">dlv_9f3kAqTrM8…</span> · claude→codex · <span class="st s1">queued</span> <span class="st s2">→ dispatching → transport_written</span> <span class="st s3 delivered">→ delivered</span></div>
-<div class="convchip">conv_a71xB4Nc… returned to sender — reply with the token, only the token-holder can</div>
-<div class="ground"></div>
-</div>
-</div>
-</div>
-<section class="band" id="why">
-<div class="wrap">
-<p class="eyebrow">Why</p>
-<h2>Three moments this exists for</h2>
-<p class="lede">If you run more than one agent, you already know them.</p>
-<div class="cols3">
-<div><span class="k">Mid-flow</span><h3>Your agent has a question</h3><p>Claude hits a decision Codex already made. Instead of you replaying context between two windows, it asks — and keeps working until the reply lands.</p></div>
-<div><span class="k">Away from desk</span><h3>The reply routes without you</h3><p>Codex-bound questions wait honestly for an idle turn boundary. Answers back to Claude enter its mailbox immediately, even while Claude is busy. Nothing needs you watching a terminal.</p></div>
-<div><span class="k">Small footprint</span><h3>Almost nothing to install</h3><p>Claude needs no Embassy commands at all — its native ListAgents and SendMessage discover and message the peers Embassy advertises to it. A Codex task runs one CLI command to register. A shell harness registers with one command and reads its mailbox with <code style="font-size:13px">embassy await</code>.</p></div>
-</div>
-</div>
-</section>
-<section class="band" id="providers">
-<div class="wrap">
-<p class="eyebrow">Providers</p>
-<h2>Three flags, one gate</h2>
-<p class="lede">Claude Code and Codex keep their native transports, because those deliver into the live session you already have open. Any shell harness that can run the CLI joins as a peer with a pull mailbox. Every one of them routes through the same broker, the same OS boundary, and the same ledger.</p>
-<div class="truths">
-<div><b>Claude Code</b><p>Native peer protocol over a private Unix-domain socket. Mail lands in the live session you are working in: discovery, route installation on first use, and a mailbox write with a correlated native receipt. <code style="font-size:13px">peerProtocol 1</code> is exact wire grammar, checked per record.</p></div>
-<div><b>Codex</b><p>The managed App Server over a local subprocess Embassy owns. A registered task is resumed and observed; a message enters at an idle turn or at a validated tool-call boundary — never mid-generation.</p></div>
-<div><b>Shell peers</b><p>Any harness that can run the CLI. It registers a <code style="font-size:13px">peer-*</code> route and receives its one-time token once; <code style="font-size:13px">embassy await</code> long-polls the mailbox in bounded 30-second iterations and acknowledges only after the body reached stdout. No PID binding, no token file, no daemon.</p></div>
-</div>
-</div>
-</section>
-<section class="band" id="how">
-<div class="wrap">
-<p class="eyebrow">How it works</p>
-<h2>Four commands to a working route</h2>
-<p class="lede">Each command is what the shipped CLI accepts once you substitute your host. Replace <code style="border:none;background:none;padding:0">your-host</code> with the <code style="border:none;background:none;padding:0">hostId</code> on the broker's ready line.</p>
-<div class="steps">
-<div><div class="cmd2"><code>embassy serve</code><button type="button" class="cp" data-copy="embassy serve" hidden>Copy</button></div><p>Start the broker. It opens no network listener — everything stays on this machine.</p></div>
-<div><div class="cmd2"><code>embassy register-codex --alias codex-embassy@your-host</code><button type="button" class="cp" data-copy="embassy register-codex --alias codex-embassy@your-host" hidden>Copy</button></div><p>Run inside the Codex task — identity is inherited from the task, never impersonated. Ask your agent to run it.</p></div>
-<div><div class="cmd2"><code>embassy status</code><button type="button" class="cp" data-copy="embassy status" hidden>Copy</button></div><p>Read the current name of the Claude session you want under <code style="border:none;background:none;padding:0">availablePeers</code>. Its route installs the first time you use it.</p></div>
-<div><div class="cmd2"><code>embassy send --from codex-embassy@your-host --to claude-main@your-host &lt;&lt;'MSG'</code><button type="button" class="cp" data-copy="embassy send --from codex-embassy@your-host --to claude-main@your-host <<'MSG'
+<h1><img src="assets/mark.svg" alt="">Embassy</h1>
+<p><strong>A local embassy for your AI agents.</strong> Embassy is a small local broker that lets a Claude Code session and a Codex CLI task on the same Mac message each other by name, with a receipt for every delivery — and the receipt never claims more than it proved. <code>delivered</code> means the provider boundary was crossed: toward Claude, the native mailbox write (<code>transport_written</code>) completed; toward Codex, the App Server accepted the turn. <code>held</code> is progress, never success, and <code>unconfirmed</code> or <code>ambiguous</code> means the evidence is missing. Claude-bound mail is written immediately; Codex-bound mail waits for an idle turn. The recipient answers with the <code>conv_</code> token it was delivered, and no state ever implies a model read the message. Local, single-user, unofficial — not affiliated with or endorsed by Anthropic or OpenAI.</p>
+<h2>Quickstart</h2>
+<p>Each command is what the shipped CLI accepts once you substitute your host. Replace <code>your-host</code> with the <code>hostId</code> on the broker's ready line.</p>
+<pre><span class="c"># install, and run the broker as your launchd agent</span>
+npm install -g agent-embassy
+embassy service install
+<span class="c"># 1. inside the Codex task — ask the agent to run it</span>
+embassy register-codex --alias codex-reviewer@your-host
+<span class="c"># 2. read the live Claude session names</span>
+embassy status
+<span class="c"># 3. from the Codex task — body via stdin, never an argument</span>
+embassy send --from codex-reviewer@your-host --to advisor@your-host --expects-reply &lt;&lt;'MSG'
 Which auth middleware did you settle on?
-MSG" hidden>Copy</button></div><p>The envelope crosses — body via stdin, never an argument. You get a <code style="border:none;background:none;padding:0">dlv_</code> receipt and a <code style="border:none;background:none;padding:0">conv_</code> token back.</p></div>
-</div>
-</div>
-</section>
-<section class="band" id="protocol">
-<div class="wrap">
-<p class="eyebrow">Protocol truth</p>
-<h2>The register doesn't flatter you</h2>
-<p class="lede">Every claim below means exactly what it says — that's the product.</p>
-<div class="truths">
-<div><b>delivered ≠ read</b><p>Toward Codex, delivered means App Server accepted the turn. Toward Claude, it means the native mailbox write completed. Toward a shell peer, it means the awaiting harness flushed the body to stdout and acknowledged it. None of them implies the body was read, understood, or acted on.</p></div>
-<div><b>direction determines timing</b><p>Codex-bound messages wait for idle or the exact STEER next-tool boundary; a Codex wait may show as held — progress, not success — and Embassy never interrupts mid-generation. Claude-bound messages enter Claude's mailbox immediately, busy or idle. A peer-bound message waits in its mailbox until the harness asks for it.</p></div>
-<div><b>runtime claims only what it proved</b><p>There are no evidence tiers, no compatibility probes, and no version gate anywhere at runtime. Authority to route is the OS boundary plus the exact owned route identity; success is what this connection, this route, and this correlated operation demonstrated. Version numbers are unverified metadata, and no version fact grants or withholds anything.</p></div>
-<div><b>an unconfirmed receipt is the honest one</b><p>When Embassy cannot prove the boundary was crossed — a federated handoff whose acceptance never came back, a broker crash with the attempt armed — it settles <code style="font-size:13px">unconfirmed</code> or <code style="font-size:13px">ambiguous</code> rather than call it delivered. A genuine cancellation still settles cancelled. The receipt says what was proved, not what would be tidy.</p></div>
-<div><b>restarts stop dropping mail</b><p>Queued mail survives a broker restart and re-sends exactly once when its route returns. In-flight-at-crash settles ambiguous — never silently lost, never double-sent.</p></div>
-<div><b>every message says who sent it</b><p>The permission to message is the one Embassy already lives inside: your OS account, this machine — or a machine you listed in your private <code style="font-size:13px">nodes.json</code> — and an exact name. There is no second grant to hand out or take back, because none could stop code already running as you. What Embassy adds is attribution: every routed body arrives inside one broker-composed provenance envelope naming the sender, the originating provider, and the reply token, and a name shared by two live sessions is refused rather than guessed.</p></div>
-<div><b>the OS boundary is the perimeter</b><p><code style="font-size:13px">embassy serve</code> binds nothing. Identity is attested at the operating-system boundary — same machine, same user, exact executables, private mode-0600 sockets and state — and never asserted by a name. Embassy binds no TCP port and serves no HTTP.</p></div>
-<div><b>bounded by design</b><p>An accepted message is capped at 16 KiB; queues, conversations, retention, and deadlines are all bounded; a lost Codex observation backs off on a fixed ladder instead of spinning. Embassy answers no approval request on any provider's behalf.</p></div>
-<div><b>a routed message is a new input path</b><p>Treat anything that arrives as untrusted input to its receiver — the same discipline you'd apply to any tool result.</p></div>
-</div>
-<div class="states">
-<details class="d"><summary>delivered</summary><p>The direction's provider boundary was crossed: App Server accepted a Codex-bound turn, Claude's native mailbox accepted a Claude-bound write, or a shell peer acknowledged the body after flushing it to stdout. None means read.</p></details>
-<details class="u"><summary>unconfirmed</summary><p>Embassy could not confirm the direction's delivery boundary — including the case where the provider's own adapter destroys the evidence. Not a failure; not a success. It stays unconfirmed rather than guessing.</p></details>
-<details class="a"><summary>ambiguous</summary><p>Conflicting signals about settlement, or a subprocess that died with the outcome outstanding. Distinct from failed — the broker reports what it knows, not what would be tidy.</p></details>
-<details class="e"><summary>expired</summary><p>The message deadline elapsed before settlement. Terminal, and visible in the ledger with the deadline that killed it.</p></details>
-</div>
-</div>
-</section>
-<section class="band" id="new">
-<div class="wrap">
-<div class="release"><span class="v">v2.0.1</span><span>One provider-neutral send, background Claude sessions as peers, and control protocol 2.</span><a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">Changelog ↗</a></div>
-</div>
-</section>
-<section class="band" id="vocabulary">
-<div class="wrap">
-<p class="eyebrow">The vocabulary</p>
-<h2>Words that mean things</h2>
-<div class="vocab">
-<div><h3>Registration &amp; provenance</h3><p>The permission model. A Codex task registers itself so the broker records its inherited task identity; a shell peer registers with its one-time token; a Claude session's route installs the first time it is addressed. The boundary that decides who may talk is your OS account — what Embassy guarantees is that every message names its sender.</p></div>
-<div><h3>The ledger</h3><p>Receipts for every delivery, with states that never overclaim. The register of record when you ask "where is my message?"</p></div>
-<div><h3>The pouch</h3><p>Transit. Sealed en route: the broker moves messages, it does not read them.</p></div>
-<div><h3>Consulates</h3><p>Three flags fly today: Claude Code, Codex, and any shell harness that can run the CLI — same embassy, same rules for each.</p></div>
-</div>
-</div>
-</section>
-<section class="band" id="agents">
-<div class="wrap">
-<p class="eyebrow">For agents</p>
-<h2>Teach your agent the protocol</h2>
-<p class="lede" style="margin-bottom:20px">The <code style="font-family:var(--mono);font-size:14px">embassy-peer</code> skill teaches an agent how to address peers, interpret receipts, and reply with the conversation token. Install it, then invoke with <code style="font-family:var(--mono);font-size:14px">$embassy-peer</code>.</p>
-<div class="qs" style="line-height:1.9"><span class="c"># Claude Code</span><br>cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/<br><span class="c"># Codex</span><br>cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.codex/skills/</div>
-</div>
-</section>
-<section class="band" id="quickstart">
-<div class="wrap">
-<p class="eyebrow">Quickstart</p>
-<h2>Running in five minutes</h2>
-<p class="req">Requirements first: macOS · Node ≥ 20 · the current <code>agent-embassy</code> release · Claude Code with <code>peerProtocol 1</code> · the managed Codex App Server, all on the same machine and OS user. A provider that isn't there renders degraded with its safe code — nothing refuses to boot over a missing or unexpected version. Single-user, same-machine only. The Claude side needs no Embassy commands (native <code>ListAgents</code>/<code>SendMessage</code>); only the <code>conv_</code> token-holder can <code>reply</code>.</p>
-<div class="qs">
-<span class="p">$</span> npm install -g agent-embassy<br>
-<span class="p">$</span> embassy serve<br>
-<span class="c"># your-host is the hostId on the broker's ready line</span><br>
-<span class="c"># inside your Codex task — ask the agent to run it:</span><br>
-<span class="p">$</span> embassy register-codex --alias codex-embassy@your-host<br>
-<span class="c"># as the operator, read the session's current name from availablePeers:</span><br>
-<span class="p">$</span> embassy status<br>
-<span class="c"># from the Codex task — body via stdin, never an argument:</span><br>
-<span class="p">$</span> embassy send --from codex-embassy@your-host --to claude-main@your-host --expects-reply &lt;&lt;'MSG'<br>
-Which auth middleware did you settle on?<br>
 MSG
-</div>
-</div>
-</section>
-</main>
-<footer class="site">
-<div class="wrap">
-<div class="cols">
-<a href="https://github.com/YuanpingSong/embassy/blob/main/docs/GATEWAY-ARCHITECTURE.md">Architecture</a>
-<a href="https://github.com/YuanpingSong/embassy/blob/main/SECURITY.md">Security</a>
-<a href="https://github.com/YuanpingSong/embassy/blob/main/CONTRIBUTING.md">Contributing</a>
-<a href="https://github.com/YuanpingSong/embassy">GitHub</a>
-</div>
-<p>MIT licensed. An unofficial, independent project — not affiliated with or endorsed by Anthropic or OpenAI. Claude and Codex are trademarks of their respective owners, used here only to name the tools this gateway connects.</p>
-<p>This site is a static page: it loads no external assets, sets no cookies, and collects nothing.</p>
-</div>
-</footer>
-<script>
-(function(){for(var b=document.querySelectorAll('[data-copy]'),i=0;i<b.length;i++){b[i].hidden=false;b[i].addEventListener('click',function(){var t=this;navigator.clipboard.writeText(t.getAttribute('data-copy')).then(function(){var o=t.textContent;t.textContent='Copied';setTimeout(function(){t.textContent=o},1400)})})}})();
-</script>
+<span class="c"># 4. the recipient answers with the token from its reply hint</span>
+embassy send --conversation conv_&lt;token&gt; --from advisor@your-host &lt;&lt;'MSG'
+The session-scoped one; the risk is the double-write window.
+MSG</pre>
+<p>Everything else — the shell-peer fallback, federation, <code>embassy check</code> after an upstream update, and safety in one minute — is in the <a href="https://github.com/YuanpingSong/embassy#readme">README</a>. What each release changed is in the <a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">changelog</a>.</p>
+<footer><p>MIT licensed. Claude and Codex are trademarks of their respective owners, used here only to name the tools this gateway connects. This page loads no external assets, sets no cookies, and collects nothing.</p></footer>
 </body>
 </html>

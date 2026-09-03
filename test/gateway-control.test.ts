@@ -971,6 +971,7 @@ test("rejects untrusted fields, invalid ownership, steering, and unsafe reply ro
     "unselect_claude",
     "pair",
     "unpair",
+    "reply",
   ]) {
     assertWireError(
       await rawRequest(socketPath, wireRequest(removedMethod, {})),

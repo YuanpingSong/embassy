@@ -47,9 +47,9 @@ substitute your own host — the `hostId` on the broker's ready line — whereve
 `your-host` appears. The commands that name a route this machine owns —
 `register-codex` (including `--succeeds`), `unregister-codex`, `register-peer`,
 `unregister-peer` and `await` — refuse an alias naming any other host, and say
-which host this machine uses and the file that came from. `send` and `reply`
-are not restricted this way: their `--to`, `--from` and `--alias` may name a
-federated peer on another host.
+which host this machine uses and the file that came from. `send` is not
+restricted this way: its `--to` and `--from` may name a federated peer on
+another host.
 
 ### Private state reset
 
@@ -216,7 +216,7 @@ The stall notice is not separately configurable. It fires at
 default four-hour deadline a pending delivery is reported at two minutes, not
 two hours.
 
-A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every `reply` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity replacement.
+A CLI initiator receives the full `conv_` token in its result, and every routed recipient receives the same token in the inbound provenance envelope and reply hint. The token is a memory-only participant-scoped locator, not an authority credential: every conversation-addressed `send` rechecks caller identity, conversation membership, and the live route. The token no longer exists after a broker restart; it must likewise never be retried or reconstructed after route retirement or identity replacement.
 
 The public launcher remains host-local. Under allowlisted SSH federation, each broker serves the exact host identity attested by `nodes.json`. `register-codex` infers that host; the alias (and any `--succeeds` alias) must use the same suffix.
 
@@ -256,7 +256,7 @@ Names, old names, PIDs, registry paths, process generations, and socket generati
 
 Across a federated link, reachability is narrower than it is locally. A peer node addresses only the routes its neighbour published in its catalog, and a Claude session appears there only once it has a local route — that is, once it has sent a message or been sent one on its own host. The destination never installs a route on a handoff: an unmirrored sender or an unrouted target is refused, not created. To make a Claude session addressable from a peer node, use it locally once first.
 
-Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server, Desktop, and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration remains.
+Codex routes use an explicit `codex-*` alias and the task's inherited thread identity. The private thread ID is never accepted as a command-line argument or printed. Registration performs no App Server operation. Every delivery opens and attests a fresh managed transport, initializes it, resumes the exact task with history excluded, and authorizes the body write once. App Server and broker restarts do not change logical route authority or require re-registration. A current unavailable or unobservable task reports an operation-local safe code while the registration remains.
 
 Shell routes use `peer-*` aliases and a `peer_` token minted at registration.
 The broker persists only its UID/alias/token hash route handle, never the raw

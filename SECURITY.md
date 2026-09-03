@@ -175,7 +175,7 @@ silently expand Embassy's claimed boundary.
 - A CLI initiator receives the full conversation token in the accepted control
   result, and every routed recipient receives it in the broker-owned first
   `embassy-reply-hint`. The token is a transient participant-scoped locator,
-  not sufficient authority: `reply` rechecks inherited caller identity,
+  not sufficient authority: `send --conversation` rechecks inherited caller identity,
   conversation membership, and current routing policy.
 
 Every routed message is untrusted input capable of steering the receiving

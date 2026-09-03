@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [3.0.0] - <PM fills the date>
 
 ### Added
 
@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - zh-CN localization, the `--lang` option, and the copy-table layer (emb-102).
 - Progress watches: `TRACK:`/`DONE:`, `--track`, `--idle-minutes`, `untrack`, the automated liveness nudge, `EMBASSY_TRACKING_ENABLED`, `EMBASSY_MAX_WATCHES` (emb-103). A body beginning `TRACK:` or `DONE:` is now delivered verbatim as an ordinary message. Busy-gating (`ROUTE_BUSY` deferral and requeue), `STEER:`, and the queued-ahead marker are unchanged.
 - `GATEWAY_NODE_INVENTORY_REQUIRED` (emb-106).
+- Codex Desktop as a documented task host: the attachment mode upstream had broken, its `CODEX_APP_SERVER_USE_LOCAL_DAEMON` guidance, and the known-limitation note are gone from every shipped document; the supported host is Codex CLI with the managed standalone App Server (emb-109). The marketing site is one short page pointing at the README and this changelog; its former second-language page redirects to it (emb-109).
 - Consent edges, with `embassy pair` / `embassy unpair`, `embassy select-claude` / `embassy unselect-claude`, `embassy serve --inbound`, and `EMBASSY_MAX_PAIRS` (emb-104). The `pair`, `unpair`, `select_claude`, and `unselect_claude` control methods, the four safe codes `SENDER_NOT_PAIRED`, `CONSENT_OWNER_HOST_REQUIRED`, `INVALID_CONSENT_EDGE`, and `CONSENT_EDGE_CAPACITY_REACHED`, the `consentEdges` inventory in private state and in the public snapshot, the consent rows on the federation catalog and handoff wire, and the `native_reply` dispatch authorization (the one branch that skipped the target-workspace assertion) are all gone.
 
 ### Changed
@@ -35,19 +36,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Private control protocol is 3; a client and broker on different lines report `CONTROL_VERSION_MISMATCH`.
 - `unregister-codex` against a federated (read-only) route now returns `rejected` with `FEDERATED_ROUTE_READ_ONLY` instead of `not_found` (emb-101).
 - The stall and diagnostic notices written into a Claude session now say ``Run `embassy status` for details`` (emb-102).
-- `send` and `reply` install a discovered Claude session's route on first use; the permission to message is same UID + same host (or a configured node) + alias; the provenance envelope names the sender; a colliding alias is refused with `PEER_ALIAS_COLLISION` at send time (emb-104).
+- `send` installs a discovered Claude session's route on first use; the permission to message is same UID + same host (or a configured node) + alias; the provenance envelope names the sender; a colliding alias is refused with `PEER_ALIAS_COLLISION` at send time (emb-104).
 - Private state keeps schema 5 with a shape change: the retired `consentEdges` key makes an existing file fail the exact-key check, so an older schema-5 state file is refused with `CORRUPT_GATEWAY_STATE` and the documented [private state reset](docs/CONFIGURATION.md#private-state-reset) applies (emb-104). A message's `sourceRegistrationId` is narrowed from nullable to always present, since every sender now holds a route.
 - Two safe codes are added (emb-104): `ROUTE_DIRECTION_MISMATCH`, when admission is asked to route between two endpoints with no direction between them, and `ENDPOINT_RETIRED`, the settlement reason for the work of a route displaced by another session claiming its alias. Two activity actions replace the four retired ones: `claude_route_installed` and `claude_route_retired`.
-- A refused `send` or `reply` control result may carry an optional `reason` — the safe code behind the coarse decision — and the CLI renders one remedy per reason instead of one generic line (emb-104).
+- A refused `send` control result may carry an optional `reason` — the safe code behind the coarse decision — and the CLI renders one remedy per reason instead of one generic line (emb-104).
 - `availablePeers[].selected` is renamed to `routed` in the public snapshot: it means the session has an installed route, never a permission (emb-104).
 - The native Claude helper IPC protocol is version 2: `selected_route` is the only dispatch authorization and its `stateRoot` is required, so every preparation runs the target-workspace assertion (emb-104).
 - A federation node whose only routes are peer mirrors can persist and reload its state: the loader takes the local host identity from the broker's configuration instead of deriving it from local routes, which previously left a fresh node unable to write after its first peer refresh (emb-104).
-- `send` addresses either a route by name (`--to <alias>`) or an open conversation by its token (`--conversation conv_<token>`), never both and never neither; the conversation form is what `reply` was, and it is how a recipient answers (emb-105). The caller must already own one end of that conversation, the other end stays the binding the conversation recorded — a replaced endpoint still refuses with `CONVERSATION_ROUTE_RETIRED` rather than retargeting — and an answer always expects a reply, so `--expects-reply` is rejected beside `--conversation`. The `reply` control method is gone with it: both CLI verbs build one `send` request, and the closed version 3 method family is now fourteen methods. One code changes shape: a conversation-addressed send with no inherited identity reports `CLAUDE_IDENTITY_REQUIRED`, the code `send` already used, where `reply` reported `CALLER_IDENTITY_REQUIRED`.
+- `send` addresses either a route by name (`--to <alias>`) or an open conversation by its token (`--conversation conv_<token>`), never both and never neither; the conversation form is what `reply` was, and it is how a recipient answers (emb-105). The caller must already own one end of that conversation, the other end stays the binding the conversation recorded — a replaced endpoint still refuses with `CONVERSATION_ROUTE_RETIRED` rather than retargeting — and an answer always expects a reply, so `--expects-reply` is rejected beside `--conversation`. The `reply` control method is gone with it: both CLI verbs build one `send` request, and the closed version 3 method family is now fourteen methods. A conversation-addressed send with no inherited credential reports the provider-neutral `CALLER_IDENTITY_REQUIRED`, and the CLI's hint names the three credentials it accepts — the Codex task's `CODEX_THREAD_ID`, the Claude session's messaging socket, or a shell peer's token on the first stdin line with `--token-stdin`; a peer credential authenticates a `peer-*` alias and nothing else, in either addressing form (emb-109). A conversation answered from the wrong end — an end-owner naming the other end in `--from` with its own credential — is refused with `CODEX_THREAD_MISMATCH` or `CLAUDE_REPLY_ADDRESS_INVALID`, and the CLI renders the own-alias remedy for the caller-mismatch reasons (emb-109).
 - The `<embassy-reply-hint>` that begins every delivered envelope now names `embassy send --conversation <token> --from <alias>` (emb-105).
+- A control request naming a method this broker does not implement still fails with `UNKNOWN_METHOD` — a `reply` frame from an intermediate 3.x build included — and the CLI now adds one hint: rebuild or update this client to the broker's Embassy installation (emb-109).
 
 ### Deprecated
 
 - `embassy reply --conversation <token> --alias <your-alias>` is a deprecated alias for `embassy send --conversation <token> --from <your-alias>` (emb-105). It builds the identical control request and returns the identical result and exit code; only the echoed `command` name differs. It stays for one release because reply hints delivered in envelopes already in flight still name it, and is removed after that.
+
+### Upgrade note
+
+- Reset only. Stop Embassy, move `gateway-state.json` aside — schema 5 refuses 2.x state with `GATEWAY_STATE_SCHEMA_UNSUPPORTED` and never rewrites it — and start 3.0, following the [private state reset](docs/CONFIGURATION.md#private-state-reset). `nodes.json` is optional: keep yours if you federate; the broker writes one on first boot if you have none.
+- Re-register Codex tasks from inside each task. There is no select or pair step: Claude routes install themselves on first use.
+- `embassy reply` is deprecated for `embassy send --conversation <token> --from <alias>`; update scripts now, it is removed next release.
+- Codex Desktop hosting is no longer documented; run tasks in Codex CLI with the managed standalone App Server.
+- The four numbers: private state schema 5, control protocol 3 (keep the CLI and broker on one installation), federation peer protocol 2 (upgrade every node), Claude helper protocol 2 (internal to one installation).
 
 ## [2.0.1] - 2026-09-01
 

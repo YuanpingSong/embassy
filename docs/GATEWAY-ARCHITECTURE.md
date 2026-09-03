@@ -1,20 +1,15 @@
 # Embassy Gateway Architecture
 
-Status: local bidirectional routing is implemented for Claude, Codex, and
-universal shell peers. Configured Embassy nodes federate allowlisted
-named routes over a fixed attach-only SSH transport. The published package
-supports macOS, the only platform exercised end to end so far.
+Local bidirectional routing between Claude Code sessions, Codex CLI tasks,
+and universal shell peers, with optional federation of named routes between
+the operator's own machines over a fixed attach-only SSH transport. The
+published package supports macOS, the only platform exercised end to end.
 
-This document uses four evidence labels:
+This document uses three evidence labels:
 
 - **Official**: documented by Anthropic or OpenAI.
-- **Implemented**: present in this worktree and covered by deterministic tests.
-- **Observed**: established by a bounded, read-only local feasibility probe.
-- **Planned**: designed but not yet integrated or live-validated.
-
-A bounded real test completed native Claude discovery and messaging, held a
-message while the registered Codex task was active, automatically started the
-queued turn after idle, and delivered the exact final reply back to Claude.
+- **Implemented**: present in this tree and covered by deterministic tests.
+- **Observed**: established by a bounded, read-only local probe.
 
 ## Purpose and boundary
 
@@ -118,20 +113,6 @@ turn start, turn steer, turn interrupt, and notifications. Embassy exposes
 `turn/steer` only behind the exact Claude-to-Codex `STEER:` contract described
 below; there is no generic RPC surface.
 
-**Official:** for an SSH project, the ChatGPT desktop app starts the remote
-Codex App Server through SSH using the remote user's login shell. Files,
-commands, credentials, permissions, plugins, skills, and local tools come from
-that execution host. App Server transports should not be exposed directly on
-a shared or public network.
-
-**Observed:** this Desktop build connects to a host-local App Server on each
-execution host. Remote tasks on `build-mac` do not route through the local App
-Server. Desktop reaches the remote listener through an SSH `app-server proxy`.
-A second attach-only client successfully initialized against the already-owned
-`build-mac` listener and called only `thread/loaded/list` without creating a turn.
-The same topology is expected for `lab-mac.example`, but that host has not been
-probed by this project.
-
 ## Topology
 
 ```text
@@ -147,9 +128,7 @@ probed by this project.
              │
              ├─ local Codex App Server ─ registered native local tasks
              │
-             ├─ planned attach-only SSH proxy ─ build-mac App Server
-             │
-             └─ planned attach-only SSH proxy ─ lab-mac.example App Server
+             └─ optional federation ─ ssh <node> embassy peer-stdio ─ peer broker
 
   Claude-side skill/CLI ─ private control UDS ─ gateway
   Codex-side skill/CLI  ─ private control UDS ─ gateway
@@ -162,13 +141,14 @@ wake a different idle runtime after that turn ends.
 
 ## Component status
 
-The status below is intentionally narrower than the target architecture.
+Everything below is exercised by the deterministic suite; live validation is
+a separately authorized operator action (see [Validation boundary](#validation-boundary)).
 
 | Component | Current evidence |
 | --- | --- |
-| Neutral gateway types, private-v4 metadata store, bounded attempt state machine, queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention |
+| Neutral gateway types, schema-5 metadata store, bounded attempt state machine, queues, dedupe, rate limits, and public projection | **Implemented**, deterministic tests; message bodies persist under bounded retention |
 | Private JSONL control protocol over a controller-owned UDS | **Implemented**, deterministic synthetic tests; no provider connection required |
-| Claude registry/peer adapter with strict peer protocol 1 and per-operation validation | **Implemented** and live-tested through Claude Code 2.1.227, including discovery, native status frames, cancellation, and accessible-workspace validation |
+| Claude registry/peer adapter with strict peer protocol 1 and per-operation validation | **Implemented**; deterministic tests cover discovery, native status frames, cancellation, and accessible-workspace validation |
 | Claude current-user runtime roots | **Implemented**; derives the registry and callback roots from the verified OS user without inspecting a launcher or configuration file |
 | Stateless allowlisted Codex App Server transport with bounded busy behavior | **Implemented**; every operation opens and attests its own transport, and the conformance suite covers idle gating, exact `STEER:` behavior, clean retry, and ambiguous no-replay settlement |
 | Attach-only local Codex proxy transport and exact-owned cleanup | **Implemented**, five deterministic tests; no live App Server connection in routine tests |
@@ -180,12 +160,9 @@ The status below is intentionally narrower than the target architecture.
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
 | Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
-| Live Codex-to-Claude delivery | **Tested** against real Claude 2.1.224–2.1.226 sessions |
-| Claude-initiated Codex turn/reply into Codex | **Tested** with a real busy Codex task: native `busy → waiting`, automatic post-idle turn, terminal delivery status, and exact reply round trip |
-| Remote production connector | **Planned**; only the `build-mac` read-only attach feasibility probe is complete |
 
 Synthetic tests do not scan `~/.claude`, connect `/tmp/cc-socks`, attach to a
-Desktop App Server, invoke SSH, or make a model request.
+live App Server, invoke SSH, or make a model request.
 
 ## Identity, discovery, and opt-in
 
@@ -219,8 +196,8 @@ Codex registration is explicit. A task registers its own alias and
 authoritative `CODEX_THREAD_ID`; the gateway does not enumerate global Codex
 history to invent routes. Registration performs no provider I/O. Each delivery
 opens a fresh attested App Server transport, initializes it, resumes the exact
-private task with history excluded, and authorizes one body write. Endpoint or
-Desktop restart is therefore a transport fact, not a logical route transition;
+private task with history excluded, and authorizes one body write. An App
+Server restart is therefore a transport fact, not a logical route transition;
 an unavailable or duplicate exact task fails that operation with a safe code
 without retargeting the alias or replaying an ambiguous write.
 
@@ -251,7 +228,7 @@ never substitutes for it.
 
 An installed Claude route keeps its UUID as durable identity until a
 different session claims its alias and displaces it; there is no operator
-command that retires one (deliberate retirement is emb-107's subject).
+command that retires one.
 Discovery publishes only bounded sanitized candidates and current
 lookup aliases; it never changes the installed UUID. Immediately before a
 Claude-bound write, Embassy performs a fresh bounded registry scan, resolves
@@ -506,7 +483,7 @@ locator. The service still validates
 the inherited caller, current conversation membership, and current route
 policy. The full token remains confined to the accepted control result
 and transient provider payload, and is memory-only: it is never persisted,
-journaled, logged, snapshotted, rendered on a dashboard, placed in a receipt,
+journaled, logged, snapshotted, placed in a receipt,
 or returned from suffix-only public correlation. Formatter,
 provenance-metadata, and framed-size failures are clean pre-write terminal
 failures; they can never become ambiguous writes or replay authorizations.
@@ -527,10 +504,9 @@ result contains both its conversation ID and a fresh opaque delivery
 correlation handle called a delivery token.
 The token has the closed form `dlv_` followed by exactly 24 base64url
 characters (`A-Z`, `a-z`, `0-9`, `_`, or `-`). It addresses one bounded
-private-v4 message/status row and is not a provider receipt handle or a
+private schema-5 message/status row and is not a provider receipt handle or a
 provider native identifier. It is stored only in the mode-0600 broker state
-and never appears in a public snapshot, normal log, provider receipt, or
-dashboard.
+and never appears in a public snapshot, normal log, or provider receipt.
 
 The read-only `delivery_status` method accepts only that token and returns one
 of these closed results:
@@ -736,7 +712,7 @@ names only: a session UUID is unambiguous, so a UUID selector still reaches its
 session, and a sender is never fenced by its own display name because its
 identity was attested rather than typed.
 
-## Codex connectors and remote hosts
+## Codex connector and federation
 
 Each broker's local connector has an explicit host identity, from `nodes.json` when federating or from this host's own hostname otherwise; `this-mac` has no reserved meaning. Configured peers exchange only body-free local catalogs and destination-owned handoffs over fixed SSH.
 
@@ -773,7 +749,7 @@ does not participate. Embassy does not read or retain reported
 working-directory or policy fields, and a transport failure cannot discard the
 registration or its accepted queue.
 
-Version 1 never changes or independently classifies a Codex task's approval or
+Embassy never changes or independently classifies a Codex task's approval or
 sandbox policy. Offline `TurnStartParams` schema evidence from tested App
 Server 0.147.0 shows that
 policy overrides persist for the current and subsequent turns, so using them
@@ -783,37 +759,24 @@ tool enforcement to the registered task's native Codex configuration. Explicit
 `codex-*` registration plus exact per-operation task and transport validation is the
 gateway reachability boundary; native task policy remains Codex's concern.
 
-A remote connector never starts, stops, replaces, signals, or unlinks a
-Desktop-owned App Server or its socket. If attach fails, the host is offline;
-Desktop remains responsible for lifecycle recovery. SSH aliases are fixed
-operator configuration, never model-provided strings. Normal OpenSSH host-key
-validation applies.
+### Federation
 
-### Completed no-model feasibility evidence
+Federation is the only cross-machine path. Each entry in `nodes.json` is an
+OpenSSH `Host` alias; the broker dials `ssh <node> embassy peer-stdio` and
+speaks the fixed peer protocol — version 2, three methods: `initialize`,
+`catalog/get`, `handoff`. A peer's catalog is body-free (aliases, providers,
+states), and its routes appear locally as `alias@host` mirrors behind opaque
+references; a handoff is `delivered` when the destination durably accepts it,
+after which the destination owns provider delivery, and anything lost after
+that acceptance settles ambiguous and is never replayed. One hop only, no
+forwarding. A node answering `initialize` with another protocol version
+surfaces `PEER_PROTOCOL_MISMATCH` on its mirrored routes and in `embassy
+status` instead of a tunnel fault. SSH aliases are fixed operator
+configuration, never model-provided strings; normal OpenSSH host-key
+validation applies, your SSH configuration owns keys, users, and ports, and
+Embassy opens no listener of its own.
 
-On 2026-08-07:
-
-- A no-model environment check in the current Codex task confirmed that the
-  task tool process inherits `CODEX_THREAD_ID` and that its value matches the
-  required UUID grammar. The check emitted booleans only and never printed or
-  retained the identifier. This validates the repo skill/CLI premise that a
-  Codex task can self-register without accepting its private thread ID as a
-  command-line argument.
-- A local attach-only probe connected through a second proxy to managed Codex
-  App Server 0.147.0, initialized, called only `thread/loaded/list`, and
-  confirmed the current task was already loaded. It emitted normalized
-  booleans and an aggregate count, then confirmed cleanup of only its own
-  proxy process.
-- An authorized remote probe attached through a second SSH proxy to the
-  already-running `build-mac` App Server (remote Codex CLI 0.145.0), initialized,
-  and validated a schema-correct `thread/loaded/list`. It printed no task IDs,
-  payloads, remote diagnostics, history, or credentials and left Desktop's
-  original proxy alive.
-
-Both proxy processes required their exact-owned forced-cleanup fallback after
-the bounded graceful-close window; final cleanup was confirmed. These probes
-prove attach and loaded-task discovery on the tested versions. They do not
-prove notification fanout, approval routing, or writable task control.
+### Offline App Server schema evidence
 
 The connector requires turn notifications to carry the exact `threadId` and
 correlates the exact `turn.id`; `item/completed` must carry the exact
@@ -841,14 +804,19 @@ next-tool-call timing boundary to App Server, treats a clean refusal as normal
 queue fallback, and treats malformed or write-ambiguous results as terminally
 uncertain without replay.
 
-The one Desktop restart needed for the local shared-App-Server feasibility
-test has already been completed. Building, running synthetic tests, starting
-the gateway, and a future Claude peer-socket test do
-not themselves require another Desktop restart. A provider or Desktop major
-upgrade may change an internal interface; strict per-operation checks keep the
-responsible route closed if that interface no longer matches. Other providers
-remain available. If the attachment mode changes, a supporting release may
-require a separately announced controlled restart.
+## Protocol and schema versions
+
+Each number below is bumped once per release line, at first need, and a
+mismatch is refused rather than adapted to:
+
+| Surface | Version | On mismatch |
+| --- | --- | --- |
+| Private state schema (`gateway-state.json`) | 5 | An older or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED`; reset only, never rewritten |
+| Private control protocol (CLI ↔ broker) | 3 | `CONTROL_VERSION_MISMATCH` at the client; keep the CLI and broker on one installation. A method the broker does not implement is `UNKNOWN_METHOD`, and the CLI says to rebuild or update the client |
+| Federation peer protocol (`peer-stdio`) | 2 | `PEER_PROTOCOL_MISMATCH` on that node's mirrored routes and in `embassy status` |
+| Native Claude helper IPC protocol | 2 | Internal to one installation; the helper and broker ship together |
+| Public snapshot schema (`embassy status --json`) | 2 | Unchanged across the 3.0 line |
+| Claude peer protocol (consumed, not owned) | 1 | A session record declaring another value is rejected in isolation and counted |
 
 ## Persistence and privacy
 
@@ -870,7 +838,7 @@ snapshot is a
 strict projection that removes private route handles, registration IDs, and
 operation-local endpoint evidence. The state directory is mode 0700 and state is mode 0600;
 provider-native identifiers never enter normalized events, public snapshots,
-the dashboard, CLI arguments/output, aliases, logs, or error text. On restart,
+CLI arguments/output, aliases, logs, or error text. On restart,
 logical routes remain unchanged. Queued and reserved bodies
 may resume once only after their exact registration authority is
 rechecked; armed and accepted work settles without replay. Callback, native
@@ -895,9 +863,10 @@ user's interactive Claude history. The narrow live boundary is:
   accessible Claude peer-socket directory, with inode/generation checks;
 - create its control socket plus metadata files only inside its
   separate controller-owned mode-0700 state directory;
-- attach to explicitly allowlisted Codex App Server endpoints; and
-- optionally execute fixed `ssh`/Codex proxy argv for allowlisted hosts, with
-  no shell and no model-supplied command or hostname.
+- attach to the managed local Codex App Server; and
+- optionally execute the fixed `ssh <node> embassy peer-stdio` argv for each
+  node listed in `nodes.json`, with no shell and no model-supplied command or
+  hostname.
 
 It does not read Claude transcripts, settings, project state, credentials,
 Keychain, shell history, or unrelated user files. It does not copy, print,
@@ -924,8 +893,8 @@ paths, peers, and transports:
 
 No grant to `~/.claude/projects`, the rest of
 `~/.claude`, Keychain APIs, the full home directory, or
-unrelated temporary files is required. Remote-host access is a later,
-separately reviewed fixed-SSH-alias capability.
+unrelated temporary files is required. Cross-machine reach is federation over
+`ssh <node> embassy peer-stdio`, configured only in `nodes.json`.
 
 A routed Claude session's workspace may contain the private controller-state
 directory. The filesystem root and configured temporary roots are still
@@ -967,7 +936,7 @@ the preferred least-context setup, but it is not mandatory.
 - A queued or reserved body survives process loss under bounded retention and
   may resume once after exact logical authority is rechecked. Armed or accepted
   work settles `ambiguous` or `unconfirmed` and is never replayed.
-- A provider or Desktop update that changes an internal interface degrades its
+- A provider update that changes an internal interface degrades its
   responsible route while the broker and other providers remain available. A
   Claude record outside peer protocol 1 is rejected per record, and every
   current provider artifact used for an operation is re-attested before effect.
@@ -976,9 +945,8 @@ the preferred least-context setup, but it is not mandatory.
 
 Routine validation is deterministic and synthetic: it does not inspect live
 provider state, connect a provider socket, attach to App Server, invoke SSH, or
-make a model request. The separately authorized local live tests recorded
-above established discovery and both message directions. Remote production
-connectors remain a separately reviewed future capability.
+make a model request. Live validation is a separately authorized operator
+action — `embassy check` is its everyday form — and is never part of CI.
 
 Only the synthetic layer is routine validation. Server startup,
 discovery, and callback binding remain no-send operations; step 4 is the first

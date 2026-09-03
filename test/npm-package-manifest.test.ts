@@ -63,6 +63,11 @@ test("exact npm manifest names every runtime artifact and canonical public asset
     "README.zh-CN.md",
     "docs/CONFIGURATION.zh-CN.md",
     "docs/DELIVERY.zh-CN.md",
+    // emb-109: nothing of the deleted surfaces ships, docs and data included.
+    "docs/DASHBOARD.md",
+    "support/provider-support-matrix.json",
+    "dist/src/gateway/dashboard-model.js",
+    "site/style.css",
   ]) {
     assert.ok(!expected.includes(removedPath), removedPath);
   }

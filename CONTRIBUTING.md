@@ -122,7 +122,7 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
   terminal failure, ambiguity, expiry, and restart abandonment.
 - Never retry an ambiguous provider write. Requeue only a confirmed clean
   deferral that has not crossed an ambiguous mutation boundary.
-- The private mode-0600 v4 ledger retains bounded queued and recent bodies,
+- The private mode-0600 v5 ledger retains bounded queued and recent bodies,
   opaque delivery tokens, and status. Queued or reserved work may resume once
   within its deadline and attempt budget against the same exact route and edge.
   Armed work settles `ambiguous`; accepted work settles `unconfirmed`; neither
@@ -138,7 +138,7 @@ native. Do not route around a hold or refusal or fabricate a successful receipt.
 `embassy serve` may use one private same-user control UDS and nothing else. It
 must not listen on TCP or HTTP, and Embassy ships no other listener. Do not add
 a wildcard/remote listener, external assets, service workers, telemetry, or a
-mutation endpoint. Keep the public v1 launcher foreground, macOS-only, and
+mutation endpoint. Keep the shipped launcher foreground, macOS-only, and
 local-host-only.
 
 ## Live validation
@@ -205,4 +205,4 @@ deliverability beats ceremony. Never auto-retry a delivery the recipient's
 user denied: that is consent, not transport.
 
 For long messages, write the body to a file and pipe it
-(`embassy reply ... < body.md`); never inline `printf` for prose.
+(`embassy send --conversation ... < body.md`); never inline `printf` for prose.
