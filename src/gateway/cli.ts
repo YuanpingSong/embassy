@@ -867,6 +867,13 @@ type GatewayCheckOptions = Readonly<{
  * moment waits at most that long for the broker to reclaim it.
  */
 const CHECK_IDENTITY_GRACE_MS = 60_000;
+/**
+ * Set when a real Ctrl-C interrupted `check`. The abandoned `await_peer`
+ * request may still hold its socket — and with it the event loop — until the
+ * broker answers it. The operator already has the summary, so the entry point
+ * exits once stdio has drained instead of lingering on that socket.
+ */
+let interruptedCheckExit = false;
 
 /**
  * The round-trip self-test. It mints its own principal — a throwaway `peer-*`
@@ -1315,6 +1322,7 @@ export async function runGatewayCli(
           delay: dependencies.delay ?? defaultDelay, color: useColor(stdout, env),
         });
       } finally {
+        if (dependencies.watchSignal === undefined && checkInterrupt.signal.aborted) interruptedCheckExit = true;
         checkInterrupt.dispose();
       }
     }
@@ -1461,6 +1469,11 @@ if (isDirectExecution()) {
   void runGatewayCli().then(
     (exitCode) => {
       process.exitCode = exitCode;
+      // Bounded exit after an interrupted `check`: drain stdout, then stderr,
+      // then leave — see `interruptedCheckExit`.
+      if (interruptedCheckExit) {
+        process.stdout.write("", () => process.stderr.write("", () => process.exit(exitCode)));
+      }
     },
     () => {
       process.stderr.write(fixedStderr("failure"));

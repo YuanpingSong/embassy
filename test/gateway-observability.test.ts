@@ -137,12 +137,12 @@ test("status is read-only: it reads the snapshot and nothing else", async () => 
     assert.deepEqual(methods, ["list_snapshot"], argv.join(" "));
     assert.equal(code, gatewayCliExitCodes.ok, argv.join(" "));
   }
-  // Instead it says how old the scan is, and offers the command.
+  // Instead it says how old the scan is — dated by the sessions the scan
+  // found — and offers the command.
   const stale = capture(true);
   await runGatewayCli(["status"], dependencies(stale, () => ({
     ...SNAPSHOT,
-    connectors: [{ ...SNAPSHOT.connectors[0]!, lastSeenAt: "2026-09-02T17:00:00.000Z" },
-      SNAPSHOT.connectors[1]!],
+    availablePeers: [{ ...SNAPSHOT.availablePeers[0]!, lastSeenAt: "2026-09-02T17:00:00.000Z" }],
   }), { now: () => Date.parse("2026-09-02T18:04:11.000Z") }));
   assert.match(text(stale), /^sessions scanned 1h ago {2}— run `embassy refresh` to rescan$/m);
 });

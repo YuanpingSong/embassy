@@ -57,6 +57,10 @@ const PEER_TOKEN = /^peer_[A-Za-z0-9_-]{32}$/;
 const DISCOVERY_INTERVAL_MS = 30_000;
 const MANAGED_CODEX_SOCKET_CHECK_INTERVAL_MS = 30_000;
 const PEER_REFRESH_INTERVAL_MS = 30_000;
+/** A failed timed retirement of an ephemeral peer is retried this much later… */
+const EPHEMERAL_EXPIRY_RETRY_MS = 5_000;
+/** …this many times in a row before the registration is left to the next restart. */
+const EPHEMERAL_EXPIRY_MAX_ATTEMPTS = 3;
 const PEER_FAILURE_CODES = ["PEER_DIAL_FAILED", "PEER_TUNNEL_UNAVAILABLE", "PEER_PROTOCOL_MISMATCH"] as const;
 type PeerFailureCode = (typeof PEER_FAILURE_CODES)[number];
 const CLEAN_RETRY_DELAY_MS = 500;
@@ -413,6 +417,8 @@ export class GatewayService {
    * the routes at all.
    */
   private readonly ephemeralPeerExpiries = new Map<string, number>();
+  /** Consecutive failed retirements per ephemeral alias; cleared on success or removal. */
+  private readonly ephemeralExpiryFailures = new Map<string, number>();
   private control: GatewayControlServer | undefined;
   private wakeTimer: GatewayServiceTimer | undefined;
   private nextDiscoveryAt = 0;
@@ -1002,13 +1008,24 @@ export class GatewayService {
     const route = await this.assertPeer(params);
     if (this.peerCleanupAliases.has(route.alias)) throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
     this.peerCleanupAliases.add(route.alias);
+    // The expiry leaves the map before the removal, under the same cleanup
+    // guard, so a clock that fires mid-removal has nothing to act on; a
+    // removal that does not happen puts it back, so a refused unregister
+    // still leaves the registration to its own expiry.
+    const expiry = this.ephemeralPeerExpiries.get(route.alias);
+    this.ephemeralPeerExpiries.delete(route.alias);
+    this.ephemeralExpiryFailures.delete(route.alias);
+    let removed = false;
     try {
       const result = await this.store.removeOwnedRouteAtomic({ alias: route.alias, binding: route.binding });
       if (!result.removed) throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+      removed = true;
       await this.finishSettlements(result.settlements);
       this.forgetRoute(route); await this.reconcileUnadvertisement(route);
-      this.ephemeralPeerExpiries.delete(route.alias);
-    } finally { this.peerCleanupAliases.delete(route.alias); }
+    } finally {
+      if (!removed && expiry !== undefined) this.ephemeralPeerExpiries.set(route.alias, expiry);
+      this.peerCleanupAliases.delete(route.alias);
+    }
   }
 
   /**
@@ -1016,22 +1033,44 @@ export class GatewayService {
    * is the same removal an explicit `unregister-peer` performs — queued work
    * is settled, not abandoned — minus the token check, because the authority
    * here is the clock the broker set itself.
+   *
+   * The clock is keyed by alias, and an alias can be re-registered durably
+   * after its ephemeral holder left, so nothing is retired unless the route
+   * behind the alias is still an ephemeral one. A retirement that throws
+   * keeps its entry and is retried `EPHEMERAL_EXPIRY_RETRY_MS` later, with an
+   * alert each time; after `EPHEMERAL_EXPIRY_MAX_ATTEMPTS` consecutive
+   * failures the entry is dropped and the registration is left to the next
+   * restart, which clears it by construction.
    */
   private async expireEphemeralPeers(now: number): Promise<void> {
     for (const [alias, expiresAt] of [...this.ephemeralPeerExpiries]) {
       if (expiresAt > now) continue;
-      this.ephemeralPeerExpiries.delete(alias);
+      // Another owner is mid-removal; the entry is theirs to clear or restore.
       if (this.peerCleanupAliases.has(alias)) continue;
       const route = await this.store.inspectPrivateRoute(alias);
-      if (route === undefined) continue;
+      if (route === undefined || !this.store.isEphemeralRegistration(route.binding.registrationId)) {
+        this.ephemeralPeerExpiries.delete(alias); this.ephemeralExpiryFailures.delete(alias);
+        continue;
+      }
       this.peerCleanupAliases.add(alias);
       try {
         const result = await this.store.removeOwnedRouteAtomic({ alias, binding: route.binding });
-        if (!result.removed) continue;
-        await this.finishSettlements(result.settlements);
-        this.forgetRoute(route); await this.reconcileUnadvertisement(route);
+        if (result.removed) {
+          await this.finishSettlements(result.settlements);
+          this.forgetRoute(route); await this.reconcileUnadvertisement(route);
+        }
+        // Not removed means the binding changed underneath: the alias belongs
+        // to someone else now, and this clock is spent either way.
+        this.ephemeralPeerExpiries.delete(alias); this.ephemeralExpiryFailures.delete(alias);
       } catch (error) {
         this.alert("EPHEMERAL_ROUTE_EXPIRY_FAILED", route, error);
+        const attempts = (this.ephemeralExpiryFailures.get(alias) ?? 0) + 1;
+        if (attempts >= EPHEMERAL_EXPIRY_MAX_ATTEMPTS) {
+          this.ephemeralPeerExpiries.delete(alias); this.ephemeralExpiryFailures.delete(alias);
+        } else {
+          this.ephemeralExpiryFailures.set(alias, attempts);
+          this.ephemeralPeerExpiries.set(alias, now + EPHEMERAL_EXPIRY_RETRY_MS);
+        }
       } finally { this.peerCleanupAliases.delete(alias); }
     }
   }

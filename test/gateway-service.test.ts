@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
@@ -367,6 +367,7 @@ async function fixture(
     spawnPeer?: NonNullable<GatewayServiceOptions["spawnPeer"]>;
     seed?: (store: GatewayStore) => Promise<void>;
     managedCodexSocketHeld?: () => Promise<boolean>;
+    afterStateFileRename?: () => void | Promise<void>;
   }> = {},
 ): Promise<Fixture> {
   const temporary = await realpath(os.tmpdir());
@@ -385,7 +386,8 @@ async function fixture(
   };
   const clock = new TestClock();
   const timers = new TestTimers(clock);
-  const store = new GatewayStore(config, { now: clock.now, randomId: clock.randomId });
+  const store = new GatewayStore(config, { now: clock.now, randomId: clock.randomId,
+    ...(options.afterStateFileRename === undefined ? {} : { afterStateFileRename: options.afterStateFileRename }) });
   await store.initialize();
   await options.seed?.(store);
   const service = new GatewayService({
@@ -3159,6 +3161,16 @@ test("restart composes queued, reserved, armed, and accepted phase truth without
 
 const ephemeralProviders = (): GatewayProviderAdapter[] => (["claude", "codex", "peer"] as const)
   .map((provider) => new FakeProvider({ provider, hostId: "this-mac" }));
+/**
+ * Move the clock and fire what is due. `scheduleWake` arms its timer a tick
+ * after the operation that asked for it, so the timers are read after a
+ * macrotask boundary — otherwise a wake armed by the previous line is missed.
+ */
+async function advanceAndRun(subject: Fixture, milliseconds: number): Promise<void> {
+  subject.clock.advance(milliseconds);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await subject.timers.runDue();
+}
 
 test("an ephemeral peer registration routes in memory but is never written down, published, or restored", async () => {
   const subject = await fixture(ephemeralProviders(), {
@@ -3246,5 +3258,166 @@ test("a refused unregister leaves an ephemeral registration to its own expiry", 
     subject.clock.advance(5_000); await subject.timers.runDue();
     await eventually(async () => (await subject.store.inspectPrivateRoute(alias)) === undefined,
       "the refused unregister should not have pinned the registration");
+  } finally { await subject.close(); }
+});
+
+test("an ephemeral registration's rows never reach disk: not while it lives, not at unregister, not at expiry", async () => {
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false });
+  try {
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    const bytes = async (): Promise<string> => readFile(subject.store.stateFilePath, "utf8");
+    const roundTrip = async (alias: string, body: string, ttlMs: number): Promise<string> => {
+      const minted = await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs });
+      assert.ok(minted.accepted && "token" in minted);
+      const sent = await subject.handlers.send({ fromAlias: alias, peerToken: minted.token,
+        toAlias: codex.alias, text: body, expectsReply: true });
+      assert.ok(sent.accepted);
+      await eventually(async () => {
+        const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+        return status.found && status.terminal;
+      });
+      // Live: the ledger shows the delivered row. Disk: nothing.
+      assert.ok((await subject.service.snapshot()).messages.some((row) => row.sourceAlias === alias));
+      const raw = await bytes();
+      assert.equal(raw.includes(alias), false, `${alias} reached disk while it lived`);
+      assert.equal(raw.includes(body), false, `"${body}" reached disk while its sender lived`);
+      return minted.token;
+    };
+
+    // The cleanup path: the check's own unregister. The delivered rows leave
+    // the live state with the registration, in the same write, so the file
+    // written at removal — and every file written after it — carries nothing.
+    const first = "peer-check-aaaa1111@this-mac";
+    const token = await roundTrip(first, "first trip", 60_000);
+    assert.deepEqual(await subject.handlers.unregisterPeer({ alias: first, token }), { accepted: true, code: "ok" });
+    let raw = await bytes();
+    assert.equal(raw.includes(first), false); assert.equal(raw.includes("first trip"), false);
+    assert.equal((await subject.service.snapshot()).messages.some((row) => row.sourceAlias === first), false);
+    assert.ok((await subject.handlers.registerPeer({ alias: "peer-durable@this-mac" })).accepted);
+    raw = await bytes();
+    assert.equal(raw.includes(first), false); assert.equal(raw.includes("first trip"), false);
+    assert.equal(raw.includes("peer-durable@this-mac"), true);
+
+    // The expiry path.
+    const second = "peer-check-bbbb2222@this-mac";
+    await roundTrip(second, "second trip", 5_000);
+    subject.clock.advance(5_000); await subject.timers.runDue();
+    await eventually(async () => (await subject.store.inspectPrivateRoute(second)) === undefined);
+    raw = await bytes();
+    assert.equal(raw.includes(second), false); assert.equal(raw.includes("second trip"), false);
+    assert.equal((await subject.service.snapshot()).messages.some((row) => row.sourceAlias === second), false);
+  } finally { await subject.close(); }
+});
+
+test("a failed timed retirement is retried five seconds later, and gives up after three attempts", async () => {
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false });
+  try {
+    const store = subject.store as { removeOwnedRouteAtomic: GatewayStore["removeOwnedRouteAtomic"] };
+    const original = store.removeOwnedRouteAtomic.bind(subject.store);
+    let failing: string | undefined; let failures = 0;
+    store.removeOwnedRouteAtomic = async (input) => {
+      if (input.alias === failing) { failures += 1; throw new Error("injected removal failure"); }
+      return original(input);
+    };
+    const failedAlerts = async (alias: string): Promise<number> => (await subject.service.snapshot()).alerts
+      .filter((alert) => alert.code === "EPHEMERAL_ROUTE_EXPIRY_FAILED" && alert.alias === alias).length;
+
+    // One failure: alerted, kept, re-armed; the retry retires it.
+    const alias = "peer-check-cccc3333@this-mac";
+    assert.ok((await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 5_000 })).accepted);
+    failing = alias;
+    await advanceAndRun(subject, 5_000);
+    await eventually(() => failures === 1, "the first retirement attempt did not run");
+    assert.equal(await failedAlerts(alias), 1);
+    assert.notEqual(await subject.store.inspectPrivateRoute(alias), undefined);
+    failing = undefined;
+    await advanceAndRun(subject, 4_999);
+    assert.notEqual(await subject.store.inspectPrivateRoute(alias), undefined);
+    await advanceAndRun(subject, 1);
+    await eventually(async () => (await subject.store.inspectPrivateRoute(alias)) === undefined,
+      "the retry did not retire the registration");
+
+    // Three consecutive failures: alerted each time, then left alone.
+    const stubborn = "peer-check-dddd4444@this-mac";
+    assert.ok((await subject.handlers.registerPeer({ alias: stubborn, ephemeral: true, ttlMs: 5_000 })).accepted);
+    failing = stubborn; failures = 0;
+    for (const expected of [1, 2, 3]) {
+      await advanceAndRun(subject, 5_000);
+      await eventually(() => failures === expected, `attempt ${String(expected)} did not run`);
+    }
+    assert.equal(await failedAlerts(stubborn), 3);
+    await advanceAndRun(subject, 60_000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(failures, 3, "a fourth attempt ran");
+    assert.notEqual(await subject.store.inspectPrivateRoute(stubborn), undefined);
+  } finally { await subject.close(); }
+});
+
+test("a stale expiry never retires a durable registration that later took the alias", async () => {
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false });
+  try {
+    const alias = "peer-check-eeee5555@this-mac";
+    const minted = await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 5_000 });
+    assert.ok(minted.accepted && "token" in minted);
+    assert.deepEqual(await subject.handlers.unregisterPeer({ alias, token: minted.token }), { accepted: true, code: "ok" });
+    assert.ok((await subject.handlers.registerPeer({ alias })).accepted);
+    // The unregister already cleared the clock; plant a stale one anyway, so
+    // the guard alone has to hold.
+    const internals = subject.service as unknown as { ephemeralPeerExpiries: Map<string, number>; scheduleWake(): void };
+    internals.ephemeralPeerExpiries.set(alias, subject.clock.now().getTime() - 1);
+    internals.scheduleWake();
+    await advanceAndRun(subject, 0);
+    await eventually(() => !internals.ephemeralPeerExpiries.has(alias), "the stale clock was not discarded");
+    const durable = await subject.store.inspectPrivateRoute(alias);
+    assert.notEqual(durable, undefined);
+    assert.equal(subject.store.isEphemeralRegistration(durable!.binding.registrationId), false);
+  } finally { await subject.close(); }
+});
+
+test("an ephemeral registration survives a post-rename persistence error in memory", async () => {
+  let failAfterRename = false;
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false,
+    afterStateFileRename: () => { if (failAfterRename) throw new Error("injected directory-sync failure"); } });
+  try {
+    const alias = "peer-check-ffff6666@this-mac";
+    const minted = await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 60_000 });
+    assert.ok(minted.accepted && "token" in minted);
+    // A durable write whose rename lands but whose follow-up fails: the store
+    // reads the file back and finds its own commit — the projection, without
+    // the ephemeral rows — and must keep the live state rather than install it.
+    failAfterRename = true;
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    failAfterRename = false;
+    const route = await subject.store.inspectPrivateRoute(alias);
+    assert.notEqual(route, undefined);
+    assert.equal(subject.store.isEphemeralRegistration(route!.binding.registrationId), true);
+    assert.equal((await readFile(subject.store.stateFilePath, "utf8")).includes(alias), false);
+    assert.deepEqual(await subject.handlers.unregisterPeer({ alias, token: minted.token }), { accepted: true, code: "ok" });
+  } finally { await subject.close(); }
+});
+
+test("a rolled-back mutate restores the ephemeral set together with the state", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("root bypasses file permissions");
+    return;
+  }
+  const subject = await fixture(ephemeralProviders(), { managedCodexSocketHeld: async () => false });
+  try {
+    const alias = "peer-check-1111aaaa@this-mac";
+    assert.ok((await subject.handlers.registerPeer({ alias, ephemeral: true, ttlMs: 60_000 })).accepted);
+    const before = (await subject.store.inspectPrivateRoute(alias))!;
+    // The removal drops the id from the set inside the operation; a write
+    // that then fails must put both the rows and the id back.
+    await chmod(subject.config.stateDir, 0o500);
+    try {
+      await assert.rejects(subject.store.removeOwnedRouteAtomic({ alias, binding: before.binding }));
+    } finally { await chmod(subject.config.stateDir, 0o700); }
+    assert.notEqual(await subject.store.inspectPrivateRoute(alias), undefined);
+    assert.equal(subject.store.isEphemeralRegistration(before.binding.registrationId), true);
+    // Still memory-only: the next durable write carries nothing of it.
+    assert.ok((await subject.handlers.registerPeer({ alias: "peer-durable@this-mac" })).accepted);
+    assert.equal((await readFile(subject.store.stateFilePath, "utf8")).includes(alias), false);
   } finally { await subject.close(); }
 });

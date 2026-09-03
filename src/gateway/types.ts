@@ -512,9 +512,11 @@ export type RegisterRouteInput = {
   /**
    * An ephemeral registration is real in memory — it routes, queues, and
    * settles exactly like any other — but it is projected out of the durable
-   * state document along with its own messages, so it cannot survive a
-   * restart and cannot be published to a federation peer. `embassy check`
-   * uses one so a self-test leaves nothing behind.
+   * state document along with every row that names it, so it cannot survive
+   * a restart and cannot be published to a federation peer; and when it is
+   * removed, by `unregister-peer` or by its own expiry, those rows leave the
+   * live state with it, so nothing of it is written afterwards either.
+   * `embassy check` uses one so a self-test leaves nothing behind.
    */
   ephemeral?: true;
 };

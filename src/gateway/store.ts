@@ -708,8 +708,11 @@ export class GatewayStore {
    * Registration ids that must never reach the durable state document. They
    * are ordinary rows in the in-memory state — admission, dispatch, queueing
    * and settlement all see them — and are projected out at the one place that
-   * serializes, together with any message row that names one. Nothing here is
-   * written down, so a restart reclaims them by construction.
+   * serializes, together with every row that names one. When such a
+   * registration is removed, the same rows leave the live state in the same
+   * mutate, before the id leaves this set; a rolled-back mutate restores the
+   * set with the state. Nothing here is written down, so a restart reclaims
+   * them by construction.
    */
   private readonly ephemeralRegistrations = new Set<string>();
   constructor(config: GatewayConfig, dependencies: GatewayStoreDependencies = {}) {
@@ -905,38 +908,54 @@ export class GatewayStore {
     return this.ephemeralRegistrations.has(registrationId);
   }
   /**
-   * The document actually written. An ephemeral registration is dropped along
-   * with every message, dedupe fingerprint and rate bucket that names it, and
-   * the queued-bytes total is reduced by what those messages held, so the
-   * written state stays internally consistent under the strict loader — which
-   * refuses a state whose active message points at a route it cannot find, or
-   * whose queued total disagrees with its queued rows. Both refusals are
-   * exactly right, and neither must ever be reachable by a document we wrote.
+   * Everything an ephemeral registration owns, taken out of `state`: the route
+   * itself, every message that names it as source or target, the dedupe
+   * fingerprints and rate bucket keyed by its alias, the journal rows —
+   * message activity and runtime activity — that name the alias, and the
+   * queued-bytes total those messages contributed. Pure: the caller decides
+   * whether this becomes the written projection or the live state.
+   */
+  private ephemeralRowsRemoved(
+    state: GatewayPersistedState, ids: ReadonlySet<string>, aliases: ReadonlySet<string>,
+  ): Pick<GatewayPersistedState, "routes" | "messages" | "dedupe" | "rateBuckets" | "activity" | "accounting"> {
+    const kept = (message: GatewayMessageRecord): boolean =>
+      !ids.has(message.sourceRegistrationId) &&
+      (message.targetRegistrationId === null || !ids.has(message.targetRegistrationId));
+    const names = (row: Readonly<{ sourceAlias: string; targetAlias: string }>): boolean =>
+      aliases.has(row.sourceAlias) || aliases.has(row.targetAlias);
+    const droppedQueuedBytes = state.messages
+      .filter((message) => !kept(message) && message.state.phase === "queued")
+      .reduce((total, message) => total + message.bytes, 0);
+    return {
+      routes: state.routes.filter((route) => !ids.has(route.binding.registrationId)),
+      messages: state.messages.filter(kept),
+      dedupe: state.dedupe.filter((row) => !names(row)),
+      rateBuckets: state.rateBuckets.filter((row) => !aliases.has(row.sourceAlias)),
+      activity: state.activity.filter((entry) => entry.type === "message_activity"
+        ? !names(entry.event)
+        : !entry.event.aliases.some((alias) => aliases.has(alias))),
+      accounting: { ...state.accounting,
+        queuedBytes: state.accounting.queuedBytes - droppedQueuedBytes },
+    };
+  }
+  /**
+   * The document actually written. While an ephemeral registration lives, its
+   * rows are projected out here, so the written state stays internally
+   * consistent under the strict loader — which refuses a state whose active
+   * message points at a route it cannot find, or whose queued total disagrees
+   * with its queued rows. Both refusals are exactly right, and neither must
+   * ever be reachable by a document we wrote. When the registration is
+   * removed, `removeRegistrationMetadata` takes the same rows out of the live
+   * state in the same mutate, so nothing of it is written afterwards either.
    */
   private persistedProjection(state: GatewayPersistedState): GatewayPersistedState {
     if (this.ephemeralRegistrations.size === 0) return state;
     const dropped = state.routes.filter((route) =>
       this.ephemeralRegistrations.has(route.binding.registrationId));
     if (dropped.length === 0) return state;
-    const aliases = new Set(dropped.map((route) => route.alias));
-    const ids = new Set(dropped.map((route) => route.binding.registrationId));
-    const names = (row: Readonly<{ sourceAlias: string; targetAlias: string }>): boolean =>
-      aliases.has(row.sourceAlias) || aliases.has(row.targetAlias);
-    const kept = (message: GatewayMessageRecord): boolean =>
-      !ids.has(message.sourceRegistrationId) &&
-      (message.targetRegistrationId === null || !ids.has(message.targetRegistrationId));
-    const droppedQueuedBytes = state.messages
-      .filter((message) => !kept(message) && message.state.phase === "queued")
-      .reduce((total, message) => total + message.bytes, 0);
-    return {
-      ...state,
-      routes: state.routes.filter((route) => !ids.has(route.binding.registrationId)),
-      messages: state.messages.filter(kept),
-      dedupe: state.dedupe.filter((row) => !names(row)),
-      rateBuckets: state.rateBuckets.filter((row) => !aliases.has(row.sourceAlias)),
-      accounting: { ...state.accounting,
-        queuedBytes: state.accounting.queuedBytes - droppedQueuedBytes },
-    };
+    return { ...state, ...this.ephemeralRowsRemoved(state,
+      new Set(dropped.map((route) => route.binding.registrationId)),
+      new Set(dropped.map((route) => route.alias))) };
   }
   async removeOwnedRouteAtomic(
     input: Readonly<{
@@ -2122,8 +2141,17 @@ export class GatewayStore {
   private removeRegistrationMetadata(
     state: GatewayPersistedState, route: GatewayRouteRecord,
   ): void {
+    if (this.ephemeralRegistrations.has(route.binding.registrationId)) {
+      // An ephemeral registration takes every row it owns with it — in this
+      // same mutate, and before its id leaves the set — so the closing
+      // persist finds nothing of it to write: not the message it sent, not
+      // the reply it received, not a journal row that names it.
+      Object.assign(state, this.ephemeralRowsRemoved(state,
+        new Set([route.binding.registrationId]), new Set([route.alias])));
+      this.ephemeralRegistrations.delete(route.binding.registrationId);
+      return;
+    }
     state.routes = state.routes.filter((candidate) => candidate !== route);
-    this.ephemeralRegistrations.delete(route.binding.registrationId);
     state.dedupe = state.dedupe.filter(
       (entry) =>
         entry.sourceAlias !== route.alias && entry.targetAlias !== route.alias,
@@ -2320,6 +2348,15 @@ export class GatewayStore {
     return this.mutex.run("gateway", async () => {
       const state = this.requireState();
       const before = structuredClone(state);
+      // The ephemeral set is state too: a removal drops an id from it inside
+      // the operation, and a rollback that restored the rows but not the id
+      // would turn a memory-only registration into a durable one.
+      const ephemeralBefore = new Set(this.ephemeralRegistrations);
+      const rollback = (): void => {
+        this.state = before;
+        this.ephemeralRegistrations.clear();
+        for (const id of ephemeralBefore) this.ephemeralRegistrations.add(id);
+      };
       const now = this.now();
       this.prune(state, now);
       let value: T;
@@ -2334,14 +2371,12 @@ export class GatewayStore {
           try {
             await this.persist();
           } catch (persistError) {
-            if (!(persistError instanceof PostRenamePersistenceError)) {
-              this.state = before;
-            }
+            if (!(persistError instanceof PostRenamePersistenceError)) rollback();
             throw persistError;
           }
           throw error.error;
         }
-        this.state = before;
+        rollback();
         throw error;
       }
       state.updatedAt = now.toISOString();
@@ -2351,7 +2386,7 @@ export class GatewayStore {
       try {
         await this.persist();
       } catch (error) {
-        if (!(error instanceof PostRenamePersistenceError)) this.state = before;
+        if (!(error instanceof PostRenamePersistenceError)) rollback();
         throw error;
       }
       return value;
@@ -2774,10 +2809,12 @@ export class GatewayStore {
         const installedCurrent =
           installed?.commit.id === state.commit.id &&
           installed.commit.sequence === state.commit.sequence;
-        if (installedCurrent && installed !== undefined) {
-          this.state = installed;
-          return;
-        }
+        // The rename crossed the commit point and the file holds this very
+        // commit: the write succeeded. The live state stays as it is — the
+        // file is its projection, minus the ephemeral rows that must never be
+        // read back in, so installing the readback here would silently turn
+        // every live ephemeral registration into nothing.
+        if (installedCurrent) return;
         const installedPrior =
           !readbackFailed &&
           (prior === undefined

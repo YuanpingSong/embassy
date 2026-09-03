@@ -102,7 +102,7 @@ export const STATUS_REMEDY: Readonly<Record<string, string>> = {
   ROUTE_OBSERVATION_FAILED:
     "The provider's route observation failed once; the state words above may be out of date until the next poll.",
   EPHEMERAL_ROUTE_EXPIRY_FAILED:
-    "A throwaway `embassy check` registration could not be retired on time; it is retired at the next tick, and a broker restart clears it either way.",
+    "A throwaway `embassy check` registration could not be retired on time. The broker retries twice more, five seconds apart; if all three attempts fail the registration stays until the broker restarts, which clears it by construction.",
   GATEWAY_WAKE_FAILED:
     "The broker's maintenance tick failed once; if it repeats, restart the broker.",
 } as const;
@@ -340,10 +340,19 @@ export function renderStatus(
   lines.push(paint(`state dir ${options.stateDir}`, "dim"));
   // `status` never rescans — a rescan journals an activity row and performs a
   // passive discovery scan, both of which need the operator to ask. So the
-  // header says how old the scan is and offers the command.
-  const scannedAt = claudeConnector(snapshot)?.lastSeenAt;
+  // header says how old the scan is and offers the command. The scan's own
+  // stamp is the newest `availablePeers[].lastSeenAt`: every discovered
+  // session is stamped by the scan that found it, whereas the claude
+  // connector's `lastSeenAt` also moves on a delivery. With nothing
+  // discovered there is no stamp to read, so the line says that rather than
+  // inventing an age.
+  const scannedAt = snapshot.availablePeers
+    .map((peer) => peer.lastSeenAt)
+    .filter((stamp): stamp is string => stamp !== undefined)
+    .sort().at(-1);
   const scanAge = ageMs(scannedAt, now);
-  lines.push(paint(`sessions scanned ${relativeAge(scannedAt, now)}`, "dim") +
+  lines.push(paint(scannedAt === undefined ? "sessions: none discovered"
+    : `sessions scanned ${relativeAge(scannedAt, now)}`, "dim") +
     (scanAge === undefined || scanAge > STATUS_SCAN_STALE_AFTER_MS
       ? paint("  — run `embassy refresh` to rescan", "yellow") : ""));
 

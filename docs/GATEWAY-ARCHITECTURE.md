@@ -273,7 +273,9 @@ scan it reports is the broker's own and a status loop cannot journal anything.
 Its `sessions` block is the sanitized `availablePeers` inventory — every live
 Claude session the last scan found, by current name, marked `routed` once a
 route exists for it — and its header says how old that scan is, offering
-`embassy refresh` when it is older than a minute. Below the sessions come the
+`embassy refresh` when it is older than a minute — that age is read from the
+newest discovered session's own stamp, because the connector's `lastSeenAt`
+also moves on a delivery. Below the sessions come the
 routes: routed Claude aliases and explicitly registered Codex aliases, with
 provider, current state, queue depth, and last-seen age. The same
 pane also carries the bounded ledger's retained message bodies, so its output
@@ -618,9 +620,15 @@ The closed version 3 method family is exactly these fourteen methods:
   first registration may ask to be `ephemeral` with a bounded `ttlMs`
   (default five minutes): the route is real in memory — it routes, queues,
   and settles like any other — but it is projected out of the durable state
-  document together with its own messages, excluded from the federation
-  catalog, and retired by the broker's own clock, so it cannot survive a
-  restart or be restored on another node. `embassy check` uses one.
+  document together with every row that names it (its messages, dedupe and
+  rate rows, and journal entries), excluded from the federation catalog, and
+  retired by the broker's own clock, so it cannot survive a restart or be
+  restored on another node. Removal — by `unregister_peer` or by that clock —
+  takes the same rows out of the live state in the same write, so nothing of
+  it is written afterwards either; a retirement that fails is retried twice,
+  five seconds apart, then left to the next restart. The clock is guarded by
+  the registration's identity, so a durable route that later takes the same
+  alias is never retired by it. `embassy check` uses one.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
 seventeen implemented commands are

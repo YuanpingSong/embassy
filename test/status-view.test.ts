@@ -162,7 +162,7 @@ test("a healthy snapshot renders one broker line, connectors, sessions, routes, 
   const rendered = renderStatus(HEALTHY_FIXTURE, { ...options, pid: 41213 });
   assert.match(rendered, /^embassy 2\.0\.1 {2}broker ok · pid 41213 · snapshot just now\n/);
   assert.match(rendered, /^state dir \/private\/state\/agent-embassy$/m);
-  assert.match(rendered, /^sessions scanned 4s ago$/m);
+  assert.match(rendered, /^sessions scanned 3s ago$/m);
   assert.match(rendered, /^ {2}claude {2}ok$/m);
   assert.match(rendered, /^ {2}codex {3}ok$/m);
   assert.match(rendered, /^ {2}session {2,}state {2,}route {2,}last seen$/m);
@@ -175,17 +175,23 @@ test("a healthy snapshot renders one broker line, connectors, sessions, routes, 
   assert.equal(rendered.includes("\u001b"), false);
 });
 
-test("the header offers a rescan when the scan is old, and never rescans itself", () => {
-  const fresh = renderStatus(snapshot({ connectors: [connector("claude", { lastSeenAt: at(30_000) })] }), options);
+test("the header dates the scan from the sessions it found, and never rescans itself", () => {
+  const fresh = renderStatus(snapshot({
+    availablePeers: [session(`advisor@${HOST}`, { lastSeenAt: at(30_000) })] }), options);
   assert.match(fresh, /^sessions scanned 30s ago$/m);
   assert.doesNotMatch(fresh, /embassy refresh` to rescan/);
 
-  const old = renderStatus(snapshot({ connectors: [connector("claude", { lastSeenAt: at(300_000) })] }), options);
-  assert.match(old, /^sessions scanned 5m ago {2}— run `embassy refresh` to rescan$/m);
+  // The newest session stamp is the scan's. The claude connector's own
+  // `lastSeenAt` also moves on a delivery, so it is not consulted at all.
+  const two = renderStatus(snapshot({
+    connectors: [connector("claude", { lastSeenAt: at(1_000) }), connector("codex")],
+    availablePeers: [session(`a@${HOST}`, { lastSeenAt: at(300_000) }), session(`b@${HOST}`, { lastSeenAt: at(120_000) })],
+  }), options);
+  assert.match(two, /^sessions scanned 2m ago {2}— run `embassy refresh` to rescan$/m);
 
-  // A connector that has never been observed offers the same rescan.
-  const never = renderStatus(snapshot({ connectors: [connector("claude", { lastSeenAt: undefined })] }), options);
-  assert.match(never, /^sessions scanned never {2}— run `embassy refresh` to rescan$/m);
+  // Nothing discovered: there is no stamp to read, so no age is invented.
+  const none = renderStatus(snapshot(), options);
+  assert.match(none, /^sessions: none discovered {2}— run `embassy refresh` to rescan$/m);
 });
 
 test("the sessions block shows what can be addressed, routed or not", () => {

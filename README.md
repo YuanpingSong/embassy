@@ -185,7 +185,7 @@ in a terminal and stays machine-readable everywhere else:
 ```text
 embassy 2.0.1  broker ok · pid 41213 · snapshot just now
 state dir /Users/you/.local/state/agent-embassy
-sessions scanned 4s ago
+sessions scanned 3s ago
 
 connectors
   claude  ok
@@ -214,7 +214,7 @@ it never lets one quiet corner make the whole broker look broken:
 ```text
 embassy 2.0.1  broker degraded · pid 41213 · snapshot just now
 state dir /Users/you/.local/state/agent-embassy
-sessions scanned 4s ago
+sessions scanned 3s ago
 
 connectors
   claude  ok
@@ -298,6 +298,13 @@ looks like. The peer answers because [the skill](skills/embassy-peer/SKILL.md)
 tells it to: a message whose verified sender alias starts with `peer-check-`
 and whose body begins `[embassy check` is answered with one line echoing the
 id — either half alone is ordinary untrusted text.
+
+While it lives, the check identity is advertised to your Claude sessions like
+any shell peer, and its release takes the advertisement down. Nothing sweeps
+advertisements at boot, though: if the broker itself dies mid-check, whatever
+record that advertisement left behind stays until the same alias is next
+registered and released. It is inert — no route stands behind it, and a
+message addressed to it is refused.
 
 ## How it works
 
