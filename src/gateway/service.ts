@@ -36,6 +36,7 @@ import {
   parseDirection,
   projectGatewayPublicSnapshot,
   type GatewayMessageRecord,
+  type GatewayReservedAttempt,
   type GatewayActivityAction,
   type GatewayActivityKind,
   type GatewayPreparedWriteEvidence,
@@ -1807,201 +1808,219 @@ export class GatewayService {
         await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "ROUTE_UNREGISTERED");
         return false;
       }
-      if (target.registrationMode === "federated_peer") {
-        const peer = this.peerClients.get(target.binding.hostId);
-        if (peer === undefined || source.registrationMode === "federated_peer") {
-          await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
-          return false;
-        }
-        const sourceEndpoint = { alias: source.alias, provider: source.binding.provider,
-          host: source.binding.hostId, routeRef: peerRouteRef(source.binding.hostId, source.binding.registrationId) } as const;
-        const targetEndpoint = { alias: target.alias, provider: target.binding.provider,
-          host: target.binding.hostId, routeRef: target.binding.routeHandle } as const;
-        const params: PeerHandoffParams = {
-          originAttemptId: attempt.attemptId, originMessageId: attempt.messageId,
-          source: sourceEndpoint, target: targetEndpoint,
-          deadlineAt: attempt.deadlineAt, expectsReply: conversation?.expectsReply ?? true,
-          body: attempt.body,
-          ...(attempt.steer === true ? { steer: true as const } : {}),
-          ...(attempt.conversationIdSuffix === undefined ? {} : { conversationCorrelation: attempt.conversationIdSuffix }),
-        };
-        let armed = false, authorizationUncertain = false, acceptanceObserved = false, result: GatewayAdapterDispatchResult;
-        try {
-          const prepared = peer.prepareHandoff(params);
-          let authorized: Awaited<ReturnType<GatewayStore["authorizeMessage"]>>;
-          try { authorized = await this.store.authorizeMessage({ messageId: attempt.messageId,
-              attemptId: attempt.attemptId, sourceRegistrationId: attempt.sourceRegistrationId,
-              targetRegistrationId: attempt.targetRegistrationId,
-              prepared: { kind: "peer_handoff", bodyBytes: prepared.bodyBytes,
-                bodySha256: prepared.bodySha256, frameBytes: prepared.frameBytes, sha256: prepared.sha256 } });
-          } catch (error) { authorizationUncertain = true; throw error; }
-          if (authorized.status !== "authorized") {
-            prepared.cancel();
-            if (authorized.status === "terminal") await this.finishSettlement(authorized.settlement);
-            this.activeAttempts.delete(attempt.messageId);
-            return false;
-          }
-          armed = true;
-          await prepared.perform();
-          acceptanceObserved = true;
-          const accepted = await this.store.acceptMessage({ messageId: attempt.messageId,
-            attemptId: attempt.attemptId, lossOutcome: "unconfirmed" });
-          if (accepted.status !== "accepted") throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The peer acceptance fence is stale.");
-          result = { state: "delivered", safeErrorCode: "PEER_HANDOFF_CONFIRMED" };
-        } catch (error) {
-          if (!armed && !authorizationUncertain) {
-            peer.close();
-            this.peerClients.delete(target.binding.hostId);
-            await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
-            return false;
-          }
-          result = armed && !authorizationUncertain && !acceptanceObserved &&
-            error instanceof PeerRequestError && error.detail.code === -32000 && isPeerHandoffRefusal(error.detail.data)
-            ? { state: "failed", safeErrorCode: error.detail.data.reason }
-            : acceptanceObserved
-            ? { state: "unconfirmed", safeErrorCode: "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" }
-            : { state: "ambiguous", safeErrorCode: authorizationUncertain ? "WRITE_AUTHORIZATION_UNCERTAIN" : "PEER_HANDOFF_OUTCOME_UNKNOWN" };
-        }
-        const requeued = await this.applyDispatchResult(attempt.messageId, attempt.attemptId, result,
-          armed, conversation, attempt.sourceAlias, attempt.targetAlias);
-        this.activeAttempts.delete(attempt.messageId);
-        return requeued;
-      }
-      const adapter = this.adapterFor(target.binding);
-      if (adapter === undefined) {
-        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "PROVIDER_UNAVAILABLE");
-        return false;
-      }
-      const active = this.activeAttempts.get(attempt.messageId)!;
-      let authorizationUncertain = false;
-      let armed = false;
-      let accepted = false;
-      const conversationId = messageContext?.conversationId ??
-        conversationIdForSuffix(attempt.conversationIdSuffix);
-      const parsed = parseDirection(attempt.direction)!;
-      if (
-        target.binding.provider === "claude" &&
-        messageContext?.expectsReply === true &&
-        ![...this.pendingClaudeReplies.values()].some((rows) =>
-          rows.some((row) => row.messageId === attempt.messageId),
-        ) &&
-        [...this.pendingClaudeReplies.values()].reduce(
-          (count, rows) => count + rows.length,
-          0,
-        ) >= MAX_PENDING_CLAUDE_REPLIES
-      ) {
-        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "ROUTE_BUSY");
-        return true;
-      }
-      let result: GatewayAdapterDispatchResult;
-      try {
-        result = await adapter.dispatch({
-          attemptId: attempt.attemptId,
-          sourceAlias: source.alias,
-          sourceProvider: parsed.sourceProvider,
-          // The route's CURRENT alias, not the one captured at reserve. The
-          // provider adapters compare this against the alias they hold for the
-          // binding, so a session renamed between reserve and dispatch would
-          // otherwise fail its own delivery over a stale display name.
-          targetAlias: target.alias,
-          conversationId,
-          binding: target.binding,
-          authorization: "selected_route",
-          messageId: attempt.messageId,
-          text: attempt.body,
-          expectsReply: conversation?.expectsReply ?? true,
-          deadlineAt: attempt.deadlineAt,
-          ...(attempt.steer === true ? { steer: true as const, queuedAhead: 0 } : {}),
-          authorizeWrite: async (evidence) => {
-            if (evidence.attemptId !== attempt.attemptId) return false;
-            try {
-              const authorized = await this.store.authorizeMessage({
-                messageId: attempt.messageId,
-                attemptId: attempt.attemptId,
-                sourceRegistrationId: attempt.sourceRegistrationId,
-                targetRegistrationId: attempt.targetRegistrationId,
-                prepared: {
-                  kind: evidence.kind,
-                  bodyBytes: evidence.bodyBytes,
-                  bodySha256: evidence.bodySha256,
-                  frameBytes: evidence.frameBytes,
-                  sha256: evidence.sha256,
-                },
-              });
-              if (authorized.status === "terminal") {
-                await this.finishSettlement(authorized.settlement);
-              }
-              if (authorized.status === "authorized") {
-                armed = true;
-                if (
-                  target.binding.provider === "claude" &&
-                  messageContext?.expectsReply === true
-                ) {
-                  this.installPendingClaudeReply({
-                    messageId: attempt.messageId,
-                    conversationId,
-                    sourceAlias: source.alias,
-                    targetAlias: target.alias,
-                    sourceBinding: source.binding,
-                    targetBinding: target.binding,
-                    deadlineAt: attempt.deadlineAt,
-                    state: "armed",
-                  });
-                }
-              }
-              return authorized.status === "authorized";
-            } catch (error) {
-              authorizationUncertain = true;
-              throw error;
-            }
-          },
-          onAccepted: async (evidence) => {
-            if (
-              (target.binding.provider !== "codex" && target.binding.provider !== "peer") ||
-              evidence.attemptId !== attempt.attemptId
-            ) {
-              throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The provider accepted another attempt.");
-            }
-            const result = await this.store.acceptMessage({
-              messageId: attempt.messageId,
-              attemptId: attempt.attemptId,
-              lossOutcome: attempt.steer === true ? "ambiguous" : "unconfirmed",
-            });
-            if (result.status !== "accepted") {
-              throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The durable acceptance fence is stale.");
-            }
-            accepted = true;
-          },
-        });
-      } catch {
-        result = {
-          state: accepted
-            ? attempt.steer === true
-              ? "ambiguous"
-              : "unconfirmed"
-            : armed || authorizationUncertain
-              ? "ambiguous"
-              : "failed",
-          safeErrorCode: accepted
-              ? "DELIVERY_UNCONFIRMED"
-              : authorizationUncertain || armed
-                ? "WRITE_AUTHORIZATION_UNCERTAIN"
-              : "PROVIDER_DISPATCH_FAILED",
-        };
-      }
-      const requeued = await this.applyDispatchResult(
-        attempt.messageId,
-        attempt.attemptId,
-        result,
-        armed,
-        conversation,
-        source.alias,
-        target.alias,
-      );
-      if (this.activeAttempts.get(attempt.messageId) === active) this.activeAttempts.delete(attempt.messageId);
-      return requeued;
+      return target.registrationMode === "federated_peer"
+        ? this.runPeerAttempt(attempt, source, target, conversation)
+        : this.runProviderAttempt(attempt, source, target, conversation, messageContext);
     }
     return false;
+  }
+
+  private async runPeerAttempt(
+    attempt: GatewayReservedAttempt,
+    source: GatewayPrivateRouteInspection,
+    target: GatewayPrivateRouteInspection,
+    conversation: Conversation | undefined,
+  ): Promise<boolean> {
+    const peer = this.peerClients.get(target.binding.hostId);
+    if (peer === undefined || source.registrationMode === "federated_peer") {
+      await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
+      return false;
+    }
+    const sourceEndpoint = { alias: source.alias, provider: source.binding.provider,
+      host: source.binding.hostId, routeRef: peerRouteRef(source.binding.hostId, source.binding.registrationId) } as const;
+    const targetEndpoint = { alias: target.alias, provider: target.binding.provider,
+      host: target.binding.hostId, routeRef: target.binding.routeHandle } as const;
+    const params: PeerHandoffParams = {
+      originAttemptId: attempt.attemptId, originMessageId: attempt.messageId,
+      source: sourceEndpoint, target: targetEndpoint,
+      deadlineAt: attempt.deadlineAt, expectsReply: conversation?.expectsReply ?? true,
+      body: attempt.body,
+      ...(attempt.steer === true ? { steer: true as const } : {}),
+      ...(attempt.conversationIdSuffix === undefined ? {} : { conversationCorrelation: attempt.conversationIdSuffix }),
+    };
+    let armed = false, authorizationUncertain = false, acceptanceObserved = false, result: GatewayAdapterDispatchResult;
+    try {
+      const prepared = peer.prepareHandoff(params);
+      let authorized: Awaited<ReturnType<GatewayStore["authorizeMessage"]>>;
+      try { authorized = await this.store.authorizeMessage({ messageId: attempt.messageId,
+          attemptId: attempt.attemptId, sourceRegistrationId: attempt.sourceRegistrationId,
+          targetRegistrationId: attempt.targetRegistrationId,
+          prepared: { kind: "peer_handoff", bodyBytes: prepared.bodyBytes,
+            bodySha256: prepared.bodySha256, frameBytes: prepared.frameBytes, sha256: prepared.sha256 } });
+      } catch (error) { authorizationUncertain = true; throw error; }
+      if (authorized.status !== "authorized") {
+        prepared.cancel();
+        if (authorized.status === "terminal") await this.finishSettlement(authorized.settlement);
+        this.activeAttempts.delete(attempt.messageId);
+        return false;
+      }
+      armed = true;
+      await prepared.perform();
+      acceptanceObserved = true;
+      const accepted = await this.store.acceptMessage({ messageId: attempt.messageId,
+        attemptId: attempt.attemptId, lossOutcome: "unconfirmed" });
+      if (accepted.status !== "accepted") throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The peer acceptance fence is stale.");
+      result = { state: "delivered", safeErrorCode: "PEER_HANDOFF_CONFIRMED" };
+    } catch (error) {
+      if (!armed && !authorizationUncertain) {
+        peer.close();
+        this.peerClients.delete(target.binding.hostId);
+        await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
+        return false;
+      }
+      result = armed && !authorizationUncertain && !acceptanceObserved &&
+        error instanceof PeerRequestError && error.detail.code === -32000 && isPeerHandoffRefusal(error.detail.data)
+        ? { state: "failed", safeErrorCode: error.detail.data.reason }
+        : acceptanceObserved
+        ? { state: "unconfirmed", safeErrorCode: "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" }
+        : { state: "ambiguous", safeErrorCode: authorizationUncertain ? "WRITE_AUTHORIZATION_UNCERTAIN" : "PEER_HANDOFF_OUTCOME_UNKNOWN" };
+    }
+    const requeued = await this.applyDispatchResult(attempt.messageId, attempt.attemptId, result,
+      armed, conversation, attempt.sourceAlias, attempt.targetAlias);
+    this.activeAttempts.delete(attempt.messageId);
+    return requeued;
+  }
+
+  private async runProviderAttempt(
+    attempt: GatewayReservedAttempt,
+    source: GatewayPrivateRouteInspection,
+    target: GatewayPrivateRouteInspection,
+    conversation: Conversation | undefined,
+    messageContext: MessageContext | undefined,
+  ): Promise<boolean> {
+    const adapter = this.adapterFor(target.binding);
+    if (adapter === undefined) {
+      await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "failed", "PROVIDER_UNAVAILABLE");
+      return false;
+    }
+    const active = this.activeAttempts.get(attempt.messageId)!;
+    let authorizationUncertain = false;
+    let armed = false;
+    let accepted = false;
+    const conversationId = messageContext?.conversationId ??
+      conversationIdForSuffix(attempt.conversationIdSuffix);
+    const parsed = parseDirection(attempt.direction)!;
+    if (
+      target.binding.provider === "claude" &&
+      messageContext?.expectsReply === true &&
+      ![...this.pendingClaudeReplies.values()].some((rows) =>
+        rows.some((row) => row.messageId === attempt.messageId),
+      ) &&
+      [...this.pendingClaudeReplies.values()].reduce(
+        (count, rows) => count + rows.length,
+        0,
+      ) >= MAX_PENDING_CLAUDE_REPLIES
+    ) {
+      await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "ROUTE_BUSY");
+      return true;
+    }
+    let result: GatewayAdapterDispatchResult;
+    try {
+      result = await adapter.dispatch({
+        attemptId: attempt.attemptId,
+        sourceAlias: source.alias,
+        sourceProvider: parsed.sourceProvider,
+        // The route's CURRENT alias, not the one captured at reserve. The
+        // provider adapters compare this against the alias they hold for the
+        // binding, so a session renamed between reserve and dispatch would
+        // otherwise fail its own delivery over a stale display name.
+        targetAlias: target.alias,
+        conversationId,
+        binding: target.binding,
+        authorization: "selected_route",
+        messageId: attempt.messageId,
+        text: attempt.body,
+        expectsReply: conversation?.expectsReply ?? true,
+        deadlineAt: attempt.deadlineAt,
+        ...(attempt.steer === true ? { steer: true as const, queuedAhead: 0 } : {}),
+        authorizeWrite: async (evidence) => {
+          if (evidence.attemptId !== attempt.attemptId) return false;
+          try {
+            const authorized = await this.store.authorizeMessage({
+              messageId: attempt.messageId,
+              attemptId: attempt.attemptId,
+              sourceRegistrationId: attempt.sourceRegistrationId,
+              targetRegistrationId: attempt.targetRegistrationId,
+              prepared: {
+                kind: evidence.kind,
+                bodyBytes: evidence.bodyBytes,
+                bodySha256: evidence.bodySha256,
+                frameBytes: evidence.frameBytes,
+                sha256: evidence.sha256,
+              },
+            });
+            if (authorized.status === "terminal") {
+              await this.finishSettlement(authorized.settlement);
+            }
+            if (authorized.status === "authorized") {
+              armed = true;
+              if (
+                target.binding.provider === "claude" &&
+                messageContext?.expectsReply === true
+              ) {
+                this.installPendingClaudeReply({
+                  messageId: attempt.messageId,
+                  conversationId,
+                  sourceAlias: source.alias,
+                  targetAlias: target.alias,
+                  sourceBinding: source.binding,
+                  targetBinding: target.binding,
+                  deadlineAt: attempt.deadlineAt,
+                  state: "armed",
+                });
+              }
+            }
+            return authorized.status === "authorized";
+          } catch (error) {
+            authorizationUncertain = true;
+            throw error;
+          }
+        },
+        onAccepted: async (evidence) => {
+          if (
+            (target.binding.provider !== "codex" && target.binding.provider !== "peer") ||
+            evidence.attemptId !== attempt.attemptId
+          ) {
+            throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The provider accepted another attempt.");
+          }
+          const result = await this.store.acceptMessage({
+            messageId: attempt.messageId,
+            attemptId: attempt.attemptId,
+            lossOutcome: attempt.steer === true ? "ambiguous" : "unconfirmed",
+          });
+          if (result.status !== "accepted") {
+            throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The durable acceptance fence is stale.");
+          }
+          accepted = true;
+        },
+      });
+    } catch {
+      result = {
+        state: accepted
+          ? attempt.steer === true
+            ? "ambiguous"
+            : "unconfirmed"
+          : armed || authorizationUncertain
+            ? "ambiguous"
+            : "failed",
+        safeErrorCode: accepted
+            ? "DELIVERY_UNCONFIRMED"
+            : authorizationUncertain || armed
+              ? "WRITE_AUTHORIZATION_UNCERTAIN"
+            : "PROVIDER_DISPATCH_FAILED",
+      };
+    }
+    const requeued = await this.applyDispatchResult(
+      attempt.messageId,
+      attempt.attemptId,
+      result,
+      armed,
+      conversation,
+      source.alias,
+      target.alias,
+    );
+    if (this.activeAttempts.get(attempt.messageId) === active) this.activeAttempts.delete(attempt.messageId);
+    return requeued;
   }
 
   private async settleAttemptForShutdown(messageId: string, attemptId: string): Promise<void> {

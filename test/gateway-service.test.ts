@@ -1600,6 +1600,98 @@ test("peer handoff preserves every write boundary and never replays uncertainty"
   for (const mode of ["confirmed", "pipe", "authorization", "acceptance"] as const) await run(mode);
 });
 
+test("peer and provider engines preserve phase failures without replay", async () => {
+  type Engine = "peer" | "provider";
+  type Phase = "prewrite" | "post_authorization" | "post_acceptance";
+  const rows = [
+    ["peer", "prewrite", "queued", undefined, 0, "queued", true,
+      "1f361756e6f119d4d44f990a42bc20c540376ecedc46b64adfc587c62880f90a", "0a7773d6ababc3ef95b7552fcfe1dd28b9f7c2276cca69f2af6c45338b2350f2"],
+    ["peer", "post_authorization", "ambiguous", "PEER_HANDOFF_OUTCOME_UNKNOWN", 1, "terminal", true,
+      "fc5b05e373b1249f650593f8e77341e4360d5585be2e5d1731a87cddacd52267", "38d4c30083454a17bd12e468cdf8fbf3cfd449e51a5dc8998aad7aae944e1728"],
+    ["peer", "post_acceptance", "unconfirmed", "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED", 1, "terminal", true,
+      "9eda89c93d6a350db11cf13ddba3ca99f795b131801eee5b75b18b9fb49522e5", "420eaec2e04c6af65f6ed4d00f444fc34e12a837355ea73fbc980e0cb3ba3f17"],
+    ["provider", "prewrite", "failed", "PROVIDER_DISPATCH_FAILED", 0, "terminal", true,
+      "b0f4f86ca67faaef125be5ad540383b35c3501eeed6ad71be6867c1a32192458", "23d898f8c91e619c9b7bc53d5ad32ad493f3679a2e897a0eab6492c30f6a5a8e"],
+    ["provider", "post_authorization", "ambiguous", "WRITE_AUTHORIZATION_UNCERTAIN", 1, "terminal", true,
+      "11c805138fd4fb281dde51c868d3635e1fa0f3a3ba1d3b9203fc314462923c53", "b6b577309211b6f1fbe79a4461ebc78528927d1eaea1b00d8f1202c9da434f3e"],
+    ["provider", "post_acceptance", "unconfirmed", "DELIVERY_UNCONFIRMED", 1, "terminal", true,
+      "e9b689636f9c57ec1e387995b95e49d09c635ebf82f0b07da0e7c92fa0a883d3", "54cf9a23b4e1b0f6214f3f8bba2a960dc4545d418eb2c9cb6a5595e17edf8884"],
+  ] as const satisfies readonly (readonly [Engine, Phase, string, string | undefined, number,
+    string, boolean, string, string])[];
+  for (const [engine, phase, expectedState, expectedCode, expectedWrites,
+    expectedPersistedPhase, expectedBody, persistedSha256, publicSha256] of rows) {
+    const source = route("claude", "advisor@this-mac", "claude-session-phase", "reg_source_phase");
+    const localTarget = route("codex", "codex-phase@this-mac", THREAD_A, "reg_target_phase");
+    const remoteTarget: RegisterRouteInput = { alias: "codex-phase@m5dev", registrationMode: "federated_peer",
+      binding: { ...localTarget.binding, hostId: "m5dev", routeHandle: "reg_remote_phase" } };
+    let writes = 0;
+    const targetProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+    targetProvider.dispatch = async (input) => {
+      targetProvider.dispatches.push(input);
+      if (phase === "prewrite") throw new Error("provider prewrite");
+      assert.equal(await input.authorizeWrite({ attemptId: input.attemptId, ...prepared(input) }), true);
+      writes += 1;
+      if (phase === "post_authorization") throw new Error("provider post authorization");
+      await input.onAccepted({ attemptId: input.attemptId });
+      throw new Error("provider post acceptance");
+    };
+    const subject = await fixture([
+      new FakeProvider({ provider: "claude", hostId: "this-mac" }), targetProvider,
+    ], { peerNodes: engine === "peer" ? ["m5dev"] : [],
+      ...(engine === "peer" ? { spawnPeer: () => { throw new Error("automatic peer dial disabled"); } } : {}),
+      seed: async (store) => {
+        await routed(store, source, engine === "peer" ? remoteTarget : localTarget);
+      } });
+    try {
+      if (engine === "peer") {
+        for (let index = 0; index < 3; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+        const peer = { close: () => undefined, prepareHandoff: (params: PeerHandoffParams) => {
+          if (phase === "prewrite") throw new Error("peer prewrite");
+          const bodySha256 = createHash("sha256").update(params.body).digest("hex");
+          return { bodyBytes: Buffer.byteLength(params.body), bodySha256, frameBytes: 32,
+            sha256: createHash("sha256").update("phase-peer-frame").digest("hex"), cancel: () => undefined,
+            perform: async () => { writes += 1; if (phase === "post_authorization") throw new Error("peer post authorization"); return { accepted: true as const }; } };
+        } } as unknown as PeerClient;
+        (subject.service as unknown as { peerClients: Map<string, PeerClient> }).peerClients.set("m5dev", peer);
+        if (phase === "post_acceptance") {
+          const accept = subject.store.acceptMessage.bind(subject.store);
+          subject.store.acceptMessage = async (input) => { await accept(input); throw new Error("peer post acceptance"); };
+        }
+      }
+      const sent = await subject.handlers.send({ fromAlias: source.alias, toAlias: engine === "peer" ? remoteTarget.alias : localTarget.alias,
+        text: `${engine} ${phase}`, replyAddress: "uds:/test/phase.sock", expectsReply: false });
+      assert.equal(sent.accepted, true, JSON.stringify(sent));
+      if (!sent.accepted) throw new Error("phase send admission failed");
+      await eventually(async () => {
+        const state = JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as {
+          messages: Array<{ state: { phase: string } }>;
+        };
+        return state.messages.at(-1)?.state.phase === expectedPersistedPhase;
+      });
+      await eventually(() =>
+        (subject.service as unknown as { dispatchRunners: Map<string, unknown> }).dispatchRunners.size === 0);
+      const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
+      assert.deepEqual(status.found && [status.state, status.safeErrorCode], [expectedState, expectedCode]);
+      assert.equal(writes, expectedWrites);
+      const persisted = (JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as {
+        messages: Array<{ body?: string; state: { phase: string; safeErrorCode?: string } }>;
+      }).messages.at(-1)!;
+      assert.deepEqual([persisted.state.phase, persisted.state.safeErrorCode, Object.hasOwn(persisted, "body")],
+        [expectedPersistedPhase, expectedCode, expectedBody]);
+      const publicRow = (await subject.store.publicSnapshot()).messages.at(-1)!;
+      const persistedBytes = JSON.stringify({ ...persisted, conversationIdSuffix: "<conversation>",
+        deliveryToken: "<delivery-token>", sourceRegistrationId: "<source-registration>" });
+      const publicBytes = JSON.stringify({ ...publicRow, conversationIdSuffix: "<conversation>" });
+      assert.equal(createHash("sha256").update(persistedBytes).digest("hex"), persistedSha256);
+      assert.equal(createHash("sha256").update(publicBytes).digest("hex"), publicSha256);
+      assert.deepEqual([publicRow.state, publicRow.safeErrorCode, Object.hasOwn(publicRow, "body")],
+        [expectedState, expectedCode, expectedBody]);
+      for (let index = 0; index < 3; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(writes, expectedWrites);
+    } finally { await subject.close(); }
+  }
+});
+
 test("an unavailable peer requeues once without a hot dispatch loop", async () => {
   const provider = new FakeProvider({ provider: "claude", hostId: "studio" });
   const subject = await fixture([provider], { hostId: "studio", peerNodes: ["m5dev"] });
