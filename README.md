@@ -168,7 +168,7 @@ alerts
 
 See [SECURITY.md](SECURITY.md) for the boundary in depth and how to report a vulnerability.
 
-<!-- tested-with: filled by the PM after the cutover drill -->
+**Tested with** (cutover drill, 2026-09-03): Claude Code 2.1.259 and Codex CLI 0.152.0 on macOS, Node 22.23, on two machines — a Claude Code session ↔ Codex CLI task round trip in both directions, `embassy check` (register → send → delivered → reply → cleanup), and a cross-machine shell-peer handoff over ssh.
 
 ## Upgrading from 2.x
 
