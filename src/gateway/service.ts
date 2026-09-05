@@ -803,9 +803,8 @@ export class GatewayService {
   }
 
   private async advertise(route: GatewayPrivateRouteInspection): Promise<void> {
-    const hostId = route.registrationMode === "federated_peer"
-      ? this.config.hostId : route.binding.hostId;
-    await this.claudeAdapter(hostId)?.advertiseNativeSourcePeer?.({
+    if (route.registrationMode === "federated_peer") return;
+    await this.claudeAdapter(route.binding.hostId)?.advertiseNativeSourcePeer?.({
       alias: route.alias,
       sourceProvider: route.binding.provider,
       cwd: this.nativePeerCwd,
@@ -813,9 +812,8 @@ export class GatewayService {
   }
 
   private async unadvertise(route: GatewayPrivateRouteInspection): Promise<void> {
-    const hostId = route.registrationMode === "federated_peer"
-      ? this.config.hostId : route.binding.hostId;
-    await this.claudeAdapter(hostId)?.unadvertiseNativeSourcePeer?.(route.alias);
+    if (route.registrationMode === "federated_peer") return;
+    await this.claudeAdapter(route.binding.hostId)?.unadvertiseNativeSourcePeer?.(route.alias);
   }
 
   private reconcileAdvertisement(route: GatewayPrivateRouteInspection): void {

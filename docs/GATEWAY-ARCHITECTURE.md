@@ -93,7 +93,7 @@ Consequences:
 
 - Native Claude `ListAgents` discovers real Claude sessions plus the
   explicitly marked local `codex-*` and `peer-*` gateway peers, one per advertisement helper.
-  Federated mirrors are not advertised; the helper refuses their foreign-host aliases.
+  Federated mirrors are excluded from local helper advertisement.
 - The gateway discovers compatible real Claude sessions as transient
   candidates, but publishes only sanitized aliases and state. A send from a
   registered Codex task addresses a session by its current name or its UUID,

@@ -1315,7 +1315,7 @@ test("an unavailable peer requeues once without a hot dispatch loop", async () =
   } finally { await subject.close(); }
 });
 
-test("local Claude ingress advertises and hands off a federated Codex route", async () => {
+test("local Claude ingress hands off a federated Codex route without advertising it", async () => {
   const provider = new FakeProvider({ provider: "claude", hostId: "studio" });
   const local: RegisterRouteInput = { alias: "advisor@studio", registrationMode: "selected_live_peer",
     binding: { provider: "claude", hostId: "studio", routeHandle: provider.replyRouteHandle, registrationId: "reg_local" } };
@@ -1333,7 +1333,7 @@ test("local Claude ingress advertises and hands off a federated Codex route", as
         perform: async () => { writes += 1; return { accepted: true as const }; } };
     } } as unknown as PeerClient;
     (subject.service as unknown as { peerClients: Map<string, PeerClient> }).peerClients.set("m5dev", peer);
-    assert.ok(provider.advertised.includes(remote.alias));
+    assert.equal(provider.advertised.includes(remote.alias), false);
     provider.callbacks?.onClaudeMessage?.({ endpoint: { provider: "claude", hostId: "studio", routeHandle: provider.replyRouteHandle },
       sourceAlias: local.alias, targetAlias: remote.alias, text: "native federation", receiptHandle: "receipt-native-federation" });
     await eventually(() => writes === 1);
@@ -1356,7 +1356,19 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
     catalogCalls += 1; if (failCatalog) throw new Error("synthetic tunnel loss"); return current;
   },
     prepareHandoff: () => { throw new Error("outbound handoff not expected"); } } as unknown as PeerClient;
-  const subject = await fixture([new FakeProvider({ provider: "claude", hostId: "studio" })], {
+  const provider = new FakeProvider({ provider: "claude", hostId: "studio" });
+  let remoteAdvertisements = 0, remoteUnadvertisements = 0;
+  const advertise = provider.advertiseNativeSourcePeer.bind(provider);
+  provider.advertiseNativeSourcePeer = async (input) => {
+    if (input.alias === remote.alias) { remoteAdvertisements++; throw new BridgeError("INVALID_CODEX_PEER_ALIAS", "foreign helper alias"); }
+    await advertise(input);
+  };
+  const unadvertise = provider.unadvertiseNativeSourcePeer.bind(provider);
+  provider.unadvertiseNativeSourcePeer = async (alias) => {
+    if (alias === remote.alias) remoteUnadvertisements++;
+    await unadvertise(alias);
+  };
+  const subject = await fixture([provider], {
     hostId: "studio", peerNodes: ["m5dev"], seed: async (store) => store.registerRoute(local),
     spawnPeer: async ({ node, localHost }) => { assert.equal(node, "m5dev"); assert.equal(localHost, "studio"); return peer; },
   });
@@ -1365,6 +1377,8 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
     await subject.timers.runDue();
     await eventually(async () => (await subject.store.inspectPrivateRoute(remote.alias))?.registrationMode === "federated_peer");
     assert.equal(catalogCalls, 1);
+    assert.equal(remoteAdvertisements, 0);
+    assert.equal((await subject.service.snapshot()).alerts.some((alert) => alert.code === "NATIVE_ADVERTISEMENT_FAILED"), false);
     const reconcile = subject.store.reconcilePeerCatalog.bind(subject.store); let reconcileCalls = 0;
     subject.store.reconcilePeerCatalog = async (...args) => { reconcileCalls += 1; return reconcile(...args); };
     current = { ...current, revision: 99,
@@ -1413,6 +1427,7 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
     await eventually(async () => (await subject.store.inspectPrivateRoute(remote.alias)) === undefined);
   } finally { await subject.close(); }
   assert.equal(closes, 2, "the failed client closes and the reconnected client closes at shutdown");
+  assert.deepEqual([remoteAdvertisements, remoteUnadvertisements], [0, 0]);
 });
 
 test("a fresh canonical-host broker exports explicitly registered routes to a configured peer", async () => {
