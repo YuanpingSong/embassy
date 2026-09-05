@@ -101,10 +101,11 @@ test("status renders for a terminal and stays byte-identical JSON everywhere els
   const expectedJson = `${JSON.stringify({ ok: true, command: "status", result: SNAPSHOT })}\n`;
 
   // Piped: exactly the line scripts and the skill already parse.
-  const piped = capture();
-  assert.equal(await runGatewayCli(["status"], dependencies(piped, snapshotResponder)),
+  const piped = capture(), stderr = capture();
+  assert.equal(await runGatewayCli(["status"], dependencies(piped, snapshotResponder, { stderr })),
     gatewayCliExitCodes.ok);
   assert.equal(text(piped), expectedJson);
+  assert.equal(text(stderr), "");
   assert.deepEqual((JSON.parse(text(piped)) as { result: unknown }).result, SNAPSHOT);
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
   const selector = readme.match(/embassy status --json \| jq (\.[\w.]+)/)?.[1];
@@ -254,7 +255,7 @@ function watchResponder(): Responder {
 
 test("watch tails new rows and settlements once each, then exits 0 on interrupt", async () => {
   const controller = new AbortController();
-  const stdout = capture(true);
+  const stdout = capture(true), stderr = capture();
   let polls = 0;
   const code = await runGatewayCli(["watch"], dependencies(stdout, (request) => {
     const responder = watchState;
@@ -263,7 +264,8 @@ test("watch tails new rows and settlements once each, then exits 0 on interrupt"
       if (polls >= 3) controller.abort();
     }
     return responder(request);
-  }, { watchSignal: controller.signal, delay: async () => undefined, env: { NO_COLOR: "1" } }));
+  }, { watchSignal: controller.signal, delay: async () => undefined,
+    env: { NO_COLOR: "1" }, stderr }));
 
   assert.equal(code, gatewayCliExitCodes.ok);
   const lines = text(stdout).trimEnd().split("\n");
@@ -274,6 +276,7 @@ test("watch tails new rows and settlements once each, then exits 0 on interrupt"
     `${clock}  1b2c3d4e  advisor@${HOST} → codex-reviewer@${HOST}  queued  12 B  second`,
     `${clock}  claude_route_installed  advisor@${HOST}  accepted`,
   ]);
+  assert.equal(text(stderr), "");
 });
 const watchState = watchResponder();
 
@@ -372,20 +375,20 @@ function checkClock(): {
 
 test("check runs the whole round trip and reports every hop", async () => {
   const { respond, seen } = checkResponder();
-  const stdout = capture(true);
+  const stdout = capture(true), stderr = capture();
   const clock = checkClock();
   const code = await runGatewayCli(["check"], dependencies(stdout, respond, {
-    ...clock, env: { NO_COLOR: "1" } }));
+    ...clock, env: { NO_COLOR: "1" }, stderr }));
 
   assert.equal(code, gatewayCliExitCodes.ok);
-  const output = text(stdout);
-  assert.match(output, new RegExp(`^embassy check [0-9a-f]{8} → codex-reviewer@${HOST}\n`));
-  assert.match(output, /^ {2}ok {4}register {3}peer-check-[0-9a-f]{8}@this-mac \(ephemeral, 2 min\) {2}0 ms$/m);
-  assert.match(output, /^ {2}ok {4}send {7}accepted, conversation …89abcdef {2}0 ms$/m);
-  assert.match(output, /^ {2}ok {4}delivered {2}the peer's transport accepted it/m);
-  assert.match(output, new RegExp(`^ {2}ok {4}reply {6}codex-reviewer@${HOST} echoed [0-9a-f]{8}`, "m"));
-  assert.match(output, /^ {2}ok {4}cleanup {4}temporary check identity removed$/m);
-  assert.match(output, /^check passed$/m);
+  assert.equal(text(stderr), "");
+  const output = text(stdout).replace(/[0-9a-f]{8}/g, "<id>");
+  assert.equal(output, `embassy check <id> → codex-reviewer@${HOST}\n\n`
+    + `  ok    register   peer-check-<id>@${HOST} (ephemeral, 2 min)  0 ms\n`
+    + "  ok    send       accepted, conversation …<id>  0 ms\n"
+    + "  ok    delivered  the peer's transport accepted it  0 ms\n"
+    + `  ok    reply      codex-reviewer@${HOST} echoed <id>  0 ms\n`
+    + "  ok    cleanup    temporary check identity removed\n\ncheck passed\n");
 
   // It mints its own principal, sends through the ordinary send path, and
   // takes the temporary registration back down again.

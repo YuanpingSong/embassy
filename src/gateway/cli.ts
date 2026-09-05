@@ -329,7 +329,7 @@ function requireConversationId(options: ParsedOptions, name: string): string {
   if (!isGatewayConversationId(conversationId)) fault();
   return conversationId;
 }
-function requireClaudeSelector(options: ParsedOptions, name: string): string {
+function requireDestinationSelector(options: ParsedOptions, name: string): string {
   const selector = requireString(options, name);
   if (!isClaudeSessionSelector(selector)) fault();
   return selector;
@@ -511,7 +511,7 @@ async function buildRequest(
       const conversationId = options.conversation === undefined
         ? undefined : requireConversationId(options, "conversation");
       const toAlias = options.to === undefined
-        ? undefined : requireClaudeSelector(options, "to");
+        ? undefined : requireDestinationSelector(options, "to");
       // One target, and a conversation is always answered expecting a reply.
       if ((toAlias === undefined) === (conversationId === undefined)) fault();
       if (conversationId !== undefined && options["expects-reply"] === true) fault();
@@ -685,6 +685,11 @@ function refusalHint(
 /** UNKNOWN_METHOD is build skew, not an argument error: say which side to move. */
 function writeUnknownMethodHint(stderr: Writable, code: string): void {
   if (code === "UNKNOWN_METHOD") stderr.write(`[embassy] ${CLI_HINT.unknownMethod}\n`);
+}
+function reportControlFailure(command: GatewayCliCommand, code: string, stdout: Writable, stderr: Writable): number {
+  writeFailure(stdout, stderr, command, code, { kind: "failure" });
+  writeUnknownMethodHint(stderr, code);
+  return gatewayCliExitCodes.failure;
 }
 function responseExitCode(response: GatewayControlResponse): number {
   return !response.ok ? gatewayCliExitCodes.failure
@@ -1292,7 +1297,7 @@ export async function runGatewayCli(
         STATUS_RECENT.minimum, STATUS_RECENT.maximum);
       const timeoutSeconds = boundedOption(options, "timeout", CHECK_TIMEOUT_DEFAULT_SECONDS,
         1, CHECK_TIMEOUT_MAX_SECONDS);
-      const target = options.to === undefined ? undefined : requireClaudeSelector(options, "to");
+      const target = options.to === undefined ? undefined : requireDestinationSelector(options, "to");
       const { config } = await loadIdentity();
       await validateSocket(config.stateDir, config.controlSocketPath);
       const ask = async <M extends GatewayControlMethod>(
@@ -1311,9 +1316,7 @@ export async function runGatewayCli(
         // The header reports how old the scan is and offers `embassy refresh`.
         const response = await ask("list_snapshot", {});
         if (!response.ok) {
-          writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
-          writeUnknownMethodHint(stderr, response.error.code);
-          return gatewayCliExitCodes.failure;
+          return reportControlFailure(command, response.error.code, stdout, stderr);
         }
         if (options.json === true || !isTerminal(stdout)) {
           success(response.result);
@@ -1339,9 +1342,7 @@ export async function runGatewayCli(
           while (!interrupt.signal.aborted) {
             const observed = await ask("observe_snapshot", {});
             if (!observed.ok) {
-              writeFailure(stdout, stderr, command, observed.error.code, { kind: "failure" });
-              writeUnknownMethodHint(stderr, observed.error.code);
-              return gatewayCliExitCodes.failure;
+              return reportControlFailure(command, observed.error.code, stdout, stderr);
             }
             if (observed.result.snapshotRevision !== revision) {
               revision = observed.result.snapshotRevision;
@@ -1370,9 +1371,7 @@ export async function runGatewayCli(
       if (chosen === undefined) {
         const snapshot = await ask("list_snapshot", {});
         if (!snapshot.ok) {
-          writeFailure(stdout, stderr, command, snapshot.error.code, { kind: "failure" });
-          writeUnknownMethodHint(stderr, snapshot.error.code);
-          return gatewayCliExitCodes.failure;
+          return reportControlFailure(command, snapshot.error.code, stdout, stderr);
         }
         const candidates = snapshot.result.routes
           .filter((route) => route.provider === "codex" && route.enabled)
@@ -1474,9 +1473,7 @@ export async function runGatewayCli(
       response = await sendRequest({ socketPath: config.controlSocketPath, request });
     }
     if (!response.ok) {
-      writeFailure(stdout, stderr, command, response.error.code, { kind: "failure" });
-      writeUnknownMethodHint(stderr, response.error.code);
-      return gatewayCliExitCodes.failure;
+      return reportControlFailure(command, response.error.code, stdout, stderr);
     }
     if (command === "register-peer" && args.includes("--emit-env") && "token" in response.result) {
       stdout.write(`export EMBASSY_PEER_TOKEN='${response.result.token}'\n`);

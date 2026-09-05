@@ -823,6 +823,8 @@ test("the removed --lang option is an argument error and locale environment is i
       })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
     });
     assert.equal(code, gatewayCliExitCodes.ok, JSON.stringify(env));
+    assert.equal(stdout.chunks.join(""),
+      `${JSON.stringify({ ok: true, command: "health", result: { status: "ok" } })}\n`);
     assert.equal(stderr.chunks.join(""), "");
   }
 
@@ -3274,14 +3276,17 @@ test("a conversation answered from the wrong end, or by an unregistered task, re
   void decide;
 });
 
-test("a broker that does not implement the requested method says which side to move, on every path", async () => {
+test("the four shared wire-failure paths preserve their complete output", async () => {
   // UNKNOWN_METHOD is build skew, not an argument error: a client newer than
-  // its broker on the same protocol line. Every path that surfaces a wire
-  // error — the plain command path, status, watch, and each check hop — keeps
-  // its exit and its fixed line, and adds the one hint that names the remedy.
-  const unknown = { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false as const,
-    error: { code: "UNKNOWN_METHOD" as const, message: "The control method is unsupported." } };
-  const run = async (argv: readonly string[]) => {
+  // its broker on the same protocol line. Every shared reporter path — health,
+  // status, watch, and automatic check discovery — keeps its exit and fixed line.
+  const failures = [
+    { code: "UNKNOWN_METHOD" as const, message: "The control method is unsupported.",
+      stderr: `[embassy] command failed.\n${UNKNOWN_METHOD_HINT}` },
+    { code: "HANDLER_FAILURE" as const, message: "The gateway could not complete the control request.",
+      stderr: "[embassy] command failed.\n" },
+  ];
+  const run = async (argv: readonly string[], failure = failures[0]!) => {
     const stdout = capture(), stderr = capture();
     const code = await runGatewayCli(argv, {
       env: {}, stdout, stderr,
@@ -3289,18 +3294,21 @@ test("a broker that does not implement the requested method says which side to m
         allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
         steeringEnabled: true, limits: {} as never }),
       validateControlSocket: async () => undefined,
-      sendRequest: (async () => unknown) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+      sendRequest: (async () => ({ protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: false,
+        error: { code: failure.code, message: failure.message } })) as NonNullable<GatewayCliDependencies["sendRequest"]>,
       watchSignal: new AbortController().signal,
     });
     return { code, stdout: stdout.chunks.join(""), stderr: stderr.chunks.join("") };
   };
-  for (const argv of [["health"], ["status"], ["watch"]] as const) {
-    const outcome = await run(argv);
-    assert.equal(outcome.code, gatewayCliExitCodes.failure, argv.join(" "));
-    assert.deepEqual(JSON.parse(outcome.stdout), {
-      ok: false, command: argv[0], error: { code: "UNKNOWN_METHOD", ambiguous: false, retryable: false },
-    }, argv.join(" "));
-    assert.equal(outcome.stderr, `[embassy] command failed.\n${UNKNOWN_METHOD_HINT}`, argv.join(" "));
+  for (const failure of failures) {
+    for (const argv of [["health"], ["status"], ["watch"], ["check"]] as const) {
+      const outcome = await run(argv, failure);
+      const label = `${argv.join(" ")} ${failure.code}`;
+      assert.equal(outcome.code, gatewayCliExitCodes.failure, label);
+      assert.equal(outcome.stdout, `${JSON.stringify({ ok: false, command: argv[0],
+        error: { code: failure.code, ambiguous: false, retryable: false } })}\n`, label);
+      assert.equal(outcome.stderr, failure.stderr, label);
+    }
   }
   // `check --to` skips discovery, so its first hop is the one that meets the
   // skew; the hop line names the code and stderr carries the hint once.
