@@ -313,12 +313,13 @@ test("public docs disclose that the status snapshot carries retained bodies", as
 // second language.
 
 test("authority docs match the closed control contract", async () => {
-  const [readme, architecture, skill, changelog, site] = await Promise.all([
+  const [readme, architecture, skill, changelog, site, agent] = await Promise.all([
     readPublicFile("README.md"),
     readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
     readPublicFile("skills/embassy-peer/SKILL.md"),
     readPublicFile("CHANGELOG.md"),
     readPublicFile("site/index.html"),
+    readPublicFile(".claude/agents/content-writer.md"),
   ]);
   // Both counts are pinned here and spelled out in the docs; the words are
   // derived from the arrays, so a surface that grows or shrinks fails here
@@ -332,6 +333,8 @@ test("authority docs match the closed control contract", async () => {
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
   assert.match(architecture, new RegExp(`${commandsWord} implemented commands`));
   assert.match(readme, new RegExp(`lists all ${commandsWord} commands`));
+  assert.match(agent, new RegExp(`exactly these\\s+${commandsWord}:`));
+  for (const command of gatewayCliCommands) assert.match(agent, new RegExp(`\\b${command}\\b`), command);
   for (const command of gatewayCliCommands) assert.match(architecture, new RegExp(`\\b${command}\\b`), command);
   for (const document of [readme, architecture, skill]) {
     assert.match(document, /embassy retire --alias/);

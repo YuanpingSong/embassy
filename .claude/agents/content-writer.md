@@ -34,11 +34,11 @@ knowledgeable friend: plain sentences, concrete nouns, no filler.
   tested against are stated only once the cutover drill names them; until
   then the placeholder comment stays where it is.
 - Every "next step" names a real command. The CLI verbs are exactly these
-  seventeen: serve,
+  eighteen: serve,
   service (install|uninstall|status), health, status, watch, check,
   delivery-status, wait-delivery, refresh, register-codex, unregister-codex,
   send, reply (a deprecated alias for `send --conversation`), register-peer,
-  unregister-peer, await, peer-stdio. Nothing else exists. Settings are
+  unregister-peer, await, peer-stdio, retire. Nothing else exists. Settings are
   environment variables read when a command starts; the launchd agent
   captures them at install.
 - Every example alias ends in `@your-host` and must pass the CLI's own alias
