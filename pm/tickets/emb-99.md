@@ -266,3 +266,10 @@ no support-matrix ceremony, no site work beyond the stub.
   — remove one; document that the peer dial runs under sshd's PATH;
   (4) the reply hint in the envelope says `send --conversation` but a
   2.x-era skill still says `reply` — skills are reinstalled, OK.
+- 2026-09-03 v3 CLOSED: released, cut over, drilled on both machines
+  (Claude↔Codex both directions natively, `check`, cross-machine).
+  Founder rulings the same day: (1) a further "focus pass" led by
+  swe3 (now GPT-6 Astra high) — emb-110, audit-first; (2) QUEUED
+  after the cleanup: a lightweight macOS GUI / menu-bar app for UX —
+  not scoped; the terminal `status`/`watch` and the launchd service
+  are the substrate it would sit on.
