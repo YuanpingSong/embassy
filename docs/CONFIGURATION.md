@@ -46,7 +46,7 @@ Examples throughout this documentation write aliases as `name@your-host`;
 substitute your own host — the `hostId` on the broker's ready line — wherever
 `your-host` appears. The commands that name a route this machine owns —
 `register-codex` (including `--succeeds`), `unregister-codex`, `register-peer`,
-`unregister-peer` and `await` — refuse an alias naming any other host, and say
+`unregister-peer`, `await` and `retire` — refuse an alias naming any other host, and say
 which host this machine uses and the file that came from. `send` is not
 restricted this way: its `--to` and `--from` may name a federated peer on
 another host.

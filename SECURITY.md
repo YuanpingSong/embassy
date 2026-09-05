@@ -120,6 +120,8 @@ silently expand Embassy's claimed boundary.
 
 ## Routing and the permission model
 
+- Retirement is a credential-free same-UID operator action on local routes;
+  federated mirrors are refused with `FEDERATED_ROUTE_READ_ONLY`.
 - A universal shell peer explicitly registers one `peer-*` alias. Its principal
   is that alias plus a `peer_` token minted and printed exactly once. The token
   is supplied on stdin (or inherited only by a harness with a stable shell),
