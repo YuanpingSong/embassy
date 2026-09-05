@@ -1885,7 +1885,7 @@ export class GatewayService {
       try {
         result = await adapter.dispatch({
           attemptId: attempt.attemptId,
-          sourceAlias: attempt.sourceAlias,
+          sourceAlias: source.alias,
           sourceProvider: parsed.sourceProvider,
           // The route's CURRENT alias, not the one captured at reserve. The
           // provider adapters compare this against the alias they hold for the
@@ -1928,8 +1928,8 @@ export class GatewayService {
                   this.installPendingClaudeReply({
                     messageId: attempt.messageId,
                     conversationId,
-                    sourceAlias: attempt.sourceAlias,
-                    targetAlias: attempt.targetAlias,
+                    sourceAlias: source.alias,
+                    targetAlias: target.alias,
                     sourceBinding: source.binding,
                     targetBinding: target.binding,
                     deadlineAt: attempt.deadlineAt,
@@ -1983,8 +1983,8 @@ export class GatewayService {
         result,
         armed,
         conversation,
-        attempt.sourceAlias,
-        attempt.targetAlias,
+        source.alias,
+        target.alias,
       );
       if (this.activeAttempts.get(attempt.messageId) === active) this.activeAttempts.delete(attempt.messageId);
       return requeued;

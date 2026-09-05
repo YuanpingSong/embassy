@@ -919,6 +919,77 @@ test("a session renamed between reserve and dispatch is delivered to under its n
   } finally { await subject.close(); }
 });
 
+test("a source renamed between reserve and dispatch owns its envelope and replies", async () => {
+  const renamedAlias = "advisor-source-renamed@this-mac";
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  codexProvider.terminalReplyText = "reply to the renamed source";
+  const subject = await fixture([claudeProvider, codexProvider], {
+    seed: async (store) => routed(store, claude, codex),
+  });
+  try {
+    // Use the real refresh/install path so both persisted coordinates and the
+    // in-memory conversation move. Only the provider I/O is fake.
+    const reserve = subject.store.reserveMessage.bind(subject.store);
+    subject.store.reserveMessage = async (...args) => {
+      const result = await reserve(...args);
+      if (result.status === "reserved" && result.attempt.body === "rename the source in flight") {
+        claudeProvider.claudeDiscovery = { ...claudeProvider.claudeDiscovery,
+          alias: renamedAlias };
+        const refreshed = await subject.handlers.refreshDiscovery();
+        assert.equal(refreshed.accepted, true);
+        const renamed = await subject.handlers.send({ fromAlias: renamedAlias,
+          replyAddress: "uds:/test/claude-reply.sock", toAlias: codex.alias,
+          text: "install the current source name", expectsReply: false });
+        assert.equal(renamed.accepted, true);
+        assert.equal(await subject.store.inspectPrivateRoute(claude.alias), undefined);
+      }
+      return result;
+    };
+
+    const sent = await subject.handlers.send({
+      fromAlias: claude.alias,
+      replyAddress: "uds:/test/claude-reply.sock",
+      toAlias: codex.alias,
+      text: "rename the source in flight",
+      expectsReply: true,
+    });
+    assert.equal(sent.accepted, true);
+    await eventually(() => codexProvider.dispatches.some((row) => row.text === "rename the source in flight"));
+    const outbound = codexProvider.dispatches.find((row) => row.text === "rename the source in flight")!;
+    assert.equal(outbound.sourceAlias, renamedAlias);
+    const { composeProvenanceEnvelope } = await import("../src/gateway/provenance-envelope.js");
+    const envelope = composeProvenanceEnvelope({
+      sourceProvider: outbound.sourceProvider,
+      recipientProvider: "codex",
+      sourceAlias: outbound.sourceAlias,
+      targetAlias: outbound.targetAlias,
+      conversationId: outbound.conversationId,
+      body: outbound.text,
+    });
+    assert.ok(envelope.startsWith(
+      `<cross-session-message from-name="${renamedAlias}" conversation="${outbound.conversationId}">\n` +
+      `<embassy-reply-hint conversation="${outbound.conversationId}" reply-as="${codex.alias}" from-provider="claude">`,
+    ));
+
+    // The provider's terminal reply reverses the same conversation to the
+    // current Claude alias. Its delivered pending row must then route the next
+    // native reply back to the exact Codex endpoint.
+    await eventually(() => claudeProvider.dispatches.length === 1);
+    assert.equal(claudeProvider.dispatches[0]?.targetAlias, renamedAlias);
+    assert.equal(claudeProvider.dispatches[0]?.text, "reply to the renamed source");
+    await eventually(async () => (await subject.service.snapshot()).messages.some(
+      (row) => row.body === "reply to the renamed source" && row.state === "delivered"));
+    codexProvider.terminalReplyText = undefined;
+    claudeProvider.callbacks?.onClaudeReply({ endpoint: { provider: "claude", hostId: "this-mac",
+      routeHandle: claude.binding.routeHandle }, text: "follow-up from the renamed source" });
+    await eventually(() => codexProvider.dispatches.some((row) => row.text === "follow-up from the renamed source"));
+    assert.equal(codexProvider.dispatches.find((row) => row.text === "follow-up from the renamed source")?.targetAlias, codex.alias);
+  } finally {
+    await subject.close();
+  }
+});
+
 test("a re-anchored Claude session keeps its registration and its in-flight conversation", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
