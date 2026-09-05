@@ -1536,46 +1536,83 @@ test("steer supersession, dedupe capacity, and source acceptance counters stay b
   await restarted.close();
 });
 
-test("normalized rejections commit suffix-only activity without fabricating message authority", async () => {
-  const { config, clock: testClock, store } = await fixture();
-  await store.initialize();
-  await routed(store);
-  await assert.rejects(
-    store.enqueueMessage({
-      sourceAlias: claude.alias,
-      targetAlias: codex.alias,
-      body: "late",
-      dedupeKey: "invalid-deadline",
-      deadlineAt: new Date(testClock.now().getTime() + 20_000).toISOString(),
-    }),
-    (error: unknown) =>
-      error instanceof Error && "code" in error && error.code === "INVALID_DEADLINE",
-  );
-  const raw = JSON.parse(await readFile(store.stateFilePath, "utf8")) as {
-    messages: unknown[];
-    activity: Array<{ type: string; event: { state?: string; safeErrorCode?: string } }>;
-    accounting: { rejected: number };
-    routes: Array<{ alias: string; counters: { rejected: number } }>;
-  };
-  assert.equal(raw.messages.length, 0);
-  assert.deepEqual(raw.activity.map((entry) => [
-    entry.type,
-    entry.event.state,
-    entry.event.safeErrorCode,
-  ]), [["message_activity", "rejected", "INVALID_DEADLINE"]]);
-  assert.equal(raw.accounting.rejected, 1);
-  assert.equal(
-    raw.routes.find((entry) => entry.alias === claude.alias)?.counters.rejected,
-    1,
-  );
-  await store.close();
-  const restarted = new GatewayStore(config, {
-    now: testClock.now,
-    randomId: testClock.randomId,
-  });
-  await restarted.initialize();
-  assert.equal((await restarted.publicSnapshot()).messages[0]?.state, "rejected");
-  await restarted.close();
+test("normalized enqueue rejections preserve exact errors, state bytes, and precedence", async () => {
+  const cases = [
+    ["MESSAGE_TOO_LARGE", "The message exceeds the configured byte bound.", false,
+      { maxMessageBytes: 4 }, "a68827ad0cef3a6be2fc828f9d0d437120935314bd92bd7dbc61a6f38a667b58"],
+    ["INVALID_DEADLINE", "The message deadline must fall inside the configured delivery window.",
+      false, { maxQueueMessages: 1, rateLimitPerRoute: 1 },
+      "e2239f02cf3afc2ec8f2ef63daa2e89637951b2f571fab42e2a11bae06fea136"],
+    ["GATEWAY_RATE_LIMITED", "The source exceeded the bounded gateway rate window.",
+      true, { maxQueueMessages: 1, rateLimitPerRoute: 1 },
+      "a30eba9c1f7647b417185864aa231803c2da91bfa92c5ad97926d4e9269e4440"],
+    ["GATEWAY_QUEUE_FULL", "The bounded gateway queue is full.", true,
+      { maxQueueMessages: 1, rateLimitPerRoute: 2 },
+      "284cea5bbe53c02f7673b05ee3728e260672fd64398d3871c84bdf2ef77bd5a3"],
+  ] as const;
+
+  for (const [code, message, recoverable, caseLimits, stateSha256] of cases) {
+    const { config, clock: testClock, store } = await fixture({ limits: caseLimits });
+    await store.initialize();
+    await routed(store);
+    if (code !== "MESSAGE_TOO_LARGE") {
+      await enqueue(store, "precedence-seed", "seed");
+    }
+    if (code === "GATEWAY_RATE_LIMITED") {
+      assert.deepEqual(await enqueue(store, "precedence-seed", "seed"), {
+        accepted: false, duplicate: true, messageIdSuffix: "00000004",
+      });
+    }
+
+    const beforeBytes = await readFile(store.stateFilePath, "utf8");
+    const beforeMessages = (JSON.parse(beforeBytes) as { messages: unknown[] }).messages;
+    const beforeAuthority = await store.inspectPrivateRoutes();
+    if (code === "MESSAGE_TOO_LARGE") {
+      await assert.rejects(store.enqueueMessage({ sourceAlias: claude.alias,
+        targetAlias: codex.alias, body: "\0oversized", dedupeKey: "invalid-before-size" }),
+      (error: unknown) => error instanceof BridgeError &&
+        error.code === "INVALID_GATEWAY_MESSAGE" && !error.recoverable);
+      assert.equal(await readFile(store.stateFilePath, "utf8"), beforeBytes);
+    }
+
+    const deadlineAt = code === "MESSAGE_TOO_LARGE" || code === "INVALID_DEADLINE"
+      ? new Date(testClock.now().getTime() + 20_000).toISOString() : undefined;
+    await assert.rejects(store.enqueueMessage({
+      sourceAlias: claude.alias, targetAlias: codex.alias,
+      body: code === "MESSAGE_TOO_LARGE" ? "oversized" : "rejected",
+      dedupeKey: code === "INVALID_DEADLINE" ? "precedence-seed" : `reject-${code}`,
+      ...(deadlineAt === undefined ? {} : { deadlineAt }),
+    }), (error: unknown) => {
+      assert.ok(error instanceof BridgeError);
+      assert.deepEqual([error.code, error.message, error.recoverable],
+        [code, message, recoverable]);
+      return true;
+    });
+
+    const persistedBytes = await readFile(store.stateFilePath, "utf8");
+    const raw = JSON.parse(persistedBytes) as {
+      messages: unknown[];
+      activity: Array<{ type: string; event: { state?: string; safeErrorCode?: string } }>;
+      accounting: { rejected: number };
+      routes: Array<{ alias: string; counters: { rejected: number } }>;
+    };
+    assert.deepEqual(raw.messages, beforeMessages);
+    assert.deepEqual(await store.inspectPrivateRoutes(), beforeAuthority);
+    assert.deepEqual(raw.activity.slice(-1).map((entry) => [
+      entry.type, entry.event.state, entry.event.safeErrorCode,
+    ]), [["message_activity", "rejected", code]]);
+    assert.equal(raw.accounting.rejected, 1);
+    assert.equal(raw.routes.find((entry) => entry.alias === claude.alias)?.counters.rejected, 1);
+    assert.equal(createHash("sha256").update(persistedBytes).digest("hex"), stateSha256);
+
+    await store.close();
+    const restarted = new GatewayStore(config, { now: testClock.now, randomId: testClock.randomId });
+    await restarted.initialize();
+    const rejection = (await restarted.publicSnapshot()).messages.filter(
+      (entry) => entry.state === "rejected");
+    assert.deepEqual(rejection.map((entry) => entry.safeErrorCode), [code]);
+    await restarted.close();
+  }
 });
 
 test("interleaved message and runtime activity share one strict sequence", async () => {

@@ -946,7 +946,8 @@ export class GatewayStore {
    * with its queued rows. Both refusals are exactly right, and neither must
    * ever be reachable by a document we wrote. When the registration is
    * removed, `removeRegistrationMetadata` takes the same rows out of the live
-   * state in the same mutate, so nothing of it is written afterwards either.
+   * state in the same mutate. Attributable rows and bodies are removed;
+   * aggregate counters may remain advanced.
    */
   private persistedProjection(state: GatewayPersistedState): GatewayPersistedState {
     if (this.ephemeralRegistrations.size === 0) return state;
@@ -1787,12 +1788,9 @@ export class GatewayStore {
     }
     const bytes = Buffer.byteLength(input.body, "utf8");
     if (bytes > this.config.limits.maxMessageBytes) {
-      this.recordRejection(state, authority, bytes, now, "MESSAGE_TOO_LARGE", input);
-      throw new CommitAndThrow(
-        new BridgeError(
-          "MESSAGE_TOO_LARGE",
-          "The message exceeds the configured byte bound.",
-        ),
+      this.rejectEnqueue(state, authority, bytes, now, input,
+        "MESSAGE_TOO_LARGE",
+        "The message exceeds the configured byte bound.",
       );
     }
     if (Buffer.byteLength(input.dedupeKey, "utf8") > 512) {
@@ -1806,12 +1804,9 @@ export class GatewayStore {
       Date.parse(deadlineAt) <= now.getTime() ||
       Date.parse(deadlineAt) > now.getTime() + this.config.limits.messageDeadlineMs
     ) {
-      this.recordRejection(state, authority, bytes, now, "INVALID_DEADLINE", input);
-      throw new CommitAndThrow(
-        new BridgeError(
-          "INVALID_DEADLINE",
-          "The message deadline must fall inside the configured delivery window.",
-        ),
+      this.rejectEnqueue(state, authority, bytes, now, input,
+        "INVALID_DEADLINE",
+        "The message deadline must fall inside the configured delivery window.",
       );
     }
     const fingerprint = createHash("sha256")
@@ -1837,13 +1832,9 @@ export class GatewayStore {
       };
     }
     if (!this.consumeRate(state, authority.sourceAlias, now)) {
-      this.recordRejection(state, authority, bytes, now, "GATEWAY_RATE_LIMITED", input);
-      throw new CommitAndThrow(
-        new BridgeError(
-          "GATEWAY_RATE_LIMITED",
-          "The source exceeded the bounded gateway rate window.",
-          true,
-        ),
+      this.rejectEnqueue(state, authority, bytes, now, input,
+        "GATEWAY_RATE_LIMITED",
+        "The source exceeded the bounded gateway rate window.", true,
       );
     }
     const active = state.messages.filter(
@@ -1875,13 +1866,9 @@ export class GatewayStore {
       state.accounting.queuedBytes - (superseded?.bytes ?? 0) + bytes >
         this.config.limits.maxQueueBytes
     ) {
-      this.recordRejection(state, authority, bytes, now, "GATEWAY_QUEUE_FULL", input);
-      throw new CommitAndThrow(
-        new BridgeError(
-          "GATEWAY_QUEUE_FULL",
-          "The bounded gateway queue is full.",
-          true,
-        ),
+      this.rejectEnqueue(state, authority, bytes, now, input,
+        "GATEWAY_QUEUE_FULL",
+        "The bounded gateway queue is full.", true,
       );
     }
     const messageId = `msg_${this.randomId()}`;
@@ -2001,6 +1988,16 @@ export class GatewayStore {
     }
     bucket.count += 1;
     return true;
+  }
+  private rejectEnqueue(
+    state: GatewayPersistedState,
+    authority: Parameters<GatewayStore["recordRejection"]>[1],
+    bytes: number, now: Date,
+    input: Pick<EnqueueMessageInput, "conversationIdSuffix" | "steer">,
+    code: string, message: string, recoverable = false,
+  ): never {
+    this.recordRejection(state, authority, bytes, now, code, input);
+    throw new CommitAndThrow(new BridgeError(code, message, recoverable));
   }
   private recordRejection(
     state: GatewayPersistedState,
