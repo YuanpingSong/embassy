@@ -25,7 +25,7 @@ import type {
   SafeGatewayAlert,
 } from "./types.js";
 import { decodePeerParams, decodePeerResult, type PeerCatalogResult,
-  type PeerHandoffParams, type PeerHandoffResult } from "./peer-protocol.js";
+  isPeerHandoffRefusal, type PeerHandoffParams, type PeerHandoffResult, type PeerHandoffRefusal } from "./peer-protocol.js";
 import { isPeerMailboxAwaitResult, type PeerMailboxAwaitResult } from "./peer-mailbox.js";
 
 export const GATEWAY_CONTROL_PROTOCOL_VERSION = 4 as const;
@@ -93,6 +93,7 @@ export type DeliveryStatusParams = { token: string };
 export type RetireRouteParams = { alias: string };
 export type PeerCatalogParams = { peerHost: string };
 export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
+export type PeerHandoffControlResult = PeerHandoffResult | PeerHandoffRefusal;
 export type RegisterPeerParams = {
   alias: string; token?: string; ephemeral?: true; ttlMs?: number;
 };
@@ -168,7 +169,7 @@ type ResultByMethod = {
   observe_snapshot: GatewaySnapshotObservation; delivery_status: GatewayDeliveryStatusResult;
   send: GatewaySendResult;
   refresh_discovery: GatewayRefreshResult; peer_catalog: PeerCatalogResult;
-  peer_handoff: PeerHandoffResult;
+  peer_handoff: PeerHandoffControlResult;
   register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
   await_peer: PeerMailboxAwaitResult; peer_receipt: GatewayDecision;
   retire_route: GatewayRetireRouteResult;
@@ -184,7 +185,7 @@ export type GatewayControlHandlers = {
   send: (params: Readonly<ValidatedSendParams>) => MaybePromise<GatewaySendResult>;
   refreshDiscovery: () => MaybePromise<GatewayRefreshResult>;
   peerCatalog?: (params: Readonly<PeerCatalogParams>) => MaybePromise<PeerCatalogResult>;
-  peerHandoff?: (params: Readonly<PeerHandoffControlParams>) => MaybePromise<PeerHandoffResult>;
+  peerHandoff?: (params: Readonly<PeerHandoffControlParams>) => MaybePromise<PeerHandoffControlResult>;
   registerPeer: (params: Readonly<RegisterPeerParams>) => MaybePromise<GatewayRegisterPeerResult>;
   unregisterPeer: (params: Readonly<PeerPrincipalParams>) => MaybePromise<GatewayDecision>;
   awaitPeer: (params: Readonly<PeerPrincipalParams>) => MaybePromise<PeerMailboxAwaitResult>;
@@ -412,6 +413,7 @@ const isPeerCatalog = (value: unknown): boolean => {
   try { decodePeerResult("catalog/get", value); return true; } catch { return false; }
 };
 const isPeerHandoffResult = (value: unknown): boolean => {
+  if (isPeerHandoffRefusal(value)) return true;
   try { decodePeerResult("handoff", value); return true; } catch { return false; }
 };
 function decodeRegister(value: unknown): ValidatedRegisterCodexParams {

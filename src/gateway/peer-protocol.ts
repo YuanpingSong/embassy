@@ -23,6 +23,16 @@ export type PeerHandoffParams = Readonly<{ originAttemptId: string; originMessag
   source: PeerEndpoint; target: PeerEndpoint; deadlineAt: string;
   expectsReply: boolean; body: string; steer?: true; conversationCorrelation?: string }>;
 export type PeerHandoffResult = Readonly<{ accepted: true }>;
+export type PeerHandoffRefusal = Readonly<{ accepted: false; reason: string }>;
+// These store refusals precede message admission. Other failures prove nothing
+// about whether the destination committed the handoff.
+const handoffRefusalCodes = new Set([
+  "INVALID_PEER_HANDOFF", "ROUTE_UNREGISTERED", "MESSAGE_TOO_LARGE",
+  "INVALID_DEADLINE", "GATEWAY_RATE_LIMITED", "GATEWAY_QUEUE_FULL",
+]);
+export function isPeerHandoffRefusal(value: unknown): value is PeerHandoffRefusal {
+  return exact(value, { accepted: (item) => item === false, reason: member(handoffRefusalCodes) });
+}
 export type PeerCatalogResult = Readonly<{ revision: number; complete: boolean; truncated: boolean;
   generatedAt: string; health: ConnectorHealth;
   connectors: readonly Readonly<{ provider: GatewayProvider; host: string; health: ConnectorHealth;

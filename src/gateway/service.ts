@@ -15,15 +15,16 @@ import {
   type GatewaySendResult,
   type GatewaySnapshotObservation,
   type PeerPrincipalParams,
+  type PeerHandoffControlResult,
   type PeerReceiptParams,
   type RegisterPeerParams,
   type UnregisterCodexParams,
   type ValidatedRegisterCodexParams,
   type ValidatedSendParams,
 } from "./control.js";
-import { PeerConnectionLostError, spawnPeerClient, type PeerClient } from "./peer-client.js";
+import { PeerConnectionLostError, PeerRequestError, spawnPeerClient, type PeerClient } from "./peer-client.js";
 import type { LocalPeerMailboxProvider, PeerMailboxAwaitResult } from "./peer-mailbox.js";
-import { peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
+import { isPeerHandoffRefusal, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./peer-protocol.js";
 import { GatewayStore } from "./store.js";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
@@ -650,10 +651,18 @@ export class GatewayService {
         (alert.host === undefined || alert.host === localHost) && (alert.alias === undefined || aliasHost(alert.alias) === localHost)), };
   }
 
-  private async receivePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<Readonly<{ accepted: true }>> {
+  private async receivePeerHandoff(peerHost: string, handoff: PeerHandoffParams): Promise<PeerHandoffControlResult> {
     if (!this.config.peerNodes.includes(peerHost))
       throw new BridgeError("PEER_NOT_CONFIGURED", "The sending peer host is not configured.");
-    const enqueued = await this.store.enqueuePeerHandoff(peerHost, handoff);
+    let enqueued: Awaited<ReturnType<GatewayStore["enqueuePeerHandoff"]>>;
+    try {
+      enqueued = await this.store.enqueuePeerHandoff(peerHost, handoff);
+    } catch (error) {
+      const refusal = { accepted: false, reason: error instanceof BridgeError ? error.code : undefined };
+      if (isPeerHandoffRefusal(refusal)) return refusal;
+      throw error;
+    }
+    // Post-admission bookkeeping is deliberately outside the refusal catch.
     if (enqueued.messageId !== undefined) {
       const source = await this.store.inspectPrivateRoute(handoff.source.alias);
       const target = await this.store.inspectPrivateRoute(handoff.target.alias);
@@ -1839,14 +1848,17 @@ export class GatewayService {
             attemptId: attempt.attemptId, lossOutcome: "unconfirmed" });
           if (accepted.status !== "accepted") throw new BridgeError("ACCEPTANCE_UNCONFIRMED", "The peer acceptance fence is stale.");
           result = { state: "delivered", safeErrorCode: "PEER_HANDOFF_CONFIRMED" };
-        } catch {
+        } catch (error) {
           if (!armed && !authorizationUncertain) {
             peer.close();
             this.peerClients.delete(target.binding.hostId);
             await this.resolvePrewrite(attempt.messageId, attempt.attemptId, "requeue", "PEER_TUNNEL_UNAVAILABLE");
             return false;
           }
-          result = acceptanceObserved
+          result = armed && !authorizationUncertain && !acceptanceObserved &&
+            error instanceof PeerRequestError && error.detail.code === -32000 && isPeerHandoffRefusal(error.detail.data)
+            ? { state: "failed", safeErrorCode: error.detail.data.reason }
+            : acceptanceObserved
             ? { state: "unconfirmed", safeErrorCode: "PEER_HANDOFF_ACCEPTANCE_UNCONFIRMED" }
             : { state: "ambiguous", safeErrorCode: authorizationUncertain ? "WRITE_AUTHORIZATION_UNCERTAIN" : "PEER_HANDOFF_OUTCOME_UNKNOWN" };
         }

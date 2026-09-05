@@ -9,7 +9,8 @@ import { BridgeError } from "../src/errors.js";
 import type { GatewayConfig } from "../src/gateway/config.js";
 import { spawnPeerClient, type PeerClient, type PeerSpawn } from "../src/gateway/peer-client.js";
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
+import { runGatewayCli, validatePrivateGatewayControlSocket } from "../src/gateway/cli.js";
 import { decodePeerResult, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
 import { renderStatus } from "../src/gateway/status-view.js";
@@ -1366,6 +1367,189 @@ test("federated named routes refuse removal even when the presented binding matc
     assert.equal(await readFile(subject.store.stateFilePath, "utf8"), before);
     assert.equal((await subject.store.inspectPrivateRoute(remoteCodex.alias))?.registrationMode, "federated_peer");
   } finally { await subject.close(); }
+});
+
+class CliPeerChild extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly replies: Array<Record<string, unknown>> = [];
+  dropNextHandoffReply = false;
+  rewriteError: ((error: Record<string, unknown>) => Record<string, unknown>) | undefined;
+  private readonly methods = new Map<string | number, string>();
+  private requestBuffer = "";
+  private exited = false;
+
+  constructor(destination: Fixture) {
+    super();
+    this.stdin._transform = (chunk: Buffer, _encoding, done) => {
+      this.requestBuffer += chunk.toString();
+      for (;;) {
+        const newline = this.requestBuffer.indexOf("\n");
+        if (newline < 0) break;
+        const request = JSON.parse(this.requestBuffer.slice(0, newline)) as
+          { id: string | number; method: string };
+        this.requestBuffer = this.requestBuffer.slice(newline + 1);
+        this.methods.set(request.id, request.method);
+      }
+      done(null, chunk);
+    };
+    const output = new Writable({ write: (chunk, _encoding, done) => {
+      const frame = JSON.parse(chunk.toString()) as Record<string, unknown>;
+      const method = this.methods.get(frame.id as string | number);
+      if (method === "handoff" && frame.error !== undefined && this.rewriteError !== undefined) {
+        frame.error = this.rewriteError(frame.error as Record<string, unknown>);
+        chunk = Buffer.from(`${JSON.stringify(frame)}\n`);
+      }
+      if (method === "handoff") this.replies.push(frame);
+      if (method === "handoff" && this.dropNextHandoffReply) {
+        this.dropNextHandoffReply = false;
+        done();
+        this.stdin.end();
+        this.exit();
+      } else {
+        this.stdout.write(chunk, done);
+      }
+    } });
+    void runGatewayCli(["peer-stdio"], {
+      env: {}, stdin: this.stdin, stdout: output, stderr: this.stderr,
+      loadNodeInventory: async () => ({ host: "m5dev", nodes: ["studio"] }),
+      loadConfig: () => destination.config,
+      validateControlSocket: validatePrivateGatewayControlSocket,
+      // sendRequest is deliberately not injected: this crosses the real UDS.
+    }).then(() => this.exit(), () => this.exit());
+  }
+
+  kill(): boolean {
+    this.stdin.end();
+    this.exit();
+    return true;
+  }
+
+  private exit(): void {
+    if (this.exited) return;
+    this.exited = true;
+    queueMicrotask(() => this.emit("exit"));
+  }
+}
+
+test("peer handoff distinguishes proved destination refusal from every uncertain write", async () => {
+  const localTarget = { ...route("codex", "codex-main@m5dev", THREAD_A, "reg_target"),
+    binding: { ...route("codex", "codex-main@m5dev", THREAD_A, "reg_target").binding, hostId: "m5dev" } };
+  const targetRef = peerRouteRef("m5dev", localTarget.binding.registrationId);
+  const remoteTarget: RegisterRouteInput = { alias: localTarget.alias, registrationMode: "federated_peer",
+    binding: { provider: "codex", hostId: "m5dev", routeHandle: targetRef, registrationId: "reg_target_mirror" } };
+  const sender = await fixture([], { hostId: "studio", peerNodes: ["m5dev"], seed: async (store) => {
+    await store.registerRoute(remoteTarget);
+  } });
+  const registered = await sender.handlers.registerPeer({ alias: "peer-source@studio" });
+  assert.ok(registered.accepted && "token" in registered);
+  if (!registered.accepted || !("token" in registered)) throw new Error("peer registration failed");
+  const localSource = (await sender.store.inspectPrivateRoute("peer-source@studio"))!;
+  const sourceRef = peerRouteRef("studio", localSource.binding.registrationId);
+  const remoteSource: RegisterRouteInput = { alias: localSource.alias, registrationMode: "federated_peer",
+    binding: { provider: "peer", hostId: "studio", routeHandle: sourceRef, registrationId: "reg_source_mirror" } };
+  const destination = await fixture([], { hostId: "m5dev", peerNodes: ["studio"], seed: async (store) => {
+    await store.registerRoute(remoteSource); await store.registerRoute(localTarget);
+  } });
+  let child!: CliPeerChild;
+  const spawn: PeerSpawn = () => (child = new CliPeerChild(destination)) as unknown as ReturnType<PeerSpawn>;
+  const peer = await spawnPeerClient({ node: "m5dev", localHost: "studio", spawn });
+  (sender.service as unknown as { peerClients: Map<string, PeerClient> }).peerClients.set("m5dev", peer);
+  const destinationMessages = async () => (JSON.parse(await readFile(destination.store.stateFilePath, "utf8")) as { messages: unknown[] }).messages.length;
+  const send = async (text: string) => {
+    const sent = await sender.handlers.send({ fromAlias: localSource.alias, toAlias: remoteTarget.alias,
+      text, peerToken: registered.token, expectsReply: false });
+    assert.equal(sent.accepted, true, JSON.stringify(sent));
+    if (!sent.accepted) throw new Error("send admission failed");
+    await eventually(async () => { const row = await sender.handlers.deliveryStatus({ token: sent.deliveryToken });
+      return row.found && row.terminal; });
+    return await sender.handlers.deliveryStatus({ token: sent.deliveryToken });
+  };
+  try {
+    // The stale mirror reaches a real destination lookup, but no message is admitted.
+    await destination.store.removeOwnedRouteAtomic({ alias: localTarget.alias, binding: localTarget.binding });
+    const refused = await send("proved refusal");
+    assert.deepEqual(refused.found && [refused.state, refused.safeErrorCode], ["failed", "ROUTE_UNREGISTERED"]);
+    assert.equal(await destinationMessages(), 0);
+    assert.deepEqual(child.replies.at(-1)?.error, { code: -32000, message: "Peer handoff refused",
+      data: { accepted: false, reason: "ROUTE_UNREGISTERED" } });
+    for (const rewrite of [
+      (error: Record<string, unknown>) => ({ ...error, code: -32603 }),
+      (error: Record<string, unknown>) => ({ ...error, data: { accepted: false, reason: "INTERNAL_ERROR" } }),
+      (error: Record<string, unknown>) => ({ ...error, data: { accepted: false, reason: "ROUTE_UNREGISTERED", extra: true } }),
+    ]) {
+      child.rewriteError = rewrite;
+      const unknown = await send("unproved refusal envelope");
+      assert.deepEqual(unknown.found && [unknown.state, unknown.safeErrorCode],
+        ["ambiguous", "PEER_HANDOFF_OUTCOME_UNKNOWN"]);
+      assert.equal(await destinationMessages(), 0);
+    }
+    child.rewriteError = undefined;
+    await destination.store.registerRoute(localTarget);
+
+    // The peer result stays accepted for first admission and exact duplicate.
+    const handoff: PeerHandoffParams = { originAttemptId: "attempt_duplicate", originMessageId: "msg_duplicate",
+      source: { alias: localSource.alias, provider: "peer", host: "studio", routeRef: sourceRef },
+      target: { alias: localTarget.alias, provider: "codex", host: "m5dev", routeRef: targetRef },
+      deadlineAt: new Date(destination.clock.now().getTime() + 5_000).toISOString(), expectsReply: false, body: "duplicate" };
+    for (const [key, reason] of [["maxMessageBytes", "MESSAGE_TOO_LARGE"],
+      ["maxQueueBytes", "GATEWAY_QUEUE_FULL"]] as const) {
+      const limit = destination.config.limits[key];
+      (destination.config.limits as Record<typeof key, number>)[key] = 1;
+      await assert.rejects(peer.prepareHandoff({ ...handoff, originMessageId: `msg_${key}` }).perform());
+      assert.deepEqual((child.replies.at(-1)?.error as { data: unknown }).data, { accepted: false, reason });
+      (destination.config.limits as Record<typeof key, number>)[key] = limit;
+      assert.equal(await destinationMessages(), 0);
+    }
+    await assert.rejects(peer.prepareHandoff({ ...handoff, deadlineAt: destination.clock.now().toISOString() }).perform());
+    assert.deepEqual((child.replies.at(-1)?.error as { data: unknown }).data,
+      { accepted: false, reason: "INVALID_DEADLINE" });
+    assert.deepEqual(await peer.prepareHandoff(handoff).perform(), { accepted: true });
+    assert.deepEqual(await peer.prepareHandoff(handoff).perform(), { accepted: true });
+    assert.equal(await destinationMessages(), 1);
+    (destination.config.limits as { rateLimitPerRoute: number }).rateLimitPerRoute = 1;
+    const rate = await send("proved rate refusal");
+    assert.deepEqual(rate.found && [rate.state, rate.safeErrorCode], ["failed", "GATEWAY_RATE_LIMITED"]);
+    assert.deepEqual((child.replies.at(-1)?.error as { data?: unknown }).data,
+      { accepted: false, reason: "GATEWAY_RATE_LIMITED" });
+    assert.equal(await destinationMessages(), 1); destination.clock.advance(1_000);
+
+    // A local authorization commit whose return is lost never reaches SSH.
+    const authorize = sender.store.authorizeMessage.bind(sender.store);
+    sender.store.authorizeMessage = async (input) => { await authorize(input); throw new Error("authorization uncertain"); };
+    const repliesBeforeAuthorization = child.replies.length;
+    const uncertain = await send("authorization uncertain");
+    sender.store.authorizeMessage = authorize;
+    assert.deepEqual(uncertain.found && [uncertain.state, uncertain.safeErrorCode],
+      ["ambiguous", "WRITE_AUTHORIZATION_UNCERTAIN"]);
+    assert.equal(child.replies.length, repliesBeforeAuthorization);
+    assert.equal(await destinationMessages(), 1);
+
+    // Admission commits, then destination service bookkeeping fails: generic error, never refusal.
+    const inspect = destination.store.inspectPrivateRoute.bind(destination.store);
+    let failInspection = true;
+    destination.store.inspectPrivateRoute = async (...args) => {
+      if (failInspection) { failInspection = false; throw new BridgeError("ROUTE_UNREGISTERED", "after admission"); }
+      return await inspect(...args);
+    };
+    const postAdmission = await send("post-admission failure");
+    destination.store.inspectPrivateRoute = inspect;
+    assert.deepEqual(postAdmission.found && [postAdmission.state, postAdmission.safeErrorCode],
+      ["ambiguous", "PEER_HANDOFF_OUTCOME_UNKNOWN"]);
+    assert.equal(await destinationMessages(), 2);
+    assert.deepEqual(child.replies.at(-1)?.error, { code: -32000, message: "Local broker refused peer authority" });
+
+    // The destination admits one more message, but the fake transport drops only its reply.
+    destination.clock.advance(1_000);
+    child.dropNextHandoffReply = true;
+    const lost = await send("lost reply");
+    assert.deepEqual(lost.found && [lost.state, lost.safeErrorCode],
+      ["ambiguous", "PEER_HANDOFF_OUTCOME_UNKNOWN"]);
+    assert.equal(await destinationMessages(), 3);
+  } finally {
+    await sender.close(); await destination.close();
+  }
 });
 
 test("peer handoff preserves every write boundary and never replays uncertainty", async () => {

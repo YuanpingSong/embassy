@@ -1283,7 +1283,10 @@ export async function runGatewayCli(
             catalog: async () => { const cached = firstCatalog; firstCatalog = undefined;
               return cached ?? await request("peer_catalog", { peerHost: peerHost! }); },
             handoff: async (handoff) => { firstCatalog = undefined;
-              return await request("peer_handoff", { peerHost: peerHost!, handoff }); },
+              const result = await request("peer_handoff", { peerHost: peerHost!, handoff });
+              if (!result.accepted) throw new PeerHandlerError({
+                code: -32000, message: "Peer handoff refused", data: result });
+              return result; },
           },
         });
         await session.done;
