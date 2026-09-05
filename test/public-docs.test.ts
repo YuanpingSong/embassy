@@ -442,12 +442,14 @@ test("delivery-token documentation preserves restart continuity", async () => {
 });
 
 test("advertisement guidance includes shell peers, not a singleton Codex record", async () => {
-  for (const file of ["AGENTS.md", "SECURITY.md", "CONTRIBUTING.md", "docs/GATEWAY-ARCHITECTURE.md", "skills/embassy-peer/SKILL.md"]) {
+  for (const file of ["README.md", "AGENTS.md", "SECURITY.md", "CONTRIBUTING.md", "docs/GATEWAY-ARCHITECTURE.md", "skills/embassy-peer/SKILL.md"]) {
     const document = await readPublicFile(file);
-    assert.doesNotMatch(document, /one process-owned\s+`?codex/i, file);
-    for (const paragraph of document.split(/\n\s*\n/)) {
-      if (/`codex-\*`\s+(?:(?:registry|peer)\s+)?record/.test(paragraph)) {
-        assert.match(paragraph, /`peer-\*`/, file);
+    for (const sentence of document.split(/(?<=[.!?])\s+|\n\s*\n/)) {
+      if (/\b(?:process|gateway)-owned\b/i.test(sentence) && /\bcodex\b/i.test(sentence) && /\brecord\b/i.test(sentence)) {
+        assert.match(sentence, /\bpeer\b/i, file);
+      }
+      if (/`codex-\*`\s+(?:(?:registry|peer)\s+)?records?/.test(sentence)) {
+        assert.match(sentence, /`peer-\*`/, file);
       }
     }
   }

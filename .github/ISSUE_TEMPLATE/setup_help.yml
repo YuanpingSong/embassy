@@ -23,7 +23,7 @@ body:
         - "embassy register-codex"
         - "embassy send (to a Claude session)"
         - "embassy send --conversation (answering)"
-        - "Claude session messaging the codex-* peer"
+        - "Claude session messaging a codex-* or peer-* peer"
         - "Install (npm install -g / build from source)"
         - Other
     validations:

@@ -228,7 +228,7 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Keep the gateway local, single-user, and non-hosted.
 - Keep the shipped launcher local-host-only.
 - Never read provider credentials, authentication state, history, settings, registries, raw sockets, or Keychain entries.
-- Publish only the gateway-owned marked record for each non-Claude route (`codex-*` or `peer-*`) and remove it on shutdown.
+- Publish only the gateway-owned marked record for each local non-Claude route (`codex-*` or `peer-*`); it is released when the route is released (an overlapping duplicate is outside shutdown cleanup — see SECURITY.md).
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.

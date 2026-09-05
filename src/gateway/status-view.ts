@@ -429,8 +429,10 @@ export function renderStatus(
       lines.push(`  ${line}`);
     }
     for (const { route, view } of views) {
-      if (route.safeErrorCode === "CLAUDE_PEER_WORKSPACE_UNATTESTED") {
-        lines.push(paint(`    ${route.alias}: ${STATUS_REMEDY.CLAUDE_PEER_WORKSPACE_UNATTESTED}`, "dim"));
+      if (view.remedy === undefined && (view.word === "busy" || view.word === "awaiting") &&
+          (route.safeErrorCode === "CLAUDE_PEER_WORKSPACE_UNATTESTED" ||
+           route.safeErrorCode === "CLAUDE_PEER_NOT_OBSERVED")) {
+        lines.push(paint(`    ${route.alias}: ${STATUS_REMEDY[route.safeErrorCode]}`, "dim"));
         continue;
       }
       if (view.remedy === undefined) continue;

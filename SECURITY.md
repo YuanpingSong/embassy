@@ -216,11 +216,14 @@ broker.
   included in bounded rejection evidence. Every Codex endpoint used by a
   delivery must negotiate its current interface and resume the exact task
   before that operation receives final write authorization.
-- Advertisement tracks a helper per non-Claude route (`codex-*` or `peer-*`):
+- Advertisement tracks a helper per local non-Claude route (`codex-*` or `peer-*`):
   one forked process, one callback socket, and one process-owned registry record
   with the supported explicit versioned Embassy-advertisement marker.
-  Admission checks the tracked count against `maxHelpers = config.limits.maxRoutes`
-  (default 128, ceiling 256). Known limitation: pending creations are not reserved; overlapping same-alias reconciliations can leave an extra helper outside both the tracked cap and supervisor shutdown cleanup.
+  The usable tracked-helper cap is `min(maxRoutes, 128)` (default 128); currently
+  `maxRoutes > 128` refuses provider startup rather than clamping the value.
+  Federated mirrors are not advertised: their foreign-host aliases are refused
+  by the helper, although reconciliation currently still attempts to create it.
+  Known limitation: pending creations are not reserved; overlapping same-alias reconciliations can leave an extra helper outside both the tracked cap and supervisor shutdown cleanup.
   The prefix is a visible alias convention, not the discriminator: an unmarked
   genuine Claude session named `codex-*` remains discoverable. Each helper creates
   one callback socket and removes only exact-owned artifacts whose generation
@@ -279,10 +282,12 @@ Embassy's provider-facing access is intentionally enumerable:
 - read the live Claude session registry and validate only the registry record,
   peer socket, PID, workspace, state-root, and generation evidence used by the
   current operation;
-- fork advertisement helper processes for non-Claude routes, each owning one
+- fork advertisement helper processes for local non-Claude routes, each owning one
   callback socket and one registry record (`codex-*` or `peer-*`); the tracked-count
-  admission limit is `maxHelpers = config.limits.maxRoutes` (default 128, ceiling 256),
+  admission cap is `min(maxRoutes, 128)` (default 128; larger settings currently refuse startup),
   subject to the pending-creation and shutdown-cleanup limitation above;
+- attempt helper creation for federated mirrors, whose foreign-host aliases are
+  refused before publishing a record; these mirrors are not advertised;
 - resolve the managed Codex installation and open one attested local App Server
   connection per operation; and
 - inspect canonical filesystem metadata needed to validate provider-advertised

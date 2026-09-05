@@ -23,6 +23,7 @@ test("repo-shipped peer skill has complete discoverable metadata", async () => {
 
   assert.match(skill, /^---\nname: embassy-peer\ndescription: .+\n---\n/);
   assert.doesNotMatch(skill, /\[TODO|TODO:/);
+  assert.ok(skill.includes("The agent must not install or copy skills, or modify provider configuration."));
   assert.match(interfaceYaml, /display_name: "Embassy Peer Gateway"/);
   assert.match(interfaceYaml, /short_description: ".{25,64}"/);
   assert.match(interfaceYaml, /default_prompt: ".*\$embassy-peer.*"/);
@@ -66,7 +67,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /CODEX_THREAD_ID/);
   assert.match(skill, /CLAUDE_CODE_MESSAGING_SOCKET/);
   assert.match(skill, /never echo it/i);
-  assert.match(skill, /Publish only.*non-Claude route \(`codex-\*` or `peer-\*`\)/);
+  assert.match(skill, /Publish only.*local non-Claude route \(`codex-\*` or `peer-\*`\)/);
   assert.match(skill, /Do not automatically retry/);
   assert.match(skill, /user-supplied native session UUID/);
   assert.match(skill, /old name stops resolving immediately/);

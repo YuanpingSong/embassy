@@ -437,11 +437,29 @@ test("colour is opt-in, carries no meaning alone, and keeps the table aligned", 
   assert.equal(painted.replaceAll(/\u001b\[\d+m/g, ""), plain);
 });
 
-test("busy Claude workspace observations show the unattested remedy", () => {
-  const rendered = renderStatus(snapshot({ availablePeers: [session(`advisor@${HOST}`)], routes: [route(`advisor@${HOST}`, "claude", {
-    state: "busy", safeErrorCode: "CLAUDE_PEER_WORKSPACE_UNATTESTED",
-  })] }), options);
-  assert.ok(rendered.includes("The session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias."));
+test("rendered busy Claude rows show observation remedies without overriding other states", () => {
+  const alias = `advisor@${HOST}`;
+  const cases: Array<{ overrides: Overrides<PublicRouteSnapshot>; discovered?: "idle" | "busy";
+    word: string; show?: boolean; fallback?: string }> = [
+    { overrides: { state: "busy" }, word: "busy", show: true },
+    { overrides: { state: "idle" }, discovered: "busy", word: "busy", show: true },
+    { overrides: { state: "busy" }, discovered: "idle", word: "idle" },
+    { overrides: { state: "busy", lastSeenAt: at(STATUS_ROUTE_STALE_AFTER_MS + 1_000) },
+      word: "stale", fallback: "that session has exited or renamed" },
+    { overrides: { state: "awaiting_approval" }, word: "awaiting", fallback: "waiting on an approval prompt" },
+    { overrides: { state: "busy", enabled: false }, word: "disabled" },
+  ];
+  for (const safeErrorCode of ["CLAUDE_PEER_WORKSPACE_UNATTESTED", "CLAUDE_PEER_NOT_OBSERVED"]) {
+    for (const current of cases) {
+      const rendered = renderStatus(snapshot({
+        routes: [route(alias, "claude", { safeErrorCode, ...current.overrides })],
+        availablePeers: current.discovered === undefined ? [] : [session(alias, { state: current.discovered })],
+      }), options);
+      assert.match(rendered, new RegExp(`^  ${alias} +claude +${current.word} `, "m"));
+      assert.equal(rendered.includes(STATUS_REMEDY[safeErrorCode]!), current.show === true, `${safeErrorCode}/${current.word}`);
+      if (current.fallback !== undefined) assert.ok(rendered.includes(current.fallback));
+    }
+  }
 });
 
 test("every remedy the renderer can reach is reachable, and the shared one cannot drift", async () => {
