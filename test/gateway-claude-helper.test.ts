@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { fork, type ChildProcess } from "node:child_process";
+import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
@@ -21,6 +21,11 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 async function missing(file: string): Promise<boolean> {
   try { await access(file); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
 }
+
+test("client lifecycle preserves the exact fake-child transcript", () => {
+  assert.equal(execFileSync(process.execPath, [path.join(repoRoot, "test/fixtures/helper-client-transcript.mjs")],
+    { encoding: "utf8", timeout: 10_000 }), "emb-121 client transcript: ok\n");
+});
 
 test("real-PID helpers own independent records and exact cleanup", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "embassy-helper-"));

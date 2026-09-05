@@ -44,18 +44,29 @@ export type ClaudeNativeHelperFactory = (options: ClaudeNativeHelperClientStartO
 type Pending = { resolve: (value: ClaudeNativeHelperResult) => void; reject: (error: unknown) => void; timer: NodeJS.Timeout };
 
 export class ClaudeNativeHelperClient implements ClaudeNativeHelperClientLike {
-  readonly pid: number; readonly registration: ClaudeNativeHelperRegistration; generation = "";
-  readonly #pending = new Map<string, Pending>(); readonly #exit: Promise<void>; #resolveExit!: () => void;
-  #closed = false; #exited = false;
+  readonly pid: number;
+  readonly registration: ClaudeNativeHelperRegistration;
+  generation = "";
+  readonly #pending = new Map<string, Pending>();
+  readonly #exit: Promise<void>;
+  #resolveExit!: () => void;
+  #closed = false;
+  #exited = false;
   private constructor(readonly child: ChildProcess, registration: ClaudeNativeHelperRegistration,
     readonly callbacks: ClaudeNativeHelperClientCallbacks) {
     if (!Number.isSafeInteger(child.pid) || child.pid! <= 0) throw fault("CLAUDE_NATIVE_HELPER_PID_INVALID");
-    this.pid = child.pid!; this.registration = registration;
+    this.pid = child.pid!;
+    this.registration = registration;
     this.#exit = new Promise((resolve) => { this.#resolveExit = resolve; });
     child.on("message", (value) => this.#message(value));
     child.once("error", () => this.#fail(fault("CLAUDE_NATIVE_HELPER_SPAWN_FAILED")));
-    child.once("exit", (code, signal) => { if (this.#exited) return; this.#exited = true;
-      this.#fail(fault("CLAUDE_NATIVE_HELPER_EXITED")); this.#resolveExit(); callbacks.onExit({ code, signal }); });
+    child.once("exit", (code, signal) => {
+      if (this.#exited) return;
+      this.#exited = true;
+      this.#fail(fault("CLAUDE_NATIVE_HELPER_EXITED"));
+      this.#resolveExit();
+      callbacks.onExit({ code, signal });
+    });
   }
   static async start(options: ClaudeNativeHelperClientStartOptions): Promise<ClaudeNativeHelperClient> {
     const child = fork(options.entryPath ?? fileURLToPath(new URL("./claude-helper.js", import.meta.url)), [], {
@@ -63,45 +74,98 @@ export class ClaudeNativeHelperClient implements ClaudeNativeHelperClientLike {
       execArgv: [], serialization: "json", stdio: ["ignore", "ignore", "ignore", "ipc"],
     });
     const client = new ClaudeNativeHelperClient(child, options.registration, options.callbacks);
-    const init: ClaudeNativeHelperInitialization = { protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "initialize", requestId: id(),
+    const init: ClaudeNativeHelperInitialization = {
+      protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "initialize", requestId: id(),
       runtime: options.runtime, hostId: options.hostId, deliveryNotices: options.deliveryNotices,
-      maxPendingMessages: options.maxPendingMessages, registration: options.registration };
-    try { const result = await client.#send(init); if (!("generation" in result)) throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
-      client.generation = result.generation; return client; }
-    catch (error) { await client.forceClose(); throw error; }
+      maxPendingMessages: options.maxPendingMessages, registration: options.registration,
+    };
+    try {
+      const result = await client.#send(init);
+      if (!("generation" in result)) throw fault("CLAUDE_NATIVE_HELPER_INVALID_RESPONSE");
+      client.generation = result.generation;
+      return client;
+    } catch (error) {
+      await client.forceClose();
+      throw error;
+    }
   }
   request(command: ClaudeNativeHelperCommand, timeoutMs = TIMEOUT): Promise<ClaudeNativeHelperResult> {
     return this.#send({ protocolVersion: CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION, type: "request", requestId: id(), command }, timeoutMs);
   }
   async close(): Promise<void> {
-    if (!this.#closed) { try { await this.request({ method: "close" }, CLOSE_TIMEOUT); } catch { this.child.kill("SIGTERM"); }
-      this.#closed = true; } await this.#awaitExit();
+    if (!this.#closed) {
+      try {
+        await this.request({ method: "close" }, CLOSE_TIMEOUT);
+      } catch {
+        this.child.kill("SIGTERM");
+      }
+      this.#closed = true;
+    }
+    await this.#awaitExit();
   }
-  async forceClose(): Promise<void> { this.#closed = true; if (!this.#exited) this.child.kill("SIGTERM"); await this.#awaitExit(); }
-  async #awaitExit(): Promise<void> { const timer = setTimeout(() => this.child.kill("SIGKILL"), CLOSE_TIMEOUT); timer.unref();
-    await this.#exit; clearTimeout(timer); }
+  async forceClose(): Promise<void> {
+    this.#closed = true;
+    if (!this.#exited) this.child.kill("SIGTERM");
+    await this.#awaitExit();
+  }
+  async #awaitExit(): Promise<void> {
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), CLOSE_TIMEOUT);
+    timer.unref();
+    await this.#exit;
+    clearTimeout(timer);
+  }
   async #send(message: ClaudeNativeHelperInitialization | Readonly<{ protocolVersion: typeof CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION; type: "request"; requestId: string; command: ClaudeNativeHelperCommand }>, timeoutMs = TIMEOUT): Promise<ClaudeNativeHelperResult> {
     if (this.#closed || this.#exited || !this.child.connected || this.child.killed) throw fault("CLAUDE_NATIVE_HELPER_UNAVAILABLE", true);
     if (this.#pending.size >= CLAUDE_NATIVE_HELPER_MAX_REQUESTS) throw fault("CLAUDE_NATIVE_HELPER_REQUEST_CAPACITY", true);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw fault("CLAUDE_NATIVE_HELPER_TIMEOUT_INVALID");
     assertClaudeNativeHelperIpcSize(message);
-    const pending = new Promise<ClaudeNativeHelperResult>((resolve, reject) => { const timer = setTimeout(() => {
-      this.#pending.delete(message.requestId); reject(fault("CLAUDE_NATIVE_HELPER_REQUEST_TIMEOUT")); }, timeoutMs); timer.unref();
-      this.#pending.set(message.requestId, { resolve, reject, timer }); });
-    this.child.send(message as Serializable, (error) => { if (error === null) return; const entry = this.#pending.get(message.requestId);
-      if (entry) { clearTimeout(entry.timer); this.#pending.delete(message.requestId); entry.reject(fault("CLAUDE_NATIVE_HELPER_IPC_FAILED", true)); } });
+    const pending = new Promise<ClaudeNativeHelperResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(message.requestId);
+        reject(fault("CLAUDE_NATIVE_HELPER_REQUEST_TIMEOUT"));
+      }, timeoutMs);
+      timer.unref();
+      this.#pending.set(message.requestId, { resolve, reject, timer });
+    });
+    this.child.send(message as Serializable, (error) => {
+      if (error === null) return;
+      const entry = this.#pending.get(message.requestId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        this.#pending.delete(message.requestId);
+        entry.reject(fault("CLAUDE_NATIVE_HELPER_IPC_FAILED", true));
+      }
+    });
     return await pending;
   }
   #message(value: unknown): void {
-    try { assertClaudeNativeHelperIpcSize(value); if (!isClaudeNativeHelperChildMessage(value)) throw fault("CLAUDE_NATIVE_HELPER_PROTOCOL_INVALID"); }
-    catch (error) { this.#fail(error); this.child.kill("SIGTERM"); return; }
+    try {
+      assertClaudeNativeHelperIpcSize(value);
+      if (!isClaudeNativeHelperChildMessage(value)) throw fault("CLAUDE_NATIVE_HELPER_PROTOCOL_INVALID");
+    } catch (error) {
+      this.#fail(error);
+      this.child.kill("SIGTERM");
+      return;
+    }
     const message: ClaudeNativeHelperChildMessage = value;
-    if (message.type === "event") { this.callbacks.onEvent(message.value); return; }
-    const pending = this.#pending.get(message.requestId); if (!pending) return;
-    clearTimeout(pending.timer); this.#pending.delete(message.requestId);
-    if (message.ok) pending.resolve(message.result); else pending.reject(fault(message.error.code, message.error.recoverable));
+    if (message.type === "event") {
+      this.callbacks.onEvent(message.value);
+      return;
+    }
+    const pending = this.#pending.get(message.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.#pending.delete(message.requestId);
+    if (message.ok) pending.resolve(message.result);
+    else pending.reject(fault(message.error.code, message.error.recoverable));
   }
-  #fail(error: unknown): void { for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(error); } this.#pending.clear(); }
+  #fail(error: unknown): void {
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.#pending.clear();
+  }
 }
 export const createClaudeNativeHelper: ClaudeNativeHelperFactory = ClaudeNativeHelperClient.start;
 
