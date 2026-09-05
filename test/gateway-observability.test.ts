@@ -676,6 +676,7 @@ test("check and status hold up against the real control server", async (t) => {
         frame: `${JSON.stringify({ ok: true, command: "await", result })}\n` };
     },
     peerReceipt: () => ({ accepted: true, code: "ok" }),
+    retireRoute: () => ({ accepted: false, code: "not_found" }),
   };
   const server = await startGatewayControlServer({ stateDir, socketPath, handlers });
   t.after(async () => await server.close());

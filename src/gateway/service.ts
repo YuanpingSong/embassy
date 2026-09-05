@@ -11,6 +11,7 @@ import {
   type GatewayDecision,
   type GatewayDeliveryStatusResult,
   type GatewayRegisterPeerResult,
+  type GatewayRetireRouteResult,
   type GatewaySendResult,
   type GatewaySnapshotObservation,
   type PeerPrincipalParams,
@@ -386,7 +387,7 @@ export class GatewayService {
   private readonly spawnPeer: typeof spawnPeerClient;
   private readonly peerClients = new Map<string, PeerClient>();
   private readonly peerCatalogs = new Map<string, PeerCatalogResult>();
-  private readonly peerCleanupAliases = new Set<string>();
+  private readonly routeCleanupAliases = new Set<string>();
   /** View-only freshness; never consulted by routing or write authorization. */
   private readonly peerRouteViews = new Map<string, GatewayAdapterRouteObservation>();
   private readonly connectors = new Map<string, ConnectorRuntime>();
@@ -591,6 +592,9 @@ export class GatewayService {
       unregisterPeer: (params) => decide(async () => this.unregisterPeer(params), true),
       awaitPeer: (params) => this.awaitPeer(params),
       peerReceipt: (params) => decide(async () => this.peerReceipt(params), true),
+      retireRoute: async ({ alias }) => {
+        try { return await this.retireRoute(alias); } catch (error) { return sendRefusal(error); }
+      },
       unregisterCodex: (params) => decide(async () => this.unregisterCodex(params)),
       listSnapshot: () => this.snapshot(),
       observeSnapshot: () => this.observeSnapshot(),
@@ -828,6 +832,54 @@ export class GatewayService {
     );
   }
 
+  private assertRouteNotCleaning(alias: string): void {
+    if (this.routeCleanupAliases.has(alias)) throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
+  }
+
+  private async retireRoute(alias: string): Promise<GatewayRetireRouteResult> {
+    this.assertWritable();
+    const route = await this.store.inspectPrivateRoute(alias);
+    if (!route) return { accepted: false, code: "not_found" };
+    if (route.registrationMode === "federated_peer" || route.binding.hostId !== this.config.hostId) {
+      throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "A remote route is retired by its owner, not this broker.");
+    }
+    this.assertRouteNotCleaning(alias);
+    this.routeCleanupAliases.add(alias);
+    const expiry = this.ephemeralPeerExpiries.get(alias);
+    this.ephemeralPeerExpiries.delete(alias);
+    this.ephemeralExpiryFailures.delete(alias);
+    let removed = false;
+    try {
+      const result = await this.store.removeOwnedRouteAtomic({ alias, binding: route.binding,
+        ...(route.binding.provider === "codex" ? { activity: { operatorAction: true } } : {}) });
+      if (!result.removed) return { accepted: false, code: "not_found" };
+      removed = true;
+      await this.finishSettlements(result.settlements);
+      const incident = (row: { sourceBinding?: LogicalRouteBinding; targetBinding?: LogicalRouteBinding }) =>
+        row.sourceBinding?.registrationId === route.binding.registrationId || row.targetBinding?.registrationId === route.binding.registrationId;
+      for (const [id, conversation] of this.conversations) if (incident(conversation)) this.conversations.delete(id);
+      for (const [id, rows] of this.pendingClaudeReplies) {
+        const retained = rows.filter((row) => !incident(row));
+        if (retained.length) this.pendingClaudeReplies.set(id, retained);
+        else this.pendingClaudeReplies.delete(id);
+      }
+      this.forgetRoute(route);
+      if (route.binding.provider === "claude") {
+        try { await this.adapterFor(route.binding)?.releaseRoute?.(route.binding.routeHandle); }
+        catch (error) { this.alert("ROUTE_RELEASE_FAILED", route, error); }
+      } else await this.reconcileUnadvertisement(route);
+      this.revision += 1;
+      return { accepted: true, code: "ok", settlements: {
+        cancelled: result.settlements.filter((row) => row.state === "cancelled").length,
+        ambiguous: result.settlements.filter((row) => row.state === "ambiguous").length,
+        unconfirmed: result.settlements.filter((row) => row.state === "unconfirmed").length,
+      } };
+    } finally {
+      if (!removed && expiry !== undefined) this.ephemeralPeerExpiries.set(alias, expiry);
+      this.routeCleanupAliases.delete(alias);
+    }
+  }
+
   private async removeOwnedRoute(route: GatewayPrivateRouteInspection): Promise<void> {
     this.assertWritable();
     const result = await this.store.removeOwnedRouteAtomic({
@@ -858,6 +910,7 @@ export class GatewayService {
 
   private async registerCodex(params: ValidatedRegisterCodexParams): Promise<void> {
     const existing = await this.store.inspectPrivateRoute(params.alias);
+    this.assertRouteNotCleaning(params.alias);
     if (existing !== undefined && params.succeedsAlias === undefined) {
       if (existing.binding.provider !== "codex" || existing.binding.routeHandle !== params.threadId) {
         throw new BridgeError("ROUTE_ALIAS_ALREADY_REGISTERED", "The alias belongs to another registration.");
@@ -878,6 +931,7 @@ export class GatewayService {
     };
     if (params.succeedsAlias === undefined) {
       this.assertWritable();
+      this.assertRouteNotCleaning(params.alias);
       await this.store.registerRoute(replacement);
       const installed = (await this.store.inspectPrivateRoute(params.alias))!;
       await this.recordActivity(
@@ -906,6 +960,7 @@ export class GatewayService {
       throw new BridgeError("CODEX_SUCCESSION_OWNER_MISMATCH", "The succeeded registration is absent.");
     }
     this.assertWritable();
+    this.assertRouteNotCleaning(params.alias);
     const result = await this.store.replaceCodexRegistrationAtomic({
       oldAlias: params.succeedsAlias,
       expectedOldRegistrationId: previous.binding.registrationId,
@@ -924,7 +979,7 @@ export class GatewayService {
   }
 
   private async registerPeer(params: RegisterPeerParams): Promise<string | undefined> {
-    if (this.peerCleanupAliases.has(params.alias)) {
+    if (this.routeCleanupAliases.has(params.alias)) {
       throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
     }
     const existing = await this.store.inspectPrivateRoute(params.alias);
@@ -939,6 +994,7 @@ export class GatewayService {
       throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
     }
     const token = `peer_${randomBytes(24).toString("base64url")}`;
+    this.assertRouteNotCleaning(params.alias);
     await this.store.registerRoute({ alias: params.alias, binding: {
       provider: "peer", hostId: this.config.hostId,
       routeHandle: peerHandle(process.getuid!(), params.alias, token), registrationId: registrationId(),
@@ -968,8 +1024,8 @@ export class GatewayService {
 
   private async unregisterPeer(params: PeerPrincipalParams): Promise<void> {
     const route = await this.assertPeer(params);
-    if (this.peerCleanupAliases.has(route.alias)) throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
-    this.peerCleanupAliases.add(route.alias);
+    if (this.routeCleanupAliases.has(route.alias)) throw new BridgeError("ROUTE_BUSY", "The route is still completing cleanup.", true);
+    this.routeCleanupAliases.add(route.alias);
     // The expiry leaves the map before the removal, under the same cleanup
     // guard, so a clock that fires mid-removal has nothing to act on; a
     // removal that does not happen puts it back, so a refused unregister
@@ -986,7 +1042,7 @@ export class GatewayService {
       this.forgetRoute(route); await this.reconcileUnadvertisement(route);
     } finally {
       if (!removed && expiry !== undefined) this.ephemeralPeerExpiries.set(route.alias, expiry);
-      this.peerCleanupAliases.delete(route.alias);
+      this.routeCleanupAliases.delete(route.alias);
     }
   }
 
@@ -1008,13 +1064,13 @@ export class GatewayService {
     for (const [alias, expiresAt] of [...this.ephemeralPeerExpiries]) {
       if (expiresAt > now) continue;
       // Another owner is mid-removal; the entry is theirs to clear or restore.
-      if (this.peerCleanupAliases.has(alias)) continue;
+      if (this.routeCleanupAliases.has(alias)) continue;
       const route = await this.store.inspectPrivateRoute(alias);
       if (route === undefined || !this.store.isEphemeralRegistration(route.binding.registrationId)) {
         this.ephemeralPeerExpiries.delete(alias); this.ephemeralExpiryFailures.delete(alias);
         continue;
       }
-      this.peerCleanupAliases.add(alias);
+      this.routeCleanupAliases.add(alias);
       try {
         const result = await this.store.removeOwnedRouteAtomic({ alias, binding: route.binding });
         if (result.removed) {
@@ -1033,7 +1089,7 @@ export class GatewayService {
           this.ephemeralExpiryFailures.set(alias, attempts);
           this.ephemeralPeerExpiries.set(alias, now + EPHEMERAL_EXPIRY_RETRY_MS);
         }
-      } finally { this.peerCleanupAliases.delete(alias); }
+      } finally { this.routeCleanupAliases.delete(alias); }
     }
   }
 
@@ -1132,6 +1188,7 @@ export class GatewayService {
       },
       registrationMode: "selected_live_peer",
     };
+    this.assertRouteNotCleaning(alias);
     const result = await this.installWithConcurrentFirstSend(input, adapter.identity.hostId, chosen.routeHandle);
     await this.finishSettlements(result.settlements);
     const after = (await this.store.listLogicalRoutes()).filter(

@@ -282,6 +282,7 @@ function handlers(
     unregisterPeer: () => ({ accepted: true, code: "ok" }),
     awaitPeer: () => ({ state: "timeout" }),
     peerReceipt: () => ({ accepted: true, code: "ok" }),
+    retireRoute: () => ({ accepted: false, code: "not_found" }),
     ...overrides,
   };
 }
@@ -356,7 +357,7 @@ function assertWireError(
 }
 
 test("serves the two directional routes and emits metadata-only responses", async () => {
-  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 3);
+  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 4);
   const { stateDir, socketPath } = await privateState();
   let registered: ValidatedRegisterCodexParams | undefined;
   let toClaude: ValidatedSendParams | undefined;
@@ -611,6 +612,38 @@ test("normalizes a same-host Codex succession without exposing private identifie
   await server.close();
 });
 
+test("retire_route has closed params and results and lost responses stay ambiguous", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const counts = { cancelled: 2, ambiguous: 1, unconfirmed: 1 };
+  const results = [{ accepted: true, code: "ok", settlements: counts },
+    { accepted: false, code: "not_found" },
+    { accepted: false, code: "rejected", reason: "FEDERATED_ROUTE_READ_ONLY" },
+    { accepted: true, code: "ok", settlements: { ...counts, cancelled: -1 } },
+    { accepted: true, code: "ok" },
+    { accepted: true, code: "ok", settlements: { ...counts, extra: 0 } }];
+  let calls = 0;
+  const server = await startGatewayControlServer({ stateDir, socketPath,
+    handlers: handlers({ retireRoute: ({ alias }) => {
+      assert.equal(alias, "peer-stranded@this-mac");
+      return results[calls++] as never;
+    } }) });
+  const request = { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "retire_route",
+    params: { alias: "peer-stranded@this-mac" } } as const;
+  try {
+    for (let index = 0; index < 3; index++) assert.deepEqual(
+      await sendGatewayControlRequest({ socketPath, request }),
+      { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: results[index] });
+    for (let index = 0; index < 3; index++) await assert.rejects(
+      sendGatewayControlRequest({ socketPath, request }),
+      { code: "CONTROL_OUTCOME_AMBIGUOUS", ambiguous: true });
+    for (const params of [{}, { alias: "not an alias" }, { ...request.params, token: PEER_TOKEN },
+      { ...request.params, force: true }, { ...request.params, threadId: THREAD_ID }]) {
+      assertWireError(await rawRequest(socketPath, wireRequest("retire_route", params)), "INVALID_REQUEST");
+    }
+    assert.equal(calls, 6);
+  } finally { await server.close(); }
+});
+
 test("only exposes queue-mode lifecycle methods", () => {
   assert.deepEqual(gatewayControlMethods, [
     "health",
@@ -627,6 +660,7 @@ test("only exposes queue-mode lifecycle methods", () => {
     "unregister_peer",
     "await_peer",
     "peer_receipt",
+    "retire_route",
   ]);
   assert.equal(isGatewayAlias("codex-main@this-mac"), true);
   assert.equal(isGatewayAlias("codex-main"), false);
@@ -1667,7 +1701,7 @@ test("client bounds time and output and rejects malformed responses", async () =
 
   // The previous line's broker (version 2) and a future one are both version
   // mismatches, never invalid responses: the version is read before the shape.
-  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 3);
+  assert.equal(GATEWAY_CONTROL_PROTOCOL_VERSION, 4);
   for (const version of [GATEWAY_CONTROL_PROTOCOL_VERSION - 1, GATEWAY_CONTROL_PROTOCOL_VERSION + 1]) {
     const skewed = trackedServer((socket) => socket.end(`${JSON.stringify({
       protocolVersion: version,

@@ -28,7 +28,7 @@ import { decodePeerParams, decodePeerResult, type PeerCatalogResult,
   type PeerHandoffParams, type PeerHandoffResult } from "./peer-protocol.js";
 import { isPeerMailboxAwaitResult, type PeerMailboxAwaitResult } from "./peer-mailbox.js";
 
-export const GATEWAY_CONTROL_PROTOCOL_VERSION = 3 as const;
+export const GATEWAY_CONTROL_PROTOCOL_VERSION = 4 as const;
 export const GATEWAY_CONTROL_MAX_FRAME_BYTES = 32 * 1024;
 export const GATEWAY_CONTROL_MAX_RESPONSE_BYTES = 256 * 1024;
 export const GATEWAY_CONTROL_MAX_MESSAGE_BYTES = 16 * 1024;
@@ -57,6 +57,7 @@ export const gatewayControlMethods = [
   "observe_snapshot", "delivery_status", "send",
   "refresh_discovery", "peer_catalog", "peer_handoff",
   "register_peer", "unregister_peer", "await_peer", "peer_receipt",
+  "retire_route",
 ] as const;
 export type GatewayControlMethod = (typeof gatewayControlMethods)[number];
 export type GatewayBusyPolicy = "queue";
@@ -89,6 +90,7 @@ export type ValidatedSendParams =
   | (SendBase & SendAuthority & { toAlias: string; conversationId?: never; expectsReply: boolean })
   | (SendBase & SendAuthority & { conversationId: string; toAlias?: never; expectsReply?: never });
 export type DeliveryStatusParams = { token: string };
+export type RetireRouteParams = { alias: string };
 export type PeerCatalogParams = { peerHost: string };
 export type PeerHandoffControlParams = { peerHost: string; handoff: PeerHandoffParams };
 export type RegisterPeerParams = {
@@ -110,6 +112,7 @@ type RequestParams = {
   peer_handoff: PeerHandoffControlParams;
   register_peer: RegisterPeerParams; unregister_peer: PeerPrincipalParams;
   await_peer: PeerPrincipalParams; peer_receipt: PeerReceiptParams;
+  retire_route: RetireRouteParams;
 };
 type ValidatedParams = Omit<RequestParams, "register_codex" | "send"> & {
   register_codex: ValidatedRegisterCodexParams;
@@ -154,6 +157,10 @@ export type GatewayDeliveryStatusResult =
 export type GatewaySnapshot = GatewayPublicSnapshot;
 export type GatewaySnapshotObservation = { snapshotRevision: number; snapshot: GatewaySnapshot };
 export type GatewayRegisterPeerResult = GatewayDecision | { accepted: true; code: "ok"; token: string };
+export type GatewayRetireRouteResult = Extract<GatewaySendResult, { accepted: false }> | {
+  accepted: true; code: "ok";
+  settlements: { cancelled: number; ambiguous: number; unconfirmed: number };
+};
 
 type ResultByMethod = {
   health: GatewayHealthResult; register_codex: GatewayDecision;
@@ -164,6 +171,7 @@ type ResultByMethod = {
   peer_handoff: PeerHandoffResult;
   register_peer: GatewayRegisterPeerResult; unregister_peer: GatewayDecision;
   await_peer: PeerMailboxAwaitResult; peer_receipt: GatewayDecision;
+  retire_route: GatewayRetireRouteResult;
 };
 type MaybePromise<T> = T | Promise<T>;
 export type GatewayControlHandlers = {
@@ -181,6 +189,7 @@ export type GatewayControlHandlers = {
   unregisterPeer: (params: Readonly<PeerPrincipalParams>) => MaybePromise<GatewayDecision>;
   awaitPeer: (params: Readonly<PeerPrincipalParams>) => MaybePromise<PeerMailboxAwaitResult>;
   peerReceipt: (params: Readonly<PeerReceiptParams>) => MaybePromise<GatewayDecision>;
+  retireRoute: (params: Readonly<RetireRouteParams>) => MaybePromise<GatewayRetireRouteResult>;
 };
 
 export type GatewayWireErrorCode =
@@ -444,6 +453,10 @@ function decodeSend(value: unknown): ValidatedSendParams {
 function decodeDeliveryStatus(value: unknown): DeliveryStatusParams {
   if (!shape(value, { token: (item) => typeof item === "string" && DELIVERY_TOKEN_PATTERN.test(item) })) invalid();
   return { token: value.token as string }; }
+function decodeRetire(value: unknown): RetireRouteParams {
+  if (!shape(value, { alias })) invalid();
+  return { alias: value.alias as string };
+}
 
 function isDecision(value: unknown): value is GatewayDecision {
   return shape(value, { accepted: (item) => typeof item === "boolean", code: oneOf(
@@ -464,6 +477,11 @@ function isSendResult(value: unknown): value is GatewaySendResult {
   return shape(value, { accepted: oneOf(true), code: oneOf("ok"),
     conversationId: (item) => typeof item === "string" && CONVERSATION_ID_PATTERN.test(item),
     deliveryToken: (item) => typeof item === "string" && DELIVERY_TOKEN_PATTERN.test(item) });
+}
+function isRetireResult(value: unknown): value is GatewayRetireRouteResult {
+  if (isRecord(value) && value.accepted === false) return isSendResult(value);
+  return shape(value, { accepted: oneOf(true), code: oneOf("ok"),
+    settlements: (counts) => shape(counts, { cancelled: nonNegative, ambiguous: nonNegative, unconfirmed: nonNegative }) });
 }
 function isRefreshResult(value: unknown): value is GatewayRefreshResult {
   return shape(value, { accepted: (item) => typeof item === "boolean", code: oneOf(
@@ -597,6 +615,7 @@ const descriptors = {
   unregister_peer: { handler: "unregisterPeer", decode: decodePeerPrincipal, result: isDecision, mutation: true },
   await_peer: { handler: "awaitPeer", decode: decodePeerPrincipal, result: isPeerMailboxAwaitResult, mutation: false },
   peer_receipt: { handler: "peerReceipt", decode: decodePeerReceipt, result: isDecision, mutation: true },
+  retire_route: { handler: "retireRoute", decode: decodeRetire, result: isRetireResult, mutation: true },
 } satisfies Record<GatewayControlMethod, Descriptor>;
 
 function parseRequestObject(value: unknown): ValidatedGatewayControlRequest {

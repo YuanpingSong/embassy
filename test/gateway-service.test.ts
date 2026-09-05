@@ -135,6 +135,7 @@ class FakeProvider implements GatewayProviderAdapter {
   readonly forgotten: string[] = [];
   readonly advertised: string[] = [];
   readonly unadvertised: string[] = [];
+  readonly released: string[] = [];
   readonly effects: string[] = [];
   readonly pauseEntered = deferred<void>();
   readonly pauseRelease = deferred<void>();
@@ -211,6 +212,11 @@ class FakeProvider implements GatewayProviderAdapter {
   async unadvertiseNativeSourcePeer(alias: string): Promise<void> {
     this.unadvertised.push(alias);
     this.effects.push(`unadvertise:${alias}`);
+  }
+
+  async releaseRoute(routeHandle: string): Promise<void> {
+    this.released.push(routeHandle);
+    this.effects.push(`release-route:${routeHandle}`);
   }
 
   async updateNativeInboundStatus(
@@ -1575,7 +1581,7 @@ test("one blocked peer does not prevent another peer catalog from reconciling", 
 });
 
 test("stale removal and succession controls preserve a same-alias replacement", async () => {
-  const run = async (operation: "remove" | "succeeds"): Promise<void> => {
+  const run = async (operation: "remove" | "retire" | "succeeds"): Promise<void> => {
     const subject = await fixture([
       new FakeProvider({ provider: "claude", hostId: "this-mac" }),
       new FakeProvider({ provider: "codex", hostId: "this-mac" }),
@@ -1584,7 +1590,7 @@ test("stale removal and succession controls preserve a same-alias replacement", 
     const release = deferred<void>();
     const removeOwnedRoute = subject.store.removeOwnedRouteAtomic.bind(subject.store);
     try {
-      const pending = operation === "remove"
+      const pending = operation === "remove" || operation === "retire"
         ? (() => {
             subject.store.removeOwnedRouteAtomic = async (input) => {
               if (input.alias === codex.alias) {
@@ -1593,7 +1599,9 @@ test("stale removal and succession controls preserve a same-alias replacement", 
               }
               return await removeOwnedRoute(input);
             };
-            return subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
+            return operation === "remove"
+              ? subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle })
+              : subject.handlers.retireRoute({ alias: codex.alias });
           })()
         : (() => {
             const original = subject.store.replaceCodexRegistrationAtomic.bind(subject.store);
@@ -1620,7 +1628,7 @@ test("stale removal and succession controls preserve a same-alias replacement", 
       release.resolve();
       assert.deepEqual(
         await pending,
-        operation === "remove"
+        operation === "remove" || operation === "retire"
           ? { accepted: false, code: "not_found" }
           : { accepted: false, code: "rejected" },
       );
@@ -1635,7 +1643,78 @@ test("stale removal and succession controls preserve a same-alias replacement", 
     }
   };
   await run("remove");
+  await run("retire");
   await run("succeeds");
+});
+
+test("retire route covers every local provider and refuses a federated route without mutation", async () => {
+  for (const local of [
+    claude,
+    codex,
+    route("peer", "peer-local@this-mac", `peer:${"a".repeat(64)}`, "reg_peer_local"),
+  ]) {
+    const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+    const provider = local.binding.provider === "claude"
+      ? claudeProvider : new FakeProvider({ provider: local.binding.provider, hostId: "this-mac" });
+    const subject = await fixture(provider === claudeProvider ? [provider] : [claudeProvider, provider], {
+      seed: async (store) => store.registerRoute(local).then(() => undefined),
+    });
+    try {
+      assert.deepEqual(await subject.handlers.retireRoute({ alias: local.alias }), {
+        accepted: true, code: "ok", settlements: { cancelled: 0, ambiguous: 0, unconfirmed: 0 },
+      });
+      assert.equal(await subject.store.inspectPrivateRoute(local.alias), undefined);
+      assert.deepEqual(provider.forgotten, [local.binding.registrationId]);
+      if (local.binding.provider === "claude") assert.deepEqual(provider.released, [local.binding.routeHandle]);
+      else assert.deepEqual(claudeProvider.unadvertised, [local.alias]);
+    } finally { await subject.close(); }
+  }
+
+  const remote = { ...codex, alias: "codex-remote@studio", registrationMode: "federated_peer" as const,
+    binding: { ...codex.binding, hostId: "studio", registrationId: "reg_remote" } };
+  const subject = await fixture([], { hostId: "this-mac", peerNodes: ["studio"],
+    seed: async (store) => store.registerRoute(remote).then(() => undefined) });
+  try {
+    const before = await readFile(subject.store.stateFilePath);
+    assert.deepEqual(await subject.handlers.retireRoute({ alias: remote.alias }), {
+      accepted: false, code: "rejected", reason: "FEDERATED_ROUTE_READ_ONLY",
+    });
+    assert.deepEqual(await readFile(subject.store.stateFilePath), before);
+  } finally { await subject.close(); }
+});
+
+test("retire route reports four-phase settlement counts and guards post-commit helper cleanup", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider], {
+    seed: async (store) => routed(store, claude, codex),
+  });
+  const entered = deferred<void>(); const release = deferred<void>();
+  claudeProvider.unadvertiseNativeSourcePeer = async () => { entered.resolve(); await release.promise; };
+  try {
+    for (const body of ["reserved", "armed", "accepted", "queued"]) {
+      await subject.store.enqueueMessage({ sourceAlias: claude.alias, targetAlias: codex.alias,
+        body, dedupeKey: `retire-${body}` });
+    }
+    const reserved = await subject.store.reserveMessage(codex.alias);
+    const armed = await subject.store.reserveMessage(codex.alias);
+    const accepted = await subject.store.reserveMessage(codex.alias);
+    if (reserved.status !== "reserved" || armed.status !== "reserved" || accepted.status !== "reserved") assert.fail("reservation");
+    for (const row of [armed, accepted]) await subject.store.authorizeMessage({
+      messageId: row.attempt.messageId, attemptId: row.attempt.attemptId,
+      sourceRegistrationId: row.attempt.sourceRegistrationId, targetRegistrationId: row.attempt.targetRegistrationId,
+      prepared: evidenceFor(row.attempt.body, "codex_turn_start"),
+    });
+    await subject.store.acceptMessage({ messageId: accepted.attempt.messageId,
+      attemptId: accepted.attempt.attemptId, lossOutcome: "unconfirmed" });
+    const retiring = subject.handlers.retireRoute({ alias: codex.alias });
+    await entered.promise;
+    assert.deepEqual(await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_B,
+      hostId: "this-mac", busyPolicy: "queue" }), { accepted: false, code: "busy" });
+    release.resolve();
+    assert.deepEqual(await retiring, { accepted: true, code: "ok",
+      settlements: { cancelled: 2, ambiguous: 1, unconfirmed: 1 } });
+  } finally { release.resolve(); await subject.close(); }
 });
 
 test("confirmed removal atomically terminalizes phase truth", async () => {
@@ -1663,6 +1742,8 @@ test("confirmed removal atomically terminalizes phase truth", async () => {
       body: "accepted",
       dedupeKey: "remove-accepted",
     });
+    await subject.store.enqueueMessage({ sourceAlias: claude.alias, targetAlias: codex.alias,
+      body: "still queued", dedupeKey: "remove-still-queued" });
     const armed = await subject.store.reserveMessage(codex.alias);
     assert.equal(armed.status, "reserved");
     const accepted = await subject.store.reserveMessage(codex.alias);
@@ -1687,6 +1768,7 @@ test("confirmed removal atomically terminalizes phase truth", async () => {
       attemptId: accepted.attempt.attemptId,
       lossOutcome: "unconfirmed",
     });
+    assert.equal((await subject.store.reserveMessage(codex.alias)).status, "reserved");
     const removed = await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle });
     assert.deepEqual(removed, { accepted: true, code: "ok" });
     const messages = await subject.store.publicSnapshot();
@@ -1694,6 +1776,7 @@ test("confirmed removal atomically terminalizes phase truth", async () => {
     assert.equal(byBody.get("accepted")?.state, "cancelled");
     assert.equal(byBody.get("queued")?.state, "ambiguous");
     assert.equal(byBody.get("armed")?.state, "unconfirmed");
+    assert.equal(byBody.get("still queued")?.state, "cancelled");
     assert.equal(queued.accepted && armedEnqueue.accepted && acceptedEnqueue.accepted, true);
     assert.deepEqual(codexProvider.forgotten, ["reg_codex_a"]);
     assert.deepEqual(claudeProvider.unadvertised, [codex.alias]);
@@ -2819,7 +2902,7 @@ test("selected Claude replies require an exact inherited reply capability", asyn
   }
 });
 
-test("native receipt settlement precedes teardown and closing ingress cannot persist mail", async () => {
+test("retire settles native receipt before teardown and closing ingress cannot persist mail", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider(
     { provider: "codex", hostId: "this-mac" },
@@ -2845,8 +2928,8 @@ test("native receipt settlement precedes teardown and closing ingress cannot per
     subject.clock.advance(2_500);
     await subject.timers.runDue();
     assert.deepEqual(
-      await subject.handlers.unregisterCodex({ alias: codex.alias, threadId: codex.binding.routeHandle }),
-      { accepted: true, code: "ok" },
+      await subject.handlers.retireRoute({ alias: codex.alias }),
+      { accepted: true, code: "ok", settlements: { cancelled: 0, ambiguous: 0, unconfirmed: 1 } },
     );
     await eventually(() => claudeProvider.unadvertised.includes(codex.alias));
     assert.deepEqual(claudeProvider.effects, [
@@ -2878,6 +2961,32 @@ test("native receipt settlement precedes teardown and closing ingress cannot per
     await subject.service.close();
     await rm(subject.root, { recursive: true, force: true });
   }
+});
+
+test("retire drops terminal conversations and buffered native reply capabilities", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" }, "pause_armed");
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const subject = await fixture([claudeProvider, codexProvider], {
+    seed: async (store) => routed(store, claude, codex),
+  });
+  try {
+    const sent = await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: claude.alias, text: "reply later", expectsReply: true });
+    if (!sent.accepted) assert.fail("conversation admission");
+    await claudeProvider.pauseEntered.promise;
+    claudeProvider.callbacks?.onClaudeReply({ endpoint: { provider: "claude", hostId: "this-mac",
+      routeHandle: claude.binding.routeHandle }, text: "buffered native reply" });
+    assert.deepEqual(await subject.handlers.retireRoute({ alias: codex.alias }), {
+      accepted: true, code: "ok", settlements: { cancelled: 0, ambiguous: 1, unconfirmed: 0 },
+    });
+    claudeProvider.pauseRelease.resolve();
+    await eventually(() => claudeProvider.dispatches.length === 1);
+    assert.equal(codexProvider.dispatches.length, 0);
+    assert.deepEqual(await subject.handlers.send({ conversationId: sent.conversationId,
+      fromAlias: claude.alias, replyAddress: "uds:/test/reply.sock", text: "late" }), {
+      accepted: false, code: "not_found", reason: "CONVERSATION_NOT_FOUND",
+    });
+  } finally { claudeProvider.pauseRelease.resolve(); await subject.close(); }
 });
 
 test("provider replyText reverses an exact native ingress through the sender's installed route", async () => {

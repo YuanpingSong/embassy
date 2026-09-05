@@ -102,7 +102,7 @@ export const STATUS_REMEDY: Readonly<Record<string, string>> = {
   CLAUDE_PEER_NOT_OBSERVED:
     "Discovery did not find that session; run `embassy refresh`, then inspect `embassy status` for current peers. Sending does not retire a missing session's stored route.",
   ROUTE_UNOBSERVED:
-    "The provider stopped reporting this route; retire it if the session or task ended.",
+    "The provider stopped reporting this local route; if the session or task ended, run `embassy retire --alias <alias>`.",
   THREAD_NOT_OBSERVED:
     "That Codex task is gone. Run `embassy register-codex --alias <new-alias> --succeeds <this alias>` from the new task, or `embassy unregister-codex --alias <this alias>` from the old one.",
   CODEX_OBSERVER_UNAVAILABLE:

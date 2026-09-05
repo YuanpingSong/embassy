@@ -566,6 +566,7 @@ test("all client commands use one private control socket and expose only normali
     unregisterPeer: () => ({ accepted: true, code: "ok" }),
     awaitPeer: () => ({ state: "timeout" }),
     peerReceipt: () => ({ accepted: true, code: "ok" }),
+    retireRoute: () => ({ accepted: false, code: "not_found" }),
   };
   const server = await startGatewayControlServer({
     stateDir: state.stateDir,
@@ -2413,6 +2414,7 @@ test("refresh reports a failed rescan as a decision, not a client-side transport
       unregisterPeer: () => ({ accepted: true, code: "ok" }),
       awaitPeer: () => ({ state: "timeout" }),
       peerReceipt: () => ({ accepted: true, code: "ok" }),
+      retireRoute: () => ({ accepted: false, code: "not_found" }),
     },
   });
   t.after(async () => await server.close());
@@ -2471,6 +2473,7 @@ test("the CLI refuses an insecure state directory before connecting", async (t) 
       unregisterPeer: () => ({ accepted: true, code: "ok" }),
       awaitPeer: () => ({ state: "timeout" }),
       peerReceipt: () => ({ accepted: true, code: "ok" }),
+      retireRoute: () => ({ accepted: false, code: "not_found" }),
     },
   });
   t.after(async () => await server.close());
@@ -3126,9 +3129,9 @@ test("the installed binary implements exactly the seventeen documented commands"
   assert.deepEqual([...gatewayCliCommands], [
     "serve", "service", "health", "status", "watch", "check", "delivery-status",
     "wait-delivery", "refresh", "register-codex", "unregister-codex", "send", "reply",
-    "register-peer", "unregister-peer", "await", "peer-stdio",
+    "register-peer", "unregister-peer", "await", "peer-stdio", "retire",
   ]);
-  assert.equal(gatewayCliCommands.length, 17);
+  assert.equal(gatewayCliCommands.length, 18);
 });
 
 test("the health probe still terminates when the injected clock never advances", async () => {
@@ -3274,6 +3277,35 @@ test("a conversation answered from the wrong end, or by an unregistered task, re
     assert.equal(`${stdout.chunks.join("")}${stderr.chunks.join("")}`.includes(SECRET_BODY), false, label);
   }
   void decide;
+});
+
+test("retire is alias-only, local, and independent of inherited provider identities", async () => {
+  const result = { accepted: true, code: "ok", settlements: { cancelled: 2, ambiguous: 1, unconfirmed: 1 } };
+  for (const alias of ["codex-stranded@this-mac", "peer-stranded@this-mac", "advisor@this-mac"]) {
+    const stdout = capture(), stderr = capture();
+    let calls = 0;
+    const dependencies: GatewayCliDependencies = {
+      env: { CODEX_THREAD_ID: THREAD_ID, CLAUDE_CODE_MESSAGING_SOCKET: CLAUDE_SOCKET_PATH }, stdout, stderr,
+      stdin: (async function* () { throw new Error("retire must not read a token or body"); })(),
+      loadConfig: () => ({ stateDir: "/private/fake-state", controlSocketPath: "/private/fake-state/control.sock",
+        allowedHosts: ["this-mac"], hostId: "this-mac", peerNodes: [], stallNoticeMs: 30_000,
+        steeringEnabled: true, limits: {} as never }),
+      validateControlSocket: async () => undefined,
+      sendRequest: (async ({ request }) => {
+        calls++;
+        assert.deepEqual(request, { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "retire_route", params: { alias } });
+        return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result };
+      }) as NonNullable<GatewayCliDependencies["sendRequest"]>,
+    };
+    assert.equal(await runGatewayCli(["retire", "--alias", alias], dependencies), 0);
+    assert.equal(stdout.chunks.join(""), `${JSON.stringify({ ok: true, command: "retire", result })}\n`);
+    assert.equal(stderr.chunks.join(""), "");
+    for (const args of [["--alias", alias, "--force"], ["--alias", alias, "--token-stdin"],
+      ["--alias", alias.replace("this-mac", "elsewhere")]]) {
+      assert.equal(await runGatewayCli(["retire", ...args], dependencies), gatewayCliExitCodes.invalidInput);
+    }
+    assert.equal(calls, 1);
+  }
 });
 
 test("the four shared wire-failure paths preserve their complete output", async () => {

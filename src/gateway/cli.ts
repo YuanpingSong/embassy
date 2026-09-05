@@ -47,7 +47,7 @@ export const gatewayCliCommands = [
   "unregister-codex",
   "send", "reply",
   "register-peer", "unregister-peer", "await",
-  "peer-stdio",
+  "peer-stdio", "retire",
 ] as const;
 
 export type GatewayCliCommand = (typeof gatewayCliCommands)[number];
@@ -106,6 +106,7 @@ Commands:
   check [--to <alias>] [--timeout <s>]
                          Round-trip self-test against a registered peer
   refresh                Rescan for Claude sessions
+  retire --alias <alias>  Remove a local route and report settled work
   register-codex --alias <codex-alias> [--succeeds <old-alias>]
                          Register or succeed a Codex task
   unregister-codex --alias <codex-alias>
@@ -474,6 +475,13 @@ async function buildRequest(
       const local = await loadLocalHost();
       if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
       return envelope("unregister_codex", { alias, threadId });
+    }
+    case "retire": {
+      const options = parseOptions(args, ["alias"]);
+      count(options, 1, 1);
+      const alias = requireAlias(options, "alias"), local = await loadLocalHost();
+      if (gatewayAliasHost(alias) !== local.host) throw aliasHostFault(local, gatewayAliasHost(alias));
+      return envelope("retire_route", { alias });
     }
     case "register-peer":
     case "unregister-peer":

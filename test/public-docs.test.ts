@@ -7,7 +7,7 @@ import { gatewayCliCommands } from "../src/gateway/cli.js";
 import { gatewayControlMethods, isGatewayAlias } from "../src/gateway/control.js";
 
 /** The counts the docs spell out in words; grows when the surfaces do. */
-const NUMBER_WORDS: Readonly<Record<number, string>> = { 14: "fourteen", 17: "seventeen" };
+const NUMBER_WORDS: Readonly<Record<number, string>> = { 15: "fifteen", 18: "eighteen" };
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -313,28 +313,34 @@ test("public docs disclose that the status snapshot carries retained bodies", as
 // second language.
 
 test("authority docs match the closed control contract", async () => {
-  const [readme, architecture, skill, changelog, site, agent] = await Promise.all([
+  const [readme, architecture, skill, changelog, site] = await Promise.all([
     readPublicFile("README.md"),
     readPublicFile("docs/GATEWAY-ARCHITECTURE.md"),
     readPublicFile("skills/embassy-peer/SKILL.md"),
     readPublicFile("CHANGELOG.md"),
     readPublicFile("site/index.html"),
-    readPublicFile(".claude/agents/content-writer.md"),
   ]);
   // Both counts are pinned here and spelled out in the docs; the words are
   // derived from the arrays, so a surface that grows or shrinks fails here
   // until every sentence that states the count is corrected.
-  assert.equal(gatewayControlMethods.length, 14);
-  assert.equal(gatewayCliCommands.length, 17);
+  assert.equal(gatewayControlMethods.length, 15);
+  assert.equal(gatewayCliCommands.length, 18);
   const methodsWord = NUMBER_WORDS[gatewayControlMethods.length];
   const commandsWord = NUMBER_WORDS[gatewayCliCommands.length];
   assert.ok(methodsWord !== undefined && commandsWord !== undefined, "add the new count to NUMBER_WORDS");
-  assert.match(architecture, new RegExp(`closed version 3 method family is exactly these ${methodsWord} methods`, "i"));
+  assert.match(architecture, new RegExp(`closed version 4 method family is exactly these ${methodsWord} methods`, "i"));
   for (const method of gatewayControlMethods) assert.match(architecture, new RegExp(`\\b${method}\\b`));
   assert.match(architecture, new RegExp(`${commandsWord} implemented commands`));
   assert.match(readme, new RegExp(`lists all ${commandsWord} commands`));
-  assert.match(agent, new RegExp(`exactly these\\s+${commandsWord}:`));
-  for (const command of gatewayCliCommands) assert.match(agent, new RegExp(`\\b${command}\\b`), command);
+  for (const command of gatewayCliCommands) assert.match(architecture, new RegExp(`\\b${command}\\b`), command);
+  for (const document of [readme, architecture, skill]) {
+    assert.match(document, /embassy retire --alias/);
+    assert.match(document, /no (?:route )?credential/);
+    assert.match(document, /any\s+local Claude, Codex, or\s+shell-peer route/);
+    assert.match(document, /no token, force, or remote option/);
+    assert.match(document, /FEDERATED_ROUTE_READ_ONLY/);
+    assert.match(document, /\{cancelled,ambiguous,unconfirmed\}/);
+  }
   // The permission model in one sentence, in every authority document.
   assert.match(architecture, /A session already bound under the\s+same \(host, session UUID\) keeps its registration/);
   assert.match(architecture, /operating norm, not an additional gateway identity\s+check/);

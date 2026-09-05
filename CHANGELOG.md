@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- `embassy retire --alias <local-alias>` adds credential-free, same-UID operator cleanup for any local provider route through the existing atomic removal; it accepts no token, force, or remote option, refuses federated mirrors with `FEDERATED_ROUTE_READ_ONLY`, reports `{cancelled,ambiguous,unconfirmed}` settlement counts, and moves the private control protocol to version 4 (emb-117).
 - The supported package surface is the CLI, skill, and documented JSON; deep imports of shipped `dist` declarations are unsupported, and unused internal exports have been removed.
 - Expired or unknown peer receipts now return `not_found`, not `route_mismatch`; invalid peer principals still refuse as before.
 

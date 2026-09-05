@@ -572,13 +572,20 @@ controller-owned mode-0700 state directory. The socket and state files are
 mode 0600. Frames are size-bounded and closed against unknown keys, methods,
 versions, and enum values.
 
-The closed version 3 method family is exactly these fourteen methods:
+The closed version 4 method family is exactly these fifteen methods:
 
 - `health` and `list_snapshot`, a safe public snapshot;
 - `observe_snapshot`, a read-only projection that may settle already-due
   delivery deadlines before projecting;
 - `register_codex` and `unregister_codex` — explicit Codex registration with
   atomic `--succeeds` replacement, and owner unregister;
+- `retire_route` (CLI `embassy retire --alias <local-alias@local-host>`), the
+  explicit OS-boundary exception to owner unregister: any
+  same-UID control client may atomically remove any local Claude, Codex, or
+  shell-peer route and requires no route credential; the request accepts only the
+  local alias (no token, force, or remote option), refuses a federated mirror
+  with `FEDERATED_ROUTE_READ_ONLY`, and returns settlement counts
+  `{cancelled,ambiguous,unconfirmed}`;
 - `delivery_status`, a lookup by an opaque correlation handle retained only in
   bounded private v5 state;
 - `send`, whose direction follows the inherited principal — who is sending —
@@ -606,10 +613,10 @@ The closed version 3 method family is exactly these fourteen methods:
   alias is never retired by it. `embassy check` uses one.
 
 The installed binary is `embassy`, and it is the only installed binary. Its
-seventeen implemented commands are
+eighteen implemented commands are
 `serve`, `service`, `health`, `status`, `watch`, `check`, `delivery-status`,
 `wait-delivery`, `refresh`, `register-codex`, `unregister-codex`, `send`,
-`reply`, `register-peer`, `unregister-peer`, `await`, and
+`reply`, `retire`, `register-peer`, `unregister-peer`, `await`, and
 `peer-stdio`. `reply --conversation <token> --alias <own-alias>` is a
 deprecated alias for `send --conversation <token> --from <own-alias>`: it
 builds the same `send` request and is kept only until the reply hints already
@@ -812,7 +819,7 @@ mismatch is refused rather than adapted to:
 | Surface | Version | On mismatch |
 | --- | --- | --- |
 | Private state schema (`gateway-state.json`) | 5 | An older or unknown schema refuses with `GATEWAY_STATE_SCHEMA_UNSUPPORTED`; reset only, never rewritten |
-| Private control protocol (CLI ↔ broker) | 3 | `CONTROL_VERSION_MISMATCH` at the client; keep the CLI and broker on one installation. A method the broker does not implement is `UNKNOWN_METHOD`, and the CLI says to rebuild or update the client |
+| Private control protocol (CLI ↔ broker) | 4 | `CONTROL_VERSION_MISMATCH` at the client; keep the CLI and broker on one installation. A method the broker does not implement is `UNKNOWN_METHOD`, and the CLI says to rebuild or update the client |
 | Federation peer protocol (`peer-stdio`) | 2 | `PEER_PROTOCOL_MISMATCH` on that node's mirrored routes and in `embassy status` |
 | Native Claude helper IPC protocol | 2 | Internal to one installation; the helper and broker ship together |
 | Public snapshot schema (`embassy status --json`) | 2 | Unchanged across the 3.0 line |

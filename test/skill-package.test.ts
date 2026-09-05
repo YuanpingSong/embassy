@@ -40,6 +40,7 @@ test("skill exposes only the stable gateway operating surface", async () => {
     "refresh",
     "register-codex",
     "unregister-codex",
+    "retire",
     "send",
     "reply",
   ];
@@ -97,6 +98,13 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /env -u CLAUDE_CODE_MESSAGING_SOCKET/);
   assert.match(skill, /env -u CODEX_THREAD_ID/);
   assert.match(skill, /wrong principal/);
+  assert.match(skill, /retire --alias codex-reviewer@your-host/);
+  assert.match(skill, /requires no route credential/);
+  assert.match(skill, /unregister still requires the exact principal stated above/);
+  assert.match(skill, /any local Claude, Codex, or shell-peer route/);
+  assert.match(skill, /no token, force, or remote option/);
+  assert.match(skill, /FEDERATED_ROUTE_READ_ONLY/);
+  assert.match(skill, /\{cancelled,ambiguous,unconfirmed\}/);
   assert.match(skill, /Direction determines timing/);
   assert.match(skill, /Claude-bound send or correlated reply writes immediately/);
   assert.match(skill, /transport_written` is the terminal `delivered` boundary/);

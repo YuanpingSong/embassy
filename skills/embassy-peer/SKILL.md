@@ -142,6 +142,8 @@ removes incident conversation, reply, or native capabilities,
 cancels queued/reserved work, settles armed work `ambiguous`, and settles
 accepted work `unconfirmed`.
 
+Only when the user explicitly asks to retire a route, use the explicit OS-boundary exception `embassy retire --alias codex-reviewer@your-host`: it requires no route credential and atomically removes any local Claude, Codex, or shell-peer route, accepts no token, force, or remote option, refuses a federated mirror with `FEDERATED_ROUTE_READ_ONLY`, and prints settlement counts `{cancelled,ambiguous,unconfirmed}`; unregister still requires the exact principal stated above.
+
 ## Send a message
 
 Pass a non-empty UTF-8 body through standard input. Never place message text in a gateway argument or a temporary file.
