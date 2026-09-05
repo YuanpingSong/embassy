@@ -3173,11 +3173,10 @@ test("restart composes queued, reserved, armed, and accepted phase truth without
 
 // --- ephemeral peer registrations (`embassy check`) -------------------------
 //
-// An ephemeral registration is a real route in memory and nothing at all on
-// disk: it routes, queues and settles like any other, is projected out of the
-// durable document together with its own messages, is never published to a
-// federation peer, and is retired by the broker's own clock. These three
-// tests are the whole contract; nothing here touches a real state directory.
+// An ephemeral registration routes, queues and settles in memory. Its own
+// rows and bodies are projected out of durable state, but aggregates advance.
+// It is excluded from federation and retired by the broker's clock.
+// These tests use only test-owned state directories.
 
 const ephemeralProviders = (): GatewayProviderAdapter[] => (["claude", "codex", "peer"] as const)
   .map((provider) => new FakeProvider({ provider, hostId: "this-mac" }));

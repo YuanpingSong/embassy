@@ -88,8 +88,10 @@ interface drift or an unavailable optional provider degrades only that
 surface. Do not widen a declared protocol without documented review and
 deterministic fixtures.
 
-The gateway may publish one process-owned `codex-*` peer so Claude's native
-`ListAgents` and `SendMessage` tools can reach Codex. It must never overwrite a
+The gateway may advertise each non-Claude route (`codex-*` or `peer-*`) through
+its own forked helper, callback socket and marked registry record, subject to the
+tracked-helper limit and pending-creation limitation in SECURITY.md. Claude's native `ListAgents` and `SendMessage` tools
+can reach those routes. The gateway must never overwrite a
 foreign registry record, claim to be a Claude model session, or unlink a socket
 whose exact generation it no longer owns.
 

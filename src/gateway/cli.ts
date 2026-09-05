@@ -108,7 +108,8 @@ Commands:
   refresh                Rescan for Claude sessions
   register-codex --alias <codex-alias> [--succeeds <old-alias>]
                          Register or succeed a Codex task
-  unregister-codex       Unregister the current Codex task
+  unregister-codex --alias <codex-alias>
+                         Unregister the current Codex task
   register-peer --alias <peer-alias> [--token-stdin|--emit-env]
                          Register a universal shell peer
   unregister-peer --alias <peer-alias> [--token-stdin]
@@ -121,8 +122,10 @@ Commands:
                          Exactly one of --to and --conversation; body from stdin.
                          A discovered Claude session's route installs on first send
   reply                  Deprecated alias for send --conversation
-  delivery-status        Read a delivery token
-  wait-delivery          Wait for terminal delivery status
+  delivery-status --token <delivery-token>
+                         Read a delivery token
+  wait-delivery --token <delivery-token>
+                         Wait for terminal delivery status
 
 Options:
   --token-stdin          Read the peer token as the first LF-terminated stdin line
@@ -193,8 +196,6 @@ const CLI_HINT = {
     "that session's workspace is a filesystem root or overlaps a temporary root; reopen the session in a specific project directory outside temporary roots.",
   workspaceUnsafe:
     "the session workspace or user home failed directory checks; verify access, ownership, permissions and canonical, non-symlink paths before retrying.",
-  workspaceUnattested:
-    "the session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias.",
   callerAliasMismatch:
     "--from must be the sending session's own alias; read the name embassy status shows for this session.",
   targetChanged:
@@ -666,7 +667,6 @@ function refusalHint(
   if (reason === "PEER_ALIAS_COLLISION") return { hint: "aliasCollision" };
   if (reason === "CLAUDE_PEER_WORKSPACE_BROAD") return { hint: "workspaceBroad" };
   if (reason === "CLAUDE_PEER_WORKSPACE_UNSAFE") return { hint: "workspaceUnsafe" };
-  if (reason === "CLAUDE_PEER_WORKSPACE_UNATTESTED") return { hint: "workspaceUnattested" };
   // A Codex task with no registration under its alias — every task, after a
   // private state reset — is told to register; a registration held by another
   // task is a genuine mismatch with its own remedy; a conversation answered

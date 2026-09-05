@@ -437,6 +437,13 @@ test("colour is opt-in, carries no meaning alone, and keeps the table aligned", 
   assert.equal(painted.replaceAll(/\u001b\[\d+m/g, ""), plain);
 });
 
+test("busy Claude workspace observations show the unattested remedy", () => {
+  const rendered = renderStatus(snapshot({ availablePeers: [session(`advisor@${HOST}`)], routes: [route(`advisor@${HOST}`, "claude", {
+    state: "busy", safeErrorCode: "CLAUDE_PEER_WORKSPACE_UNATTESTED",
+  })] }), options);
+  assert.ok(rendered.includes("The session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias."));
+});
+
 test("every remedy the renderer can reach is reachable, and the shared one cannot drift", async () => {
   // The comment on STATUS_REMEDY claims this pin exists; here it is.
   const cli = await readFile(path.join(

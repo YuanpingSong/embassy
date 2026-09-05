@@ -5,7 +5,7 @@ description: Operate Embassy through current name@host or Claude session-UUID se
 
 # Embassy Peer Gateway
 
-Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. This skill is repo-shipped and packaged for the operator to copy into each agent's skill directory; Embassy does not install it automatically. Do not modify provider configuration.
+Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. This skill is repo-shipped and packaged for the operator to copy into each agent's skill directory; Embassy does not install it automatically. The agent must not install or copy skills, or modify provider configuration.
 
 Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the broker's ready line. `register-codex`, `unregister-codex`, `register-peer`, `unregister-peer` and `await` refuse an alias naming another host and state the one this machine uses; `send` and `reply` accept a federated peer's host, so check those aliases yourself.
 
@@ -17,7 +17,7 @@ If `CALLER_IDENTITY_CONFLICT` reports both inherited identities, strip only the 
 
 Address a Claude session by its latest `name@host` or by a user-supplied native session UUID. The UUID is the stable identity; the name is only the current live index. The gateway stores no historical names, so an old name stops resolving immediately after a rename. An optional private `nodes.json` names the local host for federation; absent, the local host is named by its own hostname and there are no peers. Where present, configured allowlisted Embassy nodes exchange bounded public route catalogs and destination-owned handoffs over fixed attach-only SSH. Ask the user to choose a selector when it is ambiguous.
 
-Run `embassy status --json` to read the current snapshot. Always pass `--json`: without it, and with a terminal on stdout, `status` renders a human summary instead of the snapshot you parse. `status` is read-only and never rescans. Run `embassy refresh` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` Embassy peer.
+Run `embassy status --json` to read the current snapshot. Always pass `--json`: without it, and with a terminal on stdout, `status` renders a human summary instead of the snapshot you parse. `status` is read-only and never rescans. Run `embassy refresh` when passive live discovery is authorized. Claude Code's native `ListAgents` includes genuine Claude sessions plus each explicitly advertised `codex-*` or `peer-*` Embassy peer.
 
 Read the status snapshot's `availablePeers` as sanitized current-name candidates. Native records carrying Embassy's supported explicit versioned advertisement marker are excluded because they are not Claude destinations; a genuine unmarked Claude session remains visible even when its name starts with `codex-*`. Send straight to the name shown there: the gateway installs a discovered Claude session's route on its first use, so there is no step between reading a name and messaging it. A name currently shared by two live sessions is refused with `PEER_ALIAS_COLLISION`; report it and ask the user which session to rename, never retry against a guess.
 
@@ -228,7 +228,7 @@ Do not synthesize `STEER:`, use it from Codex to Claude, approve permissions, wi
 - Keep the gateway local, single-user, and non-hosted.
 - Keep the shipped launcher local-host-only.
 - Never read provider credentials, authentication state, history, settings, registries, raw sockets, or Keychain entries.
-- Publish only each registered `codex-*` peer record owned by the gateway and remove it on shutdown.
+- Publish only the gateway-owned marked record for each non-Claude route (`codex-*` or `peer-*`) and remove it on shutdown.
 - Never print or copy discovered provider-native identifiers, callback addresses, raw message bodies, tool data, or stderr into skill output or an agent-created file. A user-supplied Claude session UUID may be passed unchanged as an explicit selector, but do not echo it in the normalized result. The gateway may retain the UUID in its closed, mode-0600 private route-binding state.
 - Never modify Claude or Codex permissions, hooks, plugins, agents, MCP configuration, or settings.
 - Return only the CLI's concise public outcome: selectors, normalized state, a public conversation token, or an opaque delivery correlation handle when present.

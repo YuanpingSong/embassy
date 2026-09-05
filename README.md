@@ -27,7 +27,13 @@ embassy --version
 ssh <node> 'which -a embassy; embassy --version'
 ```
 
-The SSH check uses the non-interactive environment that federation launches in. Update or remove a shadowing install through the package manager that owns it; updating npm does not update a separate pnpm install.
+For a configured federation peer, `<node>` is its OpenSSH Host alias; the SSH
+check uses federation's non-interactive launch environment. Update or remove a
+shadowing install through its owning package manager; updating npm does not update pnpm.
+The launchd plist pins the absolute Node and CLI paths used by `embassy service install`,
+not the next shell's PATH. After removing an installation, rerun `embassy service install`
+from the retained installation. `embassy service status` reports a plist program path
+that is no longer on disk.
 
 `service install` runs the broker as your user's launchd agent: it starts at login, restarts after a crash, and logs to `~/Library/Logs/agent-embassy/broker.log`. Prefer a process you start by hand? Run `embassy serve` in a terminal and leave it running instead. You need macOS, Node.js 20+, Claude Code (with its [`crossSessionInbound`](docs/CONFIGURATION.md#claude-codes-own-setting-crosssessioninbound) setting enabled on any session that should receive mail), and Codex CLI with the managed standalone App Server — the official installer `curl -fsSL https://chatgpt.com/codex/install.sh | sh`, then `codex app-server daemon start`. From source: `git clone https://github.com/YuanpingSong/embassy && cd embassy && npm ci && npm run build && npm link`.
 

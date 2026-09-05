@@ -82,7 +82,7 @@ records whose peer protocol is not 1 remain isolated and counted. Version
 metadata describes what was observed but grants no runtime authority.
 
 For the lowest-impedance native path, each supervised advertisement helper publishes
-one process-owned registry record whose name is visibly prefixed `codex-` and carries
+one process-owned registry record for a non-Claude route (`codex-*` or `peer-*`) with
 the supported explicit versioned Embassy-advertisement marker. The listener remains
 gateway-owned and does not claim to be a Claude model session; the marker, not
 the name prefix alone, distinguishes Embassy's advertisement. The record uses
@@ -92,7 +92,7 @@ the validated native peer shape so Claude's own `ListAgents` and
 Consequences:
 
 - Native Claude `ListAgents` discovers real Claude sessions plus the
-  explicitly marked `codex-*` gateway peers, one per advertisement helper.
+  explicitly marked `codex-*` and `peer-*` gateway peers, one per advertisement helper.
 - The gateway discovers compatible real Claude sessions as transient
   candidates, but publishes only sanitized aliases and state. A send from a
   registered Codex task addresses a session by its current name or its UUID,
@@ -333,8 +333,8 @@ gateway publishes a process-owned native registry entry per task, accepts
 Claude's native `SendMessage`, starts an App Server turn, and returns the
 final reply.
 
-1. The gateway advertises one process-owned `codex-*` record per registered
-   task in Claude's native registry. The broker owns the advertisement,
+1. The gateway advertises each registered task through a marked `codex-*`
+   record; shell routes similarly use `peer-*` records. The broker owns the advertisement,
    callback socket, state, queue, and dispatch; provider process lifecycle is
    not persisted as route authority.
 2. A real Claude session uses native `ListAgents` and `SendMessage`; the

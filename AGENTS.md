@@ -151,7 +151,7 @@ silently expanding the boundary through a test or hardening patch.
   mutable lookup aliases; historical names do not resolve. A user-supplied UUID
   may be accepted as a CLI selector, but Embassy must never print or discover
   one through public output.
-- Publish at most one process-owned `codex-*` registry record per supervised
+- Publish at most one marked registry record (`codex-*` or `peer-*`) per supervised
   advertisement process. Remove only the exact-owned record and callback socket
   during graceful shutdown; never modify another process's artifacts.
 - Persist message bodies, opaque delivery tokens, and delivery status only in

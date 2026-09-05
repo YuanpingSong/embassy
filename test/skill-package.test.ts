@@ -48,7 +48,7 @@ test("skill exposes only the stable gateway operating surface", async () => {
   }
 
   assert.match(skill, /name@host/);
-  assert.match(skill, /ListAgents.*codex-\*/);
+  assert.match(skill, /ListAgents.*`codex-\*` or `peer-\*`/);
   assert.match(skill, /availablePeers/);
   assert.match(skill, /exact prefix `STEER:`/);
   assert.match(skill, /next tool-call boundary/);
@@ -66,7 +66,7 @@ test("skill preserves transient identities and limits native advertisement", asy
   assert.match(skill, /CODEX_THREAD_ID/);
   assert.match(skill, /CLAUDE_CODE_MESSAGING_SOCKET/);
   assert.match(skill, /never echo it/i);
-  assert.match(skill, /Publish only.*registered `codex-\*` peer record/);
+  assert.match(skill, /Publish only.*non-Claude route \(`codex-\*` or `peer-\*`\)/);
   assert.match(skill, /Do not automatically retry/);
   assert.match(skill, /user-supplied native session UUID/);
   assert.match(skill, /old name stops resolving immediately/);

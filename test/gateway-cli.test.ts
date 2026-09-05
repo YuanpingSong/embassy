@@ -147,6 +147,9 @@ test("bare invocation and help flags print usage without side effects", async ()
     assert.ok(help.includes("send --from <own-alias> --to <alias-or-uuid> [--expects-reply]"));
     assert.ok(help.includes("send --from <own-alias> --conversation <token>"));
     assert.ok(help.includes("Exactly one of --to and --conversation"));
+    assert.ok(help.includes("unregister-codex --alias <codex-alias>"));
+    assert.ok(help.includes("delivery-status --token <delivery-token>"));
+    assert.ok(help.includes("wait-delivery --token <delivery-token>"));
     assert.doesNotMatch(help, /select-claude|unselect-claude|\bpair\b|unpair|--inbound/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.doesNotMatch(help, /dashboard/i);
@@ -1782,10 +1785,6 @@ test("each refusal reason renders exactly the remedy that fits it", async () => 
   assert.deepEqual(await decide(send, { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_UNSAFE" }), [
     decision,
     "[embassy] the session workspace or user home failed directory checks; verify access, ownership, permissions and canonical, non-symlink paths before retrying.",
-  ]);
-  assert.deepEqual(await decide(send, { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_UNATTESTED" }), [
-    decision,
-    "[embassy] the session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias.",
   ]);
   assert.deepEqual(await decide(send, { accepted: false, code: "route_mismatch", reason: "CLAUDE_ROUTE_MISMATCH" }), [
     decision,

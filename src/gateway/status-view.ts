@@ -75,6 +75,8 @@ export const STATUS_REMEDY: Readonly<Record<string, string>> = {
     "Either a process outside Embassy holds the managed Codex control socket — quit it — or the managed App Server standalone layout is missing, which starting the daemon alone does not create: follow the Codex prerequisite in the README (the official installer, then the daemon).",
   PEER_ALIAS_COLLISION:
     "the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.",
+  CLAUDE_PEER_WORKSPACE_UNATTESTED:
+    "The session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias.",
   PEER_PROTOCOL_MISMATCH:
     "That node runs a different federation peer protocol; upgrade the lagging node's Embassy and it re-catalogs on the next refresh.",
   PEER_TUNNEL_UNAVAILABLE:
@@ -427,6 +429,10 @@ export function renderStatus(
       lines.push(`  ${line}`);
     }
     for (const { route, view } of views) {
+      if (route.safeErrorCode === "CLAUDE_PEER_WORKSPACE_UNATTESTED") {
+        lines.push(paint(`    ${route.alias}: ${STATUS_REMEDY.CLAUDE_PEER_WORKSPACE_UNATTESTED}`, "dim"));
+        continue;
+      }
       if (view.remedy === undefined) continue;
       lines.push(paint(`    ${route.alias}: ${view.remedy}`, "dim"));
     }
