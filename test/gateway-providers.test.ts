@@ -536,6 +536,20 @@ function binding(
   return current;
 }
 
+test("configured route bounds also construct the real Claude provider", async () => {
+  for (const maximum of [128, 129, 200, 256]) {
+    const config = loadGatewayConfig({ EMBASSY_STATE_DIR: inventoryRoot,
+      EMBASSY_MAX_ROUTES: String(maximum) }, nodeInventory);
+    assert.equal(config.limits.maxRoutes, maximum);
+    const construct = () => createLocalClaudeGatewayProvider({ runtime: claudeRuntime(),
+      stateRoot: inventoryRoot, peerFactory: () => new FakeClaudePeer() as never,
+      nativeHelpers: { maxHelpers: config.limits.maxRoutes } });
+    await construct().close();
+  }
+  assert.throws(() => loadGatewayConfig({ EMBASSY_STATE_DIR: inventoryRoot,
+    EMBASSY_MAX_ROUTES: "257" }, nodeInventory), { code: "INVALID_GATEWAY_CONFIGURATION" });
+});
+
 test("local Claude provider forwards the exact delivery notice policy", () => {
   const fake = new FakeClaudePeer();
   let receivedDeliveryNotices: unknown;

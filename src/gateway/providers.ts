@@ -36,8 +36,8 @@ import type {
   GatewayAdapterStart,
   GatewayProviderAdapter,
 } from "./service.js";
-import type {
-  GatewayProvider,
+import {
+  gatewayPublicSnapshotLimits, type GatewayProvider,
 } from "./types.js";
 
 const NATIVE_CLAUDE_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -357,8 +357,8 @@ export class LocalClaudeGatewayProvider implements GatewayProviderAdapter {
             maxPendingMessages: this.maxPending,
             maxHelpers: positiveBounded(
               options.nativeHelpers.maxHelpers,
-              256,
               128,
+              gatewayPublicSnapshotLimits.routes,
             ),
             callbacks: () => this.callbacks,
             ...(options.nativeHelpers.factory === undefined

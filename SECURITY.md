@@ -219,8 +219,7 @@ broker.
 - Advertisement tracks a helper per local non-Claude route (`codex-*` or `peer-*`):
   one forked process, one callback socket, and one process-owned registry record
   with the supported explicit versioned Embassy-advertisement marker.
-  The usable tracked-helper cap is `min(maxRoutes, 128)` (default 128); currently
-  `maxRoutes > 128` refuses provider startup rather than clamping the value.
+  The tracked-helper cap is `maxRoutes` (default 128, maximum 256).
   Federated mirrors are not advertised: their foreign-host aliases are refused
   by the helper, although reconciliation currently still attempts to create it.
   Known limitation: pending creations are not reserved; overlapping same-alias reconciliations can leave an extra helper outside both the tracked cap and supervisor shutdown cleanup.
@@ -284,7 +283,7 @@ Embassy's provider-facing access is intentionally enumerable:
   current operation;
 - fork advertisement helper processes for local non-Claude routes, each owning one
   callback socket and one registry record (`codex-*` or `peer-*`); the tracked-count
-  admission cap is `min(maxRoutes, 128)` (default 128; larger settings currently refuse startup),
+  admission cap is `maxRoutes` (default 128, maximum 256),
   subject to the pending-creation and shutdown-cleanup limitation above;
 - attempt helper creation for federated mirrors, whose foreign-host aliases are
   refused before publishing a record; these mirrors are not advertised;

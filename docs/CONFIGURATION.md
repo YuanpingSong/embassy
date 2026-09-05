@@ -207,9 +207,7 @@ These variables retain conservative defaults:
 | `EMBASSY_MESSAGE_DEADLINE_MS` | `14400000` |
 | `EMBASSY_RATE_LIMIT` / `EMBASSY_RATE_WINDOW_MS` | `30` / `60000` |
 
-The configuration parser accepts 2 through 256 for `EMBASSY_MAX_ROUTES`, but
-provider setup currently rejects values above 128 with `INVALID_GATEWAY_PROVIDER_CONFIGURATION`.
-Use 2 through 128 until that helper-capacity mismatch is corrected; values are not clamped.
+`EMBASSY_MAX_ROUTES` accepts 2 through 256 and also sets the tracked advertisement-helper cap.
 Every value in this table is validated at startup, and an out-of-range or non-integer setting
 fails closed with `INVALID_GATEWAY_CONFIGURATION` rather than being clamped.
 
