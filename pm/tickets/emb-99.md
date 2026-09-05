@@ -3,9 +3,9 @@ id: emb-99
 title: v3 charter — subtraction: Embassy shrinks to the daily path
 kind: normal
 size: 8
-status: dispatched
+status: landed
 release: v3.0.0
-updated: 2026-09-02
+updated: 2026-09-03
 ---
 
 ## Binding
@@ -276,3 +276,7 @@ no support-matrix ceremony, no site work beyond the stub.
 - 2026-09-03 Founder clarification: the post-v3 pass is a QUALITY
   pass, not only focus — use the stronger engineer model to clean up
   awkward code, behavior-preserving, priced like deletions.
+- 2026-09-03 Charter DELIVERED: v3.0.0 released, cut over, drilled;
+  status → landed. Linear mirrors: emb-99→2185LAB-325, 100→326,
+  101→327, 102→328, 103→329, 104→330, 105→331, 106→332, 107→333,
+  108→334, 109→335 (label v3.0.0 created). emb-110 mirrors next.
