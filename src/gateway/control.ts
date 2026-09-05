@@ -547,13 +547,13 @@ function isGatewayActivityEvent(value: unknown): value is PublicGatewayActivityE
   if (!shape(value, { sequence: positive, timestamp: iso,
     kind: oneOf("discovery", "registration"),
     action: oneOf("discovery_refreshed", "codex_registered", "codex_succeeded", "codex_unregistered",
-      "claude_route_installed", "claude_route_retired"),
+      "claude_route_installed", "claude_route_retired", "route_retired"),
     outcome: oneOf("accepted", "rejected"), aliases: (rows) => arrayOf(rows, 2, alias),
     operatorAction: oneOf(true) }, { safeErrorCode: safeCode })) return false;
   const allowed: Record<string, readonly string[]> = {
     discovery: ["discovery_refreshed"],
     registration: ["codex_registered", "codex_succeeded", "codex_unregistered",
-      "claude_route_installed", "claude_route_retired"],
+      "claude_route_installed", "claude_route_retired", "route_retired"],
   };
   return new Set(value.aliases as string[]).size === (value.aliases as string[]).length &&
     (allowed[value.kind as string]?.includes(value.action as string) ?? false); }

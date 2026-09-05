@@ -863,7 +863,7 @@ export class GatewayService {
     let removed = false;
     try {
       const result = await this.store.removeOwnedRouteAtomic({ alias, binding: route.binding,
-        ...(route.binding.provider === "codex" ? { activity: { operatorAction: true } } : {}) });
+        activity: { operatorAction: true, action: "route_retired" } });
       if (!result.removed) return { accepted: false, code: "not_found" };
       removed = true;
       await this.finishSettlements(result.settlements);

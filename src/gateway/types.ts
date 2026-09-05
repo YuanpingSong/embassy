@@ -226,6 +226,7 @@ export const gatewayActivityActions = [
   "codex_unregistered",
   "claude_route_installed",
   "claude_route_retired",
+  "route_retired",
 ] as const;
 export type GatewayActivityAction = (typeof gatewayActivityActions)[number];
 export type PublicGatewayActivityEvent = {

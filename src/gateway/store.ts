@@ -962,7 +962,7 @@ export class GatewayStore {
     input: Readonly<{
       alias: string;
       binding: LogicalRouteBinding;
-      activity?: Readonly<{ operatorAction: boolean }>;
+      activity?: Readonly<{ operatorAction: boolean; action?: "route_retired" }>;
     }>,
   ): Promise<RemoveRouteAtomicResult> {
     return this.mutate((state, now) => {
@@ -976,7 +976,7 @@ export class GatewayStore {
       if (route.registrationMode === "federated_peer") {
         throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "A federated route is owned by its peer node; only catalog reconciliation may retire it.");
       }
-      if (input.activity !== undefined && route.binding.provider !== "codex") {
+      if (input.activity !== undefined && input.activity.action !== "route_retired" && route.binding.provider !== "codex") {
         throw new BridgeError("INVALID_ROUTE_BINDING", "Only exact Codex unregister has public activity.");
       }
       const settlements = this.terminalizeRegistration(
@@ -987,7 +987,7 @@ export class GatewayStore {
       this.removeRegistrationMetadata(state, route);
       if (input.activity !== undefined) {
         this.appendRuntimeActivity(state, now, {
-          kind: "registration", action: "codex_unregistered",
+          kind: "registration", action: input.activity.action ?? "codex_unregistered",
           outcome: "accepted", aliases: [route.alias],
           operatorAction: input.activity.operatorAction,
         });

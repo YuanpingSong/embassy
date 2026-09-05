@@ -11,9 +11,10 @@ import { spawnPeerClient, type PeerClient, type PeerSpawn } from "../src/gateway
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { runGatewayCli, validatePrivateGatewayControlSocket } from "../src/gateway/cli.js";
+import { GATEWAY_CONTROL_PROTOCOL_VERSION, sendGatewayControlRequest } from "../src/gateway/control.js";
 import { decodePeerResult, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
-import { renderStatus } from "../src/gateway/status-view.js";
+import { renderStatus, renderWatchEvent } from "../src/gateway/status-view.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
@@ -2057,9 +2058,23 @@ test("retire route covers every local provider and refuses a federated route wit
         accepted: true, code: "ok", settlements: { cancelled: 0, ambiguous: 0, unconfirmed: 0 },
       });
       assert.equal(await subject.store.inspectPrivateRoute(local.alias), undefined);
+      const snapshot = await sendGatewayControlRequest({ socketPath: subject.config.controlSocketPath,
+        request: { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "list_snapshot", params: {} } });
+      assert.ok(snapshot.ok);
+      const events = snapshot.result.activityEvents;
+      assert.deepEqual(events, [{ sequence: 1, timestamp: subject.clock.now().toISOString(),
+        kind: "registration", action: "route_retired", outcome: "accepted",
+        aliases: [local.alias], operatorAction: true }]);
+      assert.match(renderWatchEvent({ type: "activity", event: events![0]! }, false), /route_retired/);
+      assert.deepEqual(await subject.handlers.retireRoute({ alias: local.alias }), { accepted: false, code: "not_found" });
       assert.deepEqual(provider.forgotten, [local.binding.registrationId]);
       if (local.binding.provider === "claude") assert.deepEqual(provider.released, [local.binding.routeHandle]);
       else assert.deepEqual(claudeProvider.unadvertised, [local.alias]);
+      await subject.service.close();
+      const restarted = new GatewayStore(subject.config, { now: subject.clock.now, randomId: subject.clock.randomId });
+      await restarted.initialize();
+      assert.deepEqual((await restarted.publicSnapshot()).activityEvents, events);
+      await restarted.close();
     } finally { await subject.close(); }
   }
 
